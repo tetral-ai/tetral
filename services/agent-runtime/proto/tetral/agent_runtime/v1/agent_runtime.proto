@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package tetral.agent_runtime.v1;
+
+option go_package = "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1;agentruntimev1";
+
+service AgentRuntimePodService {
+  rpc AcceptInput(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc AcceptAgentMail(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc AcceptTaskNotification(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc Interrupt(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc ResolveToolConfirmation(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc ApplyRuntimeConfig(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+  rpc CleanupSession(RuntimeInputCommandRequest) returns (RuntimeInputCommandResponse);
+}
+
+enum RuntimeCommandKind {
+  RUNTIME_COMMAND_KIND_UNSPECIFIED = 0;
+  RUNTIME_COMMAND_KIND_MESSAGES = 1;
+  RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL = 2;
+  RUNTIME_COMMAND_KIND_TOOL_CONFIRMATION = 3;
+  RUNTIME_COMMAND_KIND_TASK_NOTIFICATION = 4;
+  RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH = 5;
+  RUNTIME_COMMAND_KIND_CLEANUP_SESSION = 6;
+  RUNTIME_COMMAND_KIND_AGENT_MAIL = 7;
+}
+
+enum RuntimeCommandStatus {
+  RUNTIME_COMMAND_STATUS_UNSPECIFIED = 0;
+  RUNTIME_COMMAND_STATUS_ACCEPTED = 1;
+  RUNTIME_COMMAND_STATUS_DUPLICATE = 2;
+  RUNTIME_COMMAND_STATUS_REJECTED = 3;
+}
+
+enum RuntimeInputErrorCode {
+  RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED = 0;
+  RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH = 1;
+  RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT = 2;
+  RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH = 3;
+  RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_UNAVAILABLE = 4;
+  RUNTIME_INPUT_ERROR_CODE_BRIDGE_COMMIT_REJECTED = 5;
+  RUNTIME_INPUT_ERROR_CODE_BRIDGE_TOKEN_UNAVAILABLE = 6;
+  RUNTIME_INPUT_ERROR_CODE_BRIDGE_TASK_NOTIFICATION_PROJECTION_INVALID = 7;
+  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT = 8;
+  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED = 9;
+  RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED = 10;
+  RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT = 11;
+}
+
+message RuntimeInputCommandRequest {
+  string request_id = 1;
+  string workspace_id = 2;
+  string session_id = 3;
+  string session_thread_id = 4;
+  string binding_id = 5;
+  int64 binding_generation = 6;
+  string target_pod_namespace = 7;
+  string target_pod_name = 8;
+  string target_pod_uid = 9;
+  string target_pod_ip = 10;
+  string runtime_input_id = 11;
+  repeated string event_ids = 12;
+  int64 sequence_from = 13;
+  int64 sequence_to = 14;
+  RuntimeCommandKind command_kind = 15;
+  string payload_json = 16;
+}
+
+message RuntimeInputCommandResponse {
+  RuntimeCommandStatus status = 1;
+  bool retryable = 2;
+  RuntimeInputErrorCode error_code = 3;
+  string session_id = 4;
+  string runtime_input_id = 5;
+  string binding_id = 6;
+  int64 binding_generation = 7;
+}

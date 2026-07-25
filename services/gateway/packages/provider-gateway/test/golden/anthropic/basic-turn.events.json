@@ -1,0 +1,82 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 3
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA",
+      "count": 2
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "reasoningTextIncludes": [
+    "271828",
+    "585987"
+  ],
+  "text": "reading now.",
+  "toolInputJson": "{\"path\":\"/workspace/app.ts\"}",
+  "toolCalls": [
+    {
+      "name": "Read",
+      "inputJson": "{\"path\":\"/workspace/app.ts\"}"
+    }
+  ],
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_TOOL_CALLS",
+    "usage": {
+      "inputUncachedTokens": 532,
+      "inputCacheReadTokens": 0,
+      "inputCacheWriteTokens": 0,
+      "inputTotalTokens": 532,
+      "outputTotalTokens": 78,
+      "totalTokens": 610
+    },
+    "metadata": {
+      "credential_source": "session",
+      "raw_finish_reason": "tool_use"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-03",
+    "model_id": "anthropic/claude-opus-4-8",
+    "provider": "anthropic",
+    "source": "real-provider",
+    "source_fixture": "fixtures/anthropic-claude-opus-4-8-live-2026-07-03.sse"
+  }
+}

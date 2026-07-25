@@ -1,0 +1,55 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: auth
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: auth
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: auth
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tetral.ai/network-role: public-ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

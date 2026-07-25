@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-runtime
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent-runtime
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

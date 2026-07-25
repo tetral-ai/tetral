@@ -1,0 +1,1278 @@
+package agentruntimebridge
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/id"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// This file owns durable repair and release fencing after a Runtime Pod is proven lost.
+
+type runtimeOpenRequestStart struct {
+	SessionThreadID string
+	EventID         string
+	ModelRequestID  string
+	RequestKind     string
+}
+
+type runtimeOrphanToolUse struct {
+	SessionThreadID string
+	EventID         string
+	ModelRequestID  string
+	PayloadJSON     string
+	ProjectionJSON  string
+}
+
+func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
+	if err := lockSessionPreparationResetFenceTx(ctx, tx, workspaceID, sessionID); err != nil {
+		return 0, err
+	}
+	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	modelRequestIDs := make([]string, 0, len(starts))
+	for _, start := range starts {
+		modelRequestIDs = append(modelRequestIDs, start.ModelRequestID)
+	}
+	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, modelRequestIDs)
+	if err != nil {
+		return 0, err
+	}
+	repaired := 0
+	for _, start := range starts {
+		inserted, err := insertRuntimePodLostRequestEndTx(ctx, tx, workspaceID, sessionID, binding, start, now)
+		if err != nil {
+			return 0, err
+		}
+		if inserted {
+			repaired++
+		}
+	}
+	for _, toolUse := range toolUses {
+		inserted, err := insertRuntimePodLostToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, now)
+		if err != nil {
+			return 0, err
+		}
+		if inserted {
+			repaired++
+		}
+	}
+	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, binding, now)
+	if err != nil {
+		return 0, err
+	}
+	repaired += deliveryRepaired
+	taskRepaired, err := settleRuntimePodLostBackgroundTasksTx(ctx, tx, workspaceID, sessionID, binding, now)
+	if err != nil {
+		return 0, err
+	}
+	repaired += taskRepaired
+	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, binding, now)
+	if err != nil {
+		return 0, err
+	}
+	repaired += liveScopesSettled
+	return repaired, nil
+}
+
+func settleRuntimePodLostLiveScopesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) (int, error) {
+	var mainThreadID, sessionStatus string
+	if err := tx.QueryRow(ctx,
+		`SELECT main_thread_id, status
+		   FROM sessions
+		  WHERE workspace_id = $1
+		    AND id = $2
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+	).Scan(&mainThreadID, &sessionStatus); dbconnect.IsNoRows(err) {
+		return 0, runtimePodLostStaleFenceError("runtime pod-loss session is stale")
+	} else if err != nil {
+		return 0, err
+	}
+	var runtimeStatus string
+	if err := tx.QueryRow(ctx,
+		`SELECT status
+		   FROM session_runtime_status
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND binding_id = $3
+		    AND binding_generation = $4
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+		binding.BindingGeneration,
+	).Scan(&runtimeStatus); dbconnect.IsNoRows(err) {
+		return 0, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
+	} else if err != nil {
+		return 0, err
+	}
+
+	threadIDs := make([]string, 0)
+	if runtimeStatus == "running" || sessionStatus == "rescheduling" {
+		threadIDs = append(threadIDs, mainThreadID)
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT id
+		   FROM session_threads
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND id <> $3
+		    AND status IN ('running', 'rescheduling')
+		  ORDER BY id
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		mainThreadID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var threadID string
+		if err := rows.Scan(&threadID); err != nil {
+			return 0, err
+		}
+		threadIDs = append(threadIDs, threadID)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, threadID := range threadIDs {
+		if err := settleRuntimePodLostLiveScopeTx(ctx, tx, workspaceID, sessionID, mainThreadID, threadID, binding, now); err != nil {
+			return 0, err
+		}
+	}
+	return len(threadIDs), nil
+}
+
+func settleRuntimePodLostLiveScopeTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	mainThreadID string,
+	threadID string,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) error {
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, threadID, binding, "settlement")
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	interruptedThenLost, err := runtimePodLostInterruptedThenLostTx(ctx, tx, workspaceID, sessionID, threadID)
+	if err != nil {
+		return err
+	}
+	if !interruptedThenLost {
+		errorPayload, err := marshalBridgeJSON(map[string]any{
+			"type": "session.error",
+			"error": map[string]any{
+				"type":         "unknown_error",
+				"message":      "The session runtime was lost before the request turn settled.",
+				"retry_status": map[string]any{"type": "exhausted"},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := insertRuntimePodLostSettlementEventTx(ctx, tx, scope, threadScope, "session.error", errorPayload, now); err != nil {
+			return err
+		}
+	}
+	idleEventType := "session.status_idle"
+	stopReasonJSON := `{"type":"retries_exhausted"}`
+	if interruptedThenLost {
+		stopReasonJSON = `{"type":"end_turn"}`
+	}
+	idlePayload, err := idleStatusPayloadJSON(stopReasonJSON)
+	if threadID != mainThreadID {
+		idleEventType = "session.thread_status_idle"
+		idlePayload, err = threadStatusPayloadJSON(idleEventType, scope, threadScope, stopReasonJSON)
+	}
+	if err != nil {
+		return err
+	}
+	idleEventID, err := insertRuntimePodLostSettlementEventTx(ctx, tx, scope, threadScope, idleEventType, idlePayload, now)
+	if err != nil {
+		return err
+	}
+	if err := resetTurnRetryCountersTx(ctx, tx, scope, now); err != nil {
+		return err
+	}
+	formattedNow := now
+	if threadID != mainThreadID {
+		_, err = tx.Exec(ctx,
+			`UPDATE session_threads
+			    SET status = 'idle',
+			        last_active_at = $4,
+			        updated_at = $4
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND id = $3
+			    AND status IN ('running', 'rescheduling')`,
+			workspaceID,
+			sessionID,
+			threadID,
+			formattedNow,
+		)
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_threads
+		    SET status = 'idle',
+		        last_active_at = $4,
+		        updated_at = $4
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND id = $3
+		    AND status IN ('running', 'rescheduling', 'idle')`,
+		workspaceID,
+		sessionID,
+		threadID,
+		formattedNow,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE sessions
+		    SET status = CASE WHEN status = 'rescheduling' THEN 'idle' ELSE status END,
+		        updated_at = $3
+		  WHERE workspace_id = $1
+		    AND id = $2
+		    AND status <> 'terminated'`,
+		workspaceID,
+		sessionID,
+		formattedNow,
+	); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET status = 'idle',
+		        status_event_id = $5,
+		        idle_since = $6,
+		        active_seconds_total = active_seconds_total + CASE
+		          WHEN running_since IS NULL THEN 0
+		          ELSE GREATEST(0, EXTRACT(EPOCH FROM ($6 - running_since)))
+		        END,
+		        running_since = NULL,
+		        cleanup_after = $7,
+		        cleanup_enqueued_at = NULL,
+		        cleanup_claimed_at = NULL,
+		        cleanup_job_id = NULL,
+		        updated_at = $6
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND binding_id = $3
+		    AND binding_generation = $4`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+		binding.BindingGeneration,
+		idleEventID,
+		formattedNow,
+		now.Add(defaultIdleCleanupDelay),
+	)
+	return err
+}
+
+// The interrupted-then-lost exception is intentionally decidable from one
+// thread only. Processed user events and committed inter-agent receipt events
+// are durable input truth; sequence values from sibling threads are unrelated.
+func runtimePodLostInterruptedThenLostTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	threadID string,
+) (bool, error) {
+	var interruptSequence int64
+	err := tx.QueryRow(ctx,
+		`SELECT sequence
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND type = 'user.interrupt'
+		    AND processed_at IS NOT NULL
+		  ORDER BY sequence DESC
+		  LIMIT 1`,
+		workspaceID,
+		sessionID,
+		threadID,
+	).Scan(&interruptSequence)
+	if dbconnect.IsNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var superseded bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1
+		     FROM session_events
+		    WHERE workspace_id = $1
+		      AND session_id = $2
+		      AND session_thread_id = $3
+		      AND sequence > $4
+		      AND (
+		           (type IN ('user.message', 'user.interrupt', 'user.tool_confirmation') AND processed_at IS NOT NULL)
+		        OR type = 'agent.thread_message_received'
+		      )
+		)`,
+		workspaceID,
+		sessionID,
+		threadID,
+		interruptSequence,
+	).Scan(&superseded)
+	return !superseded, err
+}
+
+func insertRuntimePodLostSettlementEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	eventType string,
+	payloadJSON string,
+	now time.Time,
+) (string, error) {
+	visibility, sessionVisible := threadScope.publicProjection(eventType)
+	eventID := id.New("evt_")
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, projection_json, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7, $10, $10, $10)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		eventID,
+		sequence,
+		eventType,
+		payloadJSON,
+		visibility,
+		sessionVisible,
+		now,
+	); err != nil {
+		return "", err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return "", err
+	}
+	return eventID, nil
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Context, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) error {
+	var sandboxID string
+	claimID := runtimePodLostClaimID(binding)
+	if err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
+		current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, workspaceID, sessionID)
+		if err != nil {
+			return err
+		}
+		if !found || current.BindingID != binding.BindingID || current.BindingGeneration != binding.BindingGeneration {
+			return runtimePodLostStaleFenceError("runtime pod-loss repair binding fence is stale")
+		}
+		freshClaim, err := verifyRuntimePodLostReleaseClaimAvailableTx(ctx, tx, workspaceID, sessionID, binding, claimID)
+		if err != nil {
+			return err
+		}
+		if _, err := repairLostRuntimeBindingTx(ctx, tx, workspaceID, sessionID, binding, now); err != nil {
+			return err
+		}
+		if freshClaim {
+			if _, err := rearmPendingCompletionMailForSessionTx(ctx, tx, workspaceID, sessionID, now); err != nil {
+				return err
+			}
+		}
+		if err := claimRuntimePodLostReleaseTx(ctx, tx, workspaceID, sessionID, binding, claimID, now); err != nil {
+			return err
+		}
+		sandboxID, err = cleanupSandboxIDTx(ctx, tx, workspaceID, sessionID)
+		return err
+	}); err != nil {
+		return err
+	}
+	if sandboxID == "" {
+		return runtimeDeliveryPrepareError{kind: "sandbox_release_unavailable", message: "sandbox release fence is unavailable during runtime pod loss repair", retryable: true}
+	}
+	if s.SandboxReleaser == nil {
+		return runtimeDeliveryPrepareError{kind: "sandbox_release_unavailable", message: "sandbox release client is unavailable during runtime pod loss repair", retryable: true}
+	}
+	release, err := s.SandboxReleaser.ReleaseSandbox(ctx, SandboxReleaseRequest{
+		WorkspaceID:         workspaceID,
+		SessionID:           sessionID,
+		SandboxID:           sandboxID,
+		BindingID:           binding.BindingID,
+		BindingGeneration:   binding.BindingGeneration,
+		Reason:              "runtime_pod_lost",
+		IdempotencyKey:      claimID,
+		DurableCleanupFence: true,
+	})
+	if err != nil {
+		return runtimeDeliveryPrepareError{kind: "sandbox_release_unavailable", message: "sandbox release call failed during runtime pod loss repair", retryable: true}
+	}
+	switch release.Status {
+	case SandboxReleaseReleased, SandboxReleaseArchived, SandboxReleaseAlreadyReleased:
+	case SandboxReleaseRetryLater:
+		return runtimeDeliveryPrepareError{kind: "sandbox_release_retry_later", message: "sandbox release is not complete during runtime pod loss repair", retryable: true}
+	case SandboxReleaseFailed:
+		return runtimeDeliveryPrepareError{kind: "sandbox_release_failed", message: "sandbox release failed during runtime pod loss repair", retryable: false}
+	default:
+		return runtimeDeliveryPrepareError{kind: "sandbox_release_protocol_error", message: "sandbox release status is invalid during runtime pod loss repair", retryable: false}
+	}
+	return s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.finalize_lost_runtime_binding", func(tx *dbconnect.Tx) error {
+		return finalizeRuntimePodLostReleaseTx(ctx, tx, workspaceID, sessionID, binding, claimID, now)
+	})
+}
+
+func runtimePodLostClaimID(binding runtimeBindingForDelivery) string {
+	return "runtime_pod_lost:" + binding.BindingID + ":" + strconv.FormatInt(binding.BindingGeneration, 10)
+}
+
+func runtimePodLostStaleFenceError(message string) runtimeDeliveryPrepareError {
+	return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_claim_stale", message: message, retryable: true}
+}
+
+func verifyRuntimePodLostReleaseClaimAvailableTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	binding runtimeBindingForDelivery,
+	claimID string,
+) (bool, error) {
+	var cleanupJobID, cleanupClaimedAt sql.NullString
+	if err := tx.QueryRow(ctx,
+		`SELECT cleanup_job_id, cleanup_claimed_at
+		   FROM session_runtime_status
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND binding_id = $3
+		    AND binding_generation = $4
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+		binding.BindingGeneration,
+	).Scan(&cleanupJobID, &cleanupClaimedAt); dbconnect.IsNoRows(err) {
+		return false, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
+	} else if err != nil {
+		return false, err
+	}
+	if !cleanupJobID.Valid && !cleanupClaimedAt.Valid {
+		return true, nil
+	}
+	if cleanupJobID.Valid && cleanupJobID.String == claimID && cleanupClaimedAt.Valid {
+		return false, nil
+	}
+	return false, runtimePodLostStaleFenceError("runtime pod-loss cleanup claim is stale")
+}
+
+func claimRuntimePodLostReleaseTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, claimID string, now time.Time) error {
+	formattedNow := now
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET cleanup_job_id = $5,
+		        cleanup_claimed_at = COALESCE(cleanup_claimed_at, $6),
+		        updated_at = $6
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND binding_id = $3
+		    AND binding_generation = $4
+		    AND (
+		         (cleanup_job_id IS NULL AND cleanup_claimed_at IS NULL)
+		      OR (cleanup_job_id = $5 AND cleanup_claimed_at IS NOT NULL)
+		    )`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+		binding.BindingGeneration,
+		claimID,
+		formattedNow,
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(result) {
+		return runtimePodLostStaleFenceError("runtime pod-loss cleanup claim is stale")
+	}
+	return nil
+}
+
+func finalizeRuntimePodLostReleaseTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, claimID string, now time.Time) error {
+	result, err := tx.Exec(ctx,
+		`DELETE FROM session_runtime_bindings
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND binding_id = $3
+		    AND binding_generation = $4`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+		binding.BindingGeneration,
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(result) {
+		return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_finalize_stale", message: "runtime pod-loss binding finalization fence is stale", retryable: true}
+	}
+	result, err = tx.Exec(ctx,
+		`UPDATE session_runtime_status
+		    SET cleanup_after = NULL,
+		        cleanup_enqueued_at = NULL,
+		        cleanup_claimed_at = NULL,
+		        cleanup_job_id = NULL,
+		        binding_id = NULL,
+		        binding_generation = NULL,
+		        updated_at = $6
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND cleanup_job_id = $3
+		    AND cleanup_claimed_at IS NOT NULL
+		    AND binding_id = $4
+		    AND binding_generation = $5`,
+		workspaceID,
+		sessionID,
+		claimID,
+		binding.BindingID,
+		binding.BindingGeneration,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(result) {
+		return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_finalize_stale", message: "runtime pod-loss cleanup claim finalization fence is stale", retryable: true}
+	}
+	return nil
+}
+
+type runtimePodLostBackgroundTask struct {
+	ThreadID           string
+	TaskID             string
+	SourceToolUseEvent string
+}
+
+func settleRuntimePodLostBackgroundTasksTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT session_thread_id, task_id, source_tool_use_event_id
+		   FROM session_background_tasks
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND binding_id = $3
+		    AND status = 'running'
+		  ORDER BY created_at ASC, task_id ASC
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		binding.BindingID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	tasks := make([]runtimePodLostBackgroundTask, 0)
+	for rows.Next() {
+		var task runtimePodLostBackgroundTask
+		if err := rows.Scan(&task.ThreadID, &task.TaskID, &task.SourceToolUseEvent); err != nil {
+			return 0, err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	repaired := 0
+	for _, task := range tasks {
+		result, err := tx.Exec(ctx,
+			`UPDATE session_background_tasks
+			    SET status = 'cancelled_by_cleanup',
+			        terminal_at = COALESCE(terminal_at, $6),
+			        updated_at = $6
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND task_id = $4
+			    AND binding_id = $5
+			    AND status = 'running'`,
+			workspaceID,
+			sessionID,
+			task.ThreadID,
+			task.TaskID,
+			binding.BindingID,
+			now,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if !rowsAffected(result) {
+			continue
+		}
+		scope := runtimePodLostRepairScope(workspaceID, sessionID, task.ThreadID, binding, "background:"+task.TaskID)
+		eventID, _, err := insertRuntimeNotificationTx(ctx, tx, scope, task.TaskID, task.SourceToolUseEvent, "cancelled_by_cleanup", `{}`, now)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_background_tasks
+			    SET terminal_event_id = COALESCE(terminal_event_id, $6),
+			        updated_at = $7
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND task_id = $4
+			    AND binding_id = $5`,
+			workspaceID,
+			sessionID,
+			task.ThreadID,
+			task.TaskID,
+			binding.BindingID,
+			eventID,
+			now,
+		); err != nil {
+			return 0, err
+		}
+		repaired++
+	}
+	return repaired, nil
+}
+
+func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimeOpenRequestStart, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.payload_json
+		   FROM session_events e
+		  WHERE e.workspace_id = $1
+		    AND e.session_id = $2
+		    AND e.type = 'span.model_request_start'
+		    AND COALESCE(e.model_request_id, '') <> ''
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events ended
+		         WHERE ended.workspace_id = e.workspace_id
+		           AND ended.session_id = e.session_id
+		           AND ended.model_request_id = e.model_request_id
+		           AND ended.type = 'span.model_request_end'
+		    )
+		  ORDER BY e.sequence ASC, e.event_id ASC
+		  FOR UPDATE OF e`,
+		workspaceID,
+		sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	starts := make([]runtimeOpenRequestStart, 0)
+	for rows.Next() {
+		var start runtimeOpenRequestStart
+		var payloadJSON string
+		if err := rows.Scan(&start.SessionThreadID, &start.EventID, &start.ModelRequestID, &payloadJSON); err != nil {
+			return nil, err
+		}
+		start.RequestKind = requestKindFromModelRequestStartPayload(payloadJSON)
+		starts = append(starts, start)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return starts, nil
+}
+
+func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, modelRequestIDs []string) ([]runtimeOrphanToolUse, error) {
+	if len(modelRequestIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, 0, len(modelRequestIDs))
+	args := []any{workspaceID, sessionID}
+	for index, modelRequestID := range modelRequestIDs {
+		placeholders = append(placeholders, "$"+strconv.Itoa(index+3))
+		args = append(args, modelRequestID)
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.payload_json, COALESCE(e.projection_json, '{}')
+		   FROM session_events e
+		  WHERE e.workspace_id = $1
+		    AND e.session_id = $2
+		    AND e.type = 'agent.tool_use'
+		    AND e.visibility = 'public'
+		    AND e.session_visible
+		    AND COALESCE(
+		          NULLIF(e.projection_json::jsonb ->> 'tool_name', ''),
+		          e.payload_json::jsonb ->> 'name',
+		          ''
+		        ) NOT IN ('spawn_agent', 'send_message')
+		    AND e.model_request_id IN (`+strings.Join(placeholders, ", ")+`)
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events result
+		         WHERE result.workspace_id = e.workspace_id
+		           AND result.session_id = e.session_id
+		           AND result.type = 'agent.tool_result'
+		           AND (
+		                result.payload_json::jsonb ->> 'tool_use_event_id' = e.event_id
+		             OR result.payload_json::jsonb ->> 'tool_use_id' = e.event_id
+		           )
+		    )
+		  ORDER BY e.sequence ASC, e.event_id ASC
+		  FOR UPDATE OF e`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	toolUses := make([]runtimeOrphanToolUse, 0)
+	for rows.Next() {
+		var toolUse runtimeOrphanToolUse
+		if err := rows.Scan(&toolUse.SessionThreadID, &toolUse.EventID, &toolUse.ModelRequestID, &toolUse.PayloadJSON, &toolUse.ProjectionJSON); err != nil {
+			return nil, err
+		}
+		toolUses = append(toolUses, toolUse)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return toolUses, nil
+}
+
+func insertRuntimePodLostRequestEndTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, start runtimeOpenRequestStart, now time.Time) (bool, error) {
+	return insertRuntimeTerminalRequestEndTx(ctx, tx, workspaceID, sessionID, binding, start, "runtime_pod_lost", "rwrite_runtime_pod_lost_", now)
+}
+
+func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, start runtimeOpenRequestStart, errorKind string, writeIDPrefix string, now time.Time) (bool, error) {
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, start.SessionThreadID, binding, start.ModelRequestID)
+	if _, ok, err := modelRequestEndExistsTx(ctx, tx, workspaceID, sessionID, start.ModelRequestID); err != nil || ok {
+		return false, err
+	}
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return false, err
+	}
+	visibility, sessionVisible := threadScope.publicProjection("span.model_request_end")
+	request := &bridgev1.WriteRequestEndRequest{
+		Scope:                    scope,
+		RuntimeWriteId:           writeIDPrefix + start.ModelRequestID,
+		ModelRequestId:           start.ModelRequestID,
+		ModelRequestStartEventId: start.EventID,
+		RequestKind:              start.RequestKind,
+		IsError:                  true,
+		ErrorKind:                errorKind,
+		FinishReason:             "error",
+		UsageJson:                "{}",
+	}
+	payloadJSON, err := modelRequestEndPayloadJSON(request, start.RequestKind, "error", bridgeUsage{})
+	if err != nil {
+		return false, err
+	}
+	eventID := id.New("evt_")
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, 'span.model_request_end', $6, $7, $8, $9, $10, $6, $11, $11, $11)`,
+		workspaceID,
+		sessionID,
+		start.SessionThreadID,
+		eventID,
+		sequence,
+		payloadJSON,
+		visibility,
+		sessionVisible,
+		request.GetRuntimeWriteId(),
+		start.ModelRequestID,
+		now,
+	); err != nil {
+		return false, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO request_usage_details (
+			workspace_id, session_id, session_thread_id, model_request_id, runtime_write_id,
+			request_kind, input_total_tokens, input_uncached_tokens, output_total_tokens,
+			total_tokens, provider_usage_json, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, '{}', $7)
+		ON CONFLICT (workspace_id, session_id, model_request_id, runtime_write_id) DO NOTHING`,
+		workspaceID,
+		sessionID,
+		start.SessionThreadID,
+		start.ModelRequestID,
+		request.GetRuntimeWriteId(),
+		start.RequestKind,
+		now,
+	)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func insertRuntimePodLostToolResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, now time.Time) (bool, error) {
+	return insertRuntimeTerminalToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, runtimeTerminalToolResult{
+		WriteIDPrefix: "rwrite_runtime_pod_lost_tool_",
+		Reason:        "runtime_pod_lost",
+		ErrorType:     "runtime_pod_lost",
+		Message:       "Tool result unavailable because the runtime pod was lost.",
+		Retryable:     true,
+	}, now)
+}
+
+type runtimePodLostSubAgentDelivery struct {
+	ToolUse     runtimeOrphanToolUse
+	ToolName    string
+	SentEvent   string
+	SentPayload string
+}
+
+type runtimePodLostSentDeliveryPayload struct {
+	DeliveryID           string          `json:"delivery_id"`
+	SourceThreadID       string          `json:"source_thread_id"`
+	TargetThreadID       string          `json:"target_thread_id"`
+	TargetTaskName       string          `json:"target_task_name"`
+	SourceToolUseEventID string          `json:"source_tool_use_event_id"`
+	Message              json.RawMessage `json:"message"`
+}
+
+func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
+	deliveries, err := runtimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	repaired := 0
+	for _, delivery := range deliveries {
+		if _, exists, err := toolResultForToolUseExistsTx(ctx, tx, workspaceID, sessionID, delivery.ToolUse.EventID); err != nil {
+			return 0, err
+		} else if exists {
+			continue
+		}
+		if delivery.SentEvent == "" {
+			inserted, err := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
+				"Sub-agent delivery could not be recovered because its durable delivery anchor is missing.", now)
+			if err != nil {
+				return 0, err
+			}
+			if inserted {
+				repaired++
+			}
+			continue
+		}
+
+		var sent runtimePodLostSentDeliveryPayload
+		if err := json.Unmarshal([]byte(delivery.SentPayload), &sent); err != nil ||
+			sent.DeliveryID == "" || sent.SourceThreadID != delivery.ToolUse.SessionThreadID ||
+			sent.TargetThreadID == "" || sent.SourceToolUseEventID != delivery.ToolUse.EventID ||
+			len(sent.Message) == 0 || !json.Valid(sent.Message) {
+			inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
+				"Sub-agent delivery could not be recovered because its durable delivery anchor is invalid.", now)
+			if insertErr != nil {
+				return 0, insertErr
+			}
+			if inserted {
+				repaired++
+			}
+			continue
+		}
+
+		parentScope := runtimePodLostRepairScope(workspaceID, sessionID, delivery.ToolUse.SessionThreadID, binding, sent.DeliveryID)
+		received, err := interAgentDeliveryEventExistsTx(ctx, tx, parentScope, sent.TargetThreadID, "agent.thread_message_received", sent.DeliveryID)
+		if err != nil {
+			return 0, err
+		}
+		if !received {
+			childScope := scopeForThread(parentScope, sent.TargetThreadID)
+			redrivePayload, err := marshalBridgeJSON(interAgentMessagePayload{
+				DeliveryID:           sent.DeliveryID,
+				SourceThreadID:       sent.SourceThreadID,
+				SourceToolUseEventID: sent.SourceToolUseEventID,
+				Message:              sent.Message,
+			})
+			if err != nil {
+				return 0, err
+			}
+			if err := commitInterAgentMessageTx(ctx, tx, childScope, redrivePayload, now); err != nil {
+				switch status.Code(err) {
+				case codes.FailedPrecondition, codes.NotFound:
+					inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
+						"Sub-agent delivery could not be recovered because the target child is not receivable.", now)
+					if insertErr != nil {
+						return 0, insertErr
+					}
+					if inserted {
+						repaired++
+					}
+					continue
+				default:
+					return 0, err
+				}
+			}
+			received, err = interAgentDeliveryEventExistsTx(ctx, tx, parentScope, sent.TargetThreadID, "agent.thread_message_received", sent.DeliveryID)
+			if err != nil {
+				return 0, err
+			}
+			if !received {
+				return 0, status.Error(codes.Internal, "sub-agent delivery re-drive did not commit a durable receipt")
+			}
+		}
+
+		taskName := sent.TargetTaskName
+		if taskName == "" {
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(task_name, '')
+				   FROM session_threads
+				  WHERE workspace_id = $1 AND session_id = $2 AND id = $3`,
+				workspaceID, sessionID, sent.TargetThreadID).Scan(&taskName); err != nil && !dbconnect.IsNoRows(err) {
+				return 0, err
+			}
+		}
+		resultText := "task_name: " + defaultString(taskName, "subagent") + "\nsession_thread_id: " + sent.TargetThreadID + "\nstatus: delivered"
+		inserted, err := insertRuntimePodLostSubAgentDeliveredResultTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse, resultText, now)
+		if err != nil {
+			return 0, err
+		}
+		if inserted {
+			repaired++
+		}
+	}
+	return repaired, nil
+}
+
+func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimePodLostSubAgentDelivery, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT tool_use.session_thread_id,
+		        tool_use.event_id,
+		        COALESCE(tool_use.model_request_id, ''),
+		        tool_use.payload_json,
+		        COALESCE(tool_use.projection_json, '{}'),
+		        COALESCE(NULLIF(tool_use.projection_json::jsonb ->> 'tool_name', ''), tool_use.payload_json::jsonb ->> 'name', ''),
+		        COALESCE(sent.event_id, ''),
+		        COALESCE(sent.payload_json, '')
+		   FROM session_events tool_use
+		   LEFT JOIN LATERAL (
+		       SELECT candidate.event_id, candidate.payload_json
+		         FROM session_events candidate
+		        WHERE candidate.workspace_id = tool_use.workspace_id
+		          AND candidate.session_id = tool_use.session_id
+		          AND candidate.session_thread_id = tool_use.session_thread_id
+		          AND candidate.type = 'agent.thread_message_sent'
+		          AND candidate.payload_json::jsonb ->> 'source_tool_use_event_id' = tool_use.event_id
+		        ORDER BY candidate.sequence ASC, candidate.event_id ASC
+		        LIMIT 1
+		   ) sent ON TRUE
+		  WHERE tool_use.workspace_id = $1
+		    AND tool_use.session_id = $2
+		    AND tool_use.type = 'agent.tool_use'
+		    AND tool_use.visibility = 'public'
+		    AND COALESCE(NULLIF(tool_use.projection_json::jsonb ->> 'tool_name', ''), tool_use.payload_json::jsonb ->> 'name', '') IN ('spawn_agent', 'send_message')
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events result
+		         WHERE result.workspace_id = tool_use.workspace_id
+		           AND result.session_id = tool_use.session_id
+		           AND result.type = 'agent.tool_result'
+		           AND (
+		                result.payload_json::jsonb ->> 'tool_use_event_id' = tool_use.event_id
+		             OR result.payload_json::jsonb ->> 'tool_use_id' = tool_use.event_id
+		           )
+		    )
+		  ORDER BY tool_use.sequence ASC, tool_use.event_id ASC
+		  FOR UPDATE OF tool_use`,
+		workspaceID,
+		sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	result := make([]runtimePodLostSubAgentDelivery, 0)
+	for rows.Next() {
+		var delivery runtimePodLostSubAgentDelivery
+		if err := rows.Scan(
+			&delivery.ToolUse.SessionThreadID,
+			&delivery.ToolUse.EventID,
+			&delivery.ToolUse.ModelRequestID,
+			&delivery.ToolUse.PayloadJSON,
+			&delivery.ToolUse.ProjectionJSON,
+			&delivery.ToolName,
+			&delivery.SentEvent,
+			&delivery.SentPayload,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, delivery)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func insertRuntimePodLostSubAgentDeliveredResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, message string, now time.Time) (bool, error) {
+	return insertRuntimeTerminalToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, runtimeTerminalToolResult{
+		WriteIDPrefix: "rwrite_runtime_pod_lost_delivery_",
+		Message:       message,
+		Success:       true,
+	}, now)
+}
+
+func insertRuntimePodLostSubAgentDeliveryErrorTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, message string, now time.Time) (bool, error) {
+	return insertRuntimeTerminalToolResultTx(ctx, tx, workspaceID, sessionID, binding, toolUse, runtimeTerminalToolResult{
+		WriteIDPrefix: "rwrite_runtime_pod_lost_delivery_",
+		Reason:        "runtime_pod_lost_delivery_failed",
+		ErrorType:     "runtime_pod_lost_delivery_failed",
+		Message:       message,
+		Retryable:     false,
+	}, now)
+}
+
+type runtimeTerminalToolResult struct {
+	WriteIDPrefix string
+	Reason        string
+	ErrorType     string
+	Message       string
+	Retryable     bool
+	Success       bool
+}
+
+func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, terminal runtimeTerminalToolResult, now time.Time) (bool, error) {
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, toolUse.SessionThreadID, binding, toolUse.ModelRequestID)
+	if _, ok, err := toolResultForToolUseExistsTx(ctx, tx, workspaceID, sessionID, toolUse.EventID); err != nil || ok {
+		return false, err
+	}
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return false, err
+	}
+	visibility, sessionVisible := threadScope.publicProjection("agent.tool_result")
+	projection, err := parseRuntimeToolProjection(toolUse.ProjectionJSON)
+	if err != nil {
+		return false, err
+	}
+	inputJSON, err := runtimeToolProjectionInputJSON(projection.Input, nil)
+	if err != nil {
+		return false, err
+	}
+	eventPayload := map[string]any{
+		"type":              "agent.tool_result",
+		"tool_use_event_id": toolUse.EventID,
+		"content": []map[string]string{{
+			"type": "text",
+			"text": terminal.Message,
+		}},
+		"is_error": !terminal.Success,
+	}
+	if terminal.Reason != "" {
+		eventPayload["reason"] = terminal.Reason
+	}
+	payloadJSON, err := marshalBridgeJSON(eventPayload)
+	if err != nil {
+		return false, err
+	}
+	projectionPayload := map[string]any{
+		"type":               "runtime_tool_projection",
+		"model_tool_call_id": projection.ModelToolCallID,
+		"tool_name":          projection.ToolName,
+		"input":              json.RawMessage(inputJSON),
+	}
+	if terminal.Success {
+		projectionPayload["state"] = "completed"
+		projectionPayload["output"] = map[string]any{
+			"text":      terminal.Message,
+			"truncated": false,
+		}
+	} else {
+		projectionPayload["state"] = "error"
+		projectionPayload["error"] = map[string]any{
+			"type":      terminal.ErrorType,
+			"message":   terminal.Message,
+			"retryable": terminal.Retryable,
+		}
+	}
+	projectionJSON, err := marshalBridgeJSON(projectionPayload)
+	if err != nil {
+		return false, err
+	}
+	terminalProjection, err := parseRuntimeToolProjection(projectionJSON)
+	if err != nil {
+		return false, err
+	}
+	eventID := id.New("evt_")
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, $11, $12, $12, $12)`,
+		workspaceID,
+		sessionID,
+		toolUse.SessionThreadID,
+		eventID,
+		sequence,
+		payloadJSON,
+		visibility,
+		sessionVisible,
+		terminal.WriteIDPrefix+toolUse.EventID,
+		toolUse.ModelRequestID,
+		projectionJSON,
+		now,
+	); err != nil {
+		return false, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return false, err
+	}
+	var payload runtimeToolResultEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return false, err
+	}
+	if err := insertToolResultMessageProjectionTx(ctx, tx, scope, toolUse.ModelRequestID, eventID, toolUse.EventID, payload, terminalProjection, inputJSON, now); err != nil {
+		return false, err
+	}
+	if terminal.Success {
+		if err := markPendingToolResultResolvedTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
+			return false, err
+		}
+	} else {
+		if err := cancelPendingToolUseForRuntimePodLostTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, modelRequestID string) (string, bool, error) {
+	var eventID string
+	err := tx.QueryRow(ctx,
+		`SELECT event_id
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND model_request_id = $3
+		    AND type = 'span.model_request_end'
+		  ORDER BY sequence ASC
+		  LIMIT 1`,
+		workspaceID,
+		sessionID,
+		modelRequestID,
+	).Scan(&eventID)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return eventID, true, nil
+}
+
+func toolResultForToolUseExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, toolUseEventID string) (string, bool, error) {
+	var eventID string
+	err := tx.QueryRow(ctx,
+		`SELECT event_id
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND type = 'agent.tool_result'
+		    AND (
+		         payload_json::jsonb ->> 'tool_use_event_id' = $3
+		      OR payload_json::jsonb ->> 'tool_use_id' = $3
+		    )
+		  ORDER BY sequence ASC
+		  LIMIT 1`,
+		workspaceID,
+		sessionID,
+		toolUseEventID,
+	).Scan(&eventID)
+	if dbconnect.IsNoRows(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return eventID, true, nil
+}
+
+func cancelPendingToolUseForRuntimePodLostTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultEventID string, now time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE session_pending_tool_uses
+		    SET status = 'cancelled',
+		        result_event_id = COALESCE(result_event_id, $5),
+		        resolved_at = COALESCE(resolved_at, $6),
+		        updated_at = $6
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND tool_use_event_id = $4
+		    AND status IN ('pending', 'resolving')`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventID,
+		resultEventID,
+		now,
+	)
+	return err
+}
+
+func requestKindFromModelRequestStartPayload(payloadJSON string) string {
+	var payload struct {
+		RequestKind string `json:"request_kind"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil {
+		if requestKind, err := normalizeRequestKind(payload.RequestKind); err == nil {
+			return requestKind
+		}
+	}
+	return requestKindAgentProviderRequest
+}
+
+func runtimePodLostRepairScope(workspaceID string, sessionID string, sessionThreadID string, binding runtimeBindingForDelivery, requestIDPart string) *bridgev1.RuntimeScope {
+	return &bridgev1.RuntimeScope{
+		RequestId:       "repair_runtime_pod_lost:" + requestIDPart,
+		WorkspaceId:     workspaceID,
+		SessionId:       sessionID,
+		SessionThreadId: sessionThreadID,
+		Binding: &bridgev1.RuntimeBindingRef{
+			BindingId:         binding.BindingID,
+			BindingGeneration: binding.BindingGeneration,
+			TargetPodUid:      binding.PodUID,
+		},
+	}
+}

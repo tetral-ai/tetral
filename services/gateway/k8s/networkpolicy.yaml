@@ -1,0 +1,80 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "api.anthropic.com, api.openai.com, auth.openai.com, chatgpt.com, api.deepseek.com, api.kimi.com, api.z.ai, api.githubcopilot.com, s.jina.ai, r.jina.ai, blob.example.internal"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 9464
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 9091
+        - protocol: TCP
+          port: 9092
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

@@ -1,0 +1,24 @@
+{
+  "name": "empty reasoning is still sent in reasoning_content",
+  "rule": "deepseek-reasoning-remap",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
+    "messages": [
+      {
+        "role": "assistant",
+        "parts": [
+          { "type": "reasoning", "id": "r1", "text": "" }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [],
+        "providerOptions": { "deepseek": { "reasoning_content": "" } }
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "high variant maps to DeepSeek reasoningEffort high",
+  "rule": "deepseek-effort-lowering",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro", "variant": "high" },
+    "messages": []
+  },
+  "expected": {
+    "providerOptions": { "deepseek": { "reasoningEffort": "high" } }
+  }
+}

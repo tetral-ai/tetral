@@ -1,0 +1,114 @@
+{
+  "cases": [
+    {
+      "provenance": "synthetic",
+      "request": {
+        "method": "POST",
+        "url": "https://r.jina.ai/",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-Return-Format": "markdown",
+          "X-Timeout": "30",
+          "X-Token-Budget": "262144",
+          "X-With-Generated-Alt": "true"
+        },
+        "body": {
+          "url": "https://example.com/"
+        }
+      },
+      "outcome": "http-response",
+      "outer_http_status": 402,
+      "response": {
+        "code": 402
+      }
+    },
+    {
+      "provenance": "synthetic",
+      "request": {
+        "method": "POST",
+        "url": "https://s.jina.ai/",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-Respond-With": "no-content"
+        },
+        "body": {
+          "q": "fixture query"
+        }
+      },
+      "outcome": "http-response",
+      "outer_http_status": 429,
+      "response": {
+        "code": 429
+      }
+    },
+    {
+      "provenance": "synthetic",
+      "request": {
+        "method": "POST",
+        "url": "https://r.jina.ai/",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-Return-Format": "markdown",
+          "X-Timeout": "30",
+          "X-Token-Budget": "262144",
+          "X-With-Generated-Alt": "true"
+        },
+        "body": {
+          "url": "https://example.com/"
+        }
+      },
+      "outcome": "http-response",
+      "outer_http_status": 503,
+      "response": null
+    },
+    {
+      "provenance": "synthetic",
+      "request": {
+        "method": "POST",
+        "url": "https://r.jina.ai/",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-Return-Format": "markdown",
+          "X-Timeout": "30",
+          "X-Token-Budget": "262144",
+          "X-With-Generated-Alt": "true"
+        },
+        "body": {
+          "url": "https://example.com/"
+        }
+      },
+      "outcome": "transport-timeout",
+      "outer_http_status": null,
+      "response": null
+    },
+    {
+      "provenance": "synthetic",
+      "request": {
+        "method": "POST",
+        "url": "https://r.jina.ai/",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "X-Return-Format": "markdown",
+          "X-Timeout": "30",
+          "X-Token-Budget": "262144",
+          "X-With-Generated-Alt": "true"
+        },
+        "body": {
+          "url": "https://example.com/"
+        }
+      },
+      "outcome": "http-response",
+      "outer_http_status": 418,
+      "response": {
+        "code": 418,
+        "name": "FixtureResidualClientError",
+        "status": 41800
+      }
+    }
+  ]
+}

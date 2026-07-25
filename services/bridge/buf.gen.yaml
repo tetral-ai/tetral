@@ -1,0 +1,43 @@
+version: v2
+clean: true
+inputs:
+  - directory: services/bridge/proto
+plugins:
+  - local:
+      - go
+      - run
+      - google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+    out: services/bridge/gen
+    opt:
+      - paths=source_relative
+  - local:
+      - go
+      - run
+      - google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+    out: services/bridge/gen
+    opt:
+      - paths=source_relative
+  - local:
+      - npm
+      - exec
+      - -y
+      - --package=ts-proto@2.11.8
+      - --
+      - protoc-gen-ts_proto
+    out: services/agent-runtime/packages/protocol/src/gen-bridge
+    opt:
+      - outputServices=grpc-js
+      - importSuffix=.js
+      - forceLong=number
+  - local:
+      - npm
+      - exec
+      - -y
+      - --package=ts-proto@2.11.8
+      - --
+      - protoc-gen-ts_proto
+    out: services/gateway/packages/protocol/src/gen-bridge
+    opt:
+      - outputServices=grpc-js
+      - importSuffix=.js
+      - forceLong=number

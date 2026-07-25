@@ -1,0 +1,245 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-runtime
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-runtime
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-runtime
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: agent-runtime
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: agent-runtime
+          image: ghcr.io/tetral-ai/agent-runtime:0.1.0-alpha
+          imagePullPolicy: IfNotPresent
+          command:
+            - bun
+            - /app/dist/command.js
+          env:
+            - name: TETRAL_RUNTIME_POD_HTTP_ADDR
+              value: 0.0.0.0:8080
+            - name: TETRAL_RUNTIME_POD_GRPC_PORT
+              value: "9090"
+            - name: TETRAL_RUNTIME_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: TETRAL_RUNTIME_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TETRAL_RUNTIME_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: TETRAL_RUNTIME_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: local
+            - name: TETRAL_SERVICE_VERSION
+              value: dev
+            - name: TETRAL_RUNTIME_POD_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-system/bridge
+            - name: TETRAL_RUNTIME_POD_OUTBOUND_GRPC_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/runtime-pod/token
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: bridge.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_GATEWAY_GRPC_ADDR
+              value: dns:///gateway.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
+              value: dns:///gateway.tetral-system.svc.cluster.local:9091
+            - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
+              value: dns:///gateway.tetral-system.svc.cluster.local:9092
+            - name: TETRAL_RUNTIME_APPROVAL_REVIEWER_MODEL
+              value: deepseek/deepseek-v4-pro
+            - name: TETRAL_RUNTIME_SKILL_GUIDANCE_DESCRIPTION_BUDGET_BYTES
+              value: "32768"
+            - name: TETRAL_RUNTIME_PROVIDER_STREAM_TIMEOUT_MS
+              value: "1800000"
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/runtime-pod-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: runtime-pod-internal-grpc-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/runtime-pod
+              readOnly: true
+            - name: runtime-pod-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+      volumes:
+        - name: runtime-pod-internal-grpc-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: runtime-pod-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: kubernetes.default.svc
+                  expirationSeconds: 600
+                  path: runtime-pod-tokenreview/token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-runtime
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent-runtime
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-runtime
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 9091
+        - protocol: TCP
+          port: 9092
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

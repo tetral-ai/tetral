@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: provider-grpc
+      port: 9090
+      targetPort: provider-grpc
+    - name: mcp-grpc
+      port: 9091
+      targetPort: mcp-grpc
+    - name: web-grpc
+      port: 9092
+      targetPort: web-grpc
+    - name: web-metrics
+      port: 9464
+      targetPort: web-metrics
+    - name: mcp-http
+      port: 8081
+      targetPort: mcp-http

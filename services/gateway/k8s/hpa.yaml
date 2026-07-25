@@ -1,0 +1,24 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/hpa-metric-source: "resource: cpu"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

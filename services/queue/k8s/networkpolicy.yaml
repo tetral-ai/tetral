@@ -1,0 +1,62 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: queue
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: queue
+    app.kubernetes.io/part-of: tetral
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: queue
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

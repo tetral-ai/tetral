@@ -1,0 +1,82 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 66
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "reasoningTextIncludes": [
+    "7",
+    "15"
+  ],
+  "textIncludes": "ok",
+  "toolInputJson": "{\"query\":\"tetral\"}",
+  "toolCalls": [
+    {
+      "name": "Search",
+      "inputJson": "{\"query\":\"tetral\"}"
+    }
+  ],
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_TOOL_CALLS",
+    "usage": {
+      "inputUncachedTokens": 24,
+      "inputCacheReadTokens": 192,
+      "inputTotalTokens": 216,
+      "outputReasoningTokens": 66,
+      "outputTotalTokens": 79,
+      "totalTokens": 295
+    },
+    "metadata": {
+      "credential_source": "session",
+      "raw_finish_reason": "tool_calls"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-04",
+    "model_id": "zai/glm-5.2",
+    "provider": "zai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/zai-glm-5.2-live-2026-07-04.sse"
+  }
+}

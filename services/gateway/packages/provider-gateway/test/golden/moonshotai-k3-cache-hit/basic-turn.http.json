@@ -1,0 +1,26 @@
+{
+  "method": "POST",
+  "pathname": "/coding/v1/messages",
+  "headers": {
+    "x-api-key": "<session-api-key>"
+  },
+  "body": {
+    "model": "k3",
+    "max_tokens": 32,
+    "stream": true
+  },
+  "absentBodyFields": [
+    "thinking",
+    "output_config",
+    "temperature",
+    "top_p",
+    "top_k"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "moonshotai/kimi-k3",
+    "provider": "moonshotai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/moonshotai-kimi-k3-cache-hit-2026-07-19.sse"
+  }
+}

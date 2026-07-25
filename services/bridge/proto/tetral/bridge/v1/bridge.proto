@@ -1,0 +1,487 @@
+syntax = "proto3";
+
+package tetral.bridge.v1;
+
+option go_package = "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1;bridgev1";
+
+service AgentRuntimeBridgeService {
+  rpc LoadContext(LoadContextRequest) returns (LoadContextResponse);
+  rpc RefreshRuntimeBindingToken(RefreshRuntimeBindingTokenRequest) returns (RefreshRuntimeBindingTokenResponse);
+  rpc CommitInputs(CommitInputsRequest) returns (CommitInputsResponse);
+  rpc CommitTaskNotificationResult(CommitTaskNotificationResultRequest) returns (CommitTaskNotificationResultResponse);
+  rpc WriteEvent(WriteEventRequest) returns (WriteEventResponse);
+  rpc WriteRequestEnd(WriteRequestEndRequest) returns (WriteRequestEndResponse);
+  rpc FinishIdle(FinishIdleRequest) returns (FinishIdleResponse);
+  rpc CreateChildThread(CreateChildThreadRequest) returns (CreateChildThreadResponse);
+  rpc ResolveChildThread(ResolveChildThreadRequest) returns (ResolveChildThreadResponse);
+  rpc ListChildThreads(ListChildThreadsRequest) returns (ListChildThreadsResponse);
+  rpc ResolveInterAgentDelivery(ResolveInterAgentDeliveryRequest) returns (ResolveInterAgentDeliveryResponse);
+  rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);
+  rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);
+  rpc RunTool(RunToolRequest) returns (RunToolResponse);
+  rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
+  rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
+  rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
+  rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);
+  rpc ResolveTransientAttachment(ResolveTransientAttachmentRequest) returns (ResolveTransientAttachmentResponse);
+  rpc ResolveFileAttachmentMetadata(ResolveFileAttachmentMetadataRequest) returns (ResolveFileAttachmentMetadataResponse);
+  rpc ReadFileAttachmentChunk(ReadFileAttachmentChunkRequest) returns (ReadFileAttachmentChunkResponse);
+  rpc McpManifestChanged(McpManifestChangedRequest) returns (McpManifestChangedResponse);
+  rpc ClaimMcpToolResult(ClaimMcpToolResultRequest) returns (ClaimMcpToolResultResponse);
+  rpc CommitMcpToolResult(CommitMcpToolResultRequest) returns (CommitMcpToolResultResponse);
+  rpc CommitInternalToolRepair(CommitInternalToolRepairRequest) returns (CommitInternalToolRepairResponse);
+  rpc CommitRuntimeTermination(CommitRuntimeTerminationRequest) returns (CommitRuntimeTerminationResponse);
+}
+
+enum BridgeWriteStatus {
+  BRIDGE_WRITE_STATUS_UNSPECIFIED = 0;
+  BRIDGE_WRITE_STATUS_COMMITTED = 1;
+  BRIDGE_WRITE_STATUS_DUPLICATE = 2;
+  BRIDGE_WRITE_STATUS_REJECTED = 3;
+}
+
+message RuntimeBindingRef {
+  string binding_id = 1;
+  int64 binding_generation = 2;
+  string target_pod_uid = 3;
+}
+
+message RuntimeScope {
+  string request_id = 1;
+  string workspace_id = 2;
+  string session_id = 3;
+  string session_thread_id = 4;
+  RuntimeBindingRef binding = 5;
+}
+
+message BridgeWriteAck {
+  BridgeWriteStatus status = 1;
+  string runtime_input_id = 2;
+  string runtime_write_id = 3;
+  string error_code = 4;
+}
+
+message LoadContextRequest {
+  RuntimeScope scope = 1;
+  string runtime_input_id = 2;
+  int64 sequence_from = 3;
+  int64 sequence_to = 4;
+  string agent_mail_source_thread_id = 5;
+}
+
+message LoadContextResponse {
+  BridgeWriteAck ack = 1;
+  string context_json = 2;
+  string runtime_binding_token = 3;
+}
+
+message RefreshRuntimeBindingTokenRequest {
+  RuntimeScope scope = 1;
+}
+
+message RefreshRuntimeBindingTokenResponse {
+  string runtime_binding_token = 1;
+}
+
+message CommitInputsRequest {
+  RuntimeScope scope = 1;
+  string runtime_input_id = 2;
+  repeated string event_ids = 3;
+  int64 sequence_from = 4;
+  int64 sequence_to = 5;
+  string hot_context_patch_json = 6;
+  string input_kind = 7;
+  string inter_agent_message_json = 8;
+  string approval_review_json = 9;
+}
+
+message CommitInputsResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message CommitTaskNotificationResultRequest {
+  RuntimeScope scope = 1;
+  string runtime_input_id = 2;
+  string task_id = 3;
+  string result_json = 4;
+}
+
+message CommitTaskNotificationResultResponse {
+  BridgeWriteAck ack = 1;
+  string runtime_message_json = 2;
+}
+
+message McpManifestChangedRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string mcp_server_name = 3;
+  string manifest_etag = 4;
+}
+
+message McpManifestChangedResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message ClaimMcpToolResultRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string normalized_input_hash = 3;
+  string mcp_server_name = 4;
+  string tool_name = 5;
+  string input_json = 6;
+}
+
+message ClaimMcpToolResultResponse {
+  BridgeWriteAck ack = 1;
+  string result_json = 2;
+}
+
+message CommitMcpToolResultRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string normalized_input_hash = 3;
+  string mcp_server_name = 4;
+  string tool_name = 5;
+  string input_json = 6;
+  string result_json = 7;
+  repeated McpInlineMedia inline_media = 8;
+}
+
+message McpInlineMedia {
+  bytes data = 1;
+  string mime = 2;
+  string suggested_filename = 3;
+}
+
+message CommitMcpToolResultResponse {
+  BridgeWriteAck ack = 1;
+  string refs_only_result_json = 2;
+}
+
+message CommitInternalToolRepairRequest {
+  RuntimeScope scope = 1;
+  string model_request_id = 2;
+  string model_tool_call_id = 3;
+  string tool_name = 4;
+  string data_json = 5;
+}
+
+message CommitInternalToolRepairResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message CommitRuntimeTerminationRequest {
+  RuntimeScope scope = 1;
+  string runtime_write_id = 2;
+  string failure_json = 3;
+}
+
+message CommitRuntimeTerminationResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message TransientAttachmentRef {
+  string attachment_ref = 1;
+  string mime = 2;
+  string filename = 3;
+  string source_tool_use_event_id = 4;
+  string source_path = 5;
+  string page_range = 6;
+  string detail = 7;
+}
+
+message ResolveTransientAttachmentRequest {
+  RuntimeScope scope = 1;
+  string attachment_ref = 2;
+  string source_tool_use_event_id = 3;
+}
+
+message ResolvedTransientAttachment {
+  TransientAttachmentRef attachment = 1;
+  bytes data = 2;
+  string expires_at = 3;
+}
+
+message TransientAttachmentUnavailable {}
+
+message ResolveTransientAttachmentResponse {
+  oneof outcome {
+    ResolvedTransientAttachment resolved = 1;
+    TransientAttachmentUnavailable unavailable = 2;
+  }
+}
+
+message FileAttachmentPair {
+  string source_event_id = 1;
+  string file_id = 2;
+}
+
+message ResolveFileAttachmentMetadataRequest {
+  RuntimeScope scope = 1;
+  repeated FileAttachmentPair attachments = 2;
+}
+
+message FileAttachmentMetadata {
+  FileAttachmentPair attachment = 1;
+  string mime = 2;
+  int64 size_bytes = 3;
+  string filename = 4;
+}
+
+enum FileAttachmentRejectionReason {
+  FILE_ATTACHMENT_REJECTION_REASON_UNSPECIFIED = 0;
+  FILE_ATTACHMENT_REJECTION_REASON_DELETED = 1;
+}
+
+message FileAttachmentRejection {
+  FileAttachmentPair attachment = 1;
+  FileAttachmentRejectionReason reason = 2;
+}
+
+message FileAttachmentMetadataResult {
+  oneof outcome {
+    FileAttachmentMetadata metadata = 1;
+    FileAttachmentRejection rejected = 2;
+  }
+}
+
+message ResolveFileAttachmentMetadataResponse {
+  repeated FileAttachmentMetadataResult attachments = 1;
+}
+
+message ReadFileAttachmentChunkRequest {
+  RuntimeScope scope = 1;
+  FileAttachmentPair attachment = 2;
+  int64 offset = 3;
+  int64 length = 4;
+}
+
+message ReadFileAttachmentChunkResponse {
+  oneof outcome {
+    bytes data = 1;
+    FileAttachmentRejection rejected = 2;
+  }
+}
+
+message WriteEventRequest {
+  RuntimeScope scope = 1;
+  string runtime_write_id = 2;
+  string model_request_id = 3;
+  string event_type = 4;
+  string payload_json = 5;
+  string projection_json = 6;
+  bool session_visible = 7;
+  repeated StableReasoningPart stable_reasoning_parts = 8;
+  ServerToolUseUsage server_tool_use = 9;
+}
+
+message ServerToolUseUsage {
+  int64 web_search_requests = 1;
+  int64 web_fetch_requests = 2;
+}
+
+message WriteEventResponse {
+  BridgeWriteAck ack = 1;
+  string event_id = 2;
+  int64 sequence = 3;
+}
+
+message WriteRequestEndRequest {
+  RuntimeScope scope = 1;
+  string runtime_write_id = 2;
+  string model_request_id = 3;
+  string finish_reason = 4;
+  string usage_json = 5;
+  string model_request_start_event_id = 6;
+  bool is_error = 7;
+  string error_kind = 8;
+  repeated string consumed_attachment_refs = 9;
+  string request_kind = 10;
+  RequestEndReschedule reschedule = 11;
+  repeated StableReasoningPart stable_reasoning_parts = 12;
+  repeated FileAttachmentPair consumed_file_attachments = 13;
+}
+
+message StableReasoningPart {
+  string reasoning_part_id = 1;
+  string provider_part_id = 2;
+  int32 part_sequence = 3;
+  string text = 4;
+  string metadata_json = 5;
+  bool truncated = 6;
+}
+
+message WriteRequestEndResponse {
+  BridgeWriteAck ack = 1;
+  RequestEndRescheduleDisposition reschedule_disposition = 2;
+}
+
+message RequestEndReschedule {
+  int32 attempt = 1;
+  string deadline = 2;
+  int64 backoff_ms = 3;
+}
+
+message RequestEndRescheduleDisposition {
+  string status = 1;
+  string denial_reason = 2;
+  int32 attempt = 3;
+  string effective_deadline = 4;
+}
+
+message FinishIdleRequest {
+  RuntimeScope scope = 1;
+  string runtime_write_id = 2;
+  string idle_since = 3;
+  string stop_reason_json = 4;
+}
+
+message FinishIdleResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message CreateChildThreadRequest {
+  RuntimeScope scope = 1;
+  string parent_thread_id = 2;
+  string child_thread_id = 3;
+  string role = 4;
+  string task_name = 5;
+  string metadata_json = 6;
+  string agent_type = 7;
+  string source_tool_use_event_id = 8;
+  string fork_turns = 9;
+  string fork_seed_json = 10;
+  bool is_trunk = 11;
+  string reviewer_review_id = 12;
+}
+
+message CreateChildThreadResponse {
+  BridgeWriteAck ack = 1;
+  string child_thread_id = 2;
+}
+
+message ResolveChildThreadRequest {
+  RuntimeScope scope = 1;
+  string child_thread_id = 2;
+}
+
+message ResolveChildThreadResponse {
+  BridgeWriteAck ack = 1;
+  string thread_json = 2;
+}
+
+message ListChildThreadsRequest {
+  RuntimeScope scope = 1;
+  string parent_thread_id = 2;
+}
+
+message ListChildThreadsResponse {
+  BridgeWriteAck ack = 1;
+  repeated string thread_json = 2;
+}
+
+message ResolveInterAgentDeliveryRequest {
+  RuntimeScope scope = 1;
+  string child_thread_id = 2;
+  string delivery_id = 3;
+}
+
+message ResolveInterAgentDeliveryResponse {
+  BridgeWriteAck ack = 1;
+  bool sent_exists = 2;
+  bool received_exists = 3;
+  bool child_receivable = 4;
+  string child_thread_json = 5;
+}
+
+message MarkChildThreadClosedRequest {
+  RuntimeScope scope = 1;
+  string child_thread_id = 2;
+  string closed_at = 3;
+}
+
+message MarkChildThreadClosedResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message MarkChildThreadActiveRequest {
+  RuntimeScope scope = 1;
+  string child_thread_id = 2;
+  string active_at = 3;
+}
+
+message MarkChildThreadActiveResponse {
+  BridgeWriteAck ack = 1;
+}
+
+message RunToolRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string normalized_input_hash = 3;
+  string tool_name = 4;
+  string input_json = 5;
+  string approval_decision_json = 6;
+}
+
+message RunToolResponse {
+  BridgeWriteAck ack = 1;
+  string result_json = 2;
+  bool background_task_started = 3;
+  string task_id = 4;
+}
+
+message ReadCommandResultRequest {
+  RuntimeScope scope = 1;
+  string task_id = 2;
+  bool defer_terminal_settlement = 3;
+  int32 max_output_tokens = 4;
+  string tool_use_event_id = 5;
+}
+
+message ReadCommandResultResponse {
+  BridgeWriteAck ack = 1;
+  string result_json = 2;
+}
+
+message SendCommandInputRequest {
+  reserved 6;
+  reserved "stdin_write_sequence";
+  RuntimeScope scope = 1;
+  string task_id = 2;
+  int32 max_output_tokens = 3;
+  string input_json = 4;
+  string tool_use_event_id = 5;
+}
+
+message SendCommandInputResponse {
+  BridgeWriteAck ack = 1;
+  string result_json = 2;
+  int64 write_seq = 3;
+}
+
+message CancelCommandRequest {
+  RuntimeScope scope = 1;
+  string task_id = 2;
+  string reason = 4;
+  string tool_use_event_id = 5;
+}
+
+message CancelCommandResponse {
+  BridgeWriteAck ack = 1;
+  string result_json = 2;
+}
+
+message RunMemoryRequest {
+  reserved 4;
+
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string normalized_input_hash = 3;
+  string operation = 5;
+  string input_json = 6;
+}
+
+message RunMemoryResponse {
+  BridgeWriteAck ack = 1;
+  string result_json = 2;
+}

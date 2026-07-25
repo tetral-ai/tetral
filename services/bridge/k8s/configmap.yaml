@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bridge-config
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+data:
+  TETRAL_SANDBOX_DRIVER: daytona
+  DAYTONA_API_URL: https://daytona.example.internal
+  DAYTONA_TARGET: default
+  TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
+  TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
+  TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT: 30s
+  TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
+  TETRAL_COMPACTION_RESCHEDULE_BUDGET: "2"

@@ -1,0 +1,34 @@
+[
+  {
+    "name": "shell operators and reordered whitespace",
+    "inputs": [
+      "{\"workdir\":\"/workspace\",\"cmd\":\"printf '<>&'\"}",
+      "{ \"cmd\" : \"printf '<>&'\", \"workdir\" : \"/workspace\" }"
+    ],
+    "canonical": "{\"cmd\":\"printf '<>&'\",\"workdir\":\"/workspace\"}"
+  },
+  {
+    "name": "lone surrogate escapes",
+    "inputs": [
+      "{\"high\":\"\\ud800\",\"low\":\"\\udfff\"}",
+      "{ \"low\" : \"\\udfff\", \"high\" : \"\\ud800\" }"
+    ],
+    "canonical": "{\"high\":\"\\ud800\",\"low\":\"\\udfff\"}"
+  },
+  {
+    "name": "integer-like and non-ascii keys",
+    "inputs": [
+      "{\"2\":\"two\",\"10\":\"ten\",\"中\":3,\"ä\":4}",
+      "{ \"ä\" : 4, \"中\" : 3, \"10\" : \"ten\", \"2\" : \"two\" }"
+    ],
+    "canonical": "{\"10\":\"ten\",\"2\":\"two\",\"ä\":4,\"中\":3}"
+  },
+  {
+    "name": "line separators and literal backslash-u",
+    "inputs": [
+      "{\"actual\":\"before middle after\",\"literal\":\"\\\\u2028\"}",
+      "{ \"literal\" : \"\\\\u2028\", \"actual\" : \"before middle after\" }"
+    ],
+    "canonical": "{\"actual\":\"before middle after\",\"literal\":\"\\\\u2028\"}"
+  }
+]

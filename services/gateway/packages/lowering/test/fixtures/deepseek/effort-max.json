@@ -1,0 +1,11 @@
+{
+  "name": "max variant maps to DeepSeek reasoningEffort max",
+  "rule": "deepseek-effort-lowering",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro", "variant": "max" },
+    "messages": []
+  },
+  "expected": {
+    "providerOptions": { "deepseek": { "reasoningEffort": "max" } }
+  }
+}

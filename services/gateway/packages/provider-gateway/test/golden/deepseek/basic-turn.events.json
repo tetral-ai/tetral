@@ -1,0 +1,58 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 20
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "reasoningTextIncludes": [
+    "We"
+  ],
+  "text": "ok",
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_STOP",
+    "usage": {
+      "inputUncachedTokens": 22,
+      "inputCacheReadTokens": 0,
+      "inputTotalTokens": 22,
+      "outputReasoningTokens": 20,
+      "outputTotalTokens": 22,
+      "totalTokens": 44
+    },
+    "metadata": {
+      "credential_source": "session",
+      "raw_finish_reason": "stop"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-08",
+    "model_id": "deepseek/deepseek-v4-pro",
+    "provider": "deepseek",
+    "source": "real-provider",
+    "source_fixture": "fixtures/deepseek-deepseek-v4-pro-live-2026-07-06.sse"
+  }
+}

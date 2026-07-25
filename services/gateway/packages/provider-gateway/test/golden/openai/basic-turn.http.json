@@ -1,0 +1,70 @@
+{
+  "method": "POST",
+  "pathname": "/v1/responses",
+  "headers": {
+    "authorization": "Bearer <session-api-key>"
+  },
+  "body": {
+    "model": "gpt-5.5",
+    "stream": true,
+    "store": false,
+    "prompt_cache_key": "sesn_live_openai_fixture",
+    "text": {
+      "verbosity": "low"
+    },
+    "reasoning": {
+      "effort": "xhigh",
+      "summary": "auto"
+    },
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "input": [
+      {
+        "role": "developer",
+        "content": "Keep visible output minimal and call tools exactly as requested."
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Use brief hidden reasoning to verify 7 + 8 = 15. Then emit visible text exactly: ok. Then call Search exactly once with JSON input {\"query\":\"tetral\"}. Do not add any other visible text."
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "name": "Search",
+        "description": "Search.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        },
+        "strict": false
+      }
+    ]
+  },
+  "absentBodyFields": [
+    "max_output_tokens",
+    "temperature",
+    "top_p"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-08",
+    "model_id": "openai/gpt-5.5",
+    "provider": "openai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/openai-gpt-5.5-responses-live-2026-07-06.sse"
+  }
+}

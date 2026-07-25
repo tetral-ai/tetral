@@ -1,0 +1,23 @@
+: fixture provenance: recorded 2026-07-09 model_id=anthropic/claude-opus-4-8 source=real-provider provider=anthropic api=messages-stream cache_hit=true message_id=msg_011CcqdCNbf8KoEWDpvKjSUM
+
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-opus-4-8","id":"msg_011CcqdCNbf8KoEWDpvKjSUM","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":15614,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":4,"service_tier":"standard","inference_geo":"us"}}               }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}            }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0       }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":15614,"output_tokens":4,"output_tokens_details":{"thinking_tokens":0}}         }
+
+event: message_stop
+data: {"type":"message_stop"   }
+

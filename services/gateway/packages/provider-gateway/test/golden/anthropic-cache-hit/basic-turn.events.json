@@ -1,0 +1,32 @@
+{
+  "eventTypes": [
+    "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+    "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+    "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+    "PROVIDER_STREAM_EVENT_TYPE_FINISH"
+  ],
+  "text": "ok",
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_STOP",
+    "usage": {
+      "inputTotalTokens": 15616,
+      "inputUncachedTokens": 2,
+      "inputCacheReadTokens": 15614,
+      "inputCacheWriteTokens": 0,
+      "outputTotalTokens": 4,
+      "totalTokens": 15620,
+      "providerUsageJson": "{\"inputTokens\":15616,\"inputTokenDetails\":{\"noCacheTokens\":2,\"cacheReadTokens\":15614,\"cacheWriteTokens\":0},\"outputTokens\":4,\"outputTokenDetails\":{},\"totalTokens\":15620,\"raw\":\"[redacted]\",\"cachedInputTokens\":15614}"
+    },
+    "metadata": {
+      "credential_source": "session",
+      "raw_finish_reason": "end_turn"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-09",
+    "model_id": "anthropic/claude-opus-4-8",
+    "provider": "anthropic",
+    "source": "real-provider",
+    "source_fixture": "fixtures/anthropic-claude-opus-4-8-cache-hit-2026-07-09.sse"
+  }
+}

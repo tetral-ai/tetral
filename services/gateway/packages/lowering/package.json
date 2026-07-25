@@ -1,0 +1,13 @@
+{
+  "name": "@tetral/gateway-lowering",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.13",
+  "scripts": {
+    "test": "bun test test/"
+  },
+  "dependencies": {
+    "@tetral/gateway-protocol": "workspace:*"
+  }
+}

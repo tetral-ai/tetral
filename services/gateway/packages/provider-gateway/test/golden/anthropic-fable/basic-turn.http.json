@@ -1,0 +1,52 @@
+{
+  "method": "POST",
+  "pathname": "/v1/messages",
+  "headers": {
+    "x-api-key": "<session-api-key>",
+    "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+  },
+  "body": {
+    "model": "claude-fable-5",
+    "max_tokens": 128,
+    "thinking": {
+      "type": "adaptive",
+      "display": "summarized"
+    },
+    "output_config": {
+      "effort": "high"
+    },
+    "system": [
+      {
+        "type": "text",
+        "text": "Reply tersely and do not call tools."
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reply with exactly: ok",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "stream": true
+  },
+  "absentBodyFields": [
+    "temperature",
+    "top_p",
+    "top_k"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "anthropic/claude-fable-5",
+    "provider": "anthropic",
+    "source": "real-provider",
+    "source_fixture": "fixtures/anthropic-claude-fable-5-live-2026-07-19.sse"
+  }
+}

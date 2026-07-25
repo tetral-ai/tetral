@@ -1,0 +1,45 @@
+{
+  "method": "POST",
+  "pathname": "/coding/v1/messages",
+  "headers": {
+    "x-api-key": "<session-api-key>"
+  },
+  "body": {
+    "model": "k3",
+    "max_tokens": 1024,
+    "system": [
+      {
+        "type": "text",
+        "text": "Reply tersely and do not call tools."
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reply with exactly: ok",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "stream": true
+  },
+  "absentBodyFields": [
+    "thinking",
+    "temperature",
+    "top_p",
+    "top_k"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "moonshotai/kimi-k3",
+    "provider": "moonshotai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/moonshotai-kimi-k3-live-2026-07-19.sse"
+  }
+}

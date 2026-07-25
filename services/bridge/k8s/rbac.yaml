@@ -1,0 +1,42 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bridge-visibility
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bridge-visibility
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+subjects:
+  - kind: ServiceAccount
+    name: bridge
+    namespace: tetral-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bridge-visibility

@@ -1,0 +1,61 @@
+.PHONY: build build-sandbox-helper install-sandbox-helper test lint vulncheck integration-test run run-api run-bridge-api run-job-runner run-sandbox run-git-proxy run-cleanup run-event-stream
+
+SANDBOX_HELPER_OUT ?= bin/sandbox
+SANDBOX_HELPER_INSTALL_PATH ?= /usr/local/bin/sandbox
+
+build:
+	go build ./...
+
+build-sandbox-helper:
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o $(SANDBOX_HELPER_OUT) ./internal/sandbox/helper/cmd/sandbox
+
+install-sandbox-helper: build-sandbox-helper
+	install -D -m 0755 $(SANDBOX_HELPER_OUT) $(DESTDIR)$(SANDBOX_HELPER_INSTALL_PATH)
+
+test:
+	go test -race ./...
+
+lint:
+	go vet ./...
+	golangci-lint run ./...
+
+# vulncheck runs the same merge-blocking vulnerability gate as Engine CI.
+vulncheck:
+	go tool govulncheck ./...
+
+# run is an alias for the public API workload.
+run: run-api
+
+run-api:
+	go run ./services/api/cmd/tetral-api
+
+run-bridge-api:
+	go run ./services/bridge/cmd/bridge-api
+
+run-job-runner:
+	go run ./services/bridge/cmd/job-runner
+
+run-sandbox:
+	go run ./services/sandbox/cmd/tetral-sandbox
+
+run-git-proxy:
+	go run ./services/git-proxy/cmd/git-proxy
+
+run-cleanup:
+	go run ./services/cleanup/cmd/tetral-cleanup
+
+run-event-stream:
+	go run ./services/event-stream/cmd/event-stream
+
+run-auth:
+	go run ./services/auth/cmd/tetral-auth
+
+run-queue:
+	go run ./services/queue/cmd/tetral-queue
+
+run-web-connector:
+	go run ./services/web-connector/cmd/web-connector
+
+# integration-test runs the Engine integration package directly.
+integration-test:
+	go test -race ./integration

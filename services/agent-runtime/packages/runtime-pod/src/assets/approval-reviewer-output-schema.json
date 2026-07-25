@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["risk_level", "user_authorization", "outcome", "rationale"],
+  "properties": {
+    "risk_level": { "enum": ["low", "medium", "high", "critical"] },
+    "user_authorization": { "enum": ["unknown", "low", "medium", "high"] },
+    "outcome": { "enum": ["allow", "deny"] },
+    "rationale": { "type": "string" }
+  }
+}

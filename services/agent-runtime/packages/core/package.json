@@ -1,0 +1,18 @@
+{
+  "name": "@tetral/agent-runtime-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.13",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test/unit/",
+    "build": "rm -rf dist && bun build src/contracts/provider.ts src/contracts/runtime.ts src/llm/llm-event.ts src/llm/llm-service.ts src/context/context-loader.ts src/context/context-validation.ts src/agent-loop/agent-loop.ts src/agent-loop/provider-call-assembly.ts src/effect/runner.ts src/session/approval-reviewer-manager.ts src/session/context-manager.ts src/session/session-state.ts src/session/session.ts src/session/session-manager.ts src/session-run-host/session-run-host.ts src/runtime/accumulator.ts src/runtime/conversation-turns.ts src/runtime/message-projection.ts src/runtime/metrics.ts src/runtime/session-event-writer.ts src/runtime/turn-retry-budget.ts src/tools/tool-catalog.ts src/tools/tool-copy.ts src/tools/tool-gate.ts src/tools/tool-scheduler.ts --outdir dist --target bun",
+    "audit": "bun audit"
+  },
+  "dependencies": {
+    "@tetral/gateway-protocol": "file:../../../gateway/packages/protocol",
+    "effect": "4.0.0-beta.66",
+    "zod": "4.4.3"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "method": "POST",
+  "pathname": "/api/coding/paas/v4/chat/completions",
+  "headers": {
+    "authorization": "Bearer <session-api-key>"
+  },
+  "body": {
+    "model": "glm-5.2",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_tokens": 1024,
+    "thinking": {
+      "type": "enabled",
+      "clear_thinking": false
+    },
+    "reasoning_effort": "high",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Keep visible output minimal. Do not explain. Use tool calls when requested."
+      },
+      {
+        "role": "user",
+        "content": "Use brief hidden reasoning to verify 7 + 8 = 15. Then emit visible text exactly: ok. Then call Search exactly once with JSON input {\"query\":\"tetral\"}. Do not add any other visible text."
+      }
+    ]
+  },
+  "absentBodyFields": [
+    "temperature",
+    "top_p"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-04",
+    "model_id": "zai/glm-5.2",
+    "provider": "zai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/zai-glm-5.2-live-2026-07-04.sse"
+  }
+}

@@ -1,0 +1,8 @@
+: fixture provenance: recorded 2026-07-04 model_id=zai/glm-5.2 source=real-provider-prefix provider=zai api=chat-completions-stream stream_id=20260705001226134a86d2fa424521
+
+data: {"id":"20260705001226134a86d2fa424521","created":1783181547,"object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"The"}}]}
+
+data: {"id":"20260705001226134a86d2fa424521","created":1783181547,"object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" user"}}]}
+
+data: {"id":"20260705001226134a86d2fa424521","created":1783181547,"object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" wants"}}]}
+

@@ -1,0 +1,55 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 21
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "text": "ok",
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_STOP",
+    "usage": {
+      "inputUncachedTokens": 228,
+      "inputCacheReadTokens": 8192,
+      "inputCacheWriteTokens": 0,
+      "inputTotalTokens": 8420,
+      "outputTotalTokens": 37,
+      "totalTokens": 8457
+    },
+    "metadata": {
+      "credential_source": "session",
+      "raw_finish_reason": "end_turn"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "moonshotai/kimi-k3",
+    "provider": "moonshotai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/moonshotai-kimi-k3-cache-hit-2026-07-19.sse"
+  }
+}

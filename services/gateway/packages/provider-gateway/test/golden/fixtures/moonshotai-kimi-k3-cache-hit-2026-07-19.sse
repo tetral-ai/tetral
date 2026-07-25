@@ -1,0 +1,88 @@
+: fixture provenance: recorded 2026-07-19 model_id=moonshotai/kimi-k3 source=real-provider provider=moonshotai api=messages-stream cache_hit=true
+
+event:message_start
+data:{"type":"message_start","message":{"id":"msg_dCmuAJB2OJKcOKbnr3HjwCiZ","type":"message","role":"assistant","content":[],"model":"k3","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8420,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
+
+event:content_block_start
+data:{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" asking"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" reply"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" with"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" exactly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" \""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ok"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" This"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" simple"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" instruction"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" following"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" test"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"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"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":0}
+
+event:content_block_start
+data:{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":1}
+
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":228,"cache_creation_input_tokens":0,"cache_read_input_tokens":8192,"output_tokens":37}}
+
+event:message_stop
+data:{"type":"message_stop"}

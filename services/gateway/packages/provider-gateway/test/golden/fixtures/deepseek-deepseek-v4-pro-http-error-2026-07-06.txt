@@ -1,0 +1,3 @@
+: fixture provenance: recorded 2026-07-08 model_id=deepseek/deepseek-v4-pro source=real-provider-http-error provider=deepseek api=chat-completions status=400 case=empty-messages
+
+{"error":{"message":"Empty input messages","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}

@@ -1,0 +1,24 @@
+{
+  "name": "assistant message without reasoning yields empty reasoning_content",
+  "rule": "deepseek-reasoning-default",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
+    "messages": [
+      {
+        "role": "assistant",
+        "parts": [
+          { "type": "text", "id": "t1", "text": "Paris is the capital." }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Paris is the capital." }],
+        "providerOptions": { "deepseek": { "reasoning_content": "" } }
+      }
+    ]
+  }
+}

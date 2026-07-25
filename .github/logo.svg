@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="256" height="256">
+  <defs>
+    <linearGradient id="faceLeftFront" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#f5f5f5"></stop>
+      <stop offset="100%" stop-color="#c8c8c8"></stop>
+    </linearGradient>
+    <linearGradient id="faceRightFront" x1="100%" x2="0%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#707070"></stop>
+      <stop offset="100%" stop-color="#404040"></stop>
+    </linearGradient>
+    <linearGradient id="faceLeftBack" x1="0%" x2="100%" y1="100%" y2="0%">
+      <stop offset="0%" stop-color="#858585"></stop>
+      <stop offset="100%" stop-color="#5a5a5a"></stop>
+    </linearGradient>
+    <linearGradient id="faceRightBack" x1="100%" x2="0%" y1="100%" y2="0%">
+      <stop offset="0%" stop-color="#353535"></stop>
+      <stop offset="100%" stop-color="#121212"></stop>
+    </linearGradient>
+  </defs>
+  <polygon fill="url(#faceLeftBack)" points="50,12 8,68 50,55"></polygon>
+  <polygon fill="url(#faceRightBack)" points="50,12 50,55 92,68"></polygon>
+  <polygon fill="url(#faceLeftFront)" points="50,12 50,88 8,68"></polygon>
+  <polygon fill="url(#faceRightFront)" points="50,12 92,68 50,88"></polygon>
+</svg>

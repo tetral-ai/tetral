@@ -1,0 +1,118 @@
+: fixture provenance: recorded 2026-07-19 model_id=moonshotai/kimi-k3 source=real-provider provider=moonshotai api=messages-stream
+
+event:message_start
+data:{"type":"message_start","message":{"id":"msg_kIEYtnY1hZYwKR0Fzhuol2K5","type":"message","role":"assistant","content":[],"model":"k3","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":111,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
+
+event:content_block_start
+data:{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"We"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" need"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" answer"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" exactly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" ok"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" The"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" wants"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" exact"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" '"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ok"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"'."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" Final"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" should"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" be"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" exactly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" ok"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" no"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" punctuation"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"/ex"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"tra"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" Ensure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" no"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" extra"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"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"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":0}
+
+event:content_block_start
+data:{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":1}
+
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":111,"output_tokens":47}}
+
+event:message_stop
+data:{"type":"message_stop"}

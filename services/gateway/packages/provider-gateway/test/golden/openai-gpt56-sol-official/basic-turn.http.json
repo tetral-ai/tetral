@@ -1,0 +1,50 @@
+{
+  "method": "POST",
+  "pathname": "/v1/responses",
+  "headers": {
+    "authorization": "Bearer <session-api-key>"
+  },
+  "body": {
+    "model": "gpt-5.6-sol",
+    "stream": true,
+    "store": false,
+    "prompt_cache_key": "sesn_live_gpt56_sol_official_fixture",
+    "text": {
+      "verbosity": "low"
+    },
+    "reasoning": {
+      "effort": "medium",
+      "summary": "auto"
+    },
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "input": [
+      {
+        "role": "developer",
+        "content": "Reply tersely and do not call tools."
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Reply with exactly: ok"
+          }
+        ]
+      }
+    ]
+  },
+  "absentBodyFields": [
+    "max_output_tokens",
+    "temperature",
+    "top_p"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "openai/gpt-5.6-sol",
+    "provider": "openai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/openai-gpt-5.6-sol-responses-live-2026-07-19.sse"
+  }
+}

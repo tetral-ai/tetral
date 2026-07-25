@@ -1,0 +1,3 @@
+: fixture provenance: recorded 2026-07-19 model_id=moonshotai/kimi-k3 source=real-provider-http-error provider=moonshotai api=messages-stream status=400 case=no-messages
+
+{"error":{"type":"invalid_request_error","message":"messages must not be empty"},"type":"error"}

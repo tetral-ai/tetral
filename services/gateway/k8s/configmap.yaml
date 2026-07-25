@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+data:
+  TETRAL_WEB_SEARCH_ENDPOINT: "https://s.jina.ai/"
+  TETRAL_WEB_READER_ENDPOINT: "https://r.jina.ai/"
+  TETRAL_BLOB_ENDPOINT: "https://blob.example.internal"

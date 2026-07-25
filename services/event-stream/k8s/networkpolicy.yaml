@@ -1,0 +1,52 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: event-stream
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: event-stream
+    app.kubernetes.io/component: event-stream
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: event-stream
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tetral.ai/network-role: public-ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

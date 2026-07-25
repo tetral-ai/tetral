@@ -1,0 +1,115 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bridge
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      ports:
+        - protocol: TCP
+          port: 9090
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: queue
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      ports:
+        - protocol: TCP
+          port: 9091
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

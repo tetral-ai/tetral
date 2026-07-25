@@ -1,0 +1,15 @@
+{
+  "name": "absent variant uses the frozen DeepSeek high default",
+  "rule": "deepseek-effort-lowering",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
+    "messages": []
+  },
+  "expected": {
+    "providerOptions": {
+      "deepseek": {
+        "reasoningEffort": "high"
+      }
+    }
+  }
+}

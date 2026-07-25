@@ -1,0 +1,19 @@
+version: v2
+clean: true
+inputs:
+  - directory: services/queue/proto
+plugins:
+  - local:
+      - go
+      - run
+      - google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+    out: services/queue/gen
+    opt:
+      - paths=source_relative
+  - local:
+      - go
+      - run
+      - google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+    out: services/queue/gen
+    opt:
+      - paths=source_relative

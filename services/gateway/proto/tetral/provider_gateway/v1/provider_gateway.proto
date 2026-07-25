@@ -1,0 +1,424 @@
+syntax = "proto3";
+
+package tetral.provider_gateway.v1;
+
+option go_package = "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1;providergatewayv1";
+
+service ProviderGatewayService {
+  rpc StreamProviderRequest(ProviderRequest) returns (stream ProviderStreamEvent);
+  rpc RunWeb(RunWebRequest) returns (RunWebResponse);
+}
+
+service McpConnectorService {
+  rpc RunMcpTool(RunMcpToolRequest) returns (RunMcpToolResponse);
+  rpc ListMcpTools(ListMcpToolsRequest) returns (ListMcpToolsResponse);
+}
+
+enum ProviderRequestKind {
+  PROVIDER_REQUEST_KIND_UNSPECIFIED = 0;
+  PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST = 1;
+  PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY = 2;
+  PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER = 3;
+  PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION = 4;
+}
+
+enum SystemSegmentKind {
+  SYSTEM_SEGMENT_KIND_UNSPECIFIED = 0;
+  SYSTEM_SEGMENT_KIND_BASE = 1;
+  SYSTEM_SEGMENT_KIND_TOOL_GUIDANCE = 2;
+  SYSTEM_SEGMENT_KIND_AGENT = 3;
+  SYSTEM_SEGMENT_KIND_SKILL = 4;
+  SYSTEM_SEGMENT_KIND_APPROVAL_REVIEWER_POLICY = 5;
+  SYSTEM_SEGMENT_KIND_MEMORY = 6;
+}
+
+enum SystemCacheHint {
+  SYSTEM_CACHE_HINT_UNSPECIFIED = 0;
+  SYSTEM_CACHE_HINT_STABLE = 1;
+  SYSTEM_CACHE_HINT_SESSION = 2;
+  SYSTEM_CACHE_HINT_NONE = 3;
+}
+
+enum RuntimeMessageRole {
+  RUNTIME_MESSAGE_ROLE_UNSPECIFIED = 0;
+  RUNTIME_MESSAGE_ROLE_USER = 1;
+  RUNTIME_MESSAGE_ROLE_ASSISTANT = 2;
+}
+
+enum RuntimeToolPartState {
+  RUNTIME_TOOL_PART_STATE_UNSPECIFIED = 0;
+  RUNTIME_TOOL_PART_STATE_COMPLETED = 1;
+  RUNTIME_TOOL_PART_STATE_ERROR = 2;
+  RUNTIME_TOOL_PART_STATE_CANCELLED = 3;
+}
+
+enum ProviderStreamEventType {
+  PROVIDER_STREAM_EVENT_TYPE_UNSPECIFIED = 0;
+  PROVIDER_STREAM_EVENT_TYPE_TEXT_START = 1;
+  PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA = 2;
+  PROVIDER_STREAM_EVENT_TYPE_TEXT_END = 3;
+  PROVIDER_STREAM_EVENT_TYPE_REASONING_START = 4;
+  PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA = 5;
+  PROVIDER_STREAM_EVENT_TYPE_REASONING_END = 6;
+  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START = 7;
+  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA = 8;
+  PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END = 9;
+  PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL = 10;
+  PROVIDER_STREAM_EVENT_TYPE_FINISH = 11;
+  PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR = 12;
+  PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS = 13;
+}
+
+enum ProviderAttachmentRejectionReason {
+  PROVIDER_ATTACHMENT_REJECTION_REASON_UNSPECIFIED = 0;
+  PROVIDER_ATTACHMENT_REJECTION_REASON_DELETED = 1;
+  PROVIDER_ATTACHMENT_REJECTION_REASON_OVER_ENVELOPE = 2;
+}
+
+enum ProviderFinishReason {
+  PROVIDER_FINISH_REASON_UNSPECIFIED = 0;
+  PROVIDER_FINISH_REASON_STOP = 1;
+  PROVIDER_FINISH_REASON_LENGTH = 2;
+  PROVIDER_FINISH_REASON_TOOL_CALLS = 3;
+  PROVIDER_FINISH_REASON_CONTENT_FILTER = 4;
+  PROVIDER_FINISH_REASON_ERROR = 5;
+  PROVIDER_FINISH_REASON_OTHER = 6;
+  PROVIDER_FINISH_REASON_UNKNOWN = 7;
+}
+
+enum RunWebStatus {
+  RUN_WEB_STATUS_UNSPECIFIED = 0;
+  RUN_WEB_STATUS_COMPLETED = 1;
+  RUN_WEB_STATUS_TOOL_ERROR = 2;
+  RUN_WEB_STATUS_RUNTIME_ERROR = 3;
+}
+
+enum RunMcpToolStatus {
+  RUN_MCP_TOOL_STATUS_UNSPECIFIED = 0;
+  RUN_MCP_TOOL_STATUS_COMPLETED = 1;
+  RUN_MCP_TOOL_STATUS_TOOL_ERROR = 2;
+  RUN_MCP_TOOL_STATUS_RUNTIME_ERROR = 3;
+}
+
+enum McpErrorKind {
+  MCP_ERROR_KIND_UNSPECIFIED = 0;
+  MCP_ERROR_KIND_TOOL_ERROR = 1;
+  MCP_ERROR_KIND_INVALID_INPUT = 2;
+  MCP_ERROR_KIND_CONNECTION_FAILED = 3;
+  MCP_ERROR_KIND_AUTHENTICATION_FAILED = 4;
+  MCP_ERROR_KIND_TIMEOUT = 5;
+  MCP_ERROR_KIND_CLAIM_CONFLICT = 6;
+  MCP_ERROR_KIND_IN_FLIGHT = 7;
+  MCP_ERROR_KIND_COMMIT_FAILED = 8;
+  MCP_ERROR_KIND_CREDENTIAL_REQUIRED = 9;
+  MCP_ERROR_KIND_INTERNAL = 10;
+}
+
+enum McpRetryStatus {
+  MCP_RETRY_STATUS_UNSPECIFIED = 0;
+  MCP_RETRY_STATUS_RETRYING = 1;
+  MCP_RETRY_STATUS_EXHAUSTED = 2;
+  MCP_RETRY_STATUS_TERMINAL = 3;
+}
+
+message ProviderRequest {
+  string request_id = 1;
+  string model_request_id = 2;
+  ProviderRequestKind request_kind = 3;
+  string workspace_id = 4;
+  string session_id = 5;
+  string session_thread_id = 6;
+  optional string parent_thread_id = 7;
+  string binding_id = 8;
+  int64 binding_generation = 9;
+  string runtime_binding_token = 10;
+  ModelRef model = 11;
+  repeated SystemSegment system = 12;
+  repeated RuntimeMessage messages = 13;
+  repeated RuntimeToolDefinition tools = 14;
+  repeated ProviderRequestAttachment attachments = 15;
+  ProviderRequestLimits limits = 16;
+  optional string output_schema_json = 17;
+}
+
+message ModelRef {
+  string provider_id = 1;
+  string model_id = 2;
+  string variant = 3;
+}
+
+message SystemSegment {
+  SystemSegmentKind kind = 1;
+  string text = 2;
+  SystemCacheHint cache_hint = 3;
+}
+
+message RuntimeMessage {
+  string id = 1;
+  RuntimeMessageRole role = 2;
+  repeated RuntimePart parts = 3;
+  string status = 4;
+  string origin = 5;
+}
+
+message RuntimePart {
+  string id = 1;
+  oneof value {
+    RuntimeTextPart text = 2;
+    RuntimeReasoningPart reasoning = 3;
+    RuntimeToolPart tool = 4;
+  }
+}
+
+message RuntimeTextPart {
+  string text = 1;
+}
+
+message RuntimeReasoningPart {
+  string text = 1;
+  string metadata_json = 2;
+}
+
+message RuntimeToolPart {
+  string call_id = 1;
+  string name = 2;
+  optional string tool_use_event_id = 3;
+  RuntimeToolPartState state = 4;
+  string input_json = 5;
+  string output_or_error_json = 6;
+}
+
+message RuntimeToolDefinition {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  optional string output_schema_json = 4;
+}
+
+message ProviderRequestAttachment {
+  oneof origin {
+    ProviderRequestTransientAttachment transient = 1;
+    ProviderRequestFileAttachment file_backed = 2;
+  }
+  string mime = 3;
+  string filename = 4;
+}
+
+message ProviderRequestTransientAttachment {
+  string attachment_ref = 1;
+  string source_tool_use_event_id = 2;
+  string source_path = 3;
+  string page_range = 4;
+  string detail = 5;
+}
+
+message ProviderRequestFileAttachment {
+  string source_event_id = 1;
+  string file_id = 2;
+}
+
+message ProviderRequestLimits {
+  int32 max_output_tokens = 1;
+  int32 timeout_ms = 2;
+}
+
+message ProviderStreamEvent {
+  string request_id = 1;
+  string model_request_id = 2;
+  ProviderStreamEventType type = 3;
+  oneof payload {
+    ProviderTextPayload text = 4;
+    ProviderReasoningPayload reasoning = 5;
+    ProviderToolInputPayload tool_input = 6;
+    ProviderToolCallPayload tool_call = 7;
+    ProviderFinishPayload finish = 8;
+    ProviderErrorPayload provider_error = 9;
+    ProviderAttachmentRejectionsPayload attachment_rejections = 10;
+  }
+}
+
+message ProviderAttachmentRejection {
+  oneof origin {
+    ProviderRequestTransientAttachment transient = 1;
+    ProviderRequestFileAttachment file_backed = 2;
+  }
+  ProviderAttachmentRejectionReason reason = 3;
+}
+
+message ProviderAttachmentRejectionsPayload {
+  repeated ProviderAttachmentRejection rejections = 1;
+}
+
+message ProviderTextPayload {
+  string id = 1;
+  string text = 2;
+  string metadata_json = 3;
+}
+
+message ProviderReasoningPayload {
+  string id = 1;
+  string text = 2;
+  string metadata_json = 3;
+}
+
+message ProviderToolInputPayload {
+  string id = 1;
+  string name = 2;
+  string text = 3;
+  string metadata_json = 4;
+}
+
+message ProviderToolCallPayload {
+  string id = 1;
+  string name = 2;
+  string input_json = 3;
+  string metadata_json = 4;
+}
+
+message RequestUsage {
+  int64 input_total_tokens = 1;
+  int64 input_uncached_tokens = 2;
+  optional int64 input_cache_read_tokens = 3;
+  optional int64 input_cache_write_tokens = 4;
+  int64 output_total_tokens = 5;
+  optional int64 output_reasoning_tokens = 6;
+  optional int64 total_tokens = 7;
+  string provider_usage_json = 8;
+}
+
+message ProviderFinishPayload {
+  ProviderFinishReason reason = 1;
+  optional RequestUsage usage = 2;
+  string metadata_json = 3;
+  optional int64 context_window_tokens = 4;
+  optional int64 input_limit_tokens = 5;
+  optional int64 output_token_limit = 6;
+}
+
+message ProviderError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  bool fatal = 4;
+  int32 status_code = 5;
+  int32 retry_after_ms = 6;
+}
+
+message ProviderErrorPayload {
+  ProviderError error = 1;
+  string metadata_json = 2;
+}
+
+message RunWebRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  string tool_use_event_id = 4;
+  WebToolInput input = 5;
+  string binding_id = 6;
+  int64 binding_generation = 7;
+  string runtime_binding_token = 8;
+}
+
+message RunWebResponse {
+  RunWebStatus status = 1;
+  string result_text = 2;
+  repeated WebRef refs = 3;
+  optional int32 next_lineno = 4;
+  bool window_truncated = 5;
+  bool source_incomplete = 6;
+  optional WebUsage usage = 7;
+}
+
+message WebUsage {
+  string operation = 1;
+  int64 backend_tokens = 2;
+  optional int32 target_http_status = 3;
+  int64 stored_bytes = 4;
+  int64 duration_ms = 5;
+  int64 web_search_requests = 6;
+  int64 web_fetch_requests = 7;
+}
+
+message WebToolInput {
+  repeated WebSearchQuery search_query = 1;
+  repeated WebOpenRequest open = 2;
+  repeated WebFindRequest find = 3;
+}
+
+message WebSearchQuery {
+  string q = 1;
+  repeated string domains = 2;
+}
+
+message WebOpenRequest {
+  optional string url = 1;
+  optional string ref_id = 2;
+  optional int32 lineno = 3;
+}
+
+message WebFindRequest {
+  string ref_id = 1;
+  string pattern = 2;
+}
+
+message WebRef {
+  string ref_id = 1;
+  string url = 2;
+  optional string title = 3;
+  optional int32 line_start = 4;
+  optional int32 line_end = 5;
+  optional int32 total_lines = 6;
+}
+
+message RunMcpToolRequest {
+  string request_id = 1;
+  string workspace_id = 2;
+  string session_id = 3;
+  string session_thread_id = 4;
+  string tool_use_event_id = 5;
+  string mcp_server_name = 6;
+  string tool_name = 7;
+  string input_json = 8;
+  string binding_id = 9;
+  int64 binding_generation = 10;
+  string runtime_binding_token = 11;
+}
+
+message RunMcpToolResponse {
+  RunMcpToolStatus status = 1;
+  string result_text = 2;
+  repeated McpAttachmentRef attachments = 3;
+  optional McpErrorKind error_kind = 4;
+  optional McpRetryStatus retry_status = 5;
+}
+
+message McpAttachmentRef {
+  string attachment_ref = 1;
+  string mime = 2;
+  int64 size_bytes = 3;
+  string suggested_filename = 4;
+}
+
+message ListMcpToolsRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string mcp_server_name = 3;
+}
+
+message ListMcpToolsResponse {
+  repeated McpToolDefinition tools = 1;
+  string manifest_etag = 2;
+  repeated McpOmittedTool omitted_tools = 3;
+}
+
+message McpToolDefinition {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+}
+
+message McpOmittedTool {
+  string name = 1;
+  string reason = 2;
+}

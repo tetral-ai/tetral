@@ -1,0 +1,2697 @@
+import { describe, expect, jest, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { Metadata, status as GrpcStatus } from "@grpc/grpc-js";
+import {
+  BridgeWriteStatus,
+} from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import type {
+  AgentRuntimeBridgeServiceClient,
+  CancelCommandRequest,
+  CreateChildThreadRequest,
+  ListChildThreadsRequest,
+  MarkChildThreadActiveRequest,
+  MarkChildThreadClosedRequest,
+  ReadCommandResultRequest,
+  ResolveChildThreadRequest,
+  ResolveInterAgentDeliveryRequest,
+  RunMemoryRequest,
+  RunToolRequest,
+  SendCommandInputRequest,
+  WriteEventRequest,
+} from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import {
+  McpErrorKind,
+  McpRetryStatus,
+  RunMcpToolStatus,
+  RunWebStatus,
+} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type {
+  McpConnectorServiceClient,
+  ProviderGatewayServiceClient,
+  RunMcpToolRequest,
+  RunMcpToolResponse,
+  RunWebRequest,
+  RunWebResponse,
+} from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
+import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
+import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import { RuntimePodToolRunner } from "../../src/tool-runner.js";
+import { canonicalRunToolJSON } from "../../src/run-tool-canonical-json.js";
+import type { RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
+import {
+  buildToolRunnerCompletedToolMessage as completedToolMessage,
+  buildToolRunnerRuntimeTextMessage as runtimeTextMessage,
+} from "../../../core/test/unit/runtime-message-builders.js";
+
+describe("RuntimePodToolRunner", () => {
+  test("shares exact raw JSON canonical vectors with Bridge", () => {
+    const vectors = JSON.parse(readFileSync(resolve(import.meta.dir, "../../../../../../testdata/run-tool-canonical-vectors.json"), "utf8")) as Array<{
+      name: string;
+      inputs: string[];
+      canonical: string;
+    }>;
+    for (const vector of vectors) {
+      for (const input of vector.inputs) {
+        expect(canonicalRunToolJSON(input), vector.name).toBe(vector.canonical);
+      }
+    }
+    expect(() => canonicalRunToolJSON(`${"[".repeat(257)}0${"]".repeat(257)}`)).toThrow("nesting exceeds");
+    expect(() => canonicalRunToolJSON(`{"unterminated":`)).toThrow();
+  });
+
+  test("routes sandbox tools through Bridge RunTool with stable input identity", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        summary: "created notes/a.txt",
+        payload_path: "/tmp/tetral-runtime/tool-payloads/sevt_tool_1/payload.json",
+        provider_command_id: "provider-secret",
+        sandbox_process_id: "pid-secret",
+      },
+    });
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: {
+        text: "status: success\nsummary: created notes/a.txt",
+        truncated: false,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("payload");
+    expect(JSON.stringify(result)).not.toContain("provider-secret");
+    expect(JSON.stringify(result)).not.toContain("sandbox_process");
+    expect(bridge.runToolRequests).toHaveLength(1);
+    expect(bridge.runToolRequests[0]).toMatchObject({
+      toolUseEventId: "sevt_tool_1",
+      toolName: "Write",
+      inputJson: '{"content":"hello","file_path":"notes/a.txt"}',
+      normalizedInputHash: sha256('{"content":"hello","file_path":"notes/a.txt"}'),
+      scope: {
+        workspaceId: "wksp_1",
+        sessionId: "sesn_1",
+        sessionThreadId: "thrd_1",
+        binding: {
+          bindingId: "bind_1",
+          bindingGeneration: 42,
+          targetPodUid: "pod_1",
+        },
+      },
+    });
+  });
+
+  test("numbers only the requested Read range with true file line numbers", async () => {
+    const allLines = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`);
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: `${allLines.slice(9, 14).join("\n")}\n`,
+        start_line: 10,
+        returned_lines: 5,
+        total_lines: 20,
+        truncated: false,
+        line_truncations: 0,
+      },
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Read", {
+      file_path: "notes/a.txt",
+      offset: 10,
+      limit: 5,
+    }));
+
+    expect(result.type).toBe("completed");
+    if (result.type !== "completed") throw new Error("expected completed result");
+    expect(result.output.text).toContain(
+      `content:\n${allLines.slice(9, 14).map((line, index) => `${String(index + 10).padStart(6, " ")}\t${line}`).join("\n")}`,
+    );
+    expect(result.output.text).not.toMatch(/(?:^|\n) {5}9\t/u);
+    expect(result.output.text).not.toMatch(/(?:^|\n) {4}15\t/u);
+  });
+
+  test("uses the helper start_line when a Read request offset is zero", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: "first\nsecond\n",
+        start_line: 1,
+        returned_lines: 2,
+        total_lines: 2,
+        truncated: false,
+        line_truncations: 0,
+      },
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Read", {
+      file_path: "notes/a.txt",
+      offset: 0,
+    }));
+
+    expect(result.type).toBe("completed");
+    if (result.type !== "completed") throw new Error("expected completed result");
+    expect(result.output.text).toContain("content:\n     1\tfirst\n     2\tsecond");
+    expect(result.output.text).not.toContain("     0\t");
+  });
+
+  test("does not number a spurious empty line for trailing-newline Read content", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: "one\n\nthree\n",
+        start_line: 4,
+        returned_lines: 3,
+        total_lines: 6,
+        truncated: false,
+        line_truncations: 0,
+      },
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Read", { file_path: "notes/a.txt" }));
+
+    expect(result.type).toBe("completed");
+    if (result.type !== "completed") throw new Error("expected completed result");
+    expect(result.output.text).toContain("     4\tone\n     5\t\n     6\tthree");
+    expect(result.output.text).not.toMatch(/(?:^|\n) {5}7\t(?:\n|$)/u);
+
+    const blankBridge = new RecordingBridgeClient();
+    blankBridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: "\n",
+        start_line: 9,
+        returned_lines: 1,
+        total_lines: 9,
+        truncated: false,
+        line_truncations: 0,
+      },
+    });
+    const blankResult = await makeRunner({ bridge: blankBridge }).runTool(
+      toolRequest("Read", { file_path: "notes/blank.txt" }),
+    );
+    expect(blankResult.type).toBe("completed");
+    if (blankResult.type !== "completed") throw new Error("expected completed result");
+    expect(blankResult.output.text).toContain("content:\n     9\t");
+  });
+
+  test("keeps cat-n prefixes exclusive to Read results", async () => {
+    const cases = [
+      { tool: "Write", input: { file_path: "notes/a.txt", content: "alpha\nbeta\n" } },
+      { tool: "Grep", input: { pattern: "alpha", path: "notes" } },
+      { tool: "apply_patch", input: { patch: "*** Begin Patch\n*** End Patch\n" } },
+    ] as const;
+
+    for (const testCase of cases) {
+      const bridge = new RecordingBridgeClient();
+      bridge.runToolResultJson = JSON.stringify({
+        status: "success",
+        result: { content: "alpha\nbeta\n", start_line: 7 },
+      });
+
+      const result = await makeRunner({ bridge }).runTool(toolRequest(testCase.tool, testCase.input));
+
+      expect(result.type, testCase.tool).toBe("completed");
+      if (result.type !== "completed") throw new Error("expected completed result");
+      expect(result.output.text, testCase.tool).toContain("content: alpha\nbeta\n");
+      expect(result.output.text, testCase.tool).not.toMatch(/(?:^|\n)\s*\d+\t/u);
+    }
+  });
+
+  test("renders truncation without hiding result bodies and never rebuilds expected guards", async () => {
+    const truncatedReadBridge = new RecordingBridgeClient();
+    truncatedReadBridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: "long line… [line truncated]\n",
+        start_line: 1,
+        returned_lines: 1,
+        truncated: true,
+        line_truncations: 1,
+      },
+    });
+    const truncatedRead = await makeRunner({ bridge: truncatedReadBridge }).runTool(
+      toolRequest("Read", { file_path: "notes/a.txt" }),
+    );
+    expect(truncatedRead.type).toBe("completed");
+    if (truncatedRead.type !== "completed") throw new Error("expected completed result");
+    expect(truncatedRead.output.text).toContain("truncated: true");
+    expect(truncatedRead.output.text).toContain("line_truncations: 1");
+    expect(truncatedRead.output.truncated).toBe(true);
+
+    const completeReadBridge = new RecordingBridgeClient();
+    completeReadBridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: "complete\n",
+        start_line: 1,
+        returned_lines: 1,
+        total_lines: 1,
+        truncated: false,
+        line_truncations: 0,
+      },
+    });
+    const completeRead = await makeRunner({ bridge: completeReadBridge }).runTool(
+      toolRequest("Read", { file_path: "notes/a.txt" }),
+    );
+    expect(completeRead.type).toBe("completed");
+    if (completeRead.type !== "completed") throw new Error("expected completed result");
+    expect(completeRead.output.text).not.toContain("truncated:");
+    expect(completeRead.output.text).not.toContain("line_truncations:");
+    expect(completeRead.output.truncated).toBe(false);
+
+    const readMessage = completedToolMessage(
+      "Read",
+      { file_path: "notes/a.txt" },
+      truncatedRead.output.text,
+    );
+    const editBridge = new RecordingBridgeClient();
+    editBridge.runToolResultJson = JSON.stringify({ status: "success", result: { replacements: 1 } });
+    await makeRunner({ bridge: editBridge }).runTool({
+      ...toolRequest("Edit", { file_path: "notes/a.txt", old_string: "line", new_string: "row" }),
+      committedMessages: [readMessage],
+    });
+    expect(JSON.parse(editBridge.runToolRequests[0]?.inputJson ?? "{}")).toEqual({
+      file_path: "notes/a.txt",
+      old_string: "line",
+      new_string: "row",
+    });
+
+    const writeBridge = new RecordingBridgeClient();
+    writeBridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      truncated: true,
+      result: { created: true, bytes_written: 12 },
+    });
+    const writeResult = await makeRunner({ bridge: writeBridge }).runTool(
+      toolRequest("Write", { file_path: "notes/a.txt", content: "hello world\n" }),
+    );
+    expect(writeResult.type).toBe("completed");
+    if (writeResult.type !== "completed") throw new Error("expected completed result");
+    expect(writeResult.output.text).toContain('"created": true');
+    expect(writeResult.output.text).toContain('"bytes_written": 12');
+    expect(writeResult.output.text).toContain("truncated: true");
+    expect(writeResult.output.truncated).toBe(true);
+  });
+
+  test("keeps maximal numbered Read parts below the fatal context byte bound at deep line numbers", async () => {
+    const content = `${Array.from({ length: 2000 }, () => "x".repeat(99)).join("\n")}\n`;
+    for (const startLine of [1, 1_000_000, 1_000_000_000, Number.MAX_SAFE_INTEGER]) {
+      const bridge = new RecordingBridgeClient();
+      bridge.runToolResultJson = JSON.stringify({
+        status: "success",
+        result: {
+          content,
+          start_line: startLine,
+          returned_lines: 2000,
+          truncated: true,
+          line_truncations: 0,
+        },
+      });
+
+      const result = await makeRunner({ bridge }).runTool(toolRequest("Read", {
+        file_path: "notes/deep.txt",
+        offset: startLine,
+        limit: 2000,
+      }));
+
+      expect(result.type, String(startLine)).toBe("completed");
+      if (result.type !== "completed") throw new Error("expected completed result");
+      expect(result.output.text, String(startLine)).toContain(`${String(startLine).padStart(6, " ")}\t`);
+      if (startLine === Number.MAX_SAFE_INTEGER) {
+        expect(result.output.text).toContain(`${(BigInt(startLine) + 1n).toString()}\t`);
+      }
+      const state = {
+        status: "completed",
+        input: {
+          value: { file_path: "notes/deep.txt", offset: startLine, limit: 2000 },
+          preview: JSON.stringify({ file_path: "notes/deep.txt", offset: startLine, limit: 2000 }),
+          truncated: false,
+        },
+        output: result.output,
+      };
+      expect(new TextEncoder().encode(JSON.stringify(state)).length, String(startLine)).toBeLessThan(256_000);
+    }
+
+    const unsafeStartBridge = new RecordingBridgeClient();
+    unsafeStartBridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        content: "alpha\nbeta\n",
+        start_line: Number.MAX_SAFE_INTEGER + 1,
+        returned_lines: 2,
+        truncated: false,
+        line_truncations: 0,
+      },
+    });
+    const unsafeStartResult = await makeRunner({ bridge: unsafeStartBridge }).runTool(
+      toolRequest("Read", { file_path: "notes/deep.txt" }),
+    );
+    expect(unsafeStartResult.type).toBe("completed");
+    if (unsafeStartResult.type !== "completed") throw new Error("expected completed result");
+    expect(unsafeStartResult.output.text).toContain("content:\nalpha\nbeta");
+    expect(unsafeStartResult.output.text).not.toMatch(/(?:^|\n)\s*\d+\t/u);
+  });
+
+  test("formats failed Read envelopes without content or start_line", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "tool_error",
+      error: { kind: "not_found", message: "path does not exist" },
+      result: {},
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Read", { file_path: "missing.txt" }));
+
+    expect(result.type).toBe("error");
+    expect(JSON.stringify(result)).toContain("path does not exist");
+    expect(JSON.stringify(result)).not.toContain("NaN");
+  });
+
+  test("never adds expected to runtime-built sandbox requests", async () => {
+    const readMessage = completedToolMessage("Read", { file_path: "notes/a.txt" }, "status: success\ncontent: hello");
+    const cases = [
+      { tool: "Bash", input: { command: "true" } },
+      { tool: "Read", input: { file_path: "notes/a.txt" } },
+      { tool: "Write", input: { content: "hello again", file_path: "notes/a.txt" } },
+      { tool: "Edit", input: { file_path: "notes/a.txt", old_string: "hello", new_string: "there" } },
+      { tool: "Glob", input: { pattern: "**/*" } },
+      { tool: "Grep", input: { pattern: "hello", path: "notes" } },
+      { tool: "exec_command", input: { cmd: "true" } },
+      { tool: "view_image", input: { path: "image.png" } },
+      { tool: "apply_patch", input: { patch: "*** Begin Patch\n*** End Patch\n" } },
+    ] as const;
+
+    for (const testCase of cases) {
+      const bridge = new RecordingBridgeClient();
+      bridge.runToolResultJson = JSON.stringify({ status: "success", result: {} });
+      await makeRunner({ bridge }).runTool({
+        ...toolRequest(testCase.tool, testCase.input),
+        committedMessages: [readMessage],
+      });
+      expect(JSON.parse(bridge.runToolRequests[0]?.inputJson ?? "{}"), testCase.tool).not.toHaveProperty("expected");
+    }
+
+    const stdinBridge = new RecordingBridgeClient();
+    await makeRunner({ bridge: stdinBridge }).runTool(toolRequest("write_stdin", {
+      session_id: "task_1",
+      chars: "hello",
+    }));
+    expect(JSON.stringify(stdinBridge.sendCommandInputRequests)).not.toContain("expected");
+  });
+
+  test("returns background task metadata for sandbox running results", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "running",
+      result: {
+        task_id: "task_bridge_1",
+        stdout: { text: "started", truncated: false },
+      },
+    });
+    bridge.runToolBackgroundTaskStarted = true;
+    bridge.runToolTaskId = "task_bridge_1";
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("exec_command", { cmd: "sleep 10" }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: {
+        text: "status: running\nsession_id: task_bridge_1\nstdout:\nstarted",
+        truncated: false,
+      },
+      backgroundTask: { taskId: "task_bridge_1" },
+    });
+  });
+
+  test("provider Bash background execution reaches detached helper after privilege drop", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "running",
+      result: { task_id: "sevt_tool_1" },
+    });
+    bridge.runToolBackgroundTaskStarted = true;
+    bridge.runToolTaskId = "sevt_tool_1";
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Bash", {
+      command: "sleep 60",
+      cwd: "/workspace",
+      timeout: 120_000,
+      run_in_background: true,
+    }));
+
+    expect(bridge.runToolRequests).toHaveLength(1);
+    expect(bridge.runToolRequests[0]).toMatchObject({
+      toolUseEventId: "sevt_tool_1",
+      toolName: "Bash",
+      inputJson: '{"command":"sleep 60","cwd":"/workspace","run_in_background":true,"timeout":120000}',
+    });
+    expect(result).toMatchObject({
+      type: "completed",
+      backgroundTask: { taskId: "sevt_tool_1" },
+      output: { text: "status: running\nsession_id: sevt_tool_1" },
+    });
+  });
+
+  test("turns Bridge view_image attachment refs into pending provider attachments", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        mime: "image/png",
+        size_bytes: 3,
+        attachment_ref: "att_bridge_view_image",
+        filename: "plot.png",
+        source_tool_use_event_id: "sevt_tool_1",
+        source_path: "plot.png",
+        page_range: "",
+        detail: "auto",
+      },
+    });
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("view_image", { path: "plot.png" }));
+
+    expect(result).toMatchObject({
+      type: "completed",
+      output: {
+        text: "status: success\nmime: image/png\nsize_bytes: 3\nattachment: plot.png",
+        truncated: false,
+      },
+      attachments: [{
+        transient: {
+          attachmentRef: "att_bridge_view_image",
+          sourceToolUseEventId: "sevt_tool_1",
+          sourcePath: "plot.png",
+          pageRange: "",
+          detail: "auto",
+        },
+        fileBacked: undefined,
+        mime: "image/png",
+        filename: "plot.png",
+      }],
+    });
+    expect(JSON.stringify(result)).not.toContain("AAEC");
+    expect(JSON.stringify(result)).not.toContain("data_base64");
+    expect(bridge.runToolRequests).toHaveLength(1);
+  });
+
+  test("turns Bridge Read PDF attachment refs into pending provider attachments with page range", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        mime: "application/pdf",
+        size_bytes: 5,
+        attachment_ref: "att_bridge_pdf",
+        filename: "report.pdf",
+        source_tool_use_event_id: "sevt_tool_1",
+        source_path: "docs/report.pdf",
+        page_range: "2-6",
+        detail: "auto",
+      },
+    });
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("Read", { file_path: "docs/report.pdf", page_range: "2-6" }));
+
+    expect(result).toMatchObject({
+      type: "completed",
+      output: {
+        text: "status: success\nmime: application/pdf\nsize_bytes: 5\npage_range: 2-6\nattachment: report.pdf",
+        truncated: false,
+      },
+      attachments: [{
+        transient: {
+          attachmentRef: "att_bridge_pdf",
+          sourceToolUseEventId: "sevt_tool_1",
+          sourcePath: "docs/report.pdf",
+          pageRange: "2-6",
+          detail: "auto",
+        },
+        fileBacked: undefined,
+        mime: "application/pdf",
+        filename: "report.pdf",
+      }],
+    });
+    expect(JSON.stringify(result)).not.toContain("data_base64");
+    expect(JSON.stringify(result)).not.toContain("JVBERi0=");
+  });
+
+  test("does not re-derive missing PDF page range from the original tool input", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        mime: "application/pdf",
+        size_bytes: 5,
+        attachment_ref: "att_bridge_pdf_legacy",
+        filename: "report.pdf",
+        source_tool_use_event_id: "sevt_tool_1",
+        source_path: "docs/report.pdf",
+        detail: "auto",
+      },
+    });
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("Read", { file_path: "docs/report.pdf", page_range: "4-8" }));
+
+    expect(result).toMatchObject({
+      type: "completed",
+      attachments: [{ transient: { pageRange: "" } }],
+    });
+  });
+
+  test("rejects raw sandbox media bytes at the Runtime boundary", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        mime: "image/png",
+        size_bytes: 3,
+        data_base64: "AAEC",
+      },
+    });
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("view_image", { path: "plot.png" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        retryable: true,
+        message: "view_image returned raw media payload after Bridge attachment boundary.",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("AAEC");
+  });
+
+  test("filters transport-only base64 fields out of visible non-media sandbox tool JSON", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        mime: "image/png",
+        size_bytes: 3,
+        data_base64: "AAEC",
+      },
+    });
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("Write", { file_path: "plot.png", content: "ok" }));
+
+    expect(result).toMatchObject({
+      type: "completed",
+      output: {
+        text: "{\n  \"mime\": \"image/png\",\n  \"size_bytes\": 3\n}",
+        truncated: false,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("data_base64");
+    expect(JSON.stringify(result)).not.toContain("AAEC");
+  });
+
+  test("routes write_stdin send and poll through the Bridge command RPCs", async () => {
+    const bridge = new RecordingBridgeClient();
+    const runner = makeRunner({ bridge });
+
+    await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "hello", max_output_tokens: 123 }, "sevt_tool_send"));
+    await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "", max_output_tokens: 123 }, "sevt_tool_poll"));
+
+    expect(bridge.sendCommandInputRequests).toEqual([
+      expect.objectContaining({
+        scope: expect.objectContaining({
+          requestId: stableTestId("req", "command-followup:sevt_tool_send"),
+        }),
+        taskId: "task_1",
+        maxOutputTokens: 123,
+        inputJson: '{"chars":"hello","max_output_tokens":123,"session_id":"task_1"}',
+        toolUseEventId: "sevt_tool_send",
+      }),
+    ]);
+    expect(bridge.readCommandResultRequests).toEqual([
+      expect.objectContaining({
+        scope: expect.objectContaining({
+          requestId: stableTestId("req", "command-followup:sevt_tool_poll"),
+        }),
+        taskId: "task_1",
+        deferTerminalSettlement: false,
+        maxOutputTokens: 123,
+        toolUseEventId: "sevt_tool_poll",
+      }),
+    ]);
+  });
+
+  test("write_stdin ignores undeclared task and camel-case token aliases", async () => {
+    const bridge = new RecordingBridgeClient();
+    const runner = makeRunner({ bridge });
+
+    const legacyTask = await runner.runTool(toolRequest("write_stdin", { task_id: "task_1", chars: "hello" }));
+    await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "hello", maxOutputTokens: 123 }));
+
+    expect(legacyTask).toMatchObject({
+      type: "error",
+      error: { retryable: false, message: "write_stdin requires a session_id task handle." },
+    });
+    expect(bridge.sendCommandInputRequests).toHaveLength(1);
+    expect(bridge.sendCommandInputRequests[0]?.maxOutputTokens).toBe(0);
+  });
+
+  test("uses distinct stable request ids for multiple stdin writes in one runtime input", async () => {
+    const bridge = new RecordingBridgeClient();
+    const runner = makeRunner({ bridge });
+
+    await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "first" }, "sevt_tool_send_1"));
+    await runner.runTool(toolRequest("write_stdin", { session_id: "task_1", chars: "second" }, "sevt_tool_send_2"));
+
+    expect(bridge.sendCommandInputRequests.map((request) => request.scope?.requestId)).toEqual([
+      stableTestId("req", "command-followup:sevt_tool_send_1"),
+      stableTestId("req", "command-followup:sevt_tool_send_2"),
+    ]);
+    expect(bridge.sendCommandInputRequests).toHaveLength(2);
+    expect(bridge.sendCommandInputRequests.every((request) => !("stdinWriteSequence" in request))).toBe(true);
+  });
+
+  test("cancels background command tasks through Bridge CancelCommand on tool abort", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.deferReadCommandResult = true;
+    const runner = makeRunner({ bridge });
+    const abortController = new AbortController();
+
+    const resultPromise = runner.runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "" },
+      "sevt_tool_poll",
+      abortController.signal,
+    ));
+    await waitForCondition(() => bridge.readCommandResultRequests.length === 1, "read command request");
+    abortController.abort();
+    const result = await resultPromise;
+
+    expect(result.type).toBe("cancelled");
+    expect(bridge.cancelCommandRequests).toEqual([
+      expect.objectContaining({
+        taskId: "task_1",
+        reason: "runtime_interrupted",
+        toolUseEventId: "sevt_tool_poll",
+      }),
+    ]);
+  });
+
+  test("routes memory through Bridge RunMemory", async () => {
+    const bridge = new RecordingBridgeClient();
+    const runner = makeRunner({ bridge });
+
+    const result = await runner.runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+
+    expect(result.type).toBe("completed");
+    expect(bridge.runMemoryRequests).toEqual([
+      expect.objectContaining({
+        toolUseEventId: "sevt_tool_1",
+        operation: "create",
+        inputJson: '{"action":"create","content":"one","path":"notes/todo.md"}',
+        normalizedInputHash: sha256('{"action":"create","content":"one","path":"notes/todo.md"}'),
+      }),
+    ]);
+  });
+
+  test("parks for 300 ms before an identical same-ID Memory replay and refreshes metadata only after release", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" })];
+    bridge.deferRunMemoryCall = 2;
+    const controlledSleep = new ControlledSleep();
+    let tokenGeneration = 0;
+    const runner = makeRunner({
+      bridge,
+      sleep: controlledSleep.sleep,
+      metadataFactory: async () => {
+        tokenGeneration++;
+        const metadata = new Metadata();
+        metadata.set("authorization", `Bearer rotated-token-${tokenGeneration}`);
+        return metadata;
+      },
+    });
+    let settlements = 0;
+    const request = toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" });
+
+    const resultPromise = runner.runTool(request);
+    void resultPromise.then(() => {
+      settlements++;
+    });
+    await waitForCondition(() => controlledSleep.calls.length === 1, "same-ID Memory projection replay wait");
+
+    expect(controlledSleep.calls[0]).toMatchObject({ delayMs: 300, abortSignal: request.abortSignal });
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+    expect(tokenGeneration).toBe(1);
+    expect(settlements).toBe(0);
+
+    controlledSleep.releaseNext();
+    await waitForCondition(() => bridge.runMemoryRequests.length === 2, "same-ID Memory projection replay");
+    expect(settlements).toBe(0);
+    expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
+    expect(bridge.runMemoryMetadata.map((metadata) => metadata.get("authorization"))).toEqual([
+      ["Bearer rotated-token-1"],
+      ["Bearer rotated-token-2"],
+    ]);
+    expect(tokenGeneration).toBe(2);
+
+    bridge.completeDeferredRunMemory();
+    const result = await resultPromise;
+    expect(result.type).toBe("completed");
+    expect(settlements).toBe(1);
+    expect(controlledSleep.calls).toHaveLength(1);
+  });
+
+  test("refreshes Runtime Bridge metadata for every same-ID Memory replay", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" })];
+    let tokenGeneration = 0;
+    const runner = makeRunner({
+      bridge,
+      sleep: immediateSleep,
+      metadataFactory: async () => {
+        tokenGeneration++;
+        const metadata = new Metadata();
+        metadata.set("authorization", `Bearer rotated-token-${tokenGeneration}`);
+        return metadata;
+      },
+    });
+
+    const result = await runner.runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+
+    expect(result.type).toBe("completed");
+    expect(bridge.runMemoryRequests).toHaveLength(2);
+    expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
+    expect(bridge.runMemoryMetadata.map((metadata) => metadata.get("authorization"))).toEqual([
+      ["Bearer rotated-token-1"],
+      ["Bearer rotated-token-2"],
+    ]);
+    expect(tokenGeneration).toBe(2);
+  });
+
+  test("keeps retrying the exact Memory projection envelope without a retry-count ceiling", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [
+      memoryProjectionRetryResult(),
+      memoryProjectionRetryResult(),
+      memoryProjectionRetryResult(),
+      memoryProjectionRetryResult(),
+      JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" }),
+    ];
+
+    const sleepCalls: Array<{ readonly delayMs: number; readonly abortSignal: AbortSignal }> = [];
+    const request = toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" });
+    const result = await makeRunner({
+      bridge,
+      sleep: async (delayMs, abortSignal) => {
+        sleepCalls.push({ delayMs, abortSignal });
+      },
+    }).runTool(request);
+
+    expect(result.type).toBe("completed");
+    expect(bridge.runMemoryRequests).toHaveLength(5);
+    expect(bridge.runMemoryRequests.every((request) => JSON.stringify(request) === JSON.stringify(bridge.runMemoryRequests[0]))).toBe(true);
+    expect(sleepCalls).toEqual([
+      { delayMs: 300, abortSignal: request.abortSignal },
+      { delayMs: 300, abortSignal: request.abortSignal },
+      { delayMs: 300, abortSignal: request.abortSignal },
+      { delayMs: 300, abortSignal: request.abortSignal },
+    ]);
+  });
+
+  test("cancellation after a projection failure prevents another Memory replay", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
+    const abortController = new AbortController();
+    bridge.afterRunMemoryResponse = (callNumber) => {
+      if (callNumber === 1) {
+        abortController.abort();
+      }
+    };
+
+    let sleepCalls = 0;
+    const result = await makeRunner({
+      bridge,
+      sleep: async () => {
+        sleepCalls++;
+      },
+    }).runTool(toolRequest(
+      "memory",
+      { action: "create", path: "notes/todo.md", content: "one" },
+      "sevt_tool_1",
+      abortController.signal,
+    ));
+
+    expect(result.type).toBe("cancelled");
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+    expect(sleepCalls).toBe(0);
+  });
+
+  test("cancelling a parked Memory replay settles before release and cannot resume later", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
+    const controlledSleep = new ControlledSleep();
+    const abortController = new AbortController();
+    let settlements = 0;
+    const resultPromise = makeRunner({ bridge, sleep: controlledSleep.sleep }).runTool(toolRequest(
+      "memory",
+      { action: "create", path: "notes/todo.md", content: "one" },
+      "sevt_tool_1",
+      abortController.signal,
+    ));
+    void resultPromise.then(() => {
+      settlements++;
+    });
+    await waitForCondition(() => controlledSleep.calls.length === 1, "parked Memory projection replay");
+
+    abortController.abort();
+    const result = await resultPromise;
+    expect(result.type).toBe("cancelled");
+    expect(settlements).toBe(1);
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+
+    controlledSleep.releaseNext();
+    await Promise.resolve();
+    expect(settlements).toBe(1);
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+  });
+
+  test("post-wait abort fence prevents metadata refresh and Memory replay", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
+    const abortController = new AbortController();
+    let metadataCalls = 0;
+    const result = await makeRunner({
+      bridge,
+      metadataFactory: async () => {
+        metadataCalls++;
+        return new Metadata();
+      },
+      sleep: async (_delayMs, abortSignal) => {
+        expect(abortSignal).toBe(abortController.signal);
+        abortController.abort();
+      },
+    }).runTool(toolRequest(
+      "memory",
+      { action: "create", path: "notes/todo.md", content: "one" },
+      "sevt_tool_1",
+      abortController.signal,
+    ));
+
+    expect(result.type).toBe("cancelled");
+    expect(metadataCalls).toBe(1);
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+  });
+
+  test("cancelling an in-flight Memory replay has no orphan call or duplicate settlement", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
+    bridge.deferRunMemoryCall = 2;
+    const abortController = new AbortController();
+    let settlements = 0;
+    const resultPromise = makeRunner({ bridge, sleep: immediateSleep }).runTool(toolRequest(
+      "memory",
+      { action: "create", path: "notes/todo.md", content: "one" },
+      "sevt_tool_1",
+      abortController.signal,
+    ));
+    void resultPromise.then(() => {
+      settlements++;
+    });
+    await waitForCondition(() => bridge.runMemoryRequests.length === 2, "in-flight Memory projection replay");
+
+    abortController.abort();
+    const result = await resultPromise;
+    expect(result.type).toBe("cancelled");
+    expect(settlements).toBe(1);
+    expect(bridge.runMemoryRequests).toHaveLength(2);
+
+    bridge.completeDeferredRunMemory();
+    await Promise.resolve();
+    expect(settlements).toBe(1);
+    expect(bridge.runMemoryRequests).toHaveLength(2);
+  });
+
+  test("production replay sleep removes its abort listener after timer completion", async () => {
+    jest.useFakeTimers();
+    try {
+      const bridge = new RecordingBridgeClient();
+      bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
+      const abortController = new AbortController();
+      const addListener = jest.spyOn(abortController.signal, "addEventListener");
+      const removeListener = jest.spyOn(abortController.signal, "removeEventListener");
+      const resultPromise = makeRunner({ bridge }).runTool(toolRequest(
+        "memory",
+        { action: "create", path: "notes/todo.md", content: "one" },
+        "sevt_tool_1",
+        abortController.signal,
+      ));
+      await flushMicrotasks();
+
+      expect(bridge.runMemoryRequests).toHaveLength(1);
+      expect(jest.getTimerCount()).toBe(1);
+      const sleepAbortListener = addListener.mock.calls.at(-1)?.[1];
+      expect(sleepAbortListener).toBeDefined();
+
+      jest.advanceTimersByTime(300);
+      await flushMicrotasks();
+      const result = await resultPromise;
+
+      expect(result.type).toBe("completed");
+      expect(bridge.runMemoryRequests).toHaveLength(2);
+      expect(removeListener).toHaveBeenCalledWith("abort", sleepAbortListener);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("production replay sleep clears its timer and listener when aborted", async () => {
+    jest.useFakeTimers();
+    try {
+      const bridge = new RecordingBridgeClient();
+      bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
+      const abortController = new AbortController();
+      const addListener = jest.spyOn(abortController.signal, "addEventListener");
+      const removeListener = jest.spyOn(abortController.signal, "removeEventListener");
+      const resultPromise = makeRunner({ bridge }).runTool(toolRequest(
+        "memory",
+        { action: "create", path: "notes/todo.md", content: "one" },
+        "sevt_tool_1",
+        abortController.signal,
+      ));
+      await flushMicrotasks();
+
+      expect(bridge.runMemoryRequests).toHaveLength(1);
+      expect(jest.getTimerCount()).toBe(1);
+      const sleepAbortListener = addListener.mock.calls.at(-1)?.[1];
+      expect(sleepAbortListener).toBeDefined();
+      abortController.abort();
+      await flushMicrotasks();
+      const result = await resultPromise;
+
+      expect(result.type).toBe("cancelled");
+      expect(removeListener).toHaveBeenCalledWith("abort", sleepAbortListener);
+      expect(jest.getTimerCount()).toBe(0);
+
+      jest.advanceTimersByTime(300);
+      await flushMicrotasks();
+      expect(bridge.runMemoryRequests).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("does not sleep for nonqualifying Memory results or non-Memory routes", async () => {
+    let sleepCalls = 0;
+    const sleep = async (): Promise<void> => {
+      sleepCalls++;
+    };
+    const terminalMemoryResults = [
+      { name: "validation tool error", result: { status: "tool_error", error_code: "invalid_input", retryable: false } },
+      { name: "projection error not retryable", result: { status: "runtime_error", error_code: "projection_refresh_failed", retryable: false } },
+      { name: "different retryable Runtime code", result: { status: "runtime_error", error_code: "database_unavailable", retryable: true } },
+      { name: "missing retryable flag", result: { status: "runtime_error", error_code: "projection_refresh_failed" } },
+    ];
+    for (const testCase of terminalMemoryResults) {
+      const bridge = new RecordingBridgeClient();
+      bridge.runMemoryResultJson = JSON.stringify(testCase.result);
+      const result = await makeRunner({ bridge, sleep }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+      expect(result.type, testCase.name).toBe("error");
+      expect(bridge.runMemoryRequests, testCase.name).toHaveLength(1);
+    }
+
+    const nonMemoryBridge = new RecordingBridgeClient();
+    nonMemoryBridge.runToolResultJson = memoryProjectionRetryResult();
+    const nonMemoryResult = await makeRunner({ bridge: nonMemoryBridge, sleep }).runTool(toolRequest("Write", { file_path: "notes/todo.md", content: "one" }));
+    expect(nonMemoryResult.type).toBe("error");
+    expect(nonMemoryBridge.runToolRequests).toHaveLength(1);
+    expect(nonMemoryBridge.runMemoryRequests).toHaveLength(0);
+    expect(sleepCalls).toBe(0);
+  });
+
+  test("Memory transport errors preserve retryable failure mapping without replay sleep", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryError = new Error("bridge unavailable");
+    let sleepCalls = 0;
+
+    const result = await makeRunner({
+      bridge,
+      sleep: async () => {
+        sleepCalls++;
+      },
+    }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Bridge memory tool execution is unavailable.",
+        retryable: true,
+      },
+    });
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+    expect(sleepCalls).toBe(0);
+  });
+
+  test("preserves model-visible Memory stale and refresh signals", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryResultJson = JSON.stringify({
+      status: "tool_error",
+      error_code: "path_exists",
+      message: "The requested path conflicts with existing memory.",
+      reread_required: true,
+      projection_refreshed: true,
+      retryable: false,
+      conflicting_paths: ["notes", "notes/todo.md"],
+      memory_store_id: "mem_internal",
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("memory", { action: "create", path: "notes" }));
+
+    expect(result.type).toBe("error");
+    expect(JSON.stringify(result)).toContain("error_code: path_exists");
+    expect(JSON.stringify(result)).toContain("reread_required: true");
+    expect(JSON.stringify(result)).toContain("projection_refreshed: true");
+    expect(JSON.stringify(result)).toContain('conflicting_paths: [\\"notes\\",\\"notes/todo.md\\"]');
+    expect(JSON.stringify(result)).not.toContain("mem_internal");
+  });
+
+  test("recursively removes formatter-declared forbidden result fields", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: {
+        raw_bytes: "top-secret-bytes",
+        nested: { rawBytes: "nested-secret-bytes", summary: "visible" },
+      },
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Read", { file_path: "notes/a.txt" }));
+
+    expect(JSON.stringify(result)).not.toContain("secret-bytes");
+    expect(JSON.stringify(result)).toContain("visible");
+  });
+
+  test("does not replace a route-bounded Read result with a universal text prefix", async () => {
+    const bridge = new RecordingBridgeClient();
+    const content = "x".repeat(60 * 1024);
+    bridge.runToolResultJson = JSON.stringify({
+      status: "success",
+      result: { content, next_offset: 61440, total_lines: 2000 },
+    });
+
+    const result = await makeRunner({ bridge }).runTool(toolRequest("Read", { file_path: "notes/a.txt" }));
+
+    expect(result.type).toBe("completed");
+    if (result.type !== "completed") throw new Error("expected completed result");
+    expect(result.output.text).toContain(content);
+    expect(result.output.text).toContain("next_offset: 61440");
+    expect(result.output.truncated).toBe(false);
+  });
+
+  test("routes web through Gateway RunWeb with Runtime binding token", async () => {
+    const gateway = new RecordingGatewayClient();
+    const runner = makeRunner({ gateway });
+
+    const result = await runner.runTool(toolRequest("web", { search_query: [{ q: "tetral", domains: ["example.com"] }] }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: { text: "web result", truncated: false },
+      serverToolUse: { webSearchRequests: 2, webFetchRequests: 1 },
+    });
+    expect(gateway.runWebRequests).toEqual([
+      expect.objectContaining({
+        workspaceId: "wksp_1",
+        sessionId: "sesn_1",
+        sessionThreadId: "thrd_1",
+        toolUseEventId: "sevt_tool_1",
+        bindingId: "bind_1",
+        bindingGeneration: 42,
+        runtimeBindingToken: "binding-token",
+        input: {
+          searchQuery: [{ q: "tetral", domains: ["example.com"] }],
+          open: [],
+          find: [],
+        },
+      }),
+    ]);
+  });
+
+  test("web ignores the undeclared refId alias", async () => {
+    const gateway = new RecordingGatewayClient();
+    const result = await makeRunner({ gateway }).runTool(toolRequest("web", {
+      open: [{ refId: "ref_legacy" }],
+    }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: { retryable: false, message: "web requires at least one valid search, open, or find operation." },
+    });
+    expect(gateway.runWebRequests).toHaveLength(0);
+  });
+
+  test("carries web usage on a durable tool-error result without inventing it for transport failures", async () => {
+    const gateway = new RecordingGatewayClient();
+    gateway.runWebResponse = {
+      ...gateway.runWebResponse,
+      status: RunWebStatus.RUN_WEB_STATUS_TOOL_ERROR,
+      resultText: "target rejected",
+      usage: {
+        operation: "open",
+        backendTokens: 0,
+        targetHttpStatus: 422,
+        storedBytes: 0,
+        durationMs: 8,
+        webSearchRequests: 0,
+        webFetchRequests: 1,
+      },
+    };
+    const result = await makeRunner({ gateway }).runTool(toolRequest("web", { open: [{ ref_id: "https://example.invalid" }] }));
+    expect(result).toMatchObject({
+      type: "error",
+      serverToolUse: { webSearchRequests: 0, webFetchRequests: 1 },
+    });
+
+    gateway.runWebResponse = { ...gateway.runWebResponse, usage: undefined };
+    const malformed = await makeRunner({ gateway }).runTool(toolRequest("web", { open: [{ ref_id: "https://example.invalid" }] }));
+    expect(malformed).toMatchObject({ type: "error", error: { retryable: true } });
+    expect(malformed).not.toHaveProperty("serverToolUse");
+  });
+
+  test("accepts the per-call web usage maxima and rejects counters above them", async () => {
+    const gateway = new RecordingGatewayClient();
+    gateway.runWebResponse = {
+      ...gateway.runWebResponse,
+      usage: {
+        ...gateway.runWebResponse.usage!,
+        webSearchRequests: 32,
+        webFetchRequests: 8,
+      },
+    };
+    const accepted = await makeRunner({ gateway }).runTool(toolRequest("web", { search_query: [{ q: "tetral" }] }));
+    expect(accepted).toMatchObject({
+      type: "completed",
+      serverToolUse: { webSearchRequests: 32, webFetchRequests: 8 },
+    });
+
+    gateway.runWebResponse = {
+      ...gateway.runWebResponse,
+      usage: { ...gateway.runWebResponse.usage!, webSearchRequests: 33 },
+    };
+    const tooManySearches = await makeRunner({ gateway }).runTool(toolRequest("web", { search_query: [{ q: "tetral" }] }));
+    expect(tooManySearches).toMatchObject({ type: "error", error: { retryable: true } });
+    expect(tooManySearches).not.toHaveProperty("serverToolUse");
+
+    gateway.runWebResponse = {
+      ...gateway.runWebResponse,
+      usage: { ...gateway.runWebResponse.usage!, webSearchRequests: 0, webFetchRequests: 9 },
+    };
+    const tooManyFetches = await makeRunner({ gateway }).runTool(toolRequest("web", { open: [{ ref_id: "https://example.com" }] }));
+    expect(tooManyFetches).toMatchObject({ type: "error", error: { retryable: true } });
+    expect(tooManyFetches).not.toHaveProperty("serverToolUse");
+  });
+
+  test("routes MCP tools through the MCP connector with Runtime binding token", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "mcp result",
+      attachments: [],
+      errorKind: undefined,
+    };
+    const runner = makeRunner({ mcp });
+
+    const result = await runner.runTool(mcpToolRequest({ query: "issues" }));
+
+    expect(result).toEqual({ type: "completed", output: { text: "mcp result", truncated: false } });
+    expect(mcp.runMcpToolRequests).toEqual([
+      {
+        requestId: "req_1",
+        workspaceId: "wksp_1",
+        sessionId: "sesn_1",
+        sessionThreadId: "thrd_1",
+        toolUseEventId: "sevt_tool_1",
+        mcpServerName: "github",
+        toolName: "github_search",
+        inputJson: '{"query":"issues"}',
+        bindingId: "bind_1",
+        bindingGeneration: 42,
+        runtimeBindingToken: "binding-token",
+      },
+    ]);
+  });
+
+  test("maps MCP tool_error to a model-visible tool error", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,
+      resultText: "invalid repository",
+      attachments: [],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+    };
+    const runner = makeRunner({ mcp });
+
+    const result = await runner.runTool(mcpToolRequest({ repo: "" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        retryable: false,
+        message: "invalid repository",
+      },
+    });
+  });
+
+  test("uses MCP tool-error attachment refs without a Runtime-side byte handoff", async () => {
+    const bridge = new RecordingBridgeClient();
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR,
+      resultText: "tool returned an image error",
+      attachments: [{ attachmentRef: "att_mcp_error", mime: "image/png", sizeBytes: 3, suggestedFilename: "error.png" }],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_TOOL_ERROR,
+    };
+    const runner = makeRunner({ bridge, mcp });
+
+    const result = await runner.runTool(mcpToolRequest({ repo: "" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: { retryable: false, message: "tool returned an image error" },
+      attachments: [{
+        transient: {
+          attachmentRef: "att_mcp_error",
+          sourceToolUseEventId: "sevt_tool_1",
+          sourcePath: "mcp:github/error.png",
+        },
+        fileBacked: undefined,
+        mime: "image/png",
+        filename: "error.png",
+      }],
+    });
+  });
+
+  test("preserves terminal MCP authentication retry status for runtime error events", async () => {
+    for (const scenario of [
+      {
+        response: {
+          errorKind: McpErrorKind.MCP_ERROR_KIND_AUTHENTICATION_FAILED,
+          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+          resultText: "MCP authentication failed after refresh.",
+        },
+        publicErrorEvent: {
+          type: "mcp_authentication_failed_error",
+          mcpServerName: "github",
+          message: "MCP authentication failed after refresh.",
+          retryStatus: { type: "terminal" },
+        },
+      },
+      {
+        response: {
+          errorKind: McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED,
+          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+          resultText: "MCP server github requires a configured credential.",
+        },
+        publicErrorEvent: {
+          type: "mcp_authentication_failed_error",
+          mcpServerName: "github",
+          message: "MCP server github requires a configured credential.",
+          retryStatus: { type: "terminal" },
+        },
+      },
+      {
+        response: {
+          errorKind: McpErrorKind.MCP_ERROR_KIND_CLAIM_CONFLICT,
+          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_TERMINAL,
+          resultText: "MCP tool idempotency conflict.",
+        },
+        publicErrorEvent: {
+          type: "unknown_error",
+          message: "MCP tool idempotency conflict.",
+          retryStatus: { type: "terminal" },
+        },
+      },
+      {
+        response: {
+          errorKind: McpErrorKind.MCP_ERROR_KIND_CONNECTION_FAILED,
+          retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
+          resultText: "MCP connection failed.",
+        },
+        publicErrorEvent: {
+          type: "mcp_connection_failed_error",
+          mcpServerName: "github",
+          message: "MCP connection failed.",
+          retryStatus: { type: "exhausted" },
+        },
+      },
+    ]) {
+      const mcp = new RecordingMcpConnectorClient();
+      mcp.runMcpToolResponse = {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+        resultText: scenario.response.resultText,
+        attachments: [],
+        errorKind: scenario.response.errorKind,
+        retryStatus: scenario.response.retryStatus,
+      };
+      const runner = makeRunner({ mcp });
+
+      const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+
+      expect(result).toMatchObject({
+        type: "error",
+        error: {
+          retryable: true,
+          message: scenario.response.resultText,
+          retryStatus: scenario.publicErrorEvent.retryStatus,
+        },
+        publicErrorEvent: scenario.publicErrorEvent,
+      });
+    }
+  });
+
+  test("settles internal MCP failures without retry status or a public error event", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP connector failed.",
+      attachments: [],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
+      retryStatus: undefined,
+    };
+    const runner = makeRunner({ mcp });
+
+    const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        retryable: true,
+        message: "MCP connector failed.",
+      },
+    });
+    expect(result).not.toHaveProperty("publicErrorEvent");
+  });
+
+  test("returns MCP attachment refs without a Runtime-side byte handoff", async () => {
+    const bridge = new RecordingBridgeClient();
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "image",
+      attachments: [{ attachmentRef: "att_mcp_plot", mime: "image/png", sizeBytes: 3, suggestedFilename: "plot.png" }],
+      errorKind: undefined,
+    };
+    const runner = makeRunner({ bridge, mcp });
+
+    const result = await runner.runTool(mcpToolRequest({ repo: "tetral" }));
+
+    expect(result).toMatchObject({
+      type: "completed",
+      output: { text: "image", truncated: false },
+      attachments: [{
+        transient: {
+          attachmentRef: "att_mcp_plot",
+          sourceToolUseEventId: "sevt_tool_1",
+          sourcePath: "mcp:github/plot.png",
+          pageRange: "",
+          detail: "auto",
+        },
+        fileBacked: undefined,
+        mime: "image/png",
+        filename: "plot.png",
+      }],
+    });
+  });
+
+  test("spawns a sub-agent by creating the child, writing parent sent event, and enqueueing child input", async () => {
+    const bridge = new RecordingBridgeClient();
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("spawn_agent", {
+      task_name: "researcher",
+      prompt: "work on this",
+      agent_type: "research",
+      fork_turns: "none",
+    }));
+
+    expect(result.type).toBe("completed");
+    expect(bridge.createChildThreadRequests).toEqual([
+      expect.objectContaining({
+        parentThreadId: "thrd_1",
+        role: "subagent",
+        taskName: "researcher",
+        agentType: "research",
+        sourceToolUseEventId: "sevt_tool_1",
+        forkTurns: "none",
+      }),
+    ]);
+    expect(bridge.writeEventRequests).toEqual([
+      expect.objectContaining({
+        eventType: "agent.thread_message_sent",
+        sessionVisible: true,
+      }),
+    ]);
+    expect(bridge.resolveInterAgentDeliveryRequests).toEqual([
+      expect.objectContaining({
+        childThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
+      }),
+    ]);
+    expect(subAgentHost.actions).toEqual(["preload", "enqueue"]);
+    expect(subAgentHost.preloaded).toEqual([
+      expect.objectContaining({
+        sessionThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
+        thread: expect.objectContaining({
+          parentThreadId: "thrd_1",
+          role: "subagent",
+          taskName: "researcher",
+        }),
+      }),
+    ]);
+    expect(subAgentHost.enqueued).toEqual([
+      expect.objectContaining({
+        kind: "inter_agent_message",
+        sourceThreadId: "thrd_1",
+        sourceToolUseEventId: "sevt_tool_1",
+        message: expect.objectContaining({
+          origin: "runtime",
+          role: "user",
+        }),
+        thread: expect.objectContaining({
+          parentThreadId: "thrd_1",
+          role: "subagent",
+          taskName: "researcher",
+          agentType: "research",
+        }),
+      }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain("delivery");
+    expect(JSON.stringify(result)).not.toContain("binding-token");
+  });
+
+  test("rejects legacy camelCase sub-agent tool inputs", async () => {
+    const runner = makeRunner({ bridge: new RecordingBridgeClient(), subAgentHost: new RecordingSubAgentHost() });
+
+    const spawn = await runner.runTool(toolRequest("spawn_agent", {
+      taskName: "researcher",
+      prompt: "work on this",
+      agentType: "research",
+      forkTurns: "none",
+    }));
+    const wait = await runner.runTool(toolRequest("wait_agent", { taskName: "researcher", timeoutMs: 25 }));
+
+    expect(spawn).toMatchObject({ type: "error", error: { retryable: false, message: "spawn_agent requires task_name and prompt." } });
+    expect(wait).toMatchObject({ type: "error", error: { retryable: false, message: "wait_agent requires task_name." } });
+  });
+
+  test("spawn_agent and send_message ignore undeclared text aliases", async () => {
+    const runner = makeRunner({ bridge: new RecordingBridgeClient(), subAgentHost: new RecordingSubAgentHost() });
+
+    const spawn = await runner.runTool(toolRequest("spawn_agent", { task_name: "worker", message: "legacy" }));
+    const send = await runner.runTool(toolRequest("send_message", { task_name: "worker", prompt: "legacy" }));
+
+    expect(spawn).toMatchObject({ type: "error", error: { retryable: false, message: "spawn_agent requires task_name and prompt." } });
+    expect(send).toMatchObject({ type: "error", error: { retryable: false, message: "send_message requires task_name and message." } });
+  });
+
+  test("replayed sub-agent delivery returns existing delivered result without enqueueing child input", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.deliveryReceived = true;
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("spawn_agent", {
+      task_name: "researcher",
+      prompt: "work on this",
+      agent_type: "research",
+      fork_turns: "none",
+    }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: delivered"),
+      }),
+    });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+    expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
+    expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("duplicate spawn_agent task names return a non-retryable tool error", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.createChildThreadErrorCode = GrpcStatus.ALREADY_EXISTS;
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest("spawn_agent", {
+      task_name: "researcher",
+      prompt: "work on this",
+      agent_type: "research",
+      fork_turns: "none",
+    }));
+
+    expect(result).toEqual({
+      type: "error",
+      error: expect.objectContaining({
+        message: expect.stringContaining("already exists"),
+        retryable: false,
+      }),
+    });
+  });
+
+  test("send_message serializes child enqueue before a concurrent close releases hot state", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.deferResolveInterAgentDelivery = true;
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const send = runner.runTool(toolRequest("send_message", {
+      task_name: "worker",
+      message: "keep going",
+    }, "sevt_tool_send"));
+    await waitForCondition(() => bridge.resolveInterAgentDeliveryRequests.length === 1, "send delivery repair check");
+
+    const close = runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(bridge.listChildThreadsRequests).toHaveLength(1);
+    expect(bridge.markChildThreadClosedRequests).toEqual([]);
+
+    bridge.completeDeferredResolveInterAgentDelivery();
+    expect(await send).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: accepted"),
+      }),
+    });
+    expect(await close).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: closed_for_runtime"),
+      }),
+    });
+    expect(subAgentHost.actions).toEqual(["preload", "enqueue", "close"]);
+  });
+
+  test("close_agent commits durable closed projection before releasing hot child state", async () => {
+    const bridge = new RecordingBridgeClient();
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.onClose = () => {
+      expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: closed_for_runtime"),
+      }),
+    });
+    expect(subAgentHost.actions).toEqual(["close"]);
+    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+  });
+
+  test("close_agent does not release hot child state when durable close is rejected", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED;
+    bridge.markChildThreadClosedErrorCode = "stale_child";
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({
+      type: "error",
+      error: expect.objectContaining({
+        message: expect.stringContaining("stale_child"),
+        retryable: true,
+      }),
+    });
+    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+    expect(subAgentHost.actions).toEqual([]);
+  });
+
+  test("close_agent reports retryable failure when hot close fails after durable close", async () => {
+    const bridge = new RecordingBridgeClient();
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.closeResult = {
+      ok: false,
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_child_1",
+      reason: "thread_busy",
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({
+      type: "error",
+      error: expect.objectContaining({
+        message: expect.stringContaining("thread_busy"),
+        retryable: true,
+      }),
+    });
+    expect(subAgentHost.actions).toEqual(["close"]);
+    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+  });
+
+  test("send_message keeps same-child inputs in model order when the first child lookup is slow", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.deferFirstListChildThreads = true;
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const first = runner.runTool(toolRequest("send_message", {
+      task_name: "worker",
+      message: "first",
+    }, "sevt_tool_send_1", new AbortController().signal, 0));
+    await waitForCondition(() => bridge.listChildThreadsRequests.length === 1, "first send child lookup");
+
+    const second = runner.runTool(toolRequest("send_message", {
+      task_name: "worker",
+      message: "second",
+    }, "sevt_tool_send_2", new AbortController().signal, 1));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(bridge.listChildThreadsRequests).toHaveLength(1);
+    expect(subAgentHost.enqueued).toHaveLength(0);
+
+    bridge.completeDeferredListChildThreads();
+    await Promise.all([first, second]);
+
+    expect(subAgentHost.enqueued.map((input) => input.kind === "inter_agent_message" ? input.sourceToolUseEventId : undefined)).toEqual([
+      "sevt_tool_send_1",
+      "sevt_tool_send_2",
+    ]);
+    expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
+      "sevt_tool_send_1",
+      "sevt_tool_send_2",
+    ]);
+  });
+
+  test("send_message drops an aborted operation while it is waiting in the same-task queue", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.deferFirstListChildThreads = true;
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const first = runner.runTool(toolRequest("send_message", {
+      task_name: "worker",
+      message: "first",
+    }, "sevt_tool_send_1", new AbortController().signal, 0));
+    await waitForCondition(() => bridge.listChildThreadsRequests.length === 1, "first send child lookup");
+
+    const secondController = new AbortController();
+    const second = runner.runTool(toolRequest("send_message", {
+      task_name: "worker",
+      message: "cancelled",
+    }, "sevt_tool_send_2", secondController.signal, 1));
+    secondController.abort();
+
+    expect(await second).toEqual({
+      type: "cancelled",
+      error: expect.objectContaining({
+        code: "runtime_invalid_sequence",
+        message: "Sub-agent send was cancelled.",
+        retryable: false,
+      }),
+    });
+    expect(bridge.listChildThreadsRequests).toHaveLength(1);
+
+    bridge.completeDeferredListChildThreads();
+    await first;
+
+    expect(subAgentHost.enqueued).toHaveLength(1);
+    expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
+      "sevt_tool_send_1",
+    ]);
+  });
+
+  test("fork_turns counts complete user-led turns without splitting tool results", async () => {
+    const bridge = new RecordingBridgeClient();
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+    const request = {
+      ...toolRequest("spawn_agent", {
+        task_name: "recent-turn",
+        prompt: "work on the latest turn",
+        fork_turns: "1",
+      }),
+      committedMessages: [
+        runtimeTextMessage("user-old", "user", "user", 0, "old input"),
+        completedToolMessage("Read", { file_path: "old.txt" }, "old result"),
+        runtimeTextMessage("user-latest", "user", "runtime", 2, "inter-agent input"),
+        runtimeTextMessage("assistant-latest", "assistant", "agent", 3, "latest answer"),
+      ],
+    } satisfies RuntimeToolExecutionRequest;
+
+    const result = await runner.runTool(request);
+
+    expect(result.type).toBe("completed");
+    const seed = JSON.parse(bridge.createChildThreadRequests[0]?.forkSeedJson ?? "{}") as {
+      readonly runtime_messages_snapshot?: readonly RuntimeMessage[];
+    };
+    expect(seed.runtime_messages_snapshot?.map((message) => message.id)).toEqual(["user-latest", "assistant-latest"]);
+  });
+
+  test("wait_agent uses the hot child wait signal instead of treating timeout_ms as an automatic timeout", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.waitResult = {
+      ok: true,
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_child_1",
+      observed: true,
+      status: "idle",
+      timedOut: false,
+    };
+    subAgentHost.pulledAgentMail = {
+      deliveryId: "delivery_child_complete",
+      finalMessage: "completed child output",
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("wait_agent", { task_name: "worker", timeout_ms: 25 }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("timed_out: false"),
+      }),
+    });
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("final_message:\ncompleted child output"),
+      }),
+    });
+    expect(subAgentHost.pullAgentMailCalls).toEqual([{
+      sessionThreadId: "thrd_1",
+      sourceThreadId: "thr_child_1",
+    }]);
+  });
+
+  test("wait_agent surfaces observed hot wait timeouts as completed results", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.waitResult = {
+      ok: true,
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_child_1",
+      observed: true,
+      status: "running",
+      timedOut: true,
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("wait_agent", { task_name: "worker", timeout_ms: 25 }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("timed_out: true"),
+      }),
+    });
+    expect(subAgentHost.pullAgentMailCalls).toEqual([]);
+  });
+
+  test("wait_agent refuses completion pulls until hot or cold child status is settled", async () => {
+    for (const statusValue of ["running", "rescheduling", "requires_action"] as const) {
+      const bridge = new RecordingBridgeClient();
+      bridge.childStatus = statusValue;
+      const subAgentHost = new RecordingSubAgentHost();
+      subAgentHost.waitResult = {
+        ok: true,
+        sessionId: "sesn_1",
+        sessionThreadId: "thr_child_1",
+        observed: statusValue === "requires_action",
+        ...(statusValue === "requires_action" ? { status: statusValue } : {}),
+        timedOut: false,
+      };
+      subAgentHost.pulledAgentMail = {
+        deliveryId: `delivery_stale_${statusValue}`,
+        finalMessage: "stale completion",
+      };
+      const runner = makeRunner({ bridge, subAgentHost });
+
+      const result = await runner.runTool(toolRequest("wait_agent", { task_name: "worker" }));
+
+      expect(result).toEqual({
+        type: "completed",
+        output: expect.objectContaining({
+          text: expect.stringContaining(`status: ${statusValue}`),
+        }),
+      });
+      expect(result).toEqual({
+        type: "completed",
+        output: expect.not.objectContaining({
+          text: expect.stringContaining("final_message:"),
+        }),
+      });
+      expect(subAgentHost.pullAgentMailCalls).toEqual([]);
+    }
+  });
+
+  test("wait_agent pulls completion mail for every hot or cold settled child status", async () => {
+    for (const statusValue of ["idle", "failed", "terminated", "closed_for_runtime"] as const) {
+      const hotObserved = statusValue === "terminated" || statusValue === "closed_for_runtime";
+      const bridge = new RecordingBridgeClient();
+      bridge.childStatus = statusValue;
+      const subAgentHost = new RecordingSubAgentHost();
+      subAgentHost.waitResult = {
+        ok: true,
+        sessionId: "sesn_1",
+        sessionThreadId: "thr_child_1",
+        observed: hotObserved,
+        ...(hotObserved ? { status: statusValue } : {}),
+        timedOut: false,
+      };
+      subAgentHost.pulledAgentMail = {
+        deliveryId: `delivery_settled_${statusValue}`,
+        finalMessage: `completion for ${statusValue}`,
+      };
+      const runner = makeRunner({ bridge, subAgentHost });
+
+      const result = await runner.runTool(toolRequest("wait_agent", { task_name: "worker" }));
+
+      expect(result).toEqual({
+        type: "completed",
+        output: expect.objectContaining({
+          text: expect.stringContaining(`final_message:\ncompletion for ${statusValue}`),
+        }),
+      });
+      expect(subAgentHost.pullAgentMailCalls).toEqual([{
+        sessionThreadId: "thrd_1",
+        sourceThreadId: "thr_child_1",
+      }]);
+    }
+  });
+
+  test("wait_agent presents the same enveloped body when a receipt ensure replays", async () => {
+    const bridge = new RecordingBridgeClient();
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.pulledAgentMail = {
+      deliveryId: "delivery_child_duplicate",
+      finalMessage: "Message Type: FINAL_ANSWER\nTask name: main\nSender: worker\nPayload:\ncompleted",
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("wait_agent", { task_name: "worker" }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("final_message:\nMessage Type: FINAL_ANSWER"),
+      }),
+    });
+  });
+
+  test("wait_agent returns a truncated errored completion envelope without rewriting it", async () => {
+    const bridge = new RecordingBridgeClient();
+    const subAgentHost = new RecordingSubAgentHost();
+    const envelope = "Message Type: FINAL_ANSWER\nTask name: main\nSender: worker\nPayload:\nAgent errored: head…42 tokens truncated…tail";
+    subAgentHost.pulledAgentMail = {
+      deliveryId: "delivery_child_errored",
+      finalMessage: envelope,
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("wait_agent", {
+      task_name: "worker",
+      timeout_ms: 1_000,
+    }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining(`final_message:\n${envelope}`),
+      }),
+    });
+  });
+
+  test("interrupt_agent reports an already-settled child as not interrupted", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.interruptApplied = false;
+    subAgentHost.interruptRunExitOutcome = "completed_clean";
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("interrupt_agent", { task_name: "worker" }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("interrupted: false"),
+      }),
+    });
+    if (result.type === "completed") {
+      expect(result.output.text).toContain("run_outcome: completed_clean");
+    }
+    expect(subAgentHost.actions).toEqual(["interrupt"]);
+  });
+
+  test("wait_agent cancellation detaches the hot waiter without a late result", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.waitUntilAbort = true;
+    const runner = makeRunner({ bridge, subAgentHost });
+    const controller = new AbortController();
+    const waiting = runner.runTool({
+      ...toolRequest("wait_agent", { task_name: "worker" }),
+      abortSignal: controller.signal,
+    });
+    await waitForCondition(() => subAgentHost.waitStarted, "hot wait start");
+
+    controller.abort();
+
+    await expect(waiting).resolves.toMatchObject({ type: "cancelled" });
+    expect(subAgentHost.waitDetached).toBe(true);
+  });
+
+  test("resume_agent marks a closed child active and preloads context without enqueueing new input", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "closed_for_runtime";
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+
+    expect(result.type).toBe("completed");
+    expect(bridge.markChildThreadActiveRequests).toEqual([
+      expect.objectContaining({ childThreadId: "thr_child_1" }),
+    ]);
+    expect(subAgentHost.preloaded).toEqual([
+      expect.objectContaining({
+        sessionThreadId: "thr_child_1",
+        thread: expect.objectContaining({
+          status: "idle",
+          taskName: "worker",
+        }),
+      }),
+    ]);
+    expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("resume_agent is a benign no-op for a child that is not closed", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.inspectObserved = true;
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: running"),
+      }),
+    });
+    expect(bridge.markChildThreadActiveRequests).toEqual([]);
+    expect(subAgentHost.actions).toEqual(["inspect"]);
+    expect(subAgentHost.preloaded).toEqual([]);
+    expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("resume_agent retries preload for a non-closed cold child after the durable reopen already committed", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "closed_for_runtime";
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.preloadResults.push(
+      { ok: false, sessionId: "sesn_1", sessionThreadId: "thr_child_1", reason: "context_load_failed" },
+      { ok: true, sessionId: "sesn_1", sessionThreadId: "thr_child_1", applied: true },
+    );
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const first = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+    bridge.childStatus = "idle";
+    const second = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+
+    expect(first).toMatchObject({ type: "error" });
+    expect(second).toMatchObject({ type: "completed" });
+    expect(bridge.markChildThreadActiveRequests).toHaveLength(1);
+    expect(subAgentHost.preloaded).toHaveLength(2);
+    expect(subAgentHost.actions.filter((action) => action === "resume")).toHaveLength(0);
+  });
+});
+
+function makeRunner(options: {
+  readonly bridge?: RecordingBridgeClient;
+  readonly gateway?: RecordingGatewayClient;
+  readonly mcp?: RecordingMcpConnectorClient;
+  readonly subAgentHost?: RecordingSubAgentHost;
+  readonly metadataFactory?: () => Promise<Metadata>;
+  readonly sleep?: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
+}): RuntimePodToolRunner {
+  return new RuntimePodToolRunner({
+    bridgeAddress: "bridge.test:9090",
+    webAddress: "gateway.test:9090",
+    mcpConnectorAddress: "gateway.test:9091",
+    tokenPath: "/var/run/token",
+    bridgeClient: (options.bridge ?? new RecordingBridgeClient()).client(),
+    webClient: (options.gateway ?? new RecordingGatewayClient()).client(),
+    mcpConnectorClient: (options.mcp ?? new RecordingMcpConnectorClient()).client(),
+    metadataFactory: options.metadataFactory ?? (async () => new Metadata()),
+    ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
+    scopeForThread: (sessionId: string, sessionThreadId: string) => sessionId === "sesn_1" && sessionThreadId === "thrd_1"
+      ? {
+        requestId: "req_1",
+        workspaceId: "wksp_1",
+        sessionId: "sesn_1",
+        sessionThreadId: "thrd_1",
+        bindingId: "bind_1",
+        bindingGeneration: 42,
+        targetPodUid: "pod_1",
+        runtimeInputId: "rin_1",
+        eventIds: ["sevt_user_1"],
+        sequenceFrom: 1,
+        sequenceTo: 1,
+        kind: "messages",
+        payloadJson: "{}",
+      }
+      : undefined,
+    subAgentRunHost: () => options.subAgentHost,
+  });
+}
+
+function toolRequest(
+  toolName: string,
+  input: RuntimeJsonValue,
+  toolUseEventId = "sevt_tool_1",
+  abortSignal: AbortSignal = new AbortController().signal,
+  modelOrder = 0,
+): RuntimeToolExecutionRequest {
+  const gptNames = new Set(["exec_command", "write_stdin", "view_image", "apply_patch"]);
+  const catalog = createToolCatalog({ family: gptNames.has(toolName) ? "gpt" : "claude" });
+  const entry = lookupToolEntry(catalog, toolName);
+  if (entry === undefined) {
+    throw new Error(`missing test tool ${toolName}`);
+  }
+  return {
+    workspaceId: "wksp_1",
+    sessionId: "sesn_1",
+    sessionThreadId: "thrd_1",
+    bindingId: "bind_1",
+    bindingGeneration: 42,
+    runtimeBindingToken: "binding-token",
+    targetPodUid: "pod_1",
+    modelRequestId: "mreq_1",
+    modelToolCallId: "tool_call_1",
+    modelOrder,
+    toolUseEventId,
+    entry,
+    input,
+    currentModel: { providerId: "openai", modelId: "gpt-5.5" },
+    committedMessages: [],
+    abortSignal,
+  };
+}
+
+function mcpToolRequest(input: RuntimeJsonValue): RuntimeToolExecutionRequest {
+  return {
+    ...toolRequest("web", input),
+    entry: mcpToolEntry(),
+  };
+}
+
+function mcpToolEntry(): ToolEntry {
+  return {
+    name: "github_search",
+    definition: {
+      name: "github_search",
+      description: "Search GitHub through MCP.",
+      inputSchema: { type: "object", properties: { query: { type: "string" } } },
+    },
+    route: { kind: "gateway", operation: "RunMcpTool", mcpServerName: "github" },
+    formatter: {
+      successShape: "MCP formatted text.",
+      errorShape: "MCP formatted error.",
+      forbiddenFields: ["authorization", "token", "credential"],
+    },
+    defaultPermissionPolicy: "always_allow",
+    required: false,
+  };
+}
+
+function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function memoryProjectionRetryResult(): string {
+  return JSON.stringify({
+    status: "runtime_error",
+    error_code: "projection_refresh_failed",
+    retryable: true,
+    message: "projection refresh failed",
+  });
+}
+
+const immediateSleep = async (): Promise<void> => undefined;
+
+class ControlledSleep {
+  readonly calls: Array<{ readonly delayMs: number; readonly abortSignal: AbortSignal }> = [];
+  private readonly releases: Array<() => void> = [];
+
+  readonly sleep = (delayMs: number, abortSignal: AbortSignal): Promise<void> => {
+    this.calls.push({ delayMs, abortSignal });
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => {
+        abortSignal.removeEventListener("abort", abort);
+      };
+      const abort = (): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(new DOMException("aborted", "AbortError"));
+      };
+      abortSignal.addEventListener("abort", abort, { once: true });
+      this.releases.push(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      });
+      if (abortSignal.aborted) {
+        abort();
+      }
+    });
+  };
+
+  releaseNext(): void {
+    const release = this.releases.shift();
+    if (release === undefined) {
+      throw new Error("no controlled sleep is parked");
+    }
+    release();
+  }
+}
+
+function stableTestId(prefix: string, seed: string): string {
+  return `${prefix}_${sha256(seed).slice(0, 32)}`;
+}
+
+function sourceToolUseEventIdFromPayload(payloadJson: string): string | undefined {
+  const parsed = JSON.parse(payloadJson) as { readonly source_tool_use_event_id?: string };
+  return parsed.source_tool_use_event_id;
+}
+
+class RecordingBridgeClient {
+  readonly runToolRequests: RunToolRequest[] = [];
+  readonly runMemoryRequests: RunMemoryRequest[] = [];
+  readonly runMemoryMetadata: Metadata[] = [];
+  readonly sendCommandInputRequests: SendCommandInputRequest[] = [];
+  readonly readCommandResultRequests: ReadCommandResultRequest[] = [];
+  readonly cancelCommandRequests: CancelCommandRequest[] = [];
+  readonly createChildThreadRequests: CreateChildThreadRequest[] = [];
+  readonly resolveChildThreadRequests: ResolveChildThreadRequest[] = [];
+  readonly listChildThreadsRequests: ListChildThreadsRequest[] = [];
+  readonly resolveInterAgentDeliveryRequests: ResolveInterAgentDeliveryRequest[] = [];
+  readonly markChildThreadClosedRequests: MarkChildThreadClosedRequest[] = [];
+  readonly markChildThreadActiveRequests: MarkChildThreadActiveRequest[] = [];
+  readonly writeEventRequests: WriteEventRequest[] = [];
+  private deferredListChildThreads: ((response: unknown) => void) | undefined;
+  private deferredResolveInterAgentDelivery: ((response: unknown) => void) | undefined;
+  private deferredRunMemory: (() => void) | undefined;
+  deferReadCommandResult = false;
+  deferFirstListChildThreads = false;
+  deferResolveInterAgentDelivery = false;
+  createChildThreadErrorCode: GrpcStatus | undefined;
+  deliveryReceived = false;
+  childReceivable = true;
+  childStatus = "idle";
+  runToolResultJson = '{"status":"success","result":{"text":"ok"}}';
+  runToolBackgroundTaskStarted = false;
+  runToolTaskId = "";
+  runMemoryResultJson = '{"status":"completed","summary":"created"}';
+  runMemoryResultJsons: string[] = [];
+  runMemoryError: Error | undefined;
+  deferRunMemoryCall = 0;
+  afterRunMemoryResponse: ((callNumber: number) => void) | undefined;
+  markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
+  markChildThreadClosedErrorCode = "";
+
+  client(): Pick<AgentRuntimeBridgeServiceClient,
+    | "runTool"
+    | "runMemory"
+    | "sendCommandInput"
+    | "readCommandResult"
+    | "cancelCommand"
+    | "createChildThread"
+    | "resolveChildThread"
+    | "listChildThreads"
+    | "resolveInterAgentDelivery"
+    | "markChildThreadClosed"
+    | "markChildThreadActive"
+    | "writeEvent"
+  > {
+    return {
+      runTool: this.runTool.bind(this),
+      runMemory: this.runMemory.bind(this),
+      sendCommandInput: this.sendCommandInput.bind(this),
+      readCommandResult: this.readCommandResult.bind(this),
+      cancelCommand: this.cancelCommand.bind(this),
+      createChildThread: this.createChildThread.bind(this),
+      resolveChildThread: this.resolveChildThread.bind(this),
+      listChildThreads: this.listChildThreads.bind(this),
+      resolveInterAgentDelivery: this.resolveInterAgentDelivery.bind(this),
+      markChildThreadClosed: this.markChildThreadClosed.bind(this),
+      markChildThreadActive: this.markChildThreadActive.bind(this),
+      writeEvent: this.writeEvent.bind(this),
+    } as unknown as Pick<AgentRuntimeBridgeServiceClient,
+      | "runTool"
+      | "runMemory"
+      | "sendCommandInput"
+      | "readCommandResult"
+      | "cancelCommand"
+      | "createChildThread"
+      | "resolveChildThread"
+      | "listChildThreads"
+      | "resolveInterAgentDelivery"
+      | "markChildThreadClosed"
+      | "markChildThreadActive"
+      | "writeEvent"
+    >;
+  }
+
+  private runTool(request: RunToolRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.runToolRequests.push(request);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: this.runToolResultJson,
+      backgroundTaskStarted: this.runToolBackgroundTaskStarted,
+      taskId: this.runToolTaskId,
+    });
+    return grpcCall();
+  }
+
+  private runMemory(request: RunMemoryRequest, metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.runMemoryRequests.push(request);
+    this.runMemoryMetadata.push(metadata);
+    if (this.runMemoryError !== undefined) {
+      callback(this.runMemoryError, undefined);
+      return grpcCall();
+    }
+    const resultJson = this.runMemoryResultJsons.shift() ?? this.runMemoryResultJson;
+    const respond = (): void => {
+      callback(null, {
+        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+        resultJson,
+      });
+      this.afterRunMemoryResponse?.(this.runMemoryRequests.length);
+    };
+    if (this.deferRunMemoryCall === this.runMemoryRequests.length) {
+      this.deferredRunMemory = respond;
+      return grpcCall();
+    }
+    respond();
+    return grpcCall();
+  }
+
+  completeDeferredRunMemory(): void {
+    const complete = this.deferredRunMemory;
+    if (complete === undefined) {
+      throw new Error("no deferred runMemory call");
+    }
+    this.deferredRunMemory = undefined;
+    complete();
+  }
+
+  private sendCommandInput(request: SendCommandInputRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.sendCommandInputRequests.push(request);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: '{"status":"accepted"}',
+      writeSeq: this.sendCommandInputRequests.length,
+    });
+    return grpcCall();
+  }
+
+  private readCommandResult(request: ReadCommandResultRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.readCommandResultRequests.push(request);
+    if (this.deferReadCommandResult) {
+      return grpcCall();
+    }
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: '{"status":"running","task_id":"task_1"}',
+    });
+    return grpcCall();
+  }
+
+  private cancelCommand(request: CancelCommandRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.cancelCommandRequests.push(request);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: '{"status":"cancelled"}',
+    });
+    return grpcCall();
+  }
+
+  private createChildThread(request: CreateChildThreadRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.createChildThreadRequests.push(request);
+    if (this.createChildThreadErrorCode !== undefined) {
+      callback(Object.assign(new Error("create child failed"), { code: this.createChildThreadErrorCode }), undefined);
+      return grpcCall();
+    }
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      childThreadId: request.childThreadId,
+    });
+    return grpcCall();
+  }
+
+  private resolveChildThread(request: ResolveChildThreadRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.resolveChildThreadRequests.push(request);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      threadJson: childThreadJson("worker", this.childStatus),
+    });
+    return grpcCall();
+  }
+
+  private listChildThreads(request: ListChildThreadsRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.listChildThreadsRequests.push(request);
+    const response = {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      threadJson: [childThreadJson("worker", this.childStatus)],
+    };
+    if (this.deferFirstListChildThreads && this.listChildThreadsRequests.length === 1) {
+      this.deferredListChildThreads = (deferredResponse) => callback(null, deferredResponse);
+      return grpcCall();
+    }
+    callback(null, response);
+    return grpcCall();
+  }
+
+  completeDeferredListChildThreads(): void {
+    const complete = this.deferredListChildThreads;
+    if (complete === undefined) {
+      throw new Error("no deferred listChildThreads call");
+    }
+    this.deferFirstListChildThreads = false;
+    this.deferredListChildThreads = undefined;
+    complete({
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      threadJson: [childThreadJson("worker", this.childStatus)],
+    });
+  }
+
+  private resolveInterAgentDelivery(request: ResolveInterAgentDeliveryRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.resolveInterAgentDeliveryRequests.push(request);
+    const response = {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      sentExists: this.writeEventRequests.some((event) => event.eventType === "agent.thread_message_sent"),
+      receivedExists: this.deliveryReceived,
+      childReceivable: this.childReceivable,
+      childThreadJson: childThreadJson("worker", this.childStatus),
+    };
+    if (this.deferResolveInterAgentDelivery) {
+      this.deferredResolveInterAgentDelivery = (deferredResponse) => callback(null, deferredResponse);
+      return grpcCall();
+    }
+    callback(null, response);
+    return grpcCall();
+  }
+
+  completeDeferredResolveInterAgentDelivery(): void {
+    const complete = this.deferredResolveInterAgentDelivery;
+    if (complete === undefined) {
+      throw new Error("no deferred resolveInterAgentDelivery call");
+    }
+    this.deferResolveInterAgentDelivery = false;
+    this.deferredResolveInterAgentDelivery = undefined;
+    complete({
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      sentExists: true,
+      receivedExists: this.deliveryReceived,
+      childReceivable: this.childReceivable,
+      childThreadJson: childThreadJson("worker", this.childStatus),
+    });
+  }
+
+  private markChildThreadClosed(request: MarkChildThreadClosedRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.markChildThreadClosedRequests.push(request);
+    callback(null, {
+      ack: { status: this.markChildThreadClosedStatus, runtimeInputId: "", runtimeWriteId: "", errorCode: this.markChildThreadClosedErrorCode },
+    });
+    return grpcCall();
+  }
+
+  private markChildThreadActive(request: MarkChildThreadActiveRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.markChildThreadActiveRequests.push(request);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+    });
+    return grpcCall();
+  }
+
+  private writeEvent(request: WriteEventRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.writeEventRequests.push(request);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: request.runtimeWriteId, errorCode: "" },
+      eventId: "evt_thread_message_sent",
+      sequence: 1,
+    });
+    return grpcCall();
+  }
+}
+
+class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
+  readonly actions: string[] = [];
+  readonly enqueued: Parameters<RuntimeSubAgentRunHost["enqueueThreadInput"]>[0][] = [];
+  readonly preloaded: Parameters<RuntimeSubAgentRunHost["preloadThread"]>[0][] = [];
+  waitResult: Awaited<ReturnType<RuntimeSubAgentRunHost["waitThread"]>> | undefined;
+  pulledAgentMail: Awaited<ReturnType<NonNullable<RuntimeSubAgentRunHost["pullAgentMail"]>>> | undefined;
+  readonly pullAgentMailCalls: Array<{ readonly sessionThreadId: string; readonly sourceThreadId: string }> = [];
+  closeResult: Awaited<ReturnType<RuntimeSubAgentRunHost["markThreadClosed"]>> | undefined;
+  interruptApplied = true;
+  interruptRunExitOutcome: "completed_clean" | "interrupt_applied" | "failed_closeout" | undefined;
+  onClose: (() => void) | undefined;
+  waitUntilAbort = false;
+  waitStarted = false;
+  waitDetached = false;
+  inspectObserved = false;
+  readonly preloadResults: Array<Awaited<ReturnType<RuntimeSubAgentRunHost["preloadThread"]>>> = [];
+
+  async enqueueThreadInput(input: Parameters<RuntimeSubAgentRunHost["enqueueThreadInput"]>[0]) {
+    this.actions.push("enqueue");
+    this.enqueued.push(input);
+    return {
+      ok: true as const,
+      sessionId: input.sessionId,
+      created: false,
+      started: true,
+      pendingWake: false,
+      ...(input.kind === "approval_review"
+        ? { reviewerExecutionToken: { reviewId: input.reviewId, reviewerThreadId: input.sessionThreadId, runId: 1 } }
+        : {}),
+    };
+  }
+
+  async preloadThread(input: Parameters<RuntimeSubAgentRunHost["preloadThread"]>[0]) {
+    this.actions.push("preload");
+    this.preloaded.push(input);
+    return this.preloadResults.shift() ?? { ok: true as const, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true };
+  }
+
+  async interruptThread(command: Parameters<RuntimeSubAgentRunHost["interruptThread"]>[0]) {
+    this.actions.push("interrupt");
+    return {
+      ok: true as const,
+      sessionId: command.sessionId,
+      sessionThreadId: command.sessionThreadId,
+      applied: this.interruptApplied,
+      ...(this.interruptRunExitOutcome === undefined ? {} : { runExitOutcome: this.interruptRunExitOutcome }),
+    };
+  }
+
+  async interruptReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["interruptReviewerExecution"]>[0]) {
+    this.actions.push("interrupt-reviewer");
+    return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true };
+  }
+
+  async markThreadClosed(command: Parameters<RuntimeSubAgentRunHost["markThreadClosed"]>[0]) {
+    this.actions.push("close");
+    this.onClose?.();
+    return this.closeResult ?? { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
+  }
+
+  async markThreadActive(command: Parameters<RuntimeSubAgentRunHost["markThreadActive"]>[0]) {
+    this.actions.push("resume");
+    return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
+  }
+
+  async waitThread(command: Parameters<RuntimeSubAgentRunHost["waitThread"]>[0], _timeoutMs: number | undefined, abortSignal?: AbortSignal) {
+    this.waitStarted = true;
+    if (this.waitUntilAbort) {
+      await new Promise<void>((_resolve, reject) => {
+        const onAbort = () => {
+          abortSignal?.removeEventListener("abort", onAbort);
+          this.waitDetached = true;
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        };
+        abortSignal?.addEventListener("abort", onAbort, { once: true });
+        if (abortSignal?.aborted === true) {
+          onAbort();
+        }
+      });
+    }
+    return this.waitResult ?? { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, observed: false, timedOut: false };
+  }
+
+  async pullAgentMail(command: Parameters<NonNullable<RuntimeSubAgentRunHost["pullAgentMail"]>>[0], sourceThreadId: string) {
+    this.pullAgentMailCalls.push({ sessionThreadId: command.sessionThreadId, sourceThreadId });
+    return this.pulledAgentMail;
+  }
+
+  async waitReviewerExecution(
+    command: Parameters<RuntimeSubAgentRunHost["waitReviewerExecution"]>[0],
+    _token: Parameters<RuntimeSubAgentRunHost["waitReviewerExecution"]>[1],
+    timeoutMs: number | undefined,
+    abortSignal?: AbortSignal,
+  ) {
+    const result = await this.waitThread(command, timeoutMs, abortSignal);
+    if (!result.ok) {
+      return { ok: false as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "reviewer_execution_mismatch" as const };
+    }
+    return {
+      ok: true as const,
+      sessionId: command.sessionId,
+      sessionThreadId: command.sessionThreadId,
+      status: result.status ?? "idle" as const,
+      terminal: !result.timedOut,
+      timedOut: result.timedOut,
+    };
+  }
+
+  async inspectThread(command: Parameters<RuntimeSubAgentRunHost["inspectThread"]>[0]) {
+    this.actions.push("inspect");
+    return {
+      ok: true as const,
+      sessionId: command.sessionId,
+      sessionThreadId: command.sessionThreadId,
+      observed: this.inspectObserved,
+      ...(this.inspectObserved ? { status: "idle" as const } : {}),
+      messages: [],
+    };
+  }
+
+  async inspectReviewerExecution(command: Parameters<RuntimeSubAgentRunHost["inspectReviewerExecution"]>[0]) {
+    this.actions.push("inspect-reviewer");
+    return { ok: false as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "reviewer_execution_mismatch" as const };
+  }
+
+  async commitApprovalReviewDecision(command: Parameters<RuntimeSubAgentRunHost["commitApprovalReviewDecision"]>[0]) {
+    this.actions.push("commit-approval-review");
+    return { ok: true as const, writeId: `rwrite_${command.reviewId}_decision`, eventId: "evt_decision", processedAt: "2026-07-06T00:00:00.000Z" };
+  }
+
+  async commitApprovalReviewFailure(command: Parameters<RuntimeSubAgentRunHost["commitApprovalReviewFailure"]>[0]) {
+    this.actions.push("commit-approval-review-failure");
+    return { ok: true as const, writeId: `rwrite_${command.reviewId}_failure`, eventId: "evt_failure", processedAt: "2026-07-06T00:00:00.000Z" };
+  }
+}
+
+function childThreadJson(taskName: string, status = "idle"): string {
+  return JSON.stringify({
+    session_thread_id: "thr_child_1",
+    parent_thread_id: "thrd_1",
+    role: "subagent",
+    status,
+    task_name: taskName,
+    agent_type: "worker",
+  });
+}
+
+class RecordingGatewayClient {
+  readonly runWebRequests: RunWebRequest[] = [];
+  runWebResponse: RunWebResponse = {
+    status: RunWebStatus.RUN_WEB_STATUS_COMPLETED,
+    resultText: "web result",
+    refs: [],
+    windowTruncated: false,
+    sourceIncomplete: false,
+    usage: {
+      operation: "search",
+      backendTokens: 4,
+      targetHttpStatus: 200,
+      storedBytes: 0,
+      durationMs: 12,
+      webSearchRequests: 2,
+      webFetchRequests: 1,
+    },
+  };
+
+  client(): Pick<ProviderGatewayServiceClient, "runWeb"> {
+    return {
+      runWeb: this.runWeb.bind(this),
+    } as unknown as Pick<ProviderGatewayServiceClient, "runWeb">;
+  }
+
+  private runWeb(request: RunWebRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.runWebRequests.push(request);
+    callback(null, this.runWebResponse);
+    return grpcCall();
+  }
+}
+
+class RecordingMcpConnectorClient {
+  readonly runMcpToolRequests: RunMcpToolRequest[] = [];
+  runMcpToolResponse: RunMcpToolResponse = {
+    status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+    resultText: "mcp result",
+    attachments: [],
+    errorKind: undefined,
+    retryStatus: undefined,
+  };
+
+  client(): Pick<McpConnectorServiceClient, "runMcpTool"> {
+    return {
+      runMcpTool: this.runMcpTool.bind(this),
+    } as unknown as Pick<McpConnectorServiceClient, "runMcpTool">;
+  }
+
+  private runMcpTool(request: RunMcpToolRequest, _metadata: Metadata, callback: (error: Error | null, response: RunMcpToolResponse) => void): unknown {
+    this.runMcpToolRequests.push(request);
+    callback(null, this.runMcpToolResponse);
+    return grpcCall();
+  }
+}
+
+function grpcCall(): { readonly cancel: () => void } {
+  return { cancel: () => undefined };
+}
+
+async function waitForCondition(condition: () => boolean, description: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await Promise.resolve();
+  }
+}

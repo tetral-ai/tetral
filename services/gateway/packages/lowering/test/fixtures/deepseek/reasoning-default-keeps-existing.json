@@ -1,0 +1,25 @@
+{
+  "name": "assistant message with reasoning keeps existing reasoning_content",
+  "rule": "deepseek-reasoning-default",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
+    "messages": [
+      {
+        "role": "assistant",
+        "parts": [
+          { "type": "reasoning", "id": "r1", "text": "Existing reasoning." },
+          { "type": "text", "id": "t1", "text": "Paris." }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Paris." }],
+        "providerOptions": { "deepseek": { "reasoning_content": "Existing reasoning." } }
+      }
+    ]
+  }
+}

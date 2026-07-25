@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: tetral
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: api
+      automountServiceAccountToken: false
+      containers:
+        - name: api
+          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/tetral-api
+          env:
+            - name: TETRAL_API_HTTP_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_HTTP_ADDR
+            - name: TETRAL_API_METRICS_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_METRICS_ADDR
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_DEPLOYMENT_ENVIRONMENT
+            - name: TETRAL_SERVICE_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_SERVICE_VERSION
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-secrets
+                  key: engine-vault-key
+            - name: TETRAL_SCHEMA_MODE
+              value: migrate
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: api-database
+                  key: url
+            - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
+              valueFrom:
+                secretKeyRef:
+                  name: auth-internal-principal
+                  key: public_key_b64
+            - name: ENGINE_DATA_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: ENGINE_DATA_DIR
+            - name: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: secret-key
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: engine-data
+              mountPath: /var/tetral
+      volumes:
+        - name: engine-data
+          emptyDir: {}

@@ -1,0 +1,45 @@
+name: engine-vulncheck
+
+# Go dependency vulnerabilities track upstream advisories, not pull requests: a
+# change to this repository cannot introduce one, and an advisory published
+# tomorrow applies to code that merged last week. Running the scan on a schedule
+# reports it when it actually changes.
+#
+# It also has to live here because the scan kept taking the hosted runner down
+# with it inside the pull-request gate, and while it did, the dependency audits
+# and secret guards that share that job never ran at all.
+#
+# The same gate runs locally through the Makefile's vulncheck target.
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-vulncheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        # actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        # actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: '1.25.12'
+          cache-dependency-path: go.sum
+
+      - name: Govulncheck
+        run: make vulncheck

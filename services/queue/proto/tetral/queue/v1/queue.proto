@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package tetral.queue.v1;
+
+option go_package = "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1;queuev1";
+
+service QueueService {
+  rpc Lease(LeaseRequest) returns (LeaseResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (TransitionResponse);
+  rpc Ack(AckRequest) returns (TransitionResponse);
+  rpc Retry(RetryRequest) returns (TransitionResponse);
+  rpc Defer(DeferRequest) returns (TransitionResponse);
+  rpc DeadLetter(DeadLetterRequest) returns (TransitionResponse);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+}
+
+// Every variable field participates in the Lease-response byte arithmetic in
+// internal/queue. Adding a field without updating those bounds and the derived
+// batch inequality is an incomplete change, enforced by the QueueJob field
+// census test.
+message QueueJob {
+  string id = 1;
+  string workspace_id = 2;
+  string kind = 3;
+  string partition_key = 4;
+  string dedupe_key = 5;
+  int32 payload_version = 6;
+  string payload_json = 7;
+  string status = 8;
+  int32 priority = 9;
+  string available_at = 10;
+  string leased_by = 11;
+  string lease_token = 12;
+  string leased_at = 13;
+  string leased_until = 14;
+  int32 attempt_count = 15;
+  int32 max_attempts = 16;
+}
+
+message LeaseRequest {
+  string workspace_id = 1;
+  repeated string kinds = 2;
+  string lease_owner = 3;
+  int32 max_jobs = 4;
+  int64 lease_duration_ms = 5;
+}
+
+message LeaseResponse {
+  repeated QueueJob jobs = 1;
+}
+
+message HeartbeatRequest {
+  string workspace_id = 1;
+  string job_id = 2;
+  string lease_token = 3;
+  int64 lease_duration_ms = 4;
+}
+
+message AckRequest {
+  string workspace_id = 1;
+  string job_id = 2;
+  string lease_token = 3;
+}
+
+message RetryRequest {
+  string workspace_id = 1;
+  string job_id = 2;
+  string lease_token = 3;
+  reserved 4;
+  string error_kind = 5;
+  string error_message = 6;
+}
+
+message DeferRequest {
+  string workspace_id = 1;
+  string job_id = 2;
+  string lease_token = 3;
+}
+
+message DeadLetterRequest {
+  string workspace_id = 1;
+  string job_id = 2;
+  string lease_token = 3;
+  string error_kind = 4;
+  string error_message = 5;
+}
+
+message CancelRequest {
+  string workspace_id = 1;
+  string session_id = 2;
+  string session_thread_id = 3;
+  int64 interrupt_fence_sequence = 4;
+}
+
+message CancelResponse {
+  int32 cancelled_count = 1;
+}
+
+message TransitionResponse {
+  bool updated = 1;
+}

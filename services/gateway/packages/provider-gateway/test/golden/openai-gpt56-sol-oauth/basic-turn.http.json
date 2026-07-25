@@ -1,0 +1,48 @@
+{
+  "method": "POST",
+  "pathname": "/backend-api/codex/responses",
+  "headers": {
+    "authorization": "Bearer <oauth-access-token>",
+    "chatgpt-account-id": "acct_1"
+  },
+  "body": {
+    "model": "gpt-5.6-sol",
+    "stream": true,
+    "store": false,
+    "instructions": "Reply tersely and do not call tools.",
+    "prompt_cache_key": "sesn_live_gpt56_sol_oauth_fixture",
+    "text": {
+      "verbosity": "low"
+    },
+    "reasoning": {
+      "effort": "medium",
+      "summary": "auto"
+    },
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Reply with exactly: ok"
+          }
+        ]
+      }
+    ]
+  },
+  "absentBodyFields": [
+    "max_output_tokens",
+    "temperature",
+    "top_p"
+  ],
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "openai/gpt-5.6-sol",
+    "provider": "openai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/openai-gpt-5.6-sol-oauth-responses-live-2026-07-19.sse"
+  }
+}

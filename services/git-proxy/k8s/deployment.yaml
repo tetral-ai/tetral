@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-proxy
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: git-proxy
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: git-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: git-proxy
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: git-proxy
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 1800
+      containers:
+        - name: git-proxy
+          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/git-proxy
+          env:
+            - name: TETRAL_GIT_PROXY_HTTP_ADDR
+              value: ":8080"
+            - name: TETRAL_GIT_PROXY_METRICS_ADDR
+              value: ":8081"
+            - name: TETRAL_GIT_PROXY_PUBLIC_BASE_URL
+              value: https://git.tetral.example
+            - name: TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS
+              value: "1800"
+            - name: TETRAL_GIT_PROXY_LEGACY_PATH_CUTOVER
+              value: "true"
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: local
+            - name: TETRAL_SERVICE_VERSION
+              value: dev
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-database
+                  key: git-proxy-url
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-secrets
+                  key: engine-vault-key
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

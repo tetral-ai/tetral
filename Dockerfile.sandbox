@@ -1,0 +1,70 @@
+# The base image every sandbox boots from, and the image every environment
+# artifact snapshot is built on top of. The driver references it by name
+# (internal/sandbox/driver/provider.go, defaultDaytonaImage).
+#
+# Its contents are not a matter of taste: the helper's health subcommand
+# (internal/sandbox/helper/internal/health) runs during sandbox preparation and
+# fails preparation unless every item below is present. That check list and this
+# recipe must move together.
+#
+#   sandbox         helper binary on PATH
+#   rg              ripgrep, on PATH and runnable
+#   runtime_root    /tmp/tetral-runtime exists at mode 0700
+#   apply_patch     helper self-test (no external dependency)
+#   rclone          on PATH
+#   fusermount3     present and setuid
+#   fuse_conf       /etc/fuse.conf contains user_allow_other
+#   capture_procfd  /proc/self/fd reopen self-test (kernel, not packaging)
+
+FROM golang:1.25.12-alpine AS helper
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/sandbox ./internal/sandbox/helper/cmd/sandbox
+
+FROM ubuntu:24.04
+
+# Tool execution runs arbitrary user commands, so this image keeps a real
+# distribution: a shell, coreutils, and the package manager's own dependency
+# resolution. bash is the helper's preferred shell; sudo carries the two
+# privilege transitions the driver performs (root for helper invocation, the
+# runtime user for tool execution).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      fuse3 \
+      git \
+      ripgrep \
+      rclone \
+      sudo \
+      unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# fusermount3 ships setuid on some distributions and not others; the health
+# check requires it, so the bit is set explicitly rather than assumed.
+RUN chmod u+s /usr/bin/fusermount3
+
+# rclone mounts are read by the runtime user while root owns the mount, which
+# is exactly what user_allow_other governs.
+RUN printf 'user_allow_other\n' > /etc/fuse.conf
+
+# The runtime user's name is a contract with the driver
+# (internal/sandbox/driver/types.go, RuntimeUser).
+RUN useradd --create-home --shell /bin/bash daytona \
+    && printf 'daytona ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/daytona \
+    && chmod 0440 /etc/sudoers.d/daytona
+
+COPY --from=helper /out/sandbox /usr/local/bin/sandbox
+
+# The driver re-creates these per sandbox, but the health check reads the
+# runtime root before any of that runs.
+RUN install -d -m 0700 -o daytona -g daytona /tmp/tetral-runtime \
+    && install -d -m 0755 -o daytona -g daytona /workspace
+
+WORKDIR /workspace
+USER daytona
+CMD ["sleep", "infinity"]

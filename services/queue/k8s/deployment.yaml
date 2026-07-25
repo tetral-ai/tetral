@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: queue
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: queue
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: queue
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: queue
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: queue
+      automountServiceAccountToken: false
+      containers:
+        - name: queue
+          image: ghcr.io/tetral-ai/tetral:0.1.0-alpha
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/tetral-queue
+          env:
+            - name: TETRAL_QUEUE_HTTP_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_HTTP_ADDR
+            - name: TETRAL_QUEUE_GRPC_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_GRPC_ADDR
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_DEPLOYMENT_ENVIRONMENT
+            - name: TETRAL_SERVICE_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_SERVICE_VERSION
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: queue-database
+                  key: url
+            - name: TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_LEASE_RECLAIM_INTERVAL_SECONDS
+            - name: TETRAL_QUEUE_LEASE_RECLAIM_LIMIT
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_LEASE_RECLAIM_LIMIT
+            - name: TETRAL_QUEUE_RETRY_BASE_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_RETRY_BASE_MS
+            - name: TETRAL_QUEUE_RETRY_CAP_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_RETRY_CAP_MS
+            - name: TETRAL_QUEUE_RETRY_MAX_ATTEMPTS
+              valueFrom:
+                configMapKeyRef:
+                  name: queue-config
+                  key: TETRAL_QUEUE_RETRY_MAX_ATTEMPTS
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+              ephemeral-storage: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL

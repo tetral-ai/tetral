@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: sandbox
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sandbox
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: grpc
+      port: 9090
+      targetPort: grpc

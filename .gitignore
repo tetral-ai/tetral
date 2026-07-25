@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build output
+dist/
+out/
+coverage/
+coverage.out
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Claude Code (local settings only)
+.claude/settings.local.json
+.claude/checkpoints/
+.claude/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Database
+postgres_data/

@@ -1,0 +1,42 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "text": "ok",
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_STOP",
+    "usage": {
+      "inputUncachedTokens": 24,
+      "inputCacheReadTokens": 0,
+      "inputTotalTokens": 24,
+      "outputReasoningTokens": 0,
+      "outputTotalTokens": 5,
+      "totalTokens": 29
+    },
+    "metadata": {
+      "credential_source": "session"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "openai/gpt-5.6-sol",
+    "provider": "openai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/openai-gpt-5.6-sol-responses-live-2026-07-19.sse"
+  }
+}

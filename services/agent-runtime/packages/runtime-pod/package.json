@@ -1,0 +1,19 @@
+{
+  "name": "@tetral/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.13",
+  "scripts": {
+    "test": "bun test test/unit/",
+    "test:integration": "bun test test/integration/",
+    "build": "rm -rf dist && bun build src/command.ts src/index.ts --outdir dist --target bun && mkdir -p dist/assets && cp -R src/assets/. dist/assets/"
+  },
+  "dependencies": {
+    "@tetral/agent-runtime-core": "workspace:*",
+    "@tetral/agent-runtime-protocol": "workspace:*",
+    "@tetral/gateway-protocol": "file:../../../gateway/packages/protocol",
+    "@tetral/ts-observability": "file:../../../../internal/ts-observability",
+    "@grpc/grpc-js": "1.14.4"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "reasoning is lifted out of content into the compat side-channel",
+  "rule": "deepseek-reasoning-remap",
+  "input": {
+    "model": { "provider_id": "deepseek", "model_id": "deepseek-v4-pro" },
+    "messages": [
+      {
+        "role": "assistant",
+        "parts": [
+          { "type": "reasoning", "id": "r1", "text": "User asks for capital." },
+          { "type": "text", "id": "t1", "text": "Paris." }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Paris." }],
+        "providerOptions": { "deepseek": { "reasoning_content": "User asks for capital." } }
+      }
+    ]
+  }
+}

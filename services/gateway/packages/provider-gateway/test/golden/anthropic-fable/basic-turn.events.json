@@ -1,0 +1,43 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "text": "ok",
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_STOP",
+    "usage": {
+      "inputUncachedTokens": 30,
+      "inputCacheReadTokens": 0,
+      "inputCacheWriteTokens": 0,
+      "inputTotalTokens": 30,
+      "outputTotalTokens": 4,
+      "totalTokens": 34
+    },
+    "metadata": {
+      "credential_source": "session",
+      "raw_finish_reason": "end_turn"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-19",
+    "model_id": "anthropic/claude-fable-5",
+    "provider": "anthropic",
+    "source": "real-provider",
+    "source_fixture": "fixtures/anthropic-claude-fable-5-live-2026-07-19.sse"
+  }
+}

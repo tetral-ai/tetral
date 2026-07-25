@@ -1,0 +1,108 @@
+name: engine-release
+
+# One git tag, four images, one version. The tag is the release event; nothing
+# else publishes. Image tags carry the version without its leading `v`, and the
+# digests each build reports are what a deployment should pin.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish without the leading v (e.g. 0.1.0-alpha)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: engine-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Every context is the repository root. Both TypeScript services carry
+          # file: dependencies that reach across service boundaries — the
+          # Gateway's protocol package and internal/ts-observability — so a
+          # narrower context cannot resolve them.
+          - image: tetral
+            dockerfile: Dockerfile
+          - image: sandbox
+            dockerfile: Dockerfile.sandbox
+          - image: gateway
+            dockerfile: services/gateway/Dockerfile
+          - image: agent-runtime
+            dockerfile: services/agent-runtime/Dockerfile
+    steps:
+      - name: Checkout
+        # actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -n "$DISPATCH_VERSION" ]; then
+            version="$DISPATCH_VERSION"
+          else
+            version="${REF_NAME#v}"
+          fi
+          case "$version" in
+            ''|v*) echo "refusing to publish version '$version'" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        # docker/setup-buildx-action@v4.2.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      - name: Log in to GitHub Container Registry
+        # docker/login-action@v4.5.1
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.image }}
+        id: build
+        # docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          # No `latest`: a moving tag makes a deployment unreproducible, and the
+          # manifests name an exact version.
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.version.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Report digest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### $IMAGE"
+            echo
+            echo '```'
+            echo "$IMAGE:$VERSION"
+            echo "$IMAGE@$DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

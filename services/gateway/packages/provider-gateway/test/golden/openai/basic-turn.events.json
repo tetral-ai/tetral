@@ -1,0 +1,105 @@
+{
+  "eventTypeRuns": [
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 89
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 94
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA",
+      "count": 88
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_REASONING_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TEXT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA",
+      "count": 6
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL",
+      "count": 1
+    },
+    {
+      "type": "PROVIDER_STREAM_EVENT_TYPE_FINISH",
+      "count": 1
+    }
+  ],
+  "reasoningTextIncludes": [
+    "7",
+    "15"
+  ],
+  "textIncludes": "ok",
+  "toolInputJson": "{\"query\":\"tetral\"}",
+  "toolCalls": [
+    {
+      "name": "Search",
+      "inputJson": "{\"query\":\"tetral\"}"
+    }
+  ],
+  "finish": {
+    "reason": "PROVIDER_FINISH_REASON_TOOL_CALLS",
+    "usage": {
+      "inputUncachedTokens": 98,
+      "inputCacheReadTokens": 0,
+      "inputTotalTokens": 98,
+      "outputReasoningTokens": 1034,
+      "outputTotalTokens": 1062,
+      "totalTokens": 1160
+    },
+    "metadata": {
+      "credential_source": "session"
+    }
+  },
+  "_fixtureProvenance": {
+    "recorded": "2026-07-08",
+    "model_id": "openai/gpt-5.5",
+    "provider": "openai",
+    "source": "real-provider",
+    "source_fixture": "fixtures/openai-gpt-5.5-responses-live-2026-07-06.sse"
+  }
+}
