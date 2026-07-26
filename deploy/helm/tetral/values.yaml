@@ -1,0 +1,172 @@
+namespaces:
+  create: false
+
+cilium:
+  enabled: true
+
+edge:
+  enabled: false
+  tlsSecretName: git-proxy-tls
+
+image:
+  registry: ghcr.io/tetral-ai
+  tag: ""
+
+secrets:
+  apiDatabase: api-database
+  apiSecrets: api-secrets
+  authBootstrap: auth-bootstrap
+  authDatabase: auth-database
+  authInternalPrincipal: auth-internal-principal
+  bridgeDaytona: bridge-daytona
+  gatewayWebBlob: gateway-web-blob
+  gatewayWebKeypool: gateway-web-keypool
+  queueDatabase: queue-database
+  runtimeBindingToken: runtime-binding-token
+  sandboxBlob: sandbox-blob
+  sandboxDaytona: sandbox-daytona
+  sandboxInternalGRPC: sandbox-internal-grpc
+  sandboxR2Parent: sandbox-r2-parent
+  tetralBlob: tetral-blob
+  tetralDatabase: tetral-database
+  eventStreamDatabase: tetral-event-stream-database
+
+daytona:
+  bridgeAPIURL: https://daytona.example.internal
+  sandboxAPIURL: https://daytona.example.internal/api
+
+blob:
+  endpoint: https://blob.example.internal
+  region: local
+  bucket: tetral-files
+  r2AccountID: replace-me
+
+web:
+  searchEndpoint: https://s.jina.ai/
+  readerEndpoint: https://r.jina.ai/
+
+gitProxyHost: git.tetral.example
+bootstrapWorkspaceID: existing-workspace-id
+
+observability:
+  deploymentEnvironment: local
+  serviceVersion: dev
+
+resources:
+  agentRuntime:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+  api:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+  auth:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  bridgeAPI:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+  bridgeJobRunner:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  cleanup:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+  eventStream:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  providerGateway:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+  mcpConnector:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  webConnector:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  gitProxy:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+      ephemeral-storage: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  queue:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+  sandbox:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 2Gi

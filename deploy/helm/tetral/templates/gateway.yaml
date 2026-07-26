@@ -1,0 +1,459 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+data:
+  TETRAL_WEB_SEARCH_ENDPOINT: {{ .Values.web.searchEndpoint | quote }}
+  TETRAL_WEB_READER_ENDPOINT: {{ .Values.web.readerEndpoint | quote }}
+  TETRAL_BLOB_ENDPOINT: {{ .Values.blob.endpoint | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: gateway
+      automountServiceAccountToken: false
+      containers:
+        - name: provider-gateway
+          image: {{ .Values.image.registry }}/gateway:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - bun
+            - /app/dist/provider-gateway/src-command.js
+          env:
+            - name: TETRAL_PROVIDER_GATEWAY_HTTP_ADDR
+              value: 0.0.0.0:8080
+            - name: TETRAL_PROVIDER_GATEWAY_GRPC_ADDR
+              value: 0.0.0.0:9090
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralDatabase | quote }}
+                  key: gateway-url
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.apiSecrets | quote }}
+                  key: engine-vault-key
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: bridge.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_PROVIDER_GATEWAY_BRIDGE_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/bridge/token
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.runtimeBindingToken | quote }}
+                  key: hmac-key
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/gateway-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: provider-grpc
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          resources:
+{{ toYaml .Values.resources.providerGateway | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: gateway-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+            - name: gateway-bridge-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/bridge
+              readOnly: true
+        - name: mcp-connector
+          image: {{ .Values.image.registry }}/gateway:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - bun
+            - /app/dist/mcp-connector/src-command.js
+          env:
+            - name: TETRAL_MCP_CONNECTOR_GRPC_ADDR
+              value: 0.0.0.0:9091
+            - name: TETRAL_MCP_CONNECTOR_HTTP_ADDR
+              value: 0.0.0.0:8081
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime
+            - name: TETRAL_MCP_CONNECTOR_ALLOWED_BRIDGE_SERVICE_ACCOUNTS
+              value: tetral-system/bridge
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: bridge.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_MCP_CONNECTOR_BRIDGE_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/bridge/token
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralDatabase | quote }}
+                  key: gateway-url
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.apiSecrets | quote }}
+                  key: engine-vault-key
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.runtimeBindingToken | quote }}
+                  key: hmac-key
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/gateway-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: mcp-grpc
+              containerPort: 9091
+            - name: mcp-http
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: mcp-http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: mcp-http
+          resources:
+{{ toYaml .Values.resources.mcpConnector | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: gateway-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+            - name: gateway-bridge-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/bridge
+              readOnly: true
+        - name: web-connector
+          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/web-connector
+          env:
+            - name: TETRAL_WEB_CONNECTOR_GRPC_ADDR
+              value: 0.0.0.0:9092
+            - name: TETRAL_WEB_CONNECTOR_METRICS_ADDR
+              value: 0.0.0.0:9464
+            - name: TETRAL_WEB_SEARCH_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: TETRAL_WEB_SEARCH_ENDPOINT
+            - name: TETRAL_WEB_READER_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: gateway-config
+                  key: TETRAL_WEB_READER_ENDPOINT
+            - name: TETRAL_WEB_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gatewayWebKeypool | quote }}
+                  key: TETRAL_WEB_API_KEYS
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gatewayWebBlob | quote }}
+                  key: TETRAL_BLOB_ENDPOINT
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gatewayWebBlob | quote }}
+                  key: TETRAL_BLOB_REGION
+            # Provision this external bucket with an enabled expire-web-cache
+            # lifecycle rule that expires objects after seven days.
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gatewayWebBlob | quote }}
+                  key: TETRAL_BLOB_BUCKET
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gatewayWebBlob | quote }}
+                  key: TETRAL_BLOB_ACCESS_KEY
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.gatewayWebBlob | quote }}
+                  key: TETRAL_BLOB_SECRET_KEY
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.runtimeBindingToken | quote }}
+                  key: hmac-key
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/gateway-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+          ports:
+            - name: web-grpc
+              containerPort: 9092
+            - name: web-metrics
+              containerPort: 9464
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: web-metrics
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: web-metrics
+          resources:
+{{ toYaml .Values.resources.webConnector | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: gateway-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+      volumes:
+        - name: gateway-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: kubernetes.default.svc
+                  expirationSeconds: 600
+                  path: gateway-tokenreview/token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: gateway-bridge-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: provider-grpc
+      port: 9090
+      targetPort: provider-grpc
+    - name: mcp-grpc
+      port: 9091
+      targetPort: mcp-grpc
+    - name: web-grpc
+      port: 9092
+      targetPort: web-grpc
+    - name: web-metrics
+      port: 9464
+      targetPort: web-metrics
+    - name: mcp-http
+      port: 8081
+      targetPort: mcp-http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "api.anthropic.com, api.openai.com, auth.openai.com, chatgpt.com, api.deepseek.com, api.kimi.com, api.z.ai, api.githubcopilot.com, {{ (urlParse .Values.web.searchEndpoint).host }}, {{ (urlParse .Values.web.readerEndpoint).host }}, {{ (urlParse .Values.blob.endpoint).host }}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 9464
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 9091
+        - protocol: TCP
+          port: 9092
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bridge
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/hpa-metric-source: "resource: cpu"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

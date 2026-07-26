@@ -23,7 +23,11 @@ func TestSchemaOwnershipManifestDiscoveryClassifiesEveryDatabaseContainer(t *tes
 	if err != nil {
 		t.Fatalf("glob service manifests: %v", err)
 	}
-	topFiles, err := filepath.Glob(filepath.Join(root, "deploy", "kubernetes", "*.yaml"))
+	topRoot := filepath.Join(root, "deploy", "kubernetes")
+	if override := os.Getenv("TETRAL_SCHEMA_OWNERSHIP_TOP_MANIFESTS_ROOT"); override != "" {
+		topRoot = override
+	}
+	topFiles, err := filepath.Glob(filepath.Join(topRoot, "*.yaml"))
 	if err != nil {
 		t.Fatalf("glob top-level manifests: %v", err)
 	}

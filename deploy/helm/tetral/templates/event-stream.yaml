@@ -1,0 +1,174 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: event-stream
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: event-stream
+    app.kubernetes.io/component: event-stream
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-stream
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: event-stream
+    app.kubernetes.io/component: event-stream
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: event-stream
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: event-stream
+        app.kubernetes.io/component: event-stream
+        app.kubernetes.io/part-of: tetral
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: event-stream
+      automountServiceAccountToken: false
+      containers:
+        - name: event-stream
+          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/event-stream
+          env:
+            - name: TETRAL_EVENT_STREAM_HTTP_ADDR
+              value: ":8080"
+            - name: TETRAL_EVENT_STREAM_METRICS_ADDR
+              value: ":8081"
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_EVENT_STREAM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.eventStreamDatabase | quote }}
+                  key: url
+            - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.authInternalPrincipal | quote }}
+                  key: public_key_b64
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+{{ toYaml .Values.resources.eventStream | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-stream
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: event-stream
+    app.kubernetes.io/component: event-stream
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+    tetral.ai/exposure: public
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: event-stream
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: event-stream-metrics
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: event-stream
+    app.kubernetes.io/component: event-stream
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: event-stream
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: event-stream
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: event-stream
+    app.kubernetes.io/component: event-stream
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: event-stream
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tetral.ai/network-role: public-ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

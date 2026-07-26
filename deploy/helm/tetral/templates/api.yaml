@@ -1,0 +1,274 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+data:
+  TETRAL_API_HTTP_ADDR: ":8080"
+  TETRAL_API_METRICS_ADDR: ":8081"
+  TETRAL_DEPLOYMENT_ENVIRONMENT: {{ .Values.observability.deploymentEnvironment | quote }}
+  TETRAL_SERVICE_VERSION: {{ .Values.observability.serviceVersion | quote }}
+  ENGINE_DATA_DIR: /var/tetral/data
+  TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF: {{ .Values.image.registry }}/sandbox:{{ include "tetral.imageTag" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: tetral
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: api
+      automountServiceAccountToken: false
+      containers:
+        - name: api
+          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/tetral-api
+          env:
+            - name: TETRAL_API_HTTP_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_HTTP_ADDR
+            - name: TETRAL_API_METRICS_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_API_METRICS_ADDR
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_DEPLOYMENT_ENVIRONMENT
+            - name: TETRAL_SERVICE_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_SERVICE_VERSION
+            - name: ENGINE_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.apiSecrets | quote }}
+                  key: engine-vault-key
+            - name: TETRAL_SCHEMA_MODE
+              value: migrate
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.apiDatabase | quote }}
+                  key: url
+            - name: TETRAL_AUTH_INTERNAL_PRINCIPAL_PUBLIC_KEY_B64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.authInternalPrincipal | quote }}
+                  key: public_key_b64
+            - name: ENGINE_DATA_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: ENGINE_DATA_DIR
+            - name: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+              valueFrom:
+                configMapKeyRef:
+                  name: api-config
+                  key: TETRAL_DEFAULT_ENVIRONMENT_ARTIFACT_REF
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: secret-key
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+{{ toYaml .Values.resources.api | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: engine-data
+              mountPath: /var/tetral
+      volumes:
+        - name: engine-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+    tetral.ai/exposure: public
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-metrics
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: tetral
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    tetral.ai/egress-intent: "blob.example.internal"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              tetral.ai/network-role: public-ingress
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: queue
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9090
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

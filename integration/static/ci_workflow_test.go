@@ -61,7 +61,7 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	// on a maintainer's machine and getting no checks at all.
 	engineCIJobs := []string{
 		"go-static:", "go-test:", "protocol:", "agent-runtime-ts:", "gateway-ts:",
-		"k8s-manifests:", "security:", "helper-privilege:", "external-smoke:",
+		"k8s-manifests:", "helm-chart:", "security:", "helper-privilege:", "external-smoke:",
 	}
 	for _, jobName := range engineCIJobs {
 		if !strings.Contains(workflowJobForStaticTest(t, text, jobName), "runs-on: ubuntu-latest") {
@@ -75,10 +75,10 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 	}
 	// A hosted runner starts empty, so each Go toolchain keys its cache on the
 	// repository's module file.
-	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 5 {
-		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 5", got)
+	if got := strings.Count(text, "cache-dependency-path: go.sum"); got != 6 {
+		t.Fatalf("engine-ci setup-go cache-dependency-path count = %d; want 6", got)
 	}
-	if strings.Count(text, "persist-credentials: false") != 11 {
+	if strings.Count(text, "persist-credentials: false") != 12 {
 		t.Fatal("each engine-ci checkout must disable credential persistence")
 	}
 	for fragment, want := range map[string]int{
@@ -101,6 +101,7 @@ func TestFinalArchitectureEngineCIProtectsAgentRuntimeAndProtoGeneration(t *test
 		"agent-runtime-ts:",
 		"gateway-ts:",
 		"k8s-manifests:",
+		"helm-chart:",
 		"security:",
 		"external-smoke:",
 	} {
@@ -304,6 +305,18 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 			}
 		})
 	}
+	helmJob := workflowJobForStaticTest(t, text, "helm-chart:")
+	for _, token := range []string{
+		"version: v4.2.0",
+		"helm lint deploy/helm/tetral",
+		"go test -count=1 ./deploy/helm/...",
+	} {
+		t.Run("helm_chart_"+strings.ReplaceAll(token, " ", "_"), func(t *testing.T) {
+			if !strings.Contains(helmJob, token) {
+				t.Fatalf("helm-chart gate missing %q; job was:\n%s", token, helmJob)
+			}
+		})
+	}
 
 	if strings.Contains(goTestJob, "continue-on-error: true") {
 		t.Fatal("the PostgreSQL-backed full-suite gate must not continue on error")
@@ -334,6 +347,51 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 			t.Fatalf("golangci-lint step must use %q; step was:\n%s", token, lintStep)
 		}
 	})
+}
+
+func TestEngineReleasePublishesChartOnlyAfterAllImages(t *testing.T) {
+	repoRoot := finalArchitectureEngineRoot(t)
+	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "engine-release.yml")
+	content, err := os.ReadFile(workflowPath) //nolint:gosec // test-only static read of repo workflow
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowPath, err)
+	}
+	text := string(content)
+	versionJob := workflowJobForStaticTest(t, text, "version:")
+	imagesJob := workflowJobForStaticTest(t, text, "images:")
+	chartJob := workflowJobForStaticTest(t, text, "chart:")
+
+	for _, token := range []string{
+		"outputs:",
+		"version: ${{ steps.resolve.outputs.version }}",
+		"SemVer 2",
+		"without build metadata",
+		"${#version} > 128",
+		"OCI image tags are limited to 128 characters",
+	} {
+		if !strings.Contains(versionJob, token) {
+			t.Errorf("release version job missing %q", token)
+		}
+	}
+	for _, token := range []string{
+		"needs: version",
+		"${{ needs.version.outputs.version }}",
+	} {
+		if !strings.Contains(imagesJob, token) {
+			t.Errorf("release image job missing %q", token)
+		}
+	}
+	for _, token := range []string{
+		"needs: [version, images]",
+		"version: v4.2.0",
+		`helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION"`,
+		"helm push",
+		"oci://ghcr.io/tetral-ai/charts",
+	} {
+		if !strings.Contains(chartJob, token) {
+			t.Errorf("release chart job missing %q", token)
+		}
+	}
 }
 
 func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {

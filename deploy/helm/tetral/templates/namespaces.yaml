@@ -1,0 +1,11 @@
+{{- if .Values.namespaces.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tetral-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tetral-agent-runtime
+{{- end }}

@@ -1,0 +1,484 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bridge-config
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+data:
+  TETRAL_SANDBOX_DRIVER: daytona
+  DAYTONA_API_URL: {{ .Values.daytona.bridgeAPIURL | quote }}
+  DAYTONA_TARGET: default
+  TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
+  TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
+  TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT: 30s
+  TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
+  TETRAL_COMPACTION_RESCHEDULE_BUDGET: "2"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bridge
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bridge
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bridge
+        app.kubernetes.io/part-of: tetral
+    spec:
+      serviceAccountName: bridge
+      automountServiceAccountToken: false
+      containers:
+        - name: bridge-api
+          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/bridge-api
+          env:
+            - name: TETRAL_BRIDGE_API_HTTP_ADDR
+              value: ":8080"
+            - name: TETRAL_BRIDGE_API_GRPC_ADDR
+              value: ":9090"
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralDatabase | quote }}
+                  key: bridge-url
+            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
+              value: tetral-internal-grpc
+            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
+              value: tetral-agent-runtime/agent-runtime,tetral-system/bridge,tetral-system/gateway
+            - name: TETRAL_BRIDGE_MCP_CONNECTOR_GRPC_ADDR
+              value: gateway.tetral-system.svc.cluster.local:9091
+            - name: TETRAL_BRIDGE_GATEWAY_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/gateway/token
+            - name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.runtimeBindingToken | quote }}
+                  key: hmac-key
+            - name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
+            - name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
+            - name: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
+            - name: TETRAL_PROVIDER_RESCHEDULE_BUDGET
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_PROVIDER_RESCHEDULE_BUDGET
+            - name: TETRAL_COMPACTION_RESCHEDULE_BUDGET
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_COMPACTION_RESCHEDULE_BUDGET
+            - name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token
+            - name: KUBERNETES_API_SERVER_URL
+              value: https://kubernetes.default.svc
+            - name: KUBERNETES_API_CA_CERT_PATH
+              value: /var/run/secrets/tetral-kubernetes-api/ca.crt
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralBlob | quote }}
+                  key: secret-key
+            - name: TETRAL_SANDBOX_DRIVER
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_SANDBOX_DRIVER
+            - name: DAYTONA_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: DAYTONA_API_URL
+            - name: DAYTONA_TARGET
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: DAYTONA_TARGET
+            - name: DAYTONA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.bridgeDaytona | quote }}
+                  key: DAYTONA_API_KEY
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+          resources:
+{{ toYaml .Values.resources.bridgeAPI | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: bridge-api-kubernetes-api
+              mountPath: /var/run/secrets/tetral-kubernetes-api
+              readOnly: true
+            - name: bridge-api-gateway-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/gateway
+              readOnly: true
+        - name: job-runner
+          image: {{ .Values.image.registry }}/tetral:{{ include "tetral.imageTag" . }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/job-runner
+          env:
+            - name: TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR
+              value: ":8081"
+            - name: TETRAL_DEPLOYMENT_ENVIRONMENT
+              value: {{ .Values.observability.deploymentEnvironment | quote }}
+            - name: TETRAL_SERVICE_VERSION
+              value: {{ .Values.observability.serviceVersion | quote }}
+            - name: TETRAL_SCHEMA_MODE
+              value: verify
+            - name: TETRAL_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.tetralDatabase | quote }}
+                  key: bridge-url
+            - name: TETRAL_QUEUE_GRPC_ADDR
+              value: queue.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_GRPC_ADDR
+              value: 127.0.0.1:9090
+            - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
+              value: bridge-job-runner
+            - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
+              value: "30000"
+            - name: TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS
+              value: "10000"
+            - name: TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS
+              value: "1"
+            - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
+              value: "1000"
+            - name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
+            - name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
+              valueFrom:
+                configMapKeyRef:
+                  name: bridge-config
+                  key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
+            - name: TETRAL_KUBERNETES_NAMESPACE
+              value: tetral-agent-runtime
+            - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
+              value: app.kubernetes.io/name=agent-runtime
+            - name: TETRAL_AGENT_RUNTIME_GRPC_PORT
+              value: "9090"
+            - name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token
+            - name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/bridge-api/token
+            - name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR
+              value: gateway.tetral-system.svc.cluster.local:9091
+            - name: TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/gateway/token
+            - name: TETRAL_SANDBOX_GRPC_ADDR
+              value: sandbox.tetral-system.svc.cluster.local:9090
+            - name: TETRAL_BRIDGE_SANDBOX_TOKEN_PATH
+              value: /var/run/secrets/tetral-internal-grpc/sandbox/token
+          ports:
+            - name: http-job
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http-job
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http-job
+          resources:
+{{ toYaml .Values.resources.bridgeJobRunner | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: bridge-runtime-pod-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime
+              readOnly: true
+            - name: bridge-job-runner-bridge-api-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/bridge-api
+              readOnly: true
+            - name: bridge-job-runner-gateway-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/gateway
+              readOnly: true
+            - name: bridge-sandbox-token
+              mountPath: /var/run/secrets/tetral-internal-grpc/sandbox
+              readOnly: true
+            - name: job-runner-kubernetes-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: bridge-api-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: kubernetes.default.svc
+                  expirationSeconds: 600
+                  path: bridge-api-tokenreview/token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: bridge-api-gateway-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: bridge-runtime-pod-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: bridge-job-runner-bridge-api-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: bridge-job-runner-gateway-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: tetral-internal-grpc
+                  expirationSeconds: 600
+                  path: token
+        - name: bridge-sandbox-token
+          secret:
+            secretName: {{ .Values.secrets.sandboxInternalGRPC | quote }}
+            items:
+              - key: token
+                path: token
+        - name: job-runner-kubernetes-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: kubernetes.default.svc
+                  expirationSeconds: 600
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bridge
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: bridge
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+    - name: metrics-job
+      port: 8081
+      targetPort: http-job
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bridge
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+  annotations:
+    tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      ports:
+        - protocol: TCP
+          port: 9090
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: tetral
+      ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tetral-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: queue
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      ports:
+        - protocol: TCP
+          port: 9091
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tetral-agent-runtime
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-runtime
+      ports:
+        - protocol: TCP
+          port: 9090
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -24,7 +24,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -n "$DISPATCH_VERSION" ]; then
+            version="$DISPATCH_VERSION"
+          else
+            version="${REF_NAME#v}"
+          fi
+          # SemVer 2 core plus optional pre-release. Build metadata is excluded:
+          # the same value is an OCI image tag, where '+' is invalid.
+          prerelease_identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-${prerelease_identifier}(\\.${prerelease_identifier})*)?$"
+          if [[ ! "$version" =~ $semver ]]; then
+            echo "refusing to publish version '$version'; require SemVer 2 without build metadata" >&2
+            exit 1
+          fi
+          if (( ${#version} > 128 )); then
+            echo "refusing to publish version '$version'; OCI image tags are limited to 128 characters" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   images:
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -50,22 +82,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve version
-        id: version
-        env:
-          DISPATCH_VERSION: ${{ inputs.version }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [ -n "$DISPATCH_VERSION" ]; then
-            version="$DISPATCH_VERSION"
-          else
-            version="${REF_NAME#v}"
-          fi
-          case "$version" in
-            ''|v*) echo "refusing to publish version '$version'" >&2; exit 1 ;;
-          esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
       - name: Set up Buildx
         # docker/setup-buildx-action@v4.2.0
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
@@ -88,14 +104,14 @@ jobs:
           push: true
           # No `latest`: a moving tag makes a deployment unreproducible, and the
           # manifests name an exact version.
-          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.version.outputs.version }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.version.outputs.version }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
       - name: Report digest
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
@@ -106,3 +122,35 @@ jobs:
             echo "$IMAGE@$DIGEST"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  chart:
+    needs: [version, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Setup Helm
+        # azure/setup-helm@v4.3.1
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with:
+          version: v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Package chart
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: helm package deploy/helm/tetral --version "$VERSION" --app-version "$VERSION"
+
+      - name: Push chart
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: helm push "tetral-$VERSION.tgz" oci://ghcr.io/tetral-ai/charts

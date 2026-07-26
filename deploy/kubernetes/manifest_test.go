@@ -898,7 +898,6 @@ func TestKubernetesManifestEventStreamHasNoBootstrapSecret(t *testing.T) {
 func TestKubernetesManifestPublicAuthBoundaryKeepsRawKeysAtTetralAuth(t *testing.T) {
 	documents := readManifestDocuments(t)
 	authDeployment := requireDocument(t, documents, "auth.yaml", "Deployment", "auth")
-	authConfigMap := requireDocument(t, documents, "auth.yaml", "ConfigMap", "auth-config")
 	for _, required := range []string{
 		"name: ENGINE_API_KEY",
 		"name: ENGINE_BOOTSTRAP_WORKSPACE_ID",
@@ -910,8 +909,9 @@ func TestKubernetesManifestPublicAuthBoundaryKeepsRawKeysAtTetralAuth(t *testing
 	} {
 		requireContains(t, authDeployment, required)
 	}
-	requireContains(t, authConfigMap, "ENGINE_BOOTSTRAP_WORKSPACE_ID: existing-workspace-id")
-	requireNotContains(t, authConfigMap, "ENGINE_BOOTSTRAP_WORKSPACE_ID: default")
+	if got := requireConfigMapDataValue(t, documents, "auth.yaml", "auth-config", "ENGINE_BOOTSTRAP_WORKSPACE_ID"); got != "existing-workspace-id" {
+		t.Fatalf("auth bootstrap workspace id = %q; want existing-workspace-id", got)
+	}
 
 	for _, publicTarget := range []struct {
 		file string
@@ -1388,7 +1388,7 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"name: DAYTONA_API_KEY",
 		"mountPath: /var/run/secrets/tetral-internal-grpc/gateway",
 	} {
-		if !strings.Contains(bridgeAPI, required) {
+		if !manifestTextContains(bridgeAPI, required) {
 			t.Fatalf("bridge-api container missing %q", required)
 		}
 	}
@@ -1415,7 +1415,7 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"mountPath: /var/run/secrets/tetral-internal-grpc/sandbox",
 		"mountPath: /var/run/secrets/kubernetes.io/serviceaccount",
 	} {
-		if !strings.Contains(jobRunner, required) {
+		if !manifestTextContains(jobRunner, required) {
 			t.Fatalf("job-runner container missing %q", required)
 		}
 	}
@@ -1849,7 +1849,7 @@ func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
 		"name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
 		"mountPath: /var/run/secrets/tetral-internal-grpc/bridge",
 	} {
-		if !strings.Contains(mcpConnector, required) {
+		if !manifestTextContains(mcpConnector, required) {
 			t.Fatalf("mcp-connector container missing %q", required)
 		}
 	}
@@ -1969,13 +1969,13 @@ func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
 		"path: /health\n              port: web-metrics",
 		"path: /ready\n              port: web-metrics",
 	} {
-		if !strings.Contains(webContainer, required) {
+		if !manifestTextContains(webContainer, required) {
 			t.Fatalf("web-connector container missing %q", required)
 		}
 	}
 	for _, envName := range []string{"TETRAL_BLOB_ENDPOINT", "TETRAL_BLOB_REGION", "TETRAL_BLOB_BUCKET", "TETRAL_BLOB_ACCESS_KEY", "TETRAL_BLOB_SECRET_KEY"} {
 		exact := "name: " + envName + "\n              valueFrom:\n                secretKeyRef:\n                  name: gateway-web-blob\n                  key: " + envName
-		if !strings.Contains(webContainer, exact) {
+		if !manifestTextContains(webContainer, exact) {
 			t.Fatalf("web-connector blob setting %s is not sourced from the matching Web-only Secret key", envName)
 		}
 		if strings.Contains(webContainer, "name: "+envName+"\n              valueFrom:\n                configMapKeyRef:") {
@@ -3826,6 +3826,7 @@ func (documents manifestDocuments) find(file string, kind string, name string) *
 
 func readManifestDocuments(t *testing.T) manifestDocuments {
 	t.Helper()
+	root := topLevelManifestRoot()
 	expectedFiles := []string{
 		"agent-runtime.yaml",
 		"bridge.yaml",
@@ -3842,26 +3843,27 @@ func readManifestDocuments(t *testing.T) manifestDocuments {
 	}
 	seen := map[string]bool{}
 	for _, expected := range expectedFiles {
-		if _, err := os.Stat(expected); err != nil {
+		if _, err := os.Stat(filepath.Join(root, expected)); err != nil {
 			t.Fatalf("required manifest %s is missing: %v", expected, err)
 		}
 		seen[expected] = true
 	}
-	entries, err := filepath.Glob("*.yaml")
+	entries, err := filepath.Glob(filepath.Join(root, "*.yaml"))
 	if err != nil {
 		t.Fatalf("glob manifests: %v", err)
 	}
 	sort.Strings(entries)
 	for _, entry := range entries {
-		if !seen[entry] {
-			t.Fatalf("unexpected manifest file %s", entry)
+		name := filepath.Base(entry)
+		if !seen[name] {
+			t.Fatalf("unexpected manifest file %s", name)
 		}
 	}
 
 	var documents manifestDocuments
 	for _, file := range expectedFiles {
 		// #nosec G304 -- file comes from the hard-coded expected manifest list above.
-		source, err := os.ReadFile(file)
+		source, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}
@@ -3883,7 +3885,7 @@ func readManifestDocuments(t *testing.T) manifestDocuments {
 
 func readEdgeGatewayAdapterDocuments(t *testing.T, file string) manifestDocuments {
 	t.Helper()
-	adapterDir := "edge-gateway"
+	adapterDir := filepath.Join(topLevelManifestRoot(), "edge-gateway")
 	entries, err := os.ReadDir(adapterDir)
 	if err != nil {
 		t.Fatalf("read %s: %v", adapterDir, err)
@@ -3908,13 +3910,20 @@ func readEdgeGatewayAdapterDocuments(t *testing.T, file string) manifestDocument
 			continue
 		}
 		documents = append(documents, manifestDocument{
-			file: path,
+			file: filepath.Join("edge-gateway", file),
 			kind: requireScalar(t, path, text, "kind"),
 			name: requireMetadataName(t, path, text),
 			text: text,
 		})
 	}
 	return documents
+}
+
+func topLevelManifestRoot() string {
+	if root := os.Getenv("TETRAL_KUBERNETES_MANIFEST_ROOT"); root != "" {
+		return root
+	}
+	return "."
 }
 
 func requireDocument(t *testing.T, documents manifestDocuments, file string, kind string, name string) *manifestDocument {
@@ -3958,7 +3967,7 @@ func requireMetadataName(t *testing.T, file string, text string) string {
 
 func requireContains(t *testing.T, document *manifestDocument, want string) {
 	t.Helper()
-	if !strings.Contains(document.text, want) {
+	if !manifestTextContains(document.text, want) {
 		t.Fatalf("%s %s/%s missing:\n%s", document.file, document.kind, document.name, want)
 	}
 }
@@ -3981,15 +3990,43 @@ func readServiceLocalManifestText(t *testing.T, path string) string {
 
 func requireEngineVaultKeyEnvCount(t *testing.T, source string, text string, want int) {
 	t.Helper()
-	if got := strings.Count(text, "name: ENGINE_VAULT_KEY"); got != want {
+	if got := countManifestScalar(text, "name", "ENGINE_VAULT_KEY"); got != want {
 		t.Fatalf("%s ENGINE_VAULT_KEY env count = %d; want %d", source, got, want)
 	}
-	if got := strings.Count(text, "key: engine-vault-key"); got != want {
+	if got := countManifestScalar(text, "key", "engine-vault-key"); got != want {
 		t.Fatalf("%s engine-vault-key secret key count = %d; want %d", source, got, want)
 	}
-	if got := strings.Count(text, "name: api-secrets"); got != want {
+	if got := countManifestScalar(text, "name", "api-secrets"); got != want {
 		t.Fatalf("%s api-secrets secret reference count = %d; want %d", source, got, want)
 	}
+}
+
+var quotedManifestStringFieldPattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]+)?(?:host|name|secretName):[ \t]*)["']([A-Za-z0-9_./:@+*=-]+)["']([ \t]*)$`)
+
+func manifestTextContains(text string, want string) bool {
+	if strings.Contains(text, want) {
+		return true
+	}
+	if os.Getenv("TETRAL_KUBERNETES_MANIFEST_ROOT") == "" {
+		return false
+	}
+	return strings.Contains(
+		quotedManifestStringFieldPattern.ReplaceAllString(text, `$1$2$3`),
+		quotedManifestStringFieldPattern.ReplaceAllString(want, `$1$2$3`),
+	)
+}
+
+func countManifestScalar(text string, wantKey string, wantValue string) int {
+	count := 0
+	for _, line := range strings.Split(text, "\n") {
+		item := strings.TrimSpace(line)
+		item = strings.TrimSpace(strings.TrimPrefix(item, "- "))
+		key, value, ok := splitManifestScalar(item)
+		if ok && key == wantKey && value == wantValue {
+			count++
+		}
+	}
+	return count
 }
 
 func TestKubernetesManifestDocumentsHaveRecognizedKindAndName(t *testing.T) {

@@ -31,8 +31,8 @@ Tetral scales agents with:
 - **One database**: sessions, full event history, queues, memory,
   credentials — everything durable lives in PostgreSQL. One system to
   operate and back up, and the complete audit trail is a SQL query.
-- **Single-version releases**: one git tag, four images, ordered rolling
-  upgrades on your cluster.
+- **Single-version releases**: one git tag, four images, and one Helm chart
+  carry the same platform version.
 
 Tetral is compatible and complete:
 
@@ -63,8 +63,8 @@ S3-compatible bucket, and a sandbox provider credential.
 Two install paths, one platform version:
 
 - **Helm** — reproducible, versioned installs: one `values.yaml` carries the
-  whole configuration contract; upgrade with `helm upgrade`, roll back with
-  `helm rollback`.
+  whole configuration contract; use plain `helm upgrade`, and roll back only
+  between releases with no schema migration.
 - **kubectl** — the raw manifests in
   [`deploy/kubernetes/`](deploy/kubernetes/), for operators who want every
   object auditable and editable.
