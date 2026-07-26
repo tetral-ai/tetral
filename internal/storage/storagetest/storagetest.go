@@ -283,12 +283,7 @@ func openIsolatedPostgreSQLDBWithAdminAndInitialization(ctx context.Context, wit
 }
 
 func seedTestDefaultWorkspace(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx,
-		`INSERT INTO workspaces (id, type, name, created_at)
-		 VALUES ($1, 'workspace', 'Default Test Fixture', '2026-01-01T00:00:00Z')
-		 ON CONFLICT (id) DO NOTHING`,
-		string(workspace.DefaultID),
-	)
+	_, err := workspace.NewSeeder(db).Seed(ctx, workspace.DefaultID, "Default Test Fixture")
 	return err
 }
 

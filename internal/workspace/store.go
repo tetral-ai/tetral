@@ -9,14 +9,17 @@ import (
 // Store reads workspace metadata from the `workspaces` system table.
 // This stage has no public workspace lifecycle API, so the store is
 // intentionally read-only. The `workspaces` table itself is RLS-free
-// because it is the workspace catalog, not a workspace-owned table.
+// because it is the workspace catalog, not a workspace-owned table. The
+// separate Seeder is the only production exception: it creates the initial
+// deployment-owned row without granting write capability to serving stores.
 type Store struct {
 	db *sql.DB
 }
 
 // NewStore constructs a Store backed by the given *sql.DB. The DB must already
 // be initialized through storage.InitializePostgreSQLSchema, but workspace rows
-// are deployment/bootstrap data and are not created by schema initialization.
+// are deployment/bootstrap data created through Seeder, not schema
+// initialization.
 func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }

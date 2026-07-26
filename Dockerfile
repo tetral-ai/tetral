@@ -11,6 +11,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/ \
       ./services/api/cmd/tetral-api \
       ./services/auth/cmd/tetral-auth \
+      ./services/auth/cmd/tetral-bootstrap \
       ./services/bridge/cmd/bridge-api \
       ./services/bridge/cmd/job-runner \
       ./services/cleanup/cmd/tetral-cleanup \

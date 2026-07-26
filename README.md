@@ -77,6 +77,10 @@ make build && make test          # Go services
 bun install && bun run build     # services/agent-runtime, services/gateway
 ```
 
+Before the first install, follow the
+[from-zero bootstrap sequence](docs/bootstrap.md) to generate the required
+Secrets, let API migrate the schema, and seed the initial workspace.
+
 Each service's contract — responsibilities, lifecycle, seams, testing —
 lives in `services/<name>/README.md`.
 

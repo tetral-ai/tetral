@@ -6,7 +6,8 @@ without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
 
-Complete all eight prerequisites before running any install command.
+Complete prerequisites 1–7 before running the install command. Prerequisite 8
+finishes bootstrap after API has created the schema.
 
 1. **Create the two namespaces.** The default chart does not own namespaces:
 
@@ -87,10 +88,12 @@ Complete all eight prerequisites before running any install command.
 
 8. **Seed the bootstrap workspace.** Auth resolves
    `bootstrapWorkspaceID` against the `workspaces` table during startup.
-   Before starting the platform, seed that workspace and set the value; the
-   default `existing-workspace-id` is a placeholder. The complete bootstrap
-   seed story also includes an admin key, signing keys, and a vault master key
-   and remains a separate deliverable.
+   Set that value to the chosen ID, install the platform so API can migrate the
+   schema, allow Auth to crash-loop while the row is absent, then run the
+   one-shot seed and let Auth self-heal. The default `existing-workspace-id` is
+   a placeholder. Follow the complete
+   [from-zero bootstrap sequence](../../../docs/bootstrap.md) for key
+   generation, the Secret inventory, and the seed command.
 
 ## Install
 
