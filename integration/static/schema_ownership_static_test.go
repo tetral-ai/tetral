@@ -387,7 +387,7 @@ func schemaOwnershipEngineRoot(t *testing.T) string {
 
 func readSchemaOwnershipFile(t *testing.T, path string) string {
 	t.Helper()
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) //nolint:gosec // test-owned manifest root path.
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}

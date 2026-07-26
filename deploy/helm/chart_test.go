@@ -514,7 +514,7 @@ func copyTestFile(t *testing.T, source string, destination string) {
 	if err != nil {
 		t.Fatalf("read %s: %v", source, err)
 	}
-	if err := os.WriteFile(destination, body, 0o600); err != nil {
+	if err := os.WriteFile(destination, body, 0o600); err != nil { //nolint:gosec // test-owned rendered-output path.
 		t.Fatalf("write %s: %v", destination, err)
 	}
 }
