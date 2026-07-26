@@ -1,0 +1,67 @@
+name: mirror-base-images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mirror-base-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - primary: public.ecr.aws/docker/library/golang:1.25.12
+            fallback: docker.io/library/golang:1.25.12
+            target: ghcr.io/tetral-ai/mirror/golang:1.25.12
+          - primary: public.ecr.aws/docker/library/postgres:18-alpine
+            fallback: docker.io/library/postgres:18-alpine
+            target: ghcr.io/tetral-ai/mirror/postgres:18-alpine
+    steps:
+      - name: Log in to GitHub Container Registry
+        # docker/login-action@v4.5.1
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror ${{ matrix.target }}
+        env:
+          PRIMARY: ${{ matrix.primary }}
+          FALLBACK: ${{ matrix.fallback }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          if docker pull "$PRIMARY"; then
+            selected_source="$PRIMARY"
+          else
+            echo "primary mirror unavailable; falling back to Docker Hub"
+            docker pull "$FALLBACK"
+            selected_source="$FALLBACK"
+          fi
+
+          docker tag "$selected_source" "$TARGET"
+          push_output="$(docker push "$TARGET" 2>&1)"
+          printf '%s\n' "$push_output"
+          digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' <<<"$push_output" | tail -n 1)"
+          if [ -z "$digest" ]; then
+            echo "mirror push did not report an image digest" >&2
+            exit 1
+          fi
+
+          {
+            echo "### $TARGET"
+            echo
+            echo '```'
+            echo "$TARGET"
+            echo "$TARGET@$digest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
