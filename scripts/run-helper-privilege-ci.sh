@@ -28,7 +28,7 @@ output="$(docker run --rm \
   --env GOFLAGS=-buildvcs=false \
   --volume "$engine_root:/workspace/engine" \
   --workdir /workspace/engine \
-  golang:1.25.12 \
+  public.ecr.aws/docker/library/golang:1.25.12 \
   sh -ceu 'test "$(id -u)" -eq 0; go test ./internal/sandbox/helper -run "^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$" -count=1 -v' 2>&1)"
 status=$?
 set -e

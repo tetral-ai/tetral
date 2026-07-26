@@ -166,11 +166,11 @@ jobs:
           # Registry reachability is not part of what this suite tests, and a
           # single timed-out pull should not read as a failing build.
           for attempt in 1 2 3 4 5; do
-            if docker pull postgres:18-alpine; then
+            if docker pull public.ecr.aws/docker/library/postgres:18-alpine; then
               break
             fi
             if [ "$attempt" = 5 ]; then
-              echo "could not pull postgres:18-alpine after $attempt attempts" >&2
+              echo "could not pull public.ecr.aws/docker/library/postgres:18-alpine after $attempt attempts" >&2
               exit 1
             fi
             echo "pull attempt $attempt failed; retrying"
@@ -183,7 +183,7 @@ jobs:
             -e POSTGRES_USER=tetral \
             -e POSTGRES_PASSWORD=tetral \
             -e POSTGRES_DB=tetral \
-            postgres:18-alpine \
+            public.ecr.aws/docker/library/postgres:18-alpine \
             -c fsync=off \
             -c synchronous_commit=off \
             -c full_page_writes=off \
