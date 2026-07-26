@@ -491,13 +491,19 @@ describe("OpenAI Responses golden wire path", () => {
     const fixture = await readFile(OpenAIDisconnectFixtureUrl, "utf8");
     expect(fixture).toContain("source=real-provider-prefix");
     expectFixtureHasNoProviderSecrets(fixture);
-    const mock = createMockAnthropicServer(fixture, { disconnectAfterFixture: true, disconnectDelayMs: 25 });
+    const mock = createMockAnthropicServer(fixture, { holdOpenAfterFixture: true });
     const registry = new ProviderClientRegistry({ fetch: mock.fetch });
     try {
-      const result = await collectEventsUntilError(registry.stream({
-        request: openAIGoldenRequest(),
-        credential: sessionOpenAICredential(),
-      }));
+      const result = await collectEventsDisconnectingWhen(
+        registry.stream({
+          request: openAIGoldenRequest(),
+          credential: sessionOpenAICredential(),
+        }),
+        (events) =>
+          events.map((event) => event.type).includes(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START)
+          && events.map((event) => event.reasoning?.text ?? "").join("").includes("Evaluating tool response"),
+        mock.disconnect,
+      );
 
       expect(mock.requests).toHaveLength(1);
       const captured = mock.requests[0]!;
@@ -513,6 +519,7 @@ describe("OpenAI Responses golden wire path", () => {
         statusCode: 502,
       });
     } finally {
+      await mock.disconnect();
       await mock.close();
     }
   });
@@ -719,13 +726,23 @@ describe("Anthropic golden wire path", () => {
     const fixture = await readFile(AnthropicDisconnectFixtureUrl, "utf8");
     expect(fixture).toContain("source=real-provider-prefix");
     expectFixtureHasNoProviderSecrets(fixture);
-    const mock = createMockAnthropicServer(fixture, { disconnectAfterFixture: true });
+    const mock = createMockAnthropicServer(fixture, { holdOpenAfterFixture: true });
     const registry = new ProviderClientRegistry({ fetch: mock.fetch });
     try {
-      const result = await collectEventsUntilError(registry.stream({
-        request: anthropicGoldenRequest(),
-        credential: sessionAnthropicCredential(),
-      }));
+      const result = await collectEventsDisconnectingWhen(
+        registry.stream({
+          request: anthropicGoldenRequest(),
+          credential: sessionAnthropicCredential(),
+        }),
+        (events) => {
+          const types = events.map((event) => event.type);
+          return types.length === 2
+            && types[0] === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START
+            && types[1] === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA
+            && events.map((event) => event.reasoning?.text ?? "").join("").includes("271828");
+        },
+        mock.disconnect,
+      );
 
       expect(mock.requests).toHaveLength(1);
       expect(mock.requests[0]?.headers["anthropic-beta"]).toBe(AnthropicBetaHeader);
@@ -743,6 +760,7 @@ describe("Anthropic golden wire path", () => {
         statusCode: 502,
       });
     } finally {
+      await mock.disconnect();
       await mock.close();
     }
   });
@@ -799,13 +817,19 @@ describe("Session provider golden wire path", () => {
     const fixture = await readFile(KimiDisconnectFixtureUrl, "utf8");
     expect(fixture).toContain("source=real-provider-prefix");
     expectFixtureHasNoProviderSecrets(fixture);
-    const mock = createMockAnthropicServer(fixture, { disconnectAfterFixture: true });
+    const mock = createMockAnthropicServer(fixture, { holdOpenAfterFixture: true });
     const registry = new ProviderClientRegistry({ fetch: mock.fetch });
     try {
-      const result = await collectEventsUntilError(registry.stream({
-        request: kimiK3GoldenRequest(),
-        credential: sessionKimiCredential(),
-      }));
+      const result = await collectEventsDisconnectingWhen(
+        registry.stream({
+          request: kimiK3GoldenRequest(),
+          credential: sessionKimiCredential(),
+        }),
+        (events) =>
+          events.map((event) => event.type).includes(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START)
+          && events.map((event) => event.reasoning?.text ?? "").join("").includes("The"),
+        mock.disconnect,
+      );
 
       expect(mock.requests).toHaveLength(1);
       expect(mock.requests[0]?.headers["anthropic-beta"]).toBeUndefined();
@@ -819,6 +843,7 @@ describe("Session provider golden wire path", () => {
         statusCode: 502,
       });
     } finally {
+      await mock.disconnect();
       await mock.close();
     }
   });
@@ -1150,13 +1175,19 @@ describe("Session provider golden wire path", () => {
     const fixture = await readFile(DeepSeekDisconnectFixtureUrl, "utf8");
     expect(fixture).toContain("source=real-provider-prefix");
     expectFixtureHasNoProviderSecrets(fixture);
-    const mock = createMockAnthropicServer(fixture, { disconnectAfterFixture: true });
+    const mock = createMockAnthropicServer(fixture, { holdOpenAfterFixture: true });
     const registry = new ProviderClientRegistry({ fetch: mock.fetch });
     try {
-      const result = await collectEventsUntilError(registry.stream({
-        request: deepSeekGoldenRequest(),
-        credential: sessionDeepSeekCredential(),
-      }));
+      const result = await collectEventsDisconnectingWhen(
+        registry.stream({
+          request: deepSeekGoldenRequest(),
+          credential: sessionDeepSeekCredential(),
+        }),
+        (events) =>
+          events.map((event) => event.type).includes(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START)
+          && events.map((event) => event.reasoning?.text ?? "").join("").includes("We"),
+        mock.disconnect,
+      );
 
       expect(mock.requests).toHaveLength(1);
       const captured = mock.requests[0]!;
@@ -1172,6 +1203,7 @@ describe("Session provider golden wire path", () => {
         statusCode: 502,
       });
     } finally {
+      await mock.disconnect();
       await mock.close();
     }
   });
@@ -1219,13 +1251,19 @@ describe("Session provider golden wire path", () => {
     const fixture = await readFile(ZaiDisconnectFixtureUrl, "utf8");
     expect(fixture).toContain("source=real-provider-prefix");
     expectFixtureHasNoProviderSecrets(fixture);
-    const mock = createMockAnthropicServer(fixture, { disconnectAfterFixture: true });
+    const mock = createMockAnthropicServer(fixture, { holdOpenAfterFixture: true });
     const registry = new ProviderClientRegistry({ fetch: mock.fetch });
     try {
-      const result = await collectEventsUntilError(registry.stream({
-        request: zaiGoldenRequest(),
-        credential: sessionZaiCredential(),
-      }));
+      const result = await collectEventsDisconnectingWhen(
+        registry.stream({
+          request: zaiGoldenRequest(),
+          credential: sessionZaiCredential(),
+        }),
+        (events) =>
+          events.map((event) => event.type).includes(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START)
+          && events.map((event) => event.reasoning?.text ?? "").join("").includes("The"),
+        mock.disconnect,
+      );
 
       expect(mock.requests).toHaveLength(1);
       expect(result.events.map((event) => event.type)).toContain(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START);
@@ -1238,6 +1276,7 @@ describe("Session provider golden wire path", () => {
         statusCode: 502,
       });
     } finally {
+      await mock.disconnect();
       await mock.close();
     }
   });
@@ -1290,20 +1329,24 @@ interface CapturedAnthropicRequest {
 }
 
 function createMockAnthropicServer(fixture: string, options: {
-  readonly disconnectAfterFixture?: boolean;
-  readonly disconnectDelayMs?: number;
+  readonly holdOpenAfterFixture?: boolean;
   readonly status?: number;
   readonly contentType?: string;
 } = {}): {
   readonly requests: CapturedAnthropicRequest[];
   readonly fetch: FetchFunction;
+  readonly disconnect: () => Promise<void>;
   readonly close: () => Promise<void>;
 } {
   const requests: CapturedAnthropicRequest[] = [];
+  let disconnected = false;
   let server: ReturnType<typeof Bun.serve>;
   server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    // Keep Bun's default behavior explicit: the 3 s collector watchdog must
+    // fire before both bun test's 5 s case limit and this 10 s server timeout.
+    idleTimeout: 10,
     async fetch(request) {
       const url = new URL(request.url);
       requests.push({
@@ -1312,8 +1355,8 @@ function createMockAnthropicServer(fixture: string, options: {
         headers: Object.fromEntries(Array.from(request.headers.entries()).map(([key, value]) => [key.toLowerCase(), value])),
         body: await request.json() as Record<string, unknown>,
       });
-      return new Response(options.disconnectAfterFixture === true
-        ? disconnectingFixtureStream(fixture, () => server.stop(true), options.disconnectDelayMs ?? 1)
+      return new Response(options.holdOpenAfterFixture === true
+        ? fixtureStreamHoldingOpen(fixture)
         : fixtureResponseBody(fixture, options.contentType), {
         status: options.status ?? 200,
         headers: {
@@ -1341,6 +1384,13 @@ function createMockAnthropicServer(fixture: string, options: {
     }, {
       preconnect: () => {},
     }) satisfies FetchFunction,
+    disconnect: async () => {
+      if (disconnected) {
+        return;
+      }
+      disconnected = true;
+      await server.stop(true);
+    },
     close: async () => {
       await server.stop(true);
     },
@@ -1377,17 +1427,11 @@ function anthropicStructuredOutputFixture(): string {
   ].join("\n");
 }
 
-function disconnectingFixtureStream(fixture: string, disconnect: () => void, delayMs: number): ReadableStream<Uint8Array> {
+function fixtureStreamHoldingOpen(fixture: string): ReadableStream<Uint8Array> {
   const bytes = new TextEncoder().encode(fixture);
-  let sentFixture = false;
   return new ReadableStream({
-    pull(controller) {
-      if (!sentFixture) {
-        sentFixture = true;
-        controller.enqueue(bytes);
-        setTimeout(disconnect, delayMs);
-        return;
-      }
+    start(controller) {
+      controller.enqueue(bytes);
     },
   });
 }
@@ -2110,6 +2154,76 @@ async function collectEventsUntilError(events: AsyncIterable<ProviderStreamEvent
     return { events: output, error };
   }
   throw new Error("expected provider stream to fail");
+}
+
+async function collectEventsDisconnectingWhen(
+  events: AsyncIterable<ProviderStreamEvent>,
+  predicate: (events: readonly ProviderStreamEvent[]) => boolean,
+  disconnect: () => Promise<void>,
+  watchdogMs = 3_000,
+): Promise<{
+  readonly events: readonly ProviderStreamEvent[];
+  readonly error: unknown;
+}> {
+  const output: ProviderStreamEvent[] = [];
+  const iterator = events[Symbol.asyncIterator]();
+  let disconnected = false;
+  const disconnectOnce = async (): Promise<void> => {
+    if (disconnected) {
+      return;
+    }
+    disconnected = true;
+    await disconnect();
+  };
+  const diagnostic = (stage: string): string => {
+    const eventTypes = output.map((event) => providerStreamEventTypeToJSON(event.type));
+    return `timed out waiting for provider stream ${stage} after ${watchdogMs} ms; received event types: ${JSON.stringify(eventTypes)}`;
+  };
+
+  if (predicate(output)) {
+    await disconnectOnce();
+  }
+
+  while (true) {
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    let watchdogExpired = false;
+    let next: IteratorResult<ProviderStreamEvent>;
+    try {
+      next = await Promise.race([
+        iterator.next(),
+        new Promise<never>((_, reject) => {
+          watchdog = setTimeout(() => {
+            watchdogExpired = true;
+            reject(new Error(diagnostic("predicate/error")));
+          }, watchdogMs);
+        }),
+      ]);
+    } catch (error) {
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog);
+      }
+      if (watchdogExpired) {
+        await disconnectOnce();
+        throw error;
+      }
+      if (!disconnected) {
+        await disconnectOnce();
+        throw error;
+      }
+      return { events: output, error };
+    } finally {
+      if (watchdog !== undefined) {
+        clearTimeout(watchdog);
+      }
+    }
+    if (next.done) {
+      throw new Error("expected provider stream to fail");
+    }
+    output.push(next.value);
+    if (!disconnected && predicate(output)) {
+      await disconnectOnce();
+    }
+  }
 }
 
 function sessionAnthropicCredential(): ResolvedProviderCredential {
