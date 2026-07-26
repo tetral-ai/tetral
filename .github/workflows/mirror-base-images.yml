@@ -25,6 +25,9 @@ jobs:
           - primary: public.ecr.aws/docker/library/postgres:18-alpine
             fallback: docker.io/library/postgres:18-alpine
             target: ghcr.io/tetral-ai/mirror/postgres:18-alpine
+          - primary: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+            fallback: ""
+            target: ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z
     steps:
       - name: Log in to GitHub Container Registry
         # docker/login-action@v4.5.1
@@ -42,10 +45,13 @@ jobs:
         run: |
           if docker pull "$PRIMARY"; then
             selected_source="$PRIMARY"
-          else
+          elif [ -n "$FALLBACK" ]; then
             echo "primary mirror unavailable; falling back to Docker Hub"
             docker pull "$FALLBACK"
             selected_source="$FALLBACK"
+          else
+            echo "primary image unavailable and no fallback is configured" >&2
+            exit 1
           fi
 
           docker tag "$selected_source" "$TARGET"
