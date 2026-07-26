@@ -10,16 +10,19 @@ import (
 )
 
 // TestSkillIsTheOnlyYAMLConsumer pins the YAML parser confinement rule:
-// the gopkg.in/yaml.v3 dependency must be used only by the Skill
-// package/frontmatter parser package. Other Engine packages must
-// continue to follow engine/CLAUDE.md's stdlib-first dependency rule.
+// production use of gopkg.in/yaml.v3 must remain inside the Skill
+// package/frontmatter parser package. The one test-only exception performs
+// object-level YAML parsing to validate Helm chart equivalence. Other Engine
+// packages must continue to follow engine/CLAUDE.md's stdlib-first dependency
+// rule.
 //
 // The test walks every Go source file under engine/ and asserts that
-// no file outside `internal/skill` imports `gopkg.in/yaml.v3`
-// directly.
+// no file outside `internal/skill` or the exact chart-equivalence test imports
+// `gopkg.in/yaml.v3` directly.
 func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 	const yamlImport = `"gopkg.in/yaml.v3"`
 	const allowedDir = "internal/skill"
+	const allowedChartTest = "deploy/helm/chart_test.go"
 
 	engineRoot := engineRootDir(t)
 	violations := []string{}
@@ -41,7 +44,8 @@ func TestSkillIsTheOnlyYAMLConsumer(t *testing.T) {
 		if relErr != nil {
 			return relErr
 		}
-		if strings.HasPrefix(filepath.ToSlash(rel), allowedDir+"/") {
+		rel = filepath.ToSlash(rel)
+		if strings.HasPrefix(rel, allowedDir+"/") || rel == allowedChartTest {
 			return nil
 		}
 		body, readErr := os.ReadFile(path) //nolint:gosec // engine source path, walked from root
