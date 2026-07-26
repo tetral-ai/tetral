@@ -165,12 +165,13 @@ jobs:
           docker rm -f "$POSTGRES_CONTAINER" >/dev/null 2>&1 || true
           # Registry reachability is not part of what this suite tests, and a
           # single timed-out pull should not read as a failing build.
+          # Tetral's public GHCR mirror avoids anonymous third-party registry limits on shared runner IPs.
           for attempt in 1 2 3 4 5; do
-            if docker pull public.ecr.aws/docker/library/postgres:18-alpine; then
+            if docker pull ghcr.io/tetral-ai/mirror/postgres:18-alpine; then
               break
             fi
             if [ "$attempt" = 5 ]; then
-              echo "could not pull public.ecr.aws/docker/library/postgres:18-alpine after $attempt attempts" >&2
+              echo "could not pull ghcr.io/tetral-ai/mirror/postgres:18-alpine after $attempt attempts" >&2
               exit 1
             fi
             echo "pull attempt $attempt failed; retrying"
@@ -183,7 +184,7 @@ jobs:
             -e POSTGRES_USER=tetral \
             -e POSTGRES_PASSWORD=tetral \
             -e POSTGRES_DB=tetral \
-            public.ecr.aws/docker/library/postgres:18-alpine \
+            ghcr.io/tetral-ai/mirror/postgres:18-alpine \
             -c fsync=off \
             -c synchronous_commit=off \
             -c full_page_writes=off \
@@ -208,12 +209,13 @@ jobs:
           MINIO_CONTAINER: tetral-minio-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
         run: |
           docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
+          # Tetral's public GHCR mirror avoids anonymous third-party registry limits on shared runner IPs.
           for attempt in 1 2 3 4 5; do
-            if docker pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z; then
+            if docker pull ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z; then
               break
             fi
             if [ "$attempt" = 5 ]; then
-              echo "could not pull the MinIO image after $attempt attempts" >&2
+              echo "could not pull ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z after $attempt attempts" >&2
               exit 1
             fi
             echo "pull attempt $attempt failed; retrying"
@@ -224,7 +226,7 @@ jobs:
             -p 127.0.0.1::9000 \
             -e MINIO_ROOT_USER=tetralminio \
             -e MINIO_ROOT_PASSWORD=tetralminio123 \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z \
+            ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z \
             server /data --address ":9000"
           for attempt in $(seq 1 30); do
             port="$(docker port "$MINIO_CONTAINER" 9000/tcp | sed -n 's/.*://p' | tail -n1)"

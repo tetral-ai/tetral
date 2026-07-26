@@ -23,12 +23,13 @@ fi
 engine_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 set +e
+# Tetral's public GHCR mirror avoids anonymous third-party registry limits on shared runner IPs.
 output="$(docker run --rm \
   --user 0:0 \
   --env GOFLAGS=-buildvcs=false \
   --volume "$engine_root:/workspace/engine" \
   --workdir /workspace/engine \
-  public.ecr.aws/docker/library/golang:1.25.12 \
+  ghcr.io/tetral-ai/mirror/golang:1.25.12 \
   sh -ceu 'test "$(id -u)" -eq 0; go test ./internal/sandbox/helper -run "^TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop$" -count=1 -v' 2>&1)"
 status=$?
 set -e

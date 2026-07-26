@@ -264,7 +264,8 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		token string
 		why   string
 	}{
-		{"postgres:18-alpine", "the test job requires a PostgreSQL service"},
+		{"ghcr.io/tetral-ai/mirror/postgres:18-alpine", "the test job requires the Tetral-owned PostgreSQL mirror"},
+		{"ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z", "the test job requires the Tetral-owned MinIO mirror"},
 		{"TETRAL_TEST_DATABASE_URL", "the test step must export the PostgreSQL test DSN to Engine tests"},
 		{"go list ./...", "shards must derive their package set from the module, so no package can be silently dropped"},
 		{"go test -race -coverprofile=coverage.out $packages", "the shard test command must keep the race detector and coverage"},
@@ -321,6 +322,44 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 	if strings.Contains(goTestJob, "continue-on-error: true") {
 		t.Fatal("the PostgreSQL-backed full-suite gate must not continue on error")
 	}
+	if got := strings.Count(goTestJob, "ghcr.io/tetral-ai/mirror/postgres:18-alpine"); got != 3 {
+		t.Fatalf("go-test PostgreSQL mirror reference count = %d; want pull, error, and run references", got)
+	}
+	if got := strings.Count(goTestJob, "postgres:18-alpine"); got != 3 {
+		t.Fatalf("go-test PostgreSQL image reference count = %d; want only the three GHCR mirror references", got)
+	}
+	for _, thirdParty := range []string{
+		"public.ecr.aws/docker/library/postgres:18-alpine",
+		"docker.io/library/postgres:18-alpine",
+	} {
+		if strings.Contains(goTestJob, thirdParty) {
+			t.Fatalf("go-test must not pull PostgreSQL from shared third-party registry %q", thirdParty)
+		}
+	}
+	if got := strings.Count(goTestJob, "ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z"); got != 3 {
+		t.Fatalf("go-test MinIO mirror reference count = %d; want pull, error, and run references", got)
+	}
+	if got := strings.Count(goTestJob, "minio:RELEASE.2025-09-07T16-13-09Z"); got != 3 {
+		t.Fatalf("go-test MinIO image reference count = %d; want only the three GHCR mirror references", got)
+	}
+	if strings.Contains(goTestJob, "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z") {
+		t.Fatal("go-test must not pull MinIO directly from quay.io")
+	}
+	for _, retryToken := range []string{
+		"for attempt in 1 2 3 4 5; do",
+		`if [ "$attempt" = 5 ]; then`,
+		"sleep $((attempt * 5))",
+	} {
+		if !strings.Contains(goTestJob, retryToken) {
+			t.Fatalf("go-test must preserve the bounded PostgreSQL pull retry lifecycle; missing %q", retryToken)
+		}
+	}
+	if got := strings.Count(goTestJob, "for attempt in 1 2 3 4 5; do"); got != 2 {
+		t.Fatalf("go-test bounded image-pull retry loops = %d; want PostgreSQL and MinIO", got)
+	}
+	if regexp.MustCompile(`(?m)(docker\s+login\b|uses:\s*docker/login-action@)`).MatchString(goTestJob) {
+		t.Fatal("go-test must use anonymous pulls for the public GHCR mirror")
+	}
 
 	// Ordering proof: the readiness probe must run before the test
 	// step, otherwise CI may pass through go test running before the
@@ -331,9 +370,9 @@ func TestEngineCIWorkflowRunsFoundationSuites(t *testing.T) {
 		// --health-cmd. The explicit standalone readiness step appears
 		// last and is the load-bearing step.
 		readinessIdx := strings.LastIndex(goTestJob, "pg_isready")
-		testCmdIdx := strings.Index(goTestJob, "go test -race -coverprofile=coverage.out ./...")
+		testCmdIdx := strings.Index(goTestJob, "go test -race -coverprofile=coverage.out $packages")
 		if readinessIdx < 0 || testCmdIdx < 0 {
-			t.Skip("missing required tokens; covered by other subtests")
+			t.Fatal("readiness-order proof is missing its probe or sharded go-test command")
 		}
 		if readinessIdx > testCmdIdx {
 			t.Errorf("pg_isready readiness probe must appear before the go test step in engine-ci.yml")
@@ -420,6 +459,9 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 			t.Fatalf("helper-privilege job widens root execution with %q", forbidden)
 		}
 	}
+	if regexp.MustCompile(`(?m)(docker\s+login\b|uses:\s*docker/login-action@)`).MatchString(job) {
+		t.Fatal("helper-privilege job must use an anonymous pull for the public GHCR mirror")
+	}
 
 	scriptPath := filepath.Join(engineRoot, "scripts", "run-helper-privilege-ci.sh")
 	scriptBody, err := os.ReadFile(scriptPath) //nolint:gosec // repository-local CI command.
@@ -430,6 +472,7 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 	for _, token := range []string{
 		"docker run --rm",
 		"--user 0:0",
+		"ghcr.io/tetral-ai/mirror/golang:1.25.12",
 		`test "$(id -u)" -eq 0`,
 		"go test ./internal/sandbox/helper",
 		"TestSupervisorKeepsDetachedTaskAuthorizationAfterPrivilegeDrop",
@@ -441,6 +484,20 @@ func TestEngineCIWorkflowIsolatesRootHelperPrivilegeGate(t *testing.T) {
 	}
 	if strings.Contains(script, "go test ./...") {
 		t.Fatal("helper privilege script must not run the full suite as root")
+	}
+	for _, thirdParty := range []string{
+		"public.ecr.aws/docker/library/golang:1.25.12",
+		"docker.io/library/golang:1.25.12",
+	} {
+		if strings.Contains(script, thirdParty) {
+			t.Fatalf("helper privilege script must not pull Go from shared third-party registry %q", thirdParty)
+		}
+	}
+	if got := strings.Count(script, "golang:1.25.12"); got != 1 {
+		t.Fatalf("helper privilege Go image reference count = %d; want only the GHCR mirror reference", got)
+	}
+	if regexp.MustCompile(`(?m)docker\s+login\b`).MatchString(script) {
+		t.Fatal("helper privilege script must use an anonymous pull for the public GHCR mirror")
 	}
 }
 
@@ -457,6 +514,105 @@ func TestHelperPrivilegeCIGuardFailsOnSkip(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("helper privilege output guard rejected a passing proof: %v\n%s", err, output)
 	}
+}
+
+func TestBaseImageMirrorWorkflowOwnsManualGHCRCopies(t *testing.T) {
+	repoRoot := finalArchitectureEngineRoot(t)
+	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "mirror-base-images.yml")
+	body, err := os.ReadFile(workflowPath) //nolint:gosec // Repository-local workflow definition.
+	if err != nil {
+		t.Fatalf("read base-image mirror workflow: %v", err)
+	}
+	workflow := string(body)
+	const workflowPreamble = `name: mirror-base-images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+`
+	if !strings.HasPrefix(workflow, workflowPreamble) {
+		t.Fatalf("base-image mirror workflow must be dispatch-only with workflow-level read/package-write permissions")
+	}
+	const loginBlock = `      - name: Log in to GitHub Container Registry
+        # docker/login-action@v4.5.1
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+`
+	if !strings.Contains(workflow, loginBlock) {
+		t.Fatal("base-image mirror workflow must authenticate its GHCR push with the workflow GITHUB_TOKEN")
+	}
+	const matrixEnvironment = `        env:
+          PRIMARY: ${{ matrix.primary }}
+          FALLBACK: ${{ matrix.fallback }}
+          TARGET: ${{ matrix.target }}
+`
+	if !strings.Contains(workflow, matrixEnvironment) {
+		t.Fatal("base-image mirror workflow must wire each matrix source tuple into the matching shell variables")
+	}
+	for _, matrixEntry := range []string{
+		`          - primary: public.ecr.aws/docker/library/golang:1.25.12
+            fallback: docker.io/library/golang:1.25.12
+            target: ghcr.io/tetral-ai/mirror/golang:1.25.12`,
+		`          - primary: public.ecr.aws/docker/library/postgres:18-alpine
+            fallback: docker.io/library/postgres:18-alpine
+            target: ghcr.io/tetral-ai/mirror/postgres:18-alpine`,
+		`          - primary: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+            fallback: ""
+            target: ghcr.io/tetral-ai/mirror/minio:RELEASE.2025-09-07T16-13-09Z`,
+	} {
+		if !strings.Contains(workflow, matrixEntry) {
+			t.Fatalf("base-image mirror workflow has a missing or mismatched source tuple:\n%s", matrixEntry)
+		}
+	}
+	const fallbackFlow = `          if docker pull "$PRIMARY"; then
+            selected_source="$PRIMARY"
+          elif [ -n "$FALLBACK" ]; then
+            echo "primary mirror unavailable; falling back to Docker Hub"
+            docker pull "$FALLBACK"
+            selected_source="$FALLBACK"
+          else
+            echo "primary image unavailable and no fallback is configured" >&2
+            exit 1
+          fi
+`
+	if !strings.Contains(workflow, fallbackFlow) {
+		t.Fatal("base-image mirror workflow must use a configured fallback and reject a failed source when no fallback exists")
+	}
+	for _, digestProof := range []string{
+		`push_output="$(docker push "$TARGET" 2>&1)"`,
+		`digest="$(sed -n 's/.*digest: \(sha256:[0-9a-f]\{64\}\).*/\1/p' <<<"$push_output" | tail -n 1)"`,
+	} {
+		if !strings.Contains(workflow, digestProof) {
+			t.Fatalf("base-image mirror workflow must verify and report the pushed digest; missing %q", digestProof)
+		}
+	}
+	const emptyDigestFailure = `          if [ -z "$digest" ]; then
+            echo "mirror push did not report an image digest" >&2
+            exit 1
+          fi
+`
+	if !strings.Contains(workflow, emptyDigestFailure) {
+		t.Fatal("base-image mirror workflow must reject a push that does not report a digest")
+	}
+	const summaryBlock = "          {\n" +
+		"            echo \"### $TARGET\"\n" +
+		"            echo\n" +
+		"            echo '```'\n" +
+		"            echo \"$TARGET\"\n" +
+		"            echo \"$TARGET@$digest\"\n" +
+		"            echo '```'\n" +
+		"          } >> \"$GITHUB_STEP_SUMMARY\"\n"
+	if !strings.Contains(workflow, summaryBlock) {
+		t.Fatal("base-image mirror workflow must append the target and pushed digest to the job summary")
+	}
+	requireWorkflowActionsUseFullSHAs(t, "mirror-base-images.yml", workflow)
 }
 
 // govulncheckCommand is the exact, whole invocation the merge-gating
