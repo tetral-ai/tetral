@@ -421,12 +421,10 @@ spec:
           port: 8081
   egress:
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: tetral-postgres
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 5432
+          port: {{ .Values.network.databasePort }}
     - to:
         - podSelector:
             matchLabels:
@@ -459,26 +457,45 @@ spec:
         - protocol: TCP
           port: 9090
     - to:
-        - ipBlock:
-            cidr: 10.96.0.1/32
+{{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
           port: 443
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
+{{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
       ports:
+{{- range .Values.network.externalEgressPorts }}
         - protocol: TCP
-          port: 443
+          port: {{ . }}
+{{- end }}
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+{{- if .Values.cilium.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: bridge-apiserver-egress
+  namespace: tetral-system
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+{{- end }}

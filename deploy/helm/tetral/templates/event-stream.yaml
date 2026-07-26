@@ -139,9 +139,7 @@ spec:
     - Egress
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              tetral.ai/network-role: public-ingress
+{{- toYaml .Values.network.publicIngressPeers | nindent 8 }}
       ports:
         - protocol: TCP
           port: 8080
@@ -157,16 +155,12 @@ spec:
           port: 8081
   egress:
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: tetral-postgres
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 5432
+          port: {{ .Values.network.databasePort }}
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53

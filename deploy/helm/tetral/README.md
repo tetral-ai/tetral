@@ -1,7 +1,7 @@
 # Tetral Helm chart
 
 This chart installs the same Tetral platform objects as the canonical
-manifests under `deploy/kubernetes`. Default values render those 59 objects
+manifests under `deploy/kubernetes`. Default values render those 62 objects
 without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
@@ -23,16 +23,38 @@ finishes bootstrap after API has created the schema.
    > in them, including all supplied Secrets and an in-namespace PostgreSQL.
    > This is why `namespaces.create` defaults to `false`.
 
-2. **Run PostgreSQL inside `tetral-system`.** Label its pods
-   `app.kubernetes.io/name=tetral-postgres`. Nine NetworkPolicies select that
-   label without a namespace selector, so an external or differently
-   namespaced database is unreachable under the shipped policy.
+2. **Make PostgreSQL reachable under the policy.** The default is an
+   in-cluster pod in `tetral-system` labelled
+   `app.kubernetes.io/name=tetral-postgres`: nine NetworkPolicies select that
+   label without a namespace selector. A database in another namespace, or one
+   reachable at a stable address range, is admitted by overriding
+   `network.databasePeers` — a `namespaceSelector` with a `podSelector`, or an
+   `ipBlock`. Note the limit of the mechanism: a `NetworkPolicyPeer` cannot
+   name a hostname, so a managed endpoint whose address is dynamic cannot be
+   expressed as a CIDR that stays correct; those deployments need a policy
+   engine with FQDN support alongside this chart. A `CiliumNetworkPolicy` is
+   one, and it composes with what the chart ships — Cilium unions its allows
+   with the Kubernetes policies — but a `toFQDNs` rule does nothing on its
+   own: the same policy must also carry an L7 DNS visibility rule for those
+   pods, the pattern the shipped git-proxy policy already demonstrates.
+   Match `network.databasePort` to the DSN as well; a peer alone does not
+   admit a port the policy never names. The database address itself always
+   comes from the DSN in the Secrets; the peer list only decides what the
+   policy admits.
 
-3. **Install the Cilium CRDs or disable their object.** Defaults preserve the
-   canonical `CiliumNetworkPolicy`. A non-Cilium cluster must set
-   `cilium.enabled=false`, but that policy is git-proxy's only GitHub egress
-   permission. On a policy-enforcing non-Cilium CNI, the operator must supply
-   an equivalent GitHub egress allowance or git-proxy cannot operate.
+3. **Install the Cilium CRDs or disable their objects.** Defaults preserve four
+   canonical `CiliumNetworkPolicy` objects: git-proxy's GitHub egress policy
+   and one API-server entity allowance each for agent-runtime, bridge, and
+   gateway. Cilium does not match the Kubernetes API service through an
+   `ipBlock` under the tested policy mode, so the three entity rules admit both
+   the service port 443 and the node-direct port 6443. This behavior was
+   verified on Cilium 1.19.6 with kube-proxy replacement disabled.
+
+   A non-Cilium cluster must set `cilium.enabled=false`. That removes all four
+   Cilium objects, restores git-proxy's ordinary L4 DNS rule, and leaves the
+   three workloads' API-server path to `network.apiServerPeers`. The operator
+   must also supply an equivalent GitHub egress allowance or git-proxy cannot
+   operate.
 
 4. **Install ingress-nginx before enabling the edge.** `edge.enabled=true`
    renders three Ingresses with `ingressClassName: nginx`. Their nginx
@@ -75,8 +97,11 @@ finishes bootstrap after API has created the schema.
      tetral.ai/network-role=public-ingress
    ```
 
-   This is required even when the chart's edge objects are disabled. The two
-   Tetral namespaces need no custom label; Kubernetes supplies their
+   This is required even when the chart's edge objects are disabled, and it
+   is required under the default `network.publicIngressPeers`: a deployment
+   that replaces that value — with a load-balancer CIDR, for instance — admits
+   its edge by that peer instead and needs no label. The two Tetral namespaces
+   need no custom label; Kubernetes supplies their
    `kubernetes.io/metadata.name` labels.
 
 7. **Use restricted database roles.** The nine Go DB-connected containers
@@ -132,14 +157,61 @@ The chart parameterizes only axes already present in the canonical manifests:
   `bootstrapWorkspaceID` select environment endpoints and placeholders.
   `gitProxyHost` drives the sandbox config, git-proxy public URL, and edge
   host/TLS entry together.
+- `network.*` carries the peers and the port for the dependencies whose
+  location belongs to the cluster rather than to Tetral. Every peer list is a
+  plain NetworkPolicy peer list accepting any peer shape that API allows —
+  except `ciliumDNSEndpointSelectors`, which is a Cilium endpoint selector in
+  Cilium's own label syntax. The defaults reproduce the canonical manifests
+  exactly, and an empty list is refused at render time: Kubernetes reads an
+  empty peer list as "match everything", so emptying one widens the policy
+  instead of narrowing it.
+  - `apiServerPeers` — the kubeadm-style `10.96.0.1/32`, in the three ordinary
+    NetworkPolicies whose workloads call the API server (agent-runtime for its
+    runtime contract, bridge for pod visibility, gateway for TokenReview on
+    bearer-authenticated requests). Missing bearer credentials are rejected
+    before TokenReview, and health endpoints do not use it. A non-Cilium
+    cluster whose service CIDR differs must override this value; the failure
+    surfaces as stalled work, not as a failed install. On Cilium, the three
+    entity policies described in prerequisite 3 carry this path instead;
+    `apiServerPeers` remains the non-Cilium fallback.
+  - `databasePeers` and `databasePort` — the in-cluster database pod label and
+    `5432`, in nine policies. The port must match the DSN in the Secrets;
+    managed PostgreSQL often listens elsewhere, and a pooler in front of it
+    often does.
+  - `publicIngressPeers` — the labelled ingress namespace, in four policies.
+    An edge that is not a pod, such as a cloud load balancer, is admitted by
+    replacing this with the peer that describes it.
+  - `dnsPeers` — `kube-system` plus `k8s-app=kube-dns`, in nine ordinary
+    NetworkPolicies, and
+    `ciliumDNSEndpointSelectors` — the same dependency for the shipped
+    `CiliumNetworkPolicy`. Override them together: the Cilium policy carries
+    the L7 DNS rule that teaches Cilium the addresses behind git-proxy's
+    `toFQDNs` allowance, so overriding only the first leaves DNS working while
+    git-proxy's GitHub egress is dropped. With Cilium enabled, git-proxy DNS
+    uses that L7 rule rather than a parallel L4 allowance; disabling Cilium
+    restores the ordinary DNS rule. One topology neither value reaches is
+    NodeLocal DNSCache, where the resolver runs on the host network: an
+    `ipBlock` for the link-local address expresses it under some CNIs and not
+    under others.
+  - `externalEgressPeers` and `externalEgressPorts` — outbound traffic for the
+    four workloads that reach
+    third-party APIs, unrestricted by default because those endpoints are
+    operator-chosen and resolve dynamically, on port 443 by default. If a
+    provider, sandbox, blob, or web endpoint URL carries an explicit port,
+    list it in `externalEgressPorts`. NetworkPolicy is a union of allows, so a
+    deployment that requires an egress gateway or a fixed provider range
+    narrows the peer list here; adding a second, tighter policy cannot revoke
+    what this one permits.
 - `observability.deploymentEnvironment` and
   `observability.serviceVersion` drive all eleven container sites.
 - `resources.*` carries the thirteen workload-container request/limit blocks.
   The other five `resources:` mappings in the canonical YAML are fixed RBAC
   resource-name lists, not container budgets, so the chart has no values for
   them.
-- `cilium.enabled`, `edge.enabled`, `edge.tlsSecretName`, and
-  `namespaces.create` control the explicitly enumerated optional objects.
+- `cilium.enabled` controls the four Cilium objects and whether git-proxy's
+  ordinary L4 DNS rule is present. `edge.enabled`, `edge.tlsSecretName`, and
+  `namespaces.create` control the other explicitly enumerated optional
+  objects.
 
 The gateway and sandbox egress-intent annotations derive hostnames from the
 same non-secret endpoint values as their ConfigMaps. The api and Bridge blob

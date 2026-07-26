@@ -64,9 +64,11 @@ type tokenReviewGrant struct {
 }
 
 type networkPolicyPeer struct {
-	namespace string
-	podName   string
-	podPartOf string
+	namespace       string
+	podName         string
+	podPartOf       string
+	namespaceLabels map[string]string
+	podLabels       map[string]string
 }
 
 type networkPolicyRule struct {
@@ -136,6 +138,7 @@ var workloadManifests = []workloadManifest{
 		binary:       "bun",
 		httpEnv:      "TETRAL_RUNTIME_POD_HTTP_ADDR",
 		httpPortName: "http",
+		ciliumPolicy: true,
 		internalGRPC: true,
 		grpcEnv:      "TETRAL_RUNTIME_POD_GRPC_PORT",
 		grpcPortName: "grpc",
@@ -173,6 +176,7 @@ var workloadManifests = []workloadManifest{
 		grpcEnv:       "TETRAL_PROVIDER_GATEWAY_GRPC_ADDR",
 		grpcPortName:  "provider-grpc",
 		autoscaling:   true,
+		ciliumPolicy:  true,
 		requiredEnvVar: []string{
 			"ENGINE_VAULT_KEY",
 			"TETRAL_DEPLOYMENT_ENVIRONMENT",
@@ -215,6 +219,7 @@ var workloadManifests = []workloadManifest{
 		internalGRPC:   true,
 		grpcEnv:        "TETRAL_BRIDGE_API_GRPC_ADDR",
 		grpcPortName:   "grpc",
+		ciliumPolicy:   true,
 		requiredEnvVar: []string{"TETRAL_INTERNAL_GRPC_AUDIENCE", "TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS"},
 	},
 	{
@@ -1207,6 +1212,60 @@ func TestKubernetesManifestEventStreamAndCleanupRestrictEgress(t *testing.T) {
 	}
 }
 
+// Every workload that uses plain NetworkPolicy DNS resolves names through the
+// same peer, and the shape has to be the same everywhere. This census covers
+// all nine policies; git-proxy uses its Cilium L7 DNS rule when Cilium is on.
+func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
+	documents := readManifestDocuments(t)
+
+	for _, policy := range []struct{ file, name string }{
+		{"agent-runtime.yaml", "agent-runtime"},
+		{"api.yaml", "api"},
+		{"auth.yaml", "auth"},
+		{"bridge.yaml", "bridge"},
+		{"cleanup.yaml", "cleanup"},
+		{"event-stream.yaml", "event-stream"},
+		{"gateway.yaml", "gateway"},
+		{"queue.yaml", "queue"},
+		{"sandbox.yaml", "sandbox"},
+	} {
+		requireKubeDNSEgress(t, requireDocument(t, documents, policy.file, "NetworkPolicy", policy.name))
+	}
+}
+
+func TestNetworkPolicyRuleShapeRejectsUnsupportedPortForms(t *testing.T) {
+	cases := map[string][]string{
+		"port-first": {
+			"    - to:",
+			"        - ipBlock:",
+			"            cidr: 192.0.2.0/24",
+			"      ports:",
+			"        - port: 53",
+			"          protocol: UDP",
+		},
+		"flow-style": {
+			"    - to: [{ipBlock: {cidr: 192.0.2.0/24}}]",
+			"      ports: [{port: 53, protocol: UDP}]",
+		},
+		"port-range": {
+			"    - to:",
+			"        - ipBlock:",
+			"            cidr: 192.0.2.0/24",
+			"      ports:",
+			"        - protocol: UDP",
+			"          port: 52",
+			"          endPort: 53",
+		},
+	}
+	for name, lines := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := validateRecognizedNetworkPolicyRuleShape(lines); err == nil {
+				t.Fatal("unsupported NetworkPolicy rule shape was accepted")
+			}
+		})
+	}
+}
+
 func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 	documents := readManifestDocuments(t)
 
@@ -1539,7 +1598,7 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 	requireNotContains(t, networkPolicy, "0.0.0.0/0")
 	requireContains(t, githubEgressPolicy, "endpointSelector:\n    matchLabels:\n      app.kubernetes.io/name: git-proxy")
 	requireContains(t, githubEgressPolicy, "toEndpoints:\n        - matchLabels:\n            k8s:io.kubernetes.pod.namespace: kube-system\n            k8s:k8s-app: kube-dns")
-	requireContains(t, githubEgressPolicy, "port: \"53\"\n              protocol: UDP\n          rules:\n            dns:\n              - matchPattern: \"*\"")
+	requireContains(t, githubEgressPolicy, "ports:\n            - port: \"53\"\n              protocol: UDP\n            - port: \"53\"\n              protocol: TCP\n          rules:\n            dns:\n              - matchPattern: \"*\"")
 	requireContains(t, githubEgressPolicy, "toFQDNs:\n        - matchName: github.com")
 	requireContains(t, githubEgressPolicy, "port: \"443\"\n              protocol: TCP")
 	requireNotContains(t, githubEgressPolicy, "toFQDNs:\n        - matchPattern:")
@@ -2901,7 +2960,7 @@ func requireNetworkPolicyIngressEdge(t *testing.T, document *manifestDocument, p
 			continue
 		}
 		for _, actual := range rule.peers {
-			if actual == peer {
+			if networkPolicyPeersEqual(actual, peer) {
 				return
 			}
 		}
@@ -2916,7 +2975,7 @@ func requireNetworkPolicyEgressEdge(t *testing.T, document *manifestDocument, po
 			continue
 		}
 		for _, actual := range rule.peers {
-			if actual == peer {
+			if networkPolicyPeersEqual(actual, peer) {
 				return
 			}
 		}
@@ -2959,7 +3018,7 @@ func networkPolicyTransportsForPeer(t *testing.T, rules []networkPolicyRule, pee
 	transports := map[networkPolicyTransport]struct{}{}
 	for _, rule := range rules {
 		for _, actual := range rule.peers {
-			if actual != peer {
+			if !networkPolicyPeersEqual(actual, peer) {
 				continue
 			}
 			for _, transport := range rule.transports {
@@ -2978,6 +3037,12 @@ func networkPolicyTransportsForPeer(t *testing.T, rules []networkPolicyRule, pee
 		return result[left].protocol < result[right].protocol
 	})
 	return result
+}
+
+func networkPolicyPeersEqual(left networkPolicyPeer, right networkPolicyPeer) bool {
+	return left.namespace == right.namespace &&
+		left.podName == right.podName &&
+		left.podPartOf == right.podPartOf
 }
 
 func gatewayGRPCServiceTransports(t *testing.T, service *manifestDocument) []networkPolicyTransport {
@@ -3085,13 +3150,46 @@ func requireNoNetworkPolicyIngressPort(t *testing.T, document *manifestDocument,
 
 func requireKubeDNSEgress(t *testing.T, document *manifestDocument) {
 	t.Helper()
-	for _, required := range []string{
-		"kubernetes.io/metadata.name: kube-system",
-		"k8s-app: kube-dns",
-		"protocol: UDP\n          port: 53",
-		"protocol: TCP\n          port: 53",
-	} {
-		requireContains(t, document, required)
+	var dnsRules []networkPolicyRule
+	for _, rule := range parseNetworkPolicyEgressRules(t, document) {
+		for _, transport := range rule.transports {
+			if transport.port == 53 {
+				dnsRules = append(dnsRules, rule)
+				break
+			}
+		}
+	}
+	if len(dnsRules) != 1 {
+		t.Fatalf("%s %s/%s DNS egress rules = %d; want exactly 1", document.file, document.kind, document.name, len(dnsRules))
+	}
+	rule := dnsRules[0]
+	wantTransports := []networkPolicyTransport{
+		{protocol: "TCP", port: 53},
+		{protocol: "UDP", port: 53},
+	}
+	gotTransports := append([]networkPolicyTransport(nil), rule.transports...)
+	sort.Slice(gotTransports, func(i int, j int) bool {
+		if gotTransports[i].protocol != gotTransports[j].protocol {
+			return gotTransports[i].protocol < gotTransports[j].protocol
+		}
+		return gotTransports[i].port < gotTransports[j].port
+	})
+	if !reflect.DeepEqual(gotTransports, wantTransports) {
+		t.Fatalf("%s %s/%s DNS transports = %#v; want %#v", document.file, document.kind, document.name, gotTransports, wantTransports)
+	}
+	if len(rule.peers) == 0 {
+		t.Fatalf("%s %s/%s DNS rule has no peers", document.file, document.kind, document.name)
+	}
+	if len(rule.ipBlocks) != 0 {
+		t.Fatalf("%s %s/%s DNS rule has ipBlock peers %#v; every peer must carry both DNS selectors", document.file, document.kind, document.name, rule.ipBlocks)
+	}
+	for _, peer := range rule.peers {
+		if peer.namespaceLabels["kubernetes.io/metadata.name"] != "kube-system" {
+			t.Fatalf("%s %s/%s DNS peer namespaceSelector labels = %#v; want kubernetes.io/metadata.name=kube-system", document.file, document.kind, document.name, peer.namespaceLabels)
+		}
+		if peer.podLabels["k8s-app"] != "kube-dns" {
+			t.Fatalf("%s %s/%s DNS peer podSelector labels = %#v; want k8s-app=kube-dns", document.file, document.kind, document.name, peer.podLabels)
+		}
 	}
 }
 
@@ -3203,6 +3301,9 @@ func parseNetworkPolicyRules(t *testing.T, document *manifestDocument, section s
 
 func parseNetworkPolicyRule(t *testing.T, lines []string, policyNamespace string, peerField string) networkPolicyRule {
 	t.Helper()
+	if err := validateRecognizedNetworkPolicyRuleShape(lines); err != nil {
+		t.Fatalf("unrecognized NetworkPolicy rule shape: %v", err)
+	}
 	var rule networkPolicyRule
 	var peerLines []string
 	inPeers := false
@@ -3252,32 +3353,107 @@ func parseNetworkPolicyRule(t *testing.T, lines []string, policyNamespace string
 	return rule
 }
 
-func appendNetworkPolicyPeerOrIPBlock(t *testing.T, rule *networkPolicyRule, lines []string, policyNamespace string) {
-	t.Helper()
+func validateRecognizedNetworkPolicyRuleShape(lines []string) error {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "cidr: ") {
-			rule.ipBlocks = append(rule.ipBlocks, cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "cidr: "))))
-			return
+		switch {
+		case strings.ContainsAny(trimmed, "{}[]"):
+			return fmt.Errorf("flow-style YAML is not supported: %q", trimmed)
+		case strings.HasPrefix(trimmed, "- port:"):
+			return fmt.Errorf("port-first entries are not supported: %q", trimmed)
+		case strings.HasPrefix(trimmed, "endPort:"):
+			return fmt.Errorf("port ranges are not supported: %q", trimmed)
+		case strings.HasPrefix(trimmed, "matchExpressions:"):
+			return fmt.Errorf("selector expressions are not supported: %q", trimmed)
 		}
+	}
+	return nil
+}
+
+func appendNetworkPolicyPeerOrIPBlock(t *testing.T, rule *networkPolicyRule, lines []string, policyNamespace string) {
+	t.Helper()
+	hasIPBlock := false
+	cidr := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		listValue := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+		if listValue == "ipBlock:" || strings.HasPrefix(listValue, "ipBlock: ") {
+			hasIPBlock = true
+		}
+		if index := strings.Index(listValue, "cidr:"); index >= 0 {
+			value := strings.TrimSpace(listValue[index+len("cidr:"):])
+			value = strings.Trim(value, "{},")
+			cidr = cleanManifestListValue(value)
+		}
+	}
+	if hasIPBlock {
+		rule.ipBlocks = append(rule.ipBlocks, cidr)
+		return
 	}
 	rule.peers = append(rule.peers, parseNetworkPolicyPeer(t, lines, policyNamespace))
 }
 
 func parseNetworkPolicyPeer(t *testing.T, lines []string, policyNamespace string) networkPolicyPeer {
 	t.Helper()
-	peer := networkPolicyPeer{namespace: policyNamespace}
+	peer := networkPolicyPeer{
+		namespace:       policyNamespace,
+		namespaceLabels: map[string]string{},
+		podLabels:       map[string]string{},
+	}
+	selector := ""
+	selectorIndent := -1
+	matchLabelsIndent := -1
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "kubernetes.io/metadata.name: ") {
-			peer.namespace = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "kubernetes.io/metadata.name: ")))
+		isListItem := strings.HasPrefix(trimmed, "- ")
+		listValue := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if isListItem {
+			indent += 2
+		}
+		switch listValue {
+		case "namespaceSelector:":
+			selector = "namespace"
+			selectorIndent = indent
+			matchLabelsIndent = -1
+			continue
+		case "podSelector:":
+			selector = "pod"
+			selectorIndent = indent
+			matchLabelsIndent = -1
+			continue
+		case "matchLabels:":
+			if selector != "" && indent == selectorIndent+2 {
+				matchLabelsIndent = indent
+			}
 			continue
 		}
-		if strings.HasPrefix(trimmed, "app.kubernetes.io/name: ") {
-			peer.podName = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "app.kubernetes.io/name: ")))
+		if selector != "" && indent <= selectorIndent {
+			selector = ""
+			selectorIndent = -1
+			matchLabelsIndent = -1
 		}
-		if strings.HasPrefix(trimmed, "app.kubernetes.io/part-of: ") {
-			peer.podPartOf = cleanManifestListValue(strings.TrimSpace(strings.TrimPrefix(trimmed, "app.kubernetes.io/part-of: ")))
+		if matchLabelsIndent < 0 || indent != matchLabelsIndent+2 {
+			continue
+		}
+		key, value, ok := strings.Cut(listValue, ": ")
+		if !ok {
+			continue
+		}
+		value = cleanManifestListValue(value)
+		if selector == "namespace" {
+			peer.namespaceLabels[key] = value
+			if key == "kubernetes.io/metadata.name" {
+				peer.namespace = value
+			}
+			continue
+		}
+		peer.podLabels[key] = value
+		switch key {
+		case "app.kubernetes.io/name":
+			peer.podName = value
+		case "app.kubernetes.io/part-of":
+			peer.podPartOf = value
 		}
 	}
 	return peer

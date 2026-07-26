@@ -371,25 +371,19 @@ spec:
         - protocol: TCP
           port: 9090
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: tetral-postgres
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 5432
+          port: {{ .Values.network.databasePort }}
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
+{{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
       ports:
+{{- range .Values.network.externalEgressPorts }}
         - protocol: TCP
-          port: 443
+          port: {{ . }}
+{{- end }}
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53

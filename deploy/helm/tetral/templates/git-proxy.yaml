@@ -126,9 +126,7 @@ spec:
     - Egress
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              tetral.ai/network-role: public-ingress
+{{- toYaml .Values.network.publicIngressPeers | nindent 8 }}
       ports:
         - protocol: TCP
           port: 8080
@@ -141,21 +139,19 @@ spec:
           port: 8081
   egress:
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: tetral-postgres
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 5432
+          port: {{ .Values.network.databasePort }}
+{{- if not .Values.cilium.enabled }}
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+{{- end }}
 ---
 {{ if .Values.cilium.enabled }}
 apiVersion: cilium.io/v2
@@ -172,13 +168,13 @@ spec:
       app.kubernetes.io/name: git-proxy
   egress:
     - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: kube-system
-            k8s:k8s-app: kube-dns
+{{- toYaml .Values.network.ciliumDNSEndpointSelectors | nindent 8 }}
       toPorts:
         - ports:
             - port: "53"
               protocol: UDP
+            - port: "53"
+              protocol: TCP
           rules:
             dns:
               - matchPattern: "*"

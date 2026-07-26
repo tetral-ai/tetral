@@ -1,6 +1,68 @@
 namespaces:
   create: false
 
+# Where Tetral's dependencies live is a property of the cluster, not of
+# Tetral, so every such location is a value here rather than a literal in
+# a template: the API server, the database, the ingress controller, the
+# DNS service, and the outbound-HTTPS allowance. The defaults reproduce
+# the canonical manifests, so a cluster shaped like the kubeadm default
+# needs none of them. Each peer list is a plain NetworkPolicy peer list
+# and accepts every peer shape that API allows - except
+# ciliumDNSEndpointSelectors, which is a Cilium endpoint selector and
+# uses Cilium's own label syntax.
+#
+# An empty list is refused at render time. Kubernetes reads an empty peer
+# list as "match everything", so emptying one of these would widen the
+# policy rather than narrow it.
+network:
+  apiServerPeers:
+    - ipBlock:
+        cidr: 10.96.0.1/32
+  databasePeers:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: tetral-postgres
+  # Must match the port in the database DSN carried by the Secrets. Managed
+  # PostgreSQL often does not listen on 5432, and a pooler in front of it
+  # often does not either.
+  databasePort: 5432
+  publicIngressPeers:
+    - namespaceSelector:
+        matchLabels:
+          tetral.ai/network-role: public-ingress
+  # Cluster DNS. Every workload resolves names, so an override that does not
+  # match the cluster's DNS topology - a different namespace, different pod
+  # labels, NodeLocal DNSCache - breaks every service at once rather than one.
+  dnsPeers:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  # The same DNS dependency expressed for Cilium. The CiliumNetworkPolicy
+  # carries the L7 DNS rule that teaches Cilium the addresses behind
+  # git-proxy's toFQDNs allowance, so this selector has to track dnsPeers:
+  # if it points at a pod set that does not exist, DNS still resolves through
+  # the plain NetworkPolicies while git-proxy's GitHub egress is dropped.
+  ciliumDNSEndpointSelectors:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kube-dns
+  # Outbound HTTPS for the four workloads that call third-party APIs (model
+  # providers, the sandbox provider, blob storage, the web reader). The default
+  # is unrestricted because those endpoints are operator-chosen and resolve
+  # dynamically. NetworkPolicy is a union of allows, so this cannot be narrowed
+  # by adding another policy - a deployment that requires an egress gateway or
+  # a fixed provider range narrows it here.
+  externalEgressPeers:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+  # Must match explicit ports in the operator-selected provider, sandbox,
+  # blob, and web endpoint URLs.
+  externalEgressPorts:
+    - 443
+
 cilium:
   enabled: true
 

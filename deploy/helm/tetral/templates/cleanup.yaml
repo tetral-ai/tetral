@@ -72,19 +72,12 @@ spec:
     - Egress
   egress:
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: tetral-postgres
+{{- toYaml .Values.network.databasePeers | nindent 8 }}
       ports:
         - protocol: TCP
-          port: 5432
+          port: {{ .Values.network.databasePort }}
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53

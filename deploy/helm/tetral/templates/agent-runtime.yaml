@@ -219,20 +219,38 @@ spec:
         - protocol: TCP
           port: 9092
     - to:
-        - ipBlock:
-            cidr: 10.96.0.1/32
+{{- toYaml .Values.network.apiServerPeers | nindent 8 }}
       ports:
         - protocol: TCP
           port: 443
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
+{{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+{{- if .Values.cilium.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: agent-runtime-apiserver-egress
+  namespace: tetral-agent-runtime
+  labels:
+    app.kubernetes.io/name: agent-runtime
+    app.kubernetes.io/part-of: tetral
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-runtime
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+{{- end }}

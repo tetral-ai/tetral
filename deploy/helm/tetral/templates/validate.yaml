@@ -1,0 +1,31 @@
+{{/*
+Peer lists are allow-lists, and Kubernetes reads an empty one as "match
+everything": a NetworkPolicy rule whose `to` or `from` renders as `[]` admits
+every destination or source on that port. Narrowing egress therefore cannot be
+expressed by emptying a list - that is the widest setting, not the narrowest -
+so an empty or absent list is refused here rather than rendered into a policy
+that silently permits more than the default did.
+*/}}
+{{- range $key := list "apiServerPeers" "databasePeers" "publicIngressPeers" "dnsPeers" "externalEgressPeers" "ciliumDNSEndpointSelectors" }}
+{{- $peers := get $.Values.network $key }}
+{{- if or (not (kindIs "slice" $peers)) (not $peers) }}
+{{- fail (printf "network.%s must list at least one peer: an empty or absent list renders as an allow-all rule, which is wider than the default it replaces. To restrict traffic, name the peers you permit." $key) }}
+{{- end }}
+{{- range $index, $peer := $peers }}
+{{- if or (not (kindIs "map" $peer)) (not $peer) }}
+{{- fail (printf "network.%s[%d] must be a non-empty peer object: null and empty peers render as an allow-all match." $key $index) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $numericKinds := list "int" "int8" "int16" "int32" "int64" "uint" "uint8" "uint16" "uint32" "uint64" "float32" "float64" }}
+{{- if or (not .Values.network.databasePort) (not (has (kindOf .Values.network.databasePort) $numericKinds)) }}
+{{- fail "network.databasePort must be set: it has to match the port in the database DSN carried by the Secrets." }}
+{{- end }}
+{{- if or (not (kindIs "slice" .Values.network.externalEgressPorts)) (not .Values.network.externalEgressPorts) }}
+{{- fail "network.externalEgressPorts must list at least one port: an empty ports list renders as an all-ports rule. List every explicit port used by the configured provider, sandbox, blob, and web endpoints." }}
+{{- end }}
+{{- range $index, $port := .Values.network.externalEgressPorts }}
+{{- if or (not $port) (not (has (kindOf $port) $numericKinds)) }}
+{{- fail (printf "network.externalEgressPorts[%d] must be a non-zero numeric port: null or non-numeric elements render as an all-ports rule." $index) }}
+{{- end }}
+{{- end }}
