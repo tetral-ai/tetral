@@ -356,3 +356,28 @@ func TestSessionPrepareErrorClassificationSurvivesIntoQueueRow(t *testing.T) {
 		t.Fatalf("unclassified kind = %q; want session_prepare_error", got)
 	}
 }
+
+// The handler can also settle a preparation as a structured failed RESULT
+// instead of returning an error; that path dead-letters on the first attempt
+// and must name the stage and provider detail the same way.
+func TestSessionPrepareFailedResultMessageNamesStageAndDetail(t *testing.T) {
+	full := sessionPrepareFailedResultMessage(sandbox.SessionPrepareResult{
+		Status:        sandbox.SessionPrepareStatusFailed,
+		FailureReason: "sandbox_preparation_failed",
+		FailureStage:  "mount_resources",
+		FailureDetail: "sandbox base directory preparation failed",
+	})
+	if full != "session_prepare failed at mount_resources: sandbox base directory preparation failed" {
+		t.Fatalf("message = %q; want stage and detail", full)
+	}
+	stageOnly := sessionPrepareFailedResultMessage(sandbox.SessionPrepareResult{
+		Status:       sandbox.SessionPrepareStatusFailed,
+		FailureStage: "session_prepare",
+	})
+	if stageOnly != "session_prepare failed at session_prepare" {
+		t.Fatalf("message = %q; want stage-only form", stageOnly)
+	}
+	if bare := sessionPrepareFailedResultMessage(sandbox.SessionPrepareResult{Status: sandbox.SessionPrepareStatusFailed}); bare != "session_prepare failed" {
+		t.Fatalf("message = %q; want bare fallback", bare)
+	}
+}

@@ -171,7 +171,7 @@ func (r *SessionPrepareJobRunner) processJob(ctx context.Context, queueJob *queu
 			JobId:        job.JobID,
 			LeaseToken:   job.LeaseToken,
 			ErrorKind:    errorKind,
-			ErrorMessage: "session_prepare failed",
+			ErrorMessage: sessionPrepareFailedResultMessage(result),
 		}))
 	}
 	if result.Status == sandbox.SessionPrepareStatusWaitingOnMachine {
@@ -275,4 +275,18 @@ func sessionPrepareErrorMessage(err error) string {
 		return "session_prepare failed at " + stage
 	}
 	return "session_prepare handler failed"
+}
+
+// sessionPrepareFailedResultMessage is the structured-failure sibling of
+// sessionPrepareErrorMessage: when the handler settles a preparation as
+// failed (instead of returning an error), the result's stage and provider
+// detail still reach the dead-letter row in the same format.
+func sessionPrepareFailedResultMessage(result sandbox.SessionPrepareResult) string {
+	if result.FailureStage == "" {
+		return "session_prepare failed"
+	}
+	if result.FailureDetail == "" {
+		return "session_prepare failed at " + result.FailureStage
+	}
+	return "session_prepare failed at " + result.FailureStage + ": " + result.FailureDetail
 }

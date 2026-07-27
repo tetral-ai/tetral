@@ -33,6 +33,12 @@ type SessionPrepareRequest struct {
 type SessionPrepareResult struct {
 	Status        string
 	FailureReason string
+	// FailureStage and FailureDetail carry the preparation row's summarized
+	// stage and the provider's safe message into the queue dead-letter row,
+	// so a terminal failure names where and why it died instead of only a
+	// classification.
+	FailureStage  string
+	FailureDetail string
 }
 
 type SessionPreparationStore interface {
@@ -170,7 +176,19 @@ func (s *Service) PrepareSession(ctx context.Context, request SessionPrepareRequ
 		if cleanupErr := s.cleanupFailedSessionPreparationSandbox(ctx, request, failure.FailureReason, now, allowInlineCleanup); cleanupErr != nil {
 			return SessionPrepareResult{}, cleanupErr
 		}
-		return SessionPrepareResult{Status: SessionPrepareStatusFailed, FailureReason: failure.FailureReason}, nil
+		failedResult := SessionPrepareResult{
+			Status:        SessionPrepareStatusFailed,
+			FailureReason: failure.FailureReason,
+			FailureStage:  failure.FailureStage,
+		}
+		var providerErr *ProviderError
+		if errors.As(err, &providerErr) {
+			if providerErr.Stage != "" {
+				failedResult.FailureStage = string(providerErr.Stage)
+			}
+			failedResult.FailureDetail = providerErr.SafeMessage
+		}
+		return failedResult, nil
 	}
 	if result == nil {
 		return SessionPrepareResult{}, errors.New("session preparation returned no sandbox")
@@ -245,7 +263,7 @@ func (s *Service) FailSessionPreparationAfterRetryExhaustion(ctx context.Context
 	if err := s.cleanupFailedSessionPreparationSandbox(ctx, request, failureReason, now, true); err != nil {
 		return SessionPrepareResult{}, err
 	}
-	return SessionPrepareResult{Status: SessionPrepareStatusFailed, FailureReason: failureReason}, nil
+	return SessionPrepareResult{Status: SessionPrepareStatusFailed, FailureReason: failureReason, FailureStage: "session_prepare"}, nil
 }
 
 func (s *Service) cleanupFailedSessionPreparationSandbox(ctx context.Context, request SessionPrepareRequest, failureReason string, now time.Time, allowInlineCleanup bool) error {
