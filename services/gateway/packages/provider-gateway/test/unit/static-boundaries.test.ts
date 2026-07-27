@@ -258,3 +258,15 @@ async function collectTypeScriptFiles(directoryUrl: URL): Promise<readonly strin
 function workspaceRelative(filePath: string): string {
   return relative(serviceRoot.pathname, filePath).split(sep).join("/");
 }
+
+// The platform key writer targets a TIMESTAMPTZ column. Writing now()::text
+// made PostgreSQL reject every insert, and the CLI's generic failure string
+// hid the cause; both halves are pinned here.
+test("platform key writer stores timestamps as timestamps and names unexpected failures", async () => {
+  const script = await readFile(new URL("../../../../scripts/platform-key.ts", import.meta.url), "utf8");
+
+  expect(script).not.toContain("now()::text");
+  expect(script).toContain("now()");
+  expect(script).toContain("error.constructor.name");
+  expect(script).toContain("[REDACTED]");
+});

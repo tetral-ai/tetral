@@ -80,7 +80,7 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
           ${parsed.cacheScope},
           'active',
           NULL,
-          now()::text
+          now()
         )
         ON CONFLICT (key_id) DO UPDATE SET
           provider_id = EXCLUDED.provider_id,
@@ -90,7 +90,7 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
           cache_scope = EXCLUDED.cache_scope,
           status = 'active',
           disabled_reason = NULL,
-          updated_at = now()::text
+          updated_at = now()
         RETURNING key_id
       `;
       assertOneRow(rows, parsed.keyId);
@@ -167,7 +167,7 @@ async function updatePlatformKeyStatus(sql: PlatformKeySQL, command: ParsedStatu
       UPDATE platform_provider_keys
          SET status = 'disabled',
              disabled_reason = ${command.disabledReason ?? "operator_disabled"},
-             updated_at = now()::text
+             updated_at = now()
        WHERE key_id = ${command.keyId}
        RETURNING key_id
     `;
@@ -178,7 +178,7 @@ async function updatePlatformKeyStatus(sql: PlatformKeySQL, command: ParsedStatu
     UPDATE platform_provider_keys
        SET status = 'active',
            disabled_reason = NULL,
-           updated_at = now()::text
+           updated_at = now()
      WHERE key_id = ${command.keyId}
      RETURNING key_id
   `;
@@ -319,8 +319,19 @@ function usageText(): string {
   ].join("\n");
 }
 
+// An unexpected error still names its class and message. Collapsing every
+// non-CLI failure into one fixed string hid a schema type mismatch behind
+// "platform key operation failed" and cost an operator a full debugging cycle;
+// the redaction pass below is what keeps that safe, not the erasure.
 function safeCLIErrorMessage(error: unknown, env: Record<string, string | undefined>): string {
-  let message = error instanceof PlatformKeyCLIError ? error.message : "platform key operation failed";
+  let message: string;
+  if (error instanceof PlatformKeyCLIError) {
+    message = error.message;
+  } else if (error instanceof Error) {
+    message = `platform key operation failed: ${error.constructor.name}: ${error.message}`;
+  } else {
+    message = "platform key operation failed";
+  }
   for (const secret of [env.TETRAL_DATABASE_URL, env.ENGINE_VAULT_KEY]) {
     if (secret !== undefined && secret.length > 0) {
       message = message.split(secret).join("[REDACTED]");
