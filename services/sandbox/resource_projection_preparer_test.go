@@ -1805,3 +1805,65 @@ func (r *recordingPreparationCommandRunner) StagePreparationFile(_ context.Conte
 	r.uploads = append(r.uploads, preparationFileUpload{target: target, remotePath: remotePath, body: string(body)})
 	return r.stageErr
 }
+
+// Daytona executes preparation commands as the runtime user; every operation
+// on the root-owned /skills tree must be sudo'd or the whole materialization
+// dies at its first chown.
+func TestSkillMaterializationCommandRunsPrivilegedStepsUnderSudo(t *testing.T) {
+	command := skillMaterializationCommand([]sandbox.SkillMount{{
+		SkillID:        "skill_test",
+		SkillVersionID: "skill_version_test",
+		Version:        "1",
+		Directory:      "finance",
+		BlobKey:        "skills/ws/skill_test/versions/1/package.zip",
+	}})
+	for _, required := range []string{
+		"sudo mkdir -p /skills\n",
+		"sudo chown root:root /skills\n",
+		"sudo chmod 0755 /skills\n",
+		"sudo rm -rf -- '/skills/finance'\n",
+		"sudo mv -- ",
+		"sudo chown -R root:root '/skills/finance'\n",
+		"sudo find '/skills/finance' -type d -exec chmod 0555 {} +\n",
+		"sudo find '/skills/finance' -type f -exec chmod 0444 {} +\n",
+	} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("skill materialization command missing %q in:\n%s", required, command)
+		}
+	}
+	for _, line := range strings.Split(command, "\n") {
+		if strings.Contains(line, "/skills") && !strings.HasPrefix(line, "sudo ") && !strings.HasPrefix(line, "test ") {
+			t.Fatalf("skill materialization touches /skills unprivileged: %q", line)
+		}
+	}
+	cleanup := skillProjectionCleanupCommand([]sandbox.SkillMount{{Directory: "finance"}})
+	if !strings.Contains(cleanup, "sudo rm -rf -- '/skills/finance'\n") {
+		t.Fatalf("skill cleanup removes /skills content unprivileged:\n%s", cleanup)
+	}
+}
+
+// The preparation runner never surfaces command output, so the caller-side
+// label is what names a failed command in the dead-letter row.
+func TestLabelPreparationCommandErrorNamesCommandInSafeMessage(t *testing.T) {
+	labeled := labelPreparationCommandError(&sandbox.ProviderError{
+		Provider:    "daytona",
+		Stage:       sandbox.StageMountResources,
+		Kind:        sandbox.ProviderErrorUnknown,
+		Retryable:   true,
+		SafeMessage: "daytona preparation command failed",
+	}, "skill_materialization")
+	var providerErr *sandbox.ProviderError
+	if !errors.As(labeled, &providerErr) {
+		t.Fatalf("labeled error lost its provider classification: %v", labeled)
+	}
+	if providerErr.SafeMessage != "skill_materialization: daytona preparation command failed" {
+		t.Fatalf("safe message = %q; want label prefix", providerErr.SafeMessage)
+	}
+	if !providerErr.Retryable || providerErr.Stage != sandbox.StageMountResources {
+		t.Fatalf("labeling changed classification: %+v", providerErr)
+	}
+	plain := labelPreparationCommandError(errors.New("opaque"), "mount_bind_verify")
+	if plain.Error() != "mount_bind_verify: opaque" {
+		t.Fatalf("plain error label = %q", plain.Error())
+	}
+}

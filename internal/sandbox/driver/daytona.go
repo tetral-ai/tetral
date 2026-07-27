@@ -560,6 +560,10 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona preparation command returned no response", nil)
 	}
 	if response.ExitCode != 0 {
+		// Command output is deliberately NOT surfaced: tool errors (rclone
+		// especially) can embed signed URLs or other capability material, and
+		// the no-leak contract is pinned by test. Callers label the error
+		// with the engine-authored command name instead.
 		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona preparation command failed", nil)
 	}
 	return nil

@@ -272,7 +272,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		if err := resourceprojection.RunLocalCopyVerify(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, plan, p.commandTimeout); err != nil {
 			_ = p.cleanupLocalCopyStage(ctx, handle, plan)
 			_ = p.deleteCopiedSessionObjects(ctx, copiedThisAttempt)
-			return sandbox.ResourceSetup{}, err
+			return sandbox.ResourceSetup{}, labelPreparationCommandError(err, "local_copy_verify")
 		}
 		prepared.Files = nil
 		prepared.DeletedFiles = nil
@@ -306,7 +306,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		ReuseExistingCredential: reuseExistingCredential,
 	}, env, p.commandTimeout); err != nil {
 		_ = p.deleteCopiedSessionObjects(ctx, copiedThisAttempt)
-		return sandbox.ResourceSetup{}, err
+		return sandbox.ResourceSetup{}, labelPreparationCommandError(err, "mount_bind_verify")
 	}
 	prepared.Files = nil
 	prepared.DeletedFiles = nil
@@ -338,7 +338,7 @@ func (p *ResourceProjectionPreparer) CompensateSessionResourcePreparation(ctx co
 			return projectionFailureFromError(err)
 		}
 		if err := resourceprojection.RunFileProjectionCompensation(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, plan, p.commandTimeout); err != nil {
-			joined = errors.Join(joined, err)
+			joined = errors.Join(joined, labelPreparationCommandError(err, "file_projection_compensation"))
 		}
 	}
 	if len(setup.Resources.Skills) > 0 {
@@ -418,9 +418,24 @@ func (p *ResourceProjectionPreparer) materializeSkills(ctx context.Context, hand
 		}
 	}
 	if err := p.commandRunner.RunPreparationCommand(ctx, target, skillMaterializationCommand(skills), nil, p.commandTimeout); err != nil {
-		return errors.Join(err, p.cleanupSkills(ctx, handle, skills))
+		return errors.Join(labelPreparationCommandError(err, "skill_materialization"), p.cleanupSkills(ctx, handle, skills))
 	}
 	return nil
+}
+
+// labelPreparationCommandError prepends the engine-authored name of the
+// failing preparation command to a provider error's safe message. The runner
+// deliberately never surfaces command output (it can embed capability
+// material), so the label is what makes a dead-lettered preparation name its
+// culprit.
+func labelPreparationCommandError(err error, label string) error {
+	var providerErr *sandbox.ProviderError
+	if errors.As(err, &providerErr) {
+		labeled := *providerErr
+		labeled.SafeMessage = label + ": " + providerErr.SafeMessage
+		return &labeled
+	}
+	return fmt.Errorf("%s: %w", label, err)
 }
 
 func (p *ResourceProjectionPreparer) skillArchiveForSandbox(ctx context.Context, mount sandbox.SkillMount) ([]byte, error) {
@@ -540,12 +555,15 @@ func normalizedSkillZipToTarGz(body []byte, mount sandbox.SkillMount) ([]byte, e
 }
 
 func skillMaterializationCommand(skills []sandbox.SkillMount) string {
+	// Daytona executes this as the runtime user: every operation on the
+	// root-owned /skills tree runs under sudo, while stage work stays
+	// unprivileged in the runtime-user-owned staging root.
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	b.WriteString("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n")
-	b.WriteString("mkdir -p /skills\n")
-	b.WriteString("chown root:root /skills\n")
-	b.WriteString("chmod 0755 /skills\n")
+	b.WriteString("sudo mkdir -p /skills\n")
+	b.WriteString("sudo chown root:root /skills\n")
+	b.WriteString("sudo chmod 0755 /skills\n")
 	for _, mount := range skills {
 		stage := skillProjectionStagePath(mount)
 		destination := "/skills/" + mount.Directory
@@ -554,11 +572,11 @@ func skillMaterializationCommand(skills []sandbox.SkillMount) string {
 		b.WriteString("mkdir -p -- " + shellQuote(stage+"/extract") + "\n")
 		b.WriteString("tar -xzf " + shellQuote(skillProjectionArchivePath(mount)) + " -C " + shellQuote(stage+"/extract") + "\n")
 		b.WriteString("test -d " + shellQuote(extracted) + "\n")
-		b.WriteString("rm -rf -- " + shellQuote(destination) + "\n")
-		b.WriteString("mv -- " + shellQuote(extracted) + " " + shellQuote(destination) + "\n")
-		b.WriteString("chown -R root:root " + shellQuote(destination) + "\n")
-		b.WriteString("find " + shellQuote(destination) + " -type d -exec chmod 0555 {} +\n")
-		b.WriteString("find " + shellQuote(destination) + " -type f -exec chmod 0444 {} +\n")
+		b.WriteString("sudo rm -rf -- " + shellQuote(destination) + "\n")
+		b.WriteString("sudo mv -- " + shellQuote(extracted) + " " + shellQuote(destination) + "\n")
+		b.WriteString("sudo chown -R root:root " + shellQuote(destination) + "\n")
+		b.WriteString("sudo find " + shellQuote(destination) + " -type d -exec chmod 0555 {} +\n")
+		b.WriteString("sudo find " + shellQuote(destination) + " -type f -exec chmod 0444 {} +\n")
 		b.WriteString("test -r " + shellQuote(destination+"/SKILL.md") + "\n")
 		b.WriteString("rm -rf -- " + shellQuote(stage) + "\n")
 	}
@@ -578,7 +596,7 @@ func skillProjectionCleanupCommand(skills []sandbox.SkillMount) string {
 	b.WriteString("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n")
 	for _, mount := range skills {
 		if directory, err := validateSkillDirectory(mount.Directory); err == nil {
-			b.WriteString("rm -rf -- " + shellQuote("/skills/"+directory) + "\n")
+			b.WriteString("sudo rm -rf -- " + shellQuote("/skills/"+directory) + "\n")
 		}
 		b.WriteString("rm -rf -- " + shellQuote(skillProjectionStagePath(mount)) + "\n")
 	}
@@ -636,7 +654,7 @@ func (p *ResourceProjectionPreparer) cleanupDeletedFiles(ctx context.Context, ha
 	for _, target := range targets {
 		remove := func(ctx context.Context) error {
 			if err := resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, []resourceprojection.DeletedFileCleanupTarget{target}, false, p.commandTimeout); err != nil {
-				return err
+				return labelPreparationCommandError(err, "deleted_file_cleanup")
 			}
 			if target.DestinationKey == "" {
 				return nil
@@ -660,7 +678,10 @@ func (p *ResourceProjectionPreparer) cleanupDeletedFiles(ctx context.Context, ha
 		}
 	}
 	if unmountStaging {
-		return resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, nil, true, p.commandTimeout)
+		if err := resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, nil, true, p.commandTimeout); err != nil {
+			return labelPreparationCommandError(err, "deleted_file_cleanup")
+		}
+		return nil
 	}
 	return nil
 }
