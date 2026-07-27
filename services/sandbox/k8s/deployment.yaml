@@ -63,6 +63,11 @@ spec:
                   name: sandbox-config
                   key: DAYTONA_TARGET
                   optional: true
+            - name: TETRAL_SANDBOX_BASE_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: TETRAL_SANDBOX_BASE_IMAGE
             - name: DAYTONA_API_KEY
               valueFrom:
                 secretKeyRef:

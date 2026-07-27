@@ -42,6 +42,7 @@ func validSandboxSchemaEnv() sandboxEnvMap {
 	return sandboxEnvMap{
 		tetralsandbox.EnvPostgresDSN:         "postgres://runtime@postgres/tetral",
 		tetralsandbox.EnvSandboxDriver:       "daytona",
+		tetralsandbox.EnvSandboxBaseImage:    "ghcr.io/tetral-ai/sandbox:0.1.0-alpha.test",
 		tetralsandbox.EnvDaytonaAPIURL:       "https://daytona.example",
 		tetralsandbox.EnvDaytonaAPIKey:       "test-key",
 		tetralsandbox.EnvQueueGRPCAddress:    "queue:9090",

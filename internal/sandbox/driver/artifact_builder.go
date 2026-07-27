@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	stderrors "errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,9 @@ type DaytonaArtifactBuilder struct {
 }
 
 func NewDaytonaArtifactBuilder(cfg Config) (*DaytonaArtifactBuilder, error) {
+	if cfg.ArtifactBaseImage == "" {
+		return nil, stderrors.New("artifact base image is required")
+	}
 	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
 		APIKey: cfg.DaytonaAPIKey,
 		APIUrl: cfg.DaytonaAPIURL,
@@ -30,16 +34,19 @@ func NewDaytonaArtifactBuilder(cfg Config) (*DaytonaArtifactBuilder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewDaytonaArtifactBuilderForClient(client.Snapshot), nil
+	return NewDaytonaArtifactBuilderForClient(client.Snapshot, cfg.ArtifactBaseImage), nil
 }
 
-func NewDaytonaArtifactBuilderForClient(snapshots daytonaSnapshotCreator) *DaytonaArtifactBuilder {
-	return &DaytonaArtifactBuilder{snapshots: snapshots, baseImage: defaultDaytonaImage}
+func NewDaytonaArtifactBuilderForClient(snapshots daytonaSnapshotCreator, baseImage string) *DaytonaArtifactBuilder {
+	return &DaytonaArtifactBuilder{snapshots: snapshots, baseImage: baseImage}
 }
 
 func (b *DaytonaArtifactBuilder) BuildArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) (sandbox.BuildArtifactResult, error) {
 	if b == nil || b.snapshots == nil {
 		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona artifact builder is unavailable", nil)
+	}
+	if b.baseImage == "" {
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorConfigInvalid, false, 0, "artifact base image is not configured", nil)
 	}
 	if request.WorkspaceID == "" || request.EnvironmentID == "" || request.Generation <= 0 {
 		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorInvalidRequest, false, 0, "environment artifact identity is required", nil)
@@ -125,9 +132,6 @@ func sanitizeSnapshotName(value string) string {
 }
 
 func deterministicArtifactDockerfile(baseImage string, packages sandbox.PackageSetup) string {
-	if baseImage == "" {
-		baseImage = defaultDaytonaImage
-	}
 	lines := []string{"FROM " + baseImage}
 	managers := make([]string, 0, len(packages))
 	for manager, entries := range packages {

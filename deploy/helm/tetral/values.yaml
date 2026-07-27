@@ -100,6 +100,11 @@ secrets:
 daytona:
   bridgeAPIURL: https://daytona.example.internal
   sandboxAPIURL: https://daytona.example.internal/api
+  # Daytona region the platform creates sandboxes in. Daytona Cloud has no
+  # region literally named "default" — asking for one answers "Region not
+  # found" and no sandbox is ever created — so this must name a real region
+  # (Daytona Cloud ships "us" and "eu").
+  target: us
 
 blob:
   endpoint: https://blob.example.internal

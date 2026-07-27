@@ -19,6 +19,7 @@ func validSandboxConfigEnv() configTestEnv {
 	return configTestEnv{ //nolint:gosec // Test env values are fixture credentials only.
 		EnvPostgresDSN:         "postgres://tetral-sandbox@example.invalid/tetral",
 		EnvSandboxDriver:       "daytona",
+		EnvSandboxBaseImage:    "ghcr.io/tetral-ai/sandbox:0.1.0-alpha.test",
 		EnvDaytonaAPIURL:       "https://daytona.example.invalid/api",
 		EnvDaytonaAPIKey:       "daytona-test-key",
 		EnvQueueGRPCAddress:    "queue:9090",
@@ -43,6 +44,7 @@ func TestConfigFromEnvRequiresResourceProjectionAndGitProxySurface(t *testing.T)
 		{name: "parent api token", key: EnvR2ParentAPIToken},
 		{name: "parent access key", key: EnvR2ParentAccessKeyID},
 		{name: "git proxy host", key: EnvGitProxyHost},
+		{name: "sandbox base image", key: EnvSandboxBaseImage},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -9,7 +9,11 @@ metadata:
 data:
   TETRAL_SANDBOX_DRIVER: daytona
   DAYTONA_API_URL: https://daytona.example.internal/api
-  DAYTONA_TARGET: default
+  DAYTONA_TARGET: us
+  # Environment artifact builds start FROM this image; it must be the same
+  # sandbox image this release deploys, or every packages build fails at its
+  # first Dockerfile line.
+  TETRAL_SANDBOX_BASE_IMAGE: ghcr.io/tetral-ai/sandbox:0.1.0-alpha
   TETRAL_QUEUE_GRPC_ADDR: queue.tetral-system.svc.cluster.local:9090
   TETRAL_GIT_PROXY_HOST: git.tetral.example
   TETRAL_SANDBOX_LEASE_HEARTBEAT_INTERVAL: 15s

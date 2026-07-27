@@ -22,6 +22,7 @@ const (
 	EnvPostgresDSN           = "TETRAL_POSTGRES_DSN"
 
 	EnvSandboxDriver                            = "TETRAL_SANDBOX_DRIVER"
+	EnvSandboxBaseImage                         = "TETRAL_SANDBOX_BASE_IMAGE"
 	EnvDaytonaAPIURL                            = "DAYTONA_API_URL"
 	EnvDaytonaTarget                            = "DAYTONA_TARGET"
 	EnvDaytonaAPIKey                            = "DAYTONA_API_KEY" //nolint:gosec // G101: env-var name, not a credential value
@@ -162,9 +163,10 @@ func ConfigFromEnv(env Env) (Config, error) {
 		RcloneVFSMinFree:                  valueOrDefault(env.Getenv(EnvRcloneVFSMinFree), defaultRcloneVFSMinFree),
 		GitProxyHost:                      strings.TrimSpace(env.Getenv(EnvGitProxyHost)),
 		Daytona: driver.Config{
-			DaytonaAPIURL: strings.TrimSpace(env.Getenv(EnvDaytonaAPIURL)),
-			DaytonaTarget: strings.TrimSpace(env.Getenv(EnvDaytonaTarget)),
-			DaytonaAPIKey: strings.TrimSpace(env.Getenv(EnvDaytonaAPIKey)),
+			DaytonaAPIURL:     strings.TrimSpace(env.Getenv(EnvDaytonaAPIURL)),
+			DaytonaTarget:     strings.TrimSpace(env.Getenv(EnvDaytonaTarget)),
+			DaytonaAPIKey:     strings.TrimSpace(env.Getenv(EnvDaytonaAPIKey)),
+			ArtifactBaseImage: strings.TrimSpace(env.Getenv(EnvSandboxBaseImage)),
 		},
 	}
 	if cfg.PostgresDSN == "" {
@@ -181,6 +183,9 @@ func ConfigFromEnv(env Env) (Config, error) {
 	}
 	if cfg.Daytona.DaytonaAPIKey == "" {
 		return Config{}, workload.NewConfigError(EnvDaytonaAPIKey + " is required")
+	}
+	if cfg.Daytona.ArtifactBaseImage == "" {
+		return Config{}, workload.NewConfigError(EnvSandboxBaseImage + " is required")
 	}
 	if cfg.QueueGRPCAddress == "" {
 		return Config{}, workload.NewConfigError(EnvQueueGRPCAddress + " is required")

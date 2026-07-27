@@ -13,7 +13,7 @@ import (
 
 func TestDaytonaArtifactBuilderCreatesSnapshotFromDeterministicDockerfile(t *testing.T) {
 	client := &recordingSnapshotCreator{snapshot: &types.Snapshot{ID: "snapshot_provider_ref", Name: "snapshot_name"}}
-	builder := NewDaytonaArtifactBuilderForClient(client)
+	builder := NewDaytonaArtifactBuilderForClient(client, "ghcr.io/tetral-ai/sandbox:0.1.0-alpha")
 
 	result, err := builder.BuildArtifact(context.Background(), sandbox.BuildArtifactRequest{
 		WorkspaceID:       workspace.ID("ws_test"),
@@ -52,7 +52,7 @@ func TestDaytonaArtifactBuilderCreatesSnapshotFromDeterministicDockerfile(t *tes
 
 func TestDaytonaArtifactBuilderRejectsUnsupportedPackageManagerBeforeProviderCall(t *testing.T) {
 	client := &recordingSnapshotCreator{snapshot: &types.Snapshot{ID: "snapshot_provider_ref"}}
-	builder := NewDaytonaArtifactBuilderForClient(client)
+	builder := NewDaytonaArtifactBuilderForClient(client, "ghcr.io/tetral-ai/sandbox:0.1.0-alpha")
 
 	_, err := builder.BuildArtifact(context.Background(), sandbox.BuildArtifactRequest{
 		WorkspaceID:       workspace.ID("ws_test"),
