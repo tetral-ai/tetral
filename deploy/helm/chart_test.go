@@ -27,8 +27,8 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 	chart := filepath.Join(engineRoot, "deploy", "helm", "tetral")
 
 	canonical := readManifestObjects(t, canonicalManifestPaths(t, engineRoot))
-	if len(canonical) != 62 {
-		t.Fatalf("canonical object count = %d; want 62", len(canonical))
+	if len(canonical) != 61 {
+		t.Fatalf("canonical object count = %d; want 61", len(canonical))
 	}
 
 	rendered := renderChart(t, helm, chart)
@@ -62,7 +62,6 @@ func TestHelmChartDefaultAndTogglesMatchCanonicalManifests(t *testing.T) {
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-agent-runtime|agent-runtime-apiserver-egress",
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|bridge-apiserver-egress",
 		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|gateway-apiserver-egress",
-		"cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress",
 	})
 
 	withEdge := renderChart(t, helm, chart, "edge.enabled=true")
@@ -144,11 +143,11 @@ func TestHelmChartCiliumAPIServerPoliciesAreExact(t *testing.T) {
 func TestHelmChartGitProxyCiliumDNSBranchesAreL7(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
-	rendered := uniqueObjects(t, renderChart(t, helm, chart))
+	rendered := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true"))
 	key := "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
 	policy, ok := rendered[key]
 	if !ok {
-		t.Fatalf("default render missing %s", key)
+		t.Fatalf("git-proxy FQDN-policy render missing %s", key)
 	}
 
 	for branchIndex, branchValue := range requireManifestList(t, policy, "spec", "egress") {
@@ -187,6 +186,67 @@ func TestHelmChartGitProxyCiliumDNSBranchesAreL7(t *testing.T) {
 	}
 }
 
+func TestHelmChartGitProxyFQDNPolicyIsMutuallyExclusive(t *testing.T) {
+	helm := requireHelm(t)
+	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
+	defaults := uniqueObjects(t, renderChart(t, helm, chart))
+	withFQDNPolicy := uniqueObjects(t, renderChart(t, helm, chart, "cilium.gitProxyFQDNPolicy=true"))
+
+	const networkPolicyKey = "networking.k8s.io/v1|NetworkPolicy|tetral-system|git-proxy"
+	const ciliumPolicyKey = "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
+	if _, ok := defaults[ciliumPolicyKey]; ok {
+		t.Fatalf("default render unexpectedly contains %s", ciliumPolicyKey)
+	}
+	if _, ok := withFQDNPolicy[ciliumPolicyKey]; !ok {
+		t.Fatalf("git-proxy FQDN-policy render missing %s", ciliumPolicyKey)
+	}
+	if len(withFQDNPolicy) != len(defaults)+1 {
+		t.Fatalf("git-proxy FQDN-policy object count = %d; want default %d plus one CiliumNetworkPolicy", len(withFQDNPolicy), len(defaults))
+	}
+
+	networkPolicy, ok := withFQDNPolicy[networkPolicyKey]
+	if !ok {
+		t.Fatalf("git-proxy FQDN-policy render missing %s", networkPolicyKey)
+	}
+	wantDatabaseEgress := map[string]any{
+		"to": []any{
+			map[string]any{
+				"podSelector": map[string]any{
+					"matchLabels": map[string]any{"app.kubernetes.io/name": "tetral-postgres"},
+				},
+			},
+		},
+		"ports": []any{
+			map[string]any{"protocol": "TCP", "port": 5432},
+		},
+	}
+	if got := requireManifestList(t, networkPolicy, "spec", "egress"); !reflect.DeepEqual(got, []any{wantDatabaseEgress}) {
+		t.Fatalf("git-proxy FQDN-policy NetworkPolicy egress must be exactly the database rule:\ngot:  %#v\nwant: %#v", got, []any{wantDatabaseEgress})
+	}
+
+	for key, want := range defaults {
+		if key == networkPolicyKey {
+			continue
+		}
+		got, ok := withFQDNPolicy[key]
+		if !ok {
+			t.Errorf("git-proxy FQDN-policy render missing non-target object %s", key)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("git-proxy FQDN-policy toggle changed non-target object %s", key)
+		}
+	}
+	for key := range withFQDNPolicy {
+		if key == ciliumPolicyKey || key == networkPolicyKey {
+			continue
+		}
+		if _, ok := defaults[key]; !ok {
+			t.Errorf("git-proxy FQDN-policy render added unexpected object %s", key)
+		}
+	}
+}
+
 // These six peer lists and two port values are cluster properties, not Tetral
 // properties: a
 // managed database, an ingress that is not a pod, a service CIDR other than
@@ -200,10 +260,7 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
 
-	rendered := renderChart(
-		t,
-		helm,
-		chart,
+	overrideValues := []string{
 		"network.apiServerPeers[0].ipBlock.cidr=172.20.0.1/32",
 		"network.databasePeers[0].ipBlock.cidr=10.7.0.0/16",
 		"network.publicIngressPeers[0].namespaceSelector.matchLabels.tetral\\.ai/network-role=edge-override-fixture",
@@ -212,17 +269,17 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 		"network.ciliumDNSEndpointSelectors[0].matchLabels.k8s\\:k8s-app=cnp-selector-fixture",
 		"network.databasePort=25060",
 		"network.externalEgressPorts[0]=8443",
-	)
+	}
+	rendered := renderChart(t, helm, chart, overrideValues...)
 
 	defaults := map[string]int{
-		"10.96.0.1/32":          0,
-		"tetral-postgres":       0,
-		"public-ingress":        0,
-		"k8s-app: kube-dns":     0,
-		"k8s:k8s-app: kube-dns": 0,
-		"0.0.0.0/0":             0,
-		"port: 5432":            0,
-		"port: 443":             0,
+		"10.96.0.1/32":      0,
+		"tetral-postgres":   0,
+		"public-ingress":    0,
+		"k8s-app: kube-dns": 0,
+		"0.0.0.0/0":         0,
+		"port: 5432":        0,
+		"port: 443":         0,
 	}
 	overrides := map[string]int{
 		"172.20.0.1/32":         0,
@@ -230,7 +287,6 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 		"edge-override-fixture": 0,
 		"dns-override-fixture":  0,
 		"203.0.113.0/24":        0,
-		"cnp-selector-fixture":  0,
 		"port: 25060":           0,
 		"port: 8443":            0,
 	}
@@ -270,60 +326,81 @@ func TestHelmChartNetworkPeersAreOverridable(t *testing.T) {
 		"172.20.0.1/32":         3,
 		"10.7.0.0/16":           9,
 		"edge-override-fixture": 4,
-		"dns-override-fixture":  9,
-		"203.0.113.0/24":        4,
-		"cnp-selector-fixture":  1,
+		"dns-override-fixture":  10,
+		"203.0.113.0/24":        5,
 		"port: 25060":           9,
-		"port: 8443":            4,
+		"port: 8443":            5,
 	}
 	for needle, expected := range want {
 		if overrides[needle] != expected {
 			t.Fatalf("override %q reached %d policies; want %d", needle, overrides[needle], expected)
 		}
 	}
+
+	ciliumValues := append(append([]string(nil), overrideValues...), "cilium.gitProxyFQDNPolicy=true")
+	ciliumRendered := uniqueObjects(t, renderChart(t, helm, chart, ciliumValues...))
+	const ciliumPolicyKey = "cilium.io/v2|CiliumNetworkPolicy|tetral-system|git-proxy-github-egress"
+	ciliumPolicy, ok := ciliumRendered[ciliumPolicyKey]
+	if !ok {
+		t.Fatalf("Cilium selector override render missing %s", ciliumPolicyKey)
+	}
+	encoded, err := yaml.Marshal(ciliumPolicy)
+	if err != nil {
+		t.Fatalf("marshal overridden git-proxy CiliumNetworkPolicy: %v", err)
+	}
+	if got := strings.Count(string(encoded), "k8s:k8s-app: kube-dns"); got != 0 {
+		t.Fatalf("default Cilium DNS selector survived the override %d times; want 0", got)
+	}
+	if got := strings.Count(string(encoded), "cnp-selector-fixture"); got != 1 {
+		t.Fatalf("Cilium DNS selector override reached %d policies; want 1", got)
+	}
 }
 
-func TestHelmChartRejectsEmptyNetworkAllowListsAndPorts(t *testing.T) {
+func TestHelmChartRejectsInvalidNetworkAndGitProxyFQDNPolicyValues(t *testing.T) {
 	helm := requireHelm(t)
 	chart := filepath.Join(engineRoot(t), "deploy", "helm", "tetral")
 
 	for _, test := range []struct {
-		name  string
-		key   string
-		value string
+		name       string
+		values     []string
+		wantInFail string
 	}{
-		{name: "apiServerPeers-empty", key: "apiServerPeers", value: "[]"},
-		{name: "apiServerPeers-null-element", key: "apiServerPeers", value: "[null]"},
-		{name: "apiServerPeers-empty-object", key: "apiServerPeers", value: "[{}]"},
-		{name: "databasePeers-empty", key: "databasePeers", value: "[]"},
-		{name: "databasePeers-null-element", key: "databasePeers", value: "[null]"},
-		{name: "databasePeers-empty-object", key: "databasePeers", value: "[{}]"},
-		{name: "publicIngressPeers-empty", key: "publicIngressPeers", value: "[]"},
-		{name: "publicIngressPeers-null-element", key: "publicIngressPeers", value: "[null]"},
-		{name: "publicIngressPeers-empty-object", key: "publicIngressPeers", value: "[{}]"},
-		{name: "dnsPeers-empty", key: "dnsPeers", value: "[]"},
-		{name: "dnsPeers-null-element", key: "dnsPeers", value: "[null]"},
-		{name: "dnsPeers-empty-object", key: "dnsPeers", value: "[{}]"},
-		{name: "externalEgressPeers-empty", key: "externalEgressPeers", value: "[]"},
-		{name: "externalEgressPeers-null-element", key: "externalEgressPeers", value: "[null]"},
-		{name: "externalEgressPeers-empty-object", key: "externalEgressPeers", value: "[{}]"},
-		{name: "ciliumDNSEndpointSelectors-empty", key: "ciliumDNSEndpointSelectors", value: "[]"},
-		{name: "ciliumDNSEndpointSelectors-null-element", key: "ciliumDNSEndpointSelectors", value: "[null]"},
-		{name: "ciliumDNSEndpointSelectors-empty-object", key: "ciliumDNSEndpointSelectors", value: "[{}]"},
-		{name: "databasePort-null", key: "databasePort", value: "null"},
-		{name: "databasePort-empty-object", key: "databasePort", value: "{}"},
-		{name: "databasePort-list", key: "databasePort", value: "[5432]"},
-		{name: "externalEgressPorts-empty", key: "externalEgressPorts", value: "[]"},
-		{name: "externalEgressPorts-null-element", key: "externalEgressPorts", value: "[null]"},
-		{name: "externalEgressPorts-empty-object", key: "externalEgressPorts", value: "[{}]"},
+		{name: "apiServerPeers-empty", values: []string{"network.apiServerPeers=[]"}, wantInFail: "network.apiServerPeers"},
+		{name: "apiServerPeers-null-element", values: []string{"network.apiServerPeers=[null]"}, wantInFail: "network.apiServerPeers"},
+		{name: "apiServerPeers-empty-object", values: []string{"network.apiServerPeers=[{}]"}, wantInFail: "network.apiServerPeers"},
+		{name: "databasePeers-empty", values: []string{"network.databasePeers=[]"}, wantInFail: "network.databasePeers"},
+		{name: "databasePeers-null-element", values: []string{"network.databasePeers=[null]"}, wantInFail: "network.databasePeers"},
+		{name: "databasePeers-empty-object", values: []string{"network.databasePeers=[{}]"}, wantInFail: "network.databasePeers"},
+		{name: "publicIngressPeers-empty", values: []string{"network.publicIngressPeers=[]"}, wantInFail: "network.publicIngressPeers"},
+		{name: "publicIngressPeers-null-element", values: []string{"network.publicIngressPeers=[null]"}, wantInFail: "network.publicIngressPeers"},
+		{name: "publicIngressPeers-empty-object", values: []string{"network.publicIngressPeers=[{}]"}, wantInFail: "network.publicIngressPeers"},
+		{name: "dnsPeers-empty", values: []string{"network.dnsPeers=[]"}, wantInFail: "network.dnsPeers"},
+		{name: "dnsPeers-null-element", values: []string{"network.dnsPeers=[null]"}, wantInFail: "network.dnsPeers"},
+		{name: "dnsPeers-empty-object", values: []string{"network.dnsPeers=[{}]"}, wantInFail: "network.dnsPeers"},
+		{name: "externalEgressPeers-empty", values: []string{"network.externalEgressPeers=[]"}, wantInFail: "network.externalEgressPeers"},
+		{name: "externalEgressPeers-null-element", values: []string{"network.externalEgressPeers=[null]"}, wantInFail: "network.externalEgressPeers"},
+		{name: "externalEgressPeers-empty-object", values: []string{"network.externalEgressPeers=[{}]"}, wantInFail: "network.externalEgressPeers"},
+		{name: "ciliumDNSEndpointSelectors-empty", values: []string{"network.ciliumDNSEndpointSelectors=[]"}, wantInFail: "network.ciliumDNSEndpointSelectors"},
+		{name: "ciliumDNSEndpointSelectors-null-element", values: []string{"network.ciliumDNSEndpointSelectors=[null]"}, wantInFail: "network.ciliumDNSEndpointSelectors"},
+		{name: "ciliumDNSEndpointSelectors-empty-object", values: []string{"network.ciliumDNSEndpointSelectors=[{}]"}, wantInFail: "network.ciliumDNSEndpointSelectors"},
+		{name: "databasePort-null", values: []string{"network.databasePort=null"}, wantInFail: "network.databasePort"},
+		{name: "databasePort-empty-object", values: []string{"network.databasePort={}"}, wantInFail: "network.databasePort"},
+		{name: "databasePort-list", values: []string{"network.databasePort=[5432]"}, wantInFail: "network.databasePort"},
+		{name: "externalEgressPorts-empty", values: []string{"network.externalEgressPorts=[]"}, wantInFail: "network.externalEgressPorts"},
+		{name: "externalEgressPorts-null-element", values: []string{"network.externalEgressPorts=[null]"}, wantInFail: "network.externalEgressPorts"},
+		{name: "externalEgressPorts-empty-object", values: []string{"network.externalEgressPorts=[{}]"}, wantInFail: "network.externalEgressPorts"},
+		{name: "git-proxy-fqdn-policy-not-boolean", values: []string{`cilium.gitProxyFQDNPolicy="enabled"`}, wantInFail: "cilium.gitProxyFQDNPolicy must be a boolean"},
+		// --set-json replaces the whole cilium map here; the chart currently has
+		// exactly these two keys, so the case fully specifies the intended state.
+		{name: "git-proxy-fqdn-policy-without-cilium", values: []string{`cilium={"enabled":false,"gitProxyFQDNPolicy":true}`}, wantInFail: "cilium.gitProxyFQDNPolicy=true requires cilium.enabled=true"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			output, err := renderChartFailure(t, helm, chart, "network."+test.key+"="+test.value)
+			output, err := renderChartFailure(t, helm, chart, test.values...)
 			if err == nil {
-				t.Fatalf("invalid network.%s=%s rendered successfully", test.key, test.value)
+				t.Fatalf("invalid values %v rendered successfully", test.values)
 			}
-			if !strings.Contains(output, "network."+test.key) {
-				t.Fatalf("invalid network.%s=%s failure does not name the key:\n%s", test.key, test.value, output)
+			if !strings.Contains(output, test.wantInFail) {
+				t.Fatalf("invalid values %v failure does not contain %q:\n%s", test.values, test.wantInFail, output)
 			}
 		})
 	}
@@ -510,9 +587,13 @@ func renderChart(t *testing.T, helm string, chart string, values ...string) []ma
 	return decodeManifestObjects(t, bytes.NewReader(output), "helm template")
 }
 
-func renderChartFailure(t *testing.T, helm string, chart string, value string) (string, error) {
+func renderChartFailure(t *testing.T, helm string, chart string, values ...string) (string, error) {
 	t.Helper()
-	command := exec.Command(helm, "template", "tetral", chart, "--set-json", value) //nolint:gosec // Helm path and chart arguments are test-owned.
+	args := []string{"template", "tetral", chart}
+	for _, value := range values {
+		args = append(args, "--set-json", value)
+	}
+	command := exec.Command(helm, args...) //nolint:gosec // Helm path and chart arguments are test-owned.
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
@@ -662,7 +743,6 @@ func requireCiliumToggleShape(t *testing.T, got []manifestObject, base []manifes
 	gotByKey := uniqueObjects(t, got)
 	baseByKey := uniqueObjects(t, base)
 	removedSet := stringSet(removed)
-	gitProxyKey := "networking.k8s.io/v1|NetworkPolicy|tetral-system|git-proxy"
 
 	if len(gotByKey) != len(baseByKey)-len(removed) {
 		t.Fatalf("cilium-disabled object count = %d; want %d", len(gotByKey), len(baseByKey)-len(removed))
@@ -684,10 +764,6 @@ func requireCiliumToggleShape(t *testing.T, got []manifestObject, base []manifes
 			t.Errorf("cilium-disabled render missing %s", key)
 			continue
 		}
-		if key == gitProxyKey {
-			requireGitProxyL4DNSDifference(t, gotValue, wantValue)
-			continue
-		}
 		if !reflect.DeepEqual(gotValue, wantValue) {
 			t.Errorf("cilium toggle changed non-target object %s", key)
 		}
@@ -696,43 +772,6 @@ func requireCiliumToggleShape(t *testing.T, got []manifestObject, base []manifes
 		if _, ok := baseByKey[key]; !ok {
 			t.Errorf("cilium-disabled render has unexpected %s", key)
 		}
-	}
-}
-
-func requireGitProxyL4DNSDifference(t *testing.T, got map[string]any, base map[string]any) {
-	t.Helper()
-	gotEgress := requireManifestList(t, got, "spec", "egress")
-	baseEgress := requireManifestList(t, base, "spec", "egress")
-	wantDNS := map[string]any{
-		"to": []any{
-			map[string]any{
-				"namespaceSelector": map[string]any{
-					"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"},
-				},
-				"podSelector": map[string]any{
-					"matchLabels": map[string]any{"k8s-app": "kube-dns"},
-				},
-			},
-		},
-		"ports": []any{
-			map[string]any{"protocol": "UDP", "port": 53},
-			map[string]any{"protocol": "TCP", "port": 53},
-		},
-	}
-	var withoutDNS []any
-	matches := 0
-	for _, rule := range gotEgress {
-		if reflect.DeepEqual(rule, wantDNS) {
-			matches++
-			continue
-		}
-		withoutDNS = append(withoutDNS, rule)
-	}
-	if matches != 1 {
-		t.Fatalf("cilium-disabled git-proxy DNS rules = %d; want exactly 1", matches)
-	}
-	if !reflect.DeepEqual(withoutDNS, baseEgress) {
-		t.Fatalf("cilium toggle changed git-proxy beyond the one DNS rule:\ngot without DNS: %#v\nbase: %#v", withoutDNS, baseEgress)
 	}
 }
 

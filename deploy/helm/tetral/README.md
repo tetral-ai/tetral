@@ -1,7 +1,7 @@
 # Tetral Helm chart
 
 This chart installs the same Tetral platform objects as the canonical
-manifests under `deploy/kubernetes`. Default values render those 62 objects
+manifests under `deploy/kubernetes`. Default values render those 61 objects
 without adding Helm-specific labels or annotations to the templates.
 
 ## Prerequisites
@@ -36,25 +36,30 @@ finishes bootstrap after API has created the schema.
    one, and it composes with what the chart ships — Cilium unions its allows
    with the Kubernetes policies — but a `toFQDNs` rule does nothing on its
    own: the same policy must also carry an L7 DNS visibility rule for those
-   pods, the pattern the shipped git-proxy policy already demonstrates.
+   pods. The chart does not provide a managed-database FQDN policy.
    Match `network.databasePort` to the DSN as well; a peer alone does not
    admit a port the policy never names. The database address itself always
    comes from the DSN in the Secrets; the peer list only decides what the
    policy admits.
 
-3. **Install the Cilium CRDs or disable their objects.** Defaults preserve four
-   canonical `CiliumNetworkPolicy` objects: git-proxy's GitHub egress policy
-   and one API-server entity allowance each for agent-runtime, bridge, and
-   gateway. Cilium does not match the Kubernetes API service through an
-   `ipBlock` under the tested policy mode, so the three entity rules admit both
-   the service port 443 and the node-direct port 6443. This behavior was
-   verified on Cilium 1.19.6 with kube-proxy replacement disabled.
+3. **Install the Cilium CRDs or disable their objects.** Defaults preserve
+   three canonical `CiliumNetworkPolicy` objects, one API-server entity
+   allowance each for agent-runtime, bridge, and gateway. Cilium does not
+   match the Kubernetes API service through an `ipBlock` under the tested
+   policy mode, so the three entity rules admit both the service port 443 and
+   the node-direct port 6443. This behavior was verified on Cilium 1.19.6 with
+   kube-proxy replacement disabled.
 
-   A non-Cilium cluster must set `cilium.enabled=false`. That removes all four
-   Cilium objects, restores git-proxy's ordinary L4 DNS rule, and leaves the
-   three workloads' API-server path to `network.apiServerPeers`. The operator
-   must also supply an equivalent GitHub egress allowance or git-proxy cannot
-   operate.
+   A non-Cilium cluster must set `cilium.enabled=false`. That removes the
+   three Cilium objects and leaves those workloads' API-server path to
+   `network.apiServerPeers`.
+
+   `cilium.gitProxyFQDNPolicy=true` is a separate opt-in network-layer GitHub
+   restriction and requires `cilium.enabled=true`. It requires a CNI whose L7
+   DNS interception works. That interception is measured broken on Cilium
+   1.19.6 with k3s, VXLAN, and legacy host routing (upstream
+   cilium/cilium#46284); enabling the flag there makes git-proxy unable to
+   resolve any name.
 
 4. **Install ingress-nginx before enabling the edge.** `edge.enabled=true`
    renders three Ingresses with `ingressClassName: nginx`. Their nginx
@@ -181,20 +186,17 @@ The chart parameterizes only axes already present in the canonical manifests:
   - `publicIngressPeers` — the labelled ingress namespace, in four policies.
     An edge that is not a pod, such as a cloud load balancer, is admitted by
     replacing this with the peer that describes it.
-  - `dnsPeers` — `kube-system` plus `k8s-app=kube-dns`, in nine ordinary
+  - `dnsPeers` — `kube-system` plus `k8s-app=kube-dns`, in ten ordinary
     NetworkPolicies, and
-    `ciliumDNSEndpointSelectors` — the same dependency for the shipped
-    `CiliumNetworkPolicy`. Override them together: the Cilium policy carries
-    the L7 DNS rule that teaches Cilium the addresses behind git-proxy's
-    `toFQDNs` allowance, so overriding only the first leaves DNS working while
-    git-proxy's GitHub egress is dropped. With Cilium enabled, git-proxy DNS
-    uses that L7 rule rather than a parallel L4 allowance; disabling Cilium
-    restores the ordinary DNS rule. One topology neither value reaches is
-    NodeLocal DNSCache, where the resolver runs on the host network: an
-    `ipBlock` for the link-local address expresses it under some CNIs and not
-    under others.
+    `ciliumDNSEndpointSelectors` — the same dependency for the opt-in
+    git-proxy FQDN policy. When `cilium.gitProxyFQDNPolicy=true`, that policy
+    carries the L7 DNS rule that teaches Cilium the addresses behind its
+    `toFQDNs` allowance; override both selectors together. One topology
+    neither value reaches is NodeLocal DNSCache, where the resolver runs on
+    the host network: an `ipBlock` for the link-local address expresses it
+    under some CNIs and not under others.
   - `externalEgressPeers` and `externalEgressPorts` — outbound traffic for the
-    four workloads that reach
+    five workloads that reach
     third-party APIs, unrestricted by default because those endpoints are
     operator-chosen and resolve dynamically, on port 443 by default. If a
     provider, sandbox, blob, or web endpoint URL carries an explicit port,
@@ -208,10 +210,19 @@ The chart parameterizes only axes already present in the canonical manifests:
   The other five `resources:` mappings in the canonical YAML are fixed RBAC
   resource-name lists, not container budgets, so the chart has no values for
   them.
-- `cilium.enabled` controls the four Cilium objects and whether git-proxy's
-  ordinary L4 DNS rule is present. `edge.enabled`, `edge.tlsSecretName`, and
+- `cilium.enabled` controls the three API-server Cilium objects.
+  `cilium.gitProxyFQDNPolicy` adds the opt-in git-proxy Cilium policy and
+  replaces its ordinary DNS and external-HTTPS NetworkPolicy branches with
+  the FQDN restriction. `edge.enabled`, `edge.tlsSecretName`, and
   `namespaces.create` control the other explicitly enumerated optional
   objects.
+
+By default, git-proxy uses `externalEgressPeers`:`externalEgressPorts` like
+the other outbound workloads. Its GitHub-only guarantee is enforced in the
+application layer: the upstream is hardcoded to `https://github.com`, only
+git endpoint route shapes are accepted, and ambient proxy environment
+variables are ignored. Setting `cilium.gitProxyFQDNPolicy=true` restores the
+network-layer FQDN restriction subject to the CNI limitation above.
 
 The gateway and sandbox egress-intent annotations derive hostnames from the
 same non-secret endpoint values as their ConfigMaps. The api and Bridge blob

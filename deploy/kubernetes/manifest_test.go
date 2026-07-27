@@ -208,7 +208,7 @@ var workloadManifests = []workloadManifest{
 		httpPortName: "http",
 		publicFacing: true,
 		autoscaling:  true,
-		ciliumPolicy: true,
+		ciliumPolicy: false,
 		requiredEnvVar: []string{
 			"TETRAL_DATABASE_URL",
 			"ENGINE_VAULT_KEY",
@@ -1222,7 +1222,7 @@ func TestKubernetesManifestEventStreamAndCleanupRestrictEgress(t *testing.T) {
 
 // Every workload that uses plain NetworkPolicy DNS resolves names through the
 // same peer, and the shape has to be the same everywhere. This census covers
-// all nine policies; git-proxy uses its Cilium L7 DNS rule when Cilium is on.
+// all ten policies, including git-proxy's default-off FQDN-policy posture.
 func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
 	documents := readManifestDocuments(t)
 
@@ -1234,6 +1234,7 @@ func TestKubernetesManifestDNSEgressIsUniform(t *testing.T) {
 		{"cleanup.yaml", "cleanup"},
 		{"event-stream.yaml", "event-stream"},
 		{"gateway.yaml", "gateway"},
+		{"git-proxy.yaml", "git-proxy"},
 		{"queue.yaml", "queue"},
 		{"sandbox.yaml", "sandbox"},
 	} {
@@ -1568,8 +1569,13 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 	deployment := requireDocument(t, documents, "git-proxy.yaml", "Deployment", "git-proxy")
 	service := requireDocument(t, documents, "git-proxy.yaml", "Service", "git-proxy")
 	networkPolicy := requireDocument(t, documents, "git-proxy.yaml", "NetworkPolicy", "git-proxy")
-	githubEgressPolicy := requireDocument(t, documents, "git-proxy.yaml", "CiliumNetworkPolicy", "git-proxy-github-egress")
 	hpa := requireDocument(t, documents, "git-proxy.yaml", "HorizontalPodAutoscaler", "git-proxy")
+	for index := range documents {
+		document := &documents[index]
+		if document.file == "git-proxy.yaml" && document.kind == "CiliumNetworkPolicy" {
+			t.Fatalf("git-proxy.yaml unexpectedly contains CiliumNetworkPolicy %s", document.name)
+		}
+	}
 
 	requireContains(t, deployment, "automountServiceAccountToken: false")
 	requireContains(t, deployment, "replicas: 2")
@@ -1607,17 +1613,38 @@ func TestKubernetesManifestGitProxyPinsGitHubEgressAndSecrets(t *testing.T) {
 	requireContains(t, networkPolicy, "tetral.ai/network-role: public-ingress")
 	requireNetworkPolicyIngressEdge(t, networkPolicy, 8081, networkPolicyPeer{namespace: "tetral-system", podPartOf: "tetral"})
 	requireNoBroadNetworkPolicyIngressPeers(t, networkPolicy, 8081)
-	requireNetworkPolicyEgressEdge(t, networkPolicy, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
-	requireNoBroadNetworkPolicyEgressPeers(t, networkPolicy, 443)
-	requireNotContains(t, networkPolicy, "0.0.0.0/0")
-	requireContains(t, githubEgressPolicy, "endpointSelector:\n    matchLabels:\n      app.kubernetes.io/name: git-proxy")
-	requireContains(t, githubEgressPolicy, "toEndpoints:\n        - matchLabels:\n            k8s:io.kubernetes.pod.namespace: kube-system\n            k8s:k8s-app: kube-dns")
-	requireContains(t, githubEgressPolicy, "ports:\n            - port: \"53\"\n              protocol: UDP\n            - port: \"53\"\n              protocol: TCP\n          rules:\n            dns:\n              - matchPattern: \"*\"")
-	requireContains(t, githubEgressPolicy, "toFQDNs:\n        - matchName: github.com")
-	requireContains(t, githubEgressPolicy, "port: \"443\"\n              protocol: TCP")
-	requireNotContains(t, githubEgressPolicy, "toFQDNs:\n        - matchPattern:")
-	for _, forbidden := range []string{"toEntities:", "0.0.0.0/0"} {
-		requireNotContains(t, githubEgressPolicy, forbidden)
+	egressRules := parseNetworkPolicyEgressRules(t, networkPolicy)
+	wantEgressRules := []networkPolicyRule{
+		{
+			ports:      []int{5432},
+			transports: []networkPolicyTransport{{protocol: "TCP", port: 5432}},
+			peers: []networkPolicyPeer{{
+				namespace:       "tetral-system",
+				podName:         "tetral-postgres",
+				namespaceLabels: map[string]string{},
+				podLabels:       map[string]string{"app.kubernetes.io/name": "tetral-postgres"},
+			}},
+		},
+		{
+			ports: []int{53, 53},
+			transports: []networkPolicyTransport{
+				{protocol: "UDP", port: 53},
+				{protocol: "TCP", port: 53},
+			},
+			peers: []networkPolicyPeer{{
+				namespace:       "kube-system",
+				namespaceLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+				podLabels:       map[string]string{"k8s-app": "kube-dns"},
+			}},
+		},
+		{
+			ports:      []int{443},
+			transports: []networkPolicyTransport{{protocol: "TCP", port: 443}},
+			ipBlocks:   []string{"0.0.0.0/0"},
+		},
+	}
+	if !reflect.DeepEqual(egressRules, wantEgressRules) {
+		t.Fatalf("git-proxy NetworkPolicy egress differs from the exact database, DNS, and external-HTTPS shape:\ngot:  %#v\nwant: %#v", egressRules, wantEgressRules)
 	}
 	requireContains(t, hpa, "apiVersion: autoscaling/v2")
 	requireContains(t, hpa, "scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: git-proxy")

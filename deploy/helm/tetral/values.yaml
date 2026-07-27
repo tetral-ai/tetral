@@ -40,21 +40,20 @@ network:
       podSelector:
         matchLabels:
           k8s-app: kube-dns
-  # The same DNS dependency expressed for Cilium. The CiliumNetworkPolicy
-  # carries the L7 DNS rule that teaches Cilium the addresses behind
-  # git-proxy's toFQDNs allowance, so this selector has to track dnsPeers:
-  # if it points at a pod set that does not exist, DNS still resolves through
-  # the plain NetworkPolicies while git-proxy's GitHub egress is dropped.
+  # The same DNS dependency expressed for the opt-in git-proxy FQDN policy.
+  # When cilium.gitProxyFQDNPolicy is enabled, its CiliumNetworkPolicy carries
+  # the L7 DNS rule that teaches Cilium the addresses behind the toFQDNs
+  # allowance, so this selector has to track dnsPeers.
   ciliumDNSEndpointSelectors:
     - matchLabels:
         k8s:io.kubernetes.pod.namespace: kube-system
         k8s:k8s-app: kube-dns
-  # Outbound HTTPS for the four workloads that call third-party APIs (model
-  # providers, the sandbox provider, blob storage, the web reader). The default
-  # is unrestricted because those endpoints are operator-chosen and resolve
-  # dynamically. NetworkPolicy is a union of allows, so this cannot be narrowed
-  # by adding another policy - a deployment that requires an egress gateway or
-  # a fixed provider range narrows it here.
+  # Outbound HTTPS for the five workloads that call third-party APIs (model
+  # providers, the sandbox provider, blob storage, the web reader, and
+  # git-proxy). The default is unrestricted because those endpoints are
+  # operator-chosen and resolve dynamically. NetworkPolicy is a union of
+  # allows, so this cannot be narrowed by adding another policy - a deployment
+  # that requires an egress gateway or a fixed provider range narrows it here.
   externalEgressPeers:
     - ipBlock:
         cidr: 0.0.0.0/0
@@ -65,6 +64,11 @@ network:
 
 cilium:
   enabled: true
+  # Opt-in network-layer GitHub restriction for git-proxy. This requires a CNI
+  # whose L7 DNS interception works. It is measured broken on Cilium 1.19.6
+  # with k3s, VXLAN, and legacy host routing (cilium/cilium#46284); enabling it
+  # there makes git-proxy unable to resolve any name.
+  gitProxyFQDNPolicy: false
 
 edge:
   enabled: false

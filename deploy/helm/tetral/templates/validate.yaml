@@ -29,3 +29,9 @@ that silently permits more than the default did.
 {{- fail (printf "network.externalEgressPorts[%d] must be a non-zero numeric port: null or non-numeric elements render as an all-ports rule." $index) }}
 {{- end }}
 {{- end }}
+{{- if not (kindIs "bool" .Values.cilium.gitProxyFQDNPolicy) }}
+{{- fail "cilium.gitProxyFQDNPolicy must be a boolean." }}
+{{- end }}
+{{- if and .Values.cilium.gitProxyFQDNPolicy (not .Values.cilium.enabled) }}
+{{- fail "cilium.gitProxyFQDNPolicy=true requires cilium.enabled=true." }}
+{{- end }}

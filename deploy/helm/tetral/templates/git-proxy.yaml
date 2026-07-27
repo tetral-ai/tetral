@@ -143,7 +143,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.network.databasePort }}
-{{- if not .Values.cilium.enabled }}
+{{- if not .Values.cilium.gitProxyFQDNPolicy }}
     - to:
 {{- toYaml .Values.network.dnsPeers | nindent 8 }}
       ports:
@@ -151,9 +151,16 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    - to:
+{{- toYaml .Values.network.externalEgressPeers | nindent 8 }}
+      ports:
+{{- range .Values.network.externalEgressPorts }}
+        - protocol: TCP
+          port: {{ . }}
 {{- end }}
+{{- end }}
+{{- if .Values.cilium.gitProxyFQDNPolicy }}
 ---
-{{ if .Values.cilium.enabled }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -184,7 +191,7 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
-{{ end }}
+{{- end }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
