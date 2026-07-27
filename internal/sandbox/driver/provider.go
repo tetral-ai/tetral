@@ -21,10 +21,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
-const (
-	DaytonaProviderName = "daytona"
-	defaultDaytonaImage = "ghcr.io/tetral-ai/sandbox:0.1.0-alpha"
-)
+const DaytonaProviderName = "daytona"
 
 type DaytonaLifecycleProvider struct {
 	client                    daytonaLifecycleClient
@@ -275,18 +272,23 @@ func canonicalSandboxBaseDirectoryCommand() string {
 		"/tmp/tetral-runtime",
 		"/tmp/tetral-runtime/rclone-cache",
 	}
+	// Every install runs under sudo: Daytona executes commands as the sandbox
+	// user (RuntimeUser, non-root), which cannot create directories under
+	// root-owned /mnt or chown anything to root. The sandbox image guarantees
+	// the runtime user passwordless sudo; the projection mount and teardown
+	// scripts rely on the same contract.
 	parts := make([]string, 0, len(writableRoots)+len(readOnlyProjectionRoots)+len(internalRoots)+len(runtimeRoots))
 	for _, root := range writableRoots {
-		parts = append(parts, "install -d -m 0755 -o "+shellQuote(RuntimeUser)+" -g "+shellQuote(RuntimeUser)+" "+shellQuote(root))
+		parts = append(parts, "sudo install -d -m 0755 -o "+shellQuote(RuntimeUser)+" -g "+shellQuote(RuntimeUser)+" "+shellQuote(root))
 	}
 	for _, root := range readOnlyProjectionRoots {
-		parts = append(parts, "install -d -m 0755 -o root -g root "+shellQuote(root))
+		parts = append(parts, "sudo install -d -m 0755 -o root -g root "+shellQuote(root))
 	}
 	for _, root := range internalRoots {
-		parts = append(parts, "install -d -m 0700 -o root -g root "+shellQuote(root))
+		parts = append(parts, "sudo install -d -m 0700 -o root -g root "+shellQuote(root))
 	}
 	for _, root := range runtimeRoots {
-		parts = append(parts, "install -d -m 0700 -o "+shellQuote(RuntimeUser)+" -g "+shellQuote(RuntimeUser)+" "+shellQuote(root))
+		parts = append(parts, "sudo install -d -m 0700 -o "+shellQuote(RuntimeUser)+" -g "+shellQuote(RuntimeUser)+" "+shellQuote(root))
 	}
 	return strings.Join(parts, " && ")
 }

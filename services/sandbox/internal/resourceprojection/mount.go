@@ -91,7 +91,9 @@ func MountBindVerifyCommand(plan Plan, config MountBindVerifyCommandConfig) stri
 		b.WriteString("EOF\n")
 		b.WriteString("chmod 0600 \"$RCLONE_CONFIG\"\n")
 	}
-	b.WriteString("install -d -m 0755 \"$STAGING\"\n")
+	// The staging root lives under root-owned /mnt, so creating it needs sudo
+	// like every other privileged step in this script.
+	b.WriteString("sudo install -d -m 0755 \"$STAGING\"\n")
 	if config.ForceRemount {
 		writeLiveRotationTeardown(&b, bindActions)
 	}

@@ -20,6 +20,31 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
 
+// innerShellScript unwraps the `sudo sh -c '<script>'` privilege wrapper so
+// assertions and local executions target the inner chain, whose semantics the
+// wrapper must not change. Non-wrapped commands pass through unchanged.
+func innerShellScript(t *testing.T, command string) string {
+	t.Helper()
+	const prefix = "sudo sh -c "
+	if !strings.HasPrefix(command, prefix) {
+		return command
+	}
+	quoted := strings.TrimPrefix(command, prefix)
+	if len(quoted) < 2 || !strings.HasPrefix(quoted, "'") || !strings.HasSuffix(quoted, "'") {
+		t.Fatalf("sudo sh -c payload is not single-quoted: %q", command)
+	}
+	return strings.ReplaceAll(quoted[1:len(quoted)-1], `'"'"'`, `'`)
+}
+
+func innerJoinedCommands(t *testing.T, commands []string) string {
+	t.Helper()
+	inner := make([]string, 0, len(commands))
+	for _, command := range commands {
+		inner = append(inner, innerShellScript(t, command))
+	}
+	return strings.Join(inner, "\n")
+}
+
 func TestDaytonaHelperExecutorProjectsMemoryUpsertWithStagedRename(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
@@ -43,16 +68,20 @@ func TestDaytonaHelperExecutorProjectsMemoryUpsertWithStagedRename(t *testing.T)
 		!strings.HasPrefix(client.fileSystem.uploads[0].path, client.fileSystem.created[0].path+"/f") {
 		t.Fatalf("uploads = %+v; want staged content upload", client.fileSystem.uploads)
 	}
-	joined := strings.Join(client.process.commands, "\n")
+	for _, command := range client.process.commands {
+		if !strings.HasPrefix(command, "sudo ") {
+			t.Fatalf("memory projection command runs unprivileged: %q", command)
+		}
+	}
+	joined := innerJoinedCommands(t, client.process.commands)
 	for _, required := range []string{
-		"chown root:root '/mnt/memory/.staging' && chmod 0700 '/mnt/memory/.staging'",
-		"chown root:root '" + client.fileSystem.created[0].path + "' && chmod 0700 '" + client.fileSystem.created[0].path + "'",
+		"install -d -m 0700 -o 'daytona' -g 'daytona' '/mnt/memory/.staging'",
 		"mkdir -p '/mnt/memory/project/notes'",
 		"if [ -e '/mnt/memory/project/notes/todo.md' ] && [ ! -f '/mnt/memory/project/notes/todo.md' ]; then echo 'memory projection target is not a regular file' >&2; exit 1; fi",
 		"chown root:root '" + client.fileSystem.uploads[0].path + "'",
 		"chmod 0644 '" + client.fileSystem.uploads[0].path + "'",
 		"mv -f '" + client.fileSystem.uploads[0].path + "' '/mnt/memory/project/notes/todo.md'",
-		"rm -rf '" + client.fileSystem.created[0].path + "'",
+		"rm -rf -- '" + client.fileSystem.created[0].path + "'",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("commands = %s; missing %s", joined, required)
@@ -75,7 +104,7 @@ func TestDaytonaHelperExecutorGuardsMemoryUpsertTargetKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RefreshMemoryProjection upsert: %v", err)
 	}
-	joined := strings.Join(client.process.commands, "\n")
+	joined := innerJoinedCommands(t, client.process.commands)
 	if !strings.Contains(joined, "if [ -e '/mnt/memory/project/a' ] && [ ! -f '/mnt/memory/project/a' ]; then echo 'memory projection target is not a regular file' >&2; exit 1; fi") {
 		t.Fatalf("commands = %s; missing target kind guard", joined)
 	}
@@ -95,7 +124,7 @@ func TestDaytonaHelperExecutorProjectsMemoryRemoveWithoutTouchingMountRoot(t *te
 	if len(client.fileSystem.created) != 0 || len(client.fileSystem.uploads) != 0 {
 		t.Fatalf("remove created/uploaded staging data: created=%+v uploads=%+v", client.fileSystem.created, client.fileSystem.uploads)
 	}
-	joined := strings.Join(client.process.commands, "\n")
+	joined := innerJoinedCommands(t, client.process.commands)
 	for _, required := range []string{
 		"rm -f '/mnt/memory/project/a/b/c.txt'",
 		"rmdir '/mnt/memory/project/a/b'",
@@ -143,7 +172,7 @@ func TestDaytonaHelperExecutorTreatsDirectoryRemoveAsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RefreshMemoryProjection remove directory: %v", err)
 	}
-	joined := strings.Join(client.process.commands, "\n")
+	joined := innerJoinedCommands(t, client.process.commands)
 	for _, required := range []string{
 		"if [ -f '/mnt/memory/project/a/b' ]; then rm -f '/mnt/memory/project/a/b'",
 		"elif [ -d '/mnt/memory/project/a/b' ] && [ ! -L '/mnt/memory/project/a/b' ]; then :; elif",
@@ -173,7 +202,7 @@ func TestDaytonaHelperExecutorRemovesDirectorySymlinkWithoutTouchingTarget(t *te
 		t.Fatalf("create directory symlink: %v", err)
 	}
 
-	if err := exec.Command("bash", "-c", memoryProjectionRemoveCommand(mountPath, finalPath)).Run(); err != nil {
+	if err := exec.Command("bash", "-c", innerShellScript(t, memoryProjectionRemoveCommand(mountPath, finalPath))).Run(); err != nil {
 		t.Fatalf("remove directory symlink command: %v", err)
 	}
 	if _, err := os.Lstat(finalPath); !os.IsNotExist(err) {
@@ -193,7 +222,7 @@ func TestDaytonaHelperExecutorDeletesExistingMemoryFileRemove(t *testing.T) {
 	if err := os.WriteFile(filePath, []byte("stale"), 0o644); err != nil {
 		t.Fatalf("write stale file: %v", err)
 	}
-	if err := exec.Command("bash", "-c", memoryProjectionRemoveCommand(mountPath, filePath)).Run(); err != nil {
+	if err := exec.Command("bash", "-c", innerShellScript(t, memoryProjectionRemoveCommand(mountPath, filePath))).Run(); err != nil {
 		t.Fatalf("remove existing file command: %v", err)
 	}
 	if _, err := os.Stat(filePath); !errors.Is(err, os.ErrNotExist) {
@@ -215,7 +244,7 @@ func TestDaytonaHelperExecutorTreatsDescendantUnderFileRemoveAsNoOp(t *testing.T
 	if err != nil {
 		t.Fatalf("RefreshMemoryProjection remove descendant under file: %v", err)
 	}
-	joined := strings.Join(client.process.commands, "\n")
+	joined := innerJoinedCommands(t, client.process.commands)
 	for _, required := range []string{
 		"ANCESTOR='/mnt/memory/project/a/b'",
 		"while [ \"$ANCESTOR\" != '/mnt/memory/project' ] && [ ! -e \"$ANCESTOR\" ]; do ANCESTOR=$(dirname \"$ANCESTOR\"); done",
@@ -260,9 +289,14 @@ func TestDaytonaHelperExecutorMaterializesMemoryStoreSnapshot(t *testing.T) {
 	if !strings.Contains(manifest, testSHA256Hex("hello")+"  ./notes/todo.md") {
 		t.Fatalf("manifest = %q; want durable content hash and projection path", manifest)
 	}
-	joined := strings.Join(client.process.commands, "\n")
+	for _, command := range client.process.commands {
+		if !strings.HasPrefix(command, "sudo ") {
+			t.Fatalf("memory materialization command runs unprivileged: %q", command)
+		}
+	}
+	joined := innerJoinedCommands(t, client.process.commands)
 	for _, required := range []string{
-		"chown root:root '" + client.fileSystem.created[0].path + "' && chmod 0700 '" + client.fileSystem.created[0].path + "'",
+		"install -d -m 0700 -o 'daytona' -g 'daytona' '/mnt/memory/.staging'",
 		"sha256sum --check --quiet",
 		"chown -R root:root",
 		"find '" + client.fileSystem.created[0].path + "/extract' -type d -exec chmod 0755 {} +",
@@ -283,7 +317,7 @@ func TestDaytonaHelperExecutorMaterializesMemoryStoreSnapshot(t *testing.T) {
 	if len(emptyClient.fileSystem.uploads) != 0 {
 		t.Fatalf("empty store uploads = %+v; want none", emptyClient.fileSystem.uploads)
 	}
-	emptyCommand := strings.Join(emptyClient.process.commands, "\n")
+	emptyCommand := innerJoinedCommands(t, emptyClient.process.commands)
 	if !strings.Contains(emptyCommand, "rm -rf '/mnt/memory/empty'") ||
 		!strings.Contains(emptyCommand, "mkdir -p '/mnt/memory/empty'") ||
 		!strings.Contains(emptyCommand, "chmod 0755 '/mnt/memory/empty'") {
@@ -311,8 +345,8 @@ func TestDaytonaHelperExecutorRemovesDeletedMemoryStoreTree(t *testing.T) {
 	if err := executor.RemoveMemoryStore(context.Background(), "provider_memory_delete", sandbox.MemoryStoreMount{MountPath: "/mnt/memory/project"}); err != nil {
 		t.Fatalf("RemoveMemoryStore: %v", err)
 	}
-	if got := strings.Join(client.process.commands, "\n"); !strings.Contains(got, "rm -rf '/mnt/memory/project'") {
-		t.Fatalf("remove command = %q; want whole-store rm -rf", got)
+	if got := strings.Join(client.process.commands, "\n"); !strings.Contains(got, "sudo rm -rf -- '/mnt/memory/project'") {
+		t.Fatalf("remove command = %q; want privileged whole-store rm -rf", got)
 	}
 }
 

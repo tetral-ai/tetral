@@ -17,15 +17,20 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
 
-// memoryProjectionStagingRoot is the root-owned (0700) staging directory for
-// projection swaps. It is a sibling of the store mounts and never inside any
-// mount_path (store slugs cannot begin with a dot). It bounds where staged trees
-// are built. The value must share the projection's filesystem so that every mv
-// into a mount is an atomic rename(2): /tmp is forbidden here because it may be a
-// tmpfs, where mv degrades to copy+unlink and can expose partial bytes to a reader.
+// memoryProjectionStagingRoot is the staging directory for projection swaps.
+// It is a sibling of the store mounts and never inside any mount_path (store
+// slugs cannot begin with a dot). It bounds where staged trees are built. The
+// value must share the projection's filesystem so that every mv into a mount
+// is an atomic rename(2): /tmp is forbidden here because it may be a tmpfs,
+// where mv degrades to copy+unlink and can expose partial bytes to a reader.
+// The root is created via sudo but owned by the runtime user (0700): Daytona's
+// filesystem transport operates as the runtime user, so uploads into the stage
+// are only possible under runtime-user ownership. Staged trees are frozen to
+// root ownership before the swap, and the in-sandbox sha256sum check against
+// the engine-authored manifest gates the swap.
 // UPDATE-WITH: memoryProjectionMountPath / validateMemoryStoreMountPath (which
 // reject mounts overlapping this path); the staging setup in
-// secureMemoryProjectionStageCommand.
+// memoryProjectionStageRootCommand.
 const memoryProjectionStagingRoot = "/mnt/memory/.staging"
 
 // Memory projection driver — two command sequences, one DaytonaHelperExecutor
@@ -71,12 +76,12 @@ func (e *DaytonaHelperExecutor) MaterializeMemoryStore(ctx context.Context, mate
 	files := append([]sandbox.MemorySnapshotFile(nil), materialization.Files...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	if len(files) == 0 {
-		command := strings.Join([]string{
+		command := sudoShellCommand(strings.Join([]string{
 			"rm -rf " + shellQuote(mountPath),
 			"mkdir -p " + shellQuote(mountPath),
 			"chown root:root " + shellQuote(mountPath),
 			"chmod 0755 " + shellQuote(mountPath),
-		}, " && ")
+		}, " && "))
 		return e.executeMemoryProjectionCommand(ctx, sandboxHandle, command)
 	}
 	for _, file := range files {
@@ -89,16 +94,22 @@ func (e *DaytonaHelperExecutor) MaterializeMemoryStore(ctx context.Context, mate
 		return err
 	}
 	stage := memoryProjectionStagePath("materialize")
-	if err := sandboxHandle.FileSystem.CreateFolder(ctx, stage, options.WithMode("0700")); err != nil {
+	// The stage root must exist before the runtime-user filesystem transport
+	// can create the stage inside it, so the sudo'd root preparation runs
+	// first.
+	if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, memoryProjectionStageRootCommand()); err != nil {
 		return err
 	}
-	if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, secureMemoryProjectionStageCommand(stage)); err != nil {
+	if err := sandboxHandle.FileSystem.CreateFolder(ctx, stage, options.WithMode("0700")); err != nil {
 		return err
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = sandboxHandle.FileSystem.DeleteFile(context.WithoutCancel(ctx), stage, true)
+			// Cleanup goes through sudo rather than the filesystem transport:
+			// after the freeze the staged tree is root-owned and the
+			// runtime-user transport can no longer delete it.
+			_ = e.executeMemoryProjectionCommand(context.WithoutCancel(ctx), sandboxHandle, "sudo rm -rf -- "+shellQuote(stage))
 		}
 	}()
 	if err := sandboxHandle.FileSystem.UploadFileStream(ctx, bytes.NewReader(archive), stage+"/store.tar.gz"); err != nil {
@@ -107,7 +118,7 @@ func (e *DaytonaHelperExecutor) MaterializeMemoryStore(ctx context.Context, mate
 	if err := sandboxHandle.FileSystem.UploadFileStream(ctx, bytes.NewReader(manifest), stage+"/SHA256SUMS"); err != nil {
 		return err
 	}
-	command := strings.Join([]string{
+	command := sudoShellCommand(strings.Join([]string{
 		"mkdir -p " + shellQuote(stage+"/extract"),
 		"tar -xzf " + shellQuote(stage+"/store.tar.gz") + " -C " + shellQuote(stage+"/extract"),
 		"(cd " + shellQuote(stage+"/extract") + " && sha256sum --check --quiet " + shellQuote(stage+"/SHA256SUMS") + ")",
@@ -118,7 +129,7 @@ func (e *DaytonaHelperExecutor) MaterializeMemoryStore(ctx context.Context, mate
 		"rm -rf " + shellQuote(mountPath),
 		"mv -T " + shellQuote(stage+"/extract") + " " + shellQuote(mountPath),
 		"rm -rf " + shellQuote(stage),
-	}, " && ")
+	}, " && "))
 	if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, command); err != nil {
 		return err
 	}
@@ -135,7 +146,7 @@ func (e *DaytonaHelperExecutor) RemoveMemoryStore(ctx context.Context, providerS
 	if err != nil {
 		return err
 	}
-	return e.executeMemoryProjectionCommand(ctx, sandboxHandle, "rm -rf "+shellQuote(mountPath))
+	return e.executeMemoryProjectionCommand(ctx, sandboxHandle, "sudo rm -rf -- "+shellQuote(mountPath))
 }
 
 func (e *DaytonaHelperExecutor) RefreshMemoryProjection(ctx context.Context, refresh MemoryProjectionRefresh) error {
@@ -150,7 +161,7 @@ func (e *DaytonaHelperExecutor) RefreshMemoryProjection(ctx context.Context, ref
 	stageCreated := false
 	defer func() {
 		if stageCreated {
-			_ = sandboxHandle.FileSystem.DeleteFile(context.WithoutCancel(ctx), stage, true)
+			_ = e.executeMemoryProjectionCommand(context.WithoutCancel(ctx), sandboxHandle, "sudo rm -rf -- "+shellQuote(stage))
 		}
 	}()
 	uploadIndex := 0
@@ -166,10 +177,10 @@ func (e *DaytonaHelperExecutor) RefreshMemoryProjection(ctx context.Context, ref
 			switch op.Kind {
 			case "upsert":
 				if !stageCreated {
-					if err := sandboxHandle.FileSystem.CreateFolder(ctx, stage, options.WithMode("0700")); err != nil {
+					if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, memoryProjectionStageRootCommand()); err != nil {
 						return err
 					}
-					if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, secureMemoryProjectionStageCommand(stage)); err != nil {
+					if err := sandboxHandle.FileSystem.CreateFolder(ctx, stage, options.WithMode("0700")); err != nil {
 						return err
 					}
 					stageCreated = true
@@ -180,14 +191,14 @@ func (e *DaytonaHelperExecutor) RefreshMemoryProjection(ctx context.Context, ref
 					return err
 				}
 				finalPath := mountPath + op.RelativePath
-				command := strings.Join([]string{
+				command := sudoShellCommand(strings.Join([]string{
 					"umask 022",
 					"mkdir -p " + shellQuote(path.Dir(finalPath)),
 					"if [ -e " + shellQuote(finalPath) + " ] && [ ! -f " + shellQuote(finalPath) + " ]; then echo 'memory projection target is not a regular file' >&2; exit 1; fi",
 					"chown root:root " + shellQuote(stagedPath),
 					"chmod 0644 " + shellQuote(stagedPath),
 					"mv -f " + shellQuote(stagedPath) + " " + shellQuote(finalPath),
-				}, " && ")
+				}, " && "))
 				if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, command); err != nil {
 					return err
 				}
@@ -203,7 +214,7 @@ func (e *DaytonaHelperExecutor) RefreshMemoryProjection(ctx context.Context, ref
 		}
 	}
 	if stageCreated {
-		if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, "rm -rf "+shellQuote(stage)); err != nil {
+		if err := e.executeMemoryProjectionCommand(ctx, sandboxHandle, "sudo rm -rf -- "+shellQuote(stage)); err != nil {
 			return err
 		}
 		stageCreated = false
@@ -217,19 +228,27 @@ func memoryProjectionRemoveCommand(mountPath string, finalPath string) string {
 		parts = append(parts, "(rmdir "+shellQuote(dir)+" || true)")
 	}
 	removeExactFile := strings.Join(parts, " && ")
-	return strings.Join([]string{
+	return sudoShellCommand(strings.Join([]string{
 		"ANCESTOR=" + shellQuote(finalPath),
 		"while [ \"$ANCESTOR\" != " + shellQuote(mountPath) + " ] && [ ! -e \"$ANCESTOR\" ]; do ANCESTOR=$(dirname \"$ANCESTOR\"); done",
 		"if [ -f " + shellQuote(finalPath) + " ]; then " + removeExactFile + "; elif [ -d " + shellQuote(finalPath) + " ] && [ ! -L " + shellQuote(finalPath) + " ]; then :; elif [ \"$ANCESTOR\" != " + shellQuote(mountPath) + " ] && [ -f \"$ANCESTOR\" ]; then :; else " + removeExactFile + "; fi",
-	}, " && ")
+	}, " && "))
 }
 
-func secureMemoryProjectionStageCommand(stage string) string {
-	return "mkdir -p " + shellQuote(memoryProjectionStagingRoot) +
-		" && chown root:root " + shellQuote(memoryProjectionStagingRoot) +
-		" && chmod 0700 " + shellQuote(memoryProjectionStagingRoot) +
-		" && chown root:root " + shellQuote(stage) +
-		" && chmod 0700 " + shellQuote(stage)
+// memoryProjectionStageRootCommand prepares the staging root under the
+// root-owned projection root. sudo creates it; the runtime user owns it so the
+// Daytona filesystem transport (which operates as the runtime user) can create
+// stages and upload payloads inside it.
+func memoryProjectionStageRootCommand() string {
+	return "sudo install -d -m 0700 -o " + shellQuote(RuntimeUser) + " -g " + shellQuote(RuntimeUser) + " " + shellQuote(memoryProjectionStagingRoot)
+}
+
+// sudoShellCommand runs a full command chain as root. Daytona executes
+// commands as the runtime user, and these chains create, chown, and swap
+// root-owned projection state; wrapping the whole chain preserves the original
+// root-execution semantics (umask, ordering, atomic rename) unchanged.
+func sudoShellCommand(script string) string {
+	return "sudo sh -c " + shellQuote(script)
 }
 
 func (e *DaytonaHelperExecutor) memoryProjectionSandbox(ctx context.Context, providerSandboxID string) (daytonaSandboxHandle, error) {

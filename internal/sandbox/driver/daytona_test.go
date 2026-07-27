@@ -222,17 +222,24 @@ func TestHelperPayloadIdentityIsSeparateFromRuntimeUser(t *testing.T) {
 func TestCanonicalSandboxBaseDirectoryCommandCreatesDraftRoots(t *testing.T) {
 	command := canonicalSandboxBaseDirectoryCommand()
 	for _, fragment := range []string{
-		"install -d -m 0755 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/workspace'",
-		"install -d -m 0755 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/mnt/session/uploads'",
-		"install -d -m 0755 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/mnt/session/outputs'",
-		"install -d -m 0755 -o root -g root '/mnt/memory'",
-		"install -d -m 0755 -o root -g root '/skills'",
-		"install -d -m 0700 -o root -g root '/tmp/tetral/session-prepare'",
-		"install -d -m 0700 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/tmp/tetral-runtime'",
-		"install -d -m 0700 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/tmp/tetral-runtime/rclone-cache'",
+		"sudo install -d -m 0755 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/workspace'",
+		"sudo install -d -m 0755 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/mnt/session/uploads'",
+		"sudo install -d -m 0755 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/mnt/session/outputs'",
+		"sudo install -d -m 0755 -o root -g root '/mnt/memory'",
+		"sudo install -d -m 0755 -o root -g root '/skills'",
+		"sudo install -d -m 0700 -o root -g root '/tmp/tetral/session-prepare'",
+		"sudo install -d -m 0700 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/tmp/tetral-runtime'",
+		"sudo install -d -m 0700 -o '" + RuntimeUser + "' -g '" + RuntimeUser + "' '/tmp/tetral-runtime/rclone-cache'",
 	} {
 		if !strings.Contains(command, fragment) {
 			t.Fatalf("base directory command missing %q in:\n%s", fragment, command)
+		}
+	}
+	// Daytona executes commands as the runtime user; a bare install cannot
+	// create directories under root-owned /mnt or chown to root.
+	for _, part := range strings.Split(command, " && ") {
+		if !strings.HasPrefix(part, "sudo install ") {
+			t.Fatalf("base directory command has an unprivileged part %q in:\n%s", part, command)
 		}
 	}
 	if strings.Contains(command, "-o root -g root '/mnt/session/uploads'") {
