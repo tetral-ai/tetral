@@ -39,10 +39,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fuse3 \
       git \
       ripgrep \
-      rclone \
       sudo \
       unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# rclone comes from upstream, not the distribution: Ubuntu 24.04 ships
+# v1.60.1, which predates --vfs-cache-min-free-space. The projection mount
+# passes that flag, so the distribution build makes every resource
+# projection fail with rclone's generic "mount not ready" after its
+# daemon-wait expires. Pinned by version and verified by checksum.
+# Not RCLONE_VERSION: rclone reads any RCLONE_* variable as a flag, and
+# RCLONE_VERSION collides with its boolean --version.
+ARG RCLONE_RELEASE=1.71.1
+ARG RCLONE_ARCHIVE_SHA256=417e3da236f3a12d292da4e7287d67b1df558b8c2b280d092e563958ed724be7
+RUN curl -fsSL -o /tmp/rclone.zip \
+      "https://downloads.rclone.org/v${RCLONE_RELEASE}/rclone-v${RCLONE_RELEASE}-linux-amd64.zip" \
+ && printf '%s  /tmp/rclone.zip\n' "${RCLONE_ARCHIVE_SHA256}" | sha256sum -c - \
+ && unzip -q -j /tmp/rclone.zip "rclone-v${RCLONE_RELEASE}-linux-amd64/rclone" -d /usr/bin \
+ && chmod 0755 /usr/bin/rclone \
+ && rm -f /tmp/rclone.zip \
+ && rclone version \
+ && rclone mount --help > /tmp/rclone-mount-help \
+ && grep -q -- --vfs-cache-min-free-space /tmp/rclone-mount-help \
+ && rm -f /tmp/rclone-mount-help
 
 # fusermount3 ships setuid on some distributions and not others; the health
 # check requires it, so the bit is set explicitly rather than assumed.
