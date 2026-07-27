@@ -160,8 +160,8 @@ func (r *SessionPrepareJobRunner) processJob(ctx context.Context, queueJob *queu
 			WorkspaceId:  job.WorkspaceID,
 			JobId:        job.JobID,
 			LeaseToken:   job.LeaseToken,
-			ErrorKind:    "session_prepare_error",
-			ErrorMessage: "session_prepare handler failed",
+			ErrorKind:    sessionPrepareErrorKind(handleErr),
+			ErrorMessage: sessionPrepareErrorMessage(handleErr),
 		}))
 	}
 	if result.Status == sandbox.SessionPrepareStatusFailed {
@@ -247,4 +247,32 @@ func transitionUpdated(response *queuev1.TransitionResponse, err error) error {
 		return errors.New("queue transition was not applied")
 	}
 	return nil
+}
+
+// sessionPrepareErrorKind and sessionPrepareErrorMessage keep a failed
+// preparation diagnosable from its durable queue row. A ProviderError
+// already carries the stage it failed in, a bounded kind, and a message the
+// provider layer vetted as safe to surface; collapsing all of that into one
+// fixed string leaves an operator with a dead-lettered job and no cause.
+func sessionPrepareErrorKind(err error) string {
+	var providerErr *sandbox.ProviderError
+	if errors.As(err, &providerErr) && providerErr.Kind != "" {
+		return string(providerErr.Kind)
+	}
+	return "session_prepare_error"
+}
+
+func sessionPrepareErrorMessage(err error) string {
+	var providerErr *sandbox.ProviderError
+	if errors.As(err, &providerErr) {
+		stage := string(providerErr.Stage)
+		if stage == "" {
+			stage = "unknown_stage"
+		}
+		if providerErr.SafeMessage != "" {
+			return "session_prepare failed at " + stage + ": " + providerErr.SafeMessage
+		}
+		return "session_prepare failed at " + stage
+	}
+	return "session_prepare handler failed"
 }

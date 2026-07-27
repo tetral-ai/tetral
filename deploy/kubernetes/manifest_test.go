@@ -962,6 +962,8 @@ func TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary(t *testing.T) {
 			"ingressClassName: nginx",
 			`nginx.ingress.kubernetes.io/auth-url: "http://auth.tetral-system.svc.cluster.local:8080/internal/auth/authorize"`,
 			`nginx.ingress.kubernetes.io/auth-method: "POST"`,
+			// The controller default is 1 MB; uploads die at the edge without this.
+			`nginx.ingress.kubernetes.io/proxy-body-size: "501m"`,
 			`nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"`,
 			"proxy_set_header X-Original-Method $request_method;",
 			// The auth_request location's own $uri is the internal

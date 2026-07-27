@@ -10,6 +10,10 @@ metadata:
     tetral.ai/edge-adapter: ingress-nginx
   annotations:
     kubernetes.io/ingress.class: nginx
+    # The platform accepts a 500 MB file plus a 1 MB multipart envelope
+    # (internal/files/staging.go RouteMultipartBytes); without this the
+    # controller's 1 MB default rejects every upload at the edge.
+    nginx.ingress.kubernetes.io/proxy-body-size: "501m"
     nginx.ingress.kubernetes.io/auth-url: "http://auth.tetral-system.svc.cluster.local:8080/internal/auth/authorize"
     nginx.ingress.kubernetes.io/auth-method: "POST"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"
@@ -62,6 +66,10 @@ metadata:
     nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "1800"
+    # The platform accepts a 500 MB file plus a 1 MB multipart envelope
+    # (internal/files/staging.go RouteMultipartBytes); without this the
+    # controller's 1 MB default rejects every upload at the edge.
+    nginx.ingress.kubernetes.io/proxy-body-size: "501m"
     nginx.ingress.kubernetes.io/auth-url: "http://auth.tetral-system.svc.cluster.local:8080/internal/auth/authorize"
     nginx.ingress.kubernetes.io/auth-method: "POST"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"

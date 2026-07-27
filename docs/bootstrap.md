@@ -80,6 +80,37 @@ workloads.
 When `edge.enabled=true`, also create the TLS Secret selected by
 `edge.tlsSecretName` (`git-proxy-tls` by default) with `tls.crt` and `tls.key`.
 
+### `sandbox-r2-parent` takes two different kinds of credential
+
+This Secret is the one place where two credential types meet, and supplying
+the wrong one for `TETRAL_R2_PARENT_API_TOKEN` fails only later, when a
+session first asks for an execution environment.
+
+`TETRAL_R2_PARENT_ACCESS_KEY` is the **access key id** of an R2 API token
+(the S3-compatible kind, created under R2 → Manage API Tokens). It is the
+same id the platform uses to read and write the bucket, and only the id is
+needed here — not its secret.
+
+`TETRAL_R2_PARENT_API_TOKEN` is a **Cloudflare account API token**, created
+under My Profile → API Tokens → Create Token → Custom token (no template
+covers R2). It needs exactly one permission — Account → Workers R2 Storage →
+Edit — scoped to the account that owns the bucket. An R2 API token does not
+work here and Cloudflare rejects it as invalid.
+
+The sandbox service presents the account token together with the parent
+access key id to Cloudflare's temporary-credentials API, which returns a
+short-lived, **object-read-only** credential scoped to one bucket. Each
+execution environment receives its own; nothing long-lived and nothing
+writable ever reaches a sandbox. Edit permission is required to mint a
+credential; it does not widen what the minted credential can do.
+
+Verify the token before installing:
+
+```
+curl -s -H "Authorization: Bearer $TOKEN" \
+  https://api.cloudflare.com/client/v4/user/tokens/verify
+```
+
 Five Secrets have no checked-in example template:
 `gateway-web-blob`, `gateway-web-keypool`, `runtime-binding-token`,
 `tetral-blob`, and `tetral-event-stream-database`. Create them directly with

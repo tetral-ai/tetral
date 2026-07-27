@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -329,4 +330,29 @@ func (q *recordingSessionPrepareQueue) Defer(_ context.Context, request *queuev1
 func (q *recordingSessionPrepareQueue) DeadLetter(_ context.Context, request *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error) {
 	q.transitions = append(q.transitions, "dead:"+request.GetJobId()+":"+request.GetErrorKind())
 	return &queuev1.TransitionResponse{Updated: true}, nil
+}
+
+// A dead-lettered preparation is the only durable trace an operator gets, so
+// the provider's stage, kind, and safe message must survive into it. This
+// pins the classification that a fixed error string previously discarded.
+func TestSessionPrepareErrorClassificationSurvivesIntoQueueRow(t *testing.T) {
+	providerErr := &sandbox.ProviderError{
+		Provider:    "daytona",
+		Stage:       sandbox.StageCreateSandbox,
+		Kind:        sandbox.ProviderErrorAuthFailed,
+		SafeMessage: "provider rejected the credential",
+	}
+	if got := sessionPrepareErrorKind(providerErr); got != string(sandbox.ProviderErrorAuthFailed) {
+		t.Fatalf("kind = %q; want %q", got, sandbox.ProviderErrorAuthFailed)
+	}
+	message := sessionPrepareErrorMessage(providerErr)
+	if !strings.Contains(message, string(sandbox.StageCreateSandbox)) {
+		t.Fatalf("message %q does not name the failing stage", message)
+	}
+	if !strings.Contains(message, "provider rejected the credential") {
+		t.Fatalf("message %q dropped the provider's safe message", message)
+	}
+	if got := sessionPrepareErrorKind(errors.New("opaque")); got != "session_prepare_error" {
+		t.Fatalf("unclassified kind = %q; want session_prepare_error", got)
+	}
 }
