@@ -22,6 +22,7 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "runtime_input.id"?: string;
   readonly "closeout.active_count"?: number;
   readonly "closeout.error_code"?: RuntimeCloseoutEvent["errorCode"];
+  readonly "startup.cause_class"?: string;
 };
 
 /** Configures the JSON sink and optional service resource attributes for Runtime Pod logs. */
@@ -49,6 +50,7 @@ export function createJsonLogger(options: JsonLoggerOptions): RuntimePodLogger {
 export function startupFailureLogRecord(input: {
   readonly kind: "config_error" | "startup_error";
   readonly message: string;
+  readonly cause?: unknown;
 }): RuntimePodLogRecord {
   const safeMessage = input.kind === "config_error" ? input.message : "runtime pod startup failed";
   return {
@@ -58,8 +60,32 @@ export function startupFailureLogRecord(input: {
     component: "agent-runtime",
     kind: input.kind,
     message: safeMessage,
+    ...(input.kind === "startup_error" ? { "startup.cause_class": startupCauseClass(input.cause) } : {}),
     ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: safeMessage }),
   };
+}
+
+function startupCauseClass(cause: unknown): string {
+  try {
+    if ((typeof cause !== "object" || cause === null) && typeof cause !== "function") {
+      return "unknown";
+    }
+    const constructor = Reflect.get(cause, "constructor") as unknown;
+    if ((typeof constructor !== "object" || constructor === null) && typeof constructor !== "function") {
+      return "unknown";
+    }
+    const name = Reflect.get(constructor, "name") as unknown;
+    if (
+      typeof name === "string" &&
+      name.length <= 64 &&
+      /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
+    ) {
+      return name;
+    }
+  } catch {
+    // A thrown value may be a revoked Proxy or expose throwing accessors.
+  }
+  return "unknown";
 }
 
 /** Builds a typed shutdown failure record for active-run settlement or drain timeout failure. */

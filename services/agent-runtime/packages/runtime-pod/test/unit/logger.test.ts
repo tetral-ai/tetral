@@ -64,6 +64,7 @@ describe("Runtime Pod JSON logger", () => {
     expect(startupFailureLogRecord({
       kind: "startup_error",
       message: "raw dependency detail must not be used",
+      cause: new ReferenceError("raw dependency detail must not be used"),
     })).toMatchObject({
       event: "startup_failed",
       "event.kind": "startup_failed",
@@ -74,6 +75,7 @@ describe("Runtime Pod JSON logger", () => {
       "error.class": "startup_error",
       "error.code": "startup_error",
       "error.message_safe": "runtime pod startup failed",
+      "startup.cause_class": "ReferenceError",
     });
 
     expect(shutdownFailureLogRecord({
@@ -89,6 +91,36 @@ describe("Runtime Pod JSON logger", () => {
       "error.code": "shutdown_drain_timeout",
       "error.message_safe": "runtime pod shutdown drain timed out",
     });
+  });
+
+  test("startup cause class accepts only bounded constructor identifiers", () => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const longConstructorName = "A".repeat(65);
+    const hostileValues: readonly [string, unknown][] = [
+      ["undefined", undefined],
+      ["null", null],
+      ["primitive", "secret-token"],
+      ["null prototype", Object.create(null) as unknown],
+      ["revoked proxy", revoked.proxy],
+      ["URL-shaped constructor", { constructor: { name: "postgres://user:pw@host/db" } }],
+      ["overlong constructor", { constructor: { name: longConstructorName } }],
+    ];
+    for (const [name, cause] of hostileValues) {
+      const record = startupFailureLogRecord({
+        kind: "startup_error",
+        message: "runtime pod startup failed",
+        cause,
+      });
+      expect(record["startup.cause_class"], name).toBe("unknown");
+    }
+
+    const typeErrorRecord = startupFailureLogRecord({
+      kind: "startup_error",
+      message: "runtime pod startup failed",
+      cause: new TypeError("raw request body"),
+    });
+    expect(typeErrorRecord["startup.cause_class"]).toBe("TypeError");
   });
 
   test("closeout records expose only bounded taxonomy and active counts", () => {

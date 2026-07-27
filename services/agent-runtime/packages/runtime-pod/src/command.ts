@@ -117,8 +117,8 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
       config: config.config,
       logger,
     });
-  } catch {
-    logger.error(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed" }));
+  } catch (error) {
+    logger.error(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed", cause: error }));
     throw new Error("runtime pod startup error");
   }
   const shutdown = async (): Promise<void> => {
@@ -315,10 +315,6 @@ function registerProcessSignalHandlers(shutdown: () => Promise<void>): void {
   process.once("SIGINT", () => {
     void shutdown().then(() => process.exit(0));
   });
-}
-
-if (import.meta.main) {
-  await runRuntimePodCommand();
 }
 
 /**
@@ -837,4 +833,8 @@ function recordArrayField(value: unknown, field: string): readonly unknown[] | u
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+if (import.meta.main) {
+  await runRuntimePodCommand();
 }

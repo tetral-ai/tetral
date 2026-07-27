@@ -673,6 +673,7 @@ describe("Runtime Pod command entrypoint", () => {
           logger: {
             info: () => undefined,
             error: (record) => {
+              records.push(JSON.stringify(record));
               records.push(`${record.kind}:${record.message}:${record["error.class"]}:${record["error.code"]}:${record["error.message_safe"]}`);
             },
           },
@@ -684,7 +685,16 @@ describe("Runtime Pod command entrypoint", () => {
       ).rejects.toThrow("runtime pod startup error");
     });
 
-    expect(records).toEqual(["startup_error:runtime pod startup failed:startup_error:startup_error:runtime pod startup failed"]);
+    expect(records).toHaveLength(2);
+    expect(JSON.parse(records[0] ?? "{}")).toMatchObject({
+      kind: "startup_error",
+      message: "runtime pod startup failed",
+      "error.class": "startup_error",
+      "error.code": "startup_error",
+      "error.message_safe": "runtime pod startup failed",
+      "startup.cause_class": "Error",
+    });
+    expect(records[1]).toBe("startup_error:runtime pod startup failed:startup_error:startup_error:runtime pod startup failed");
     for (const forbidden of ["secret-token", "kubernetes.default.svc", "TokenReview", "raw request body", "sk-provider-key", "kube object dump"]) {
       expect(records.join("\n")).not.toContain(forbidden);
     }

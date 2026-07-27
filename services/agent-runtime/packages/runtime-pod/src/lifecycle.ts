@@ -112,8 +112,8 @@ export class RuntimePodLifecycle {
       await this.options.bootstrap.authClient();
       this.readyFlag = true;
       this.accepting = true;
-    } catch {
-      this.options.logger.error(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed" }));
+    } catch (error) {
+      this.options.logger.error(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed", cause: error }));
       this.readyFlag = false;
       this.accepting = false;
     }
