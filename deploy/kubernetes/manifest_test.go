@@ -964,7 +964,11 @@ func TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary(t *testing.T) {
 			`nginx.ingress.kubernetes.io/auth-method: "POST"`,
 			`nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"`,
 			"proxy_set_header X-Original-Method $request_method;",
-			"proxy_set_header X-Original-Path $uri;",
+			// The auth_request location's own $uri is the internal
+			// /_external-auth-* path, so the parent location captures the
+			// client path into a variable the auth snippet forwards.
+			"proxy_set_header X-Original-Path $tetral_original_path;",
+			"set $tetral_original_path $uri;",
 			"proxy_set_header X-Request-Id $request_id;",
 			"proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
 			`more_clear_input_headers "X-Tetral-*";`,
@@ -977,6 +981,10 @@ func TestKubernetesEdgeGatewayIngressNginxExternalAuthBoundary(t *testing.T) {
 			requireContains(t, ingress, required)
 		}
 		requireNotContains(t, ingress, "path: /internal/auth/authorize")
+		// $uri inside the auth_request location names the internal
+		// external-auth path, not the client path — signing it breaks
+		// principal verification for every request through the edge.
+		requireNotContains(t, ingress, "proxy_set_header X-Original-Path $uri;")
 	}
 	for _, required := range []string{
 		"path: /v1/api_keys",

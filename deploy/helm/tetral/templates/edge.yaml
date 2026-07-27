@@ -15,12 +15,13 @@ metadata:
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"
     nginx.ingress.kubernetes.io/auth-snippet: |
       proxy_set_header X-Original-Method $request_method;
-      proxy_set_header X-Original-Path $uri;
+      proxy_set_header X-Original-Path $tetral_original_path;
       proxy_set_header X-Request-Id $request_id;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Tetral-Internal-Principal "";
       proxy_set_header X-Tetral-Internal-Workspace "";
     nginx.ingress.kubernetes.io/configuration-snippet: |
+      set $tetral_original_path $uri;
       more_clear_input_headers "X-Tetral-*";
       proxy_set_header X-Api-Key "";
       proxy_set_header Authorization "";
@@ -66,12 +67,13 @@ metadata:
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Tetral-Internal-Principal"
     nginx.ingress.kubernetes.io/auth-snippet: |
       proxy_set_header X-Original-Method $request_method;
-      proxy_set_header X-Original-Path $uri;
+      proxy_set_header X-Original-Path $tetral_original_path;
       proxy_set_header X-Request-Id $request_id;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Tetral-Internal-Principal "";
       proxy_set_header X-Tetral-Internal-Workspace "";
     nginx.ingress.kubernetes.io/configuration-snippet: |
+      set $tetral_original_path $uri;
       more_clear_input_headers "X-Tetral-*";
       proxy_set_header X-Api-Key "";
       proxy_set_header Authorization "";
