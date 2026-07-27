@@ -301,7 +301,6 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: kubernetes.default.svc
                   expirationSeconds: 600
                   path: gateway-tokenreview/token
               - configMap:

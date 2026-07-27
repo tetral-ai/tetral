@@ -275,7 +275,6 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: kubernetes.default.svc
                   expirationSeconds: 600
                   path: bridge-api-tokenreview/token
               - configMap:
@@ -321,7 +320,6 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: kubernetes.default.svc
                   expirationSeconds: 600
                   path: token
               - configMap:

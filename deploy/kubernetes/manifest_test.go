@@ -83,11 +83,19 @@ type networkPolicyTransport struct {
 	port     int
 }
 
+type projectedTokenAudienceMode string
+
+const (
+	projectedTokenWithAudience projectedTokenAudienceMode = "with-audience"
+	projectedTokenNoAudience   projectedTokenAudienceMode = "no-audience"
+)
+
 type projectedTokenExpectation struct {
 	envName           string
 	volume            string
 	mountPath         string
 	filePath          string
+	audienceMode      projectedTokenAudienceMode
 	audience          string
 	expirationSeconds int
 }
@@ -1495,7 +1503,7 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		volume:            "bridge-api-kubernetes-api",
 		mountPath:         "/var/run/secrets/tetral-kubernetes-api",
 		filePath:          "bridge-api-tokenreview/token",
-		audience:          "kubernetes.default.svc",
+		audienceMode:      projectedTokenNoAudience,
 		expirationSeconds: 600,
 	})
 	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
@@ -1503,11 +1511,17 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		volume:            "bridge-api-gateway-token",
 		mountPath:         "/var/run/secrets/tetral-internal-grpc/gateway",
 		filePath:          "token",
+		audienceMode:      projectedTokenWithAudience,
 		audience:          "tetral-internal-grpc",
 		expirationSeconds: 600,
 	})
-	requireContains(t, deployment, "- name: job-runner-kubernetes-api\n              mountPath: /var/run/secrets/kubernetes.io/serviceaccount\n              readOnly: true")
-	requireContains(t, deployment, "- name: job-runner-kubernetes-api\n          projected:\n            sources:\n              - serviceAccountToken:\n                  audience: kubernetes.default.svc\n                  expirationSeconds: 600\n                  path: token")
+	requireProjectedBoundedServiceAccountTokenShape(t, deployment, projectedTokenExpectation{
+		volume:            "job-runner-kubernetes-api",
+		mountPath:         "/var/run/secrets/kubernetes.io/serviceaccount",
+		filePath:          "token",
+		audienceMode:      projectedTokenNoAudience,
+		expirationSeconds: 600,
+	})
 	requireContains(t, deployment, "- configMap:\n                  name: kube-root-ca.crt\n                  items:\n                    - key: ca.crt\n                      path: ca.crt")
 	requireContains(t, service, "- name: grpc\n      port: 9090\n      targetPort: grpc")
 	requireContains(t, service, "- name: metrics-job\n      port: 8081\n      targetPort: http-job")
@@ -1725,6 +1739,7 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 		volume:            "runtime-pod-internal-grpc-token",
 		mountPath:         "/var/run/secrets/tetral-internal-grpc/runtime-pod",
 		filePath:          "token",
+		audienceMode:      projectedTokenWithAudience,
 		audience:          "tetral-internal-grpc",
 		expirationSeconds: 600,
 	})
@@ -1733,7 +1748,7 @@ func TestKubernetesManifestAgentRuntimeRuntimePodConfig(t *testing.T) {
 		volume:            "runtime-pod-kubernetes-api",
 		mountPath:         "/var/run/secrets/tetral-kubernetes-api",
 		filePath:          "runtime-pod-tokenreview/token",
-		audience:          "kubernetes.default.svc",
+		audienceMode:      projectedTokenNoAudience,
 		expirationSeconds: 600,
 	})
 	requireContains(t, deployment, "- configMap:\n                  name: kube-root-ca.crt\n                  items:\n                    - key: ca.crt\n                      path: ca.crt")
@@ -1918,7 +1933,7 @@ func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
 		volume:            "gateway-kubernetes-api",
 		mountPath:         "/var/run/secrets/tetral-kubernetes-api",
 		filePath:          "gateway-tokenreview/token",
-		audience:          "kubernetes.default.svc",
+		audienceMode:      projectedTokenNoAudience,
 		expirationSeconds: 600,
 	})
 	requireContains(t, deployment, "- configMap:\n                  name: kube-root-ca.crt\n                  items:\n                    - key: ca.crt\n                      path: ca.crt")
@@ -1927,6 +1942,7 @@ func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
 		volume:            "gateway-bridge-token",
 		mountPath:         "/var/run/secrets/tetral-internal-grpc/bridge",
 		filePath:          "token",
+		audienceMode:      projectedTokenWithAudience,
 		audience:          "tetral-internal-grpc",
 		expirationSeconds: 600,
 	})
@@ -1935,6 +1951,7 @@ func TestKubernetesManifestGatewayServiceConfig(t *testing.T) {
 		volume:            "gateway-bridge-token",
 		mountPath:         "/var/run/secrets/tetral-internal-grpc/bridge",
 		filePath:          "token",
+		audienceMode:      projectedTokenWithAudience,
 		audience:          "tetral-internal-grpc",
 		expirationSeconds: 600,
 	})
@@ -2190,6 +2207,7 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 			volume:            "runtime-pod-internal-grpc-token",
 			mountPath:         "/var/run/secrets/tetral-internal-grpc/runtime-pod",
 			filePath:          "token",
+			audienceMode:      projectedTokenWithAudience,
 			audience:          "tetral-internal-grpc",
 			expirationSeconds: 600,
 		})
@@ -2202,6 +2220,7 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 			volume:            "bridge-runtime-pod-token",
 			mountPath:         "/var/run/secrets/tetral-internal-grpc/agent-runtime",
 			filePath:          "token",
+			audienceMode:      projectedTokenWithAudience,
 			audience:          "tetral-internal-grpc",
 			expirationSeconds: 600,
 		})
@@ -2210,6 +2229,7 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 			volume:            "bridge-job-runner-bridge-api-token",
 			mountPath:         "/var/run/secrets/tetral-internal-grpc/bridge-api",
 			filePath:          "token",
+			audienceMode:      projectedTokenWithAudience,
 			audience:          "tetral-internal-grpc",
 			expirationSeconds: 600,
 		})
@@ -2218,6 +2238,7 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 			volume:            "bridge-job-runner-gateway-token",
 			mountPath:         "/var/run/secrets/tetral-internal-grpc/gateway",
 			filePath:          "token",
+			audienceMode:      projectedTokenWithAudience,
 			audience:          "tetral-internal-grpc",
 			expirationSeconds: 600,
 		})
@@ -2945,12 +2966,51 @@ func requireProjectedBoundedServiceAccountToken(t *testing.T, document *manifest
 	if tokenPath == defaultTokenPath {
 		t.Fatalf("%s env %s uses default service-account token path", document.file, expected.envName)
 	}
-	for _, fragment := range []string{
-		"- name: " + expected.volume + "\n              mountPath: " + expected.mountPath + "\n              readOnly: true",
-		fmt.Sprintf("- name: %s\n          projected:\n            sources:\n              - serviceAccountToken:\n                  audience: %s\n                  expirationSeconds: %d\n                  path: %s", expected.volume, expected.audience, expected.expirationSeconds, expected.filePath),
-	} {
-		requireContains(t, document, fragment)
+	requireProjectedBoundedServiceAccountTokenShape(t, document, expected)
+}
+
+func requireProjectedBoundedServiceAccountTokenShape(t *testing.T, document *manifestDocument, expected projectedTokenExpectation) {
+	t.Helper()
+	requireContains(t, document, "- name: "+expected.volume+"\n              mountPath: "+expected.mountPath+"\n              readOnly: true")
+	switch expected.audienceMode {
+	case projectedTokenWithAudience:
+		if expected.audience == "" {
+			t.Fatalf("%s projected token volume %s requires a non-empty audience expectation", document.file, expected.volume)
+		}
+		requireContains(t, document, fmt.Sprintf("- name: %s\n          projected:\n            sources:\n              - serviceAccountToken:\n                  audience: %s\n                  expirationSeconds: %d\n                  path: %s", expected.volume, expected.audience, expected.expirationSeconds, expected.filePath))
+	case projectedTokenNoAudience:
+		requireContains(t, document, fmt.Sprintf("- name: %s\n          projected:\n            sources:\n              - serviceAccountToken:\n                  expirationSeconds: %d\n                  path: %s", expected.volume, expected.expirationSeconds, expected.filePath))
+		volumeBlock := requireDeploymentVolumeBlock(t, document, expected.volume)
+		for lineNumber, line := range strings.Split(volumeBlock, "\n") {
+			item := strings.TrimSpace(line)
+			item = strings.TrimSpace(strings.TrimPrefix(item, "- "))
+			key, _, ok := splitManifestScalar(item)
+			if ok && key == "audience" {
+				t.Fatalf("%s projected token volume %s contains forbidden audience at block line %d: %s", document.file, expected.volume, lineNumber+1, strings.TrimSpace(line))
+			}
+		}
+	default:
+		t.Fatalf("%s projected token volume %s has unknown audience mode %q", document.file, expected.volume, expected.audienceMode)
 	}
+}
+
+func requireDeploymentVolumeBlock(t *testing.T, document *manifestDocument, volumeName string) string {
+	t.Helper()
+	volumes, err := podSpecBlock(document.text, "volumes:")
+	if err != nil {
+		t.Fatalf("%s %s/%s: %v", document.file, document.kind, document.name, err)
+	}
+	marker := "        - name: " + volumeName + "\n"
+	start := strings.Index(volumes, marker)
+	if start < 0 {
+		t.Fatalf("%s missing volume %s", document.file, volumeName)
+	}
+	rest := volumes[start:]
+	next := strings.Index(rest[len(marker):], "\n        - name: ")
+	if next >= 0 {
+		return rest[:len(marker)+next]
+	}
+	return rest
 }
 
 func requireNetworkPolicyIngressEdge(t *testing.T, document *manifestDocument, port int, peer networkPolicyPeer) {
@@ -4203,6 +4263,27 @@ func countManifestScalar(text string, wantKey string, wantValue string) int {
 		}
 	}
 	return count
+}
+
+func TestKubernetesManifestAudiencesAreAllowListed(t *testing.T) {
+	documents := readManifestDocuments(t)
+	for _, document := range documents {
+		for lineNumber, line := range strings.Split(document.text, "\n") {
+			item := strings.TrimSpace(line)
+			item = strings.TrimSpace(strings.TrimPrefix(item, "- "))
+			key, value, parsed := splitManifestScalar(item)
+			isAllowListedAudience := parsed && key == "audience" && value == "tetral-internal-grpc"
+			if parsed && key == "audience" && !isAllowListedAudience {
+				t.Fatalf("%s %s/%s line %d has non-allow-listed audience %q", document.file, document.kind, document.name, lineNumber+1, value)
+			}
+			if strings.Contains(line, "audience") && !isAllowListedAudience {
+				t.Fatalf("%s %s/%s line %d has an audience declaration outside the allow-listed scalar form: %s", document.file, document.kind, document.name, lineNumber+1, strings.TrimSpace(line))
+			}
+			if parsed && key == "serviceAccountToken" && value != "" {
+				t.Fatalf("%s %s/%s line %d must express serviceAccountToken as a block mapping: %s", document.file, document.kind, document.name, lineNumber+1, strings.TrimSpace(line))
+			}
+		}
+	}
 }
 
 func TestKubernetesManifestDocumentsHaveRecognizedKindAndName(t *testing.T) {
