@@ -46,6 +46,7 @@ class PlatformKeyCLIError extends Error {}
 export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise<number> {
   let sql: (PlatformKeySQL & { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> }) | undefined;
   const env = options.env ?? process.env;
+  let stdinKeySecrets: readonly string[] = [];
   try {
     const parsed = parsePlatformKeyArgs(options.argv, env);
     if (parsed.command === "help") {
@@ -55,6 +56,8 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
     sql = options.sqlFactory?.(parsed.databaseUrl) ?? new Bun.SQL(parsed.databaseUrl);
     if (parsed.command === "insert") {
       const plaintext = await readPlaintextKey(options.stdin ?? Bun.stdin.stream());
+      const plaintextText = new TextDecoder().decode(plaintext);
+      stdinKeySecrets = [...new Set([plaintextText, plaintextText.trim()])].filter((secret) => secret.length > 0);
       if (plaintext.byteLength === 0) {
         throw new PlatformKeyCLIError("platform key stdin is empty");
       }
@@ -106,7 +109,7 @@ export async function runPlatformKeyCLI(options: PlatformKeyCLIOptions): Promise
     await writeText(options.stdout, `enabled ${parsed.keyId}\n`);
     return 0;
   } catch (error) {
-    await writeText(options.stderr, `${safeCLIErrorMessage(error, env)}\n`);
+    await writeText(options.stderr, `${safeCLIErrorMessage(error, env, stdinKeySecrets)}\n`);
     return 1;
   } finally {
     await sql?.close?.({ timeout: 1 });
@@ -322,8 +325,15 @@ function usageText(): string {
 // An unexpected error still names its class and message. Collapsing every
 // non-CLI failure into one fixed string hid a schema type mismatch behind
 // "platform key operation failed" and cost an operator a full debugging cycle;
-// the redaction pass below is what keeps that safe, not the erasure.
-function safeCLIErrorMessage(error: unknown, env: Record<string, string | undefined>): string {
+// the redaction pass below is what keeps that safe, not the erasure. Every
+// secret the CLI holds must be in the redaction set — connection string,
+// master key, and the plaintext provider key read from stdin — because lower
+// layers embed their inputs in failure messages.
+function safeCLIErrorMessage(
+  error: unknown,
+  env: Record<string, string | undefined>,
+  extraSecrets: readonly string[] = [],
+): string {
   let message: string;
   if (error instanceof PlatformKeyCLIError) {
     message = error.message;
@@ -332,7 +342,7 @@ function safeCLIErrorMessage(error: unknown, env: Record<string, string | undefi
   } else {
     message = "platform key operation failed";
   }
-  for (const secret of [env.TETRAL_DATABASE_URL, env.ENGINE_VAULT_KEY]) {
+  for (const secret of [env.TETRAL_DATABASE_URL, env.ENGINE_VAULT_KEY, ...extraSecrets]) {
     if (secret !== undefined && secret.length > 0) {
       message = message.split(secret).join("[REDACTED]");
     }
