@@ -128,7 +128,12 @@ func MountBindVerifyCommand(plan Plan, config MountBindVerifyCommandConfig) stri
 	// one is popped first. The parent directory and the placeholder file are
 	// created as the runtime user (sudo -u daytona) so the verify parent-write
 	// check passes and the leaf bind does not change parent ownership; the bind
-	// itself and the remount,ro run as root because they need CAP_SYS_ADMIN.
+	// itself runs as root because it needs CAP_SYS_ADMIN. There is deliberately
+	// no remount,ro on the bind: read-only is enforced by the rclone mount's
+	// --read-only flag (the bind inherits the FUSE filesystem's ro) and PROVEN
+	// by the write-open verify check below — while a remount makes newer
+	// util-linux re-resolve the colon-bearing FUSE source spec ("r2:bucket/…")
+	// as a device path and fail with "special device does not exist".
 	for index, action := range bindActions {
 		source := action.StagingPath
 		target := action.MountPath
@@ -143,7 +148,6 @@ func MountBindVerifyCommand(plan Plan, config MountBindVerifyCommandConfig) stri
 		b.WriteString("  sudo -u " + shellQuote(driver.RuntimeUser) + " touch -- " + shellQuote(target) + "\n")
 		b.WriteString("  sudo mount --bind " + shellQuote(source) + " " + shellQuote(target) + "\n")
 		b.WriteString("  TETRAL_BIND_CREATED_" + strconv.Itoa(index) + "=1\n")
-		b.WriteString("  sudo mount -o remount,bind,ro " + shellQuote(target) + "\n")
 		b.WriteString("fi\n")
 	}
 	writeVerifyChecks(&b, ActionsOfType(plan.Actions, ActionVerify))

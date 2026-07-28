@@ -24,9 +24,9 @@
 // INVARIANTS:
 //   - The only hard cross-session/cross-workspace boundary is the minted R2
 //     credential (object-read-only, scoped to the one session-resources prefix,
-//     TTL-bounded). Every in-sandbox read-only guard (bind remount,ro, file
-//     ownership, chmod) is soft and user-reversible; the runtime user has
-//     passwordless sudo.
+//     TTL-bounded). Every in-sandbox read-only guard (the rclone mount's
+//     --read-only flag that the binds inherit, file ownership, chmod) is soft
+//     and user-reversible; the runtime user has passwordless sudo.
 //   - The plan stage fails atomically with zero R2/filesystem mutation. An
 //     execute-stage failure may leave partial per-sandbox copies/binds; the next
 //     attempt reconciles them idempotently (copy-if-absent plus the mount/bind

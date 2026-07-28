@@ -83,7 +83,6 @@ func TestResourceProjectionPreparerCopiesMintsRunsCommandAndReturnsMetadata(t *t
 		"findmnt -rn --mountpoint '/mnt/session/uploads/file_session'",
 		"if ! [ '/mnt/tetral/r2/sesrsc_file/file' -ef '/mnt/session/uploads/file_session' ]; then sudo umount -l -- '/mnt/session/uploads/file_session'; fi",
 		"sudo mount --bind '/mnt/tetral/r2/sesrsc_file/file' '/mnt/session/uploads/file_session'",
-		"sudo mount -o remount,bind,ro '/mnt/session/uploads/file_session'",
 		"sudo install -d -m 0755 -o '" + driver.RuntimeUser + "' -g '" + driver.RuntimeUser + "' -- '/mnt/session/uploads'",
 		"if [ -L '/mnt/session/uploads/file_session' ]; then sudo -u '" + driver.RuntimeUser + "' rm -f -- '/mnt/session/uploads/file_session'; fi",
 		"if [ -e '/mnt/session/uploads/file_session' ] && [ ! -f '/mnt/session/uploads/file_session' ]; then echo 'resource projection target is not a regular file' >&2; false; fi",
@@ -176,16 +175,12 @@ func TestResourceProjectionPreparerBatchesTwentyFilesUnderOneMountAndCredential(
 	if got := strings.Count(command, "sudo mount --bind "); got != 20 {
 		t.Fatalf("bind mount count = %d; want one per file", got)
 	}
-	if got := strings.Count(command, "sudo mount -o remount,bind,ro "); got != 20 {
-		t.Fatalf("read-only remount count = %d; want one per file", got)
-	}
 	for i := 0; i < 20; i++ {
 		resourceID := fmt.Sprintf("sesrsc_file_%02d", i)
 		sessionFileID := fmt.Sprintf("file_%02d", i)
 		assertBlobBytes(t, blobStore, "workspaces/ws_test/sessions/sesn_test/resources/"+resourceID+"/file", fmt.Sprintf("canonical-%02d", i))
 		for _, fragment := range []string{
 			"sudo mount --bind '/mnt/tetral/r2/" + resourceID + "/file' '/mnt/session/uploads/" + sessionFileID + "'",
-			"sudo mount -o remount,bind,ro '/mnt/session/uploads/" + sessionFileID + "'",
 			`"path":"/mnt/session/uploads/` + sessionFileID + `"`,
 		} {
 			if !strings.Contains(command+prepared.ResourceRootsJSON, fragment) {
@@ -252,7 +247,6 @@ func TestResourceProjectionPreparerCreatesArbitraryAbsoluteParentAsRuntimeUser(t
 		"sudo install -d -m 0755 -o '" + driver.RuntimeUser + "' -g '" + driver.RuntimeUser + "' -- '/uploads'",
 		"sudo -u '" + driver.RuntimeUser + "' touch -- '/uploads/receipt.pdf'",
 		"sudo mount --bind '/mnt/tetral/r2/sesrsc_file/file' '/uploads/receipt.pdf'",
-		"sudo mount -o remount,bind,ro '/uploads/receipt.pdf'",
 		"sudo -u '" + driver.RuntimeUser + "' sh -c 'tmp=$(mktemp \"$1/.tetral-resource-verify.XXXXXX\") && rm -f \"$tmp\"' _ '/uploads'",
 	} {
 		if !strings.Contains(command, fragment) {
