@@ -1696,6 +1696,54 @@ describe("SessionManager", () => {
     });
   });
 
+  test("cold preload seeds the runtime model before pending tool use recovery", async () => {
+    const modelsObservedDuringRecovery: unknown[] = [];
+    const agentLoop = makeControlledAgentLoop({
+      seedRuntimeModel: (session) => {
+        session.state.updateCurrentModel({ providerId: "seeded", modelId: "before-install" });
+      },
+      installLoadedPendingToolUses: (session) => Effect.sync(() => {
+        modelsObservedDuringRecovery.push(session.state.currentModel());
+        return { ok: true as const };
+      }),
+    });
+    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+      const control = threadControl("sesn_seed_before_install", "rin_seed_before_install");
+      const result = await Effect.runPromise(manager.preloadThread({
+        ...control,
+        runtimeBindingToken: "runtime-binding-token-seed-order",
+        messages: [coldUserMessage("sesn_seed_before_install")],
+        runtimeConfigPatch: {
+          ...control,
+          generation: 3,
+          coldLoad: true,
+          installedBuiltinFamily: "claude",
+          payloadJson: JSON.stringify({
+            config_generation: 3,
+            runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+          }),
+        },
+        pendingToolUses: [{
+          toolUseEventId: "sevt_seed_pending",
+          modelRequestId: "mrq_seed_pending",
+          modelToolCallId: "toolu_seed_pending",
+          toolName: "Read",
+          kind: "approval",
+          input: { path: "README.md" },
+          status: "pending",
+          expiresAt: "2026-06-14T00:30:00.000Z",
+        }],
+      }));
+      expect(result).toEqual({
+        ok: true,
+        sessionId: "sesn_seed_before_install",
+        sessionThreadId: "thrd_sesn_seed_before_install",
+        applied: true,
+      });
+      expect(modelsObservedDuringRecovery).toEqual([{ providerId: "seeded", modelId: "before-install" }]);
+    });
+  });
+
   test("tool confirmation wakes a thread when a ToolJob is pending approval", async () => {
     const agentLoop = makeControlledAgentLoop();
 

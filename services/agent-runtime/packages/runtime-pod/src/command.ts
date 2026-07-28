@@ -572,7 +572,7 @@ export function runtimeModelForThread(
     if (!isRecord(payload)) {
       continue;
     }
-    const runtimeConfig = recordField(payload, "runtime_config");
+    const runtimeConfig = recordField(payload, "runtime_config") ?? recordField(payload, "runtimeConfig");
     if (!isRecord(runtimeConfig)) {
       continue;
     }

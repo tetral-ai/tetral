@@ -561,6 +561,21 @@ describe("Runtime Pod command entrypoint", () => {
     )).toEqual(reviewerModel);
   });
 
+  test("runtime model resolution accepts both payload key spellings like its sibling parsers", () => {
+    const reviewerModel = { providerId: "anthropic", modelId: "claude-opus-4-8" };
+
+    expect(runtimeModelForThread(
+      undefined,
+      [JSON.stringify({ runtimeConfig: { agent: { config: { model: "openai/gpt-5.5" } } } })],
+      reviewerModel,
+    )).toEqual({ providerId: "openai", modelId: "gpt-5.5" });
+    expect(runtimeModelForThread(
+      undefined,
+      [JSON.stringify({ runtime_config: { agent: { config: { model: "openai/gpt-5.5" } } } })],
+      reviewerModel,
+    )).toEqual({ providerId: "openai", modelId: "gpt-5.5" });
+  });
+
   test("runtime policy parser rejects malformed MCP manifest tools instead of silently omitting them", () => {
     expect(() =>
       runtimeToolPolicyFromPatchPayloads([
