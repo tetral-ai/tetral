@@ -40,8 +40,8 @@ func TestDaytonaOutputCaptureUsesOneHelperInvocationPerVisitedPath(t *testing.T)
 	if len(scan.Files) != 1 || len(process.commands) != 2 {
 		t.Fatalf("capture files/commands = %d/%d; want root and file helper invocations", len(scan.Files), len(process.commands))
 	}
-	if command := process.commands[1]; !strings.Contains(command, "'/usr/local/bin/sandbox' __capture --path '/mnt/session/outputs/report.txt' --max-bytes 1024 --max-entries 9998 --max-name-bytes 524288") || strings.Contains(command, "sh -") || strings.Contains(command, "sudo") {
-		t.Fatalf("capture command = %q; want bare helper mode", command)
+	if command := process.commands[1]; !strings.Contains(command, "sudo -n -u 'root' '/usr/local/bin/sandbox' __capture --path '/mnt/session/outputs/report.txt' --max-bytes 1024 --max-entries 9998 --max-name-bytes 524288") || strings.Contains(command, "sh -") {
+		t.Fatalf("capture command = %q; want privileged helper mode", command)
 	}
 	file := scan.Files[0]
 	reader, err := file.Open(context.Background())
@@ -223,8 +223,28 @@ func TestDaytonaOutputCaptureMissingRootAbortsInsteadOfProvingAbsence(t *testing
 	const body = `{"schema_version":1,"status":"error","error":{"kind":"root_unavailable","message":"output root unavailable"}}`
 	client := captureSandboxGetter{handle: daytonaSandboxHandle{Process: staticCaptureResponseProcess{body: body}}}
 	executor := NewDaytonaHelperExecutorForClient(client)
-	if _, err := executor.CaptureOutputs(context.Background(), OutputCaptureTarget{ProviderSandboxID: "provider_missing_root"}); err == nil {
+	_, err := executor.CaptureOutputs(context.Background(), OutputCaptureTarget{ProviderSandboxID: "provider_missing_root"})
+	var captureErr *OutputCaptureEntryError
+	if err == nil || !errors.As(err, &captureErr) {
 		t.Fatal("missing-root capture succeeded; want abort")
+	}
+	if captureErr.Kind != "root_unavailable" || captureErr.Message != "output root unavailable" {
+		t.Fatalf("missing-root capture error = %+v; want helper kind and message", captureErr)
+	}
+}
+
+func TestDaytonaOutputCaptureTransportFailureCarriesOnlyExitCode(t *testing.T) {
+	const secretOutput = "CAPTURE_TRANSPORT_OUTPUT_MUST_NOT_LEAK"
+	sandbox := daytonaSandboxHandle{Process: staticCaptureResponseProcess{
+		body:     secretOutput,
+		exitCode: 23,
+	}}
+	_, err := daytonaCaptureOutputEntry(context.Background(), sandbox, outputCaptureRoot, 10, 10, 1024)
+	if err == nil || !strings.Contains(err.Error(), "exit code 23") {
+		t.Fatalf("transport error = %v; want exit code", err)
+	}
+	if strings.Contains(err.Error(), secretOutput) {
+		t.Fatalf("transport error leaked helper output: %v", err)
 	}
 }
 
@@ -352,7 +372,8 @@ func (p *captureProcess) ExecuteCommand(_ context.Context, command string, _ ...
 }
 
 type staticCaptureResponseProcess struct {
-	body string
+	body     string
+	exitCode int
 }
 
 type delayedErrorCaptureProcess struct{}
@@ -363,7 +384,7 @@ func (delayedErrorCaptureProcess) ExecuteCommand(context.Context, string, ...fun
 }
 
 func (p staticCaptureResponseProcess) ExecuteCommand(context.Context, string, ...func(*options.ExecuteCommand)) (*types.ExecuteResponse, error) {
-	return &types.ExecuteResponse{ExitCode: 0, Result: p.body}, nil
+	return &types.ExecuteResponse{ExitCode: p.exitCode, Result: p.body}, nil
 }
 
 type localOutputCaptureServices struct {

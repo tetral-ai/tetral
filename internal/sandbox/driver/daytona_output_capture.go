@@ -44,12 +44,15 @@ type outputCaptureWalk struct {
 	records              []OutputCaptureScanRecord
 }
 
-type outputCaptureEntryError struct {
-	kind string
+// OutputCaptureEntryError carries a helper-authored capture classification
+// without exposing it through an unstructured error string.
+type OutputCaptureEntryError struct {
+	Kind    string
+	Message string
 }
 
-func (e *outputCaptureEntryError) Error() string {
-	return "daytona capture failed with " + e.kind
+func (e *OutputCaptureEntryError) Error() string {
+	return "daytona capture failed with " + e.Kind
 }
 
 func (e *DaytonaHelperExecutor) CaptureOutputs(ctx context.Context, target OutputCaptureTarget) (OutputCaptureScan, error) {
@@ -97,18 +100,18 @@ func (w *outputCaptureWalk) scanPath(ctx context.Context, sandbox daytonaSandbox
 		outputCaptureNameBytesCeiling,
 	)
 	if err != nil {
-		var captureErr *outputCaptureEntryError
+		var captureErr *OutputCaptureEntryError
 		if !errors.As(err, &captureErr) {
 			return err
 		}
 		if remotePath == outputCaptureRoot {
 			return err
 		}
-		switch captureErr.kind {
+		switch captureErr.Kind {
 		case "not_found":
 			return nil
 		case "unsafe_path", "changed_during_capture", "permission_denied", "capture_failed":
-			w.files = append(w.files, skippedOutputCaptureFile(remotePath, "", 0, captureErr.kind))
+			w.files = append(w.files, skippedOutputCaptureFile(remotePath, "", 0, captureErr.Kind))
 			return nil
 		case outputCaptureRootUnavailableKind, "invalid_input", "path_escape":
 			return err
@@ -283,7 +286,7 @@ func daytonaCaptureOutputEntry(
 	maxEntries int,
 	maxNameBytes int64,
 ) (protocol.CaptureResult, error) {
-	command := shellQuote(helperPath) + " __capture --path " + shellQuote(remotePath) +
+	command := "sudo -n -u " + shellQuote(helperUser) + " " + shellQuote(helperPath) + " __capture --path " + shellQuote(remotePath) +
 		" --max-bytes " + strconv.FormatInt(maxBytes, 10) +
 		" --max-entries " + strconv.Itoa(maxEntries) +
 		" --max-name-bytes " + strconv.FormatInt(maxNameBytes, 10)
@@ -295,7 +298,7 @@ func daytonaCaptureOutputEntry(
 		return protocol.CaptureResult{}, errors.New("daytona capture returned no response")
 	}
 	if response.ExitCode != 0 {
-		return protocol.CaptureResult{}, fmt.Errorf("daytona capture transport failed for %s", remotePath)
+		return protocol.CaptureResult{}, fmt.Errorf("daytona capture transport failed for %s with exit code %d", remotePath, response.ExitCode)
 	}
 	var envelope protocol.CaptureEnvelope
 	if err := json.Unmarshal([]byte(response.Result), &envelope); err != nil {
@@ -305,7 +308,10 @@ func daytonaCaptureOutputEntry(
 		return protocol.CaptureResult{}, fmt.Errorf("daytona capture returned unsupported schema for %s", remotePath)
 	}
 	if envelope.Status == protocol.ToolStatusError && validCaptureErrorEnvelope(envelope) {
-		return protocol.CaptureResult{}, &outputCaptureEntryError{kind: envelope.Error.Kind}
+		return protocol.CaptureResult{}, &OutputCaptureEntryError{
+			Kind:    envelope.Error.Kind,
+			Message: envelope.Error.Message,
+		}
 	}
 	if envelope.Status != protocol.ToolStatusSuccess || envelope.Result == nil || envelope.Error != nil {
 		return protocol.CaptureResult{}, fmt.Errorf("daytona capture returned invalid envelope for %s", remotePath)

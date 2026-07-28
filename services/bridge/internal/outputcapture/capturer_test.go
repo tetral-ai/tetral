@@ -17,6 +17,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
@@ -150,6 +151,31 @@ func TestCapturerClassifiesOnlyPrePersistenceScanFailures(t *testing.T) {
 	var scanErr *CaptureScanError
 	if err == nil || errors.As(err, &scanErr) {
 		t.Fatalf("blob persistence error = %T %v; want non-scan failure", err, err)
+	}
+}
+
+func TestCapturerPreservesTypedDriverScanFailureCause(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_output_scan_cause"
+	seedOutputCaptureSession(t, admin, sessionID)
+	client := dbconnect.NewClientForTesting(runtime)
+	capturer := NewCapturer(blob.NewFakeBlobStore(), &staticOutputScanner{err: &sandboxdriver.OutputCaptureEntryError{
+		Kind:    "permission_denied",
+		Message: "capture mode requires root",
+	}})
+
+	err := client.WithWorkspaceTx(context.Background(), "default", "agentruntimebridge.finish_idle", func(tx *dbconnect.Tx) error {
+		_, err := capturer.CaptureOutputs(context.Background(), tx, Request{
+			WorkspaceID: "default", SessionID: sessionID, RuntimeWriteID: "rwrite_scan_cause",
+		})
+		return err
+	})
+	var scanErr *CaptureScanError
+	if !errors.As(err, &scanErr) || scanErr.Kind() != "scan_outputs" {
+		t.Fatalf("capture error = %T %v; want CaptureScanError", err, err)
+	}
+	if scanErr.CaptureKind != "permission_denied" || scanErr.CaptureDetail != "capture mode requires root" {
+		t.Fatalf("capture cause = %q/%q; want typed driver cause", scanErr.CaptureKind, scanErr.CaptureDetail)
 	}
 }
 

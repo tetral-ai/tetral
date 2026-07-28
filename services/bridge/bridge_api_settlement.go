@@ -995,9 +995,24 @@ func logOutputCaptureFailure(logger *slog.Logger, workspaceID string, sessionID 
 		slog.String("session.id", sessionID),
 		slog.String("error.class", "output_capture_scan_error"),
 		slog.String("error.code", captureErr.Kind()),
+		slog.String("error.capture_kind", captureErr.CaptureKind),
+		slog.String("error.capture_detail", boundedOutputCaptureFailureDetail(captureErr.CaptureDetail)),
 		slog.Bool("retryable", true),
 		slog.String("alert.family", "output_capture"),
 	)
+}
+
+const outputCaptureFailureDetailMaxBytes = 512
+
+func boundedOutputCaptureFailureDetail(detail string) string {
+	if len(detail) <= outputCaptureFailureDetailMaxBytes {
+		return detail
+	}
+	end := outputCaptureFailureDetailMaxBytes
+	for end > 0 && !utf8.ValidString(detail[:end]) {
+		end--
+	}
+	return detail[:end]
 }
 
 func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID string, skipped []outputcapture.SkippedFile) {

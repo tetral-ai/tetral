@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
@@ -25,6 +26,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
@@ -2262,7 +2264,10 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRecordsScanAbortAndCommitsIdle(t *tes
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{err: errors.New("capture failed")})
+	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{err: &sandboxdriver.OutputCaptureEntryError{
+		Kind:    "permission_denied",
+		Message: "capture mode requires root",
+	}})
 	response, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_finish_idle_capture_fail", "thr_bridge_finish_idle_capture_fail", "bind_bridge_finish_idle_capture_fail", 1, "pod_uid_finish_idle_capture_fail"),
 		RuntimeWriteId: "rwrite_bridge_finish_idle_capture_fail",
@@ -2301,6 +2306,8 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRecordsScanAbortAndCommitsIdle(t *tes
 		`"event.kind":"output_capture.scan_failed"`,
 		`"error.class":"output_capture_scan_error"`,
 		`"error.code":"scan_outputs"`,
+		`"error.capture_kind":"permission_denied"`,
+		`"error.capture_detail":"capture mode requires root"`,
 		`"alert.family":"output_capture"`,
 	} {
 		if !strings.Contains(logs.String(), field) {
@@ -2309,6 +2316,20 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRecordsScanAbortAndCommitsIdle(t *tes
 	}
 	if strings.Contains(logs.String(), "capture failed") {
 		t.Fatalf("capture failure log leaked scanner text: %s", logs.String())
+	}
+}
+
+func TestOutputCaptureFailureDetailIsUTF8Bounded(t *testing.T) {
+	detail := strings.Repeat("界", outputCaptureFailureDetailMaxBytes) + "CAPTURE_DETAIL_SECRET"
+	got := boundedOutputCaptureFailureDetail(detail)
+	if len(got) > outputCaptureFailureDetailMaxBytes {
+		t.Fatalf("bounded detail bytes = %d; want <= %d", len(got), outputCaptureFailureDetailMaxBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("bounded detail is not valid UTF-8: %q", got)
+	}
+	if strings.Contains(got, "CAPTURE_DETAIL_SECRET") {
+		t.Fatalf("bounded detail retained suffix secret: %q", got)
 	}
 }
 

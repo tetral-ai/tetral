@@ -19,6 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/pathvalidation"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"google.golang.org/grpc/codes"
@@ -87,7 +88,9 @@ type Result struct {
 // began. FinishIdle may record and downgrade only this type; database, quota,
 // and object-store failures remain settlement failures.
 type CaptureScanError struct {
-	kind string
+	kind          string
+	CaptureKind   string
+	CaptureDetail string
 }
 
 func (e *CaptureScanError) Error() string {
@@ -152,7 +155,13 @@ func (c *Capturer) CaptureOutputs(ctx context.Context, tx *dbconnect.Tx, request
 	target.MaxTotalBytes = limits.MaxTotalBytes
 	scan, err := c.Scanner.ScanOutputs(ctx, target)
 	if err != nil {
-		return Result{}, &CaptureScanError{kind: "scan_outputs"}
+		scanErr := &CaptureScanError{kind: "scan_outputs"}
+		var captureErr *sandboxdriver.OutputCaptureEntryError
+		if errors.As(err, &captureErr) {
+			scanErr.CaptureKind = captureErr.Kind
+			scanErr.CaptureDetail = captureErr.Message
+		}
+		return Result{}, scanErr
 	}
 	entries, skipped, err := normalizeScan(scan, limits)
 	if err != nil {

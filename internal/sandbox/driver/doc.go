@@ -24,7 +24,8 @@
 //     running helper envelope into a BackgroundTask handle for later
 //     poll/stdin/cancel, and a settled envelope into a terminal status.
 //   - Supporting driver surfaces in the same package: idle-output capture
-//     (daytona_output_capture.go), memory projection refresh
+//     (daytona_output_capture.go) invokes capture mode through the same
+//     passwordless sudo root-helper form; memory projection refresh
 //     (memory_projection.go), GitHub repository preparation
 //     (github_repository.go), helper payload and limit construction
 //     (helper_payload.go), and the provider artifact reference builder
@@ -54,8 +55,9 @@
 //
 // INVARIANTS:
 //   - The helper is invoked as root (helperUser) through sudo; the driver never
-//     runs tool logic as the workspace runtime user. Root ownership lets the
-//     helper read and unlink the payload before it drops privilege itself.
+//     runs tool or capture logic as the workspace runtime user. Root ownership
+//     lets tool commands read and unlink their payload before dropping
+//     privilege, while capture mode retains root for descriptor-safe reads.
 //   - Once the per-invocation payload directory is created, every return path
 //     removes it: the explicit deletes on the upload and permission-command
 //     failures, and the deferred delete around the helper run.
