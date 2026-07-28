@@ -52,10 +52,10 @@ import { ContextLoaderBoundary } from "../../src/context/context-loader.js";
 import { normalizeProviderError } from "../../src/contracts/provider.js";
 import { Session } from "../../src/session/session.js";
 import { AutoApprovalReviewerManager } from "../../src/session/approval-reviewer-manager.js";
-import type { RuntimeAcceptedInputState } from "../../src/session/session-state.js";
+import type { RuntimeAcceptedInputState, RuntimeConfigPatchState } from "../../src/session/session-state.js";
 import { SessionProcessor } from "../../src/runtime/accumulator.js";
 import { SessionToolCoordinator } from "../../src/tools/tool-scheduler.js";
-import { runtimeToolPolicyFromPatchPayloads } from "../../../runtime-pod/src/command.js";
+import { runtimeModelForThread, runtimeToolPolicyFromPatchPayloads } from "../../../runtime-pod/src/command.js";
 import {
   buildAgentLoopUserMessage as userMessage,
   buildAgentLoopRuntimeNotificationMessage as runtimeNotificationMessage,
@@ -111,6 +111,11 @@ function acceptedInput(runtimeInputId = "rin_follow_up"): RuntimeAcceptedInputSt
     kind: "messages",
     payloadJson: "{}",
   };
+}
+
+function withoutModelReceipt(message: RuntimeMessage): RuntimeMessage {
+  const { providerId: _providerId, modelId: _modelId, ...publicMessage } = message;
+  return publicMessage;
 }
 
 function beginTestUserInterrupt(
@@ -582,6 +587,7 @@ function runtimeAgentLoopLayer(
     readonly approvalMode?: Parameters<typeof AgentLoop.layer>[0]["approvalMode"];
     readonly runTool?: Parameters<typeof AgentLoop.layer>[0]["runTool"];
     readonly reviewApproval?: Parameters<typeof AgentLoop.layer>[0]["reviewApproval"];
+    readonly runtimeModel?: Parameters<typeof AgentLoop.layer>[0]["runtimeModel"];
     readonly runtimePolicy?: Parameters<typeof AgentLoop.layer>[0]["runtimePolicy"];
     readonly runtime?: RuntimeDependencies;
     readonly metrics?: RuntimeMetricsSink;
@@ -619,6 +625,7 @@ function runtimeAgentLoopLayer(
     ...(options.approvalMode !== undefined ? { approvalMode: options.approvalMode } : {}),
     ...(options.runTool !== undefined ? { runTool: options.runTool } : {}),
     ...(options.reviewApproval !== undefined ? { reviewApproval: options.reviewApproval } : {}),
+    runtimeModel: options.runtimeModel ?? (() => ({ providerId: "fake", modelId: "fake-chat" })),
     runtimePolicy: options.runtimePolicy ?? (() => ({
       toolCatalog: options.providerCallRuntime?.toolCatalog ?? createToolCatalog({ family: "claude" }),
     })),
@@ -684,7 +691,7 @@ describe("AgentLoop", () => {
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
         return yield* agentLoop.run(new Session("sesn_1"));
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader))),
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { runtimeModel: () => undefined }))),
     );
 
     expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
@@ -1325,7 +1332,7 @@ describe("AgentLoop", () => {
     expect(JSON.stringify(session.state.transientModelMessages())).toContain("transient after request snapshot");
   });
 
-  test("loads cold context and pending messages into the borrowed Session", async () => {
+  test("loads cold context and pending messages without deriving the configured model from either message list", async () => {
     const history = [userMessage("user-1", 0, "first", "openai", "gpt-5.5")];
     const pending = {
       type: "messages",
@@ -1346,7 +1353,7 @@ describe("AgentLoop", () => {
 
     expect(result).toEqual({
       type: "completed",
-      currentModel: { providerId: "anthropic", modelId: "claude-opus-4-7" },
+      currentModel: { providerId: "fake", modelId: "fake-chat" },
       modelMessageCount: 3,
     });
     expect(loader.buildCalls).toEqual(["sesn_1"]);
@@ -1465,6 +1472,110 @@ describe("AgentLoop", () => {
     expect(pendingResult).toMatchObject({ type: "completed", modelMessageCount: 1 });
   });
 
+  test("first accepted turn resolves its provider model from the cold runtime config", async () => {
+    const session = new Session("sesn_first_config_model");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_first_config_model"));
+    const publicMessage = withoutModelReceipt(
+      userMessage("user-first-config-model", 0, "hello", "receipt-only", "receipt-only"),
+    );
+    const runtimeConfigPatch: RuntimeConfigPatchState = {
+      requestId: "req_first_config_patch",
+      workspaceId: "wksp_test",
+      sessionId: session.sessionId,
+      sessionThreadId: "thrd_1",
+      bindingId: "bind_1",
+      bindingGeneration: 1,
+      targetPodUid: "pod_1",
+      runtimeInputId: "rin_first_config_patch",
+      eventIds: [],
+      sequenceFrom: 0,
+      sequenceTo: 0,
+      generation: 1,
+      coldLoad: true,
+      installedBuiltinFamily: "claude" as const,
+      payloadJson: JSON.stringify({
+        runtime_config: {
+          agent: { config: { model: "openai/gpt-5.5" } },
+          installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+        },
+      }),
+    };
+    const loader = new QueuedContextLoader([], [], [{
+      type: "context",
+      messages: [publicMessage],
+      runtimeBindingToken: "runtime-binding-token-config-model",
+      runtimeConfigPatch,
+    }]);
+    const requests: LLMRequest[] = [];
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* AgentLoop.Service).run(session);
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        runtimeModel: (activeSession) => runtimeModelForThread(
+          activeSession.identity.threadRole,
+          activeSession.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
+          { providerId: "anthropic", modelId: "claude-opus-4-8" },
+        ),
+        onStream: (request) => requests.push(request),
+      }))),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.model).toEqual({ providerId: "openai", modelId: "gpt-5.5", variant: "" });
+  });
+
+  test("accepted input without a resolvable runtime model settles an explicit exhausted error", async () => {
+    const session = new Session("sesn_missing_config_model");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_missing_config_model"));
+    const loader = new QueuedContextLoader([], [], [{
+      type: "context",
+      messages: [withoutModelReceipt(
+        userMessage("user-missing-config-model", 0, "hello", "receipt-only", "receipt-only"),
+      )],
+      runtimeBindingToken: "runtime-binding-token-missing-model",
+    }]);
+    const appended: SessionEvent[] = [];
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* AgentLoop.Service).run(session);
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        runtimeModel: () => undefined,
+        writer: writerFrom((envelope) => {
+          appended.push(envelope.event);
+          return {
+            ok: true,
+            writeId: envelope.writeId,
+            eventId: `bridge-${envelope.writeId}`,
+            processedAt: createdAt,
+          };
+        }),
+      }))),
+    );
+
+    expect(result).toMatchObject({
+      type: "failed",
+      error: {
+        code: "runtime_invalid_sequence",
+        fatal: true,
+        reason: "runtime_contract_validation",
+      },
+    });
+    expect(appended).toEqual([
+      { type: "session.status_running" },
+      expect.objectContaining({
+        type: "session.error",
+        error: expect.objectContaining({
+          code: "runtime_invalid_sequence",
+          retryStatus: { type: "exhausted" },
+        }),
+      }),
+      { type: "session.status_idle", stop_reason: { type: "retries_exhausted" } },
+    ]);
+  });
+
   test("no accepted pending input emits only terminal idle without running status", async () => {
     const loader = new RecordingContextLoader([], { type: "empty" });
     const session = new Session("sesn_1");
@@ -1477,6 +1588,7 @@ describe("AgentLoop", () => {
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
+            runtimeModel: () => undefined,
             writer: writerFrom((envelope) => {
               appendedTypes.push(envelope.event.type);
               return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
@@ -1555,7 +1667,7 @@ describe("AgentLoop", () => {
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
         return yield* agentLoop.run(new Session("sesn_1"));
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { writer }))),
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { runtimeModel: () => undefined, writer }))),
     );
 
     expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
@@ -1585,7 +1697,7 @@ describe("AgentLoop", () => {
         return yield* (yield* AgentLoop.Service).run(new Session("sesn_finish_idle_drain"));
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader([], { type: "empty" }),
-        { writer, runtime: { ...agentLoopRuntime(), sleep: async () => true } },
+        { runtimeModel: () => undefined, writer, runtime: { ...agentLoopRuntime(), sleep: async () => true } },
       ))),
     );
     let settled = false;
@@ -1649,7 +1761,7 @@ describe("AgentLoop", () => {
     expect(session.state.persistentContextLoaded()).toBe(false);
   });
 
-  test("hot restarts preserve ContextManager state and do not reload stale cold history", async () => {
+  test("hot restarts preserve the configured model and ContextManager state without reloading cold history", async () => {
     const loader = new QueuedContextLoader([], [
       { type: "messages", messages: [userMessage("user-1", 0, "first", "openai", "gpt-5.5")] },
       { type: "messages", messages: [userMessage("user-2", 1, "second", "anthropic", "claude-opus-4-7")] },
@@ -1677,9 +1789,9 @@ describe("AgentLoop", () => {
       }).pipe(Effect.provide(layer)),
     );
 
-    expect(first).toMatchObject({ type: "completed", currentModel: { providerId: "openai", modelId: "gpt-5.5" } });
-    expect(second).toMatchObject({ type: "completed", currentModel: { providerId: "anthropic", modelId: "claude-opus-4-7" } });
-    expect(third).toMatchObject({ type: "completed", currentModel: { providerId: "anthropic", modelId: "claude-opus-4-7" } });
+    expect(first).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
+    expect(second).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
+    expect(third).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
     expect(loader.buildCalls).toEqual(["sesn_1"]);
     expect(loader.pendingCalls).toEqual(["sesn_1", "sesn_1", "sesn_1"]);
     expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
@@ -1774,6 +1886,7 @@ describe("AgentLoop", () => {
             }),
             storeOperationTimeoutMs: 1_000,
             providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1_800_000 },
+            runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
           }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader))),
         ),
       ),
@@ -1975,7 +2088,12 @@ describe("AgentLoop", () => {
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
         return yield* agentLoop.run(session);
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { llmService: llm, metrics, writer }))),
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        llmService: llm,
+        metrics,
+        writer,
+        runtimeModel: () => ({ providerId: "anthropic", modelId: "claude-opus-4-8" }),
+      }))),
     );
 
     expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
@@ -2149,6 +2267,7 @@ describe("AgentLoop", () => {
       llmService: llm,
       writer,
       compaction: {},
+      runtimeModel: () => ({ providerId: "anthropic", modelId: "claude-opus-4-8" }),
     });
 
     const first = await Effect.runPromise(
@@ -8393,6 +8512,7 @@ Previous anchored summary.
             ]),
             storeOperationTimeoutMs: 1_000,
             providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1_800_000 },
+            runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
           }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader))),
         ),
       ),
@@ -8442,6 +8562,7 @@ Previous anchored summary.
             ]),
             storeOperationTimeoutMs: 1_000,
             providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1_800_000 },
+            runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
           }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader))),
         ),
       ),
@@ -8564,6 +8685,7 @@ Previous anchored summary.
             llmService: streamingService,
             storeOperationTimeoutMs: 1_000,
             providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1_800_000 },
+            runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
           }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader))),
         ),
       ),

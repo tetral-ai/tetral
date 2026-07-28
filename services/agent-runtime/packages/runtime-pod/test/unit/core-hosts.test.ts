@@ -10,7 +10,7 @@ import type {
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
-import { runtimeToolPolicyForThread } from "../../src/command.js";
+import { runtimeModelForThread, runtimeToolPolicyForThread } from "../../src/command.js";
 import {
   buildCoreHostsUserMessage as userMessage,
   buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
@@ -511,9 +511,12 @@ describe("Runtime core host production assembly", () => {
     const appended: SessionEvent[] = [];
     const terminalResultAppended = deferred<void>();
     const pendingInput = { query: "tetral" };
-    const loadedMessages = [
-      userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello", "fake", "fake-chat"),
-    ];
+    const {
+      providerId: _providerId,
+      modelId: _modelId,
+      ...loadedMessage
+    } = userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello", "receipt-only", "receipt-only");
+    const loadedMessages = [loadedMessage];
     const replacementScope = {
       ...commandScope("sesn_cold_confirm"),
       bindingId: "bind_2",
@@ -538,7 +541,10 @@ describe("Runtime core host production assembly", () => {
                 installedBuiltinFamily: "claude",
                 payloadJson: JSON.stringify({
                   config_generation: 5,
-                  runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+                  runtime_config: {
+                    agent: { config: { model: "openai/gpt-5.5" } },
+                    installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+                  },
                   tool_policy: { mcpToolsets: [{ mcpServerName: "github" }] },
                 }),
               },
@@ -576,6 +582,11 @@ describe("Runtime core host production assembly", () => {
           providerCallRuntime: {
             systemInstructions: "cold confirmation system",
           },
+          runtimeModel: (session) => runtimeModelForThread(
+            session.identity.threadRole,
+            session.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
+            { providerId: "anthropic", modelId: "claude-opus-4-8" },
+          ),
           runtimePolicy: (session) => {
             const policy = runtimeToolPolicyForThread(
               session.identity.threadRole,
@@ -602,6 +613,7 @@ describe("Runtime core host production assembly", () => {
             observations.push("tool:invoked");
             runToolCalls.push(`${request.modelRequestId}:${request.modelToolCallId}:${request.toolUseEventId}`);
             expect(request.input).toEqual(pendingInput);
+            expect(request.currentModel).toEqual({ providerId: "openai", modelId: "gpt-5.5" });
             expect(request.entry.route).toEqual({ kind: "gateway", operation: "RunMcpTool", mcpServerName: "github" });
             expect(request.bindingId).toBe("bind_2");
             expect(request.bindingGeneration).toBe(2);
@@ -687,6 +699,7 @@ describe("Runtime core host production assembly", () => {
             systemInstructions: "cold confirmation system",
             toolCatalog: createToolCatalog({ family: "claude", configs: [{ name: "Write", enabled: true, permissionPolicy: "always_ask" }] }),
           },
+          runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
           runTool: (request) => {
             runToolCalls.push(`${request.modelRequestId}:${request.modelToolCallId}:${request.toolUseEventId}`);
             expect(request.input).toEqual(pendingInput);
@@ -920,6 +933,7 @@ function testCoreDependencies(
         stream: () => Stream.empty,
       },
       storeOperationTimeoutMs: 100,
+      runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
       runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
       ...overrides.agentLoop,
     },

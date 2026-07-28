@@ -169,6 +169,7 @@ interface FollowUpCleanupAgentLoop {
 function agentLoopService(overrides: Pick<AgentLoop.Interface, "run"> & Partial<AgentLoop.Interface>): AgentLoop.Interface {
   return AgentLoop.Service.of({
     closeFailedRun: () => Effect.succeed({ type: "landed" }),
+    seedRuntimeModel: () => {},
     installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
     ...overrides,
   });

@@ -369,6 +369,7 @@ function fullHostLayer(options: {
     sessionEventWriter: options.writer,
     runtime: runtime(),
     llmService: options.llmService,
+    runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
     storeOperationTimeoutMs: 1_000,
     providerCallRuntime: {
       systemInstructions: "SessionRunHost integration test.",

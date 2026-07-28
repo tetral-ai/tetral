@@ -244,7 +244,8 @@ function parseSingleServiceAccount(value: string): { readonly namespace: string;
   return { namespace, serviceAccount };
 }
 
-function parseModelRef(value: string): RuntimePodModelRef | undefined {
+/** Parses one provider/model identifier without throwing on malformed configuration. */
+export function parseModelRef(value: string): RuntimePodModelRef | undefined {
   const [providerId, modelId, extra] = value.split("/");
   if (
     providerId === undefined ||

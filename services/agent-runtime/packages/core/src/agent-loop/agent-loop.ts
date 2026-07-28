@@ -61,7 +61,7 @@ import type {
   SessionEventWriterRuntimeTerminationEnvelope,
 } from "../contracts/runtime.js";
 import type { Session } from "../session/session.js";
-import type { RuntimePendingApprovalToolJobState, RuntimePreloadedPendingToolUseState } from "../session/session-state.js";
+import type { RuntimePendingApprovalToolJobState, RuntimePreloadedPendingToolUseState, SessionCurrentModel } from "../session/session-state.js";
 import type { AutoApprovalReviewerManager, ParentTranscriptView } from "../session/approval-reviewer-manager.js";
 import * as ContextLoader from "../context/context-loader.js";
 import type { AcceptedInputCommitResult, ContextLoader as ContextLoaderInterface } from "../context/context-loader.js";
@@ -132,7 +132,7 @@ export type AgentLoopRunResult =
 /** Classifies ownership failures that require resident session state to be released. */
 export type AgentLoopSessionReleaseReason = "crashed" | "persistence_failed" | "event_write_failed";
 
-/** Identifies the provider and model selected from committed thread context. */
+/** Identifies the provider and model selected from immutable Runtime configuration. */
 export interface RuntimeModelRef {
   readonly providerId: string;
   readonly modelId: string;
@@ -142,6 +142,12 @@ export interface RuntimeModelRef {
 export interface Interface {
   readonly run: (session: Session) => Effect.Effect<AgentLoopRunResult, unknown>;
   readonly closeFailedRun: (session: Session, defect: unknown) => Effect.Effect<FailedRunCloseoutResult>;
+  /**
+   * Seeds config-sourced model state synchronously. Both preload and accepted-input config
+   * application call this before pending-tool restoration; an unresolved model stays undefined
+   * for the run gate to settle.
+   */
+  readonly seedRuntimeModel: (session: Session) => void;
   readonly installLoadedPendingToolUses: (
     session: Session,
     pendingToolUses: readonly RuntimePreloadedPendingToolUseState[] | undefined,
@@ -271,6 +277,8 @@ export interface AgentLoopRuntimeOptions {
   readonly providerCallAssembler?: ProviderCallAssembler;
   readonly compaction?: AgentLoopCompactionOptions;
   readonly approvalMode?: ToolApprovalMode;
+  /** Totally resolves the immutable config-selected model; the run gate settles undefined. */
+  readonly runtimeModel?: (session: Session) => SessionCurrentModel | undefined;
   readonly runtimePolicy?: (session: Session) => AgentLoopRuntimePolicy;
   readonly runTool?: RuntimeToolRunner;
   readonly reviewApproval?: RuntimeApprovalReviewer;
@@ -540,6 +548,7 @@ function agentLoopLayer(options: AgentLoopRuntimeOptions): Layer.Layer<Service, 
         };
         return Effect.promise(() => closeFailedRunDurably(options, session, defect, closeout));
       },
+      seedRuntimeModel: (session) => seedRuntimeModel(session, options),
       installLoadedPendingToolUses: (session, pendingToolUses, messages) =>
         Effect.sync(() => installLoadedPendingToolUses(session, options, pendingToolUses, messages)),
     });
@@ -761,12 +770,9 @@ function runAgentLoopEffect(
     }
     if (history !== undefined) {
       session.state.contextManager.replaceMessages(history);
-      const currentModel = lastAcceptedUserMessageModel(history);
-      if (currentModel !== undefined) {
-        session.state.updateCurrentModel(currentModel);
-      }
       session.state.markPersistentContextLoaded();
     }
+    seedRuntimeModel(session, options);
 
     while (true) {
       let acceptedContextCommitted = false;
@@ -835,10 +841,7 @@ function runAgentLoopEffect(
           for (const manifest of committed.result.mcpManifests ?? []) {
             session.state.applyRuntimeConfigPatch(manifest);
           }
-          const currentModel = lastAcceptedUserMessageModel(committed.result.messages);
-          if (currentModel !== undefined) {
-            session.state.updateCurrentModel(currentModel);
-          }
+          seedRuntimeModel(session, options);
           session.state.reconcilePendingAttachments(committed.result.pendingAttachments ?? []);
           const pendingToolUseInstall = installLoadedPendingToolUses(session, options, committed.result.pendingToolUses, committed.result.messages);
           if (!pendingToolUseInstall.ok) {
@@ -900,10 +903,6 @@ function runAgentLoopEffect(
         for (const message of pendingInput.messages) {
           session.state.contextManager.appendMessage(message);
         }
-        const acceptedModel = lastAcceptedUserMessageModel(pendingInput.messages);
-        if (acceptedModel !== undefined) {
-          session.state.updateCurrentModel(acceptedModel);
-        }
       }
       appendPendingAttachmentOverflowNote(session, options);
       const committedMessages = session.state.contextManager.messages();
@@ -919,7 +918,22 @@ function runAgentLoopEffect(
         session.state.clear();
         return { type: "failed", error: projected.error, releaseSession: { reason: "crashed" } };
       }
-      if (projected === undefined || currentModel === undefined || projected.messages.length === 0) {
+      if (currentModel === undefined) {
+        const failure = normalizeRuntimeFailure({
+          type: "runtime",
+          code: "runtime_invalid_sequence",
+          retryable: false,
+          fatal: true,
+          reason: "runtime_contract_validation",
+          sessionId: session.sessionId,
+        });
+        const terminalAppend = yield* Effect.promise(() => appendTerminalEventsBestEffort(options, session, failure));
+        if (!terminalAppend.ok) {
+          return { type: "failed", error: terminalAppend.error, releaseSession: { reason: "event_write_failed" } };
+        }
+        return { type: "failed", error: failure };
+      }
+      if (projected === undefined || projected.messages.length === 0) {
         return yield* Effect.promise(() => completeRun(session, options));
       }
       const bindingTokenRefresh = yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
@@ -5632,16 +5646,9 @@ function exitFailure<A, E>(exit: Exit.Exit<A, E>): E | undefined {
   return Option.isSome(failure) ? failure.value : undefined;
 }
 
-function lastAcceptedUserMessageModel(
-  messages: readonly RuntimeMessage[],
-): { readonly providerId: string; readonly modelId: string } | undefined {
-  for (const message of [...messages].sort((left, right) => right.sequence - left.sequence)) {
-    if (message.role === "user" && message.providerId !== undefined && message.modelId !== undefined) {
-      return {
-        providerId: message.providerId,
-        modelId: message.modelId,
-      };
-    }
+function seedRuntimeModel(session: Session, options: AgentLoopRuntimeOptions): void {
+  const model = options.runtimeModel?.(session);
+  if (model !== undefined) {
+    session.state.updateCurrentModel(model);
   }
-  return undefined;
 }

@@ -31,8 +31,8 @@ import type { RuntimeCoreHosts } from "./core-hosts.js";
 import { createRuntimeApprovalReviewer, loadApprovalReviewerAssets } from "./approval-reviewer.js";
 import { RuntimePodGatewayClient } from "./gateway-client.js";
 import { gatewayGrpcChannelOptions } from "./bounds.js";
-import { loadRuntimePodConfigFromProcessEnv } from "./config.js";
-import type { RuntimePodConfig } from "./config.js";
+import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
+import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
 import { createRuntimePodApp } from "./app.js";
 import type { RuntimePodApp } from "./app.js";
 import { createJsonLogger, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
@@ -234,6 +234,12 @@ export async function buildRuntimePodCommandDependencies(input: {
       },
       compaction: streamTimeoutOptions.compaction,
       approvalMode: "ask_for_approval",
+      runtimeModel: (session) =>
+        runtimeModelForThread(
+          session.identity.threadRole,
+          session.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
+          input.config.platformModels.approvalReviewer,
+        ),
       runtimePolicy: (session) =>
         runtimeToolPolicyForThread(
           session.identity.threadRole,
@@ -540,6 +546,50 @@ export function runtimeToolPolicyForThread(
     };
   }
   return runtimeToolPolicyFromPatchPayloadsWithFamily(payloadJsons, installedBuiltinFamily, false);
+}
+
+/**
+ * Resolves the thread model from immutable Runtime configuration. Reviewer threads use the
+ * configured reviewer model; all other roles inspect the cold agent config payload. Malformed or
+ * absent configuration returns undefined so Agent Loop can settle the run through its model gate.
+ */
+export function runtimeModelForThread(
+  threadRole: RuntimeThreadRoleState | undefined,
+  payloadJsons: readonly string[],
+  reviewerModel: RuntimePodModelRef,
+): RuntimePodModelRef | undefined {
+  if (threadRole === "approval_reviewer") {
+    return reviewerModel;
+  }
+  for (const payloadJson of payloadJsons) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(payloadJson);
+    } catch {
+      continue;
+    }
+    if (!isRecord(payload)) {
+      continue;
+    }
+    const runtimeConfig = recordField(payload, "runtime_config");
+    if (!isRecord(runtimeConfig)) {
+      continue;
+    }
+    const agent = recordField(runtimeConfig, "agent");
+    if (!isRecord(agent)) {
+      continue;
+    }
+    const config = recordField(agent, "config");
+    if (!isRecord(config)) {
+      continue;
+    }
+    const model = recordField(config, "model");
+    if (typeof model !== "string" || model.length === 0) {
+      continue;
+    }
+    return parseModelRef(model);
+  }
+  return undefined;
 }
 
 function runtimeAgentSystemPatch(

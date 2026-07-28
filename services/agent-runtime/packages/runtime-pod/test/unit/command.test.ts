@@ -11,7 +11,7 @@ import type { RuntimeInputCommandRequest } from "@tetral/agent-runtime-protocol/
 import { effectivePermissionPolicy, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import { loadRuntimePodConfig, loadRuntimePodConfigFromEnv } from "../../src/config.js";
-import { buildRuntimePodCommandDependencies, runRuntimePodCommand, runtimeToolPolicyForThread, runtimeToolPolicyFromPatchPayload, runtimeToolPolicyFromPatchPayloads } from "../../src/command.js";
+import { buildRuntimePodCommandDependencies, runRuntimePodCommand, runtimeModelForThread, runtimeToolPolicyForThread, runtimeToolPolicyFromPatchPayload, runtimeToolPolicyFromPatchPayloads } from "../../src/command.js";
 import type { RuntimePodCommandDependencies } from "../../src/command.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import type { RuntimePodConfig } from "../../src/config.js";
@@ -524,6 +524,22 @@ describe("Runtime Pod command entrypoint", () => {
       const read = lookupToolEntry(policy.toolCatalog, "Read");
       expect(read !== undefined ? effectivePermissionPolicy(read, policy.toolCatalog.configs) : undefined).toBe("always_allow");
     }
+  });
+
+  test("runtime model resolution gives approval reviewers their configured model regardless of session patches", () => {
+    const reviewerModel = { providerId: "anthropic", modelId: "claude-opus-4-8" };
+
+    expect(runtimeModelForThread(
+      "approval_reviewer",
+      [
+        JSON.stringify({
+          runtime_config: {
+            agent: { config: { model: "openai/gpt-5.5" } },
+          },
+        }),
+      ],
+      reviewerModel,
+    )).toEqual(reviewerModel);
   });
 
   test("runtime policy parser rejects malformed MCP manifest tools instead of silently omitting them", () => {

@@ -34,7 +34,6 @@ import type {
   RuntimeAcceptedInputState,
   RuntimeInterAgentAcceptedInputState,
   RuntimeConfigPatchState,
-  SessionCurrentModel,
   RuntimeThreadRoleState,
   RuntimeThreadPreloadState,
   RuntimeThreadStatusState,
@@ -1157,10 +1156,9 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           for (const manifest of command.mcpManifests ?? []) {
             threadResult.threadEntry.session.state.applyRuntimeConfigPatch(manifest);
           }
-          const currentModel = lastAcceptedUserMessageModel(command.messages);
-          if (currentModel !== undefined) {
-            threadResult.threadEntry.session.state.updateCurrentModel(currentModel);
-          }
+          // Model seeding must precede pending-tool restoration because restoration requires the
+          // config-selected model to rebuild its processor source.
+          agentLoop.seedRuntimeModel(threadResult.threadEntry.session);
           threadResult.threadEntry.session.state.replacePendingAttachments(command.pendingAttachments ?? []);
           const pendingToolUseInstall = yield* agentLoop.installLoadedPendingToolUses(threadResult.threadEntry.session, command.pendingToolUses, command.messages);
           if (!pendingToolUseInstall.ok) {
@@ -1678,14 +1676,4 @@ async function defaultCloseoutSleep(durationMs: number, signal: AbortSignal): Pr
       resolve(false);
     }, { once: true });
   });
-}
-
-function lastAcceptedUserMessageModel(messages: readonly RuntimeMessage[]): SessionCurrentModel | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role === "user" && message.providerId !== undefined && message.modelId !== undefined) {
-      return { providerId: message.providerId, modelId: message.modelId };
-    }
-  }
-  return undefined;
 }
