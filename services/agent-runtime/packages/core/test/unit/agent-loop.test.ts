@@ -1344,16 +1344,25 @@ describe("AgentLoop", () => {
     const loader = new RecordingContextLoader(history, pending);
     const session = new Session("sesn_1");
 
+    // The supplier returns a model no message in either fixture list carries,
+    // so a reintroduced derivation from ANY message (first-wins or last-wins)
+    // produces a mismatch here instead of passing by coincidence.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
         return yield* agentLoop.run(session);
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader))),
+      }).pipe(
+        Effect.provide(
+          runtimeAgentLoopLayer(loader, {
+            runtimeModel: () => ({ providerId: "resolved", modelId: "from-config" }),
+          }),
+        ),
+      ),
     );
 
     expect(result).toEqual({
       type: "completed",
-      currentModel: { providerId: "fake", modelId: "fake-chat" },
+      currentModel: { providerId: "resolved", modelId: "from-config" },
       modelMessageCount: 3,
     });
     expect(loader.buildCalls).toEqual(["sesn_1"]);
