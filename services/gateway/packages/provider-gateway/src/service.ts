@@ -114,86 +114,139 @@ export class ProviderGatewayServiceShell {
     abortSignal: AbortSignal | undefined,
   ): AsyncGenerator<ProviderStreamEvent> {
     const started = performance.now();
-    const caller = await this.authorize(metadata, "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest");
-    this.ensureReady();
-    const validation = validateProviderRequest(request);
-    if (!validation.ok) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, validation.message);
-    }
-    if ((request.model?.variant ?? "") !== "") {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
-    }
-    const limits = request.limits;
-    if (limits === undefined) {
-      throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
-    }
-    if (!this.options.runtimeBindingTokenVerifier.verify({
-      request,
-      runtimeBindingToken: request.runtimeBindingToken,
-      runtimePodUid: caller.serviceAccount.podUid,
-    })) {
-      throw new GrpcStatusError(status.PERMISSION_DENIED, "runtime binding token rejected");
-    }
-    const release = this.admission.tryAcquire();
-    if (release === undefined) {
-      yield providerErrorEvent(request, {
-        code: "provider_unavailable",
-        message: "Gateway provider capacity is exhausted.",
-        retryable: true,
-        fatal: false,
-        statusCode: 503,
-      });
-      return;
-    }
-    const finishMetrics = this.metrics.startProviderStream();
-    let failed = false;
-    const providerAbortController = new AbortController();
-    const providerDeadline = performance.now() + limits.timeoutMs;
-    const forwardAbort = (): void => providerAbortController.abort(abortSignal?.reason ?? new DOMException("Provider request cancelled.", "AbortError"));
-    if (abortSignal?.aborted === true) {
-      forwardAbort();
-    } else {
-      abortSignal?.addEventListener("abort", forwardAbort, { once: true });
-    }
+    let requestOutcome: "ok" | "failed" = "failed";
+    let errorClass = "runtime_error";
+    let errorCode = "stream_incomplete";
+    let callerServiceAccount: string | undefined;
+    let requestIdentity: {
+      readonly "workspace.id": string;
+      readonly "session.id": string;
+      readonly "thread.id": string;
+      readonly "request.id": string;
+      readonly "provider.request.id": string;
+      readonly "model_request.id": string;
+    } | undefined;
     try {
-      for await (const event of this.streamProviderAttempts(
+      const caller = await this.authorize(metadata, "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest");
+      callerServiceAccount = `${caller.serviceAccount.namespace}/${caller.serviceAccount.name}`;
+      this.ensureReady();
+      const validation = validateProviderRequest(request);
+      if (!validation.ok) {
+        throw new GrpcStatusError(status.INVALID_ARGUMENT, validation.message);
+      }
+      requestIdentity = {
+        "workspace.id": request.workspaceId,
+        "session.id": request.sessionId,
+        "thread.id": request.sessionThreadId,
+        "request.id": request.requestId,
+        "provider.request.id": request.modelRequestId,
+        "model_request.id": request.modelRequestId,
+      };
+      if ((request.model?.variant ?? "") !== "") {
+        throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
+      }
+      const limits = request.limits;
+      if (limits === undefined) {
+        throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
+      }
+      if (!this.options.runtimeBindingTokenVerifier.verify({
         request,
-        caller.serviceAccount.podUid,
-        providerAbortController.signal,
-        providerDeadline,
-        () => providerAbortController.abort(new DOMException("Provider request timed out.", "AbortError")),
-      )) {
-        if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR) {
-          failed = true;
+        runtimeBindingToken: request.runtimeBindingToken,
+        runtimePodUid: caller.serviceAccount.podUid,
+      })) {
+        throw new GrpcStatusError(status.PERMISSION_DENIED, "runtime binding token rejected");
+      }
+      const release = this.admission.tryAcquire();
+      if (release === undefined) {
+        errorClass = "provider_error";
+        errorCode = "provider_unavailable";
+        yield providerErrorEvent(request, {
+          code: "provider_unavailable",
+          message: "Gateway provider capacity is exhausted.",
+          retryable: true,
+          fatal: false,
+          statusCode: 503,
+        });
+        return;
+      }
+      const finishMetrics = this.metrics.startProviderStream();
+      let failed = false;
+      const providerAbortController = new AbortController();
+      const providerDeadline = performance.now() + limits.timeoutMs;
+      const forwardAbort = (): void => providerAbortController.abort(abortSignal?.reason ?? new DOMException("Provider request cancelled.", "AbortError"));
+      if (abortSignal?.aborted === true) {
+        forwardAbort();
+      } else {
+        abortSignal?.addEventListener("abort", forwardAbort, { once: true });
+      }
+      try {
+        for await (const event of this.streamProviderAttempts(
+          request,
+          caller.serviceAccount.podUid,
+          providerAbortController.signal,
+          providerDeadline,
+          () => providerAbortController.abort(new DOMException("Provider request timed out.", "AbortError")),
+        )) {
+          if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR) {
+            failed = true;
+            errorClass = "provider_error";
+            errorCode = providerLogErrorCode(event.providerError?.error?.code);
+          }
+          yield event;
         }
-        yield event;
+      } catch (error) {
+        failed = true;
+        if (error instanceof GrpcStatusError) {
+          errorClass = "grpc_status";
+          errorCode = String(error.code);
+          throw error;
+        }
+        const classified = classifyProviderStreamError(error);
+        errorClass = "provider_error";
+        errorCode = providerLogErrorCode(classified.code);
+        yield providerErrorEvent(request, classified);
+      } finally {
+        abortSignal?.removeEventListener("abort", forwardAbort);
+        finishMetrics(failed);
+        release();
       }
+      requestOutcome = failed ? "failed" : "ok";
     } catch (error) {
-      failed = true;
+      requestOutcome = "failed";
       if (error instanceof GrpcStatusError) {
-        throw error;
+        errorClass = "grpc_status";
+        errorCode = String(error.code);
+      } else if (errorCode === "stream_incomplete") {
+        errorCode = "internal";
       }
-      yield providerErrorEvent(request, classifyProviderStreamError(error));
+      throw error;
     } finally {
-      abortSignal?.removeEventListener("abort", forwardAbort);
-      finishMetrics(failed);
-      release();
+      const record = {
+        event: "provider_request_streamed",
+        "event.kind": "provider_request_streamed",
+        operation: "StreamProviderRequest",
+        component: "gateway",
+        "grpc.method": "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest",
+        "caller.service_account": callerServiceAccount,
+        ...requestIdentity,
+        "request.outcome": requestOutcome,
+        "duration.ms": Math.round(performance.now() - started),
+      } as const;
+      try {
+        this.options.logger.info(requestOutcome === "ok"
+          ? record
+          : {
+              ...record,
+              ...semanticErrorFields({
+                errorClass,
+                errorCode,
+                messageSafe: "provider request failed",
+              }),
+            });
+      } catch {
+        // Observability must not replace the request's outcome.
+      }
     }
-    this.options.logger.info({
-      event: "provider_request_streamed",
-      "event.kind": "provider_request_streamed",
-      operation: "StreamProviderRequest",
-      component: "gateway",
-      "grpc.method": "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest",
-      "caller.service_account": `${caller.serviceAccount.namespace}/${caller.serviceAccount.name}`,
-      "workspace.id": request.workspaceId,
-      "session.id": request.sessionId,
-      "thread.id": request.sessionThreadId,
-      "request.id": request.requestId,
-      "provider.request.id": request.modelRequestId,
-      "model_request.id": request.modelRequestId,
-      "duration.ms": Math.round(performance.now() - started),
-    });
   }
 
   /** Renders the current provider-stream metrics with live readiness state. */
@@ -438,6 +491,12 @@ export class ProviderGatewayServiceShell {
     }
     return undefined;
   }
+}
+
+function providerLogErrorCode(value: string | undefined): string {
+  return value !== undefined && /^[a-z0-9_.-]{1,128}$/i.test(value)
+    ? value
+    : "provider_error";
 }
 
 function providerAttemptFailureInput(error: unknown): Parameters<typeof classifyProviderFailure>[1] {

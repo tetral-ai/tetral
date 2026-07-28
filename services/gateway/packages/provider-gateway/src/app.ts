@@ -15,7 +15,7 @@ import { authenticateGatewayCaller } from "./auth.js";
 import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
 import { createGatewayGrpcServer } from "./grpc-server.js";
 import { createGatewayHttpServer } from "./http-server.js";
-import { startupFailureLogRecord } from "./logger.js";
+import { logWorkloadStarted, startupFailureLogRecord } from "./logger.js";
 import { ProviderGatewayServiceShell } from "./service.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { GatewayGrpcServer } from "./grpc-server.js";
@@ -99,6 +99,7 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
         boundGrpcPort = await grpcServer.bind(options.config.grpcBindAddress);
         httpServer = createGatewayHttpServer(options.config.httpBindAddress, state);
         readyFlag = true;
+        logWorkloadStarted(options.logger);
       } catch {
         readyFlag = false;
         options.logger.error(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed" }));

@@ -179,7 +179,26 @@ describe("Runtime Pod command entrypoint", () => {
       approvalReviewer: { providerId: "anthropic", modelId: "claude-opus-4-8" },
     });
     expect(capturedLogger).toBeDefined();
-    expect(records).toEqual(["dependencyBuilder", "app.start", "waitForever"]);
+    expect(records).toEqual(["dependencyBuilder", "app.start", "info:workload.started", "waitForever"]);
+  });
+
+  test("started log sink failure does not replace successful runtime startup", async () => {
+    const records: string[] = [];
+    await withEnv(validEnv(), async () => {
+      await runRuntimePodCommand({
+        logger: {
+          info: () => { throw new Error("sink unavailable"); },
+          error: () => undefined,
+        },
+        dependencyBuilder: async () => fakeDependencies(records),
+        waitForever: async () => {
+          records.push("waitForever");
+          return undefined as never;
+        },
+      });
+    });
+
+    expect(records).toEqual(["app.start", "waitForever"]);
   });
 
   test("command runner exposes shutdown path that closes app and core resources", async () => {

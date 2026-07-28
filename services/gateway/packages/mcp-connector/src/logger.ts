@@ -45,3 +45,24 @@ export function startupFailureLogRecord(input: { readonly kind: "config_error"; 
     ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: input.message }),
   };
 }
+
+/** Builds the lifecycle record emitted after both connector listeners are ready. */
+export function workloadStartedLogRecord(): McpConnectorLogRecord {
+  return {
+    event: "workload.started",
+    "event.kind": "started",
+    operation: "workload.lifecycle",
+    component: "workload",
+    "listener.transport": "tcp",
+    "readiness.state": "ready",
+  };
+}
+
+/** Emits the started record without allowing a logging sink to change process readiness. */
+export function logWorkloadStarted(logger: McpConnectorLogger): void {
+  try {
+    logger.info(workloadStartedLogRecord());
+  } catch {
+    // Listener readiness, not observability delivery, determines startup success.
+  }
+}

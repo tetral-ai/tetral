@@ -1,11 +1,13 @@
 package webconnector
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -20,9 +22,23 @@ import (
 func TestRunWebRejectsMissingAuthenticatedIdentityBeforeDependencies(t *testing.T) {
 	t.Parallel()
 	service := NewService(blob.NewFakeBlobStore(), &fakeBackend{}, NewBindingVerifier([]byte("binding-verifier-key-with-at-least-32-bytes"), time.Now), NewMetrics(), time.Now, nil)
+	var logs bytes.Buffer
+	service.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil)))
 	_, err := service.RunWeb(context.Background(), validRequest(t))
 	if status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("code = %s", status.Code(err))
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &record); err != nil {
+		t.Fatalf("decode failure log: %v", err)
+	}
+	delete(record, "time")
+	if len(record) != 4 ||
+		record["level"] != "ERROR" ||
+		record["msg"] != "web.request.failed" ||
+		record["operation"] != "search" ||
+		record["grpc.code"] != "Unauthenticated" {
+		t.Fatalf("failure log fields = %#v", record)
 	}
 }
 

@@ -20,10 +20,11 @@ describe("ProviderGatewayApp lifecycle", () => {
   test("graceful shutdown flips readiness before draining in-flight gRPC streams", async () => {
     let releaseStream = (): void => undefined;
     let shutdownPromise: Promise<void> | undefined;
+    const logs: unknown[] = [];
     const request = validAnthropicProviderRequest();
     const app = createProviderGatewayApp({
       config: validConfig(),
-      logger: { info: () => undefined, error: () => undefined },
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       tokenReviewClient: new AllowingTokenReviewClient(),
       providerStreamer: {
         stream: async function* () {
@@ -36,6 +37,14 @@ describe("ProviderGatewayApp lifecycle", () => {
       },
     });
     const started = await app.start();
+    expect(logs).toContainEqual(expect.objectContaining({
+      event: "workload.started",
+      "event.kind": "started",
+      operation: "workload.lifecycle",
+      component: "workload",
+      "listener.transport": "tcp",
+      "readiness.state": "ready",
+    }));
     const client = new ProviderGatewayServiceClient(`127.0.0.1:${started.grpcPort}`, credentials.createInsecure());
     try {
       expect(await jsonProbe(started.httpUrl, "/healthz")).toEqual({ status: 200, body: { ok: true } });
@@ -51,7 +60,12 @@ describe("ProviderGatewayApp lifecycle", () => {
 
       shutdownPromise = app.shutdown();
       await waitUntil(() => !app.ready().ready);
-      await expectGrpcCode(collectEvents(app.service.streamProviderRequest(request, metadata())), status.UNAVAILABLE);
+      const rejectedRequest = {
+        ...request,
+        requestId: "req_not_ready",
+        modelRequestId: "mreq_not_ready",
+      };
+      await expectGrpcCode(collectEvents(app.service.streamProviderRequest(rejectedRequest, metadata())), status.UNAVAILABLE);
 
       releaseStream();
       const events = await eventsPromise;
@@ -61,10 +75,59 @@ describe("ProviderGatewayApp lifecycle", () => {
         ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
         ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       ]);
+      expect(logs).toContainEqual(expect.objectContaining({
+        event: "provider_request_streamed",
+        "request.outcome": "ok",
+        "provider.request.id": request.modelRequestId,
+      }));
+      expect(logs.filter((record) =>
+        typeof record === "object"
+        && record !== null
+        && "event" in record
+        && record.event === "provider_request_streamed"
+        && "provider.request.id" in record
+        && record["provider.request.id"] === request.modelRequestId
+      )).toHaveLength(1);
+      expect(logs.filter((record) =>
+        typeof record === "object"
+        && record !== null
+        && "event" in record
+        && record.event === "provider_request_streamed"
+        && "request.outcome" in record
+        && record["request.outcome"] === "failed"
+      )).toEqual([
+        expect.objectContaining({
+          "request.outcome": "failed",
+          "error.class": "grpc_status",
+          "error.code": "14",
+        }),
+      ]);
+      expect(logs).not.toContainEqual(expect.objectContaining({
+        "provider.request.id": rejectedRequest.modelRequestId,
+      }));
     } finally {
       releaseStream();
       await shutdownPromise?.catch(() => undefined);
       client.close();
+      await app.shutdown();
+    }
+  });
+
+  test("started log sink failure does not replace successful listener startup", async () => {
+    const app = createProviderGatewayApp({
+      config: validConfig(),
+      logger: {
+        info: () => { throw new Error("sink unavailable"); },
+        error: () => undefined,
+      },
+      tokenReviewClient: new AllowingTokenReviewClient(),
+    });
+
+    const started = await app.start();
+    try {
+      expect(started.grpcPort).toBeGreaterThan(0);
+      expect(app.ready()).toEqual({ ready: true });
+    } finally {
       await app.shutdown();
     }
   });

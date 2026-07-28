@@ -17,7 +17,7 @@ import { McpSDKClient } from "./client.js";
 import { loadMcpConnectorConfigFromProcessEnv } from "./config.js";
 import { SQLGitHubMcpCredentialResolver } from "./credential.js";
 import { createMcpConnectorHttpServer } from "./http-server.js";
-import { createJsonLogger, startupFailureLogRecord } from "./logger.js";
+import { createJsonLogger, logWorkloadStarted, startupFailureLogRecord } from "./logger.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import { createMcpConnectorGrpcServer } from "./server.js";
 import { McpConnectorServiceShell } from "./service.js";
@@ -25,6 +25,9 @@ import { createRuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/
 import { verifyPostgreSQLSchema } from "../../schema/src/verify.js";
 import type { McpClient, McpManifestChangeNotifier } from "./service.js";
 import type { SchemaSQL } from "../../schema/src/verify.js";
+import type { McpConnectorHttpServer } from "./http-server.js";
+import type { McpConnectorLogger } from "./logger.js";
+import type { McpConnectorGrpcServer } from "./server.js";
 
 /**
  * Starts the MCP connector process and keeps it alive until the supplied wait
@@ -44,6 +47,14 @@ export async function runMcpConnectorCommand(options: {
   readonly sql?: (SchemaSQL & { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> }) | undefined;
   readonly sqlFactory?: ((options: Bun.SQL.PostgresOrMySQLOptions) => SchemaSQL & { readonly close?: (options?: { readonly timeout?: number }) => Promise<void> }) | undefined;
   readonly schemaVerifier?: ((sql: SchemaSQL) => Promise<void>) | undefined;
+  readonly logger?: McpConnectorLogger | undefined;
+  readonly reviewerMaterialValidator?: typeof validateKubernetesTokenReviewReviewerMaterial | undefined;
+  readonly serverFactory?: ((service: McpConnectorServiceShell) => McpConnectorGrpcServer) | undefined;
+  readonly httpServerFactory?: ((
+    address: string,
+    state: Parameters<typeof createMcpConnectorHttpServer>[1],
+  ) => McpConnectorHttpServer) | undefined;
+  readonly registerSignalHandlers?: ((shutdown: () => Promise<void>) => void) | undefined;
 } = {}): Promise<void> {
   const config = loadMcpConnectorConfigFromProcessEnv();
   const startupLogger = createJsonLogger({ write: (line) => process.stderr.write(line) });
@@ -51,7 +62,7 @@ export async function runMcpConnectorCommand(options: {
     startupLogger.error(startupFailureLogRecord(config.error));
     throw new Error("mcp connector config error");
   }
-  const logger = createJsonLogger({
+  const logger = options.logger ?? createJsonLogger({
     write: (line) => process.stderr.write(line),
     deploymentEnvironment: config.config.deploymentEnvironment,
     serviceVersion: config.config.serviceVersion,
@@ -116,19 +127,20 @@ export async function runMcpConnectorCommand(options: {
         }),
     },
   });
-  const server = createMcpConnectorGrpcServer(service);
+  const server = (options.serverFactory ?? createMcpConnectorGrpcServer)(service);
   let httpServer: ReturnType<typeof createMcpConnectorHttpServer> | undefined;
-  await validateKubernetesTokenReviewReviewerMaterial({
+  await (options.reviewerMaterialValidator ?? validateKubernetesTokenReviewReviewerMaterial)({
     reviewerTokenPath: config.config.tokenReviewReviewerTokenPath,
     apiServerCaCertPath: config.config.kubernetesApiCaCertPath,
   });
   await server.bind(options.bindAddress ?? config.config.grpcBindAddress);
-  httpServer = createMcpConnectorHttpServer(options.httpBindAddress ?? config.config.httpBindAddress, {
+  httpServer = (options.httpServerFactory ?? createMcpConnectorHttpServer)(options.httpBindAddress ?? config.config.httpBindAddress, {
     health: () => ({ ok: true }),
     ready: () => ({ ready }),
     metricsText: () => service.metricsText(),
   });
   ready = true;
+  logWorkloadStarted(logger);
   const shutdown = async () => {
     ready = false;
     await httpServer?.stop();
@@ -138,12 +150,7 @@ export async function runMcpConnectorCommand(options: {
     }
     await sql?.close?.();
   };
-  process.once("SIGTERM", () => {
-    void shutdown().then(() => process.exit(0));
-  });
-  process.once("SIGINT", () => {
-    void shutdown().then(() => process.exit(0));
-  });
+  (options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
   await (options.waitForever ?? waitForever)();
 }
 
@@ -160,6 +167,15 @@ function databasePoolOptions(config: Extract<ReturnType<typeof loadMcpConnectorC
 
 async function waitForever(): Promise<never> {
   return await new Promise<never>(() => undefined);
+}
+
+function registerProcessSignalHandlers(shutdown: () => Promise<void>): void {
+  process.once("SIGTERM", () => {
+    void shutdown().then(() => process.exit(0));
+  });
+  process.once("SIGINT", () => {
+    void shutdown().then(() => process.exit(0));
+  });
 }
 
 if (import.meta.main) {

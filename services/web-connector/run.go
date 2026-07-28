@@ -50,6 +50,15 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 		return err
 	}
 	defer func() { _ = metricsListener.Close() }()
+	if runtime.Logger != nil {
+		runtime.Logger.Info("workload.started",
+			slog.String("operation", "workload.lifecycle"),
+			slog.String("event.kind", "started"),
+			slog.String("component", "workload"),
+			slog.String("listener.transport", "tcp"),
+			slog.String("readiness.state", "not ready"),
+		)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

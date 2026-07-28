@@ -16,6 +16,7 @@ import { ProviderCredentialResolver } from "../../src/providers/credentials.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
 import { encryptAES256GCM } from "../../src/providers/crypto.js";
 import { ProviderKeyFailureError } from "../../src/providers/pool.js";
+import { ProviderRequestLoweringError } from "@tetral/gateway-lowering/src/errors.js";
 import { ProviderGatewayServiceShell } from "../../src/service.js";
 import { validFileBackedProviderAttachment, validProviderAttachment, validProviderRequest, validRunWebRequest } from "./fixtures.js";
 import type { GatewayLogger } from "../../src/logger.js";
@@ -68,6 +69,32 @@ describe("ProviderGatewayServiceShell", () => {
     expect(pool.selectCalls).toBe(0);
   });
 
+  test("invalid requests log bounded classification without unvalidated identity fields", async () => {
+    const hostileIdentity = `https://example.invalid/${"x".repeat(300)}`;
+    const logs: unknown[] = [];
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+    });
+
+    await expectGrpcCode(collectEvents(service.streamProviderRequest(
+      validProviderRequest({ workspaceId: hostileIdentity }),
+      metadata(),
+    )), status.INVALID_ARGUMENT);
+
+    expect(JSON.stringify(logs)).not.toContain(hostileIdentity);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "request.outcome": "failed",
+        "error.class": "grpc_status",
+        "error.code": "3",
+      }),
+    ]);
+    expect(logs[0]).not.toHaveProperty("workspace.id");
+    expect(logs[0]).not.toHaveProperty("request.id");
+    expect(logs[0]).not.toHaveProperty("provider.request.id");
+  });
+
   test("valid ProviderRequest streams catalog-gated provider-unavailable terminal event", async () => {
     const request = validProviderRequest({
       runtimeBindingToken: signedRuntimeBindingToken(validProviderRequest(), RuntimePodUid),
@@ -115,6 +142,40 @@ describe("ProviderGatewayServiceShell", () => {
     await expectGrpcCode(collectEvents(service.streamProviderRequest(request, metadata())), status.INTERNAL);
   });
 
+  test("provider failure logs reject URL-shaped lower-layer error codes", async () => {
+    const hostileCode = `https://provider.invalid/${"x".repeat(300)}`;
+    const logs: unknown[] = [];
+    const request = validProviderRequest({
+      model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" },
+    });
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      credentialResolver: sessionCredentialResolver(),
+      providerStreamer: {
+        stream: async function* () {
+          throw new ProviderRequestLoweringError({
+            code: hostileCode,
+            message: "Provider request could not be lowered.",
+            retryable: false,
+            fatal: true,
+          });
+        },
+      },
+    });
+
+    await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(JSON.stringify(logs)).not.toContain(hostileCode);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "request.outcome": "failed",
+        "error.class": "provider_error",
+        "error.code": "provider_error",
+      }),
+    ]);
+  });
+
   test("stream and web logs emit shared safe fields", async () => {
     const logs: unknown[] = [];
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
@@ -149,6 +210,9 @@ describe("ProviderGatewayServiceShell", () => {
         "event.kind": "provider_request_streamed",
         operation: "StreamProviderRequest",
         component: "gateway",
+        "request.outcome": "failed",
+        "error.class": "provider_error",
+        "error.code": "provider_unavailable",
         "request.id": request.requestId,
         "provider.request.id": request.modelRequestId,
         "duration.ms": expect.any(Number),
@@ -254,8 +318,10 @@ describe("ProviderGatewayServiceShell", () => {
     const firstStarted = new Promise<void>((resolve) => {
       started = resolve;
     });
+    const logs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
       maxConcurrentTurns: 1,
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       providerStreamer: {
         stream: async function* () {
           started();
@@ -280,6 +346,16 @@ describe("ProviderGatewayServiceShell", () => {
       fatal: false,
     });
     await first;
+    expect(logs.filter((record) =>
+      (record as { readonly event?: unknown }).event === "provider_request_streamed"
+      && (record as { readonly "provider.request.id"?: unknown })["provider.request.id"] === "mreq_2"
+    )).toEqual([
+      expect.objectContaining({
+        "request.outcome": "failed",
+        "error.class": "provider_error",
+        "error.code": "provider_unavailable",
+      }),
+    ]);
   });
 
   test("header timeout produces a retryable terminal provider-error", async () => {
@@ -394,6 +470,43 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 499,
     });
     await iterator.return?.();
+  });
+
+  test("consumer cancellation closes the provider stream and records one failed outcome", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+    });
+    const logs: unknown[] = [];
+    let providerClosed = false;
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      providerStreamer: {
+        stream: async function* () {
+          try {
+            yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, "");
+            await never();
+          } finally {
+            providerClosed = true;
+          }
+        },
+      },
+    });
+    const iterator = service.streamProviderRequest(request, metadata())[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
+    await iterator.return?.();
+
+    expect(providerClosed).toBe(true);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "request.outcome": "failed",
+        "error.class": "runtime_error",
+        "error.code": "stream_incomplete",
+      }),
+    ]);
   });
 
   test("T-POOL-9 switches platform keys only before the first downstream event and caps attempts at three", async () => {
@@ -1000,9 +1113,20 @@ describe("ProviderGatewayServiceShell", () => {
   });
 
   test("not-ready Gateway rejects valid provider requests before provider shell work", async () => {
-    const service = createService(new RecordingAuthenticator(), false);
+    const logs: unknown[] = [];
+    const service = createService(new RecordingAuthenticator(), false, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+    });
 
     await expectGrpcCode(collectEvents(service.streamProviderRequest(validProviderRequest(), metadata())), status.UNAVAILABLE);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "provider_request_streamed",
+        "request.outcome": "failed",
+        "error.class": "grpc_status",
+        "error.code": "14",
+      }),
+    ]);
   });
 });
 

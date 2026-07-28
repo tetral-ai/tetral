@@ -57,6 +57,73 @@ describe("mcp-connector schema startup", () => {
       connection: { statement_timeout: 30_000 },
     });
   });
+
+  test("successful startup emits one started record after both listeners bind", async () => {
+    Object.assign(process.env, validEnv());
+    const events: string[] = [];
+    const logs: unknown[] = [];
+    const sql = ((<T>(_strings: TemplateStringsArray): PromiseLike<T> => Promise.resolve([] as T)) as SchemaSQL & { close: () => Promise<void> });
+    sql.close = async () => { events.push("sql.close"); };
+
+    await runMcpConnectorCommand({
+      sql,
+      schemaVerifier: async () => { events.push("schema.verify"); },
+      reviewerMaterialValidator: async () => { events.push("reviewer.validate"); },
+      client: {
+        connectionCount: () => 0,
+        listTools: async () => [],
+        callTool: async () => ({ content: [] }),
+      },
+      manifestChangeNotifier: {
+        notify: async () => ({ ok: true, duplicate: false }),
+      },
+      logger: {
+        info: (record) => {
+          events.push(`log:${record.event}`);
+          logs.push(record);
+        },
+        error: (record) => logs.push(record),
+      },
+      serverFactory: () => ({
+        server: undefined as never,
+        bind: async () => {
+          events.push("grpc.bind");
+          return 9091;
+        },
+        shutdown: async () => { events.push("grpc.shutdown"); },
+      }),
+      httpServerFactory: () => {
+        events.push("http.bind");
+        return {
+          url: new URL("http://127.0.0.1:8081"),
+          stop: async () => { events.push("http.stop"); },
+        };
+      },
+      registerSignalHandlers: () => { events.push("signals.register"); },
+      waitForever: async () => {
+        events.push("wait");
+        return undefined as never;
+      },
+    });
+
+    expect(events).toEqual([
+      "schema.verify",
+      "reviewer.validate",
+      "grpc.bind",
+      "http.bind",
+      "log:workload.started",
+      "signals.register",
+      "wait",
+    ]);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "workload.started",
+        "event.kind": "started",
+        operation: "workload.lifecycle",
+        component: "workload",
+      }),
+    ]);
+  });
 });
 
 function validEnv(): Record<string, string> {

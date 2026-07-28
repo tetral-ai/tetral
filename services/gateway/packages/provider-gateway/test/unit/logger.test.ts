@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { semanticErrorOutcome } from "@tetral/ts-observability";
-import { createJsonLogger, startupFailureLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Provider Gateway logger", () => {
   test("emits required resource fields by default", () => {
@@ -106,5 +106,20 @@ describe("Provider Gateway logger", () => {
       "error.code": "startup_error",
       "error.message_safe": "gateway service startup failed",
     });
+  });
+
+  test("started logging uses workload vocabulary and cannot change readiness", () => {
+    expect(workloadStartedLogRecord()).toEqual({
+      event: "workload.started",
+      "event.kind": "started",
+      operation: "workload.lifecycle",
+      component: "workload",
+      "listener.transport": "tcp",
+      "readiness.state": "ready",
+    });
+    expect(() => logWorkloadStarted({
+      info: () => { throw new Error("sink unavailable"); },
+      error: () => undefined,
+    })).not.toThrow();
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { semanticErrorOutcome } from "@tetral/ts-observability";
-import { createJsonLogger, startupFailureLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("MCP Connector logger", () => {
   test("emits shared resource fields through the TS observability wrapper", () => {
@@ -106,5 +106,20 @@ describe("MCP Connector logger", () => {
       "error.code": "config_error",
       "error.message_safe": "invalid mcp config",
     });
+  });
+
+  test("started helper uses the shared workload lifecycle vocabulary", () => {
+    expect(workloadStartedLogRecord()).toEqual({
+      event: "workload.started",
+      "event.kind": "started",
+      operation: "workload.lifecycle",
+      component: "workload",
+      "listener.transport": "tcp",
+      "readiness.state": "ready",
+    });
+    expect(() => logWorkloadStarted({
+      info: () => { throw new Error("sink unavailable"); },
+      error: () => undefined,
+    })).not.toThrow();
   });
 });

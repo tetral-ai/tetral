@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createJsonLogger, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Runtime Pod JSON logger", () => {
   test("emits service identity fields on structured records", () => {
@@ -91,6 +91,21 @@ describe("Runtime Pod JSON logger", () => {
       "error.code": "shutdown_drain_timeout",
       "error.message_safe": "runtime pod shutdown drain timed out",
     });
+  });
+
+  test("started helper uses the shared workload lifecycle vocabulary", () => {
+    expect(workloadStartedLogRecord()).toEqual({
+      event: "workload.started",
+      "event.kind": "started",
+      operation: "workload.lifecycle",
+      component: "workload",
+      "listener.transport": "tcp",
+      "readiness.state": "ready",
+    });
+    expect(() => logWorkloadStarted({
+      info: () => { throw new Error("sink unavailable"); },
+      error: () => undefined,
+    })).not.toThrow();
   });
 
   test("startup cause class accepts only bounded constructor identifiers", () => {

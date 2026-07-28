@@ -56,3 +56,24 @@ export function startupFailureLogRecord(input: {
     ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: safeMessage }),
   };
 }
+
+/** Builds the lifecycle record emitted after both Gateway listeners are ready. */
+export function workloadStartedLogRecord(): GatewayLogRecord {
+  return {
+    event: "workload.started",
+    "event.kind": "started",
+    operation: "workload.lifecycle",
+    component: "workload",
+    "listener.transport": "tcp",
+    "readiness.state": "ready",
+  };
+}
+
+/** Emits the started record without allowing a logging sink to change process readiness. */
+export function logWorkloadStarted(logger: GatewayLogger): void {
+  try {
+    logger.info(workloadStartedLogRecord());
+  } catch {
+    // Listener readiness, not observability delivery, determines startup success.
+  }
+}

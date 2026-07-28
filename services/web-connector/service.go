@@ -61,6 +61,9 @@ func NewService(blobs blob.BlobStore, backend Backend, verifier *BindingVerifier
 func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebRequest) (response *providergatewayv1.RunWebResponse, err error) {
 	started := s.now()
 	operation := operationLabel(nil)
+	if request != nil {
+		operation = operationLabel(request.GetInput())
+	}
 	statusLabel := "runtime_error"
 	defer func() {
 		if response != nil {
@@ -68,6 +71,12 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 			statusLabel = statusName(response.GetStatus())
 		}
 		s.metrics.ObserveRequest(operation, statusLabel, s.now().Sub(started))
+		if err != nil && s.logger != nil {
+			s.logger.Error("web.request.failed",
+				slog.String("operation", operation),
+				slog.String("grpc.code", status.Code(err).String()),
+			)
+		}
 	}()
 	identity, ok := grpcauth.IdentityFromContext(ctx)
 	if !ok || identity.KubernetesPodUID == "" {
@@ -76,7 +85,6 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid internal request")
 	}
-	operation = operationLabel(request.GetInput())
 	if validationText := validateSemanticEnvelope(request); validationText != "" {
 		return s.errorResponse(providergatewayv1.RunWebStatus_RUN_WEB_STATUS_TOOL_ERROR, validationText, operation, started), nil
 	}

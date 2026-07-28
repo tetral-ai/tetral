@@ -65,6 +65,27 @@ export function startupFailureLogRecord(input: {
   };
 }
 
+/** Builds the lifecycle record emitted after Runtime Pod listeners are ready. */
+export function workloadStartedLogRecord(): RuntimePodLogRecord {
+  return {
+    event: "workload.started",
+    "event.kind": "started",
+    operation: "workload.lifecycle",
+    component: "workload",
+    "listener.transport": "tcp",
+    "readiness.state": "ready",
+  };
+}
+
+/** Emits the started record without allowing a logging sink to change process readiness. */
+export function logWorkloadStarted(logger: RuntimePodLogger): void {
+  try {
+    logger.info(workloadStartedLogRecord());
+  } catch {
+    // Listener readiness, not observability delivery, determines startup success.
+  }
+}
+
 function startupCauseClass(cause: unknown): string {
   try {
     if ((typeof cause !== "object" || cause === null) && typeof cause !== "function") {

@@ -35,7 +35,7 @@ import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
 import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
 import { createRuntimePodApp } from "./app.js";
 import type { RuntimePodApp } from "./app.js";
-import { createJsonLogger, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
+import { createJsonLogger, logWorkloadStarted, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
 import type { RuntimePodLogger } from "./logger.js";
 import type { RuntimeControlInputCommitter, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
 import { RuntimePodToolRunner } from "./tool-runner.js";
@@ -127,6 +127,7 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
   };
   (options.registerSignalHandlers ?? registerProcessSignalHandlers)(shutdown);
   await dependencies.app.start();
+  logWorkloadStarted(logger);
   await (options.waitForever ?? waitForever)();
 }
 
