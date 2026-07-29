@@ -131,6 +131,14 @@ func TestInitializePostgreSQLSchemaCreatesVersionOneTables(t *testing.T) {
 	if !equalStringSlices(got, expected) {
 		t.Errorf("tables in isolated schema = %v; want exactly %v", got, expected)
 	}
+	assertPrimaryKeyColumns(t, db, schema, "session_bridge_operations", []string{
+		"workspace_id",
+		"session_id",
+		"session_thread_id",
+		"operation",
+		"source_kind",
+		"idempotency_key",
+	})
 }
 
 func TestWorkspaceIDColumnsHaveNoDefault(t *testing.T) {
@@ -577,9 +585,14 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_bridge_operations": {
 			"workspace_id", "session_id", "session_thread_id", "operation",
-			"idempotency_key", "request_hash", "ack_status", "runtime_input_id",
-			"runtime_write_id", "error_code", "result_json", "stdin_write_seq", "created_at",
-			"updated_at",
+			"idempotency_key", "source_kind", "request_hash", "declaration_digest",
+			"receipt_json", "ack_status", "runtime_input_id", "runtime_write_id",
+			"error_code", "result_json", "stdin_write_seq", "created_at", "updated_at",
+		},
+		"session_thread_context_prefixes": {
+			"workspace_id", "session_id", "child_thread_id", "parent_thread_id",
+			"parent_boundary_event_id", "entries_json", "created_at",
+			"consumed_by_checkpoint_message_id",
 		},
 		"session_runtime_tool_results": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
@@ -1728,6 +1741,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_runtime_inbox",
 		"session_runtime_status",
 		"session_runtime_tool_results",
+		"session_thread_context_prefixes",
 		"session_threads",
 		"session_transient_attachments",
 		"session_turn_retries",

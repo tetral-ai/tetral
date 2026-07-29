@@ -165,8 +165,6 @@ function messageInfo(overrides: Partial<RuntimeMessageInfo> = {}): RuntimeMessag
     sequence: 7,
     status: "streaming",
     createdAt,
-    providerId: "openai",
-    modelId: "gpt-5.5",
     ...overrides,
   });
 }
@@ -247,6 +245,7 @@ function internalToolRepairCommit(): RuntimeInternalToolRepairCommit {
     },
   });
   return RuntimeInternalToolRepairCommitSchema.parse({
+    workspaceId: "workspace-1",
     sessionId: "session-1",
     sessionThreadId: "thread-1",
     modelRequestId: "model-request-1",
@@ -310,6 +309,7 @@ describe("runtime boundary contracts", () => {
       truncated: false,
     };
     const base = {
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_1",
@@ -330,6 +330,7 @@ describe("runtime boundary contracts", () => {
       evaluated_permission: "allow",
     } }).success).toBe(false);
     expect(SessionEventEnvelopeSchema.safeParse({
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_2",
@@ -338,6 +339,7 @@ describe("runtime boundary contracts", () => {
     }).success).toBe(false);
 
     const projectionBase = {
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_projection",
@@ -365,6 +367,7 @@ describe("runtime boundary contracts", () => {
 
   test("request-end stable reasoning contract enforces count aggregate identity order and success-only bounds", () => {
     const base = {
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_1",
@@ -402,6 +405,7 @@ describe("runtime boundary contracts", () => {
 
   test("request-end attachment settlement is combined-bounded and absent on reschedule", () => {
     const base = {
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_attachments",
@@ -628,6 +632,7 @@ describe("runtime boundary contracts", () => {
       error: normalizeRuntimeFailure({ type: "runtime", code: "runtime_invalid_sequence", rawError: "tool failed" }),
     }).success).toBe(false);
     expect(SessionEventEnvelopeSchema.parse({
+      workspaceId: "workspace-1",
       sessionId: "session-1",
       sessionThreadId: "thread-1",
       writeId: "write-1",
@@ -770,7 +775,7 @@ describe("runtime boundary contracts", () => {
       truncated: false,
     });
     const runtimeMessage = RuntimeMessageSchema.parse({
-      ...messageInfo({ id: canary, sessionId: rawHeaders, modelId: rawProviderPayload }),
+      ...messageInfo({ id: canary, sessionId: rawHeaders }),
       parts: [part({ type: "text", id: "part-raw", messageId: canary, sessionId: rawHeaders, text: executableText })],
     });
     const toolCall = LLMEventSchema.parse({

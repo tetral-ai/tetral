@@ -60,8 +60,6 @@ function assistantShell(): RuntimeMessageInfo {
     sequence: 1,
     status: "streaming",
     createdAt,
-    providerId: "fake",
-    modelId: "fake-chat",
   };
 }
 
@@ -84,6 +82,7 @@ function createProcessor(options: {
   return new SessionProcessor({
     messageId: "message-1",
     modelRequestId: "model-request-1",
+    workspaceId: "workspace-1",
     sessionId: "session-1",
     sessionThreadId: "thread-1",
     message: assistantShell(),
@@ -606,7 +605,7 @@ describe("SessionProcessor", () => {
     expect(repaired.ok).toBe(true);
     expect(repaired.events).toEqual([]);
     expect(appended).toEqual([]);
-    const projected = toGatewayRuntimeMessages(processor.messages(), source);
+    const projected = toGatewayRuntimeMessages(processor.messages());
     expect(projected).toMatchObject({ ok: true });
     if (projected.ok) {
       expect(projected.messages[0]?.parts[0]?.tool).toMatchObject({

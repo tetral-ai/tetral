@@ -290,10 +290,6 @@ const (
 	//   runtime_notification   an internal, model-visible runtime notice (e.g.
 	//                          background command completion); NOT a public
 	//                          user.message and NOT a second tool result
-	//   fork_seed              the parent RuntimeMessage snapshot that seeds a
-	//                          forked child (subagent child or approval-reviewer
-	//                          sidecar); LoadContext(child) loads the child's own
-	//                          fork_seed and resume never re-forks the parent
 	//   compaction             the active context-window boundary; LoadContext
 	//                          starts at the latest compaction row and loads
 	//                          later rows by sequence
@@ -320,7 +316,29 @@ const (
 		UNIQUE (workspace_id, session_id, session_thread_id, sequence),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_messages_sequence_shape CHECK (sequence > 0),
-		CONSTRAINT session_messages_kind_shape CHECK (kind IN ('user', 'assistant', 'runtime_notification', 'fork_seed', 'compaction'))
+		CONSTRAINT session_messages_kind_shape CHECK (kind IN ('user', 'assistant', 'runtime_notification', 'compaction'))
+	)`
+
+	// A child thread's parent transcript is durable context material, not a
+	// child message. It remains outside child message sequencing until a
+	// successful compaction checkpoint atomically consumes it.
+	createPostgreSQLSessionThreadContextPrefixesTable = `CREATE TABLE IF NOT EXISTS session_thread_context_prefixes (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		child_thread_id TEXT NOT NULL,
+		parent_thread_id TEXT NOT NULL,
+		parent_boundary_event_id TEXT NOT NULL,
+		entries_json TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		consumed_by_checkpoint_message_id TEXT,
+		PRIMARY KEY (workspace_id, session_id, child_thread_id),
+		FOREIGN KEY (workspace_id, session_id, child_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, session_id, parent_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, parent_boundary_event_id) REFERENCES session_events(workspace_id, event_id) ON DELETE RESTRICT,
+		FOREIGN KEY (workspace_id, consumed_by_checkpoint_message_id) REFERENCES session_messages(workspace_id, message_id) ON DELETE RESTRICT,
+		CONSTRAINT session_thread_context_prefixes_identity_shape CHECK (
+			child_thread_id <> '' AND parent_thread_id <> '' AND parent_boundary_event_id <> ''
+		)
 	)`
 
 	// session_pending_tool_uses tracks public tool calls whose result waits on an
@@ -541,7 +559,10 @@ const (
 		session_thread_id TEXT NOT NULL,
 		operation TEXT NOT NULL,
 		idempotency_key TEXT NOT NULL,
+		source_kind TEXT NOT NULL,
 		request_hash TEXT NOT NULL,
+		declaration_digest TEXT,
+		receipt_json TEXT,
 		ack_status TEXT NOT NULL,
 		runtime_input_id TEXT,
 		runtime_write_id TEXT,
@@ -550,10 +571,9 @@ const (
 		stdin_write_seq BIGINT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (workspace_id, session_id, operation, idempotency_key),
+		PRIMARY KEY (workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_bridge_operations_operation_shape CHECK (operation IN (
-			'load_context',
 			'commit_inputs',
 			'commit_task_notification_result',
 			'write_event',
@@ -1429,6 +1449,7 @@ var rlsTargets = []string{
 	"session_event_stream_changes",
 	"session_event_idempotency_keys",
 	"session_messages",
+	"session_thread_context_prefixes",
 	"session_pending_tool_uses",
 	"session_transient_attachments",
 	"session_background_tasks",
@@ -1540,6 +1561,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_event_stream_changes", createPostgreSQLSessionEventStreamChangesTable},
 		{"create_session_event_idempotency_keys", createPostgreSQLSessionEventIdempotencyKeysTable},
 		{"create_session_messages", createPostgreSQLSessionMessagesTable},
+		{"create_session_thread_context_prefixes", createPostgreSQLSessionThreadContextPrefixesTable},
 		{"create_session_pending_tool_uses", createPostgreSQLSessionPendingToolUsesTable},
 		{"create_session_background_tasks", createPostgreSQLSessionBackgroundTasksTable},
 		{"create_session_runtime_inbox", createPostgreSQLSessionRuntimeInboxTable},
@@ -1845,7 +1867,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		postgresqlSchemaStep{name: "session_bridge_operations_retire_standalone_reasoning", ddl: `ALTER TABLE session_bridge_operations
 			DROP CONSTRAINT IF EXISTS session_bridge_operations_operation_shape,
 			ADD CONSTRAINT session_bridge_operations_operation_shape CHECK (operation IN (
-				'load_context',
 				'commit_inputs',
 				'commit_task_notification_result',
 				'write_event',
@@ -2071,7 +2092,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		postgresqlSchemaStep{name: "session_bridge_operations_agent_mail_settlement", ddl: `ALTER TABLE session_bridge_operations
 			DROP CONSTRAINT IF EXISTS session_bridge_operations_operation_shape,
 			ADD CONSTRAINT session_bridge_operations_operation_shape CHECK (operation IN (
-				'load_context',
 				'commit_inputs',
 				'commit_task_notification_result',
 				'write_event',

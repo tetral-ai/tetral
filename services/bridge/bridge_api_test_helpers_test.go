@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strconv"
@@ -57,6 +58,32 @@ func assertCommitInputsConflictDidNotAdvance(t *testing.T, admin *sql.DB, sessio
 	}
 	if inboxStatus != "accepted" || processedCount != 0 || messageCount != 0 || operationCount != 0 {
 		t.Fatalf("conflicting commit advanced inbox=%q processed=%d messages=%d operations=%d; want accepted/0/0/0", inboxStatus, processedCount, messageCount, operationCount)
+	}
+}
+
+func bridgeUserInputDraftForTest(workspaceID string, sessionID string, threadID string, runtimeInputID string, eventID string, text string) *bridgev1.RuntimeMessageDraft {
+	runtimeLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		workspaceID,
+		sessionID,
+		threadID,
+		"messages",
+		runtimeInputID,
+		"user_input",
+		"0",
+	)
+	return &bridgev1.RuntimeMessageDraft{
+		RuntimeLocalId:  runtimeLocalID,
+		SourceKind:      "messages",
+		SourceId:        runtimeInputID,
+		SourceEventId:   eventID,
+		DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
+		MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
+		Parts: []*bridgev1.RuntimePartDraft{{
+			RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
+			PartKind:           "text",
+			PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, text),
+		}},
 	}
 }
 
@@ -505,11 +532,11 @@ func assertBridgeRuntimeUserProjection(t *testing.T, raw string, sessionID strin
 	if err := json.Unmarshal([]byte(raw), &message); err != nil {
 		t.Fatalf("unmarshal projected user RuntimeMessage: %v", err)
 	}
-	if message.ID == "" || message.SessionID != sessionID || message.Role != "user" || message.Origin != "user" || message.Sequence != 0 || message.Status != "completed" || len(message.Parts) != 1 {
+	if message.ID == "" || message.SessionID != sessionID || message.Role != "user" || message.Origin != "user" || message.Sequence <= 0 || message.Status != "completed" || len(message.Parts) != 1 {
 		t.Fatalf("projected user RuntimeMessage = %+v; want completed user message", message)
 	}
 	part := message.Parts[0]
-	if part.ID == "" || part.SessionID != sessionID || part.MessageID != message.ID || part.Sequence != 0 || part.Type != "text" || part.Text != text || part.Status != "completed" || part.Truncated || part.CompletedAt == "" {
+	if part.ID == "" || part.SessionID != sessionID || part.MessageID != message.ID || part.Sequence != 0 || part.Type != "text" || part.Text != text || part.Status != "completed" || part.Truncated {
 		t.Fatalf("projected user RuntimePart = %+v; want completed text part", part)
 	}
 }
@@ -552,10 +579,11 @@ func bridgeRuntimeMessageJSON(t *testing.T, sessionID string, messageID string, 
 	return string(raw)
 }
 
-func bridgeForkSeedJSON(t *testing.T, sessionID string, messageID string, text string, parentThreadID string, sourceToolUseEventID string, forkTurns string) string {
+func bridgeThreadContextPrefixJSON(t *testing.T, sessionID string, messageID string, text string, parentThreadID string, sourceToolUseEventID string, forkTurns string) string {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
 		"source_parent_thread_id":   parentThreadID,
+		"parent_boundary_event_id":  sourceToolUseEventID,
 		"source_tool_use_event_id":  sourceToolUseEventID,
 		"fork_turns":                forkTurns,
 		"runtime_messages_snapshot": []json.RawMessage{json.RawMessage(bridgeRuntimeUserMessageJSON(t, sessionID, messageID, text))},
@@ -566,13 +594,14 @@ func bridgeForkSeedJSON(t *testing.T, sessionID string, messageID string, text s
 	return string(raw)
 }
 
-func bridgeReviewerForkSeedJSON(t *testing.T, parentThreadID string, reviewID string, messages []json.RawMessage) string {
+func bridgeReviewerThreadContextPrefixJSON(t *testing.T, parentThreadID string, parentBoundaryEventID string, reviewID string, messages []json.RawMessage) string {
 	t.Helper()
 	if messages == nil {
 		messages = []json.RawMessage{}
 	}
 	raw, err := json.Marshal(map[string]any{
 		"source_parent_thread_id":   parentThreadID,
+		"parent_boundary_event_id":  parentBoundaryEventID,
 		"review_id":                 reviewID,
 		"fork_turns":                "all",
 		"runtime_messages_snapshot": messages,

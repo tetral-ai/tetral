@@ -66,6 +66,396 @@ export function bridgeWriteStatusToJSON(object: BridgeWriteStatus): string {
   }
 }
 
+export enum RuntimeDraftKind {
+  RUNTIME_DRAFT_KIND_UNSPECIFIED = 0,
+  RUNTIME_DRAFT_KIND_USER_INPUT = 1,
+  RUNTIME_DRAFT_KIND_APPROVAL_INPUT = 2,
+  RUNTIME_DRAFT_KIND_REVIEWER_INPUT = 3,
+  RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT = 4,
+  RUNTIME_DRAFT_KIND_ASSISTANT_TEXT = 5,
+  RUNTIME_DRAFT_KIND_TOOL_USE = 6,
+  RUNTIME_DRAFT_KIND_TOOL_RESULT = 7,
+  RUNTIME_DRAFT_KIND_TASK_NOTIFICATION = 8,
+  RUNTIME_DRAFT_KIND_REJECTION = 9,
+  RUNTIME_DRAFT_KIND_CANCELLATION = 10,
+  RUNTIME_DRAFT_KIND_COMPLETION_MAIL = 11,
+  RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT = 12,
+  RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR = 13,
+  RUNTIME_DRAFT_KIND_TERMINATION = 14,
+  UNRECOGNIZED = -1,
+}
+
+export function runtimeDraftKindFromJSON(object: any): RuntimeDraftKind {
+  switch (object) {
+    case 0:
+    case "RUNTIME_DRAFT_KIND_UNSPECIFIED":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_UNSPECIFIED;
+    case 1:
+    case "RUNTIME_DRAFT_KIND_USER_INPUT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_USER_INPUT;
+    case 2:
+    case "RUNTIME_DRAFT_KIND_APPROVAL_INPUT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_APPROVAL_INPUT;
+    case 3:
+    case "RUNTIME_DRAFT_KIND_REVIEWER_INPUT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_REVIEWER_INPUT;
+    case 4:
+    case "RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT;
+    case 5:
+    case "RUNTIME_DRAFT_KIND_ASSISTANT_TEXT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_ASSISTANT_TEXT;
+    case 6:
+    case "RUNTIME_DRAFT_KIND_TOOL_USE":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_USE;
+    case 7:
+    case "RUNTIME_DRAFT_KIND_TOOL_RESULT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_RESULT;
+    case 8:
+    case "RUNTIME_DRAFT_KIND_TASK_NOTIFICATION":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TASK_NOTIFICATION;
+    case 9:
+    case "RUNTIME_DRAFT_KIND_REJECTION":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_REJECTION;
+    case 10:
+    case "RUNTIME_DRAFT_KIND_CANCELLATION":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION;
+    case 11:
+    case "RUNTIME_DRAFT_KIND_COMPLETION_MAIL":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPLETION_MAIL;
+    case 12:
+    case "RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT;
+    case 13:
+    case "RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR;
+    case 14:
+    case "RUNTIME_DRAFT_KIND_TERMINATION":
+      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TERMINATION;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RuntimeDraftKind.UNRECOGNIZED;
+  }
+}
+
+export function runtimeDraftKindToJSON(object: RuntimeDraftKind): string {
+  switch (object) {
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_UNSPECIFIED:
+      return "RUNTIME_DRAFT_KIND_UNSPECIFIED";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_USER_INPUT:
+      return "RUNTIME_DRAFT_KIND_USER_INPUT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_APPROVAL_INPUT:
+      return "RUNTIME_DRAFT_KIND_APPROVAL_INPUT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_REVIEWER_INPUT:
+      return "RUNTIME_DRAFT_KIND_REVIEWER_INPUT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT:
+      return "RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_ASSISTANT_TEXT:
+      return "RUNTIME_DRAFT_KIND_ASSISTANT_TEXT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_USE:
+      return "RUNTIME_DRAFT_KIND_TOOL_USE";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_RESULT:
+      return "RUNTIME_DRAFT_KIND_TOOL_RESULT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TASK_NOTIFICATION:
+      return "RUNTIME_DRAFT_KIND_TASK_NOTIFICATION";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_REJECTION:
+      return "RUNTIME_DRAFT_KIND_REJECTION";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION:
+      return "RUNTIME_DRAFT_KIND_CANCELLATION";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPLETION_MAIL:
+      return "RUNTIME_DRAFT_KIND_COMPLETION_MAIL";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT:
+      return "RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR:
+      return "RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR";
+    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TERMINATION:
+      return "RUNTIME_DRAFT_KIND_TERMINATION";
+    case RuntimeDraftKind.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum DurableEventDisposition {
+  DURABLE_EVENT_DISPOSITION_UNSPECIFIED = 0,
+  DURABLE_EVENT_DISPOSITION_EXISTING = 1,
+  DURABLE_EVENT_DISPOSITION_CREATED = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function durableEventDispositionFromJSON(object: any): DurableEventDisposition {
+  switch (object) {
+    case 0:
+    case "DURABLE_EVENT_DISPOSITION_UNSPECIFIED":
+      return DurableEventDisposition.DURABLE_EVENT_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "DURABLE_EVENT_DISPOSITION_EXISTING":
+      return DurableEventDisposition.DURABLE_EVENT_DISPOSITION_EXISTING;
+    case 2:
+    case "DURABLE_EVENT_DISPOSITION_CREATED":
+      return DurableEventDisposition.DURABLE_EVENT_DISPOSITION_CREATED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return DurableEventDisposition.UNRECOGNIZED;
+  }
+}
+
+export function durableEventDispositionToJSON(object: DurableEventDisposition): string {
+  switch (object) {
+    case DurableEventDisposition.DURABLE_EVENT_DISPOSITION_UNSPECIFIED:
+      return "DURABLE_EVENT_DISPOSITION_UNSPECIFIED";
+    case DurableEventDisposition.DURABLE_EVENT_DISPOSITION_EXISTING:
+      return "DURABLE_EVENT_DISPOSITION_EXISTING";
+    case DurableEventDisposition.DURABLE_EVENT_DISPOSITION_CREATED:
+      return "DURABLE_EVENT_DISPOSITION_CREATED";
+    case DurableEventDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum DurableProjectionDisposition {
+  DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED = 0,
+  DURABLE_PROJECTION_DISPOSITION_CREATED = 1,
+  DURABLE_PROJECTION_DISPOSITION_UPDATED = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function durableProjectionDispositionFromJSON(object: any): DurableProjectionDisposition {
+  switch (object) {
+    case 0:
+    case "DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED":
+      return DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "DURABLE_PROJECTION_DISPOSITION_CREATED":
+      return DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_CREATED;
+    case 2:
+    case "DURABLE_PROJECTION_DISPOSITION_UPDATED":
+      return DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_UPDATED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return DurableProjectionDisposition.UNRECOGNIZED;
+  }
+}
+
+export function durableProjectionDispositionToJSON(object: DurableProjectionDisposition): string {
+  switch (object) {
+    case DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED:
+      return "DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED";
+    case DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_CREATED:
+      return "DURABLE_PROJECTION_DISPOSITION_CREATED";
+    case DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_UPDATED:
+      return "DURABLE_PROJECTION_DISPOSITION_UPDATED";
+    case DurableProjectionDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum PrefixConsumptionDisposition {
+  PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED = 0,
+  PREFIX_CONSUMPTION_DISPOSITION_CONSUMED = 1,
+  UNRECOGNIZED = -1,
+}
+
+export function prefixConsumptionDispositionFromJSON(object: any): PrefixConsumptionDisposition {
+  switch (object) {
+    case 0:
+    case "PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED":
+      return PrefixConsumptionDisposition.PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "PREFIX_CONSUMPTION_DISPOSITION_CONSUMED":
+      return PrefixConsumptionDisposition.PREFIX_CONSUMPTION_DISPOSITION_CONSUMED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return PrefixConsumptionDisposition.UNRECOGNIZED;
+  }
+}
+
+export function prefixConsumptionDispositionToJSON(object: PrefixConsumptionDisposition): string {
+  switch (object) {
+    case PrefixConsumptionDisposition.PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED:
+      return "PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED";
+    case PrefixConsumptionDisposition.PREFIX_CONSUMPTION_DISPOSITION_CONSUMED:
+      return "PREFIX_CONSUMPTION_DISPOSITION_CONSUMED";
+    case PrefixConsumptionDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ReceiptApplicationDisposition {
+  RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED = 0,
+  RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY = 1,
+  RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function receiptApplicationDispositionFromJSON(object: any): ReceiptApplicationDisposition {
+  switch (object) {
+    case 0:
+    case "RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED":
+      return ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY":
+      return ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY;
+    case 2:
+    case "RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY":
+      return ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ReceiptApplicationDisposition.UNRECOGNIZED;
+  }
+}
+
+export function receiptApplicationDispositionToJSON(object: ReceiptApplicationDisposition): string {
+  switch (object) {
+    case ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED:
+      return "RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED";
+    case ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY:
+      return "RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY";
+    case ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY:
+      return "RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY";
+    case ReceiptApplicationDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum RequestRescheduleDisposition {
+  REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED = 0,
+  REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED = 1,
+  REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH = 2,
+  REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function requestRescheduleDispositionFromJSON(object: any): RequestRescheduleDisposition {
+  switch (object) {
+    case 0:
+    case "REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED":
+      return RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED":
+      return RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED;
+    case 2:
+    case "REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH":
+      return RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH;
+    case 3:
+    case "REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED":
+      return RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RequestRescheduleDisposition.UNRECOGNIZED;
+  }
+}
+
+export function requestRescheduleDispositionToJSON(object: RequestRescheduleDisposition): string {
+  switch (object) {
+    case RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED:
+      return "REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED";
+    case RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED:
+      return "REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED";
+    case RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH:
+      return "REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH";
+    case RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED:
+      return "REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED";
+    case RequestRescheduleDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ChildLifecycleDisposition {
+  CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED = 0,
+  CHILD_LIFECYCLE_DISPOSITION_CLOSED = 1,
+  CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED = 2,
+  CHILD_LIFECYCLE_DISPOSITION_RESUMED = 3,
+  CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function childLifecycleDispositionFromJSON(object: any): ChildLifecycleDisposition {
+  switch (object) {
+    case 0:
+    case "CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED":
+      return ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "CHILD_LIFECYCLE_DISPOSITION_CLOSED":
+      return ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED;
+    case 2:
+    case "CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED":
+      return ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED;
+    case 3:
+    case "CHILD_LIFECYCLE_DISPOSITION_RESUMED":
+      return ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED;
+    case 4:
+    case "CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE":
+      return ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ChildLifecycleDisposition.UNRECOGNIZED;
+  }
+}
+
+export function childLifecycleDispositionToJSON(object: ChildLifecycleDisposition): string {
+  switch (object) {
+    case ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED:
+      return "CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED";
+    case ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED:
+      return "CHILD_LIFECYCLE_DISPOSITION_CLOSED";
+    case ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED:
+      return "CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED";
+    case ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED:
+      return "CHILD_LIFECYCLE_DISPOSITION_RESUMED";
+    case ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE:
+      return "CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE";
+    case ChildLifecycleDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum SealedAgentMailDisposition {
+  SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED = 0,
+  SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH = 1,
+  UNRECOGNIZED = -1,
+}
+
+export function sealedAgentMailDispositionFromJSON(object: any): SealedAgentMailDisposition {
+  switch (object) {
+    case 0:
+    case "SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED":
+      return SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH":
+      return SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return SealedAgentMailDisposition.UNRECOGNIZED;
+  }
+}
+
+export function sealedAgentMailDispositionToJSON(object: SealedAgentMailDisposition): string {
+  switch (object) {
+    case SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED:
+      return "SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED";
+    case SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH:
+      return "SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH";
+    case SealedAgentMailDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export enum FileAttachmentRejectionReason {
   FILE_ATTACHMENT_REJECTION_REASON_UNSPECIFIED = 0,
   FILE_ATTACHMENT_REJECTION_REASON_DELETED = 1,
@@ -97,6 +487,119 @@ export function fileAttachmentRejectionReasonToJSON(object: FileAttachmentReject
     default:
       return "UNRECOGNIZED";
   }
+}
+
+export interface RuntimeMessageDraft {
+  runtimeLocalId: string;
+  sourceKind: string;
+  sourceId: string;
+  sourceEventId: string;
+  draftKind: RuntimeDraftKind;
+  ordinal: number;
+  messageInfoJson: string;
+  parts: RuntimePartDraft[];
+}
+
+export interface RuntimePartDraft {
+  runtimeLocalPartId: string;
+  partKind: string;
+  ordinal: number;
+  partJson: string;
+}
+
+export interface DurableEventStamp {
+  sessionThreadId: string;
+  sourceEventId: string;
+  eventId: string;
+  eventSequence: number;
+  disposition: DurableEventDisposition;
+}
+
+export interface DurablePartStamp {
+  runtimeLocalPartId: string;
+  partId: string;
+  messageId: string;
+  partSequence: number;
+  createdAt: string;
+  updatedAt: string;
+  disposition: DurableProjectionDisposition;
+}
+
+export interface DurableMessageStamp {
+  runtimeLocalId: string;
+  sessionThreadId: string;
+  owningEventId: string;
+  messageId: string;
+  messageSequence: number;
+  createdAt: string;
+  updatedAt: string;
+  disposition: DurableProjectionDisposition;
+  parts: DurablePartStamp[];
+}
+
+export interface PrefixConsumptionStamp {
+  childThreadId: string;
+  parentBoundaryEventId: string;
+  checkpointMessageId: string;
+  disposition: PrefixConsumptionDisposition;
+}
+
+export interface PrefixConsumptionDraft {
+  childThreadId: string;
+  parentBoundaryEventId: string;
+  checkpointRuntimeLocalId: string;
+}
+
+export interface RequestRescheduleStamp {
+  disposition: RequestRescheduleDisposition;
+  requestKind: string;
+  attempt: number;
+  effectiveDeadline: string;
+}
+
+export interface ChildLifecycleStamp {
+  childThreadId: string;
+  disposition: ChildLifecycleDisposition;
+  effectiveAt: string;
+}
+
+export interface SealedAgentMailStamp {
+  runtimeInputId: string;
+  birthPreparationAttemptId: string;
+  failedPreparationAttemptId: string;
+  disposition: SealedAgentMailDisposition;
+}
+
+export interface IdleCloseoutStamp {
+  durableTurnId: string;
+  idleEventId: string;
+  idleEventSequence: number;
+  committedIdleAt: string;
+}
+
+export interface DeclarationReceipt {
+  sessionThreadId: string;
+  operationKind: string;
+  sourceKind: string;
+  sourceId: string;
+  events: DurableEventStamp[];
+  messages: DurableMessageStamp[];
+  pendingAttachmentDeltaJson: string[];
+  pendingToolDeltaJson: string[];
+  prefixConsumptions: PrefixConsumptionStamp[];
+  declarationDigest: string;
+  requestReschedule: RequestRescheduleStamp | undefined;
+  childLifecycle: ChildLifecycleStamp[];
+  sealedAgentMail: SealedAgentMailStamp | undefined;
+  idleCloseout: IdleCloseoutStamp | undefined;
+  compactedThroughMessageSequence?: number | undefined;
+}
+
+export interface DeclarationResponse {
+  receipts: DeclarationReceipt[];
+  observedBindingId: string;
+  observedBindingGeneration: number;
+  applicationDisposition: ReceiptApplicationDisposition;
 }
 
 export interface RuntimeBindingRef {
@@ -152,10 +655,12 @@ export interface CommitInputsRequest {
   inputKind: string;
   interAgentMessageJson: string;
   approvalReviewJson: string;
+  drafts: RuntimeMessageDraft[];
 }
 
 export interface CommitInputsResponse {
   ack: BridgeWriteAck | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface CommitTaskNotificationResultRequest {
@@ -399,7 +904,7 @@ export interface CreateChildThreadRequest {
   agentType: string;
   sourceToolUseEventId: string;
   forkTurns: string;
-  forkSeedJson: string;
+  threadContextPrefixJson: string;
   isTrunk: boolean;
   reviewerReviewId: string;
 }
@@ -530,6 +1035,2057 @@ export interface RunMemoryResponse {
   ack: BridgeWriteAck | undefined;
   resultJson: string;
 }
+
+function createBaseRuntimeMessageDraft(): RuntimeMessageDraft {
+  return {
+    runtimeLocalId: "",
+    sourceKind: "",
+    sourceId: "",
+    sourceEventId: "",
+    draftKind: 0,
+    ordinal: 0,
+    messageInfoJson: "",
+    parts: [],
+  };
+}
+
+export const RuntimeMessageDraft: MessageFns<RuntimeMessageDraft> = {
+  encode(message: RuntimeMessageDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeLocalId !== "") {
+      writer.uint32(10).string(message.runtimeLocalId);
+    }
+    if (message.sourceKind !== "") {
+      writer.uint32(18).string(message.sourceKind);
+    }
+    if (message.sourceId !== "") {
+      writer.uint32(26).string(message.sourceId);
+    }
+    if (message.sourceEventId !== "") {
+      writer.uint32(34).string(message.sourceEventId);
+    }
+    if (message.draftKind !== 0) {
+      writer.uint32(40).int32(message.draftKind);
+    }
+    if (message.ordinal !== 0) {
+      writer.uint32(48).int32(message.ordinal);
+    }
+    if (message.messageInfoJson !== "") {
+      writer.uint32(58).string(message.messageInfoJson);
+    }
+    for (const v of message.parts) {
+      RuntimePartDraft.encode(v!, writer.uint32(66).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeMessageDraft {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeMessageDraft();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeLocalId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sourceKind = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.sourceEventId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.draftKind = reader.int32() as any;
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.ordinal = reader.int32();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.messageInfoJson = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.parts.push(RuntimePartDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeMessageDraft {
+    return {
+      runtimeLocalId: isSet(object.runtimeLocalId)
+        ? globalThis.String(object.runtimeLocalId)
+        : isSet(object.runtime_local_id)
+        ? globalThis.String(object.runtime_local_id)
+        : "",
+      sourceKind: isSet(object.sourceKind)
+        ? globalThis.String(object.sourceKind)
+        : isSet(object.source_kind)
+        ? globalThis.String(object.source_kind)
+        : "",
+      sourceId: isSet(object.sourceId)
+        ? globalThis.String(object.sourceId)
+        : isSet(object.source_id)
+        ? globalThis.String(object.source_id)
+        : "",
+      sourceEventId: isSet(object.sourceEventId)
+        ? globalThis.String(object.sourceEventId)
+        : isSet(object.source_event_id)
+        ? globalThis.String(object.source_event_id)
+        : "",
+      draftKind: isSet(object.draftKind)
+        ? runtimeDraftKindFromJSON(object.draftKind)
+        : isSet(object.draft_kind)
+        ? runtimeDraftKindFromJSON(object.draft_kind)
+        : 0,
+      ordinal: isSet(object.ordinal) ? globalThis.Number(object.ordinal) : 0,
+      messageInfoJson: isSet(object.messageInfoJson)
+        ? globalThis.String(object.messageInfoJson)
+        : isSet(object.message_info_json)
+        ? globalThis.String(object.message_info_json)
+        : "",
+      parts: globalThis.Array.isArray(object?.parts)
+        ? object.parts.map((e: any) => RuntimePartDraft.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: RuntimeMessageDraft): unknown {
+    const obj: any = {};
+    if (message.runtimeLocalId !== "") {
+      obj.runtimeLocalId = message.runtimeLocalId;
+    }
+    if (message.sourceKind !== "") {
+      obj.sourceKind = message.sourceKind;
+    }
+    if (message.sourceId !== "") {
+      obj.sourceId = message.sourceId;
+    }
+    if (message.sourceEventId !== "") {
+      obj.sourceEventId = message.sourceEventId;
+    }
+    if (message.draftKind !== 0) {
+      obj.draftKind = runtimeDraftKindToJSON(message.draftKind);
+    }
+    if (message.ordinal !== 0) {
+      obj.ordinal = Math.round(message.ordinal);
+    }
+    if (message.messageInfoJson !== "") {
+      obj.messageInfoJson = message.messageInfoJson;
+    }
+    if (message.parts?.length) {
+      obj.parts = message.parts.map((e) => RuntimePartDraft.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeMessageDraft>, I>>(base?: I): RuntimeMessageDraft {
+    return RuntimeMessageDraft.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeMessageDraft>, I>>(object: I): RuntimeMessageDraft {
+    const message = createBaseRuntimeMessageDraft();
+    message.runtimeLocalId = object.runtimeLocalId ?? "";
+    message.sourceKind = object.sourceKind ?? "";
+    message.sourceId = object.sourceId ?? "";
+    message.sourceEventId = object.sourceEventId ?? "";
+    message.draftKind = object.draftKind ?? 0;
+    message.ordinal = object.ordinal ?? 0;
+    message.messageInfoJson = object.messageInfoJson ?? "";
+    message.parts = object.parts?.map((e) => RuntimePartDraft.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseRuntimePartDraft(): RuntimePartDraft {
+  return { runtimeLocalPartId: "", partKind: "", ordinal: 0, partJson: "" };
+}
+
+export const RuntimePartDraft: MessageFns<RuntimePartDraft> = {
+  encode(message: RuntimePartDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeLocalPartId !== "") {
+      writer.uint32(10).string(message.runtimeLocalPartId);
+    }
+    if (message.partKind !== "") {
+      writer.uint32(18).string(message.partKind);
+    }
+    if (message.ordinal !== 0) {
+      writer.uint32(24).int32(message.ordinal);
+    }
+    if (message.partJson !== "") {
+      writer.uint32(34).string(message.partJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimePartDraft {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimePartDraft();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeLocalPartId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.partKind = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.ordinal = reader.int32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.partJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimePartDraft {
+    return {
+      runtimeLocalPartId: isSet(object.runtimeLocalPartId)
+        ? globalThis.String(object.runtimeLocalPartId)
+        : isSet(object.runtime_local_part_id)
+        ? globalThis.String(object.runtime_local_part_id)
+        : "",
+      partKind: isSet(object.partKind)
+        ? globalThis.String(object.partKind)
+        : isSet(object.part_kind)
+        ? globalThis.String(object.part_kind)
+        : "",
+      ordinal: isSet(object.ordinal) ? globalThis.Number(object.ordinal) : 0,
+      partJson: isSet(object.partJson)
+        ? globalThis.String(object.partJson)
+        : isSet(object.part_json)
+        ? globalThis.String(object.part_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimePartDraft): unknown {
+    const obj: any = {};
+    if (message.runtimeLocalPartId !== "") {
+      obj.runtimeLocalPartId = message.runtimeLocalPartId;
+    }
+    if (message.partKind !== "") {
+      obj.partKind = message.partKind;
+    }
+    if (message.ordinal !== 0) {
+      obj.ordinal = Math.round(message.ordinal);
+    }
+    if (message.partJson !== "") {
+      obj.partJson = message.partJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimePartDraft>, I>>(base?: I): RuntimePartDraft {
+    return RuntimePartDraft.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimePartDraft>, I>>(object: I): RuntimePartDraft {
+    const message = createBaseRuntimePartDraft();
+    message.runtimeLocalPartId = object.runtimeLocalPartId ?? "";
+    message.partKind = object.partKind ?? "";
+    message.ordinal = object.ordinal ?? 0;
+    message.partJson = object.partJson ?? "";
+    return message;
+  },
+};
+
+function createBaseDurableEventStamp(): DurableEventStamp {
+  return { sessionThreadId: "", sourceEventId: "", eventId: "", eventSequence: 0, disposition: 0 };
+}
+
+export const DurableEventStamp: MessageFns<DurableEventStamp> = {
+  encode(message: DurableEventStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sessionThreadId !== "") {
+      writer.uint32(10).string(message.sessionThreadId);
+    }
+    if (message.sourceEventId !== "") {
+      writer.uint32(18).string(message.sourceEventId);
+    }
+    if (message.eventId !== "") {
+      writer.uint32(26).string(message.eventId);
+    }
+    if (message.eventSequence !== 0) {
+      writer.uint32(32).int64(message.eventSequence);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(40).int32(message.disposition);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DurableEventStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDurableEventStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sourceEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.eventId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.eventSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DurableEventStamp {
+    return {
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      sourceEventId: isSet(object.sourceEventId)
+        ? globalThis.String(object.sourceEventId)
+        : isSet(object.source_event_id)
+        ? globalThis.String(object.source_event_id)
+        : "",
+      eventId: isSet(object.eventId)
+        ? globalThis.String(object.eventId)
+        : isSet(object.event_id)
+        ? globalThis.String(object.event_id)
+        : "",
+      eventSequence: isSet(object.eventSequence)
+        ? globalThis.Number(object.eventSequence)
+        : isSet(object.event_sequence)
+        ? globalThis.Number(object.event_sequence)
+        : 0,
+      disposition: isSet(object.disposition) ? durableEventDispositionFromJSON(object.disposition) : 0,
+    };
+  },
+
+  toJSON(message: DurableEventStamp): unknown {
+    const obj: any = {};
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.sourceEventId !== "") {
+      obj.sourceEventId = message.sourceEventId;
+    }
+    if (message.eventId !== "") {
+      obj.eventId = message.eventId;
+    }
+    if (message.eventSequence !== 0) {
+      obj.eventSequence = Math.round(message.eventSequence);
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = durableEventDispositionToJSON(message.disposition);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DurableEventStamp>, I>>(base?: I): DurableEventStamp {
+    return DurableEventStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DurableEventStamp>, I>>(object: I): DurableEventStamp {
+    const message = createBaseDurableEventStamp();
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.sourceEventId = object.sourceEventId ?? "";
+    message.eventId = object.eventId ?? "";
+    message.eventSequence = object.eventSequence ?? 0;
+    message.disposition = object.disposition ?? 0;
+    return message;
+  },
+};
+
+function createBaseDurablePartStamp(): DurablePartStamp {
+  return {
+    runtimeLocalPartId: "",
+    partId: "",
+    messageId: "",
+    partSequence: 0,
+    createdAt: "",
+    updatedAt: "",
+    disposition: 0,
+  };
+}
+
+export const DurablePartStamp: MessageFns<DurablePartStamp> = {
+  encode(message: DurablePartStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeLocalPartId !== "") {
+      writer.uint32(10).string(message.runtimeLocalPartId);
+    }
+    if (message.partId !== "") {
+      writer.uint32(18).string(message.partId);
+    }
+    if (message.messageId !== "") {
+      writer.uint32(26).string(message.messageId);
+    }
+    if (message.partSequence !== 0) {
+      writer.uint32(32).int64(message.partSequence);
+    }
+    if (message.createdAt !== "") {
+      writer.uint32(42).string(message.createdAt);
+    }
+    if (message.updatedAt !== "") {
+      writer.uint32(50).string(message.updatedAt);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(56).int32(message.disposition);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DurablePartStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDurablePartStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeLocalPartId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.partId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.messageId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.partSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.createdAt = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.updatedAt = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DurablePartStamp {
+    return {
+      runtimeLocalPartId: isSet(object.runtimeLocalPartId)
+        ? globalThis.String(object.runtimeLocalPartId)
+        : isSet(object.runtime_local_part_id)
+        ? globalThis.String(object.runtime_local_part_id)
+        : "",
+      partId: isSet(object.partId)
+        ? globalThis.String(object.partId)
+        : isSet(object.part_id)
+        ? globalThis.String(object.part_id)
+        : "",
+      messageId: isSet(object.messageId)
+        ? globalThis.String(object.messageId)
+        : isSet(object.message_id)
+        ? globalThis.String(object.message_id)
+        : "",
+      partSequence: isSet(object.partSequence)
+        ? globalThis.Number(object.partSequence)
+        : isSet(object.part_sequence)
+        ? globalThis.Number(object.part_sequence)
+        : 0,
+      createdAt: isSet(object.createdAt)
+        ? globalThis.String(object.createdAt)
+        : isSet(object.created_at)
+        ? globalThis.String(object.created_at)
+        : "",
+      updatedAt: isSet(object.updatedAt)
+        ? globalThis.String(object.updatedAt)
+        : isSet(object.updated_at)
+        ? globalThis.String(object.updated_at)
+        : "",
+      disposition: isSet(object.disposition) ? durableProjectionDispositionFromJSON(object.disposition) : 0,
+    };
+  },
+
+  toJSON(message: DurablePartStamp): unknown {
+    const obj: any = {};
+    if (message.runtimeLocalPartId !== "") {
+      obj.runtimeLocalPartId = message.runtimeLocalPartId;
+    }
+    if (message.partId !== "") {
+      obj.partId = message.partId;
+    }
+    if (message.messageId !== "") {
+      obj.messageId = message.messageId;
+    }
+    if (message.partSequence !== 0) {
+      obj.partSequence = Math.round(message.partSequence);
+    }
+    if (message.createdAt !== "") {
+      obj.createdAt = message.createdAt;
+    }
+    if (message.updatedAt !== "") {
+      obj.updatedAt = message.updatedAt;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = durableProjectionDispositionToJSON(message.disposition);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DurablePartStamp>, I>>(base?: I): DurablePartStamp {
+    return DurablePartStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DurablePartStamp>, I>>(object: I): DurablePartStamp {
+    const message = createBaseDurablePartStamp();
+    message.runtimeLocalPartId = object.runtimeLocalPartId ?? "";
+    message.partId = object.partId ?? "";
+    message.messageId = object.messageId ?? "";
+    message.partSequence = object.partSequence ?? 0;
+    message.createdAt = object.createdAt ?? "";
+    message.updatedAt = object.updatedAt ?? "";
+    message.disposition = object.disposition ?? 0;
+    return message;
+  },
+};
+
+function createBaseDurableMessageStamp(): DurableMessageStamp {
+  return {
+    runtimeLocalId: "",
+    sessionThreadId: "",
+    owningEventId: "",
+    messageId: "",
+    messageSequence: 0,
+    createdAt: "",
+    updatedAt: "",
+    disposition: 0,
+    parts: [],
+  };
+}
+
+export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
+  encode(message: DurableMessageStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeLocalId !== "") {
+      writer.uint32(10).string(message.runtimeLocalId);
+    }
+    if (message.sessionThreadId !== "") {
+      writer.uint32(18).string(message.sessionThreadId);
+    }
+    if (message.owningEventId !== "") {
+      writer.uint32(26).string(message.owningEventId);
+    }
+    if (message.messageId !== "") {
+      writer.uint32(34).string(message.messageId);
+    }
+    if (message.messageSequence !== 0) {
+      writer.uint32(40).int64(message.messageSequence);
+    }
+    if (message.createdAt !== "") {
+      writer.uint32(50).string(message.createdAt);
+    }
+    if (message.updatedAt !== "") {
+      writer.uint32(58).string(message.updatedAt);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(64).int32(message.disposition);
+    }
+    for (const v of message.parts) {
+      DurablePartStamp.encode(v!, writer.uint32(74).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DurableMessageStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDurableMessageStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeLocalId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.owningEventId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.messageId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.messageSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.createdAt = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.updatedAt = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.parts.push(DurablePartStamp.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DurableMessageStamp {
+    return {
+      runtimeLocalId: isSet(object.runtimeLocalId)
+        ? globalThis.String(object.runtimeLocalId)
+        : isSet(object.runtime_local_id)
+        ? globalThis.String(object.runtime_local_id)
+        : "",
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      owningEventId: isSet(object.owningEventId)
+        ? globalThis.String(object.owningEventId)
+        : isSet(object.owning_event_id)
+        ? globalThis.String(object.owning_event_id)
+        : "",
+      messageId: isSet(object.messageId)
+        ? globalThis.String(object.messageId)
+        : isSet(object.message_id)
+        ? globalThis.String(object.message_id)
+        : "",
+      messageSequence: isSet(object.messageSequence)
+        ? globalThis.Number(object.messageSequence)
+        : isSet(object.message_sequence)
+        ? globalThis.Number(object.message_sequence)
+        : 0,
+      createdAt: isSet(object.createdAt)
+        ? globalThis.String(object.createdAt)
+        : isSet(object.created_at)
+        ? globalThis.String(object.created_at)
+        : "",
+      updatedAt: isSet(object.updatedAt)
+        ? globalThis.String(object.updatedAt)
+        : isSet(object.updated_at)
+        ? globalThis.String(object.updated_at)
+        : "",
+      disposition: isSet(object.disposition) ? durableProjectionDispositionFromJSON(object.disposition) : 0,
+      parts: globalThis.Array.isArray(object?.parts)
+        ? object.parts.map((e: any) => DurablePartStamp.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: DurableMessageStamp): unknown {
+    const obj: any = {};
+    if (message.runtimeLocalId !== "") {
+      obj.runtimeLocalId = message.runtimeLocalId;
+    }
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.owningEventId !== "") {
+      obj.owningEventId = message.owningEventId;
+    }
+    if (message.messageId !== "") {
+      obj.messageId = message.messageId;
+    }
+    if (message.messageSequence !== 0) {
+      obj.messageSequence = Math.round(message.messageSequence);
+    }
+    if (message.createdAt !== "") {
+      obj.createdAt = message.createdAt;
+    }
+    if (message.updatedAt !== "") {
+      obj.updatedAt = message.updatedAt;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = durableProjectionDispositionToJSON(message.disposition);
+    }
+    if (message.parts?.length) {
+      obj.parts = message.parts.map((e) => DurablePartStamp.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DurableMessageStamp>, I>>(base?: I): DurableMessageStamp {
+    return DurableMessageStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DurableMessageStamp>, I>>(object: I): DurableMessageStamp {
+    const message = createBaseDurableMessageStamp();
+    message.runtimeLocalId = object.runtimeLocalId ?? "";
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.owningEventId = object.owningEventId ?? "";
+    message.messageId = object.messageId ?? "";
+    message.messageSequence = object.messageSequence ?? 0;
+    message.createdAt = object.createdAt ?? "";
+    message.updatedAt = object.updatedAt ?? "";
+    message.disposition = object.disposition ?? 0;
+    message.parts = object.parts?.map((e) => DurablePartStamp.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBasePrefixConsumptionStamp(): PrefixConsumptionStamp {
+  return { childThreadId: "", parentBoundaryEventId: "", checkpointMessageId: "", disposition: 0 };
+}
+
+export const PrefixConsumptionStamp: MessageFns<PrefixConsumptionStamp> = {
+  encode(message: PrefixConsumptionStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.childThreadId !== "") {
+      writer.uint32(10).string(message.childThreadId);
+    }
+    if (message.parentBoundaryEventId !== "") {
+      writer.uint32(18).string(message.parentBoundaryEventId);
+    }
+    if (message.checkpointMessageId !== "") {
+      writer.uint32(26).string(message.checkpointMessageId);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(32).int32(message.disposition);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrefixConsumptionStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrefixConsumptionStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.childThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.parentBoundaryEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.checkpointMessageId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PrefixConsumptionStamp {
+    return {
+      childThreadId: isSet(object.childThreadId)
+        ? globalThis.String(object.childThreadId)
+        : isSet(object.child_thread_id)
+        ? globalThis.String(object.child_thread_id)
+        : "",
+      parentBoundaryEventId: isSet(object.parentBoundaryEventId)
+        ? globalThis.String(object.parentBoundaryEventId)
+        : isSet(object.parent_boundary_event_id)
+        ? globalThis.String(object.parent_boundary_event_id)
+        : "",
+      checkpointMessageId: isSet(object.checkpointMessageId)
+        ? globalThis.String(object.checkpointMessageId)
+        : isSet(object.checkpoint_message_id)
+        ? globalThis.String(object.checkpoint_message_id)
+        : "",
+      disposition: isSet(object.disposition) ? prefixConsumptionDispositionFromJSON(object.disposition) : 0,
+    };
+  },
+
+  toJSON(message: PrefixConsumptionStamp): unknown {
+    const obj: any = {};
+    if (message.childThreadId !== "") {
+      obj.childThreadId = message.childThreadId;
+    }
+    if (message.parentBoundaryEventId !== "") {
+      obj.parentBoundaryEventId = message.parentBoundaryEventId;
+    }
+    if (message.checkpointMessageId !== "") {
+      obj.checkpointMessageId = message.checkpointMessageId;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = prefixConsumptionDispositionToJSON(message.disposition);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PrefixConsumptionStamp>, I>>(base?: I): PrefixConsumptionStamp {
+    return PrefixConsumptionStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrefixConsumptionStamp>, I>>(object: I): PrefixConsumptionStamp {
+    const message = createBasePrefixConsumptionStamp();
+    message.childThreadId = object.childThreadId ?? "";
+    message.parentBoundaryEventId = object.parentBoundaryEventId ?? "";
+    message.checkpointMessageId = object.checkpointMessageId ?? "";
+    message.disposition = object.disposition ?? 0;
+    return message;
+  },
+};
+
+function createBasePrefixConsumptionDraft(): PrefixConsumptionDraft {
+  return { childThreadId: "", parentBoundaryEventId: "", checkpointRuntimeLocalId: "" };
+}
+
+export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
+  encode(message: PrefixConsumptionDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.childThreadId !== "") {
+      writer.uint32(10).string(message.childThreadId);
+    }
+    if (message.parentBoundaryEventId !== "") {
+      writer.uint32(18).string(message.parentBoundaryEventId);
+    }
+    if (message.checkpointRuntimeLocalId !== "") {
+      writer.uint32(26).string(message.checkpointRuntimeLocalId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PrefixConsumptionDraft {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePrefixConsumptionDraft();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.childThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.parentBoundaryEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.checkpointRuntimeLocalId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PrefixConsumptionDraft {
+    return {
+      childThreadId: isSet(object.childThreadId)
+        ? globalThis.String(object.childThreadId)
+        : isSet(object.child_thread_id)
+        ? globalThis.String(object.child_thread_id)
+        : "",
+      parentBoundaryEventId: isSet(object.parentBoundaryEventId)
+        ? globalThis.String(object.parentBoundaryEventId)
+        : isSet(object.parent_boundary_event_id)
+        ? globalThis.String(object.parent_boundary_event_id)
+        : "",
+      checkpointRuntimeLocalId: isSet(object.checkpointRuntimeLocalId)
+        ? globalThis.String(object.checkpointRuntimeLocalId)
+        : isSet(object.checkpoint_runtime_local_id)
+        ? globalThis.String(object.checkpoint_runtime_local_id)
+        : "",
+    };
+  },
+
+  toJSON(message: PrefixConsumptionDraft): unknown {
+    const obj: any = {};
+    if (message.childThreadId !== "") {
+      obj.childThreadId = message.childThreadId;
+    }
+    if (message.parentBoundaryEventId !== "") {
+      obj.parentBoundaryEventId = message.parentBoundaryEventId;
+    }
+    if (message.checkpointRuntimeLocalId !== "") {
+      obj.checkpointRuntimeLocalId = message.checkpointRuntimeLocalId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PrefixConsumptionDraft>, I>>(base?: I): PrefixConsumptionDraft {
+    return PrefixConsumptionDraft.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PrefixConsumptionDraft>, I>>(object: I): PrefixConsumptionDraft {
+    const message = createBasePrefixConsumptionDraft();
+    message.childThreadId = object.childThreadId ?? "";
+    message.parentBoundaryEventId = object.parentBoundaryEventId ?? "";
+    message.checkpointRuntimeLocalId = object.checkpointRuntimeLocalId ?? "";
+    return message;
+  },
+};
+
+function createBaseRequestRescheduleStamp(): RequestRescheduleStamp {
+  return { disposition: 0, requestKind: "", attempt: 0, effectiveDeadline: "" };
+}
+
+export const RequestRescheduleStamp: MessageFns<RequestRescheduleStamp> = {
+  encode(message: RequestRescheduleStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.disposition !== 0) {
+      writer.uint32(8).int32(message.disposition);
+    }
+    if (message.requestKind !== "") {
+      writer.uint32(18).string(message.requestKind);
+    }
+    if (message.attempt !== 0) {
+      writer.uint32(24).int64(message.attempt);
+    }
+    if (message.effectiveDeadline !== "") {
+      writer.uint32(34).string(message.effectiveDeadline);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RequestRescheduleStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRequestRescheduleStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.requestKind = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.attempt = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.effectiveDeadline = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RequestRescheduleStamp {
+    return {
+      disposition: isSet(object.disposition) ? requestRescheduleDispositionFromJSON(object.disposition) : 0,
+      requestKind: isSet(object.requestKind)
+        ? globalThis.String(object.requestKind)
+        : isSet(object.request_kind)
+        ? globalThis.String(object.request_kind)
+        : "",
+      attempt: isSet(object.attempt) ? globalThis.Number(object.attempt) : 0,
+      effectiveDeadline: isSet(object.effectiveDeadline)
+        ? globalThis.String(object.effectiveDeadline)
+        : isSet(object.effective_deadline)
+        ? globalThis.String(object.effective_deadline)
+        : "",
+    };
+  },
+
+  toJSON(message: RequestRescheduleStamp): unknown {
+    const obj: any = {};
+    if (message.disposition !== 0) {
+      obj.disposition = requestRescheduleDispositionToJSON(message.disposition);
+    }
+    if (message.requestKind !== "") {
+      obj.requestKind = message.requestKind;
+    }
+    if (message.attempt !== 0) {
+      obj.attempt = Math.round(message.attempt);
+    }
+    if (message.effectiveDeadline !== "") {
+      obj.effectiveDeadline = message.effectiveDeadline;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RequestRescheduleStamp>, I>>(base?: I): RequestRescheduleStamp {
+    return RequestRescheduleStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RequestRescheduleStamp>, I>>(object: I): RequestRescheduleStamp {
+    const message = createBaseRequestRescheduleStamp();
+    message.disposition = object.disposition ?? 0;
+    message.requestKind = object.requestKind ?? "";
+    message.attempt = object.attempt ?? 0;
+    message.effectiveDeadline = object.effectiveDeadline ?? "";
+    return message;
+  },
+};
+
+function createBaseChildLifecycleStamp(): ChildLifecycleStamp {
+  return { childThreadId: "", disposition: 0, effectiveAt: "" };
+}
+
+export const ChildLifecycleStamp: MessageFns<ChildLifecycleStamp> = {
+  encode(message: ChildLifecycleStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.childThreadId !== "") {
+      writer.uint32(10).string(message.childThreadId);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(16).int32(message.disposition);
+    }
+    if (message.effectiveAt !== "") {
+      writer.uint32(26).string(message.effectiveAt);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ChildLifecycleStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseChildLifecycleStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.childThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.effectiveAt = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ChildLifecycleStamp {
+    return {
+      childThreadId: isSet(object.childThreadId)
+        ? globalThis.String(object.childThreadId)
+        : isSet(object.child_thread_id)
+        ? globalThis.String(object.child_thread_id)
+        : "",
+      disposition: isSet(object.disposition) ? childLifecycleDispositionFromJSON(object.disposition) : 0,
+      effectiveAt: isSet(object.effectiveAt)
+        ? globalThis.String(object.effectiveAt)
+        : isSet(object.effective_at)
+        ? globalThis.String(object.effective_at)
+        : "",
+    };
+  },
+
+  toJSON(message: ChildLifecycleStamp): unknown {
+    const obj: any = {};
+    if (message.childThreadId !== "") {
+      obj.childThreadId = message.childThreadId;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = childLifecycleDispositionToJSON(message.disposition);
+    }
+    if (message.effectiveAt !== "") {
+      obj.effectiveAt = message.effectiveAt;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ChildLifecycleStamp>, I>>(base?: I): ChildLifecycleStamp {
+    return ChildLifecycleStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ChildLifecycleStamp>, I>>(object: I): ChildLifecycleStamp {
+    const message = createBaseChildLifecycleStamp();
+    message.childThreadId = object.childThreadId ?? "";
+    message.disposition = object.disposition ?? 0;
+    message.effectiveAt = object.effectiveAt ?? "";
+    return message;
+  },
+};
+
+function createBaseSealedAgentMailStamp(): SealedAgentMailStamp {
+  return { runtimeInputId: "", birthPreparationAttemptId: "", failedPreparationAttemptId: "", disposition: 0 };
+}
+
+export const SealedAgentMailStamp: MessageFns<SealedAgentMailStamp> = {
+  encode(message: SealedAgentMailStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeInputId !== "") {
+      writer.uint32(10).string(message.runtimeInputId);
+    }
+    if (message.birthPreparationAttemptId !== "") {
+      writer.uint32(18).string(message.birthPreparationAttemptId);
+    }
+    if (message.failedPreparationAttemptId !== "") {
+      writer.uint32(26).string(message.failedPreparationAttemptId);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(32).int32(message.disposition);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SealedAgentMailStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSealedAgentMailStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.birthPreparationAttemptId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.failedPreparationAttemptId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): SealedAgentMailStamp {
+    return {
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      birthPreparationAttemptId: isSet(object.birthPreparationAttemptId)
+        ? globalThis.String(object.birthPreparationAttemptId)
+        : isSet(object.birth_preparation_attempt_id)
+        ? globalThis.String(object.birth_preparation_attempt_id)
+        : "",
+      failedPreparationAttemptId: isSet(object.failedPreparationAttemptId)
+        ? globalThis.String(object.failedPreparationAttemptId)
+        : isSet(object.failed_preparation_attempt_id)
+        ? globalThis.String(object.failed_preparation_attempt_id)
+        : "",
+      disposition: isSet(object.disposition) ? sealedAgentMailDispositionFromJSON(object.disposition) : 0,
+    };
+  },
+
+  toJSON(message: SealedAgentMailStamp): unknown {
+    const obj: any = {};
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.birthPreparationAttemptId !== "") {
+      obj.birthPreparationAttemptId = message.birthPreparationAttemptId;
+    }
+    if (message.failedPreparationAttemptId !== "") {
+      obj.failedPreparationAttemptId = message.failedPreparationAttemptId;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = sealedAgentMailDispositionToJSON(message.disposition);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<SealedAgentMailStamp>, I>>(base?: I): SealedAgentMailStamp {
+    return SealedAgentMailStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SealedAgentMailStamp>, I>>(object: I): SealedAgentMailStamp {
+    const message = createBaseSealedAgentMailStamp();
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.birthPreparationAttemptId = object.birthPreparationAttemptId ?? "";
+    message.failedPreparationAttemptId = object.failedPreparationAttemptId ?? "";
+    message.disposition = object.disposition ?? 0;
+    return message;
+  },
+};
+
+function createBaseIdleCloseoutStamp(): IdleCloseoutStamp {
+  return { durableTurnId: "", idleEventId: "", idleEventSequence: 0, committedIdleAt: "" };
+}
+
+export const IdleCloseoutStamp: MessageFns<IdleCloseoutStamp> = {
+  encode(message: IdleCloseoutStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.durableTurnId !== "") {
+      writer.uint32(10).string(message.durableTurnId);
+    }
+    if (message.idleEventId !== "") {
+      writer.uint32(18).string(message.idleEventId);
+    }
+    if (message.idleEventSequence !== 0) {
+      writer.uint32(24).int64(message.idleEventSequence);
+    }
+    if (message.committedIdleAt !== "") {
+      writer.uint32(34).string(message.committedIdleAt);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): IdleCloseoutStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIdleCloseoutStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.durableTurnId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.idleEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.idleEventSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.committedIdleAt = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IdleCloseoutStamp {
+    return {
+      durableTurnId: isSet(object.durableTurnId)
+        ? globalThis.String(object.durableTurnId)
+        : isSet(object.durable_turn_id)
+        ? globalThis.String(object.durable_turn_id)
+        : "",
+      idleEventId: isSet(object.idleEventId)
+        ? globalThis.String(object.idleEventId)
+        : isSet(object.idle_event_id)
+        ? globalThis.String(object.idle_event_id)
+        : "",
+      idleEventSequence: isSet(object.idleEventSequence)
+        ? globalThis.Number(object.idleEventSequence)
+        : isSet(object.idle_event_sequence)
+        ? globalThis.Number(object.idle_event_sequence)
+        : 0,
+      committedIdleAt: isSet(object.committedIdleAt)
+        ? globalThis.String(object.committedIdleAt)
+        : isSet(object.committed_idle_at)
+        ? globalThis.String(object.committed_idle_at)
+        : "",
+    };
+  },
+
+  toJSON(message: IdleCloseoutStamp): unknown {
+    const obj: any = {};
+    if (message.durableTurnId !== "") {
+      obj.durableTurnId = message.durableTurnId;
+    }
+    if (message.idleEventId !== "") {
+      obj.idleEventId = message.idleEventId;
+    }
+    if (message.idleEventSequence !== 0) {
+      obj.idleEventSequence = Math.round(message.idleEventSequence);
+    }
+    if (message.committedIdleAt !== "") {
+      obj.committedIdleAt = message.committedIdleAt;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<IdleCloseoutStamp>, I>>(base?: I): IdleCloseoutStamp {
+    return IdleCloseoutStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<IdleCloseoutStamp>, I>>(object: I): IdleCloseoutStamp {
+    const message = createBaseIdleCloseoutStamp();
+    message.durableTurnId = object.durableTurnId ?? "";
+    message.idleEventId = object.idleEventId ?? "";
+    message.idleEventSequence = object.idleEventSequence ?? 0;
+    message.committedIdleAt = object.committedIdleAt ?? "";
+    return message;
+  },
+};
+
+function createBaseDeclarationReceipt(): DeclarationReceipt {
+  return {
+    sessionThreadId: "",
+    operationKind: "",
+    sourceKind: "",
+    sourceId: "",
+    events: [],
+    messages: [],
+    pendingAttachmentDeltaJson: [],
+    pendingToolDeltaJson: [],
+    prefixConsumptions: [],
+    declarationDigest: "",
+    requestReschedule: undefined,
+    childLifecycle: [],
+    sealedAgentMail: undefined,
+    idleCloseout: undefined,
+    compactedThroughMessageSequence: undefined,
+  };
+}
+
+export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
+  encode(message: DeclarationReceipt, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sessionThreadId !== "") {
+      writer.uint32(10).string(message.sessionThreadId);
+    }
+    if (message.operationKind !== "") {
+      writer.uint32(18).string(message.operationKind);
+    }
+    if (message.sourceKind !== "") {
+      writer.uint32(26).string(message.sourceKind);
+    }
+    if (message.sourceId !== "") {
+      writer.uint32(34).string(message.sourceId);
+    }
+    for (const v of message.events) {
+      DurableEventStamp.encode(v!, writer.uint32(42).fork()).join();
+    }
+    for (const v of message.messages) {
+      DurableMessageStamp.encode(v!, writer.uint32(50).fork()).join();
+    }
+    for (const v of message.pendingAttachmentDeltaJson) {
+      writer.uint32(58).string(v!);
+    }
+    for (const v of message.pendingToolDeltaJson) {
+      writer.uint32(66).string(v!);
+    }
+    for (const v of message.prefixConsumptions) {
+      PrefixConsumptionStamp.encode(v!, writer.uint32(74).fork()).join();
+    }
+    if (message.declarationDigest !== "") {
+      writer.uint32(82).string(message.declarationDigest);
+    }
+    if (message.requestReschedule !== undefined) {
+      RequestRescheduleStamp.encode(message.requestReschedule, writer.uint32(90).fork()).join();
+    }
+    for (const v of message.childLifecycle) {
+      ChildLifecycleStamp.encode(v!, writer.uint32(98).fork()).join();
+    }
+    if (message.sealedAgentMail !== undefined) {
+      SealedAgentMailStamp.encode(message.sealedAgentMail, writer.uint32(106).fork()).join();
+    }
+    if (message.idleCloseout !== undefined) {
+      IdleCloseoutStamp.encode(message.idleCloseout, writer.uint32(114).fork()).join();
+    }
+    if (message.compactedThroughMessageSequence !== undefined) {
+      writer.uint32(120).int64(message.compactedThroughMessageSequence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeclarationReceipt {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeclarationReceipt();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sessionThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.operationKind = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceKind = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.sourceId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.events.push(DurableEventStamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.messages.push(DurableMessageStamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.pendingAttachmentDeltaJson.push(reader.string());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.pendingToolDeltaJson.push(reader.string());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.prefixConsumptions.push(PrefixConsumptionStamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.declarationDigest = reader.string();
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.requestReschedule = RequestRescheduleStamp.decode(reader, reader.uint32());
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.childLifecycle.push(ChildLifecycleStamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.sealedAgentMail = SealedAgentMailStamp.decode(reader, reader.uint32());
+          continue;
+        }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.idleCloseout = IdleCloseoutStamp.decode(reader, reader.uint32());
+          continue;
+        }
+        case 15: {
+          if (tag !== 120) {
+            break;
+          }
+
+          message.compactedThroughMessageSequence = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DeclarationReceipt {
+    return {
+      sessionThreadId: isSet(object.sessionThreadId)
+        ? globalThis.String(object.sessionThreadId)
+        : isSet(object.session_thread_id)
+        ? globalThis.String(object.session_thread_id)
+        : "",
+      operationKind: isSet(object.operationKind)
+        ? globalThis.String(object.operationKind)
+        : isSet(object.operation_kind)
+        ? globalThis.String(object.operation_kind)
+        : "",
+      sourceKind: isSet(object.sourceKind)
+        ? globalThis.String(object.sourceKind)
+        : isSet(object.source_kind)
+        ? globalThis.String(object.source_kind)
+        : "",
+      sourceId: isSet(object.sourceId)
+        ? globalThis.String(object.sourceId)
+        : isSet(object.source_id)
+        ? globalThis.String(object.source_id)
+        : "",
+      events: globalThis.Array.isArray(object?.events)
+        ? object.events.map((e: any) => DurableEventStamp.fromJSON(e))
+        : [],
+      messages: globalThis.Array.isArray(object?.messages)
+        ? object.messages.map((e: any) => DurableMessageStamp.fromJSON(e))
+        : [],
+      pendingAttachmentDeltaJson: globalThis.Array.isArray(object?.pendingAttachmentDeltaJson)
+        ? object.pendingAttachmentDeltaJson.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.pending_attachment_delta_json)
+        ? object.pending_attachment_delta_json.map((e: any) => globalThis.String(e))
+        : [],
+      pendingToolDeltaJson: globalThis.Array.isArray(object?.pendingToolDeltaJson)
+        ? object.pendingToolDeltaJson.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.pending_tool_delta_json)
+        ? object.pending_tool_delta_json.map((e: any) => globalThis.String(e))
+        : [],
+      prefixConsumptions: globalThis.Array.isArray(object?.prefixConsumptions)
+        ? object.prefixConsumptions.map((e: any) => PrefixConsumptionStamp.fromJSON(e))
+        : globalThis.Array.isArray(object?.prefix_consumptions)
+        ? object.prefix_consumptions.map((e: any) => PrefixConsumptionStamp.fromJSON(e))
+        : [],
+      declarationDigest: isSet(object.declarationDigest)
+        ? globalThis.String(object.declarationDigest)
+        : isSet(object.declaration_digest)
+        ? globalThis.String(object.declaration_digest)
+        : "",
+      requestReschedule: isSet(object.requestReschedule)
+        ? RequestRescheduleStamp.fromJSON(object.requestReschedule)
+        : isSet(object.request_reschedule)
+        ? RequestRescheduleStamp.fromJSON(object.request_reschedule)
+        : undefined,
+      childLifecycle: globalThis.Array.isArray(object?.childLifecycle)
+        ? object.childLifecycle.map((e: any) => ChildLifecycleStamp.fromJSON(e))
+        : globalThis.Array.isArray(object?.child_lifecycle)
+        ? object.child_lifecycle.map((e: any) => ChildLifecycleStamp.fromJSON(e))
+        : [],
+      sealedAgentMail: isSet(object.sealedAgentMail)
+        ? SealedAgentMailStamp.fromJSON(object.sealedAgentMail)
+        : isSet(object.sealed_agent_mail)
+        ? SealedAgentMailStamp.fromJSON(object.sealed_agent_mail)
+        : undefined,
+      idleCloseout: isSet(object.idleCloseout)
+        ? IdleCloseoutStamp.fromJSON(object.idleCloseout)
+        : isSet(object.idle_closeout)
+        ? IdleCloseoutStamp.fromJSON(object.idle_closeout)
+        : undefined,
+      compactedThroughMessageSequence: isSet(object.compactedThroughMessageSequence)
+        ? globalThis.Number(object.compactedThroughMessageSequence)
+        : isSet(object.compacted_through_message_sequence)
+        ? globalThis.Number(object.compacted_through_message_sequence)
+        : undefined,
+    };
+  },
+
+  toJSON(message: DeclarationReceipt): unknown {
+    const obj: any = {};
+    if (message.sessionThreadId !== "") {
+      obj.sessionThreadId = message.sessionThreadId;
+    }
+    if (message.operationKind !== "") {
+      obj.operationKind = message.operationKind;
+    }
+    if (message.sourceKind !== "") {
+      obj.sourceKind = message.sourceKind;
+    }
+    if (message.sourceId !== "") {
+      obj.sourceId = message.sourceId;
+    }
+    if (message.events?.length) {
+      obj.events = message.events.map((e) => DurableEventStamp.toJSON(e));
+    }
+    if (message.messages?.length) {
+      obj.messages = message.messages.map((e) => DurableMessageStamp.toJSON(e));
+    }
+    if (message.pendingAttachmentDeltaJson?.length) {
+      obj.pendingAttachmentDeltaJson = message.pendingAttachmentDeltaJson;
+    }
+    if (message.pendingToolDeltaJson?.length) {
+      obj.pendingToolDeltaJson = message.pendingToolDeltaJson;
+    }
+    if (message.prefixConsumptions?.length) {
+      obj.prefixConsumptions = message.prefixConsumptions.map((e) => PrefixConsumptionStamp.toJSON(e));
+    }
+    if (message.declarationDigest !== "") {
+      obj.declarationDigest = message.declarationDigest;
+    }
+    if (message.requestReschedule !== undefined) {
+      obj.requestReschedule = RequestRescheduleStamp.toJSON(message.requestReschedule);
+    }
+    if (message.childLifecycle?.length) {
+      obj.childLifecycle = message.childLifecycle.map((e) => ChildLifecycleStamp.toJSON(e));
+    }
+    if (message.sealedAgentMail !== undefined) {
+      obj.sealedAgentMail = SealedAgentMailStamp.toJSON(message.sealedAgentMail);
+    }
+    if (message.idleCloseout !== undefined) {
+      obj.idleCloseout = IdleCloseoutStamp.toJSON(message.idleCloseout);
+    }
+    if (message.compactedThroughMessageSequence !== undefined) {
+      obj.compactedThroughMessageSequence = Math.round(message.compactedThroughMessageSequence);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DeclarationReceipt>, I>>(base?: I): DeclarationReceipt {
+    return DeclarationReceipt.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeclarationReceipt>, I>>(object: I): DeclarationReceipt {
+    const message = createBaseDeclarationReceipt();
+    message.sessionThreadId = object.sessionThreadId ?? "";
+    message.operationKind = object.operationKind ?? "";
+    message.sourceKind = object.sourceKind ?? "";
+    message.sourceId = object.sourceId ?? "";
+    message.events = object.events?.map((e) => DurableEventStamp.fromPartial(e)) || [];
+    message.messages = object.messages?.map((e) => DurableMessageStamp.fromPartial(e)) || [];
+    message.pendingAttachmentDeltaJson = object.pendingAttachmentDeltaJson?.map((e) => e) || [];
+    message.pendingToolDeltaJson = object.pendingToolDeltaJson?.map((e) => e) || [];
+    message.prefixConsumptions = object.prefixConsumptions?.map((e) => PrefixConsumptionStamp.fromPartial(e)) || [];
+    message.declarationDigest = object.declarationDigest ?? "";
+    message.requestReschedule = (object.requestReschedule !== undefined && object.requestReschedule !== null)
+      ? RequestRescheduleStamp.fromPartial(object.requestReschedule)
+      : undefined;
+    message.childLifecycle = object.childLifecycle?.map((e) => ChildLifecycleStamp.fromPartial(e)) || [];
+    message.sealedAgentMail = (object.sealedAgentMail !== undefined && object.sealedAgentMail !== null)
+      ? SealedAgentMailStamp.fromPartial(object.sealedAgentMail)
+      : undefined;
+    message.idleCloseout = (object.idleCloseout !== undefined && object.idleCloseout !== null)
+      ? IdleCloseoutStamp.fromPartial(object.idleCloseout)
+      : undefined;
+    message.compactedThroughMessageSequence = object.compactedThroughMessageSequence ?? undefined;
+    return message;
+  },
+};
+
+function createBaseDeclarationResponse(): DeclarationResponse {
+  return { receipts: [], observedBindingId: "", observedBindingGeneration: 0, applicationDisposition: 0 };
+}
+
+export const DeclarationResponse: MessageFns<DeclarationResponse> = {
+  encode(message: DeclarationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.receipts) {
+      DeclarationReceipt.encode(v!, writer.uint32(10).fork()).join();
+    }
+    if (message.observedBindingId !== "") {
+      writer.uint32(18).string(message.observedBindingId);
+    }
+    if (message.observedBindingGeneration !== 0) {
+      writer.uint32(24).int64(message.observedBindingGeneration);
+    }
+    if (message.applicationDisposition !== 0) {
+      writer.uint32(32).int32(message.applicationDisposition);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeclarationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeclarationResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.receipts.push(DeclarationReceipt.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.observedBindingId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.observedBindingGeneration = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.applicationDisposition = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DeclarationResponse {
+    return {
+      receipts: globalThis.Array.isArray(object?.receipts)
+        ? object.receipts.map((e: any) => DeclarationReceipt.fromJSON(e))
+        : [],
+      observedBindingId: isSet(object.observedBindingId)
+        ? globalThis.String(object.observedBindingId)
+        : isSet(object.observed_binding_id)
+        ? globalThis.String(object.observed_binding_id)
+        : "",
+      observedBindingGeneration: isSet(object.observedBindingGeneration)
+        ? globalThis.Number(object.observedBindingGeneration)
+        : isSet(object.observed_binding_generation)
+        ? globalThis.Number(object.observed_binding_generation)
+        : 0,
+      applicationDisposition: isSet(object.applicationDisposition)
+        ? receiptApplicationDispositionFromJSON(object.applicationDisposition)
+        : isSet(object.application_disposition)
+        ? receiptApplicationDispositionFromJSON(object.application_disposition)
+        : 0,
+    };
+  },
+
+  toJSON(message: DeclarationResponse): unknown {
+    const obj: any = {};
+    if (message.receipts?.length) {
+      obj.receipts = message.receipts.map((e) => DeclarationReceipt.toJSON(e));
+    }
+    if (message.observedBindingId !== "") {
+      obj.observedBindingId = message.observedBindingId;
+    }
+    if (message.observedBindingGeneration !== 0) {
+      obj.observedBindingGeneration = Math.round(message.observedBindingGeneration);
+    }
+    if (message.applicationDisposition !== 0) {
+      obj.applicationDisposition = receiptApplicationDispositionToJSON(message.applicationDisposition);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DeclarationResponse>, I>>(base?: I): DeclarationResponse {
+    return DeclarationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeclarationResponse>, I>>(object: I): DeclarationResponse {
+    const message = createBaseDeclarationResponse();
+    message.receipts = object.receipts?.map((e) => DeclarationReceipt.fromPartial(e)) || [];
+    message.observedBindingId = object.observedBindingId ?? "";
+    message.observedBindingGeneration = object.observedBindingGeneration ?? 0;
+    message.applicationDisposition = object.applicationDisposition ?? 0;
+    return message;
+  },
+};
 
 function createBaseRuntimeBindingRef(): RuntimeBindingRef {
   return { bindingId: "", bindingGeneration: 0, targetPodUid: "" };
@@ -1284,6 +3840,7 @@ function createBaseCommitInputsRequest(): CommitInputsRequest {
     inputKind: "",
     interAgentMessageJson: "",
     approvalReviewJson: "",
+    drafts: [],
   };
 }
 
@@ -1315,6 +3872,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     }
     if (message.approvalReviewJson !== "") {
       writer.uint32(74).string(message.approvalReviewJson);
+    }
+    for (const v of message.drafts) {
+      RuntimeMessageDraft.encode(v!, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -1398,6 +3958,14 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
           message.approvalReviewJson = reader.string();
           continue;
         }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1450,6 +4018,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         : isSet(object.approval_review_json)
         ? globalThis.String(object.approval_review_json)
         : "",
+      drafts: globalThis.Array.isArray(object?.drafts)
+        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
     };
   },
 
@@ -1482,6 +4053,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.approvalReviewJson !== "") {
       obj.approvalReviewJson = message.approvalReviewJson;
     }
+    if (message.drafts?.length) {
+      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    }
     return obj;
   },
 
@@ -1501,18 +4075,22 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     message.inputKind = object.inputKind ?? "";
     message.interAgentMessageJson = object.interAgentMessageJson ?? "";
     message.approvalReviewJson = object.approvalReviewJson ?? "";
+    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     return message;
   },
 };
 
 function createBaseCommitInputsResponse(): CommitInputsResponse {
-  return { ack: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   encode(message: CommitInputsResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -1532,6 +4110,14 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1542,13 +4128,19 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   },
 
   fromJSON(object: any): CommitInputsResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+    };
   },
 
   toJSON(message: CommitInputsResponse): unknown {
     const obj: any = {};
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -1560,6 +4152,9 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
     const message = createBaseCommitInputsResponse();
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
+      : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
       : undefined;
     return message;
   },
@@ -5567,7 +8162,7 @@ function createBaseCreateChildThreadRequest(): CreateChildThreadRequest {
     agentType: "",
     sourceToolUseEventId: "",
     forkTurns: "",
-    forkSeedJson: "",
+    threadContextPrefixJson: "",
     isTrunk: false,
     reviewerReviewId: "",
   };
@@ -5602,8 +8197,8 @@ export const CreateChildThreadRequest: MessageFns<CreateChildThreadRequest> = {
     if (message.forkTurns !== "") {
       writer.uint32(74).string(message.forkTurns);
     }
-    if (message.forkSeedJson !== "") {
-      writer.uint32(82).string(message.forkSeedJson);
+    if (message.threadContextPrefixJson !== "") {
+      writer.uint32(82).string(message.threadContextPrefixJson);
     }
     if (message.isTrunk !== false) {
       writer.uint32(88).bool(message.isTrunk);
@@ -5698,7 +8293,7 @@ export const CreateChildThreadRequest: MessageFns<CreateChildThreadRequest> = {
             break;
           }
 
-          message.forkSeedJson = reader.string();
+          message.threadContextPrefixJson = reader.string();
           continue;
         }
         case 11: {
@@ -5765,10 +8360,10 @@ export const CreateChildThreadRequest: MessageFns<CreateChildThreadRequest> = {
         : isSet(object.fork_turns)
         ? globalThis.String(object.fork_turns)
         : "",
-      forkSeedJson: isSet(object.forkSeedJson)
-        ? globalThis.String(object.forkSeedJson)
-        : isSet(object.fork_seed_json)
-        ? globalThis.String(object.fork_seed_json)
+      threadContextPrefixJson: isSet(object.threadContextPrefixJson)
+        ? globalThis.String(object.threadContextPrefixJson)
+        : isSet(object.thread_context_prefix_json)
+        ? globalThis.String(object.thread_context_prefix_json)
         : "",
       isTrunk: isSet(object.isTrunk)
         ? globalThis.Boolean(object.isTrunk)
@@ -5812,8 +8407,8 @@ export const CreateChildThreadRequest: MessageFns<CreateChildThreadRequest> = {
     if (message.forkTurns !== "") {
       obj.forkTurns = message.forkTurns;
     }
-    if (message.forkSeedJson !== "") {
-      obj.forkSeedJson = message.forkSeedJson;
+    if (message.threadContextPrefixJson !== "") {
+      obj.threadContextPrefixJson = message.threadContextPrefixJson;
     }
     if (message.isTrunk !== false) {
       obj.isTrunk = message.isTrunk;
@@ -5840,7 +8435,7 @@ export const CreateChildThreadRequest: MessageFns<CreateChildThreadRequest> = {
     message.agentType = object.agentType ?? "";
     message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
     message.forkTurns = object.forkTurns ?? "";
-    message.forkSeedJson = object.forkSeedJson ?? "";
+    message.threadContextPrefixJson = object.threadContextPrefixJson ?? "";
     message.isTrunk = object.isTrunk ?? false;
     message.reviewerReviewId = object.reviewerReviewId ?? "";
     return message;

@@ -26,6 +26,7 @@ import {
   RuntimeMessageSchema,
   RuntimeMessageStore,
   SessionEventWriterRetryPolicy,
+  normalizeContextLoaderError,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
 } from "../../src/contracts/runtime.js";
@@ -48,7 +49,6 @@ import type {
   RuntimeProviderStreamKind,
 } from "../../src/runtime/metrics.js";
 import type { AcceptedInputCommitResult, ContextLoader } from "../../src/context/context-loader.js";
-import { ContextLoaderBoundary } from "../../src/context/context-loader.js";
 import { normalizeProviderError } from "../../src/contracts/provider.js";
 import { Session } from "../../src/session/session.js";
 import { AutoApprovalReviewerManager } from "../../src/session/approval-reviewer-manager.js";
@@ -60,6 +60,7 @@ import {
   buildAgentLoopUserMessage as userMessage,
   buildAgentLoopRuntimeNotificationMessage as runtimeNotificationMessage,
 } from "./runtime-message-builders.js";
+import { acceptedInputReceipt } from "./runtime-declaration-fixtures.js";
 
 interface PackageJson {
   readonly dependencies?: Readonly<Record<string, string>>;
@@ -95,11 +96,11 @@ function expectNoProviderDiagnosticCanaries(value: unknown): void {
   expect(serialized).not.toContain("stack");
 }
 
-function acceptedInput(runtimeInputId = "rin_follow_up"): RuntimeAcceptedInputState {
+function acceptedInput(runtimeInputId = "rin_follow_up", sessionId = "sesn_1"): RuntimeAcceptedInputState {
   return {
     requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_test",
-    sessionId: "sesn_1",
+    sessionId,
     sessionThreadId: "thrd_1",
     bindingId: "bind_1",
     bindingGeneration: 1,
@@ -109,13 +110,10 @@ function acceptedInput(runtimeInputId = "rin_follow_up"): RuntimeAcceptedInputSt
     sequenceFrom: 1,
     sequenceTo: 1,
     kind: "messages",
-    payloadJson: "{}",
+    payloadJson: JSON.stringify({
+      messages: [userMessage(`msg_${runtimeInputId}`, 1, "test input")],
+    }),
   };
-}
-
-function withoutModelReceipt(message: RuntimeMessage): RuntimeMessage {
-  const { providerId: _providerId, modelId: _modelId, ...publicMessage } = message;
-  return publicMessage;
 }
 
 function beginTestUserInterrupt(
@@ -145,14 +143,14 @@ function approvalReviewAcceptedInput(runtimeInputId = "rin_approval_review"): Ex
     targetPodUid: "pod_reviewer",
     runtimeInputId,
     eventIds: [`sevt_${runtimeInputId}`],
-    sequenceFrom: 0,
-    sequenceTo: 0,
+    sequenceFrom: 1,
+    sequenceTo: 1,
     kind: "approval_review",
     reviewId: `arvw_${runtimeInputId}`,
     parentThreadId: "thrd_main",
     targetModelToolCallId: `tool_call_${runtimeInputId}`,
     targetToolName: "Write",
-    promptItems: [userMessage(`review-${runtimeInputId}`, 0, "review pending tool approval", "anthropic", "claude-opus-4-8")],
+    promptItems: [userMessage(`review-${runtimeInputId}`, 0, "review pending tool approval")],
     outputSchemaJson: approvalReviewerOutputSchemaJson,
     thread: {
       parentThreadId: "thrd_main",
@@ -164,9 +162,15 @@ function approvalReviewAcceptedInput(runtimeInputId = "rin_approval_review"): Ex
   };
 }
 
-class RecordingContextLoader implements ContextLoader {
+interface TestContextLoader extends ContextLoader {
+  readonly buildContext: (sessionId: string) => Promise<readonly RuntimeMessage[]>;
+  readonly loadPendingInput: (sessionId: string) => Promise<PendingInputResult>;
+}
+
+class RecordingContextLoader implements TestContextLoader {
   readonly buildCalls: string[] = [];
   readonly pendingCalls: string[] = [];
+  private nextMessageSequence = 1;
 
   constructor(
     private readonly history: readonly RuntimeMessage[],
@@ -182,17 +186,24 @@ class RecordingContextLoader implements ContextLoader {
     this.pendingCalls.push(sessionId);
     return this.pending;
   }
+
+  async commitAcceptedInput(input: RuntimeAcceptedInputState): Promise<AcceptedInputCommitResult> {
+    const result = acceptedInputReceipt(input, "committed", this.nextMessageSequence);
+    this.nextMessageSequence += result.receipt.messages.length;
+    return result;
+  }
 }
 
-class QueuedContextLoader implements ContextLoader {
+class QueuedContextLoader implements TestContextLoader {
   readonly buildCalls: string[] = [];
   readonly pendingCalls: string[] = [];
   readonly commitCalls: RuntimeAcceptedInputState[] = [];
+  private nextMessageSequence = 1;
 
   constructor(
     private readonly history: readonly RuntimeMessage[],
     private readonly pendingResults: PendingInputResult[],
-    private readonly acceptedResults: Array<AcceptedInputCommitResult | ((input: RuntimeAcceptedInputState) => AcceptedInputCommitResult)> = [],
+    private readonly acceptedResults: Array<unknown | ((input: RuntimeAcceptedInputState) => unknown)> = [],
   ) {}
 
   async buildContext(sessionId: string): Promise<readonly RuntimeMessage[]> {
@@ -209,9 +220,49 @@ class QueuedContextLoader implements ContextLoader {
     this.commitCalls.push(input);
     const result = this.acceptedResults.shift();
     if (typeof result === "function") {
-      return result(input);
+      return result(input) as AcceptedInputCommitResult;
     }
-    return result ?? { type: "empty" };
+    if (result !== undefined) {
+      return result as AcceptedInputCommitResult;
+    }
+    const committed = acceptedInputReceipt(input, "committed", this.nextMessageSequence);
+    this.nextMessageSequence += committed.receipt.messages.length;
+    return committed;
+  }
+}
+
+let testAcceptedInputSequence = 0;
+
+function installPendingInputForTest(session: Session, pending: PendingInputResult): void {
+  if (
+    session.state.peekAcceptedInput() !== undefined ||
+    pending.type !== "messages" ||
+    pending.messages.length === 0
+  ) {
+    return;
+  }
+  testAcceptedInputSequence += 1;
+  const runtimeInputId = `rin_test_harness_${testAcceptedInputSequence}`;
+  const eventIds = pending.messages.map((_, index) => `sevt_${runtimeInputId}_${index}`);
+  session.state.enqueueAcceptedInput({
+    requestId: `req_${runtimeInputId}`,
+    ...session.identity,
+    runtimeInputId,
+    eventIds,
+    sequenceFrom: testAcceptedInputSequence,
+    sequenceTo: testAcceptedInputSequence + eventIds.length - 1,
+    kind: "messages",
+    payloadJson: JSON.stringify({ messages: pending.messages }),
+  });
+}
+
+async function installLoaderStateForTest(loader: TestContextLoader, session: Session): Promise<void> {
+  if (!session.state.persistentContextLoaded()) {
+    session.state.contextManager.replaceMessages(await loader.buildContext(session.sessionId));
+    session.state.markPersistentContextLoaded();
+  }
+  if (session.state.peekAcceptedInput() === undefined) {
+    installPendingInputForTest(session, await loader.loadPendingInput(session.sessionId));
   }
 }
 
@@ -338,6 +389,7 @@ function writerFrom(
   return {
     append: async (envelope) => append(envelope),
     writeRequestEnd: writeRequestEnd ?? (async (envelope) => append({
+      workspaceId: envelope.workspaceId,
       sessionId: envelope.sessionId,
       sessionThreadId: envelope.sessionThreadId,
       writeId: envelope.writeId,
@@ -356,6 +408,7 @@ function writerFrom(
       },
     })),
     finishIdle: async (envelope) => append({
+      workspaceId: envelope.workspaceId,
       sessionId: envelope.sessionId,
       sessionThreadId: envelope.sessionThreadId,
       writeId: envelope.writeId,
@@ -459,7 +512,7 @@ async function activeCompactionRun(
   });
   const loader = new RecordingContextLoader([], {
     type: "messages",
-    messages: [userMessage("user-1", 0, compactionHistory("please continue"), "fake", "fake-chat")],
+    messages: [userMessage("user-1", 0, compactionHistory("please continue"))],
   });
   const providerRelease = deferred<void>();
   const streamStarted = deferred<void>();
@@ -573,7 +626,7 @@ function failingEventWriter(
 }
 
 function runtimeAgentLoopLayer(
-  loader: ContextLoader,
+  loader: TestContextLoader,
   options: {
     readonly events?: readonly LLMEvent[];
     readonly store?: AgentLoopRuntimeStore;
@@ -592,6 +645,7 @@ function runtimeAgentLoopLayer(
     readonly runtime?: RuntimeDependencies;
     readonly metrics?: RuntimeMetricsSink;
     readonly refreshRuntimeBindingToken?: Parameters<typeof AgentLoop.layer>[0]["refreshRuntimeBindingToken"];
+    readonly installLoaderState?: boolean;
   } = {},
 ): Layer.Layer<AgentLoop.Service> {
   const order: string[] = [];
@@ -602,7 +656,7 @@ function runtimeAgentLoopLayer(
     eventId: `bridge-${envelope.writeId}`,
     processedAt: createdAt,
   }));
-  return AgentLoop.layer({
+  const productionLayer = AgentLoop.layer({
     messageStore: store,
     sessionEventWriter: writer,
     runtime: options.runtime ?? agentLoopRuntime(),
@@ -632,6 +686,22 @@ function runtimeAgentLoopLayer(
     ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
     ...(options.refreshRuntimeBindingToken !== undefined ? { refreshRuntimeBindingToken: options.refreshRuntimeBindingToken } : {}),
   }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader)));
+  if (options.installLoaderState === false) {
+    return productionLayer;
+  }
+  return Layer.effect(
+    AgentLoop.Service,
+    Effect.gen(function* () {
+      const production = yield* AgentLoop.Service;
+      return AgentLoop.Service.of({
+        ...production,
+        run: (session) =>
+          Effect.promise(() => installLoaderStateForTest(loader, session)).pipe(
+            Effect.flatMap(() => production.run(session)),
+          ),
+      });
+    }).pipe(Effect.provide(productionLayer)),
+  );
 }
 
 class RecordingRuntimeMetrics implements RuntimeMetricsSink {
@@ -980,11 +1050,11 @@ describe("AgentLoop", () => {
     });
   });
 
-  test("reports context-load, event-write, and provider stream metrics through injected sink", async () => {
+  test("reports declaration, event-write, and provider stream metrics through injected sink", async () => {
     const metrics = new RecordingRuntimeMetrics();
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("msg_user_1", 1, "hello", "fake", "fake-chat")],
+      messages: [userMessage("msg_user_1", 1, "hello")],
     });
 
     const result = await Effect.runPromise(
@@ -996,11 +1066,7 @@ describe("AgentLoop", () => {
 
     expect(result.type).toBe("completed");
     expect(metrics.contextLoadLatencies).toContainEqual(expect.objectContaining({
-      operation: "build_context",
-      outcome: "success",
-    }));
-    expect(metrics.contextLoadLatencies).toContainEqual(expect.objectContaining({
-      operation: "load_pending_input",
+      operation: "commit_accepted_input",
       outcome: "success",
     }));
     expect(metrics.eventWriteLatencies).toContainEqual(expect.objectContaining({
@@ -1210,7 +1276,7 @@ describe("AgentLoop", () => {
       const requests: LLMRequest[] = [];
       const loader = new RecordingContextLoader([], {
         type: "messages",
-        messages: [userMessage(`user-agent-system-${scenario.name}`, 0, "hello", "fake", "fake-chat")],
+        messages: [userMessage(`user-agent-system-${scenario.name}`, 0, "hello")],
       });
       const result = await Effect.runPromise(
         Effect.gen(function* () {
@@ -1263,7 +1329,7 @@ describe("AgentLoop", () => {
     const requests: LLMRequest[] = [];
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-gpt-patch-prompt", 0, "edit a file", "fake", "fake-chat")],
+      messages: [userMessage("user-gpt-patch-prompt", 0, "edit a file")],
     });
 
     const result = await Effect.runPromise(
@@ -1287,7 +1353,7 @@ describe("AgentLoop", () => {
     const identities: string[] = [];
     const loader = new RecordingContextLoader(
       [],
-      { type: "messages", messages: [userMessage("user-refresh", 0, "refresh token", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-refresh", 0, "refresh token")] },
     );
 
     const result = await Effect.runPromise(
@@ -1328,17 +1394,19 @@ describe("AgentLoop", () => {
     expect(JSON.stringify(requests[0]?.messages)).not.toContain("committed after request snapshot");
     expect(JSON.stringify(requests[0]?.messages)).not.toContain("transient after request snapshot");
     expect(session.identity.runtimeBindingToken).toBe("runtime-binding-token-refreshed");
-    expect(session.state.lastRequestContextAnchorSequence()).toBe(0);
+    expect(session.state.lastRequestContextAnchorSequence()).toBe(
+      session.state.contextManager.messages().find((message) => message.role === "user")?.sequence,
+    );
     expect(JSON.stringify(session.state.transientModelMessages())).toContain("transient after request snapshot");
   });
 
   test("loads cold context and pending messages without deriving the configured model from either message list", async () => {
-    const history = [userMessage("user-1", 0, "first", "openai", "gpt-5.5")];
+    const history = [userMessage("user-1", 0, "first")];
     const pending = {
       type: "messages",
       messages: [
-        userMessage("user-2", 1, "second", "fake", "fake-chat"),
-        userMessage("user-3", 2, "third", "anthropic", "claude-opus-4-7"),
+        userMessage("user-2", 1, "second"),
+        userMessage("user-3", 2, "third"),
       ],
     } as const satisfies PendingInputResult;
     const loader = new RecordingContextLoader(history, pending);
@@ -1404,7 +1472,7 @@ describe("AgentLoop", () => {
       maxOutputTokens: 321,
       timeoutMs: 777,
     };
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -1443,11 +1511,10 @@ describe("AgentLoop", () => {
       ],
       messages: [
         {
-          id: "user-1",
           role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
           status: "completed",
           origin: "user",
-          parts: [{ id: "user-1-text", text: { text: "hello" } }],
+          parts: [{ text: { text: "hello" } }],
         },
       ],
       tools: [
@@ -1469,7 +1536,7 @@ describe("AgentLoop", () => {
   });
 
   test("empty cold history still processes pending input", async () => {
-    const pendingLoader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const pendingLoader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
 
     const pendingResult = await Effect.runPromise(
       Effect.gen(function* () {
@@ -1483,10 +1550,7 @@ describe("AgentLoop", () => {
 
   test("first accepted turn resolves its provider model from the cold runtime config", async () => {
     const session = new Session("sesn_first_config_model");
-    session.state.enqueueAcceptedInput(acceptedInput("rin_first_config_model"));
-    const publicMessage = withoutModelReceipt(
-      userMessage("user-first-config-model", 0, "hello", "receipt-only", "receipt-only"),
-    );
+    session.state.enqueueAcceptedInput(acceptedInput("rin_first_config_model", session.sessionId));
     const runtimeConfigPatch: RuntimeConfigPatchState = {
       requestId: "req_first_config_patch",
       workspaceId: "wksp_test",
@@ -1509,12 +1573,8 @@ describe("AgentLoop", () => {
         },
       }),
     };
-    const loader = new QueuedContextLoader([], [], [{
-      type: "context",
-      messages: [publicMessage],
-      runtimeBindingToken: "runtime-binding-token-config-model",
-      runtimeConfigPatch,
-    }]);
+    session.state.applyRuntimeConfigPatch(runtimeConfigPatch);
+    const loader = new QueuedContextLoader([], []);
     const requests: LLMRequest[] = [];
 
     const result = await Effect.runPromise(
@@ -1535,16 +1595,126 @@ describe("AgentLoop", () => {
     expect(requests[0]?.model).toEqual({ providerId: "openai", modelId: "gpt-5.5", variant: "" });
   });
 
+  test("lost CommitInputs response retries the frozen declaration without duplicating hot input", async () => {
+    const session = new Session("sesn_lost_commit_response");
+    const input = acceptedInput("rin_lost_commit_response", session.sessionId);
+    session.state.enqueueAcceptedInput(input);
+    const submittedDrafts: string[] = [];
+    let attempts = 0;
+    const loader: TestContextLoader = {
+      buildContext: async () => [],
+      loadPendingInput: async () => ({ type: "empty" }),
+      commitAcceptedInput: async (accepted, options) => {
+        attempts += 1;
+        submittedDrafts.push(JSON.stringify(options?.drafts ?? []));
+        if (attempts === 1) {
+          throw normalizeContextLoaderError({
+            code: "unavailable",
+            sessionId: accepted.sessionId,
+            reason: "commit response was lost",
+          });
+        }
+        return acceptedInputReceipt(accepted, "duplicate");
+      },
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* AgentLoop.Service).run(session);
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader))),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(attempts).toBe(2);
+    expect(new Set(submittedDrafts).size).toBe(1);
+    expect(session.state.contextManager.messages().filter((message) => message.origin === "user")).toHaveLength(1);
+  });
+
+  test("a stale CommitInputs receipt discards hot state without terminal declaration writes", async () => {
+    const session = new Session("sesn_stale_commit_receipt");
+    const input = acceptedInput("rin_stale_commit_receipt", session.sessionId);
+    session.state.enqueueAcceptedInput(input);
+    const terminalEvents: string[] = [];
+    const committed = acceptedInputReceipt(input);
+    const loader: TestContextLoader = {
+      buildContext: async () => [],
+      loadPendingInput: async () => ({ type: "empty" }),
+      commitAcceptedInput: async () => ({
+        ...committed,
+        applicationDisposition: "stale_custody",
+      }),
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* AgentLoop.Service).run(session);
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer: writerFrom((envelope) => {
+          if (envelope.event.type === "session.error" || envelope.event.type === "span.model_request_end") {
+            terminalEvents.push(envelope.event.type);
+          }
+          return {
+            ok: true,
+            writeId: envelope.writeId,
+            eventId: `bridge-${envelope.writeId}`,
+            processedAt: createdAt,
+          };
+        }),
+      }))),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(session.state.contextManager.messages()).toEqual([]);
+    expect(session.state.acceptedInputCount()).toBe(0);
+    expect(terminalEvents).toEqual([]);
+  });
+
+  test("first accepted turn rides the file attachments returned by CommitInputs", async () => {
+    const session = new Session("sesn_first_turn_media");
+    const input = acceptedInput("rin_first_turn_media", session.sessionId);
+    session.state.enqueueAcceptedInput(input);
+    const attachment = {
+      transient: undefined,
+      fileBacked: {
+        sourceEventId: input.eventIds[0]!,
+        fileId: "file_first_turn_media",
+      },
+      mime: "image/png",
+      filename: "first-turn.png",
+    } as const;
+    const loader: TestContextLoader = {
+      buildContext: async () => [],
+      loadPendingInput: async () => ({ type: "empty" }),
+      commitAcceptedInput: async (accepted) => {
+        const committed = acceptedInputReceipt(accepted);
+        return {
+          ...committed,
+          receipt: {
+            ...committed.receipt,
+            pendingAttachmentDelta: [attachment],
+          },
+        };
+      },
+    };
+    const requests: LLMRequest[] = [];
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* AgentLoop.Service).run(session);
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        onStream: (request) => requests.push(request),
+      }))),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.attachments).toEqual([attachment]);
+  });
+
   test("accepted input without a resolvable runtime model settles an explicit exhausted error", async () => {
     const session = new Session("sesn_missing_config_model");
-    session.state.enqueueAcceptedInput(acceptedInput("rin_missing_config_model"));
-    const loader = new QueuedContextLoader([], [], [{
-      type: "context",
-      messages: [withoutModelReceipt(
-        userMessage("user-missing-config-model", 0, "hello", "receipt-only", "receipt-only"),
-      )],
-      runtimeBindingToken: "runtime-binding-token-missing-model",
-    }]);
+    session.state.enqueueAcceptedInput(acceptedInput("rin_missing_config_model", session.sessionId));
+    const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
 
     const result = await Effect.runPromise(
@@ -1727,64 +1897,19 @@ describe("AgentLoop", () => {
     expect(finishCalls).toBe(1);
   });
 
-  test("stages loader output so pending-input failure emits sanitized terminal events and leaves hot ContextManager unchanged", async () => {
-    const loader: ContextLoader = {
-      buildContext: async () => [userMessage("user-1", 0, "history", "fake", "fake-chat")],
-      loadPendingInput: async () => {
-        throw new Error("postgres://user:pass@example.invalid/db raw provider payload marker pending failed");
-      },
-    };
+  test("a second warm turn preserves model and ContextManager state without context reads", async () => {
+    const loader = new QueuedContextLoader([], []);
     const session = new Session("sesn_1");
-    const appended: SessionEvent[] = [];
+    const layer = runtimeAgentLoopLayer(loader, { installLoaderState: false });
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(
-        Effect.provide(
-          runtimeAgentLoopLayer(loader, {
-            writer: writerFrom((envelope) => {
-              appended.push(envelope.event);
-              return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-            }),
-          }),
-        ),
-      ),
-    );
-
-    expect(result).toMatchObject({
-      type: "failed",
-      error: { type: "runtime", code: "runtime_invalid_sequence", retryStatus: { type: "exhausted" } },
-    });
-    expect(JSON.stringify(result)).not.toContain("postgres://user:pass@example.invalid/db");
-    expect(JSON.stringify(result)).not.toContain("raw provider payload marker");
-    expect(appended).toEqual([
-      expect.objectContaining({
-        type: "session.error",
-        error: expect.objectContaining({ type: "runtime", retryStatus: { type: "exhausted" } }),
-      }),
-      { type: "session.status_idle", stop_reason: { type: "retries_exhausted" } },
-    ]);
-    expect(session.state.contextManager.messages()).toEqual([]);
-    expect(session.state.persistentContextLoaded()).toBe(false);
-  });
-
-  test("hot restarts preserve the configured model and ContextManager state without reloading cold history", async () => {
-    const loader = new QueuedContextLoader([], [
-      { type: "messages", messages: [userMessage("user-1", 0, "first", "openai", "gpt-5.5")] },
-      { type: "messages", messages: [userMessage("user-2", 1, "second", "anthropic", "claude-opus-4-7")] },
-      { type: "empty" },
-    ]);
-    const session = new Session("sesn_1");
-    const layer = runtimeAgentLoopLayer(loader);
-
+    session.state.enqueueAcceptedInput(acceptedInput("rin_warm_first"));
     const first = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
         return yield* agentLoop.run(session);
       }).pipe(Effect.provide(layer)),
     );
+    session.state.enqueueAcceptedInput(acceptedInput("rin_warm_second"));
     const second = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
@@ -1801,8 +1926,8 @@ describe("AgentLoop", () => {
     expect(first).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
     expect(second).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
     expect(third).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
-    expect(loader.buildCalls).toEqual(["sesn_1"]);
-    expect(loader.pendingCalls).toEqual(["sesn_1", "sesn_1", "sesn_1"]);
+    expect(loader.buildCalls).toEqual([]);
+    expect(loader.pendingCalls).toEqual([]);
     expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
   });
 
@@ -1865,13 +1990,14 @@ describe("AgentLoop", () => {
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     let providerSawShell = false;
     const writer = writerFrom((envelope) => {
       const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
       order.push(`event:${envelope.event.type}:context_parts_${assistant?.parts.length ?? 0}`);
       return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
     });
+    await installLoaderStateForTest(loader, session);
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -1923,7 +2049,7 @@ describe("AgentLoop", () => {
   test("runtime layer emits running, span, progress, span end, and idle around a normal provider call", async () => {
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore([]);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const timeline: string[] = [];
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
@@ -2007,7 +2133,7 @@ describe("AgentLoop", () => {
 
   test("a provider request does not start when WriteRequestEnd transport is unavailable", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     const completeWriter = writerFrom((envelope) => {
       appendedTypes.push(envelope.event.type);
@@ -2060,11 +2186,7 @@ describe("AgentLoop", () => {
       runtimeBindingToken: "binding-token-reviewer",
     });
     session.state.enqueueAcceptedInput(approvalReviewAcceptedInput());
-    const loader = new QueuedContextLoader([], [], [{
-      type: "context",
-      runtimeBindingToken: "binding-token-reviewer",
-      messages: [userMessage("user-review", 0, "review pending tool approval", "anthropic", "claude-opus-4-8")],
-    }]);
+    const loader = new QueuedContextLoader([], []);
     const requests: LLMRequest[] = [];
     const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
@@ -2133,7 +2255,7 @@ describe("AgentLoop", () => {
     });
   });
 
-  test("accepted context commits preserve approval-reviewer thread metadata", async () => {
+  test("accepted declarations preserve approval-reviewer thread metadata without reloading context", async () => {
     const session = new Session({
       workspaceId: "wksp_reviewer",
       sessionId: "sesn_1",
@@ -2156,13 +2278,7 @@ describe("AgentLoop", () => {
       outputTokenLimit: 4_096,
     }, 0);
     session.state.enqueueAcceptedInput(approvalReviewAcceptedInput("rin_reviewer_context"));
-    const loader = new QueuedContextLoader([], [], [
-      {
-        type: "context",
-        runtimeBindingToken: "binding-token-after-commit",
-        messages: [userMessage("user-review-context", 0, "review pending tool approval", "anthropic", "claude-opus-4-8")],
-      },
-    ]);
+    const loader = new QueuedContextLoader([], []);
     const requests: LLMRequest[] = [];
     const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
@@ -2196,7 +2312,7 @@ describe("AgentLoop", () => {
     expect(session.identity).toMatchObject({
       parentThreadId: "thrd_main",
       threadRole: "approval_reviewer",
-      runtimeBindingToken: "binding-token-after-commit",
+      runtimeBindingToken: "binding-token-before-commit",
     });
     expect(requests[0]?.requestKind).toBe(ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER);
     expect(requestEndEnvelopes.map((envelope) => envelope.requestKind)).toEqual(["approval_reviewer"]);
@@ -2216,22 +2332,11 @@ describe("AgentLoop", () => {
       targetPodUid: "pod_reviewer",
       runtimeBindingToken: "binding-token-reviewer",
     });
-    session.state.enqueueAcceptedInput(approvalReviewAcceptedInput("rin_reviewer_first"));
-    const loader = new QueuedContextLoader([], [], [
-      {
-        type: "context",
-        runtimeBindingToken: "binding-token-reviewer",
-        messages: [userMessage("user-review-first", 0, compactionHistory("review the first action"), "anthropic", "claude-opus-4-8")],
-      },
-      () => ({
-        type: "context",
-        runtimeBindingToken: "binding-token-reviewer",
-        messages: [
-          ...session.state.contextManager.messages(),
-          userMessage("user-review-second", 2, "review the next action", "anthropic", "claude-opus-4-8"),
-        ],
-      }),
-    ]);
+    session.state.enqueueAcceptedInput({
+      ...approvalReviewAcceptedInput("rin_reviewer_first"),
+      promptItems: [userMessage("user-review-first", 0, compactionHistory("review the first action"))],
+    });
+    const loader = new QueuedContextLoader([], []);
     const requests: LLMRequest[] = [];
     const llm = queuedLLMService([
       [
@@ -2332,15 +2437,15 @@ describe("AgentLoop", () => {
       "This pending model-only note must survive compaction.",
     ));
     const mediaOnlyProjection = RuntimeMessageSchema.parse({
-      ...userMessage("user-media-only", 0, "discarded media placeholder", "fake", "fake-chat"),
+      ...userMessage("user-media-only", 0, "discarded media placeholder"),
       parts: [],
     });
     const loader = new RecordingContextLoader(
       [
         mediaOnlyProjection,
-        userMessage("user-old", 1, compactionTransportHistory("old context that should be summarized"), "fake", "fake-chat"),
+        userMessage("user-old", 1, compactionTransportHistory("old context that should be summarized")),
       ],
-      { type: "messages", messages: [userMessage("user-new", 2, "new request", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-new", 2, "new request")] },
     );
     const compactionBoundaryOrder: string[] = [];
     const requests: LLMRequest[] = [];
@@ -2517,8 +2622,6 @@ Previous anchored summary.
 {"legacy":"recent"}
 </recent-context>
 </conversation-checkpoint>`,
-        "fake",
-        "fake-chat",
       ),
       origin: "runtime",
     });
@@ -2536,7 +2639,7 @@ Previous anchored summary.
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader(
           [previousCheckpoint],
-          { type: "messages", messages: [userMessage("user-fresh", 1, "fresh continuation", "fake", "fake-chat")] },
+          { type: "messages", messages: [userMessage("user-fresh", 1, "fresh continuation")] },
         ),
         {
           compaction: {},
@@ -2591,8 +2694,8 @@ Previous anchored summary.
       "pending note must survive reactive compaction",
     ));
     const loader = new RecordingContextLoader(
-      [userMessage("user-old", 0, compactionHistory("old context for reactive compaction"), "fake", "fake-chat")],
-      { type: "messages", messages: [userMessage("user-new", 1, "continue", "fake", "fake-chat")] },
+      [userMessage("user-old", 0, compactionHistory("old context for reactive compaction"))],
+      { type: "messages", messages: [userMessage("user-new", 1, "continue")] },
     );
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -2668,8 +2771,8 @@ Previous anchored summary.
   test("reactive compaction overflow stops before rebuilding the ordinary provider request", async () => {
     const session = new Session("sesn_reactive_compaction_failure");
     const loader = new RecordingContextLoader(
-      [userMessage("user-old", 0, compactionHistory("old reactive context"), "fake", "fake-chat")],
-      { type: "messages", messages: [userMessage("user-new", 1, "continue", "fake", "fake-chat")] },
+      [userMessage("user-old", 0, compactionHistory("old reactive context"))],
+      { type: "messages", messages: [userMessage("user-new", 1, "continue")] },
     );
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -2926,8 +3029,8 @@ Previous anchored summary.
       outputTokenLimit: 120,
     }, -1);
     const loader = new RecordingContextLoader(
-      [userMessage("user-oversized", 0, compactionTransportHistory("oversized history"), "fake", "fake-chat")],
-      { type: "messages", messages: [userMessage("user-new", 1, "new request", "fake", "fake-chat")] },
+      [userMessage("user-oversized", 0, compactionTransportHistory("oversized history"))],
+      { type: "messages", messages: [userMessage("user-new", 1, "new request")] },
     );
     const requests: LLMRequest[] = [];
     const appended: SessionEvent[] = [];
@@ -2969,8 +3072,8 @@ Previous anchored summary.
       cacheWriteTokens: 0,
     });
     const loader = new RecordingContextLoader(
-      [userMessage("user-old", 0, compactionHistory("old context that should be summarized"), "fake", "fake-chat")],
-      { type: "messages", messages: [userMessage("user-new", 1, "new request", "fake", "fake-chat")] },
+      [userMessage("user-old", 0, compactionHistory("old context that should be summarized"))],
+      { type: "messages", messages: [userMessage("user-new", 1, "new request")] },
     );
     const requests: LLMRequest[] = [];
     const eventBatches: readonly (readonly LLMEvent[])[] = [
@@ -3001,7 +3104,7 @@ Previous anchored summary.
       stream(request) {
         requests.push(request);
         if (request.requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY) {
-          session.state.contextManager.appendMessage(userMessage("user-later", 2, "later ACKed input", "fake", "fake-chat"));
+          session.state.contextManager.appendMessage(userMessage("user-later", 2, "later ACKed input"));
           session.state.addTransientModelMessage({
             ...runtimeNotificationMessage("note-later", "note added during compaction"),
             sequence: 3,
@@ -3047,8 +3150,8 @@ Previous anchored summary.
       ),
     );
 
-    expect(result).toMatchObject({ type: "completed", modelMessageCount: 3 });
-    expect(requests[1]?.messages).toHaveLength(3);
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 2 });
+    expect(requests[1]?.messages).toHaveLength(2);
     expect(JSON.stringify(requests[1]?.messages[0])).toContain("<conversation-checkpoint>");
     expect(JSON.stringify(requests[1]?.messages[1])).toContain("later ACKed input");
     expect(JSON.stringify(requests[1]?.messages)).toContain("note added during compaction");
@@ -3067,7 +3170,7 @@ Previous anchored summary.
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
     });
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, compactionHistory("please continue"), "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, compactionHistory("please continue"))] });
     const requests: LLMRequest[] = [];
     const llm = queuedLLMService([
       [{
@@ -3149,7 +3252,7 @@ Previous anchored summary.
     });
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, compactionHistory("please continue"), "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, compactionHistory("please continue"))],
     });
     const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
@@ -3199,7 +3302,7 @@ Previous anchored summary.
     });
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-compaction-stale", 0, compactionHistory("compact"), "fake", "fake-chat")],
+      messages: [userMessage("user-compaction-stale", 0, compactionHistory("compact"))],
     });
     const baseWriter = writerFrom((envelope) => ({
       ok: true,
@@ -3250,7 +3353,7 @@ Previous anchored summary.
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
     });
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, compactionHistory("please continue"), "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, compactionHistory("please continue"))] });
     const requests: LLMRequest[] = [];
     const llm = queuedLLMService([
       [{
@@ -3374,7 +3477,7 @@ Previous anchored summary.
     });
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, compactionHistory("compact then interrupt"), "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, compactionHistory("compact then interrupt"))],
     });
     const waitStarted = deferred<void>();
     const appended: SessionEvent[] = [];
@@ -3447,7 +3550,7 @@ Previous anchored summary.
     session.state.addPendingAttachments([pendingFileAttachment]);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "retry this request", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "retry this request")],
     });
     const requests: LLMRequest[] = [];
     const failedReasoning = "failed attempt private reasoning";
@@ -3568,7 +3671,7 @@ Previous anchored summary.
     const session = new Session("sesn_gateway_protocol_rejection");
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-gateway-protocol", 0, "send this request", "fake", "fake-chat")],
+      messages: [userMessage("user-gateway-protocol", 0, "send this request")],
     });
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -3654,17 +3757,11 @@ Previous anchored summary.
     };
     session.state.addPendingAttachments(activeRide);
     const followUp = acceptedInput("rin_hot_attachment_follow_up");
-    const firstMessage = userMessage("user-hot-1", 0, "first", "fake", "fake-chat");
-    const secondMessage = userMessage("user-hot-2", 1, "second", "fake", "fake-chat");
+    const firstMessage = userMessage("user-hot-1", 0, "first");
     const loader = new QueuedContextLoader(
       [],
       [{ type: "messages", messages: [firstMessage] }],
-      [{
-        type: "context",
-        runtimeBindingToken: "rtbt_hot_attachment_reconcile",
-        messages: [firstMessage, secondMessage],
-        pendingAttachments: [...activeRide, nextRide],
-      }],
+      [],
     );
     const requests: LLMRequest[] = [];
     const llm: LLMServiceInterface = {
@@ -3729,15 +3826,18 @@ Previous anchored summary.
 
     expect(result).toMatchObject({ type: "completed" });
     expect(requests.map((request) => request.attachments)).toEqual([activeRide, activeRide]);
-    expect(loader.commitCalls).toEqual([followUp]);
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+      expect.stringMatching(/^rin_test_harness_/),
+      followUp.runtimeInputId,
+    ]);
     expect(session.state.pendingAttachments()).toEqual([nextRide]);
   });
 
   test("provider reschedule does not repeat committed RunTool effect", async () => {
     const session = new Session("sesn_1");
     const loader = new QueuedContextLoader([], [
-      { type: "messages", messages: [userMessage("user-1", 0, "apply the mutation", "fake", "fake-chat")] },
-      { type: "messages", messages: [userMessage("user-2", 2, "report the committed result", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-1", 0, "apply the mutation")] },
+      { type: "messages", messages: [userMessage("user-2", 2, "report the committed result")] },
     ]);
     const requests: LLMRequest[] = [];
     const committedToolOutput = "unit15 mutation committed";
@@ -3900,7 +4000,7 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "mutate then continue", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "mutate then continue")],
     });
     const requests: LLMRequest[] = [];
     const toolResultCommitted = deferred<void>();
@@ -4011,7 +4111,7 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "retry then interrupt", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "retry then interrupt")],
     });
     const waitStarted = deferred<void>();
     const appended: SessionEvent[] = [];
@@ -4084,8 +4184,8 @@ Previous anchored summary.
   test("runtime shutdown abandons active provider state without Runtime-owned idle or error", async () => {
     const session = new Session("sesn_1");
     const loader = new QueuedContextLoader([], [
-      { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] },
-      { type: "messages", messages: [userMessage("user-2", 2, "second", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-1", 0, "hello")] },
+      { type: "messages", messages: [userMessage("user-2", 2, "second")] },
     ]);
     const store = new AgentLoopRuntimeStore([]);
     const releaseProvider = deferred<void>();
@@ -4159,7 +4259,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     let providerCalled = false;
 
@@ -4188,7 +4288,7 @@ Previous anchored summary.
     expect(providerCalled).toBe(false);
     expect(appendedTypes).toEqual(["session.status_running"]);
     expect(order).toEqual([]);
-    expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user"]);
+    expect(session.state.contextManager.messages()).toEqual([]);
   });
 
   test("running status append failure stops before accepted input commit", async () => {
@@ -4196,7 +4296,7 @@ Previous anchored summary.
     const followUp = acceptedInput();
     session.state.enqueueAcceptedInput(followUp);
     const loader = new QueuedContextLoader([], [], [
-      { type: "messages", messages: [userMessage("user-accepted", 2, "accepted", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-accepted", 2, "accepted")] },
     ]);
     const appendedTypes: string[] = [];
 
@@ -4228,7 +4328,7 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
     const appended: SessionEvent[] = [];
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const hostileMarker = "prompt text raw provider payload marker authorization: bearer dummy-thirdgroup-token";
     let providerCalled = false;
 
@@ -4276,14 +4376,19 @@ Previous anchored summary.
       }),
       { type: "session.status_idle", stop_reason: { type: "retries_exhausted" } },
     ]);
-    expect(session.state.contextManager.messages()).toEqual([userMessage("user-1", 0, "hello", "fake", "fake-chat")]);
+    expect(session.state.contextManager.messages()).toEqual([
+      expect.objectContaining({
+        role: "user",
+        parts: [expect.objectContaining({ type: "text", text: "hello" })],
+      }),
+    ]);
   });
 
   test("runtime layer requests hot-state discard when span start append fails after shell persistence", async () => {
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     let providerCalled = false;
 
@@ -4319,7 +4424,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
 
     const result = await Effect.runPromise(
@@ -4370,17 +4475,8 @@ Previous anchored summary.
     const followUp = acceptedInput();
     const loader = new QueuedContextLoader(
       [],
-      [{ type: "messages", messages: [userMessage("user-1", 0, "first", "fake", "fake-chat")] }],
-      [
-        () => ({
-          type: "context",
-          runtimeBindingToken: "rtbt_follow_up",
-          messages: [
-            ...session.state.contextManager.messages(),
-            userMessage("user-2", 2, "second", "fake", "fake-chat"),
-          ],
-        }),
-      ],
+      [{ type: "messages", messages: [userMessage("user-1", 0, "first")] }],
+      [],
     );
     const capturedRequests: LLMRequest[] = [];
     const runtimeBoundary: ProviderCallRuntimeConfig = {
@@ -4430,14 +4526,16 @@ Previous anchored summary.
     expect(capturedRequests[0]?.messages.map((message) => message.role)).toEqual([RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER]);
     expect(session.state.peekAcceptedInput()).toEqual(followUp);
     expect(loader.pendingCalls).toEqual(["sesn_1"]);
-    expect(loader.commitCalls).toEqual([]);
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+      expect.stringMatching(/^rin_test_harness_/),
+    ]);
   });
 
   test("runtime layer shell write failure does not start provider and requests persistence removal", async () => {
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order, false, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     let providerCalled = false;
 
     const result = await Effect.runPromise(
@@ -4470,7 +4568,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order, false, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
 
     const result = await Effect.runPromise(
@@ -4501,7 +4599,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     let providerCalled = false;
 
@@ -4556,7 +4654,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const writer = writerFrom((envelope) => {
       const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
       const toolPart = assistant?.parts.find((part) => part.type === "tool");
@@ -4630,7 +4728,7 @@ Previous anchored summary.
 
   test("commits completed reasoning with provider metadata only after durable request settlement", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const order: string[] = [];
     const requestEnds: Parameters<SessionEventWriter["writeRequestEnd"]>[0][] = [];
     const writer = writerFrom(
@@ -4686,7 +4784,7 @@ Previous anchored summary.
 
   test("keeps failed reasoning settlement out of stable hot context", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const writer = writerFrom(
       (envelope) => ({ ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt }),
       async (envelope) => ({
@@ -4726,7 +4824,7 @@ Previous anchored summary.
 
   test("retries a transient request-end failure with the identical ordered reasoning batch", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const attempts: SessionEventWriterRequestEndEnvelope[] = [];
     const writer = writerFrom(
       (envelope) => ({ ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt }),
@@ -4801,7 +4899,7 @@ Previous anchored summary.
     } as const;
     const attachments = [transientAttachment, fileAttachment];
     session.state.addPendingAttachments(attachments);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const writer = writerFrom(
       (envelope) => ({ ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt }),
@@ -4858,7 +4956,7 @@ Previous anchored summary.
       filename: "interrupted-reasoning.png",
     } as const;
     session.state.addPendingAttachments([attachment]);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const reasoningProcessed = deferred<void>();
     const releaseStream = deferred<void>();
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -4913,7 +5011,7 @@ Previous anchored summary.
   test("runtime layer tracks background tool state until task notification settlement", async () => {
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore([]);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const writer = writerFrom((envelope) => ({
       ok: true,
       writeId: envelope.writeId,
@@ -5041,7 +5139,7 @@ Previous anchored summary.
       })),
     ];
     session.state.addPendingAttachments(initialRide);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const capturedRequests: LLMRequest[] = [];
     const llm: LLMServiceInterface = {
       stream(request) {
@@ -5117,7 +5215,7 @@ Previous anchored summary.
       filename: `plot-${index + 1}.png`,
     }));
     session.state.addPendingAttachments(attachments);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "summarize", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "summarize")] });
     const capturedRequests: LLMRequest[] = [];
     const llm: LLMServiceInterface = {
       stream(request) {
@@ -5168,7 +5266,7 @@ Previous anchored summary.
       filename: "plot.png",
     } as const;
     session.state.addPendingAttachments([attachment]);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const llm: LLMServiceInterface = {
       stream() {
         return Stream.fromIterable([
@@ -5235,7 +5333,7 @@ Previous anchored summary.
 
   test("request-end failure cancels and durably settles an acknowledged live tool", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "write it", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "write it")] });
     const appended: SessionEvent[] = [];
     const toolStarted = deferred<void>();
     let toolSignal: AbortSignal | undefined;
@@ -5336,7 +5434,7 @@ Previous anchored summary.
       filename: "deleted-plot.png",
     } as const;
     session.state.addPendingAttachments([transientAttachment, fileAttachment]);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "summarize this plot", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "summarize this plot")] });
     const capturedRequests: LLMRequest[] = [];
     const llm: LLMServiceInterface = {
       stream(request) {
@@ -5485,7 +5583,7 @@ Previous anchored summary.
     session.state.addPendingAttachments([attachment]);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-stale-terminal", 0, "retry", "fake", "fake-chat")],
+      messages: [userMessage("user-stale-terminal", 0, "retry")],
     });
     const baseWriter = writerFrom((envelope) => ({
       ok: true,
@@ -5550,7 +5648,7 @@ Previous anchored summary.
     session.state.addPendingAttachments([attachment]);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-success-stale", 0, "finish", "fake", "fake-chat")],
+      messages: [userMessage("user-success-stale", 0, "finish")],
     });
     const baseWriter = writerFrom((envelope) => ({
       ok: true,
@@ -5593,7 +5691,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const writer = writerFrom((envelope) => {
       const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
       const toolPart = assistant?.parts.find((part) => part.type === "tool");
@@ -5668,7 +5766,7 @@ Previous anchored summary.
       let runToolCalls = 0;
       const loader = new RecordingContextLoader([], {
         type: "messages",
-        messages: [userMessage("user-" + tc.family, 0, "hello", "fake", "fake-chat")],
+        messages: [userMessage("user-" + tc.family, 0, "hello")],
       });
       const writer = writerFrom((envelope) => {
         if (envelope.event.type === "agent.tool_use" || envelope.event.type === "agent.tool_result") {
@@ -5714,7 +5812,7 @@ Previous anchored summary.
 
   test("runtime layer schedules same-target tool calls through ToolScheduler", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const firstRelease = deferred<void>();
     const calls: string[] = [];
     let active = 0;
@@ -5796,7 +5894,7 @@ Previous anchored summary.
       { type: "finish", finishReason: "tool-calls" },
     ];
     const makeLayer = (threadId: string) => runtimeAgentLoopLayer(
-      new RecordingContextLoader([], { type: "messages", messages: [userMessage(`user-${threadId}`, 0, "inspect memory", "fake", "fake-chat")] }),
+      new RecordingContextLoader([], { type: "messages", messages: [userMessage(`user-${threadId}`, 0, "inspect memory")] }),
       {
         events,
         approvalMode: "full_access",
@@ -5833,7 +5931,7 @@ Previous anchored summary.
 
   test("Memory projection replay stays in one ToolFiber until one final settlement", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "remember this", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "remember this")] });
     const firstProjectionFailure = deferred<void>();
     const releaseProjectionSuccess = deferred<void>();
     const appended: SessionEvent[] = [];
@@ -5922,7 +6020,7 @@ Previous anchored summary.
     const store = new AgentLoopRuntimeStore(storeOrder);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "do not start", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "do not start")],
     });
     const appended: SessionEvent[] = [];
     let providerCalls = 0;
@@ -5967,7 +6065,7 @@ Previous anchored summary.
     const store = new AgentLoopRuntimeStore(storeOrder);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "stop after shell", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "stop after shell")],
     });
     const appended: SessionEvent[] = [];
     let providerCalls = 0;
@@ -6024,7 +6122,7 @@ Previous anchored summary.
     const store = new AgentLoopRuntimeStore([]);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "stop before provider", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "stop before provider")],
     });
     const appended: SessionEvent[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -6089,7 +6187,7 @@ Previous anchored summary.
     session.state.addPendingAttachments([attachment]);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, "review this", "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, "review this")],
     });
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     let providerCalls = 0;
@@ -6144,7 +6242,7 @@ Previous anchored summary.
         const agentLoop = yield* AgentLoop.Service;
         return yield* agentLoop.run(session);
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
-        new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "review", "fake", "fake-chat")] }),
+        new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "review")] }),
         {
           writer: { ...baseWriter, writeRequestEnd: async (envelope) => {
             requestEnds.push(envelope);
@@ -6169,7 +6267,7 @@ Previous anchored summary.
     });
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, compactionHistory("compact but stop"), "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, compactionHistory("compact but stop"))],
     });
     const appended: SessionEvent[] = [];
     let providerCalls = 0;
@@ -6216,7 +6314,7 @@ Previous anchored summary.
     });
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-1", 0, compactionHistory("compact then stop"), "fake", "fake-chat")],
+      messages: [userMessage("user-1", 0, compactionHistory("compact then stop"))],
     });
     const appended: SessionEvent[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -6268,11 +6366,7 @@ Previous anchored summary.
   });
 
   test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bound before repair and snapshot", async () => {
-    const loader = new QueuedContextLoader([], [], [{
-      type: "context",
-      messages: [userMessage("user-1", 0, "run the gated tool", "fake", "fake-chat")],
-      runtimeBindingToken: "runtime-binding-token",
-    }]);
+    const loader = new QueuedContextLoader([], []);
     const toolUseAppendStarted = deferred<void>();
     const releaseToolUseAppend = deferred<void>();
     const providerRelease = deferred<void>();
@@ -6342,7 +6436,14 @@ Previous anchored summary.
     }));
 
     try {
-      await Effect.runPromise(manager.acceptInput(acceptedInput("rin_gated_tool_use")));
+      const input = acceptedInput("rin_gated_tool_use");
+      await Effect.runPromise(manager.preloadThread({
+        ...input,
+        runtimeBindingToken: "runtime-binding-token",
+        messages: [userMessage("user-1", 0, "run the gated tool")],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
+      await Effect.runPromise(manager.acceptInput(input));
       await toolUseAppendStarted.promise;
       jest.useFakeTimers();
       const command = { ...acceptedInput("rin_gated_tool_use_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
@@ -6381,11 +6482,7 @@ Previous anchored summary.
   });
 
   test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and permits no late durable repair", async () => {
-    const loader = new QueuedContextLoader([], [], [{
-      type: "context",
-      messages: [userMessage("user-1", 0, "trigger an internal repair", "fake", "fake-chat")],
-      runtimeBindingToken: "runtime-binding-token",
-    }]);
+    const loader = new QueuedContextLoader([], []);
     const repairStarted = deferred<void>();
     const releaseRepair = deferred<void>();
     const releaseRepairWrapperTimeout = deferred<boolean>();
@@ -6457,7 +6554,14 @@ Previous anchored summary.
     }));
 
     try {
-      await Effect.runPromise(manager.acceptInput(acceptedInput("rin_gated_internal_repair")));
+      const input = acceptedInput("rin_gated_internal_repair");
+      await Effect.runPromise(manager.preloadThread({
+        ...input,
+        runtimeBindingToken: "runtime-binding-token",
+        messages: [userMessage("user-1", 0, "trigger an internal repair")],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
+      await Effect.runPromise(manager.acceptInput(input));
       await repairStarted.promise;
       const command = { ...acceptedInput("rin_gated_internal_repair_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
       const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async () => {
@@ -6495,7 +6599,7 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-request-end-failure", 0, "interrupt after span start", "fake", "fake-chat")],
+      messages: [userMessage("user-request-end-failure", 0, "interrupt after span start")],
     });
     const appended: SessionEvent[] = [];
     let interruptCommits = 0;
@@ -6553,7 +6657,7 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-repair-failure", 0, "run then interrupt", "fake", "fake-chat")],
+      messages: [userMessage("user-repair-failure", 0, "run then interrupt")],
     });
     const appended: SessionEvent[] = [];
     let failRepairWrite = false;
@@ -6649,7 +6753,7 @@ Previous anchored summary.
     const store = new AgentLoopRuntimeStore([], (part) => failRepairWrite && part.type === "tool");
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-post-success-cooperative-failure", 0, "run the tool", "fake", "fake-chat")],
+      messages: [userMessage("user-post-success-cooperative-failure", 0, "run the tool")],
     });
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
@@ -6729,7 +6833,7 @@ Previous anchored summary.
     session.state.addPendingAttachments([attachment]);
     const loader = new RecordingContextLoader([], {
       type: "messages",
-      messages: [userMessage("user-post-success-interrupt-failure", 0, "run the tool", "fake", "fake-chat")],
+      messages: [userMessage("user-post-success-interrupt-failure", 0, "run the tool")],
     });
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
@@ -6805,17 +6909,7 @@ Previous anchored summary.
     const finishIdleStarted = deferred<void>();
     const requests: LLMRequest[] = [];
     const finishIdleWriteIds: string[] = [];
-    const loader = new QueuedContextLoader([], [], [
-      {
-        type: "context",
-        messages: [userMessage("user-finish-idle-owner", 0, "hold the first run", "fake", "fake-chat")],
-        runtimeBindingToken: "runtime-binding-token",
-      },
-      {
-        type: "messages",
-        messages: [userMessage("user-after-finish-idle", 1, "run after the ACK", "fake", "fake-chat")],
-      },
-    ]);
+    const loader = new QueuedContextLoader([], []);
     const baseWriter = writerFrom((envelope) => ({
       ok: true,
       writeId: envelope.writeId,
@@ -6877,6 +6971,12 @@ Previous anchored summary.
 
     try {
       const firstInput = { ...acceptedInput("rin_finish_idle_owner"), sequenceFrom: 1, sequenceTo: 1 };
+      await Effect.runPromise(manager.preloadThread({
+        ...firstInput,
+        runtimeBindingToken: "runtime-binding-token",
+        messages: [userMessage("user-finish-idle-owner", 0, "hold the first run")],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
       await Effect.runPromise(manager.acceptInput(firstInput));
       await firstProviderStarted.promise;
       const interruptCommand = { ...acceptedInput("rin_finish_idle_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
@@ -6915,7 +7015,7 @@ Previous anchored summary.
 
   test("user interrupt repairs a committed ToolFiber before CommitInputs and FinishIdle", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "remember this", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "remember this")] });
     const releaseProvider = deferred<void>();
     const projectionFailureSeen = deferred<void>();
     const appended: SessionEvent[] = [];
@@ -7041,28 +7141,30 @@ Previous anchored summary.
     const requestEndAcked = deferred<void>();
     const commitCalls: string[] = [];
     const order: string[] = [];
-    const loader: ContextLoader = {
+    let nextMessageSequence = 1;
+    const commitReceipt = (input: RuntimeAcceptedInputState): AcceptedInputCommitResult => {
+      const result = acceptedInputReceipt(input, "committed", nextMessageSequence);
+      nextMessageSequence += result.receipt.messages.length;
+      return result;
+    };
+    const loader: TestContextLoader = {
       buildContext: async () => [],
       loadPendingInput: async () => ({ type: "empty" }),
       commitAcceptedInput: async (input) => {
         commitCalls.push(input.runtimeInputId);
         if (input.runtimeInputId === "rin_initial_mixed") {
           order.push("commit:initial");
-          return {
-            type: "context",
-            messages: [userMessage("user-1", 0, "run mixed tools", "fake", "fake-chat")],
-            runtimeBindingToken: "runtime-binding-token",
-          };
+          return commitReceipt(input);
         }
         if (input.runtimeInputId === "rin_pre_fence_mixed") {
           order.push("commit:pre:start");
           preCommitStarted.resolve();
           await releasePreCommit.promise;
           order.push("commit:pre:end");
-          return { type: "empty" };
+          return commitReceipt(input);
         }
         order.push(`commit:${input.runtimeInputId}`);
-        return { type: "empty" };
+        return commitReceipt(input);
       },
     };
     const appended: SessionEvent[] = [];
@@ -7286,20 +7388,22 @@ Previous anchored summary.
     const lateRoute = deferred<AgentLoop.RuntimeToolExecutionResult>();
     const order: string[] = [];
     const commitCalls: string[] = [];
-    const loader: ContextLoader = {
+    let nextMessageSequence = 1;
+    const commitReceipt = (input: RuntimeAcceptedInputState): AcceptedInputCommitResult => {
+      const result = acceptedInputReceipt(input, "committed", nextMessageSequence);
+      nextMessageSequence += result.receipt.messages.length;
+      return result;
+    };
+    const loader: TestContextLoader = {
       buildContext: async () => [],
       loadPendingInput: async () => ({ type: "empty" }),
       commitAcceptedInput: async (input) => {
         commitCalls.push(input.runtimeInputId);
         order.push(`commit:${input.runtimeInputId}`);
         if (input.runtimeInputId === "rin_non_cooperative_route") {
-          return {
-            type: "context",
-            messages: [userMessage("user-non-cooperative", 0, "run the route", "fake", "fake-chat")],
-            runtimeBindingToken: "runtime-binding-token",
-          };
+          return commitReceipt(input);
         }
-        return { type: "empty" };
+        return commitReceipt(input);
       },
     };
     const appended: SessionEvent[] = [];
@@ -7490,8 +7594,6 @@ Previous anchored summary.
       sequence: 1,
       status: "completed",
       createdAt,
-      providerId: "fake",
-      modelId: "fake-chat",
       parts: [
         {
           id: "part-approved-settled",
@@ -7529,35 +7631,31 @@ Previous anchored summary.
         },
       ],
     });
-    const loader = new QueuedContextLoader([], [], [{
-      type: "context",
-      messages: [userMessage("user-rehydrated-approved", 0, "resume approved tools", "fake", "fake-chat"), loadedMessage],
-      runtimeBindingToken: "runtime-binding-token",
-      pendingToolUses: [
-        {
-          toolUseEventId: "sevt_approved_settled",
-          modelRequestId: "mrq_rehydrated_approved",
-          modelToolCallId: "tool-approved-settled",
-          toolName: "Write",
-          kind: "approval",
-          input: { file_path: "src/settled.ts", content: "settled" },
-          status: "resolving",
-          decision: "allow",
-          expiresAt: "2026-06-14T00:30:00.000Z",
-        },
-        {
-          toolUseEventId: "sevt_approved_late",
-          modelRequestId: "mrq_rehydrated_approved",
-          modelToolCallId: "tool-approved-late",
-          toolName: "Write",
-          kind: "approval",
-          input: { file_path: "src/late.ts", content: "late" },
-          status: "resolving",
-          decision: "allow",
-          expiresAt: "2026-06-14T00:30:00.000Z",
-        },
-      ],
-    }]);
+    const pendingToolUses = [
+      {
+        toolUseEventId: "sevt_approved_settled",
+        modelRequestId: "mrq_rehydrated_approved",
+        modelToolCallId: "tool-approved-settled",
+        toolName: "Write",
+        kind: "approval" as const,
+        input: { file_path: "src/settled.ts", content: "settled" },
+        status: "resolving" as const,
+        decision: "allow" as const,
+        expiresAt: "2026-06-14T00:30:00.000Z",
+      },
+      {
+        toolUseEventId: "sevt_approved_late",
+        modelRequestId: "mrq_rehydrated_approved",
+        modelToolCallId: "tool-approved-late",
+        toolName: "Write",
+        kind: "approval" as const,
+        input: { file_path: "src/late.ts", content: "late" },
+        status: "resolving" as const,
+        decision: "allow" as const,
+        expiresAt: "2026-06-14T00:30:00.000Z",
+      },
+    ];
+    const loader = new QueuedContextLoader([], []);
     const lateRoute = deferred<AgentLoop.RuntimeToolExecutionResult>();
     const lateRouteStarted = deferred<void>();
     const settledResultAcked = deferred<void>();
@@ -7610,7 +7708,15 @@ Previous anchored summary.
     let interrupt: Promise<unknown> | undefined;
 
     try {
-      await Effect.runPromise(manager.acceptInput(acceptedInput("rin_rehydrated_approved")));
+      const input = acceptedInput("rin_rehydrated_approved");
+      await Effect.runPromise(manager.preloadThread({
+        ...input,
+        runtimeBindingToken: "runtime-binding-token",
+        messages: [userMessage("user-rehydrated-approved", 0, "resume approved tools"), loadedMessage],
+        pendingToolUses,
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
+      await Effect.runPromise(manager.acceptInput(input));
       await Promise.all([lateRouteStarted.promise, settledResultAcked.promise]);
       jest.useFakeTimers();
       const interruptCommand = {
@@ -7706,7 +7812,13 @@ Previous anchored summary.
     const releasePreCommit = deferred<void>();
     const order: string[] = [];
     const commitCalls: string[] = [];
-    const loader: ContextLoader = {
+    let nextMessageSequence = 1;
+    const commitReceipt = (input: RuntimeAcceptedInputState): AcceptedInputCommitResult => {
+      const result = acceptedInputReceipt(input, "committed", nextMessageSequence);
+      nextMessageSequence += result.receipt.messages.length;
+      return result;
+    };
+    const loader: TestContextLoader = {
       buildContext: async () => [],
       loadPendingInput: async () => ({ type: "empty" }),
       commitAcceptedInput: async (input) => {
@@ -7716,10 +7828,10 @@ Previous anchored summary.
           preCommitStarted.resolve();
           await releasePreCommit.promise;
           order.push("commit:pre:end");
-          return { type: "empty" };
+          return commitReceipt(input);
         }
         order.push(`commit:${input.runtimeInputId}`);
-        return { type: "empty" };
+        return commitReceipt(input);
       },
     };
     const appended: SessionEvent[] = [];
@@ -7767,7 +7879,7 @@ Previous anchored summary.
 
   test("runtime shutdown aborts active ToolFiber route execution", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const releaseProvider = deferred<void>();
     const releaseTool = deferred<void>();
     let observedToolSignal: AbortSignal | undefined;
@@ -7851,7 +7963,7 @@ Previous anchored summary.
 
   test("approve_for_me runs reviewer before public tool_use is written", async () => {
     const session = new Session("sesn_1", new AutoApprovalReviewerManager());
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const order: string[] = [];
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
@@ -7907,7 +8019,7 @@ Previous anchored summary.
 
   test("approve_for_me reviewer failure falls back to public ask approval", async () => {
     const session = new Session("sesn_1", new AutoApprovalReviewerManager());
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     let runToolCalls = 0;
     let toolUseIndex = 0;
@@ -7967,7 +8079,7 @@ Previous anchored summary.
 
   test("approve_for_me reviewer receives current request-turn draft state", async () => {
     const session = new Session("sesn_1", new AutoApprovalReviewerManager());
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const order: string[] = [];
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
@@ -8028,7 +8140,7 @@ Previous anchored summary.
   test("ask approval resumes the pending ToolJob instead of rerunning the old ToolFiber", async () => {
     const session = new Session("sesn_1");
     const loader = new QueuedContextLoader([], [
-      { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-1", 0, "hello")] },
       { type: "empty" },
     ]);
     const appended: SessionEvent[] = [];
@@ -8150,26 +8262,18 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     session.state.enqueueAcceptedInput(acceptedInput("rin_cold_restore"));
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
-    const loadedMessages = [userMessage("user-cold", 0, "hello", "fake", "fake-chat")];
-    const loader = new QueuedContextLoader([], [], [
-      {
-        type: "context",
-        runtimeBindingToken: "rtbt_cold_restore",
-        messages: loadedMessages,
-        pendingToolUses: [
-          {
-            toolUseEventId: "sevt_tool_1",
-            modelRequestId: "mrq_cold_restore",
-            modelToolCallId: "tool-1",
-            toolName: "Write",
-            kind: "approval",
-            input: pendingInput,
-            status: "pending",
-            expiresAt: "2026-06-14T00:30:00.000Z",
-          },
-        ],
-      },
-    ]);
+    const loadedMessages = [userMessage("user-cold", 0, "hello")];
+    const pendingToolUses = [{
+      toolUseEventId: "sevt_tool_1",
+      modelRequestId: "mrq_cold_restore",
+      modelToolCallId: "tool-1",
+      toolName: "Write",
+      kind: "approval" as const,
+      input: pendingInput,
+      status: "pending" as const,
+      expiresAt: "2026-06-14T00:30:00.000Z",
+    }];
+    const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
       appended.push(envelope.event);
@@ -8213,6 +8317,10 @@ Previous anchored summary.
     const first = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
+        session.state.contextManager.replaceMessages(loadedMessages);
+        session.state.markPersistentContextLoaded();
+        agentLoop.seedRuntimeModel(session);
+        expect(yield* agentLoop.installLoadedPendingToolUses(session, pendingToolUses, loadedMessages)).toEqual({ ok: true });
         return yield* agentLoop.run(session);
       }).pipe(Effect.provide(layer)),
     );
@@ -8280,7 +8388,7 @@ Previous anchored summary.
     session.state.enqueueAcceptedInput(acceptedInput("rin_cold_deny_restore"));
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
-      userMessage("user-cold-deny", 0, "hello", "fake", "fake-chat"),
+      userMessage("user-cold-deny", 0, "hello"),
       RuntimeMessageSchema.parse({
         id: "assistant-cold-deny",
         sessionId: "sesn_1",
@@ -8289,8 +8397,6 @@ Previous anchored summary.
         sequence: 1,
         status: "completed",
         createdAt,
-        providerId: "fake",
-        modelId: "fake-chat",
         parts: [
           {
             id: "assistant-cold-deny-tool",
@@ -8316,27 +8422,19 @@ Previous anchored summary.
         ],
       }),
     ];
-    const loader = new QueuedContextLoader([], [], [
-      {
-        type: "context",
-        runtimeBindingToken: "rtbt_cold_deny_restore",
-        messages: loadedMessages,
-        pendingToolUses: [
-          {
-            toolUseEventId: "sevt_tool_1",
-            modelRequestId: "mrq_cold_deny_restore",
-            modelToolCallId: "tool-1",
-            toolName: "Write",
-            kind: "approval",
-            input: pendingInput,
-            status: "resolving",
-            decision: "deny",
-            denyMessage: "not now",
-            expiresAt: "2026-06-14T00:30:00.000Z",
-          },
-        ],
-      },
-    ]);
+    const pendingToolUses = [{
+      toolUseEventId: "sevt_tool_1",
+      modelRequestId: "mrq_cold_deny_restore",
+      modelToolCallId: "tool-1",
+      toolName: "Write",
+      kind: "approval" as const,
+      input: pendingInput,
+      status: "resolving" as const,
+      decision: "deny" as const,
+      denyMessage: "not now",
+      expiresAt: "2026-06-14T00:30:00.000Z",
+    }];
+    const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
       appended.push(envelope.event);
@@ -8370,6 +8468,10 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
+        session.state.contextManager.replaceMessages(loadedMessages);
+        session.state.markPersistentContextLoaded();
+        agentLoop.seedRuntimeModel(session);
+        expect(yield* agentLoop.installLoadedPendingToolUses(session, pendingToolUses, loadedMessages)).toEqual({ ok: true });
         return yield* agentLoop.run(session);
       }).pipe(Effect.provide(layer)),
     );
@@ -8386,7 +8488,7 @@ Previous anchored summary.
   test("partial approval keeps the RequestTurn idle until all waiting ToolJobs resolve", async () => {
     const session = new Session("sesn_1");
     const loader = new QueuedContextLoader([], [
-      { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] },
+      { type: "messages", messages: [userMessage("user-1", 0, "hello")] },
       { type: "empty" },
       { type: "empty" },
     ]);
@@ -8500,9 +8602,10 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     const writer = failingEventWriter(appendedTypes, (event) => event.type === "agent.message");
+    await installLoaderStateForTest(loader, session);
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -8547,7 +8650,8 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    await installLoaderStateForTest(loader, session);
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -8589,7 +8693,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
       appended.push(envelope.event);
@@ -8649,8 +8753,9 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     let eventsRead = 0;
+    await installLoaderStateForTest(loader, session);
     const streamingService: LLMServiceInterface = {
       stream() {
         return Stream.fromAsyncIterable(
@@ -8708,7 +8813,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     const writer = failingEventWriter(appendedTypes, (event) =>
       event.type === "agent.message" || event.type === "session.error" || event.type === "session.status_idle");
@@ -8770,7 +8875,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
       appended.push(envelope.event);
@@ -8831,7 +8936,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const baseWriter = writerFrom((envelope) => {
       appended.push(envelope.event);
@@ -8902,7 +9007,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const service: LLMServiceInterface = {
       stream() {
@@ -8973,7 +9078,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const service: LLMServiceInterface = {
       stream() {
@@ -9038,7 +9143,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const service: LLMServiceInterface = {
       stream() {
@@ -9096,7 +9201,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     const writer = failingEventWriter(appendedTypes, (event) => event.type === "session.error" || event.type === "session.status_idle");
     const providerError = {
@@ -9142,7 +9247,7 @@ Previous anchored summary.
 
   test("runtime layer routes a proven terminal provider failure through atomic termination", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => {
@@ -9193,7 +9298,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const writer = writerFrom((envelope) => {
       appended.push(envelope.event);
@@ -9257,7 +9362,7 @@ Previous anchored summary.
 
   test("terminal provider failure preserves completed text with a durable message ACK", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     const providerError = {
       type: "provider",
@@ -9300,7 +9405,7 @@ Previous anchored summary.
 
   test("terminal provider failure discards a tool call without a durable public tool-use identity", async () => {
     const session = new Session("sesn_1");
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
     let runToolCalls = 0;
     const providerError = {
@@ -9360,7 +9465,7 @@ Previous anchored summary.
   test("terminal provider failure retains an atomically committed internal tool repair", async () => {
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore([]);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const publicToolEvents: SessionEvent[] = [];
     const providerError = {
       type: "provider",
@@ -9416,7 +9521,7 @@ Previous anchored summary.
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello", "fake", "fake-chat")] });
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appendedTypes: string[] = [];
     const writer = failingEventWriter(appendedTypes, (event) => event.type === "session.error" || event.type === "session.status_idle");
     const providerError = {

@@ -48,6 +48,7 @@
  *              services/agent-runtime/packages/core/src/session/session-manager.ts
  */
 import { ContextManager } from "./context-manager.js";
+import type { ThreadContextPrefix } from "./context-manager.js";
 import type { RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageInfo, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -180,6 +181,7 @@ export type RuntimeAcceptedInputState =
 export interface RuntimeThreadPreloadState extends RuntimeThreadControlState {
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
   readonly messages: readonly RuntimeMessage[];
+  readonly threadContextPrefix?: ThreadContextPrefix | undefined;
   readonly runtimeBindingToken: string;
   readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
   readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;

@@ -2,9 +2,9 @@
 // schema construction in one auditable test module.
 
 import type { RuntimeJsonValue, RuntimeMessage, RuntimePart } from "../../src/contracts/runtime.js";
-import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
+import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "../../src/contracts/runtime.js";
 
-export function buildAgentLoopUserMessage(id: string, sequence: number, text: string, providerId: string, modelId: string): RuntimeMessage {
+export function buildAgentLoopUserMessage(id: string, sequence: number, text: string): RuntimeMessage {
   const createdAt = "2026-06-14T00:00:00.000Z";
   return RuntimeMessageSchema.parse({
     id,
@@ -14,8 +14,6 @@ export function buildAgentLoopUserMessage(id: string, sequence: number, text: st
     sequence,
     status: "completed",
     createdAt,
-    providerId,
-    modelId,
     parts: [
       {
         id: `${id}-text`,
@@ -71,7 +69,6 @@ export function buildContextLoaderTextMessage(id: string, sessionId: string, rol
     sequence,
     status: "completed",
     createdAt,
-    ...(role === "user" ? { providerId: "fake", modelId: "fake-chat" } : {}),
     parts: [
       {
         id: `${id}-text`,
@@ -167,8 +164,6 @@ export function buildContextLoaderFailedVisibleAssistantMessage(): RuntimeMessag
 export function buildContextLoaderAssistantMessageWithUsage(): RuntimeMessage {
   return RuntimeMessageSchema.parse({
     ...buildContextLoaderTextMessage("assistant-usage", "sesn_1", "assistant", 7, "answer"),
-    providerId: "fake",
-    modelId: "fake-chat",
     usage: {
       inputTokens: 11,
       outputTokens: 7,
@@ -189,8 +184,6 @@ export function buildContextLoaderStreamingAssistantMessage(): RuntimeMessage {
     origin: "agent",
     sequence: 8,
     status: "streaming",
-    providerId: "fake",
-    modelId: "fake-chat",
     createdAt,
     parts: [
       {
@@ -317,8 +310,6 @@ export function buildRuntimeMessageProjectionMessage(
     sequence: role === "user" ? 0 : 1,
     status: "completed",
     createdAt,
-    providerId: "openai",
-    modelId: "gpt-5.5",
     parts,
   });
 }
@@ -362,8 +353,6 @@ export function buildSessionManagerColdUserMessage(sessionId: string): RuntimeMe
     sequence: 1,
     status: "completed",
     createdAt: timestamp,
-    providerId: "anthropic",
-    modelId: "claude-opus-4-8",
     parts: [{
       id: `part_${sessionId}`,
       sessionId,
@@ -418,8 +407,6 @@ export function buildSessionRunHostUserMessage(id: string, sequence: number, tex
     sequence,
     status: "completed",
     createdAt,
-    providerId: "fake",
-    modelId: "fake-chat",
     parts: [
       {
         id: `${id}-text`,
@@ -467,16 +454,16 @@ export function buildSessionRunHostRuntimeNotificationMessage(sessionId: string)
 
 export function buildApprovalReviewerUserMessage(sessionId: string, messageId = "msg_user", text = "please edit the file"): RuntimeMessage {
   const createdAt = "2026-07-06T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id: messageId,
     sessionId,
+    owningEventId: `evt_${messageId}`,
+    eventSequence: 1,
     role: "user",
     origin: "user",
     sequence: 0,
     status: "completed",
     createdAt,
-    providerId: "anthropic",
-    modelId: "claude-test",
     parts: [{
       id: `part_${messageId}`,
       sessionId,
@@ -502,8 +489,6 @@ export function buildApprovalReviewerAssistantDraftMessage(sessionId: string): R
     sequence: 1,
     status: "streaming",
     createdAt,
-    providerId: "anthropic",
-    modelId: "claude-test",
     parts: [
       {
         id: "part_assistant_text",
@@ -563,8 +548,6 @@ export function buildApprovalReviewerAssistantReviewerText(sessionId: string, te
     sequence: 1,
     status: "completed",
     createdAt,
-    providerId: "anthropic",
-    modelId: "claude-test",
     parts: [{
       id: "part_reviewer",
       sessionId,
@@ -605,6 +588,14 @@ export function buildBridgeClientRuntimeMessage(id: string, text: string): Runti
   };
 }
 
+export function buildBridgeClientDurableRuntimeMessage(id: string, text: string): RuntimeMessage {
+  return DurableRuntimeMessageSchema.parse({
+    ...buildBridgeClientRuntimeMessage(id, text),
+    owningEventId: `evt_${id}`,
+    eventSequence: 1,
+  });
+}
+
 export function buildBridgeClientRuntimeRepairMessage(): RuntimeMessage {
   return {
     id: "msg_repair",
@@ -635,7 +626,7 @@ export function buildBridgeClientRuntimeRepairMessage(): RuntimeMessage {
   };
 }
 
-export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string, providerId: string, modelId: string): RuntimeMessage {
+export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string): RuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
   return RuntimeMessageSchema.parse({
     id,
@@ -645,8 +636,6 @@ export function buildCoreHostsUserMessage(sessionId: string, id: string, sequenc
     sequence,
     status: "completed",
     createdAt: "2026-06-16T00:00:00.000Z",
-    providerId,
-    modelId,
     parts: [
       {
         id: `${id}-text`,
@@ -681,8 +670,6 @@ export function buildCoreHostsAssistantRunningToolMessage(
     sequence,
     status: "completed",
     createdAt: "2026-06-16T00:00:00.000Z",
-    providerId: "fake",
-    modelId: "fake-chat",
     parts: [
       {
         id: `${id}-tool`,

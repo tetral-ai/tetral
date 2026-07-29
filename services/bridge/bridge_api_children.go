@@ -55,7 +55,7 @@ func (s *PostgreSQLBridgeAPIStore) CreateChildThread(ctx context.Context, reques
 		agentType,
 		request.GetSourceToolUseEventId(),
 		forkTurns,
-		request.GetForkSeedJson(),
+		request.GetThreadContextPrefixJson(),
 		boolHashPart(isTrunk),
 		request.GetReviewerReviewId(),
 	)
@@ -114,10 +114,8 @@ func (s *PostgreSQLBridgeAPIStore) CreateChildThread(ctx context.Context, reques
 		if err != nil {
 			return err
 		}
-		forkSeedMessageID := ""
-		if request.GetForkSeedJson() != "" {
-			forkSeedMessageID, err = insertForkSeedMessageTx(ctx, tx, childScope, request.GetSourceToolUseEventId(), request.GetForkSeedJson(), now)
-			if err != nil {
+		if request.GetThreadContextPrefixJson() != "" {
+			if err := insertThreadContextPrefixTx(ctx, tx, childScope, request.GetThreadContextPrefixJson(), now); err != nil {
 				return err
 			}
 		}
@@ -126,7 +124,6 @@ func (s *PostgreSQLBridgeAPIStore) CreateChildThread(ctx context.Context, reques
 			ChildThreadID:         childThreadID,
 			ThreadCreatedEventID:  threadCreatedEventID,
 			ThreadCreatedSequence: threadCreatedSequence,
-			ForkSeedMessageID:     forkSeedMessageID,
 		})
 		if err != nil {
 			return err
@@ -362,15 +359,16 @@ func childThreadIdempotencyKey(role string, childThreadID string, sourceToolUseE
 	return defaultString(sourceToolUseEventID, childThreadID)
 }
 
-type forkSeedEnvelope struct {
-	SourceParentThreadID string            `json:"source_parent_thread_id"`
-	SourceToolUseEventID string            `json:"source_tool_use_event_id,omitempty"`
-	ReviewID             string            `json:"review_id,omitempty"`
-	ForkTurns            string            `json:"fork_turns"`
-	RuntimeMessages      []json.RawMessage `json:"runtime_messages_snapshot"`
+type threadContextPrefixEnvelope struct {
+	SourceParentThreadID  string            `json:"source_parent_thread_id"`
+	ParentBoundaryEventID string            `json:"parent_boundary_event_id"`
+	SourceToolUseEventID  string            `json:"source_tool_use_event_id,omitempty"`
+	ReviewID              string            `json:"review_id,omitempty"`
+	ForkTurns             string            `json:"fork_turns"`
+	RuntimeMessages       []json.RawMessage `json:"runtime_messages_snapshot"`
 }
 
-// validateChildThreadRequest enforces the role-discriminated ForkSeed source.
+// validateChildThreadRequest enforces the role-discriminated context-prefix source.
 // The source identity differs by role because an approval-reviewer sidecar
 // provably has no source_tool_use_event_id yet — its review resolves before the
 // target tool's public agent.tool_use event exists:
@@ -394,7 +392,7 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 	taskName := request.GetTaskName()
 	sourceToolUseEventID := request.GetSourceToolUseEventId()
 	reviewID := request.GetReviewerReviewId()
-	forkSeedJSON := request.GetForkSeedJson()
+	prefixJSON := request.GetThreadContextPrefixJson()
 	if role == "subagent" {
 		if taskName == "" {
 			return status.Error(codes.InvalidArgument, "sub-agent task_name is required")
@@ -407,7 +405,7 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 		default:
 			return status.Error(codes.InvalidArgument, "invalid sub-agent agent_type")
 		}
-		if forkSeedJSON == "" {
+		if prefixJSON == "" {
 			return status.Error(codes.InvalidArgument, "sub-agent fork seed is required")
 		}
 		if reviewID != "" {
@@ -418,13 +416,13 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 		}
 	}
 	if role == "approval_reviewer" && request.GetIsTrunk() {
-		if sourceToolUseEventID != "" || reviewID != "" || forkSeedJSON != "" {
+		if sourceToolUseEventID != "" || reviewID != "" || prefixJSON != "" {
 			return status.Error(codes.InvalidArgument, "approval reviewer trunk must not carry a fork seed source")
 		}
 		return nil
 	}
 	if role == "approval_reviewer" {
-		if sourceToolUseEventID != "" || reviewID == "" || forkSeedJSON == "" {
+		if sourceToolUseEventID != "" || reviewID == "" || prefixJSON == "" {
 			return status.Error(codes.InvalidArgument, "approval reviewer sidecar requires only reviewer_review_id and a fork seed")
 		}
 		if !validForkTurns(forkTurns) {
@@ -434,8 +432,8 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 			return status.Error(codes.InvalidArgument, "approval reviewer sidecar identity is invalid")
 		}
 	}
-	var seed forkSeedEnvelope
-	decoder := json.NewDecoder(strings.NewReader(forkSeedJSON))
+	var seed threadContextPrefixEnvelope
+	decoder := json.NewDecoder(strings.NewReader(prefixJSON))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&seed); err != nil {
 		return status.Error(codes.InvalidArgument, "fork seed must match the strict schema")
@@ -446,8 +444,14 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 	if seed.SourceParentThreadID != parentThreadID || seed.ForkTurns != forkTurns || seed.RuntimeMessages == nil {
 		return status.Error(codes.InvalidArgument, "fork seed lineage or snapshot is invalid")
 	}
+	if seed.ParentBoundaryEventID == "" {
+		return status.Error(codes.InvalidArgument, "fork seed parent boundary is required")
+	}
 	if role == "subagent" && (seed.SourceToolUseEventID != sourceToolUseEventID || seed.ReviewID != "") {
 		return status.Error(codes.InvalidArgument, "sub-agent fork seed source is invalid")
+	}
+	if role == "subagent" && seed.ParentBoundaryEventID != sourceToolUseEventID {
+		return status.Error(codes.InvalidArgument, "sub-agent fork seed boundary is invalid")
 	}
 	if role == "approval_reviewer" && (seed.ReviewID != reviewID || seed.SourceToolUseEventID != "") {
 		return status.Error(codes.InvalidArgument, "approval reviewer fork seed source is invalid")
@@ -455,6 +459,16 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 	for _, message := range seed.RuntimeMessages {
 		if !json.Valid(message) {
 			return status.Error(codes.InvalidArgument, "fork seed contains malformed message")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(message, &fields); err != nil {
+			return status.Error(codes.InvalidArgument, "fork seed message must be an object")
+		}
+		if _, ok := fields["providerId"]; ok {
+			return status.Error(codes.InvalidArgument, "fork seed message contains routing metadata")
+		}
+		if _, ok := fields["modelId"]; ok {
+			return status.Error(codes.InvalidArgument, "fork seed message contains routing metadata")
 		}
 	}
 	return nil
@@ -636,64 +650,48 @@ func insertChildThreadCreatedEventTx(
 	return eventID, sequence, nil
 }
 
-func insertForkSeedMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sourceToolUseEventID string, forkSeedJSON string, now time.Time) (string, error) {
-	var sequence int64
+func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, prefixJSON string, now time.Time) error {
+	var seed threadContextPrefixEnvelope
+	if err := json.Unmarshal([]byte(prefixJSON), &seed); err != nil {
+		return status.Error(codes.InvalidArgument, "fork seed is invalid")
+	}
+	var boundaryThreadID string
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_messages
+		`SELECT session_thread_id
+		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND session_thread_id = $3`,
+		    AND event_id = $3
+		  FOR SHARE`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&sequence); err != nil {
-		return "", err
+		seed.ParentBoundaryEventID,
+	).Scan(&boundaryThreadID); err != nil {
+		return err
 	}
-	messageID := id.New("msg_")
-	sourceEventID := nullableSQLString(sourceToolUseEventID)
-	tag, err := tx.Exec(ctx,
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'fork_seed', $6, $7, $7, $8, $8)
-		ON CONFLICT (workspace_id, session_id, session_thread_id, source_event_id)
-		WHERE source_event_id IS NOT NULL
-		DO NOTHING`,
+	if boundaryThreadID != seed.SourceParentThreadID {
+		return status.Error(codes.FailedPrecondition, "fork seed parent boundary does not belong to the parent thread")
+	}
+	entriesJSON, err := json.Marshal(seed.RuntimeMessages)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_thread_context_prefixes (
+			workspace_id, session_id, child_thread_id, parent_thread_id,
+			parent_boundary_event_id, entries_json, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		messageID,
-		sequence,
-		stripInternalProviderFields(forkSeedJSON),
-		sourceEventID,
+		seed.SourceParentThreadID,
+		seed.ParentBoundaryEventID,
+		string(entriesJSON),
 		now,
-	)
-	if err != nil {
-		return "", err
+	); err != nil {
+		return err
 	}
-	rowsAffected, err := tag.RowsAffected()
-	if err != nil {
-		return "", err
-	}
-	if rowsAffected == 0 && sourceToolUseEventID != "" {
-		if err := tx.QueryRow(ctx,
-			`SELECT message_id
-			   FROM session_messages
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND source_event_id = $4
-			  LIMIT 1`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-			scope.GetSessionThreadId(),
-			sourceToolUseEventID,
-		).Scan(&messageID); err != nil {
-			return "", err
-		}
-	}
-	return messageID, nil
+	return nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) readChildThread(ctx context.Context, scope *bridgev1.RuntimeScope, childThreadID string, operation string) (string, error) {

@@ -190,13 +190,6 @@ export interface RuntimeCommandRunner {
 }
 
 /**
- * Registers accepted message input before Runtime Core handling and returns its failure rollback.
- */
-export interface RuntimeAcceptedInputRegistrar {
-  readonly registerAcceptedInput: (command: RuntimeMessagesCommand) => () => void;
-}
-
-/**
  * Pod identity, authorization policy, command ports, lifecycle gates, and observability dependencies
  * used by `RuntimeControlService`.
  */
@@ -215,7 +208,6 @@ export interface RuntimeControlServiceOptions {
   readonly cleanupController: RuntimeCleanupController;
   readonly logger: RuntimePodLogger;
   readonly ready: () => boolean;
-  readonly acceptedInputRegistrar?: RuntimeAcceptedInputRegistrar;
   readonly commandRunner?: RuntimeCommandRunner;
   readonly metrics?: RuntimeMetricsSink | undefined;
 }
@@ -509,16 +501,8 @@ export class RuntimeControlService {
   private async applyEffect(request: RuntimeInputCommandRequest, effect: CommandEffect): Promise<RuntimeInputCommandResponse | undefined> {
     if (effect === "wake-run") {
       const command = messagesCommandFromRequest(request);
-      const unregisterAcceptedInput = this.options.acceptedInputRegistrar?.registerAcceptedInput(command);
-      let result: Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>;
-      try {
-        result = await this.options.runHost.handleAcceptInput(command);
-      } catch (error) {
-        unregisterAcceptedInput?.();
-        throw error;
-      }
+      const result = await this.options.runHost.handleAcceptInput(command);
       if (!result.ok) {
-        unregisterAcceptedInput?.();
         throw new GrpcStatusError(status.RESOURCE_EXHAUSTED, "local runtime capacity exceeded");
       }
       return;

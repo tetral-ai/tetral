@@ -86,6 +86,10 @@ import { runtimeFailureFromProviderError } from "../llm/llm-event.js";
 import { internalToolRepairKey, SessionProcessor } from "../runtime/accumulator.js";
 import { toGatewayRuntimeMessages } from "../runtime/message-projection.js";
 import {
+  acceptedInputDrafts,
+  applyAcceptedInputReceipt,
+} from "../runtime/runtime-declaration.js";
+import {
   DefaultProviderCallRuntimeConfig,
   assembleProviderCallRequest,
 } from "./provider-call-assembly.js";
@@ -605,6 +609,7 @@ async function closeFailedRunDurably(
       session.sessionId,
       currentObservationWindow,
       () => finishIdleWithRetry(options, {
+        workspaceId: session.identity.workspaceId,
         sessionId: session.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
         writeId: closeout.idleWriteId,
@@ -736,17 +741,7 @@ function runAgentLoopEffect(
 ): Effect.Effect<AgentLoopRunResult, unknown> {
   let pendingRequestTurnReschedule = false;
   const run: Effect.Effect<AgentLoopRunResult, unknown> = Effect.gen(function* () {
-    const needsPersistentContext = !session.state.persistentContextLoaded();
-    const acceptedInputPresent = session.state.peekAcceptedInput() !== undefined;
-    const initialInput = yield* loadInitialAgentLoopInput(contextLoader, session, options, {
-      loadPersistentContext: needsPersistentContext && !acceptedInputPresent,
-      loadLegacyPendingInput: !acceptedInputPresent,
-    });
-    if (!initialInput.ok) {
-      return yield* Effect.promise(() => handleContextLoaderFailure(options, session, initialInput.error));
-    }
-    const history = initialInput.history;
-    let pendingInput = initialInput.pendingInput;
+    let pendingInput: PendingInputResult = { type: "empty" };
     const turnRetryCounters = {
       providerAttempts: 0,
       compactionAttempts: 0,
@@ -767,10 +762,6 @@ function runAgentLoopEffect(
         session.state.markUserInterruptCloseoutEligible();
       }
       return { type: "interrupted" };
-    }
-    if (history !== undefined) {
-      session.state.contextManager.replaceMessages(history);
-      session.state.markPersistentContextLoaded();
     }
     seedRuntimeModel(session, options);
 
@@ -794,13 +785,30 @@ function runAgentLoopEffect(
         session.state.beginAcceptedInputCommit(acceptedInput.runtimeInputId);
         // CommitInputs has no transport cancellation contract. Keep the accepted-input
         // owner joined so a user-interrupt snapshot can never ACK ahead of this write.
-        const committed = yield* Effect.promise(() => commitAcceptedInput(contextLoader, acceptedInput, options)).pipe(
+        const committed = yield* Effect.promise(() =>
+          commitAcceptedInput(
+            contextLoader,
+            acceptedInput,
+            options,
+            session.state.runtimeShutdownSignal(),
+          )
+        ).pipe(
           Effect.uninterruptible,
           Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
         );
         if (!committed.ok) {
           return yield* Effect.promise(() => handleContextLoaderFailure(options, session, committed.error));
         }
+        if (committed.result.applicationDisposition !== "current_custody") {
+          session.state.clear();
+          return { type: "interrupted", discardHotState: true };
+        }
+        const durableMessages = applyAcceptedInputReceipt(
+          acceptedInput,
+          committed.drafts,
+          committed.result.receipt,
+        );
+        session.state.addPendingAttachments(committed.result.receipt.pendingAttachmentDelta);
         session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
         if (acceptedInput.kind === "inter_agent_message") {
           session.state.markInterAgentMessageReceiptCommitted();
@@ -808,62 +816,10 @@ function runAgentLoopEffect(
         session.state.setProviderRequestOutputSchemaJson(
           acceptedInput.kind === "approval_review" ? acceptedInput.outputSchemaJson : undefined,
         );
-        if (committed.result.type === "context") {
-          if (committed.result.runtimeBindingToken.length === 0) {
-            return yield* Effect.promise(() =>
-              handleContextLoaderFailure(
-                options,
-                session,
-                normalizeContextLoaderError({
-                  code: "schema_mismatch",
-                  sessionId: session.sessionId,
-                  reason: "accepted input commit did not return runtime binding token",
-                }),
-              )
-            );
-          }
-          session.updateIdentity({
-            workspaceId: acceptedInput.workspaceId,
-            sessionId: acceptedInput.sessionId,
-            sessionThreadId: acceptedInput.sessionThreadId,
-            ...(session.identity.parentThreadId !== undefined ? { parentThreadId: session.identity.parentThreadId } : {}),
-            ...(session.identity.threadRole !== undefined ? { threadRole: session.identity.threadRole } : {}),
-            bindingId: acceptedInput.bindingId,
-            bindingGeneration: acceptedInput.bindingGeneration,
-            targetPodUid: acceptedInput.targetPodUid,
-            runtimeBindingToken: committed.result.runtimeBindingToken,
-          });
-          session.state.contextManager.replaceMessages(committed.result.messages);
-          session.state.markPersistentContextLoaded();
-          if (committed.result.runtimeConfigPatch !== undefined) {
-            session.state.applyRuntimeConfigPatch(committed.result.runtimeConfigPatch);
-          }
-          for (const manifest of committed.result.mcpManifests ?? []) {
-            session.state.applyRuntimeConfigPatch(manifest);
-          }
-          seedRuntimeModel(session, options);
-          session.state.reconcilePendingAttachments(committed.result.pendingAttachments ?? []);
-          const pendingToolUseInstall = installLoadedPendingToolUses(session, options, committed.result.pendingToolUses, committed.result.messages);
-          if (!pendingToolUseInstall.ok) {
-            return yield* Effect.promise(() => handleContextLoaderFailure(options, session, pendingToolUseInstall.error));
-          }
-          acceptedContextCommitted = true;
-          pendingInput = { type: "empty" };
-        } else if (committed.result.type === "receipt") {
-          return yield* Effect.promise(() =>
-            handleContextLoaderFailure(
-              options,
-              session,
-              normalizeContextLoaderError({
-                code: "schema_mismatch",
-                sessionId: session.sessionId,
-                reason: "accepted input commit returned a pull-only receipt",
-              }),
-            )
-          );
-        } else {
-          pendingInput = committed.result;
-        }
+        pendingInput = durableMessages.length === 0
+          ? { type: "empty" }
+          : { type: "messages", messages: [...durableMessages] };
+        acceptedContextCommitted = true;
       }
       const pendingApprovalResume = yield* resumePendingApprovalToolJobsEffect(session, options);
       if (pendingApprovalResume.type === "failed") {
@@ -906,14 +862,15 @@ function runAgentLoopEffect(
       }
       appendPendingAttachmentOverflowNote(session, options);
       const committedMessages = session.state.contextManager.messages();
+      const providerContextMessages = session.state.contextManager.providerMessages();
       const transientModelMessages = session.state.transientModelMessages();
       let requestTransientModelMessages = transientModelMessages;
       const messages = [
-        ...committedMessages,
+        ...providerContextMessages,
         ...transientModelMessages,
       ];
       let currentModel = session.state.currentModel();
-      const projected = messages.length === 0 ? undefined : toGatewayRuntimeMessages(messages, currentModel);
+      const projected = messages.length === 0 ? undefined : toGatewayRuntimeMessages(messages);
       if (projected !== undefined && !projected.ok) {
         session.state.clear();
         return { type: "failed", error: projected.error, releaseSession: { reason: "crashed" } };
@@ -1123,38 +1080,6 @@ function runAgentLoopEffect(
   );
 }
 
-function loadInitialAgentLoopInput(
-  contextLoader: ContextLoaderInterface,
-  session: Session,
-  runtimeOptions: AgentLoopRuntimeOptions,
-  options: {
-    readonly loadPersistentContext: boolean;
-    readonly loadLegacyPendingInput: boolean;
-  },
-): Effect.Effect<
-  | { readonly ok: true; readonly history: readonly RuntimeMessage[] | undefined; readonly pendingInput: PendingInputResult }
-  | { readonly ok: false; readonly error: unknown }
-> {
-  return Effect.promise(async () => {
-    try {
-      const history = options.loadPersistentContext
-        ? contextLoader.buildThreadContext !== undefined
-          ? await observeContextLoad(runtimeOptions, "build_thread_context", () => contextLoader.buildThreadContext!(session.identity))
-          : await observeContextLoad(runtimeOptions, "build_context", () => contextLoader.buildContext(session.sessionId))
-        : undefined;
-      return {
-        ok: true,
-        history,
-        pendingInput: options.loadLegacyPendingInput
-          ? await observeContextLoad(runtimeOptions, "load_pending_input", () => contextLoader.loadPendingInput(session.sessionId))
-          : { type: "empty" },
-      };
-    } catch (error) {
-      return { ok: false, error };
-    }
-  });
-}
-
 function waitForRequestTurnRescheduleEffect(
   session: Session,
   options: AgentLoopRuntimeOptions,
@@ -1184,58 +1109,50 @@ async function commitAcceptedInput(
   contextLoader: ContextLoaderInterface,
   input: ReturnType<Session["state"]["peekAcceptedInput"]> extends infer T ? Exclude<T, undefined> : never,
   options: AgentLoopRuntimeOptions,
+  signal: AbortSignal,
 ): Promise<
-  | { readonly ok: true; readonly result: AcceptedInputCommitResult }
-  | { readonly ok: false; readonly error: unknown }
-> {
-  try {
-    if (contextLoader.commitAcceptedInput !== undefined) {
-      return { ok: true, result: await observeContextLoad(options, "commit_accepted_input", () => contextLoader.commitAcceptedInput!(input)) };
+  | {
+      readonly ok: true;
+      readonly result: AcceptedInputCommitResult;
+      readonly drafts: ReturnType<typeof acceptedInputDrafts>;
     }
-    return { ok: true, result: acceptedInputResultFromPayload(input) };
-  } catch (error) {
-    return { ok: false, error };
-  }
-}
-
-function acceptedInputResultFromPayload(
-  input: ReturnType<Session["state"]["peekAcceptedInput"]> extends infer T ? Exclude<T, undefined> : never,
-): AcceptedInputCommitResult {
-  if (input.kind === "inter_agent_message") {
-    return { type: "messages", messages: [input.message] };
-  }
-  if (input.kind === "approval_review") {
-    return { type: "messages", messages: [...input.promptItems] };
-  }
-  if (input.payloadJson.trim().length === 0 || input.payloadJson.trim() === "{}") {
-    return { type: "empty" };
-  }
-  const parsed = JSON.parse(input.payloadJson) as unknown;
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw normalizeContextLoaderError({ code: "schema_mismatch", sessionId: input.sessionId, reason: "accepted input payload is not an object" });
-  }
-  const messages = "messages" in parsed ? (parsed as { readonly messages?: unknown }).messages : undefined;
-  if (!Array.isArray(messages)) {
-    throw normalizeContextLoaderError({ code: "schema_mismatch", sessionId: input.sessionId, reason: "accepted input payload has no messages" });
-  }
-  const runtimeMessages = messages.map((message) => RuntimeMessageSchema.parse(message));
-  return { type: "messages", messages: runtimeMessages };
-}
-
-function loadPendingInputResult(
-  contextLoader: ContextLoaderInterface,
-  sessionId: string,
-): Effect.Effect<
-  | { readonly ok: true; readonly pendingInput: PendingInputResult }
   | { readonly ok: false; readonly error: unknown }
 > {
-  return Effect.promise(async () => {
+  const drafts = acceptedInputDrafts(input);
+  if (contextLoader.commitAcceptedInput === undefined) {
+    return {
+      ok: false,
+      error: normalizeContextLoaderError({
+        code: "unavailable",
+        sessionId: input.sessionId,
+        reason: "accepted input commit boundary is unavailable",
+      }),
+    };
+  }
+  for (let attempt = 1; ; attempt += 1) {
     try {
-      return { ok: true, pendingInput: await contextLoader.loadPendingInput(sessionId) };
+      return {
+        ok: true,
+        result: await observeContextLoad(
+          options,
+          "commit_accepted_input",
+          () => contextLoader.commitAcceptedInput!(input, { drafts }),
+        ),
+        drafts,
+      };
     } catch (error) {
-      return { ok: false, error };
+      const parsed = ContextLoaderErrorSchema.safeParse(error);
+      if (!parsed.success || !parsed.data.retryable) {
+        return { ok: false, error };
+      }
+      const backoffMs = SessionEventWriterRetryPolicy.backoffMs[
+        Math.min(attempt - 1, SessionEventWriterRetryPolicy.backoffMs.length - 1)
+      ] ?? 0;
+      if (backoffMs > 0 && !await options.runtime.sleep(backoffMs, signal)) {
+        return { ok: false, error };
+      }
     }
-  });
+  }
 }
 
 async function observeContextLoad<T>(
@@ -1465,13 +1382,13 @@ function runCompactionSummaryAttemptEffect(
     }
     let promptMessage: RuntimeMessage;
     try {
-      promptMessage = compactionPromptMessage(session, options, currentModel, messages, prompt);
+      promptMessage = compactionPromptMessage(session, options, messages, prompt);
     } catch {
       return yield* Effect.promise(() =>
         failedCompactionResult(session, options, compactionFailure(session, currentModel, "runtime_invalid_sequence", "runtime_contract_validation", "compaction prompt projection failed")),
       );
     }
-    const projectedPrompt = toGatewayRuntimeMessages([promptMessage], currentModel);
+    const projectedPrompt = toGatewayRuntimeMessages([promptMessage]);
     if (!projectedPrompt.ok) {
       return yield* Effect.promise(() =>
         failedCompactionResult(session, options, compactionFailure(session, currentModel, "runtime_invalid_sequence", "runtime_contract_validation", "compaction prompt projection failed")),
@@ -1679,7 +1596,7 @@ function runOwnedCompactionSummaryAttemptEffect(
         if (requestEndLostToStaleTerminal(end)) {
           return { type: "interrupted", discardHotState: true } as const;
         }
-        const checkpoint = compactionCheckpointMessage(session, options, currentModel, summary, recentContext);
+        const checkpoint = compactionCheckpointMessage(session, options, summary, recentContext);
         const projectionJson = JSON.stringify(checkpoint);
         const compacted = yield* Effect.promise(() =>
           appendEvent(options, session, {
@@ -1698,7 +1615,7 @@ function runOwnedCompactionSummaryAttemptEffect(
         const projectedCheckpoint = toGatewayRuntimeMessages([
           ...compactedMessages,
           ...projectedTransientModelMessages,
-        ], currentModel);
+        ]);
         if (!projectedCheckpoint.ok || projectedCheckpoint.messages.length === 0) {
           return yield* Effect.promise(() =>
             failedCompactionResult(session, options, compactionFailure(session, currentModel, "runtime_invalid_sequence", "runtime_contract_validation", "compaction checkpoint projection failed")),
@@ -1912,7 +1829,6 @@ function compactionFailureWithRetryStatus(
 function compactionPromptMessage(
   session: Session,
   options: AgentLoopRuntimeOptions,
-  currentModel: { readonly providerId: string; readonly modelId: string },
   messages: readonly RuntimeMessage[],
   prompt: string,
 ): RuntimeMessage {
@@ -1926,8 +1842,6 @@ function compactionPromptMessage(
     sequence: highestMessageSequence(messages) + 1,
     status: "completed",
     createdAt,
-    providerId: currentModel.providerId,
-    modelId: currentModel.modelId,
     parts: [{
       id: options.runtime.createId("part"),
       sessionId: session.sessionId,
@@ -1946,7 +1860,6 @@ function compactionPromptMessage(
 function compactionCheckpointMessage(
   session: Session,
   options: AgentLoopRuntimeOptions,
-  currentModel: { readonly providerId: string; readonly modelId: string },
   summary: string,
   recentContext: string,
 ): RuntimeMessage {
@@ -1963,8 +1876,6 @@ function compactionCheckpointMessage(
     status: "completed",
     createdAt,
     updatedAt: createdAt,
-    providerId: currentModel.providerId,
-    modelId: currentModel.modelId,
     parts: [{
       id: partId,
       sessionId: session.sessionId,
@@ -2391,7 +2302,7 @@ function runProviderTurnEffect(
     }
     const source = { providerId: request.model?.providerId ?? "", modelId: request.model?.modelId ?? "" };
     const messageId = options.runtime.createId("message");
-    const shell = assistantShell(session, options, source, messageId);
+    const shell = assistantShell(session, options, messageId);
     if (session.state.runtimeShutdownRequested()) {
       return providerTurnInterrupted();
     }
@@ -2437,6 +2348,7 @@ function runProviderTurnEffect(
       processor = (options.createProcessor ?? ((processorOptions: SessionProcessorOptions) => new SessionProcessor(processorOptions)))({
         messageId,
         modelRequestId: request.modelRequestId,
+        workspaceId: session.identity.workspaceId,
         sessionId: session.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
         message: shell,
@@ -3375,6 +3287,7 @@ function createPendingApprovalSettlementProcessor(
   const processor = (options.createProcessor ?? ((processorOptions: SessionProcessorOptions) => new SessionProcessor(processorOptions)))({
     messageId: pending.assistantMessage.id,
     modelRequestId: pending.modelRequestId,
+    workspaceId: session.identity.workspaceId,
     sessionId: session.sessionId,
     sessionThreadId: session.identity.sessionThreadId,
     message: pending.assistantMessage,
@@ -3413,8 +3326,6 @@ function runtimeMessageInfoForProcessor(message: RuntimeMessage): RuntimeMessage
     ...(message.error !== undefined ? { error: message.error } : {}),
     ...(message.finishReason !== undefined ? { finishReason: message.finishReason } : {}),
     ...(message.usage !== undefined ? { usage: message.usage } : {}),
-    ...(message.providerId !== undefined ? { providerId: message.providerId } : {}),
-    ...(message.modelId !== undefined ? { modelId: message.modelId } : {}),
     ...(message.responseId !== undefined ? { responseId: message.responseId } : {}),
   };
 }
@@ -4795,7 +4706,7 @@ function interruptAndJoinToolFibersEffect(state: ProviderTurnStreamState): Effec
 
 function completedRunResult(session: Session): AgentLoopRunResult {
   const messages = session.state.contextManager.messages();
-  const projected = messages.length === 0 ? undefined : toGatewayRuntimeMessages(messages, session.state.currentModel());
+  const projected = messages.length === 0 ? undefined : toGatewayRuntimeMessages(messages);
   if (projected !== undefined && !projected.ok) {
     session.state.clear();
     return { type: "failed", error: projected.error, releaseSession: { reason: "crashed" } };
@@ -4900,6 +4811,7 @@ async function appendTerminalEventsBestEffort(
   if (isRuntimeTerminationFailure(failure)) {
     const writeId = options.runtime.createId("event_write");
     const result = await commitRuntimeTerminationWithRetry(options, {
+      workspaceId: session.identity.workspaceId,
       sessionId: session.sessionId,
       sessionThreadId: session.identity.sessionThreadId,
       writeId,
@@ -4957,6 +4869,7 @@ async function appendIdleEventWithWriteId(
         }),
       }
       : await finishIdleWithRetry(options, {
+        workspaceId: session.identity.workspaceId,
         sessionId: session.sessionId,
         sessionThreadId: session.identity.sessionThreadId,
         writeId,
@@ -5177,6 +5090,7 @@ async function appendModelRequestEndEvent(
         }]
   );
   const envelope: SessionEventWriterRequestEndEnvelope = {
+    workspaceId: session.identity.workspaceId,
     sessionId: session.sessionId,
     sessionThreadId: session.identity.sessionThreadId,
     writeId,
@@ -5375,6 +5289,7 @@ async function appendEventWithWriteId(
   const startedAt = options.runtime.monotonicMs();
   try {
     const result = await options.sessionEventWriter.append({
+      workspaceId: session.identity.workspaceId,
       sessionId: session.sessionId,
       sessionThreadId: session.identity.sessionThreadId,
       writeId,
@@ -5412,7 +5327,6 @@ function storeControls(
 function assistantShell(
   session: Session,
   options: AgentLoopRuntimeOptions,
-  source: RuntimeProcessorSource,
   messageId: string,
 ): RuntimeMessageInfo {
   return {
@@ -5423,8 +5337,6 @@ function assistantShell(
     sequence: nextRuntimeMessageSequence(session),
     status: "streaming",
     createdAt: options.runtime.now(),
-    providerId: source.providerId,
-    modelId: source.modelId,
   };
 }
 

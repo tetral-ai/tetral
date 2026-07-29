@@ -16,6 +16,7 @@ import {
   buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
   buildCoreHostsBridgeRuntimeMessage as bridgeRuntimeMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
+import { acceptedInputReceipt } from "../../../core/test/unit/runtime-declaration-fixtures.js";
 
 describe("Runtime core host production assembly", () => {
   test("SessionRunHost and SessionManager keep command wakeup and cleanup local to Runtime Pod hot state", async () => {
@@ -29,7 +30,7 @@ describe("Runtime core host production assembly", () => {
       expect(accepted).toMatchObject({ ok: true, sessionId: "sesn_1" });
 
       const cleanup = await waitForCleanup(hosts.cleanupRunHost, "sesn_1");
-      expect(cleanup).toEqual({ ok: true, sessionId: "sesn_1", cleaned: true });
+      expect(cleanup).toMatchObject({ ok: true, sessionId: "sesn_1" });
     } finally {
       await hosts.close();
     }
@@ -68,18 +69,16 @@ describe("Runtime core host production assembly", () => {
               pendingAgentMail: options?.agentMailSourceThreadId !== undefined || !durableReceipt ? [mail] : [],
             };
           },
-          commitAcceptedInput: async (_input, options) => {
+          commitAcceptedInput: async (input, options) => {
             commitAttempts += 1;
-            expect(options).toEqual({ registerScope: false, hydrateContext: false });
+            expect(options).toBeUndefined();
+            expect(options?.drafts).toBeUndefined();
             const inputDisposition = durableReceipt ? "duplicate" as const : "committed" as const;
             if (!durableReceipt) {
               durableReceipt = true;
               durableReceiptWrites += 1;
             }
-            return {
-              type: "receipt" as const,
-              inputDisposition,
-            };
+            return acceptedInputReceipt(input, inputDisposition);
           },
         },
       }),
@@ -135,18 +134,16 @@ describe("Runtime core host production assembly", () => {
               pendingAgentMail: options?.agentMailSourceThreadId === childId || !durableReceipt ? [mail] : [],
             };
           },
-          commitAcceptedInput: async (_input, options) => {
+          commitAcceptedInput: async (input, options) => {
             commitAttempts += 1;
-            expect(options).toEqual({ registerScope: false, hydrateContext: false });
+            expect(options).toBeUndefined();
+            expect(options?.drafts).toBeUndefined();
             if (!durableReceipt) {
               durableReceipt = true;
               durableReceiptWrites += 1;
               throw new Error("receipt response lost");
             }
-            return {
-              type: "receipt" as const,
-              inputDisposition: "duplicate" as const,
-            };
+            return acceptedInputReceipt(input, "duplicate");
           },
         },
       }),
@@ -222,7 +219,7 @@ describe("Runtime core host production assembly", () => {
       },
     });
     try {
-      await expect(preload(childId)).rejects.toThrow("injected first resume preload failure");
+      expect(await preload(childId)).toMatchObject({ ok: false, reason: "context_load_failed" });
       expect(await hosts.subAgentRunHost.inspectThread({
         ...commandScope(sessionId),
         sessionThreadId: childId,
@@ -273,12 +270,7 @@ describe("Runtime core host production assembly", () => {
             if (commitAttempts === 1) {
               throw new Error("injected mail receipt persistence failure");
             }
-            return {
-              type: "context" as const,
-              messages: [input.kind === "inter_agent_message" ? input.message : mail.message],
-              runtimeBindingToken: "runtime-binding-token-mail-failure",
-              inputDisposition: "committed" as const,
-            };
+            return acceptedInputReceipt(input);
           },
         },
       }),
@@ -400,8 +392,9 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
-  test("message command cold-load completes before ThreadEntry is inserted into hot state", async () => {
+  test("message command exposes an installing ThreadEntry during its sole cold load", async () => {
     const observations: string[] = [];
+    let loadCount = 0;
     let hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>> | undefined;
     hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -409,6 +402,7 @@ describe("Runtime core host production assembly", () => {
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async (command) => {
+            loadCount += 1;
             observations.push("loadThreadContext");
             const inspected = await hosts?.subAgentRunHost.inspectThread(command);
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
@@ -425,8 +419,16 @@ describe("Runtime core host production assembly", () => {
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold"));
 
       expect(accepted).toMatchObject({ ok: true, sessionId: "sesn_cold", created: false });
-      expect(observations).toEqual(["loadThreadContext", "observed:false"]);
+      expect(observations).toEqual(["loadThreadContext", "observed:true"]);
       expect(inspected).toMatchObject({ ok: true, sessionId: "sesn_cold", sessionThreadId: "thrd_1", observed: true });
+      expect(await hosts.commandRunHost.handleAcceptInput({
+        ...acceptedInput("sesn_cold"),
+        runtimeInputId: "rin_warm",
+        eventIds: ["sevt_warm"],
+        sequenceFrom: 2,
+        sequenceTo: 2,
+      })).toMatchObject({ ok: true, sessionId: "sesn_cold" });
+      expect(loadCount).toBe(1);
     } finally {
       await hosts.close();
     }
@@ -473,6 +475,8 @@ describe("Runtime core host production assembly", () => {
       await loadStarted.promise;
       const config = hosts.commandRunHost.handleRuntimeConfigPatch("sesn_singleflight", {
         ...scope,
+        bindingId: "bind_singleflight_replacement",
+        bindingGeneration: 2,
         runtimeInputId: "rin_config_singleflight",
         generation: 2,
         payloadJson: "{\"config_generation\":2}",
@@ -487,7 +491,7 @@ describe("Runtime core host production assembly", () => {
         bridgeProjection: bridgeRuntimeMessage("sesn_singleflight", "task completed"),
       });
       await Promise.resolve();
-      expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: false });
+      expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: true });
 
       releaseLoad.resolve();
       const [messageResult, configResult, taskResult] = await Promise.all([message, config, task]);
@@ -511,12 +515,7 @@ describe("Runtime core host production assembly", () => {
     const appended: SessionEvent[] = [];
     const terminalResultAppended = deferred<void>();
     const pendingInput = { query: "tetral" };
-    const {
-      providerId: _providerId,
-      modelId: _modelId,
-      ...loadedMessage
-    } = userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello", "receipt-only", "receipt-only");
-    const loadedMessages = [loadedMessage];
+    const loadedMessages = [userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello")];
     const replacementScope = {
       ...commandScope("sesn_cold_confirm"),
       bindingId: "bind_2",
@@ -664,7 +663,7 @@ describe("Runtime core host production assembly", () => {
     const toolExecuted = deferred<void>();
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
-      userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 0, "hello", "fake", "fake-chat"),
+      userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 0, "hello"),
       assistantRunningToolMessage("sesn_interrupt_confirm", "assistant-interrupt-confirm", 1, "tool-1", "Write", "sevt_tool_1", pendingInput),
     ];
 
@@ -779,7 +778,7 @@ describe("Runtime core host production assembly", () => {
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_config"));
 
       expect(result).toEqual({ ok: true, sessionId: "sesn_cold_config", created: false, applied: true });
-      expect(observations).toEqual(["load:rin_config_cold", "observed:false", "refresh:thrd_1:true"]);
+      expect(observations).toEqual(["load:rin_config_cold", "observed:true", "refresh:thrd_1:true"]);
       expect(inspected).toMatchObject({ ok: true, observed: true });
     } finally {
       await hosts?.close();
@@ -820,7 +819,7 @@ describe("Runtime core host production assembly", () => {
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_task"));
 
       expect(result).toEqual({ ok: true, sessionId: "sesn_cold_task", created: false, applied: true });
-      expect(observations).toEqual(["load:rin_task_cold", "observed:false"]);
+      expect(observations).toEqual(["load:rin_task_cold", "observed:true"]);
       expect(inspected).toMatchObject({ ok: true, observed: true });
     } finally {
       await hosts?.close();
@@ -873,7 +872,9 @@ function acceptedInput(sessionId: string) {
     eventIds: ["sevt_1"],
     sequenceFrom: 1,
     sequenceTo: 1,
-    payloadJson: "{}",
+    payloadJson: JSON.stringify({
+      messages: [userMessage(sessionId, "msg_rin_1", 1, "test input")],
+    }),
   };
 }
 
@@ -893,12 +894,11 @@ function testCoreDependencies(
 ): Pick<RuntimeCoreHostsOptions, "contextLoader" | "agentLoop"> {
   return {
     contextLoader: {
-      buildContext: async () => [],
-      loadPendingInput: async () => ({ type: "empty" }),
       loadThreadContext: async () => ({
         messages: [],
         runtimeBindingToken: "runtime-binding-token-test",
       }),
+      commitAcceptedInput: async (input) => acceptedInputReceipt(input),
       ...overrides.contextLoader,
     },
     agentLoop: {

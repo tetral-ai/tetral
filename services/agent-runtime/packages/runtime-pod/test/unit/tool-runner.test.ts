@@ -1757,9 +1757,11 @@ describe("RuntimePodToolRunner", () => {
     const result = await runner.runTool(request);
 
     expect(result.type).toBe("completed");
-    const seed = JSON.parse(bridge.createChildThreadRequests[0]?.forkSeedJson ?? "{}") as {
+    const seed = JSON.parse(bridge.createChildThreadRequests[0]?.threadContextPrefixJson ?? "{}") as {
+      readonly parent_boundary_event_id?: string;
       readonly runtime_messages_snapshot?: readonly RuntimeMessage[];
     };
+    expect(seed.parent_boundary_event_id).toBe(request.toolUseEventId);
     expect(seed.runtime_messages_snapshot?.map((message) => message.id)).toEqual(["user-latest", "assistant-latest"]);
   });
 
@@ -2066,7 +2068,8 @@ function makeRunner(options: {
     mcpConnectorClient: (options.mcp ?? new RecordingMcpConnectorClient()).client(),
     metadataFactory: options.metadataFactory ?? (async () => new Metadata()),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
-    scopeForThread: (sessionId: string, sessionThreadId: string) => sessionId === "sesn_1" && sessionThreadId === "thrd_1"
+    scopeForThread: (workspaceId: string, sessionId: string, sessionThreadId: string) =>
+      workspaceId === "wksp_1" && sessionId === "sesn_1" && sessionThreadId === "thrd_1"
       ? {
         requestId: "req_1",
         workspaceId: "wksp_1",

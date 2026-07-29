@@ -124,7 +124,7 @@ export interface RuntimePodToolRunnerOptions {
   readonly webAddress: string;
   readonly mcpConnectorAddress: string;
   readonly tokenPath: string;
-  readonly scopeForThread: (sessionId: string, sessionThreadId: string) => RuntimeAcceptedInputState | undefined;
+  readonly scopeForThread: (workspaceId: string, sessionId: string, sessionThreadId: string) => RuntimeAcceptedInputState | undefined;
   readonly subAgentRunHost?: () => RuntimeSubAgentRunHost | undefined;
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   readonly sleep?: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
@@ -565,11 +565,10 @@ export class RuntimePodToolRunner {
       sessionId: request.sessionId,
       messageId: stableId("msg", `subagent-message:${request.toolUseEventId}:0`),
       text: prompt,
-      providerId: currentModel.providerId,
-      modelId: currentModel.modelId,
     });
-    const forkSeedJson = JSON.stringify({
+    const threadContextPrefixJson = JSON.stringify({
       source_parent_thread_id: request.sessionThreadId,
+      parent_boundary_event_id: request.toolUseEventId,
       source_tool_use_event_id: request.toolUseEventId,
       fork_turns: forkTurns,
       runtime_messages_snapshot: forkedMessages(request.committedMessages, forkTurns),
@@ -586,7 +585,7 @@ export class RuntimePodToolRunner {
         agentType,
         sourceToolUseEventId: request.toolUseEventId,
         forkTurns,
-        forkSeedJson,
+        threadContextPrefixJson,
         isTrunk: false,
         reviewerReviewId: "",
       }, metadata, request.abortSignal);
@@ -694,8 +693,6 @@ export class RuntimePodToolRunner {
             sessionId: request.sessionId,
             messageId: stableId("msg", `subagent-message:${request.toolUseEventId}:0`),
             text: messageText,
-            providerId: currentModel.providerId,
-            modelId: currentModel.modelId,
           });
           const delivery = deliveryIdentity(request.toolUseEventId, currentChild.sessionThreadId, 0);
           const sent = await writeThreadMessageSent(this.bridgeClient, parentScope, request, delivery, taskName, currentChild.sessionThreadId, childMessage, metadata, request.abortSignal);
@@ -1128,7 +1125,7 @@ export class RuntimePodToolRunner {
   }
 
   private scope(request: RuntimeToolExecutionRequest): RuntimeScope | undefined {
-    const input = this.options.scopeForThread(request.sessionId, request.sessionThreadId);
+    const input = this.options.scopeForThread(request.workspaceId, request.sessionId, request.sessionThreadId);
     if (input === undefined || input.sessionThreadId !== request.sessionThreadId) {
       return undefined;
     }
@@ -1277,8 +1274,6 @@ function runtimeUserMessage(input: {
   readonly sessionId: string;
   readonly messageId: string;
   readonly text: string;
-  readonly providerId: string;
-  readonly modelId: string;
 }): RuntimeMessage {
   const now = new Date().toISOString();
   return RuntimeMessageSchema.parse({
@@ -1289,8 +1284,6 @@ function runtimeUserMessage(input: {
     sequence: 0,
     status: "completed",
     createdAt: now,
-    providerId: input.providerId,
-    modelId: input.modelId,
     parts: [
       {
         id: `${input.messageId}_text`,

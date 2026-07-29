@@ -15,7 +15,7 @@ import { SessionRunHostCleanupController } from "./cleanup-controller.js";
 import type { RuntimePodBootstrap } from "./lifecycle.js";
 import type { RuntimeGrpcServer } from "./grpc-server.js";
 import type { RuntimeHttpServer } from "./http-server.js";
-import type { RuntimeAcceptedInputRegistrar, RuntimeAuthenticator, RuntimeControlInputCommitter, RuntimeSessionRunHost, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
+import type { RuntimeAuthenticator, RuntimeControlInputCommitter, RuntimeSessionRunHost, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import type { RuntimePodConfig } from "./config.js";
 import type { RuntimePodLogger } from "./logger.js";
@@ -31,7 +31,6 @@ export interface RuntimePodAppOptions {
   readonly logger: RuntimePodLogger;
   readonly tokenReviewClient: RuntimeTokenReviewClient;
   readonly commandRunHost: RuntimeSessionRunHost;
-  readonly acceptedInputRegistrar?: RuntimeAcceptedInputRegistrar;
   readonly controlInputCommitter?: RuntimeControlInputCommitter;
   readonly taskNotificationCommitter?: RuntimeTaskNotificationCommitter;
   readonly cleanupRunHost: RuntimeCoreCleanupHost;
@@ -70,7 +69,6 @@ export function createRuntimePodApp(options: RuntimePodAppOptions): RuntimePodAp
     allowedBridge: { namespace: options.config.bridge.namespace, name: options.config.bridge.serviceAccount },
     authenticator,
     runHost: options.commandRunHost,
-    ...(options.acceptedInputRegistrar !== undefined ? { acceptedInputRegistrar: options.acceptedInputRegistrar } : {}),
     ...(options.controlInputCommitter !== undefined ? { controlInputCommitter: options.controlInputCommitter } : {}),
     ...(options.taskNotificationCommitter !== undefined ? { taskNotificationCommitter: options.taskNotificationCommitter } : {}),
     cleanupController: new SessionRunHostCleanupController(options.cleanupRunHost),

@@ -232,10 +232,10 @@ func TestPostgreSQLBridgeAPIStoreRunToolPersistsBackgroundTaskBeforeAck(t *testi
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, idempotency_key,
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
 			request_hash, ack_status, result_json, stdin_write_seq, created_at, updated_at
 		) VALUES (
-			'default', 'sesn_bridge_tool', 'thr_bridge_tool', $1, $2, $3,
+			'default', 'sesn_bridge_tool', 'thr_bridge_tool', $1, $1, $2, $3,
 			'committed', $4, 3, '2026-01-01T00:00:31Z', '2026-01-01T00:00:31Z'
 		)`,
 		bridgeOpSendCommandInput,
@@ -656,9 +656,9 @@ func TestPostgreSQLBridgeAPIStoreReadCommandReplayRequiresBackgroundTaskRow(t *t
 	requestHash := bridgeRequestHash(bridgeOpReadCommandResult, key, payloadHashPart)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, idempotency_key,
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
 			request_hash, ack_status, result_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'committed', $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ($1, $2, $3, $4, $4, $5, $6, 'committed', $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		"default",
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),

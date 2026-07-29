@@ -16,7 +16,8 @@ const runner = new RuntimePodToolRunner({
   mcpConnectorAddress: "127.0.0.1:1",
   tokenPath: "/dev/null",
   metadataFactory: async () => new Metadata(),
-  scopeForThread: (sessionId, sessionThreadId) => sessionId === "sesn_real_bash" && sessionThreadId === "thr_real_bash" ? {
+  scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
+    workspaceId === "wksp_real_bash" && sessionId === "sesn_real_bash" && sessionThreadId === "thr_real_bash" ? {
     requestId: "req_real_bash",
     workspaceId: "default",
     sessionId,

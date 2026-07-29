@@ -18,7 +18,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { RuntimeApprovalReviewer, RuntimeApprovalReviewRequest, RuntimeModelRef } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
-import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeJsonValue, RuntimeMessage, SessionEvent } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import type { ReviewerExecutionToken } from "@tetral/agent-runtime-core/src/session/session-manager.js";
@@ -82,7 +82,7 @@ export interface ApprovalReviewerThreadCreation {
   readonly reviewId: string;
   readonly reviewerThreadId: string;
   readonly isTrunk: boolean;
-  readonly forkSeedJson: string;
+  readonly threadContextPrefixJson: string;
 }
 
 /**
@@ -140,7 +140,7 @@ export function createRuntimeApprovalReviewer(
       reviewId,
       reviewerThreadId: trunkThreadId,
       isTrunk: true,
-      forkSeedJson: "",
+      threadContextPrefixJson: "",
     };
     let ensured: { readonly ok: true } | { readonly ok: false; readonly message: string };
     ensured = yield* Effect.promise(() => options.threadCreator.createApprovalReviewerThread(trunkCreation)).pipe(
@@ -152,6 +152,11 @@ export function createRuntimeApprovalReviewer(
 
     const lease = manager.beginReview(reviewId);
     const trunkSnapshot = manager.trunkSnapshot();
+    const currentParentBoundaryEventId = parentTranscriptBoundaryEventId(request);
+    if (currentParentBoundaryEventId === undefined) {
+      lease.release();
+      return failWithLog("runtime_failure", "approval reviewer parent transcript has no durable boundary");
+    }
     const executionThreadId = lease.kind === "trunk"
       ? trunkThreadId
       : stableId("thrd_aprv_sidecar", request.workspaceId, request.sessionId, request.sessionThreadId, reviewId);
@@ -162,11 +167,12 @@ export function createRuntimeApprovalReviewer(
           reviewId,
           reviewerThreadId: executionThreadId,
           isTrunk: false,
-          forkSeedJson: JSON.stringify({
+          threadContextPrefixJson: JSON.stringify({
             source_parent_thread_id: request.sessionThreadId,
+            parent_boundary_event_id: trunkSnapshot?.parentBoundaryEventId ?? currentParentBoundaryEventId,
             review_id: reviewId,
             fork_turns: "all",
-            runtime_messages_snapshot: trunkSnapshot ?? [],
+            runtime_messages_snapshot: trunkSnapshot?.messages ?? [],
           }),
         };
     const feed = lease.kind === "sidecar" && trunkSnapshot === undefined
@@ -383,7 +389,11 @@ export function createRuntimeApprovalReviewer(
         return failWithLog("runtime_failure", "approval reviewer decision was not acknowledged");
       }
       if (lease.kind === "trunk") {
-        manager.completeTrunkReview(request.parentTranscript, snapshot.messages);
+        manager.completeTrunkReview(
+          request.parentTranscript,
+          snapshot.messages,
+          currentParentBoundaryEventId,
+        );
       } else {
         yield* closeApprovalReviewerSidecarEffect(host, options.threadCreator, executionCreation, control, options.logger, request, reviewId);
       }
@@ -430,6 +440,16 @@ function approvalReviewCreatedAt(request: RuntimeApprovalReviewRequest, now: () 
   return request.currentRequestTurnMessages[0]?.createdAt
     ?? request.parentTranscript.messages.at(-1)?.createdAt
     ?? now();
+}
+
+function parentTranscriptBoundaryEventId(request: RuntimeApprovalReviewRequest): string | undefined {
+  for (let index = request.parentTranscript.messages.length - 1; index >= 0; index -= 1) {
+    const parsed = DurableRuntimeMessageSchema.safeParse(request.parentTranscript.messages[index]);
+    if (parsed.success) {
+      return parsed.data.owningEventId;
+    }
+  }
+  return undefined;
 }
 
 function reviewThreadControl(request: RuntimeApprovalReviewRequest, reviewerThreadId: string, reviewId: string): RuntimeThreadControlState {
@@ -518,8 +538,6 @@ function approvalReviewPromptMessage(
     sequence: 0,
     status: "completed",
     createdAt,
-    providerId: reviewerModel.providerId,
-    modelId: reviewerModel.modelId,
     parts: [{
       id: stableId("part", messageId, "text"),
       sessionId: request.sessionId,

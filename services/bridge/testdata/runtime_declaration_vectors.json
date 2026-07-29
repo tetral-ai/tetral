@@ -1,0 +1,26 @@
+{
+  "commit_inputs": {
+    "session_thread_id": "thr_1",
+    "runtime_input_id": "rin_1",
+    "event_ids": ["sevt_1"],
+    "sequence_from": 7,
+    "sequence_to": 7,
+    "input_kind": "messages",
+    "draft": {
+      "runtime_local_id": "stid_edcc6aa88ddf349e058ade77c0f169d73c6f3c0343d99cef1adc640fd486d82e",
+      "source_kind": "messages",
+      "source_id": "rin_1",
+      "source_event_id": "sevt_1",
+      "draft_kind": "user_input",
+      "ordinal": 0,
+      "message_info_json": "{\"status\":\"completed\",\"origin\":\"user\",\"role\":\"user\"}",
+      "part": {
+        "runtime_local_part_id": "stid_080e946f2be6e403aaaeb2afab207746171d95850660f612af67de33f1ed5828",
+        "part_kind": "text",
+        "ordinal": 0,
+        "part_json": "{\"status\":\"completed\",\"truncated\":false,\"text\":\"hello\",\"type\":\"text\"}"
+      }
+    },
+    "digest": "845aa5714fcc268c810ac3303f17db88b2511266112cc754d7273003358a8631"
+  }
+}

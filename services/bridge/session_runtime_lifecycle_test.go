@@ -112,6 +112,9 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 		SequenceFrom:        sender.requests[0].GetSequenceFrom(),
 		SequenceTo:          sender.requests[0].GetSequenceTo(),
 		HotContextPatchJson: sender.requests[0].GetPayloadJson(),
+		Drafts: []*bridgev1.RuntimeMessageDraft{
+			bridgeUserInputDraftForTest(string(ws), sessionID, threadID, runtimeInputJob.RuntimeInputID, messageEventID, "build report"),
+		},
 	}); err != nil {
 		t.Fatalf("CommitInputs: %v", err)
 	}

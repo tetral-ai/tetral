@@ -1161,7 +1161,6 @@ type createChildThreadResult struct {
 	ChildThreadID         string `json:"child_thread_id"`
 	ThreadCreatedEventID  string `json:"thread_created_event_id"`
 	ThreadCreatedSequence int64  `json:"thread_created_sequence"`
-	ForkSeedMessageID     string `json:"fork_seed_message_id,omitempty"`
 }
 
 func scopeForThread(scope *bridgev1.RuntimeScope, threadID string) *bridgev1.RuntimeScope {

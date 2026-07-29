@@ -104,7 +104,6 @@ func TestBridgeSessionMessageProjectionInsertsAreConflictSafe(t *testing.T) {
 	}
 
 	for filename, signatures := range map[string][]string{
-		"bridge_api_children.go": {"func insertForkSeedMessageTx"},
 		"bridge_api_events.go": {
 			"func insertToolResultMessageProjectionTx",
 			"func insertSessionMessageProjectionTx",

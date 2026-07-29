@@ -160,13 +160,15 @@ export async function buildRuntimePodCommandDependencies(input: {
     address: input.config.bridgeApiGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
-    releaseThreadScope: (sessionId, sessionThreadId) => bridgeContextLoader.releaseAcceptedInputForThread(sessionId, sessionThreadId),
+    releaseThreadScope: (workspaceId, sessionId, sessionThreadId) =>
+      bridgeContextLoader.releaseAcceptedInputForThread(workspaceId, sessionId, sessionThreadId),
   });
   const internalToolRepairCommitter = new BridgeAPIInternalToolRepairCommitter({
     address: input.config.bridgeApiGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
-    scopeForThread: (sessionId, sessionThreadId) => bridgeContextLoader.acceptedInputForThread(sessionId, sessionThreadId),
+    scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
+      bridgeContextLoader.acceptedInputForThread(workspaceId, sessionId, sessionThreadId),
   });
   let subAgentRunHost: RuntimeCoreHosts["subAgentRunHost"] | undefined;
   const toolRunner = new RuntimePodToolRunner({
@@ -175,7 +177,8 @@ export async function buildRuntimePodCommandDependencies(input: {
     mcpConnectorAddress: input.config.mcpConnectorGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
-    scopeForThread: (sessionId, sessionThreadId) => bridgeContextLoader.acceptedInputForThread(sessionId, sessionThreadId),
+    scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
+      bridgeContextLoader.acceptedInputForThread(workspaceId, sessionId, sessionThreadId),
     subAgentRunHost: () => subAgentRunHost,
   });
   const streamTimeoutOptions = providerStreamTimeoutOptions(input.config);
@@ -206,7 +209,8 @@ export async function buildRuntimePodCommandDependencies(input: {
         address: input.config.bridgeApiGrpcAddress,
         tokenPath: input.config.outboundInternalGrpcTokenPath,
         metadataFactory: outboundMetadataFactory,
-        scopeForThread: (sessionId, sessionThreadId) => bridgeContextLoader.acceptedInputForThread(sessionId, sessionThreadId),
+        scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
+          bridgeContextLoader.acceptedInputForThread(workspaceId, sessionId, sessionThreadId),
       }),
       runtime: {
         now: () => new Date().toISOString(),
@@ -286,9 +290,6 @@ export async function buildRuntimePodCommandDependencies(input: {
     logger: input.logger,
     tokenReviewClient,
     commandRunHost: coreHosts.commandRunHost,
-    acceptedInputRegistrar: {
-      registerAcceptedInput: (command) => bridgeContextLoader.registerAcceptedInput({ ...command, kind: "messages" as const }),
-    },
     controlInputCommitter,
     taskNotificationCommitter,
     cleanupRunHost: coreHosts.cleanupRunHost,

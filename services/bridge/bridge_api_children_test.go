@@ -2,7 +2,6 @@ package agentruntimebridge
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -28,18 +27,19 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadVisibilityFollowsRole(t *testi
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_visibility", "bind_bridge_child_visibility", 1, "pod_uid_child_visibility")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_child_visibility", "thr_bridge_child_parent", "bind_bridge_child_visibility", 1, "pod_uid_child_visibility")
-	forkSeedJSON := bridgeForkSeedJSON(t, "sesn_bridge_child_visibility", "msg_bridge_child_seed", "seed context", "thr_bridge_child_parent", "evt_bridge_child_public_spawn", "all")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_visibility", "thr_bridge_child_parent", "evt_bridge_child_public_spawn", 1, "agent.tool_use", `{}`)
+	prefixJSON := bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_visibility", "msg_bridge_child_seed", "seed context", "thr_bridge_child_parent", "evt_bridge_child_public_spawn", "all")
 
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_child_parent",
-		ChildThreadId:        "thr_bridge_child_public",
-		Role:                 "subagent",
-		TaskName:             "public child",
-		AgentType:            "general",
-		SourceToolUseEventId: "evt_bridge_child_public_spawn",
-		ForkTurns:            "all",
-		ForkSeedJson:         forkSeedJSON,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_child_parent",
+		ChildThreadId:           "thr_bridge_child_public",
+		Role:                    "subagent",
+		TaskName:                "public child",
+		AgentType:               "general",
+		SourceToolUseEventId:    "evt_bridge_child_public_spawn",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: prefixJSON,
 	}); err != nil {
 		t.Fatalf("CreateChildThread subagent: %v", err)
 	}
@@ -133,41 +133,41 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadVisibilityFollowsRole(t *testi
 	}
 }
 
-func TestValidateChildThreadRequestRejectsInvalidReviewerForkSeed(t *testing.T) {
+func TestValidateChildThreadRequestRejectsInvalidReviewerThreadContextPrefix(t *testing.T) {
 	scope := bridgeAPIScope("sesn_bridge_reviewer_validation", "thr_bridge_reviewer_parent", "bind_bridge_reviewer_validation", 1, "pod_uid_reviewer_validation")
 	reviewID := "arvw_bridge_reviewer_validation"
 	request := &bridgev1.CreateChildThreadRequest{
-		Scope:            scope,
-		ParentThreadId:   "thr_bridge_reviewer_parent",
-		ChildThreadId:    approvalReviewerSidecarThreadID(scope, "thr_bridge_reviewer_parent", reviewID),
-		Role:             "approval_reviewer",
-		AgentType:        "approval_reviewer",
-		ForkTurns:        "all",
-		ForkSeedJson:     bridgeReviewerForkSeedJSON(t, "thr_bridge_reviewer_parent", reviewID, nil),
-		ReviewerReviewId: reviewID,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_reviewer_parent",
+		ChildThreadId:           approvalReviewerSidecarThreadID(scope, "thr_bridge_reviewer_parent", reviewID),
+		Role:                    "approval_reviewer",
+		AgentType:               "approval_reviewer",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: bridgeReviewerThreadContextPrefixJSON(t, "thr_bridge_reviewer_parent", "evt_bridge_reviewer_parent_boundary", reviewID, nil),
+		ReviewerReviewId:        reviewID,
 	}
 
 	tests := []struct {
-		name         string
-		forkTurns    string
-		forkSeedJSON string
+		name       string
+		forkTurns  string
+		prefixJSON string
 	}{
 		{
-			name:         "zero fork turns",
-			forkTurns:    "0",
-			forkSeedJSON: `{"source_parent_thread_id":"thr_bridge_reviewer_parent","review_id":"arvw_bridge_reviewer_validation","fork_turns":"0","runtime_messages_snapshot":[]}`,
+			name:       "zero fork turns",
+			forkTurns:  "0",
+			prefixJSON: `{"source_parent_thread_id":"thr_bridge_reviewer_parent","review_id":"arvw_bridge_reviewer_validation","fork_turns":"0","runtime_messages_snapshot":[]}`,
 		},
 		{
-			name:         "trailing JSON value",
-			forkTurns:    "all",
-			forkSeedJSON: request.GetForkSeedJson() + `{}`,
+			name:       "trailing JSON value",
+			forkTurns:  "all",
+			prefixJSON: request.GetThreadContextPrefixJson() + `{}`,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 			candidate.ForkTurns = test.forkTurns
-			candidate.ForkSeedJson = test.forkSeedJSON
+			candidate.ThreadContextPrefixJson = test.prefixJSON
 			if err := validateChildThreadRequest(candidate, "approval_reviewer", "approval_reviewer", candidate.GetParentThreadId(), candidate.GetForkTurns()); status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("validateChildThreadRequest err = %v; want InvalidArgument", err)
 			}
@@ -181,6 +181,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_reviewer_trunk", "bind_bridge_reviewer_trunk", 1, "pod_uid_reviewer_trunk")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_reviewer_trunk", "thr_bridge_reviewer_parent", "bind_bridge_reviewer_trunk", 1, "pod_uid_reviewer_trunk")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_reviewer_trunk", "thr_bridge_reviewer_parent", "evt_bridge_reviewer_parent_boundary", 1, "user.message", `{"content":[{"type":"text","text":"parent"}]}`)
 
 	trunkRequest := &bridgev1.CreateChildThreadRequest{
 		Scope:          scope,
@@ -242,7 +243,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 		sidecar.IsTrunk = false
 		sidecar.ReviewerReviewId = reviewID
 		sidecar.ForkTurns = "all"
-		sidecar.ForkSeedJson = bridgeReviewerForkSeedJSON(t, "thr_bridge_reviewer_parent", reviewID, nil)
+		sidecar.ThreadContextPrefixJson = bridgeReviewerThreadContextPrefixJSON(t, "thr_bridge_reviewer_parent", "evt_bridge_reviewer_parent_boundary", reviewID, nil)
 		if _, err := store.CreateChildThread(context.Background(), sidecar); err != nil {
 			t.Fatalf("CreateChildThread reviewer sidecar %q: %v", sidecar.ChildThreadId, err)
 		}
@@ -264,16 +265,16 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 	}
 
 	invalidSubagent := &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_reviewer_parent",
-		ChildThreadId:        "thr_bridge_invalid_subagent_trunk",
-		Role:                 "subagent",
-		TaskName:             "invalid subagent trunk",
-		AgentType:            "general",
-		SourceToolUseEventId: "evt_bridge_invalid_subagent_trunk",
-		ForkTurns:            "all",
-		ForkSeedJson:         bridgeForkSeedJSON(t, "sesn_bridge_reviewer_trunk", "msg_bridge_invalid_subagent_trunk", "seed context", "thr_bridge_reviewer_parent", "evt_bridge_invalid_subagent_trunk", "all"),
-		IsTrunk:              true,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_reviewer_parent",
+		ChildThreadId:           "thr_bridge_invalid_subagent_trunk",
+		Role:                    "subagent",
+		TaskName:                "invalid subagent trunk",
+		AgentType:               "general",
+		SourceToolUseEventId:    "evt_bridge_invalid_subagent_trunk",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(t, "sesn_bridge_reviewer_trunk", "msg_bridge_invalid_subagent_trunk", "seed context", "thr_bridge_reviewer_parent", "evt_bridge_invalid_subagent_trunk", "all"),
+		IsTrunk:                 true,
 	}
 	if _, err := store.CreateChildThread(context.Background(), invalidSubagent); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("subagent is_trunk err = %v; want InvalidArgument", err)
@@ -346,24 +347,25 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadConcurrentReviewerTrunkReplay(
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndContextPrefix(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_child_seed", "thr_bridge_child_seed_parent")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_seed", "bind_bridge_child_seed", 1, "pod_uid_child_seed")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("child-seed-load-context-test-key")
 	scope := bridgeAPIScope("sesn_bridge_child_seed", "thr_bridge_child_seed_parent", "bind_bridge_child_seed", 1, "pod_uid_child_seed")
-	forkSeedJSON := bridgeForkSeedJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_spawn", "all")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_seed", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_spawn", 1, "agent.tool_use", `{}`)
+	prefixJSON := bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_spawn", "all")
 	request := &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_child_seed_parent",
-		ChildThreadId:        "thr_bridge_child_seed_worker",
-		Role:                 "subagent",
-		TaskName:             "seeded worker",
-		AgentType:            "worker",
-		SourceToolUseEventId: "evt_bridge_child_seed_spawn",
-		ForkTurns:            "all",
-		ForkSeedJson:         forkSeedJSON,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_child_seed_parent",
+		ChildThreadId:           "thr_bridge_child_seed_worker",
+		Role:                    "subagent",
+		TaskName:                "seeded worker",
+		AgentType:               "worker",
+		SourceToolUseEventId:    "evt_bridge_child_seed_spawn",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: prefixJSON,
 	}
 	missingSource := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 	missingSource.ChildThreadId = "thr_bridge_child_seed_missing_source"
@@ -377,6 +379,17 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 	invalidForkTurns.ForkTurns = "0"
 	if _, err := store.CreateChildThread(context.Background(), invalidForkTurns); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid fork_turns err = %v; want InvalidArgument", err)
+	}
+	forbiddenRouting := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
+	forbiddenRouting.ChildThreadId = "thr_bridge_child_seed_routing"
+	forbiddenRouting.ThreadContextPrefixJson = strings.Replace(
+		prefixJSON,
+		`"role":"user"`,
+		`"role":"user","providerId":"openai","modelId":"gpt-5.5"`,
+		1,
+	)
+	if _, err := store.CreateChildThread(context.Background(), forbiddenRouting); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("fork prefix routing metadata err = %v; want InvalidArgument", err)
 	}
 
 	response, err := store.CreateChildThread(context.Background(), request)
@@ -447,19 +460,18 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 		t.Fatalf("thread_created stream thread = %q; want child thread", streamThreadID)
 	}
 
-	var forkSeedDataJSON string
-	var forkSeedSource sql.NullString
+	var prefixEntriesJSON string
+	var prefixBoundaryEventID string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json, source_event_id
-		   FROM session_messages
+		`SELECT entries_json, parent_boundary_event_id
+		   FROM session_thread_context_prefixes
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_child_seed'
-		    AND session_thread_id = 'thr_bridge_child_seed_worker'
-		    AND kind = 'fork_seed'`).Scan(&forkSeedDataJSON, &forkSeedSource); err != nil {
-		t.Fatalf("read fork_seed message: %v", err)
+		    AND child_thread_id = 'thr_bridge_child_seed_worker'`).Scan(&prefixEntriesJSON, &prefixBoundaryEventID); err != nil {
+		t.Fatalf("read thread context prefix: %v", err)
 	}
-	if !forkSeedSource.Valid || forkSeedSource.String != "evt_bridge_child_seed_spawn" || testJSONPathString(t, forkSeedDataJSON, "fork_turns") != "all" {
-		t.Fatalf("fork seed source=%v data=%s; want source tool use and fork_turns", forkSeedSource, forkSeedDataJSON)
+	if prefixBoundaryEventID != "evt_bridge_child_seed_spawn" || !strings.Contains(prefixEntriesJSON, "parent context") {
+		t.Fatalf("thread context prefix boundary=%q entries=%s; want durable parent boundary and snapshot", prefixBoundaryEventID, prefixEntriesJSON)
 	}
 	childContext, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_child_seed", "thr_bridge_child_seed_worker", "bind_bridge_child_seed", 1, "pod_uid_child_seed"),
@@ -471,25 +483,33 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 		t.Fatalf("LoadContext child fork seed: %v", err)
 	}
 	var childContextPayload struct {
-		Messages []map[string]any `json:"messages"`
+		Messages            []map[string]any `json:"messages"`
+		ThreadContextPrefix *struct {
+			ParentBoundaryEventID string           `json:"parentBoundaryEventId"`
+			Entries               []map[string]any `json:"entries"`
+		} `json:"threadContextPrefix"`
 	}
 	if err := json.Unmarshal([]byte(childContext.GetContextJson()), &childContextPayload); err != nil {
 		t.Fatalf("decode child context: %v", err)
 	}
-	if len(childContextPayload.Messages) != 1 || childContextPayload.Messages[0]["id"] != "msg_bridge_child_seed_parent" {
-		t.Fatalf("child context = %s; want fork_seed RuntimeMessage only", childContext.GetContextJson())
+	if len(childContextPayload.Messages) != 0 {
+		t.Fatalf("child context messages = %s; want no sequenced fork message", childContext.GetContextJson())
 	}
-	if _, ok := childContextPayload.Messages[0]["fork_turns"]; ok {
-		t.Fatalf("child context leaked fork_seed wrapper: %s", childContext.GetContextJson())
+	if childContextPayload.ThreadContextPrefix == nil ||
+		childContextPayload.ThreadContextPrefix.ParentBoundaryEventID != "evt_bridge_child_seed_spawn" ||
+		len(childContextPayload.ThreadContextPrefix.Entries) != 1 ||
+		childContextPayload.ThreadContextPrefix.Entries[0]["id"] != "msg_bridge_child_seed_parent" {
+		t.Fatalf("child context = %s; want separate parent context prefix", childContext.GetContextJson())
 	}
 
-	emptyForkSeedJSON := `{"source_parent_thread_id":"thr_bridge_child_seed_parent","source_tool_use_event_id":"evt_bridge_child_seed_empty_spawn","fork_turns":"none","runtime_messages_snapshot":[]}`
+	emptyPrefixJSON := `{"source_parent_thread_id":"thr_bridge_child_seed_parent","parent_boundary_event_id":"evt_bridge_child_seed_empty_spawn","source_tool_use_event_id":"evt_bridge_child_seed_empty_spawn","fork_turns":"none","runtime_messages_snapshot":[]}`
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_seed", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_empty_spawn", 2, "agent.tool_use", `{}`)
 	emptySeedRequest := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 	emptySeedRequest.ChildThreadId = "thr_bridge_child_seed_empty"
 	emptySeedRequest.TaskName = "empty seed worker"
 	emptySeedRequest.SourceToolUseEventId = "evt_bridge_child_seed_empty_spawn"
 	emptySeedRequest.ForkTurns = "none"
-	emptySeedRequest.ForkSeedJson = emptyForkSeedJSON
+	emptySeedRequest.ThreadContextPrefixJson = emptyPrefixJSON
 	if _, err := store.CreateChildThread(context.Background(), emptySeedRequest); err != nil {
 		t.Fatalf("CreateChildThread empty fork seed: %v", err)
 	}
@@ -503,13 +523,19 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 		t.Fatalf("LoadContext empty child fork seed: %v", err)
 	}
 	var emptyChildContextPayload struct {
-		Messages []map[string]any `json:"messages"`
+		Messages            []map[string]any `json:"messages"`
+		ThreadContextPrefix *struct {
+			Entries []map[string]any `json:"entries"`
+		} `json:"threadContextPrefix"`
 	}
 	if err := json.Unmarshal([]byte(emptyChildContext.GetContextJson()), &emptyChildContextPayload); err != nil {
 		t.Fatalf("decode empty child context: %v", err)
 	}
 	if len(emptyChildContextPayload.Messages) != 0 {
-		t.Fatalf("empty child context = %s; want no fork_seed wrapper message", emptyChildContext.GetContextJson())
+		t.Fatalf("empty child context = %s; want no sequenced fork message", emptyChildContext.GetContextJson())
+	}
+	if emptyChildContextPayload.ThreadContextPrefix == nil || len(emptyChildContextPayload.ThreadContextPrefix.Entries) != 0 {
+		t.Fatalf("empty child context = %s; want empty separate prefix", emptyChildContext.GetContextJson())
 	}
 
 	conflict := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
@@ -520,7 +546,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 	duplicateTask := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 	duplicateTask.ChildThreadId = "thr_bridge_child_seed_duplicate_task"
 	duplicateTask.SourceToolUseEventId = "evt_bridge_child_seed_other_spawn"
-	duplicateTask.ForkSeedJson = bridgeForkSeedJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_other_spawn", "all")
+	duplicateTask.ThreadContextPrefixJson = bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_other_spawn", "all")
 	if _, err := store.CreateChildThread(context.Background(), duplicateTask); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("duplicate task_name err = %v; want AlreadyExists", err)
 	}
@@ -533,21 +559,23 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadConcurrentDuplicateTaskName(t 
 	storeA := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	storeB := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_child_race", "thr_bridge_child_race_parent", "bind_bridge_child_race", 1, "pod_uid_child_race")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_race", "thr_bridge_child_race_parent", "evt_bridge_child_race_a", 1, "agent.tool_use", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_race", "thr_bridge_child_race_parent", "evt_bridge_child_race_b", 2, "agent.tool_use", `{}`)
 	requestA := &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_child_race_parent",
-		ChildThreadId:        "thr_bridge_child_race_a",
-		Role:                 "subagent",
-		TaskName:             "same worker",
-		AgentType:            "worker",
-		SourceToolUseEventId: "evt_bridge_child_race_a",
-		ForkTurns:            "none",
-		ForkSeedJson:         `{"source_parent_thread_id":"thr_bridge_child_race_parent","source_tool_use_event_id":"evt_bridge_child_race_a","fork_turns":"none","runtime_messages_snapshot":[]}`,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_child_race_parent",
+		ChildThreadId:           "thr_bridge_child_race_a",
+		Role:                    "subagent",
+		TaskName:                "same worker",
+		AgentType:               "worker",
+		SourceToolUseEventId:    "evt_bridge_child_race_a",
+		ForkTurns:               "none",
+		ThreadContextPrefixJson: `{"source_parent_thread_id":"thr_bridge_child_race_parent","parent_boundary_event_id":"evt_bridge_child_race_a","source_tool_use_event_id":"evt_bridge_child_race_a","fork_turns":"none","runtime_messages_snapshot":[]}`,
 	}
 	requestB := proto.Clone(requestA).(*bridgev1.CreateChildThreadRequest)
 	requestB.ChildThreadId = "thr_bridge_child_race_b"
 	requestB.SourceToolUseEventId = "evt_bridge_child_race_b"
-	requestB.ForkSeedJson = `{"source_parent_thread_id":"thr_bridge_child_race_parent","source_tool_use_event_id":"evt_bridge_child_race_b","fork_turns":"none","runtime_messages_snapshot":[]}`
+	requestB.ThreadContextPrefixJson = `{"source_parent_thread_id":"thr_bridge_child_race_parent","parent_boundary_event_id":"evt_bridge_child_race_b","source_tool_use_event_id":"evt_bridge_child_race_b","fork_turns":"none","runtime_messages_snapshot":[]}`
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -653,17 +681,18 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	store.OutputCapturer = outputcapture.NewCapturer(blobStore, scanner)
 	parentScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_parent", "bind_bridge_child_status", 1, "pod_uid_child_status")
 	childScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_worker", "bind_bridge_child_status", 1, "pod_uid_child_status")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_status", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", 1, "agent.tool_use", `{}`)
 
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
-		Scope:                parentScope,
-		ParentThreadId:       "thr_bridge_child_status_parent",
-		ChildThreadId:        "thr_bridge_child_status_worker",
-		Role:                 "subagent",
-		TaskName:             "status worker",
-		AgentType:            "worker",
-		SourceToolUseEventId: "evt_bridge_child_status_spawn",
-		ForkTurns:            "none",
-		ForkSeedJson:         bridgeForkSeedJSON(t, "sesn_bridge_child_status", "msg_bridge_child_status_seed", "seed", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", "none"),
+		Scope:                   parentScope,
+		ParentThreadId:          "thr_bridge_child_status_parent",
+		ChildThreadId:           "thr_bridge_child_status_worker",
+		Role:                    "subagent",
+		TaskName:                "status worker",
+		AgentType:               "worker",
+		SourceToolUseEventId:    "evt_bridge_child_status_spawn",
+		ForkTurns:               "none",
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_status", "msg_bridge_child_status_seed", "seed", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", "none"),
 	}); err != nil {
 		t.Fatalf("CreateChildThread: %v", err)
 	}
@@ -1040,6 +1069,7 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	if lateStatus != "closed_for_runtime" || completionMail != 0 {
 		t.Fatalf("late FinishIdle status/mail = %q/%d; want closed_for_runtime/0", lateStatus, completionMail)
 	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "sevt_bridge_close_tree_late_spawn", 2, "agent.tool_use", `{}`)
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
 		Scope:                bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
 		ParentThreadId:       childID,
@@ -1049,7 +1079,7 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 		AgentType:            "worker",
 		SourceToolUseEventId: "sevt_bridge_close_tree_late_spawn",
 		ForkTurns:            "none",
-		ForkSeedJson: bridgeForkSeedJSON(
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(
 			t,
 			sessionID,
 			"msg_bridge_close_tree_late_seed",
@@ -1087,6 +1117,7 @@ func TestPostgreSQLBridgeAPIStoreCloseAndConcurrentChildCreateSerializeAtThePare
 			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "sevt_bridge_close_create_"+suffix, 1, "agent.tool_use", `{}`)
 			scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 			createRequest := &bridgev1.CreateChildThreadRequest{
 				Scope:                scope,
@@ -1097,7 +1128,7 @@ func TestPostgreSQLBridgeAPIStoreCloseAndConcurrentChildCreateSerializeAtThePare
 				AgentType:            "worker",
 				SourceToolUseEventId: "sevt_bridge_close_create_" + suffix,
 				ForkTurns:            "none",
-				ForkSeedJson: bridgeForkSeedJSON(
+				ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(
 					t,
 					sessionID,
 					"msg_bridge_close_create_seed_"+suffix,

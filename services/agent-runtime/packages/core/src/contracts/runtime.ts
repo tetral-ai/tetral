@@ -292,8 +292,6 @@ export const RuntimeMessageInfoSchema = z.strictObject({
   error: z.lazy(() => RuntimeFailureSchema).optional(),
   finishReason: RuntimeFinishReasonSchema.optional(),
   usage: RuntimeUsageSchema.optional(),
-  providerId: RuntimeIdentifierSchema.optional(),
-  modelId: RuntimeIdentifierSchema.optional(),
   responseId: RuntimeIdentifierSchema.optional(),
 });
 export type RuntimeMessageInfo = z.infer<typeof RuntimeMessageInfoSchema>;
@@ -370,6 +368,109 @@ export const RuntimePartSchema = z.discriminatedUnion("type", [
 /** Persisted or hot-projected message part with stable ownership and sequence identity. */
 export type RuntimePart = z.infer<typeof RuntimePartSchema>;
 
+const RuntimePartDraftBaseSchema = {
+  runtimeLocalPartId: RuntimeIdentifierSchema,
+  ordinal: NonNegativeIntegerSchema,
+} as const;
+
+const TextRuntimePartDraftSchema = z.strictObject({
+  ...RuntimePartDraftBaseSchema,
+  type: z.literal("text"),
+  text: RuntimeTextSchema,
+  truncated: z.boolean(),
+  status: RuntimePartStatusSchema,
+  startedAt: TimestampSchema.optional(),
+  completedAt: TimestampSchema.optional(),
+});
+
+const ReasoningRuntimePartDraftSchema = z.strictObject({
+  ...RuntimePartDraftBaseSchema,
+  type: z.literal("reasoning"),
+  providerPartId: RuntimeIdentifierSchema.optional(),
+  providerMetadata: ProviderMetadataSchema.optional(),
+  text: RuntimeTextSchema,
+  truncated: z.boolean(),
+  status: RuntimePartStatusSchema,
+  startedAt: TimestampSchema.optional(),
+  completedAt: TimestampSchema.optional(),
+});
+
+const ToolRuntimePartDraftSchema = z.strictObject({
+  ...RuntimePartDraftBaseSchema,
+  type: z.literal("tool"),
+  toolCallId: RuntimeIdentifierSchema,
+  toolName: RuntimeIdentifierSchema,
+  toolUseEventId: RuntimeIdentifierSchema.optional(),
+  toolEvent: z.discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("tool") }),
+    z.strictObject({ kind: z.literal("mcp"), mcpServerName: RuntimeIdentifierSchema }),
+  ]).optional(),
+  state: ToolStateSchema,
+  startedAt: TimestampSchema.optional(),
+  completedAt: TimestampSchema.optional(),
+});
+
+const StepStartRuntimePartDraftSchema = z.strictObject({
+  ...RuntimePartDraftBaseSchema,
+  type: z.literal("step-start"),
+  stepIndex: NonNegativeIntegerSchema.optional(),
+});
+
+const StepFinishRuntimePartDraftSchema = z.strictObject({
+  ...RuntimePartDraftBaseSchema,
+  type: z.literal("step-finish"),
+  stepIndex: NonNegativeIntegerSchema.optional(),
+  finishReason: RuntimeFinishReasonSchema,
+  usage: RuntimeUsageSchema.optional(),
+});
+
+/** Closed semantic part set authored before Bridge assigns durable part stamps. */
+export const RuntimePartDraftSchema = z.discriminatedUnion("type", [
+  TextRuntimePartDraftSchema,
+  ReasoningRuntimePartDraftSchema,
+  ToolRuntimePartDraftSchema,
+  StepStartRuntimePartDraftSchema,
+  StepFinishRuntimePartDraftSchema,
+]);
+export type RuntimePartDraft = z.infer<typeof RuntimePartDraftSchema>;
+
+export const RuntimeDraftKindSchema = z.enum([
+  "user_input",
+  "approval_input",
+  "reviewer_input",
+  "agent_mail_input",
+  "assistant_text",
+  "tool_use",
+  "tool_result",
+  "task_notification",
+  "rejection",
+  "cancellation",
+  "completion_mail",
+  "compaction_checkpoint",
+  "internal_tool_repair",
+  "termination",
+]);
+export type RuntimeDraftKind = z.infer<typeof RuntimeDraftKindSchema>;
+
+/** Loop-authored message declaration before any durable identity is assigned. */
+export const RuntimeMessageDraftSchema = z.strictObject({
+  runtimeLocalId: RuntimeIdentifierSchema,
+  sourceKind: RuntimeIdentifierSchema,
+  sourceId: RuntimeIdentifierSchema,
+  sourceEventId: RuntimeIdentifierSchema.optional(),
+  draftKind: RuntimeDraftKindSchema,
+  ordinal: NonNegativeIntegerSchema,
+  role: z.enum(["user", "assistant"]),
+  origin: z.enum(["user", "agent", "runtime"]),
+  status: RuntimeMessageStatusSchema,
+  error: z.lazy(() => RuntimeFailureSchema).optional(),
+  finishReason: RuntimeFinishReasonSchema.optional(),
+  usage: RuntimeUsageSchema.optional(),
+  responseId: RuntimeIdentifierSchema.optional(),
+  parts: z.array(RuntimePartDraftSchema),
+});
+export type RuntimeMessageDraft = z.infer<typeof RuntimeMessageDraftSchema>;
+
 // Boundary contract for persisted runtime parts, not a backend table definition.
 // It also enforces that every part remains attached to the owning message and session.
 export const RuntimeMessageSchema = RuntimeMessageInfoSchema.extend({
@@ -383,11 +484,32 @@ export const RuntimeMessageSchema = RuntimeMessageInfoSchema.extend({
     (message) => message.parts.every((runtimePart) => runtimePart.sessionId === message.sessionId),
     "runtime part sessionId must match the owning message session id",
   );
-/** Complete Runtime message shared by context loading, hot projection, and provider assembly. */
+/** Runtime conversation message carrying message and part identity for hot projection. */
 export type RuntimeMessage = z.infer<typeof RuntimeMessageSchema>;
+
+/**
+ * Database-stamped conversation message installed by cold recovery or receipt
+ * application. Provider and model routing remain request configuration.
+ */
+export const DurableRuntimeMessageSchema = RuntimeMessageInfoSchema
+  .extend({
+    owningEventId: RuntimeIdentifierSchema,
+    eventSequence: PositiveIntegerSchema,
+    parts: z.array(RuntimePartSchema),
+  })
+  .refine(
+    (message) => message.parts.every((runtimePart) => runtimePart.messageId === message.id),
+    "runtime part messageId must match the owning message id",
+  )
+  .refine(
+    (message) => message.parts.every((runtimePart) => runtimePart.sessionId === message.sessionId),
+    "runtime part sessionId must match the owning message session id",
+  );
+export type DurableRuntimeMessage = z.infer<typeof DurableRuntimeMessageSchema>;
 
 /** One self-contained invalid-tool repair committed before it enters hot history. */
 export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
+  workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
   modelRequestId: SanitizedIdentifierSchema,
@@ -740,6 +862,7 @@ function validateStableReasoningSet(
 
 /** WriteEvent payload with identity, projection, reasoning, and server-tool bounds. */
 export const SessionEventEnvelopeSchema = z.strictObject({
+  workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
@@ -778,6 +901,7 @@ export type SessionEventEnvelope = z.infer<typeof SessionEventEnvelopeSchema>;
 
 /** Request-end settlement payload, including retry and attachment consumption facts. */
 export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
+  workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
@@ -818,6 +942,7 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
 export type SessionEventWriterRequestEndEnvelope = z.infer<typeof SessionEventWriterRequestEndEnvelopeSchema>;
 
 export const SessionEventWriterFinishIdleEnvelopeSchema = z.strictObject({
+  workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
@@ -827,6 +952,7 @@ export const SessionEventWriterFinishIdleEnvelopeSchema = z.strictObject({
 export type SessionEventWriterFinishIdleEnvelope = z.infer<typeof SessionEventWriterFinishIdleEnvelopeSchema>;
 
 export const SessionEventWriterRuntimeTerminationEnvelopeSchema = z.strictObject({
+  workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,

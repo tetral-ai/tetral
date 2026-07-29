@@ -238,6 +238,10 @@ export interface Interface {
   readonly applyRuntimeConfigPatch: (sessionId: string, command: RuntimeConfigPatchState) => Effect.Effect<RuntimeControlResult>;
   readonly cleanupSession: (sessionId: string, command: RuntimeCleanupSessionCommand) => Effect.Effect<CleanupSessionResult>;
   readonly preloadThread: (command: RuntimeThreadPreloadState) => Effect.Effect<ThreadLifecycleResult>;
+  readonly ensureThreadInstalled: (
+    command: RuntimeThreadControlState,
+    options?: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
+  ) => Effect.Effect<ThreadLifecycleResult>;
   readonly interruptThread: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
@@ -264,6 +268,9 @@ export interface LayerOptions {
     command: RuntimeThreadControlState,
   ) => Promise<readonly RuntimeInterAgentAcceptedInputState[]>;
   readonly loadThreadMessages?: (command: RuntimeThreadControlState) => Promise<readonly RuntimeMessage[]>;
+  readonly loadThreadContext?: (
+    command: RuntimeThreadControlState,
+  ) => Promise<RuntimeThreadPreloadState>;
   readonly registerAcceptedInput?: (input: RuntimeAcceptedInputState) => () => void;
   readonly closeoutMonotonicMs?: (() => number) | undefined;
   readonly closeoutSleep?: ((durationMs: number, signal: AbortSignal) => Promise<boolean>) | undefined;
@@ -310,9 +317,10 @@ export class Service extends Context.Service<Service, Interface>()("tetral-agent
 //
 // On a successful owner exit: pendingWake -> start exactly one follow-up ThreadRun;
 // else pendingWakeAfterStop -> clear stopping and start one follow-up after cleanup;
-// else clear run_slot and complete doneDeferred. Cold context load completes BEFORE
-// the ThreadEntry is inserted into SessionEntry.threads. Cleanup cannot release a
-// ThreadEntry while run_slot is active except on the approved interrupt/cleanup closeout.
+// else clear run_slot and complete doneDeferred. A cold thread is inserted in the
+// installing state before its sole LoadContext call and becomes command-ready only
+// after that install succeeds. Cleanup cannot release an installing ThreadEntry or a
+// ThreadEntry with an active run_slot except on the approved closeout path.
 // UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts
 interface ThreadRunSlot {
   readonly runId: number;
@@ -333,11 +341,14 @@ interface ThreadEntry {
   readonly taskName: string | undefined;
   readonly agentType: string | undefined;
   status: ThreadStatus;
+  installationState: "installing" | "ready";
+  installationPromise: Promise<ThreadLifecycleResult> | undefined;
   readonly session: Session.Session;
   readonly acceptedInputQueue: Session.Session["state"];
   readonly controlQueue: Session.Session["state"];
   readonly statusSignal: Session.Session["state"];
   runSlot: ThreadRunSlot | undefined;
+  scopeDisposer: (() => void) | undefined;
   lastCompletedReviewerExecutionToken: ReviewerExecutionToken | undefined;
   refreshContextAfterRun: boolean;
   readonly approvalReviewer: AutoApprovalReviewerManager | undefined;
@@ -356,6 +367,13 @@ interface SessionEntry {
   readonly threads: Map<string, ThreadEntry>;
   readonly toolCoordinator: SessionToolCoordinator;
   readonly runtimeShutdown: RuntimeShutdownObservation;
+  // Exactly one cold thread initializes Session-scoped config and MCP state.
+  // Sibling installs wait for that result and never promote their own snapshots.
+  sharedStateStatus: "initializing" | "ready" | "failed";
+  readonly sharedStateInitializerThreadId: string;
+  readonly sharedStateReady: Promise<boolean>;
+  readonly completeSharedStateReady: (ready: boolean) => void;
+  sharedRuntimeConfigPatches: readonly RuntimeConfigPatchState[] | undefined;
 }
 
 interface RuntimeShutdownObservation {
@@ -483,15 +501,32 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
         return outcome;
       };
 
-      const createSessionEntry = (identity: Session.RuntimeSessionIdentity): SessionEntry => ({
-        workspaceId: identity.workspaceId,
-        sessionId: identity.sessionId,
-        bindingId: identity.bindingId,
-        bindingGeneration: identity.bindingGeneration,
-        threads: new Map<string, ThreadEntry>(),
-        toolCoordinator: new SessionToolCoordinator({ maxConcurrentTools: options.maxConcurrentTools ?? 8 }),
-        runtimeShutdown: createRuntimeShutdownObservation(),
-      });
+      const createSessionEntry = (identity: Session.RuntimeSessionIdentity): SessionEntry => {
+        let completed = false;
+        let completeSharedStateReady: (ready: boolean) => void = () => {};
+        const sharedStateReady = new Promise<boolean>((resolve) => {
+          completeSharedStateReady = (ready) => {
+            if (!completed) {
+              completed = true;
+              resolve(ready);
+            }
+          };
+        });
+        return {
+          workspaceId: identity.workspaceId,
+          sessionId: identity.sessionId,
+          bindingId: identity.bindingId,
+          bindingGeneration: identity.bindingGeneration,
+          threads: new Map<string, ThreadEntry>(),
+          toolCoordinator: new SessionToolCoordinator({ maxConcurrentTools: options.maxConcurrentTools ?? 8 }),
+          runtimeShutdown: createRuntimeShutdownObservation(),
+          sharedStateStatus: "initializing",
+          sharedStateInitializerThreadId: identity.sessionThreadId,
+          sharedStateReady,
+          completeSharedStateReady,
+          sharedRuntimeConfigPatches: undefined,
+        };
+      };
 
       const createThreadEntry = (
         identity: Session.RuntimeSessionIdentity,
@@ -499,6 +534,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
         role: ThreadRole = "main",
         visibility: ThreadVisibility = "public",
         metadata: RuntimeAcceptedThreadMetadataState = {},
+        installationState: ThreadEntry["installationState"] = "ready",
       ): ThreadEntry => {
         const resolvedRole = metadata.role ?? role;
         const resolvedVisibility = metadata.visibility ?? visibility;
@@ -514,11 +550,14 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           taskName: metadata.taskName,
           agentType: metadata.agentType,
           status: metadata.status ?? "idle",
+          installationState,
+          installationPromise: undefined,
           session,
           acceptedInputQueue: session.state,
           controlQueue: session.state,
           statusSignal: session.state,
           runSlot: undefined,
+          scopeDisposer: undefined,
           lastCompletedReviewerExecutionToken: undefined,
           refreshContextAfterRun: false,
           approvalReviewer,
@@ -547,6 +586,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
       const getOrCreateThreadEntry = (
         identity: Session.RuntimeSessionIdentity,
         metadata: RuntimeAcceptedThreadMetadataState = {},
+        installationState: ThreadEntry["installationState"] = "ready",
       ):
         | {
             readonly sessionEntry: SessionEntry;
@@ -580,6 +620,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           metadata.role ?? "main",
           metadata.visibility ?? "public",
           metadata,
+          installationState,
         );
         sessionResult.entry.threads.set(identity.sessionThreadId, threadEntry);
         recordHotStateMetrics();
@@ -610,6 +651,8 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
 
       const removeThreadEntry = (sessionEntry: SessionEntry, threadEntry: ThreadEntry): void => {
         threadEntry.approvalReviewer?.dispose();
+        threadEntry.scopeDisposer?.();
+        threadEntry.scopeDisposer = undefined;
         threadEntry.session.state.clear();
         threadEntry.runSlot = undefined;
         sessionEntry.threads.delete(threadEntry.sessionThreadId);
@@ -668,6 +711,8 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
       const clearSessionEntry = (sessionEntry: SessionEntry): void => {
         for (const threadEntry of sessionEntry.threads.values()) {
           threadEntry.approvalReviewer?.dispose();
+          threadEntry.scopeDisposer?.();
+          threadEntry.scopeDisposer = undefined;
           if (threadEntry.session.state.hasPendingApprovalToolJobs()) {
             threadEntry.session.state.clear();
           }
@@ -731,18 +776,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
         exit: Exit.Exit<AgentLoop.AgentLoopRunResult, unknown>,
       ): Effect.Effect<void> => Scope.close(runSlot.scope, exit).pipe(Effect.exit, Effect.asVoid);
 
-      const acceptRegisteredInput = (
-        input: RuntimeAcceptedInputState,
-      ): Effect.Effect<AcceptInputResult> =>
-        Effect.gen(function* () {
-          const unregister = options.registerAcceptedInput?.(input);
-          const result = yield* acceptInput(input);
-          if (!result.ok) {
-            unregister?.();
-          }
-          return result;
-        });
-
       const rescanPendingCompletionMail = (
         threadEntry: ThreadEntry,
         runSlot: ThreadRunSlot,
@@ -769,7 +802,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             Effect.catchCause(() => Effect.succeed([] as readonly RuntimeInterAgentAcceptedInputState[])),
           );
           for (const mail of pendingAgentMail) {
-            yield* acceptRegisteredInput(mail).pipe(Effect.asVoid);
+            yield* acceptInput(mail).pipe(Effect.asVoid);
           }
         });
 
@@ -963,6 +996,17 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             }
             return { ok: true, sessionId, created: threadResult.sessionCreated, started: false, pendingWake: false };
           }
+          try {
+            const nextScopeDisposer = options.registerAcceptedInput?.(command);
+            threadResult.threadEntry.scopeDisposer?.();
+            threadResult.threadEntry.scopeDisposer = nextScopeDisposer;
+          } catch (error) {
+            threadResult.threadEntry.acceptedInputQueue.acknowledgeAcceptedInput(command.runtimeInputId);
+            if (threadResult.threadCreated) {
+              removeThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
+            }
+            throw error;
+          }
           const runSlot = threadResult.threadEntry.runSlot;
           if (runSlot !== undefined) {
             if (runSlot.stopping) {
@@ -1118,7 +1162,11 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             return { ok: true, sessionId, cleaned: false };
           }
           for (const threadEntry of entry.threads.values()) {
-            if (threadEntry.runSlot !== undefined || threadEntry.session.state.acceptedInputCount() > 0) {
+            if (
+              threadEntry.installationState !== "ready" ||
+              threadEntry.runSlot !== undefined ||
+              threadEntry.session.state.acceptedInputCount() > 0
+            ) {
               return { ok: false, sessionId, reason: "session_busy" };
             }
           }
@@ -1126,7 +1174,10 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           return { ok: true, sessionId, cleaned: true };
         });
 
-      const preloadThread = (command: RuntimeThreadPreloadState): Effect.Effect<ThreadLifecycleResult> =>
+      const preloadThread = (
+        command: RuntimeThreadPreloadState,
+        initializeSharedState?: boolean,
+      ): Effect.Effect<ThreadLifecycleResult> =>
         Effect.gen(function* () {
           const metadata = command.thread ?? {};
           const identity: Session.RuntimeSessionIdentity = {
@@ -1140,21 +1191,43 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             targetPodUid: command.targetPodUid,
             runtimeBindingToken: command.runtimeBindingToken,
           };
-          const threadResult = getOrCreateThreadEntry(identity, metadata);
+          const threadResult = getOrCreateThreadEntry(identity, metadata, "installing");
           if (threadResult === undefined) {
             return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "local_session_capacity_exceeded" };
           }
           if (threadResult.threadEntry.runSlot !== undefined) {
             return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "thread_busy" };
           }
+          const shouldInitializeSharedState = initializeSharedState ??
+            (
+              threadResult.sessionEntry.sharedStateStatus === "initializing" &&
+              threadResult.sessionEntry.sharedStateInitializerThreadId === command.sessionThreadId
+            );
           threadResult.threadEntry.session.updateIdentity(identity);
+          threadResult.threadEntry.session.state.contextManager.installThreadContextPrefix(command.threadContextPrefix);
           threadResult.threadEntry.session.state.contextManager.replaceMessages(command.messages);
           threadResult.threadEntry.session.state.markPersistentContextLoaded();
-          if (command.runtimeConfigPatch !== undefined) {
-            threadResult.threadEntry.session.state.applyRuntimeConfigPatch(command.runtimeConfigPatch);
+          const observedSharedPatches = [
+            ...(command.runtimeConfigPatch === undefined ? [] : [command.runtimeConfigPatch]),
+            ...(command.mcpManifests ?? []),
+          ];
+          let sharedPatches: readonly RuntimeConfigPatchState[];
+          if (shouldInitializeSharedState) {
+            sharedPatches = observedSharedPatches;
+            threadResult.sessionEntry.sharedRuntimeConfigPatches = sharedPatches;
+          } else {
+            const sharedStateReady = yield* Effect.promise(() => threadResult.sessionEntry.sharedStateReady);
+            if (!sharedStateReady || threadResult.sessionEntry.sharedStateStatus !== "ready") {
+              return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+            }
+            sharedPatches = threadResult.sessionEntry.sharedRuntimeConfigPatches ?? [];
           }
-          for (const manifest of command.mcpManifests ?? []) {
-            threadResult.threadEntry.session.state.applyRuntimeConfigPatch(manifest);
+          for (const patch of sharedPatches) {
+            threadResult.threadEntry.session.state.applyRuntimeConfigPatch(patch);
+          }
+          if (shouldInitializeSharedState) {
+            threadResult.sessionEntry.sharedStateStatus = "ready";
+            threadResult.sessionEntry.completeSharedStateReady(true);
           }
           // Model seeding must precede pending-tool restoration because restoration requires the
           // config-selected model to rebuild its processor source.
@@ -1170,13 +1243,124 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           }
           threadResult.threadEntry.status = metadata.status ?? "idle";
           for (const mail of command.pendingAgentMail ?? []) {
-            const accepted = yield* acceptRegisteredInput(mail);
+            const accepted = yield* acceptInput(mail);
             if (!accepted.ok) {
               yield* releaseThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
               return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
             }
           }
+          threadResult.threadEntry.installationState = "ready";
+          threadResult.threadEntry.installationPromise = undefined;
           return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
+        });
+
+      const ensureThreadInstalled = (
+        command: RuntimeThreadControlState,
+        installOptions: { readonly requirePendingApprovalToolJobs?: boolean | undefined } = {},
+      ): Effect.Effect<ThreadLifecycleResult> =>
+        Effect.promise(async () => {
+          const resident = sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId);
+          if (resident?.installationState === "ready") {
+            if (
+              installOptions.requirePendingApprovalToolJobs === true &&
+              !resident.session.state.hasPendingApprovalToolJobs()
+            ) {
+              return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+            }
+            return {
+              ok: true,
+              sessionId: command.sessionId,
+              sessionThreadId: command.sessionThreadId,
+              applied: false,
+            };
+          }
+          if (resident?.installationPromise !== undefined) {
+            const result = await resident.installationPromise;
+            if (
+              result.ok &&
+              installOptions.requirePendingApprovalToolJobs === true &&
+              !resident.session.state.hasPendingApprovalToolJobs()
+            ) {
+              return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+            }
+            return result;
+          }
+          const residentSession = sessions.get(commandSessionKey(command));
+          if (residentSession?.sharedStateStatus === "failed") {
+            return {
+              ok: false,
+              sessionId: command.sessionId,
+              sessionThreadId: command.sessionThreadId,
+              reason: "context_load_failed",
+            };
+          }
+          if (options.loadThreadContext === undefined) {
+            return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+          }
+          const threadResult = getOrCreateThreadEntry(controlIdentity(command), {}, "installing");
+          if (threadResult === undefined) {
+            return {
+              ok: false,
+              sessionId: command.sessionId,
+              sessionThreadId: command.sessionThreadId,
+              reason: "local_session_capacity_exceeded",
+            };
+          }
+          if (threadResult.threadEntry.installationPromise !== undefined) {
+            return await threadResult.threadEntry.installationPromise;
+          }
+          const initializeSharedState =
+            threadResult.sessionEntry.sharedStateStatus === "initializing" &&
+            threadResult.sessionEntry.sharedStateInitializerThreadId === command.sessionThreadId;
+          const pending = (async (): Promise<ThreadLifecycleResult> => {
+            try {
+              const context = await options.loadThreadContext!(command);
+              const result = await Effect.runPromise(preloadThread(context, initializeSharedState));
+              if (
+                !result.ok &&
+                initializeSharedState &&
+                threadResult.sessionEntry.sharedStateStatus === "initializing"
+              ) {
+                threadResult.sessionEntry.sharedStateStatus = "failed";
+                threadResult.sessionEntry.completeSharedStateReady(false);
+              }
+              if (
+                !result.ok &&
+                threadResult.sessionEntry.threads.get(command.sessionThreadId) === threadResult.threadEntry
+              ) {
+                removeThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
+              }
+              return result;
+            } catch {
+              if (initializeSharedState && threadResult.sessionEntry.sharedStateStatus === "initializing") {
+                threadResult.sessionEntry.sharedStateStatus = "failed";
+                threadResult.sessionEntry.completeSharedStateReady(false);
+              }
+              if (
+                threadResult.sessionEntry.threads.get(command.sessionThreadId) === threadResult.threadEntry &&
+                threadResult.threadEntry.installationState === "installing"
+              ) {
+                removeThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
+              }
+              return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+            }
+          })();
+          threadResult.threadEntry.installationPromise = pending;
+          try {
+            const result = await pending;
+            if (
+              result.ok &&
+              installOptions.requirePendingApprovalToolJobs === true &&
+              !threadResult.threadEntry.session.state.hasPendingApprovalToolJobs()
+            ) {
+              return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+            }
+            return result;
+          } finally {
+            if (threadResult.threadEntry.installationPromise === pending) {
+              threadResult.threadEntry.installationPromise = undefined;
+            }
+          }
         });
 
       const interruptThread = (command: RuntimeThreadControlState): Effect.Effect<ThreadLifecycleResult> =>
@@ -1536,6 +1720,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
         cleanupSession,
         commitTaskNotification,
         preloadThread,
+        ensureThreadInstalled,
         interruptThread,
         interruptReviewerExecution,
         interruptControl,

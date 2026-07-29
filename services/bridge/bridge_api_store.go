@@ -57,7 +57,6 @@ const (
 	bridgeAckCommitted = "committed"
 	bridgeAckRejected  = "rejected"
 
-	bridgeOpLoadContext                    = "load_context"
 	bridgeOpCommitInputs                   = "commit_inputs"
 	bridgeOpCommitTaskNotificationResult   = "commit_task_notification_result"
 	runtimeTaskNotificationPayloadMaxBytes = 16 * 1024
@@ -359,6 +358,7 @@ type bridgeOperation struct {
 
 type bridgeOperationInsert struct {
 	Operation      string
+	SourceKind     string
 	IdempotencyKey string
 	RequestHash    string
 	AckStatus      string
@@ -370,18 +370,38 @@ type bridgeOperationInsert struct {
 	Now            time.Time
 }
 
+type bridgeDeclarationOperation struct {
+	DeclarationDigest string
+	ReceiptJSON       string
+}
+
 func readBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operation string, key string) (bridgeOperation, bool, error) {
+	return readBridgeOperationBySourceTx(ctx, tx, scope, operation, operation, key)
+}
+
+func readBridgeOperationBySourceTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operation string,
+	sourceKind string,
+	key string,
+) (bridgeOperation, bool, error) {
 	row := tx.QueryRow(ctx,
 		`SELECT request_hash, ack_status, COALESCE(error_code, ''), result_json, stdin_write_seq
 		   FROM session_bridge_operations
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND operation = $3
-		    AND idempotency_key = $4
+		    AND session_thread_id = $3
+		    AND operation = $4
+		    AND source_kind = $5
+		    AND idempotency_key = $6
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 		operation,
+		sourceKind,
 		key,
 	)
 	var existing bridgeOperation
@@ -397,16 +417,20 @@ func insertBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	if op.ResultJSON == "" {
 		op.ResultJSON = "{}"
 	}
+	if op.SourceKind == "" {
+		op.SourceKind = op.Operation
+	}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, idempotency_key,
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
 			request_hash, ack_status, runtime_input_id, runtime_write_id, error_code,
 			result_json, stdin_write_seq, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		op.Operation,
+		op.SourceKind,
 		op.IdempotencyKey,
 		op.RequestHash,
 		op.AckStatus,
@@ -420,21 +444,92 @@ func insertBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	return err
 }
 
+func readBridgeDeclarationOperationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operation string,
+	sourceKind string,
+	sourceID string,
+) (bridgeDeclarationOperation, bool, error) {
+	row := tx.QueryRow(ctx,
+		`SELECT COALESCE(declaration_digest, ''), COALESCE(receipt_json, '')
+		   FROM session_bridge_operations
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND operation = $4
+		    AND source_kind = $5
+		    AND idempotency_key = $6
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		operation,
+		sourceKind,
+		sourceID,
+	)
+	var existing bridgeDeclarationOperation
+	if err := row.Scan(&existing.DeclarationDigest, &existing.ReceiptJSON); dbconnect.IsNoRows(err) {
+		return bridgeDeclarationOperation{}, false, nil
+	} else if err != nil {
+		return bridgeDeclarationOperation{}, false, err
+	}
+	return existing, true, nil
+}
+
+func insertBridgeDeclarationOperationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operation string,
+	sourceKind string,
+	sourceID string,
+	declarationDigest string,
+	receiptJSON string,
+	now time.Time,
+) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO session_bridge_operations (
+			workspace_id, session_id, session_thread_id, operation, source_kind,
+			idempotency_key, request_hash, declaration_digest, receipt_json,
+			ack_status, runtime_input_id, result_json, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $6, '{}', $10, $10
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		operation,
+		sourceKind,
+		sourceID,
+		declarationDigest,
+		receiptJSON,
+		bridgeAckCommitted,
+		now,
+	)
+	return err
+}
+
 func updateBridgeOperationResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operation string, key string, resultJSON string, stdinWriteSeq sql.NullInt64, now time.Time) error {
 	if resultJSON == "" {
 		resultJSON = "{}"
 	}
 	_, err := tx.Exec(ctx,
 		`UPDATE session_bridge_operations
-		    SET result_json = $5,
-		        stdin_write_seq = COALESCE(stdin_write_seq, $6),
-		        updated_at = $7
+		    SET result_json = $7,
+		        stdin_write_seq = COALESCE(stdin_write_seq, $8),
+		        updated_at = $9
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND operation = $3
-		    AND idempotency_key = $4`,
+		    AND session_thread_id = $3
+		    AND operation = $4
+		    AND source_kind = $5
+		    AND idempotency_key = $6`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		operation,
 		operation,
 		key,
 		resultJSON,

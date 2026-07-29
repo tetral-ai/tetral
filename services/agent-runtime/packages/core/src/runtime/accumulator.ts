@@ -91,6 +91,7 @@ interface LLMEventEnvelope extends RuntimeProcessorSource {
 export interface SessionProcessorOptions {
   readonly messageId: string;
   readonly modelRequestId: string;
+  readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
   /**
@@ -419,11 +420,10 @@ export class SessionProcessor {
       status: "completed",
       createdAt: now,
       updatedAt: now,
-      ...(this.messageInfo.providerId !== undefined ? { providerId: this.messageInfo.providerId } : {}),
-      ...(this.messageInfo.modelId !== undefined ? { modelId: this.messageInfo.modelId } : {}),
       parts: [boundRuntimePartForStableWrite(repaired, this.maxBytes())],
     });
     const commit = await this.options.writer.commitInternalToolRepair({
+      workspaceId: this.options.workspaceId,
       sessionId: this.options.sessionId,
       sessionThreadId: this.options.sessionThreadId,
       modelRequestId,

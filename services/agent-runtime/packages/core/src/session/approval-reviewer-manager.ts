@@ -25,6 +25,12 @@ export interface ParentTranscriptFeed {
   readonly messages: readonly RuntimeMessage[];
 }
 
+/** Reviewer trunk snapshot paired with the durable parent boundary captured with it. */
+export interface ReviewerTrunkSnapshot {
+  readonly messages: readonly RuntimeMessage[];
+  readonly parentBoundaryEventId: string;
+}
+
 /** Atomic lease used to choose one winner between reviewer outcome and cancellation. */
 export interface ApprovalReviewExecutionLease {
   readonly kind: "trunk" | "sidecar";
@@ -101,7 +107,7 @@ export class AutoApprovalReviewerManager {
   #trunkThreadId: string | undefined;
   #trunkBusy = false;
   #feedCursor: ParentTranscriptCursor | undefined;
-  #lastCommittedTrunkSnapshot: RuntimeMessage[] | undefined;
+  #lastCommittedTrunkSnapshot: ReviewerTrunkSnapshot | undefined;
   readonly #decisionMemo = new Map<string, ApprovalReviewerOutcome>();
   readonly #ephemeralReviews = new Set<string>();
   readonly #executions = new Map<string, MutableReviewerExecutionState>();
@@ -163,7 +169,11 @@ export class AutoApprovalReviewerManager {
     };
   }
 
-  completeTrunkReview(view: ParentTranscriptView, snapshot: readonly RuntimeMessage[]): void {
+  completeTrunkReview(
+    view: ParentTranscriptView,
+    snapshot: readonly RuntimeMessage[],
+    parentBoundaryEventId: string,
+  ): void {
     if (this.#disposed) {
       return;
     }
@@ -171,13 +181,19 @@ export class AutoApprovalReviewerManager {
       generation: view.generation,
       fedEntryCount: view.messages.length,
     };
-    this.#lastCommittedTrunkSnapshot = [...snapshot];
+    this.#lastCommittedTrunkSnapshot = {
+      messages: [...snapshot],
+      parentBoundaryEventId,
+    };
   }
 
-  trunkSnapshot(): readonly RuntimeMessage[] | undefined {
+  trunkSnapshot(): ReviewerTrunkSnapshot | undefined {
     return this.#lastCommittedTrunkSnapshot === undefined
       ? undefined
-      : [...this.#lastCommittedTrunkSnapshot];
+      : {
+          messages: [...this.#lastCommittedTrunkSnapshot.messages],
+          parentBoundaryEventId: this.#lastCommittedTrunkSnapshot.parentBoundaryEventId,
+        };
   }
 
   decisionFor(key: string): ApprovalReviewerOutcome | undefined {

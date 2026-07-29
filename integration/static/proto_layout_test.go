@@ -105,13 +105,20 @@ func TestBridgeStableReasoningUsesOnlyAuthorizedDualBoundaries(t *testing.T) {
 	if count := strings.Count(text, "repeated StableReasoningPart stable_reasoning_parts"); count != 2 {
 		t.Fatalf("bridge stable reasoning boundary count = %d; want exactly WriteEvent and WriteRequestEnd", count)
 	}
-	for _, forbidden := range []string{
-		"CommitStable" + "ReasoningPart",
-		"message_id = 3;",
-	} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("bridge proto retained standalone or caller-selected stable reasoning surface %q", forbidden)
-		}
+	if forbidden := "CommitStable" + "ReasoningPart"; strings.Contains(text, forbidden) {
+		t.Fatalf("bridge proto retained standalone stable reasoning surface %q", forbidden)
+	}
+	stableReasoningStart := strings.Index(text, "message StableReasoningPart {")
+	if stableReasoningStart < 0 {
+		t.Fatal("bridge proto stable reasoning part block is missing")
+	}
+	stableReasoningEnd := strings.Index(text[stableReasoningStart:], "}")
+	if stableReasoningEnd < 0 {
+		t.Fatal("bridge proto stable reasoning part block is malformed")
+	}
+	stableReasoningBlock := text[stableReasoningStart : stableReasoningStart+stableReasoningEnd]
+	if strings.Contains(stableReasoningBlock, "message_id") {
+		t.Fatal("bridge proto stable reasoning part retained caller-selected message identity")
 	}
 }
 

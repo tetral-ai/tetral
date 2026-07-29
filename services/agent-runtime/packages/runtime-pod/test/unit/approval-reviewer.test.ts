@@ -117,12 +117,12 @@ describe("Runtime approval reviewer", () => {
     expect(threadCreator.creations[0]).toMatchObject({
       reviewerThreadId: input.sessionThreadId,
       isTrunk: true,
-      forkSeedJson: "",
+      threadContextPrefixJson: "",
     });
     const promptPart = input.promptItems[0]?.parts[0];
-    expect(input.promptItems[0]).toMatchObject({
-      providerId: "anthropic",
-      modelId: "claude-opus-4-8",
+    expect(input.thread).toMatchObject({
+      role: "approval_reviewer",
+      agentType: "approval_reviewer",
     });
     expect(promptPart?.type).toBe("text");
     if (promptPart?.type !== "text") {
@@ -226,7 +226,7 @@ describe("Runtime approval reviewer", () => {
     }
   });
 
-  test("uses the platform reviewer model even when the parent request has no current model", async () => {
+  test("uses reviewer-role selection even when the parent request has no current model", async () => {
     const host = new RecordingReviewerHost([
       assistantDecision("sesn_1", "allow", "platform reviewer model"),
     ]);
@@ -240,9 +240,9 @@ describe("Runtime approval reviewer", () => {
       message: "platform reviewer model",
     });
     expect(host.inputs).toHaveLength(1);
-    expect(host.inputs[0]?.kind === "approval_review" ? host.inputs[0].promptItems[0] : undefined).toMatchObject({
-      providerId: "anthropic",
-      modelId: "claude-opus-4-8",
+    expect(host.inputs[0]?.kind === "approval_review" ? host.inputs[0].thread : undefined).toMatchObject({
+      role: "approval_reviewer",
+      agentType: "approval_reviewer",
     });
   });
 
@@ -367,9 +367,10 @@ describe("Runtime approval reviewer", () => {
     if (sidecarCreation === undefined) {
       throw new Error("expected a sidecar creation");
     }
-    expect(JSON.parse(sidecarCreation.forkSeedJson)).toMatchObject({
+    expect(JSON.parse(sidecarCreation.threadContextPrefixJson)).toMatchObject({
       review_id: sidecarCreation.reviewId,
       source_parent_thread_id: "thrd_parent",
+      parent_boundary_event_id: "evt_msg_first",
       runtime_messages_snapshot: [assistantDecision("sesn_1", "allow", "safe")],
     });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation.reviewerThreadId);
@@ -404,9 +405,10 @@ describe("Runtime approval reviewer", () => {
     await reviewer(validReviewRequest({ approvalReviewerManager, targetModelToolCallId: "tool_call_sidecar", parentTranscript: { generation: 1, messages: [parent] } }));
 
     const sidecarCreation = threadCreator.creations.find((creation) => !creation.isTrunk);
-    expect(JSON.parse(sidecarCreation?.forkSeedJson ?? "{}")).toMatchObject({
+    expect(JSON.parse(sidecarCreation?.threadContextPrefixJson ?? "{}")).toMatchObject({
       review_id: sidecarCreation?.reviewId,
       source_parent_thread_id: "thrd_parent",
+      parent_boundary_event_id: "evt_msg_parent",
       runtime_messages_snapshot: [],
     });
     const sidecarInput = host.inputs.find((input) => input.sessionThreadId === sidecarCreation?.reviewerThreadId);

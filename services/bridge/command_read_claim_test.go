@@ -61,9 +61,9 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultRedrainsAbandonedSameOwner(t *
 	requestID, key, payload := readCommandResultOwnerIdentity(sourceID, taskID, false, 23)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, idempotency_key,
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
 			request_hash, ack_status, result_json, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, 'committed', $6,
+		) VALUES ('default', $1, $2, $3, $3, $4, $5, 'committed', $6,
 			'2026-01-01T00:00:30Z', '2026-01-01T00:00:30Z')`,
 		sessionID, threadID, bridgeOpReadCommandResult, key,
 		bridgeRequestHash(bridgeOpReadCommandResult, key, payload), pendingCommandReadJSON()); err != nil {
@@ -159,9 +159,9 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultPendingOwnerRecoversSuperseded
 	_, key, payload := readCommandResultOwnerIdentity(sourceID, taskID, false, 0)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, idempotency_key,
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
 			request_hash, ack_status, result_json, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, 'committed', $6,
+		) VALUES ('default', $1, $2, $3, $3, $4, $5, 'committed', $6,
 			'2026-01-01T00:00:30Z', '2026-01-01T00:00:30Z')`,
 		sessionID, threadID, bridgeOpReadCommandResult, key,
 		bridgeRequestHash(bridgeOpReadCommandResult, key, payload), pendingCommandReadJSON()); err != nil {

@@ -14,7 +14,6 @@ import { GrpcStatusError, RuntimeControlService } from "../../src/runtime-servic
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import type {
   RuntimeAuthenticator,
-  RuntimeAcceptedInputRegistrar,
   RuntimeControlInputCommitter,
   RuntimeCleanupController,
   RuntimeCommandScope,
@@ -125,33 +124,6 @@ describe("RuntimeControlService command envelope", () => {
     expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED);
     expect(response.retryable).toBe(true);
     expect(response.errorCode).toBe(runtimeInputErrorCodeOrGeneric("context_load_failed"));
-  });
-
-  test("registers accepted input scope before waking the run host and keeps it on success", async () => {
-    const acceptedInputRegistrar = new RecordingAcceptedInputRegistrar();
-    const fixture = runtimeFixture({ acceptedInputRegistrar });
-
-    const response = await fixture.service.acceptInput(validCommand(), authMetadata());
-
-    expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED);
-    expect(acceptedInputRegistrar.registered).toEqual([expect.objectContaining({
-      sessionId: "sesn_1",
-      sessionThreadId: "thrd_1",
-      runtimeInputId: "rin_1",
-      eventIds: ["sevt_1"],
-    })]);
-    expect(acceptedInputRegistrar.unregistered).toEqual([]);
-  });
-
-  test("unregisters accepted input scope when the run host rejects wake-run", async () => {
-    const acceptedInputRegistrar = new RecordingAcceptedInputRegistrar();
-    const runHost = new RecordingRunHost({ ok: false, sessionId: "sesn_1", reason: "local_session_capacity_exceeded" });
-    const fixture = runtimeFixture({ runHost, acceptedInputRegistrar });
-
-    await expectGrpcCode(fixture.service.acceptInput(validCommand(), authMetadata()), status.RESOURCE_EXHAUSTED);
-
-    expect(acceptedInputRegistrar.registered).toHaveLength(1);
-    expect(acceptedInputRegistrar.unregistered).toEqual(["rin_1"]);
   });
 
   test("deduplicates the same runtime_input_id across RPC attempt request_id changes", async () => {
@@ -1050,7 +1022,6 @@ function runtimeFixture(options: {
   readonly auth?: "allow" | "deny";
   readonly runHost?: RecordingRunHost;
   readonly cleanupController?: RecordingCleanupController;
-  readonly acceptedInputRegistrar?: RecordingAcceptedInputRegistrar;
   readonly controlInputCommitter?: RecordingControlInputCommitter;
   readonly taskNotificationCommitter?: RecordingTaskNotificationCommitter;
   readonly commandRunner?: RuntimeCommandRunner;
@@ -1067,7 +1038,6 @@ function runtimeFixture(options: {
     allowedBridge: { namespace: "engine", name: "bridge" },
     authenticator: new FixedAuthenticator(options.auth ?? "allow"),
     runHost,
-    ...(options.acceptedInputRegistrar !== undefined ? { acceptedInputRegistrar: options.acceptedInputRegistrar } : {}),
     controlInputCommitter,
     taskNotificationCommitter,
     cleanupController,
@@ -1312,18 +1282,6 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   async handleRuntimeConfigPatch(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1]) {
     this.runtimeConfigPatches.push({ sessionId, command });
     return this.runtimeConfigPatchResult;
-  }
-}
-
-class RecordingAcceptedInputRegistrar implements RuntimeAcceptedInputRegistrar {
-  readonly registered: Array<Parameters<RuntimeAcceptedInputRegistrar["registerAcceptedInput"]>[0]> = [];
-  readonly unregistered: string[] = [];
-
-  registerAcceptedInput(command: Parameters<RuntimeAcceptedInputRegistrar["registerAcceptedInput"]>[0]): () => void {
-    this.registered.push(command);
-    return () => {
-      this.unregistered.push(command.runtimeInputId);
-    };
   }
 }
 

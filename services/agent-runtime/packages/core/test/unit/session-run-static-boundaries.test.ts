@@ -113,6 +113,7 @@ function collectLifecycleBoundaryViolations(relativePath: string, text: string):
       (importSpecifier === "../runtime/message-projection.js" ||
         importSpecifier === "../runtime/accumulator.js" ||
         importSpecifier === "../runtime/conversation-turns.js" ||
+        importSpecifier === "../runtime/runtime-declaration.js" ||
         importSpecifier === "../runtime/metrics.js" ||
         importSpecifier === "../runtime/turn-retry-budget.js");
     const allowedSessionManagerRuntimeImport =
@@ -210,7 +211,7 @@ describe("session run static boundaries", () => {
     expect(normalizedManager).toContain("pendingWakeAfterStop:boolean;");
     expect(normalizedManager).toContain("interfaceThreadEntry{");
     expect(normalizedManager).toContain("runSlot:ThreadRunSlot|undefined;");
-    expect(normalizedSessionEntry).toBe("workspaceId:string;readonlysessionId:string;bindingId:string;bindingGeneration:number;readonlythreads:Map<string,ThreadEntry>;readonlytoolCoordinator:SessionToolCoordinator;readonlyruntimeShutdown:RuntimeShutdownObservation;");
+    expect(normalizedSessionEntry).toBe("workspaceId:string;readonlysessionId:string;bindingId:string;bindingGeneration:number;readonlythreads:Map<string,ThreadEntry>;readonlytoolCoordinator:SessionToolCoordinator;readonlyruntimeShutdown:RuntimeShutdownObservation;sharedStateStatus:\"initializing\"|\"ready\"|\"failed\";readonlysharedStateInitializerThreadId:string;readonlysharedStateReady:Promise<boolean>;readonlycompleteSharedStateReady:(ready:boolean)=>void;sharedRuntimeConfigPatches:readonlyRuntimeConfigPatchState[]|undefined;");
     expect(normalizedManager).toContain("toolCoordinator:newSessionToolCoordinator({maxConcurrentTools:options.maxConcurrentTools??8})");
     expect(normalizedManager).toContain("newSession.Session(identity,approvalReviewer,toolCoordinator)");
     expect(normalizedManager).toContain("constsessions=newMap<string,SessionEntry>();");
@@ -305,7 +306,7 @@ describe("session run static boundaries", () => {
     expect(violations).toEqual([]);
   });
 
-  test("cold preload inserts ThreadEntry and hydrates pending tools without an async boundary", async () => {
+  test("cold preload publishes installing residency before the shared-state gate and pending-tool hydration", async () => {
     const managerSource = await readFile(sourceUrl("src/session/session-manager.ts"), "utf8");
     const agentLoopSource = await readFile(sourceUrl("src/agent-loop/agent-loop.ts"), "utf8");
     const normalizedAgentLoop = normalizeSource(agentLoopSource);
@@ -314,7 +315,8 @@ describe("session run static boundaries", () => {
     const preloadSection = managerSource.slice(preloadStart, preloadEnd);
     const installIndex = preloadSection.indexOf("agentLoop.installLoadedPendingToolUses");
     const pendingAssignmentIndex = preloadSection.indexOf("const pendingToolUseInstall");
-    const beforePendingInstall = preloadSection.slice(0, pendingAssignmentIndex);
+    const residencyIndex = preloadSection.indexOf("getOrCreateThreadEntry(identity, metadata, \"installing\")");
+    const sharedStateGateIndex = preloadSection.indexOf("threadResult.sessionEntry.sharedStateReady");
 
     expect(preloadStart).toBeGreaterThanOrEqual(0);
     expect(preloadEnd).toBeGreaterThan(preloadStart);
@@ -323,10 +325,10 @@ describe("session run static boundaries", () => {
       "installLoadedPendingToolUses:(session,pendingToolUses,messages)=>Effect.sync(()=>installLoadedPendingToolUses(session,options,pendingToolUses,messages))",
     );
     expect(pendingAssignmentIndex).toBeGreaterThanOrEqual(0);
-    expect(beforePendingInstall).toContain("const threadResult = getOrCreateThreadEntry(identity, metadata);");
-    expect(beforePendingInstall).not.toContain("yield*");
-    expect(beforePendingInstall).not.toContain("Effect.promise");
-    expect(beforePendingInstall).not.toContain("Effect.async");
+    expect(residencyIndex).toBeGreaterThanOrEqual(0);
+    expect(sharedStateGateIndex).toBeGreaterThan(residencyIndex);
+    expect(pendingAssignmentIndex).toBeGreaterThan(sharedStateGateIndex);
+    expect(preloadSection.indexOf("completeSharedStateReady(true)")).toBeLessThan(pendingAssignmentIndex);
   });
 
   test("pending approval hot state stores settlement descriptors, never SessionProcessor", async () => {

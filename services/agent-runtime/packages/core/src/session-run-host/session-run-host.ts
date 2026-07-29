@@ -20,6 +20,10 @@ export interface Interface {
   readonly handleRuntimeConfigPatch: (sessionId: string, command: Parameters<SessionManager.Interface["applyRuntimeConfigPatch"]>[1]) => Effect.Effect<SessionManager.RuntimeControlResult>;
   readonly handleCleanupSession: (sessionId: string, command: SessionManager.RuntimeCleanupSessionCommand) => Effect.Effect<SessionManager.CleanupSessionResult>;
   readonly handlePreloadThread: (command: Parameters<SessionManager.Interface["preloadThread"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
+  readonly handleEnsureThreadInstalled: (
+    command: Parameters<SessionManager.Interface["ensureThreadInstalled"]>[0],
+    options?: Parameters<SessionManager.Interface["ensureThreadInstalled"]>[1],
+  ) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleInterruptThread: (command: Parameters<SessionManager.Interface["interruptThread"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleInterruptReviewerExecution: (command: Parameters<SessionManager.Interface["interruptReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken) => Effect.Effect<SessionManager.ReviewerExecutionControlResult>;
   readonly handleMarkThreadClosed: (command: Parameters<SessionManager.Interface["markThreadClosed"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
@@ -56,6 +60,7 @@ export const layer = Layer.effect(
       // External cleanup ingress; never loads pending input or context.
       handleCleanupSession: (sessionId, command) => manager.cleanupSession(sessionId, command),
       handlePreloadThread: (command) => manager.preloadThread(command),
+      handleEnsureThreadInstalled: (command, options) => manager.ensureThreadInstalled(command, options),
       handleInterruptThread: (command) => manager.interruptThread(command),
       handleInterruptReviewerExecution: (command, token) => manager.interruptReviewerExecution(command, token),
       handleMarkThreadClosed: (command) => manager.markThreadClosed(command),

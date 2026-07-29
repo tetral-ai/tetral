@@ -55,19 +55,17 @@ import type {
   RuntimePart,
 } from "../contracts/runtime.js";
 import type { ProviderError } from "../contracts/provider.js";
-import { RuntimeMessageSchema, boundRuntimePartForStableWrite } from "../contracts/runtime.js";
+import {
+  DurableRuntimeMessageSchema,
+  RuntimeMessageSchema,
+  boundRuntimePartForStableWrite,
+} from "../contracts/runtime.js";
 import { normalizeProviderError } from "../contracts/provider.js";
 
 /** Success or normalized provider-input failure from lowering Runtime messages. */
 export type RuntimeGatewayMessagesResult =
   | { readonly ok: true; readonly messages: readonly GatewayRuntimeMessage[] }
   | { readonly ok: false; readonly error: ProviderError };
-
-/** Route identity retained for callers that assemble a provider-specific request. */
-export interface RuntimeProjectionTarget {
-  readonly providerId: string;
-  readonly modelId: string;
-}
 
 /** Hot mirror that advances only after its paired message-store operation succeeds. */
 export class RuntimeMessageProjection {
@@ -108,13 +106,14 @@ export class RuntimeMessageProjection {
 }
 
 /** Lowers completed, failed, and cancelled Runtime history into provider-request messages. */
-export function toGatewayRuntimeMessages(input: unknown, _target?: RuntimeProjectionTarget): RuntimeGatewayMessagesResult {
+export function toGatewayRuntimeMessages(input: unknown): RuntimeGatewayMessagesResult {
   if (!Array.isArray(input) || input.length === 0) {
     return { ok: false, error: runtimeInputError("schema") };
   }
   const messages: GatewayRuntimeMessage[] = [];
   for (const item of input) {
-    const parsed = RuntimeMessageSchema.safeParse(item);
+    const durable = DurableRuntimeMessageSchema.safeParse(item);
+    const parsed = durable.success ? durable : RuntimeMessageSchema.safeParse(item);
     if (!parsed.success) {
       return { ok: false, error: runtimeInputError("schema") };
     }

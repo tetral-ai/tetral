@@ -600,6 +600,7 @@ function sessionManagerLayer(
   options: {
     readonly maxLocalSessions?: number;
     readonly metrics?: RuntimeMetricsSink;
+    readonly loadThreadContext?: SessionManager.LayerOptions["loadThreadContext"];
     readonly loadPendingAgentMail?: SessionManager.LayerOptions["loadPendingAgentMail"];
     readonly registerAcceptedInput?: SessionManager.LayerOptions["registerAcceptedInput"];
     readonly closeoutMonotonicMs?: SessionManager.LayerOptions["closeoutMonotonicMs"];
@@ -611,6 +612,7 @@ function sessionManagerLayer(
     maxLocalSessions: options.maxLocalSessions ?? 10,
     now: () => timestamp,
     ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
+    ...(options.loadThreadContext !== undefined ? { loadThreadContext: options.loadThreadContext } : {}),
     ...(options.loadPendingAgentMail !== undefined ? { loadPendingAgentMail: options.loadPendingAgentMail } : {}),
     ...(options.registerAcceptedInput !== undefined ? { registerAcceptedInput: options.registerAcceptedInput } : {}),
     ...(options.closeoutMonotonicMs !== undefined ? { closeoutMonotonicMs: options.closeoutMonotonicMs } : {}),
@@ -1182,6 +1184,107 @@ describe("SessionManager", () => {
         payloadJson: "{\"config_generation\":5}",
       });
       agentLoop.runs[0]?.release();
+    });
+  });
+
+  test("one failed shared-state initializer prevents sibling cold loads from creating a second session state", async () => {
+    const agentLoop = makeControlledAgentLoop();
+    let loadCount = 0;
+    let releaseFailedLoad: (() => void) | undefined;
+    let observeFailedLoad: (() => void) | undefined;
+    let releaseSiblingLoad: (() => void) | undefined;
+    let observeSiblingLoad: (() => void) | undefined;
+    const failedLoadStarted = new Promise<void>((resolve) => {
+      observeFailedLoad = resolve;
+    });
+    const failedLoadGate = new Promise<void>((resolve) => {
+      releaseFailedLoad = resolve;
+    });
+    const siblingLoadStarted = new Promise<void>((resolve) => {
+      observeSiblingLoad = resolve;
+    });
+    const siblingLoadGate = new Promise<void>((resolve) => {
+      releaseSiblingLoad = resolve;
+    });
+    const loadThreadContext: NonNullable<SessionManager.LayerOptions["loadThreadContext"]> = async (command) => {
+      loadCount += 1;
+      if (loadCount === 1) {
+        observeFailedLoad?.();
+        await failedLoadGate;
+        throw new Error("shared cold load failed");
+      }
+      if (loadCount === 2) {
+        observeSiblingLoad?.();
+        await siblingLoadGate;
+      }
+      return {
+        ...command,
+        runtimeBindingToken: `runtime-binding-token-${command.sessionThreadId}`,
+        messages: [],
+        thread: command.sessionThreadId === "thrd_shared_initializer"
+          ? { role: "main", visibility: "public", status: "idle" }
+          : {
+            parentThreadId: "thrd_shared_initializer",
+            role: "subagent",
+            visibility: "public",
+            status: "idle",
+          },
+      };
+    };
+
+    await withSessionManager(sessionManagerLayer(agentLoop, { loadThreadContext }), async (manager) => {
+      const initializer = Effect.runPromise(manager.ensureThreadInstalled(
+        threadControl("sesn_shared_install_failure", "rin_initializer", "thrd_shared_initializer"),
+      ));
+      await failedLoadStarted;
+      const sibling = Effect.runPromise(manager.ensureThreadInstalled(
+        threadControl("sesn_shared_install_failure", "rin_sibling", "thrd_shared_sibling"),
+      ));
+      await siblingLoadStarted;
+      releaseFailedLoad?.();
+
+      await expect(initializer).resolves.toEqual({
+        ok: false,
+        sessionId: "sesn_shared_install_failure",
+        sessionThreadId: "thrd_shared_initializer",
+        reason: "context_load_failed",
+      });
+      await expect(Effect.runPromise(manager.ensureThreadInstalled(
+        threadControl("sesn_shared_install_failure", "rin_early_retry", "thrd_shared_initializer"),
+      ))).resolves.toEqual({
+        ok: false,
+        sessionId: "sesn_shared_install_failure",
+        sessionThreadId: "thrd_shared_initializer",
+        reason: "context_load_failed",
+      });
+      expect(loadCount).toBe(2);
+
+      releaseSiblingLoad?.();
+      await expect(sibling).resolves.toEqual({
+        ok: false,
+        sessionId: "sesn_shared_install_failure",
+        sessionThreadId: "thrd_shared_sibling",
+        reason: "context_load_failed",
+      });
+      expect(await Effect.runPromise(manager.inspectThread(
+        threadControl("sesn_shared_install_failure", "rin_inspect", "thrd_shared_sibling"),
+      ))).toEqual({
+        ok: true,
+        sessionId: "sesn_shared_install_failure",
+        sessionThreadId: "thrd_shared_sibling",
+        observed: false,
+        messages: [],
+      });
+
+      await expect(Effect.runPromise(manager.ensureThreadInstalled(
+        threadControl("sesn_shared_install_failure", "rin_retry", "thrd_shared_initializer"),
+      ))).resolves.toEqual({
+        ok: true,
+        sessionId: "sesn_shared_install_failure",
+        sessionThreadId: "thrd_shared_initializer",
+        applied: true,
+      });
+      expect(loadCount).toBe(3);
     });
   });
 
@@ -2444,6 +2547,12 @@ describe("SessionManager", () => {
     const agentLoop = makeReviewerInterruptCleanupAgentLoop(reviewerThreadId);
     await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
       const unrelatedThreadId = "thrd_unrelated_release";
+      await Effect.runPromise(manager.preloadThread({
+        ...threadControl(sessionId, "rin_parent_preload", parentThreadId),
+        thread: { role: "main", visibility: "public", status: "idle" },
+        runtimeBindingToken: "runtime-binding-token-parent",
+        messages: [],
+      }));
       await Effect.runPromise(manager.acceptInput(acceptedInput(sessionId, "rin_parent_release", parentThreadId)));
       await Effect.runPromise(manager.acceptInput(approvalReviewInput(
         sessionId,
@@ -3708,9 +3817,12 @@ describe("SessionManager", () => {
     let deliveryAttempts = 0;
     const layer = sessionManagerLayer(agentLoop, {
       loadPendingAgentMail: async () => [mail],
-      registerAcceptedInput: () => {
-        deliveryAttempts += 1;
-        throw new Error("completion mail delivery defect");
+      registerAcceptedInput: (input) => {
+        if (input.kind === "inter_agent_message") {
+          deliveryAttempts += 1;
+          throw new Error("completion mail delivery defect");
+        }
+        return () => {};
       },
     });
 
@@ -3887,6 +3999,7 @@ describe("SessionManager", () => {
       "applyRuntimeConfigPatch",
       "cleanupSession",
       "commitTaskNotification",
+      "ensureThreadInstalled",
       "inspectReviewerExecution",
       "inspectThread",
       "interruptControl",

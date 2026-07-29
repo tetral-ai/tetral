@@ -31,6 +31,7 @@ import {
   buildSessionRunHostUserMessage as userMessage,
   buildSessionRunHostRuntimeNotificationMessage as runtimeNotificationMessage,
 } from "./runtime-message-builders.js";
+import { acceptedInputReceipt } from "./runtime-declaration-fixtures.js";
 
 const createdAt = "2026-06-14T00:00:00.000Z";
 
@@ -48,7 +49,9 @@ function acceptedInput(sessionId: string, runtimeInputId = `rin_${sessionId}`): 
     sequenceFrom: 1,
     sequenceTo: 1,
     kind: "messages",
-    payloadJson: "{}",
+    payloadJson: JSON.stringify({
+      messages: [userMessage(`msg_${runtimeInputId}`, 1, "test input")],
+    }),
   };
 }
 
@@ -80,6 +83,7 @@ interface ManagerCall {
     | "applyRuntimeConfigPatch"
     | "cleanupSession"
     | "preloadThread"
+    | "ensureThreadInstalled"
     | "interruptThread"
     | "interruptReviewerExecution"
     | "markThreadClosed"
@@ -138,6 +142,12 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
           calls.push({ method: "preloadThread", args });
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
+        }),
+      ensureThreadInstalled: (...args: readonly [Parameters<SessionManager.Interface["ensureThreadInstalled"]>[0], ...unknown[]]) =>
+        Effect.sync(() => {
+          calls.push({ method: "ensureThreadInstalled", args });
+          const command = args[0];
+          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
         }),
       interruptThread: (...args: readonly [Parameters<SessionManager.Interface["interruptThread"]>[0], ...unknown[]]) =>
         Effect.sync(() => {
@@ -209,7 +219,7 @@ class QueuedContextLoader implements ContextLoader {
   constructor(
     private readonly history: readonly RuntimeMessage[],
     private readonly pendingResults: PendingInputResult[],
-    private readonly acceptedResults: Array<AcceptedInputCommitResult | ((input: RuntimeAcceptedInputState) => AcceptedInputCommitResult)> = [],
+    private readonly acceptedResults: Array<unknown | ((input: RuntimeAcceptedInputState) => unknown)> = [],
   ) {}
 
   async buildContext(sessionId: string): Promise<readonly RuntimeMessage[]> {
@@ -226,9 +236,9 @@ class QueuedContextLoader implements ContextLoader {
     this.commitCalls.push(input);
     const result = this.acceptedResults.shift();
     if (typeof result === "function") {
-      return result(input);
+      return result(input) as AcceptedInputCommitResult;
     }
-    return result ?? { type: "empty" };
+    return (result ?? acceptedInputReceipt(input)) as AcceptedInputCommitResult;
   }
 }
 
@@ -379,6 +389,11 @@ function fullHostLayer(options: {
   const managerLayer = SessionManager.layer({
     maxLocalSessions: 10,
     now: () => createdAt,
+    loadThreadContext: async (command) => ({
+      ...command,
+      messages: [],
+      runtimeBindingToken: `rtbt_${command.sessionId}`,
+    }),
   }).pipe(Layer.provide(agentLoopLayer));
   return SessionRunHost.layer.pipe(Layer.provide(managerLayer));
 }
@@ -519,6 +534,7 @@ describe("SessionRunHost", () => {
     expect(keys).toEqual([
       "handleAcceptInput",
       "handleCleanupSession",
+      "handleEnsureThreadInstalled",
       "handleInspectReviewerExecution",
       "handleInspectThread",
       "handleInterruptControl",
@@ -538,16 +554,21 @@ describe("SessionRunHost", () => {
   });
 
   test("handleAcceptInput drives the real manager and agent loop through the fake runtime path", async () => {
-    const loader = new QueuedContextLoader([], [], [{ type: "context", messages: [userMessage("user-1", 0, "hello")], runtimeBindingToken: "rtbt_sesn_1" }]);
+    const loader = new QueuedContextLoader([], []);
     const store = new HostRuntimeStore();
     const writer = new RecordingWriter();
     const llmService = new ControlledLLMService();
 
     await withHost(fullHostLayer({ loader, store, writer, llmService }), async (host) => {
+      expect(await Effect.runPromise(host.handleEnsureThreadInstalled(acceptedInput("sesn_1")))).toMatchObject({
+        ok: true,
+        sessionId: "sesn_1",
+        applied: true,
+      });
       expect(await Effect.runPromise(host.handleAcceptInput(acceptedInput("sesn_1")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
-        created: true,
+        created: false,
         started: true,
         pendingWake: false,
       });

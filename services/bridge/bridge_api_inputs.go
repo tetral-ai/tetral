@@ -6,8 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strconv"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -15,7 +13,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
-	"github.com/tetral-ai/tetral/internal/queue"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -29,31 +26,48 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	if err := validateCommitInputsRequest(inputKind, request); err != nil {
 		return nil, err
 	}
-	interAgentHashPart := request.GetInterAgentMessageJson()
-	if inputKind == "inter_agent_message" {
-		var err error
-		interAgentHashPart, err = interAgentMessageIdentityHashPart(request.GetInterAgentMessageJson())
-		if err != nil {
-			return nil, err
-		}
-	}
 	key := request.GetRuntimeInputId()
-	requestHash := bridgeRequestHash(
-		bridgeOpCommitInputs,
-		key,
-		request.GetScope().GetSessionThreadId(),
-		inputKind,
-		strings.Join(request.GetEventIds(), "\x1f"),
-		strconv.FormatInt(request.GetSequenceFrom(), 10),
-		strconv.FormatInt(request.GetSequenceTo(), 10),
-		request.GetHotContextPatchJson(),
-		interAgentHashPart,
-		request.GetApprovalReviewJson(),
-	)
+	declarationDigest, err := commitInputsDeclarationDigest(request, inputKind)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
 	var ack *bridgev1.BridgeWriteAck
+	var receipt *bridgev1.DeclarationReceipt
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
+		// Serialize replay lookup before validating the current binding. A replacement
+		// binding may recover an ACK lost by its predecessor, while concurrent writers
+		// for the same session must still observe one committed operation.
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInputs,
+			inputKind,
+			key,
+		); err != nil {
+			return err
+		} else if ok {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "commit inputs receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
+				return status.Error(codes.AlreadyExists, "commit inputs idempotency conflict")
+			}
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "commit inputs receipt is invalid")
+			}
+			ack = duplicateAck(key, "")
+			return nil
+		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := lockThreadMutationOnlyTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
 		inboxStatus := ""
@@ -63,15 +77,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			if err != nil {
 				return err
 			}
-		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitInputs, key); err != nil {
-			return err
-		} else if ok {
-			if existing.RequestHash != requestHash {
-				return status.Error(codes.AlreadyExists, "commit inputs idempotency conflict")
-			}
-			ack = duplicateAck(key, "")
-			return nil
 		}
 		if inboxStatus == "committed" {
 			return status.Error(codes.FailedPrecondition, "committed runtime input is missing idempotency state")
@@ -84,7 +89,26 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
 				return err
 			}
-			if err := projectAcceptedInputTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+			receipt, err = commitInputDraftsTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				inputKind,
+				key,
+				request.GetEventIds(),
+				request.GetDrafts(),
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			receipt.PendingAttachmentDeltaJson, err = loadCommittedInputAttachmentDeltaTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetEventIds(),
+			)
+			if err != nil {
 				return err
 			}
 		case "interrupt_control":
@@ -121,24 +145,30 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		default:
 			return status.Error(codes.InvalidArgument, "unsupported commit inputs kind")
 		}
-		resultJSON, err := marshalBridgeJSON(map[string]any{
-			"runtime_input_id": key,
-			"input_kind":       inputKind,
-			"event_ids":        request.GetEventIds(),
-			"status":           "committed",
-		})
+		if receipt == nil {
+			receipt = &bridgev1.DeclarationReceipt{
+				SessionThreadId: request.GetScope().GetSessionThreadId(),
+				OperationKind:   bridgeOpCommitInputs,
+				SourceKind:      inputKind,
+				SourceId:        key,
+			}
+		}
+		receipt.DeclarationDigest = declarationDigest
+		resultJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpCommitInputs,
-			IdempotencyKey: key,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeInputID: sql.NullString{String: key, Valid: true},
-			ResultJSON:     resultJSON,
-			Now:            now,
-		}); err != nil {
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInputs,
+			inputKind,
+			key,
+			declarationDigest,
+			resultJSON,
+			now,
+		); err != nil {
 			return err
 		}
 		ack = committedAck(key, "")
@@ -146,7 +176,19 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	}); err != nil {
 		return nil, err
 	}
-	return &bridgev1.CommitInputsResponse{Ack: ack}, nil
+	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.CommitInputsResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
 func commitInputsKindUsesRuntimeInbox(inputKind string) bool {
@@ -209,25 +251,6 @@ func lockAndValidateRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, 
 		!sameBridgeSequence(inboxSequenceFrom, request.GetSequenceFrom()) ||
 		!sameBridgeSequence(inboxSequenceTo, request.GetSequenceTo()) {
 		return "", status.Error(codes.AlreadyExists, "commit inputs payload conflicts with runtime inbox")
-	}
-	if inputKind == "messages" && inboxStatus != "committed" {
-		expectedPayloadJSON, err := acceptedMessageCommandPayloadTx(ctx, tx, RuntimeJob{
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     scope.GetWorkspaceId(),
-			SessionID:       inboxSessionID,
-			SessionThreadID: inboxThreadID,
-			RuntimeInputID:  runtimeInputID,
-			EventIDs:        inboxEventIDs,
-			SequenceFrom:    inboxSequenceFrom.Int64,
-			SequenceTo:      inboxSequenceTo.Int64,
-			InputKind:       inboxKind,
-		})
-		if err != nil {
-			return "", status.Error(codes.FailedPrecondition, "runtime inbox payload is not committable")
-		}
-		if bridgeRequestHash(expectedPayloadJSON) != bridgeRequestHash(request.GetHotContextPatchJson()) {
-			return "", status.Error(codes.AlreadyExists, "commit inputs payload conflicts with runtime inbox")
-		}
 	}
 	return inboxStatus, nil
 }
@@ -323,6 +346,86 @@ func markSessionEventsProcessed(ctx context.Context, tx *dbconnect.Tx, scope *br
 	return nil
 }
 
+func loadCommittedInputAttachmentDeltaTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	eventIDs []string,
+) ([]string, error) {
+	result := make([]string, 0)
+	for _, eventID := range eventIDs {
+		var payloadJSON string
+		if err := tx.QueryRow(ctx,
+			`SELECT payload_json
+			   FROM session_events
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND event_id = $4
+			    AND type = 'user.message'`,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			eventID,
+		).Scan(&payloadJSON); err != nil {
+			return nil, err
+		}
+		var payload struct {
+			Content []struct {
+				Type   string `json:"type"`
+				Source struct {
+					Type   string `json:"type"`
+					FileID string `json:"file_id"`
+				} `json:"source"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, "runtime input attachment payload is invalid")
+		}
+		seen := make(map[string]struct{})
+		for _, part := range payload.Content {
+			if (part.Type != "image" && part.Type != "document") ||
+				part.Source.Type != "file" ||
+				part.Source.FileID == "" {
+				continue
+			}
+			if _, ok := seen[part.Source.FileID]; ok {
+				continue
+			}
+			seen[part.Source.FileID] = struct{}{}
+			var mime, filename sql.NullString
+			if err := tx.QueryRow(ctx,
+				`SELECT mime_type, filename
+				   FROM files
+				  WHERE workspace_id = $1
+				    AND file_id = $2`,
+				scope.GetWorkspaceId(),
+				part.Source.FileID,
+			).Scan(&mime, &filename); dbconnect.IsNoRows(err) {
+				mime = sql.NullString{}
+				filename = sql.NullString{}
+			} else if err != nil {
+				return nil, err
+			}
+			encoded, err := marshalBridgeJSON(bridgeLoadContextPendingAttachment{
+				Origin: bridgeLoadContextAttachmentOrigin{
+					FileBacked: &bridgeLoadContextFileAttachment{
+						SourceEventID: eventID,
+						FileID:        part.Source.FileID,
+					},
+				},
+				Mime:     mime.String,
+				Filename: filename.String,
+			})
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, encoded)
+		}
+	}
+	return result, nil
+}
+
 func sessionEventProcessedState(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string) (bool, bool, error) {
 	var processedAt sql.NullTime
 	err := tx.QueryRow(ctx,
@@ -344,38 +447,6 @@ func sessionEventProcessedState(ctx context.Context, tx *dbconnect.Tx, scope *br
 		return false, false, err
 	}
 	return processedAt.Valid, true, nil
-}
-
-func projectAcceptedInputTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventIDs []string, now time.Time) error {
-	for _, eventID := range eventIDs {
-		row := tx.QueryRow(ctx,
-			`SELECT type, payload_json
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4
-			  FOR UPDATE`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-			scope.GetSessionThreadId(),
-			eventID,
-		)
-		var eventType string
-		var payloadJSON string
-		if err := row.Scan(&eventType, &payloadJSON); err != nil {
-			return err
-		}
-		switch eventType {
-		case "user.message":
-			if err := insertSessionMessageProjectionTx(ctx, tx, scope, eventID, "accepted_user", payloadJSON, now); err != nil {
-				return err
-			}
-		default:
-			return status.Error(codes.FailedPrecondition, "message input event type is not committable")
-		}
-	}
-	return nil
 }
 
 func requireCommitInputEventTypesTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventIDs []string, expectedType string) error {
@@ -511,20 +582,8 @@ func cancelInterruptedPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInputsRequest) error {
 	switch inputKind {
 	case "messages":
-		if len(request.GetEventIds()) == 0 {
-			return status.Error(codes.InvalidArgument, "message commit requires event ids")
-		}
-		var snapshot struct {
-			Messages []json.RawMessage `json:"messages"`
-		}
-		if request.GetHotContextPatchJson() == "" || json.Unmarshal([]byte(request.GetHotContextPatchJson()), &snapshot) != nil || len(snapshot.Messages) != len(request.GetEventIds()) {
-			return status.Error(codes.InvalidArgument, "message commit requires an accepted message snapshot")
-		}
-		for _, message := range snapshot.Messages {
-			var object map[string]json.RawMessage
-			if json.Unmarshal(message, &object) != nil || object == nil {
-				return status.Error(codes.InvalidArgument, "accepted message snapshot contains an invalid message")
-			}
+		if len(request.GetEventIds()) == 0 || len(request.GetDrafts()) != len(request.GetEventIds()) {
+			return status.Error(codes.InvalidArgument, "message commit requires one user draft per event")
 		}
 		return nil
 	case "interrupt_control":
@@ -640,19 +699,6 @@ func commitInterAgentMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		return nil
 	}
 	return insertSessionMessageProjectionTx(ctx, tx, scope, eventID, "user", string(payload.Message), now)
-}
-
-func interAgentMessageIdentityHashPart(payloadJSON string) (string, error) {
-	var payload interAgentMessagePayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", status.Error(codes.InvalidArgument, "inter-agent message payload must be JSON")
-	}
-	return marshalBridgeJSON(map[string]any{
-		"delivery_id":              payload.DeliveryID,
-		"source_thread_id":         payload.SourceThreadID,
-		"source_tool_use_event_id": payload.SourceToolUseEventID,
-		"message":                  payload.Message,
-	})
 }
 
 func readReceivedInterAgentMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, deliveryID string) (string, string, bool, error) {

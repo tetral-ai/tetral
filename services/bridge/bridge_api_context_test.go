@@ -19,7 +19,7 @@ import (
 
 // This file owns the Bridge context protocol-family boundary.
 
-func TestPostgreSQLBridgeAPIStoreLoadContextReturnsSignedRuntimeBindingToken(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextReturnsFreshSignedSnapshot(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_load", "thr_bridge_load")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_load", "bind_bridge_load", 7, "pod_uid_load")
@@ -47,22 +47,19 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsSignedRuntimeBindingToken(t *
 		int64(claims["exp"].(float64)) != now.Add(5*time.Minute).Unix() {
 		t.Fatalf("runtime binding token claims = %#v; want scoped binding token", claims)
 	}
-	replay, err := store.LoadContext(context.Background(), request)
+	second, err := store.LoadContext(context.Background(), request)
 	if err != nil {
-		t.Fatalf("LoadContext replay: %v", err)
+		t.Fatalf("second LoadContext: %v", err)
 	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("LoadContext replay status = %s; want duplicate", replay.GetAck().GetStatus())
-	}
-	if replay.GetContextJson() != response.GetContextJson() {
-		t.Fatalf("LoadContext replay changed stored context payload")
+	if second.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("second LoadContext status = %s; want committed fresh snapshot", second.GetAck().GetStatus())
 	}
 	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(replay.GetContextJson()), &payload); err != nil {
-		t.Fatalf("parse replayed LoadContext payload: %v", err)
+	if err := json.Unmarshal([]byte(second.GetContextJson()), &payload); err != nil {
+		t.Fatalf("parse second LoadContext payload: %v", err)
 	}
 	if payload.Messages == nil || len(payload.Messages) != 0 {
-		t.Fatalf("LoadContext replay messages = %#v; want explicit empty array", payload.Messages)
+		t.Fatalf("second LoadContext messages = %#v; want explicit empty array", payload.Messages)
 	}
 }
 
@@ -339,13 +336,21 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 		t.Fatalf("filtered pending mail = %#v; want oldest unread delivery from the selected child", filteredPayload.PendingAgentMail)
 	}
 
-	_, err = store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+	refiltered, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:                   scope,
 		RuntimeInputId:          "rin_bridge_completion_window_filtered",
 		AgentMailSourceThreadId: "thr_bridge_completion_window_child_5",
 	})
-	if status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("LoadContext filter idempotency conflict err = %v; want AlreadyExists", err)
+	if err != nil {
+		t.Fatalf("LoadContext fresh alternate filter: %v", err)
+	}
+	var refilteredPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(refiltered.GetContextJson()), &refilteredPayload); err != nil {
+		t.Fatalf("decode alternate filtered completion window: %v", err)
+	}
+	if len(refilteredPayload.PendingAgentMail) != 1 ||
+		refilteredPayload.PendingAgentMail[0].SourceThreadID != "thr_bridge_completion_window_child_5" {
+		t.Fatalf("alternate filtered pending mail = %#v; want fresh selected-child snapshot", refilteredPayload.PendingAgentMail)
 	}
 }
 
@@ -654,41 +659,6 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsRuntimeSurface(t *testing.T) 
 	}
 	if strings.Contains(response.GetContextJson(), "rin_should_not_load") {
 		t.Fatalf("LoadContext leaked session_runtime_inbox row: %s", response.GetContextJson())
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreLoadContextToleratesLegacyTaskNotificationOutputPaths(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_legacy_task_notification", "thr_bridge_legacy_task_notification")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_legacy_task_notification", "bind_bridge_legacy_task_notification", 1, "pod_uid_legacy_task_notification")
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind, data_json, created_at, updated_at
-		) VALUES (
-			'default', 'sesn_bridge_legacy_task_notification', 'thr_bridge_legacy_task_notification',
-			'msg_bridge_legacy_task_notification', 1, 'runtime_notification',
-			'{"role":"user","origin":"runtime","parts":[{"type":"text","text":"{\"type\":\"runtime_notification\",\"result\":{\"task_id\":\"task_legacy\",\"output_paths\":{\"stdout\":\"/tmp/tetral-runtime/tasks/task_legacy/stdout.log\"}}}"}]}',
-			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
-		)`,
-	); err != nil {
-		t.Fatalf("seed legacy runtime notification: %v", err)
-	}
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
-	response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_legacy_task_notification", "thr_bridge_legacy_task_notification", "bind_bridge_legacy_task_notification", 1, "pod_uid_legacy_task_notification"),
-		RuntimeInputId: "rin_bridge_legacy_task_notification",
-	})
-	if err != nil {
-		t.Fatalf("LoadContext legacy task notification: %v", err)
-	}
-	var payload bridgeLoadContextPayload
-	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
-		t.Fatalf("parse legacy task notification context: %v", err)
-	}
-	if len(payload.Messages) != 1 || !strings.Contains(string(payload.Messages[0]), "output_paths") {
-		t.Fatalf("LoadContext legacy task notification messages = %s; want legacy row loaded without strict decode", response.GetContextJson())
 	}
 }
 

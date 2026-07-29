@@ -78,6 +78,7 @@ describe("AutoApprovalReviewerManager", () => {
     manager.completeTrunkReview(
       { generation: 1, messages: [first] },
       [userMessage("reviewer_snapshot", 1, "snapshot")],
+      "evt_parent_boundary",
     );
     expect(manager.parentTranscriptFeed({ generation: 1, messages: [first, second] })).toEqual({
       reanchored: false,
@@ -89,7 +90,7 @@ describe("AutoApprovalReviewerManager", () => {
     const manager = new AutoApprovalReviewerManager();
     const first = userMessage("msg_1", 1, "first");
     const second = userMessage("msg_2", 2, "second");
-    manager.completeTrunkReview({ generation: 4, messages: [first] }, []);
+    manager.completeTrunkReview({ generation: 4, messages: [first] }, [], "evt_parent_boundary");
 
     const delta = manager.parentTranscriptFeed({ generation: 4, messages: [first, second] });
     expect(delta.messages).toEqual([second]);
@@ -110,9 +111,12 @@ describe("AutoApprovalReviewerManager", () => {
       outcome: "allow" as const,
     };
 
-    manager.completeTrunkReview({ generation: 1, messages: [] }, snapshot);
+    manager.completeTrunkReview({ generation: 1, messages: [] }, snapshot, "evt_parent_boundary");
     manager.rememberDecision("target-specific-key", decision);
-    expect(manager.trunkSnapshot()).toEqual(snapshot);
+    expect(manager.trunkSnapshot()).toEqual({
+      messages: snapshot,
+      parentBoundaryEventId: "evt_parent_boundary",
+    });
     expect(manager.decisionFor("target-specific-key")).toEqual(decision);
 
     manager.dispose();

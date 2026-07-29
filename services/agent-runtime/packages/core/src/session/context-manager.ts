@@ -11,6 +11,16 @@
 
 import type { RuntimeMessage } from "../contracts/runtime.js";
 
+/** Durable, non-sequenced parent context installed separately from child history. */
+export interface ThreadContextPrefix {
+  readonly childThreadId: string;
+  readonly parentThreadId: string;
+  readonly parentBoundaryEventId: string;
+  readonly entries: readonly RuntimeMessage[];
+  readonly createdAt: string;
+  readonly consumedByCheckpointMessageId?: string | undefined;
+}
+
 // ContextManager owns the hot RuntimeMessage list for one ThreadEntry. New writes are
 // projected only after durable ACK; cold hydration may append projections already read
 // from durable state. These methods carry the hot mutation, but the discipline
@@ -41,6 +51,7 @@ import type { RuntimeMessage } from "../contracts/runtime.js";
 export class ContextManager {
   readonly sessionId: string;
   #messages: RuntimeMessage[];
+  #threadContextPrefix: ThreadContextPrefix | undefined;
   #generation = 0;
 
   constructor(sessionId: string, initialMessages: readonly RuntimeMessage[] = []) {
@@ -50,6 +61,18 @@ export class ContextManager {
 
   messages(): readonly RuntimeMessage[] {
     return [...this.#messages];
+  }
+
+  threadContextPrefix(): ThreadContextPrefix | undefined {
+    return this.#threadContextPrefix;
+  }
+
+  installThreadContextPrefix(prefix: ThreadContextPrefix | undefined): void {
+    this.#threadContextPrefix = prefix;
+  }
+
+  providerMessages(): readonly RuntimeMessage[] {
+    return [...(this.#threadContextPrefix?.entries ?? []), ...this.#messages];
   }
 
   messageListSnapshot(): { readonly generation: number; readonly messages: readonly RuntimeMessage[] } {
@@ -87,6 +110,7 @@ export class ContextManager {
 
   clear(): void {
     this.#messages = [];
+    this.#threadContextPrefix = undefined;
     this.#generation += 1;
   }
 }
