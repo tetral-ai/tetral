@@ -4,8 +4,9 @@
  * The service authenticates and authorizes callers before command admission, validates the command
  * envelope and selected pod, fences commands against the active session binding, and coalesces only
  * concurrent delivery of the same runtime input while Runtime Core owns completed replay decisions.
- * Durable control and task ACKs precede hot state updates except for the explicit interrupt closeout
- * ordering below. The gRPC server invokes this service; `createRuntimePodApp` supplies the
+ * Durable control ACKs precede hot state updates except for the explicit interrupt closeout
+ * ordering below. Task-notification transport ACKs only admit pending work; the owning loop
+ * performs its durable semantic commit. The gRPC server invokes this service; `createRuntimePodApp` supplies the
  * authenticator, lifecycle runner, Bridge-backed committers, Runtime Core hosts, cleanup controller,
  * logger, and metrics sink. The service calls those dependencies and protocol validators but does
  * not contact Gateway or providers directly.
@@ -124,7 +125,6 @@ export interface RuntimeSessionRunHost {
   ) => Promise<
     | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly applied: boolean }
     | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed" }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "commit_rejected"; readonly retryable: boolean; readonly errorCode: string | number }
   >;
   readonly handleRuntimeConfigPatch: (
     sessionId: string,
@@ -186,7 +186,8 @@ export interface RuntimeAgentMailCommand extends RuntimeCommandScope {
 /**
  * Bridge-backed durable settlement port for background task notifications.
  *
- * A successful non-stale result supplies the durable Runtime message that may then enter hot state.
+ * The owning agent run invokes this port after its running transition. A successful non-stale
+ * result supplies the durable Runtime message that may then enter hot state.
  */
 export interface RuntimeTaskNotificationCommitter {
   readonly commitTaskNotification: (input: {
@@ -354,7 +355,7 @@ export class RuntimeControlService {
     );
   }
 
-  /** Durably settles a background task notification before applying its Runtime message. */
+  /** Admits a background task notification for settlement by its owning agent run. */
   async acceptTaskNotification(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
     return await this.runRuntimeCommand(
       request,
@@ -702,12 +703,6 @@ export class RuntimeControlService {
           }),
         },
       }));
-      if (!result.ok && result.reason === "commit_rejected") {
-        return this.rejected(request, result.retryable, runtimeInputErrorCodeOrGeneric(String(result.errorCode)));
-      }
-      if (result.ok && "stale" in result) {
-        return;
-      }
       const accepted = ensureRuntimeControlAccepted(result);
       if (!accepted.ok) {
         return this.rejected(request, accepted.retryable, accepted.errorCode);

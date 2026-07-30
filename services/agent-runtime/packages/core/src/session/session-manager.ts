@@ -37,6 +37,7 @@ import type {
   RuntimeThreadPreloadState,
   RuntimeThreadStatusState,
   RuntimeTaskNotificationCommandState,
+  RuntimeTaskNotificationCommit,
   RuntimeThreadControlState,
   RuntimeThreadVisibilityState,
   RuntimeToolConfirmationState,
@@ -75,12 +76,7 @@ export interface RuntimeInterruptControlCommand extends RuntimeThreadControlStat
 /** Fenced command that releases one session's disposable hot state. */
 export interface RuntimeCleanupSessionCommand extends RuntimeThreadControlState {}
 
-/** Durable task-notification declaration performed inside the owning thread command. */
-export type RuntimeTaskNotificationCommit = () => Promise<
-  | { readonly ok: true; readonly stale: true }
-  | { readonly ok: true; readonly committedMessage: RuntimeMessage }
-  | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
->;
+export type { RuntimeTaskNotificationCommit } from "./session-state.js";
 
 /** Outcome of an interrupt command after its run-slot and input-commit closeout. */
 export type InterruptControlResult =
@@ -117,23 +113,8 @@ export type RuntimeControlResult =
       readonly reason: ControlRejectionReason;
     };
 
-/** Task notification result including a durable declaration rejection. */
-export type RuntimeTaskNotificationResult =
-  | RuntimeControlResult
-  | {
-      readonly ok: true;
-      readonly sessionId: string;
-      readonly created: boolean;
-      readonly applied: false;
-      readonly stale: true;
-    }
-  | {
-      readonly ok: false;
-      readonly sessionId: string;
-      readonly reason: "commit_rejected";
-      readonly retryable: boolean;
-      readonly errorCode: string | number;
-    };
+/** Result of admitting a task notification to the owning thread's serialized input queue. */
+export type RuntimeTaskNotificationResult = RuntimeControlResult;
 
 /** Result of admitting input and starting or waking its thread run. */
 export type AcceptInputResult =
@@ -349,7 +330,6 @@ export class Service extends Context.Service<Service, Interface>()("tetral-agent
 //   | scope                | run scope, closed on finish or direct lifecycle cancellation |
 //   | pendingWake          | coalescing flag (NOT a counter): many inputs -> one follow-up |
 //   | pendingWakeAfterStop | wake accepted during interrupt cleanup; must not be dropped   |
-//   | pendingTaskWake      | a committed task result requires a later request snapshot      |
 //   | stopping             | an interrupt is unwinding this run                            |
 //
 // wake/interrupt transitions:
@@ -373,7 +353,6 @@ interface ThreadRunSlot {
   readonly scope: Scope.Scope;
   pendingWake: boolean;
   pendingWakeAfterStop: boolean;
-  pendingTaskWake: boolean;
   stopping: boolean;
   readonly reviewerExecutionToken: ReviewerExecutionToken | undefined;
   durableTurnId: string | undefined;
@@ -833,7 +812,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             scope: runScope,
             pendingWake: false,
             pendingWakeAfterStop: false,
-            pendingTaskWake: false,
             stopping: false,
             reviewerExecutionToken: reviewId === undefined
               ? undefined
@@ -980,7 +958,13 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           }
           const cleanExit = Exit.isSuccess(exit) && exit.value.type === "completed";
           const valueLevelFailed = Exit.isSuccess(exit) && exit.value.type === "failed";
-          if (valueLevelFailed && threadEntry.session.state.hasQueuedInterAgentMessage()) {
+          if (
+            valueLevelFailed &&
+            (
+              threadEntry.session.state.hasQueuedInterAgentMessage() ||
+              threadEntry.session.state.hasQueuedTaskNotification()
+            )
+          ) {
             yield* releaseThreadEntry(sessionEntry, threadEntry);
             yield* completeRunSlot(runSlot, exit);
             return;
@@ -1476,73 +1460,46 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
         command: RuntimeTaskNotificationCommandState,
         commit: RuntimeTaskNotificationCommit,
       ): Effect.Effect<RuntimeTaskNotificationResult> =>
-        Effect.gen(function* () {
-          let staleTarget: ResidentThreadResult | undefined;
-          const result = yield* submitInstalledThreadCommand<RuntimeTaskNotificationResult>(
-            command,
-            {},
-            (threadResult) => Effect.gen(function* () {
-              const committed = yield* Effect.promise(commit);
-              if (!committed.ok) {
-                return {
-                  ok: false,
-                  sessionId,
-                  reason: "commit_rejected",
-                  retryable: committed.retryable,
-                  errorCode: committed.errorCode,
-                } as const;
+        submitInstalledThreadCommand<RuntimeTaskNotificationResult>(
+          command,
+          {},
+          (threadResult) => Effect.gen(function* () {
+            const accepted = threadResult.threadEntry.acceptedInputQueue.enqueueAcceptedInput({
+              ...command,
+              kind: "task_notification",
+              commit,
+            });
+            if (accepted === "conflict") {
+              return { ok: false, sessionId, reason: "control_conflict" } as const;
+            }
+            threadResult.threadEntry.bridgeScope = command;
+            if (accepted === "applied") {
+              const runSlot = threadResult.threadEntry.runSlot;
+              if (runSlot === undefined) {
+                yield* startThreadRun(threadResult.sessionEntry, threadResult.threadEntry).pipe(Effect.asVoid);
+              } else if (runSlot.stopping) {
+                runSlot.pendingWakeAfterStop = true;
+              } else {
+                runSlot.pendingWake = true;
               }
-              if ("stale" in committed) {
-                staleTarget = threadResult;
-                return { ok: true, sessionId, created: threadResult.sessionCreated, applied: false, stale: true } as const;
-              }
-              threadResult.threadEntry.bridgeScope = command;
-              const notification = threadResult.threadEntry.controlQueue.commitTaskNotification({
-                ...command,
-                committedMessage: committed.committedMessage,
-              });
-              if (notification === "conflict") {
-                return { ok: false, sessionId, reason: "control_conflict" } as const;
-              }
-              if (notification === "applied") {
-                const runSlot = threadResult.threadEntry.runSlot;
-                if (runSlot === undefined) {
-                  yield* startThreadRun(threadResult.sessionEntry, threadResult.threadEntry).pipe(Effect.asVoid);
-                } else if (runSlot.stopping) {
-                  runSlot.pendingWakeAfterStop = true;
-                  runSlot.pendingTaskWake = true;
-                } else {
-                  runSlot.pendingWake = true;
-                  runSlot.pendingTaskWake = true;
-                }
-              }
-              return {
-                ok: true,
-                sessionId,
-                created: threadResult.sessionCreated,
-                applied: notification === "applied",
-              } as const;
-            }),
-            (reason) => ({
-              ok: false,
+            }
+            return {
+              ok: true,
               sessionId,
-              reason: reason === "local_session_capacity_exceeded"
-                ? "local_session_capacity_exceeded"
-                : reason === "context_load_failed"
-                  ? "context_load_failed"
-                  : "control_busy",
-            } as RuntimeTaskNotificationResult),
-          );
-          if (
-            result.ok &&
-            "stale" in result &&
-            staleTarget !== undefined &&
-            staleTarget.sessionEntry.threads.get(command.sessionThreadId) === staleTarget.threadEntry
-          ) {
-            yield* discardThreadEntryForStaleCustody(staleTarget.sessionEntry, staleTarget.threadEntry);
-          }
-          return result;
-        });
+              created: threadResult.sessionCreated,
+              applied: accepted === "applied",
+            } as const;
+          }),
+          (reason) => ({
+            ok: false,
+            sessionId,
+            reason: reason === "local_session_capacity_exceeded"
+              ? "local_session_capacity_exceeded"
+              : reason === "context_load_failed"
+                ? "context_load_failed"
+                : "control_busy",
+          }),
+        );
 
       const applyRuntimeConfigPatch = (
         sessionId: string,
@@ -2304,7 +2261,7 @@ function reviewerExecutionRejection(
 }
 
 function acceptedInputThreadMetadata(input: RuntimeAcceptedInputState): RuntimeAcceptedThreadMetadataState {
-  if (input.kind === "messages" || input.kind === "rejection") {
+  if (input.kind === "messages" || input.kind === "rejection" || input.kind === "task_notification") {
     return {};
   }
   return input.thread ?? {};

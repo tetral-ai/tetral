@@ -1430,9 +1430,10 @@ describe("SessionManager", () => {
     });
   });
 
-  test("task notification committed during a run schedules one follow-up turn", async () => {
+  test("task notification received during a run remains pending for the follow-up turn", async () => {
     const agentLoop = makeControlledAgentLoop();
     const sessionId = "sesn_task_notification_wake";
+    let commitCalls = 0;
     await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput(sessionId)))).toMatchObject({
         ok: true,
@@ -1445,13 +1446,26 @@ describe("SessionManager", () => {
         sourceToolUseEventId: "sevt_task_notification_wake",
         status: "completed",
         payloadJson: "{\"status\":\"completed\"}",
-      }, async () => ({
-        ok: true,
-        committedMessage: bridgeRuntimeMessage(sessionId, "task completed"),
-      })))).toMatchObject({ ok: true, applied: true });
+      }, async () => {
+        commitCalls += 1;
+        return {
+          ok: true,
+          committedMessage: bridgeRuntimeMessage(sessionId, "task completed"),
+        };
+      }))).toMatchObject({ ok: true, applied: true });
+      expect(commitCalls).toBe(0);
+      expect(agentLoop.runs[0]!.session.state.contextManager.messages()).not.toContainEqual(
+        bridgeRuntimeMessage(sessionId, "task completed"),
+      );
 
       agentLoop.runs[0]!.release();
       await waitForRuns(agentLoop, 2);
+      expect(agentLoop.runs[1]!.session.state.peekAcceptedInput()).toMatchObject({
+        kind: "task_notification",
+        runtimeInputId: "rin_task_notification_wake",
+        taskId: "task_notification_wake",
+      });
+      expect(commitCalls).toBe(0);
       agentLoop.runs[1]!.release();
     });
   });
@@ -1600,6 +1614,7 @@ describe("SessionManager", () => {
   test("preloadThread restores running background task handles before task notification settlement", async () => {
     const agentLoop = makeControlledAgentLoop();
     const committedMessage = bridgeRuntimeMessage("sesn_cold_background", "background task completed after cold load");
+    let commitCalls = 0;
 
     await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
       expect(
@@ -1625,7 +1640,10 @@ describe("SessionManager", () => {
             sourceToolUseEventId: "sevt_tool_background",
             status: "completed",
             payloadJson: "{\"task_id\":\"task_cold_background\",\"source_tool_use_event_id\":\"sevt_tool_background\",\"status\":\"completed\"}",
-          }, async () => ({ ok: true, committedMessage })),
+          }, async () => {
+            commitCalls += 1;
+            return { ok: true, committedMessage };
+          }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_cold_background", created: false, applied: true });
 
@@ -1633,9 +1651,13 @@ describe("SessionManager", () => {
       expect(agentLoop.runs[0]?.session.state.backgroundTool("task_cold_background")).toMatchObject({
         taskId: "task_cold_background",
         sourceToolUseEventId: "sevt_tool_background",
-        status: "terminal",
-        terminalNotification: expect.objectContaining({ runtimeInputId: "rin_task_background", status: "completed" }),
+        status: "running",
       });
+      expect(agentLoop.runs[0]?.session.state.peekAcceptedInput()).toMatchObject({
+        kind: "task_notification",
+        runtimeInputId: "rin_task_background",
+      });
+      expect(commitCalls).toBe(0);
       agentLoop.runs[0]?.release();
     });
   });
@@ -2089,42 +2111,6 @@ describe("SessionManager", () => {
         stale: true,
       });
       expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
-      expect(await Effect.runPromise(manager.inspectThread(scope))).toMatchObject({
-        ok: true,
-        observed: false,
-      });
-    });
-  });
-
-  test("a stale task-notification receipt removes its idle cold residency", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const sessionId = "sesn_stale_task_receipt";
-    const threadId = "thrd_stale_task_receipt";
-    const scope = threadControl(sessionId, "rin_stale_task_receipt", threadId);
-
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
-      expect(await Effect.runPromise(manager.preloadThread({
-        ...scope,
-        runtimeBindingToken: "runtime-binding-token",
-        messages: [],
-        backgroundTools: [{
-          taskId: "task_stale_receipt",
-          sourceToolUseEventId: "sevt_stale_receipt",
-        }],
-        coldCoverage: coldCoverage(),
-      }))).toMatchObject({ ok: true, applied: true });
-
-      expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
-        ...scope,
-        taskId: "task_stale_receipt",
-        sourceToolUseEventId: "sevt_stale_receipt",
-        status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
-      }, async () => ({ ok: true, stale: true })))).toMatchObject({
-        ok: true,
-        applied: false,
-        stale: true,
-      });
       expect(await Effect.runPromise(manager.inspectThread(scope))).toMatchObject({
         ok: true,
         observed: false,
@@ -3070,14 +3056,10 @@ describe("SessionManager", () => {
     });
   });
 
-  test("cleanup rejects a thread command while its durable receipt is still pending", async () => {
+  test("cleanup rejects an admitted task while its owning run has not settled it", async () => {
     const agentLoop = makeControlledAgentLoop();
     const sessionId = "sesn_cleanup_receipt_awaiting";
     const threadId = "thrd_cleanup_receipt_awaiting";
-    let resolveCommit!: (value: { readonly ok: true; readonly committedMessage: ReturnType<typeof bridgeRuntimeMessage> }) => void;
-    const commit = new Promise<{ readonly ok: true; readonly committedMessage: ReturnType<typeof bridgeRuntimeMessage> }>((resolve) => {
-      resolveCommit = resolve;
-    });
     await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionId, "rin_cleanup_receipt_preload", threadId),
@@ -3090,23 +3072,22 @@ describe("SessionManager", () => {
         coldCoverage: coldCoverage(),
       }))).toMatchObject({ ok: true, applied: true });
 
-      const notification = Effect.runPromise(manager.commitTaskNotification(sessionId, {
+      expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
         ...threadControl(sessionId, "rin_cleanup_receipt_notification", threadId),
         taskId: "task_cleanup_receipt",
         sourceToolUseEventId: "sevt_cleanup_receipt",
         status: "completed",
         payloadJson: "{\"status\":\"completed\"}",
-      }, async () => await commit));
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      }, async () => {
+        throw new Error("transport admission must not settle the task");
+      }))).toMatchObject({ ok: true, applied: true });
+      await waitForRuns(agentLoop, 1);
 
       expect(await Effect.runPromise(manager.cleanupSession(
         sessionId,
         threadControl(sessionId, "rin_cleanup_receipt_attempt", threadId),
       ))).toEqual({ ok: false, sessionId, reason: "session_busy" });
 
-      resolveCommit({ ok: true, committedMessage: bridgeRuntimeMessage(sessionId, "task complete") });
-      await expect(notification).resolves.toMatchObject({ ok: true, applied: true });
-      await waitForRuns(agentLoop, 1);
       agentLoop.runs[0]!.release();
     });
   });
@@ -3206,6 +3187,50 @@ describe("SessionManager", () => {
       await waitForRuns(agentLoop, 2);
       expect(agentLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId).toBe(mail.runtimeInputId);
       agentLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
+    });
+  });
+
+  test("value-level failed exit releases a queued task notification for inbox repair", async () => {
+    const agentLoop = makeControlledAgentLoop();
+    const sessionId = "sesn_failed_task_notification_redelivery";
+    const threadId = "thrd_failed_task_notification_redelivery";
+    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+      expect(await Effect.runPromise(manager.preloadThread({
+        ...threadControl(sessionId, "rin_preload_failed_task_notification", threadId),
+        runtimeBindingToken: "runtime-binding-token",
+        messages: [],
+        backgroundTools: [{
+          taskId: "task_failed_task_notification",
+          sourceToolUseEventId: "sevt_failed_task_notification",
+        }],
+        coldCoverage: coldCoverage(),
+      }))).toMatchObject({ ok: true, applied: true });
+      expect(await Effect.runPromise(manager.acceptInput(
+        acceptedInput(sessionId, "rin_failed_task_notification_active", threadId),
+      ))).toMatchObject({ ok: true, started: true });
+      await waitForRuns(agentLoop, 1);
+      expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
+        ...threadControl(sessionId, "task_notification:task_failed_task_notification", threadId),
+        taskId: "task_failed_task_notification",
+        sourceToolUseEventId: "sevt_failed_task_notification",
+        status: "completed",
+        payloadJson: "{\"status\":\"completed\"}",
+      }, async () => {
+        throw new Error("failed owner run must not settle the queued task");
+      }))).toMatchObject({ ok: true, applied: true });
+
+      const failure = fatalRunResult("persistence_failed");
+      if (failure.type !== "failed") {
+        throw new Error("expected failed run fixture");
+      }
+      agentLoop.runs[0]?.release({ type: "failed", error: failure.error });
+
+      await waitForCondition(async () => {
+        const snapshot = await Effect.runPromise(manager.inspectThread(
+          threadControl(sessionId, "rin_inspect_failed_task_release", threadId),
+        ));
+        return snapshot.ok && !snapshot.observed;
+      }, "failed task-notification recipient release");
     });
   });
 

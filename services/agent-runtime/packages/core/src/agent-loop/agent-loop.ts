@@ -232,6 +232,7 @@ export const contextLoaderLayer = ContextLoader.layer;
 
 const ToolRouteCancelJoinTimeoutMs = 250;
 const RequestTurnScopeCloseTimeoutMs = ToolRouteCancelJoinTimeoutMs + 50;
+const TaskNotificationCommitReplayBackoffMs = 300;
 
 class HotDurableOperationFenced extends Error {}
 
@@ -831,6 +832,7 @@ function runAgentLoopEffect(
       return { type: "interrupted" };
     }
     seedRuntimeModel(session, options);
+    const openingAcceptedInputId = session.state.peekAcceptedInput()?.runtimeInputId;
 
     while (true) {
       let acceptedContextCommitted = false;
@@ -841,7 +843,18 @@ function runAgentLoopEffect(
         }
         return { type: "interrupted" };
       }
-      const acceptedInput = session.state.peekAcceptedInput();
+      // Reactive compaction excludes every later semantic input from the rebuilt request. Outside
+      // compaction, existing hot reconciliation remains available to ordinary inputs, while task
+      // notifications are isolated to the durable turn they open.
+      const queuedAcceptedInput = session.state.peekAcceptedInput();
+      const acceptedInput =
+        reactiveContextOverflowPending ||
+          (
+            queuedAcceptedInput?.kind === "task_notification" &&
+            queuedAcceptedInput.runtimeInputId !== openingAcceptedInputId
+          )
+          ? undefined
+          : queuedAcceptedInput;
       if (acceptedInput !== undefined) {
         const runningAppend = yield* nonAbandonablePromise(() => appendRunningEvent(
           options,
@@ -856,45 +869,101 @@ function runAgentLoopEffect(
         statusRunningAlreadyAppended = true;
         runStatusRunningAppended = true;
         session.state.beginAcceptedInputCommit(acceptedInput.runtimeInputId);
-        // CommitInputs and its receipt application form one local ownership boundary:
-        // interruption may observe either the queued input or the applied receipt,
-        // never a durable write whose hot acknowledgement is still missing.
-        const committed = yield* Effect.gen(function* () {
-          const declaration = yield* effectFromAbortablePromise((signal) =>
-            commitAcceptedInput(contextLoader, acceptedInput, options, signal)
+        if (acceptedInput.kind === "task_notification") {
+          const committed = yield* Effect.promise(acceptedInput.commit).pipe(
+            Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
+            Effect.uninterruptible,
           );
-          if (!declaration.ok) {
-            return { type: "failed" as const, error: declaration.error };
+          if (!committed.ok) {
+            if (committed.retryable) {
+              // The Bridge may have committed the frozen declaration even when its response was
+              // lost. Keep the accepted fact and durable turn resident so the next run replays
+              // the same declaration and applies its committed-or-duplicate receipt.
+              yield* Effect.promise(() => options.runtime.sleep(
+                TaskNotificationCommitReplayBackoffMs,
+                new AbortController().signal,
+              ));
+              return completedHotStateRunResult(session);
+            }
+            return yield* nonAbandonablePromise(() => handleContextLoaderFailure(
+              options,
+              session,
+              normalizeContextLoaderError({
+                code: committed.retryable ? "unavailable" : "unknown",
+                sessionId: session.sessionId,
+                reason: `task notification commit rejected: ${String(committed.errorCode)}`,
+              }),
+            ));
           }
-          if (declaration.result.applicationDisposition !== "current_custody") {
-            return { type: "stale_custody" as const };
+          if ("stale" in committed) {
+            session.state.clear();
+            return { type: "interrupted", discardHotState: true };
           }
-          const durableMessages = applyAcceptedInputReceipt(
-            acceptedInput,
-            declaration.drafts,
-            declaration.result.receipt,
-          );
-          session.state.addPendingAttachments(declaration.result.receipt.pendingAttachmentDelta);
+          const {
+            kind: _kind,
+            commit: _commit,
+            ...command
+          } = acceptedInput;
+          const notification = session.state.commitTaskNotification({
+            ...command,
+            committedMessage: committed.committedMessage,
+          });
+          if (notification === "conflict") {
+            return yield* nonAbandonablePromise(() => handleContextLoaderFailure(
+              options,
+              session,
+              normalizeContextLoaderError({
+                code: "schema_mismatch",
+                sessionId: session.sessionId,
+                reason: "task notification receipt conflicts with hot state",
+              }),
+            ));
+          }
           session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
-          session.state.setProviderRequestOutputSchemaJson(
-            acceptedInput.kind === "approval_review" ? acceptedInput.outputSchemaJson : undefined,
+          session.state.setProviderRequestOutputSchemaJson(undefined);
+          pendingInput = { type: "empty" };
+          acceptedContextCommitted = true;
+        } else {
+          // CommitInputs and its receipt application form one local ownership boundary:
+          // interruption may observe either the queued input or the applied receipt,
+          // never a durable write whose hot acknowledgement is still missing.
+          const committed = yield* Effect.gen(function* () {
+            const declaration = yield* effectFromAbortablePromise((signal) =>
+              commitAcceptedInput(contextLoader, acceptedInput, options, signal)
+            );
+            if (!declaration.ok) {
+              return { type: "failed" as const, error: declaration.error };
+            }
+            if (declaration.result.applicationDisposition !== "current_custody") {
+              return { type: "stale_custody" as const };
+            }
+            const durableMessages = applyAcceptedInputReceipt(
+              acceptedInput,
+              declaration.drafts,
+              declaration.result.receipt,
+            );
+            session.state.addPendingAttachments(declaration.result.receipt.pendingAttachmentDelta);
+            session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
+            session.state.setProviderRequestOutputSchemaJson(
+              acceptedInput.kind === "approval_review" ? acceptedInput.outputSchemaJson : undefined,
+            );
+            return { type: "committed" as const, durableMessages };
+          }).pipe(
+            Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
+            Effect.uninterruptible,
           );
-          return { type: "committed" as const, durableMessages };
-        }).pipe(
-          Effect.ensuring(Effect.sync(() => session.state.finishAcceptedInputCommit(acceptedInput.runtimeInputId))),
-          Effect.uninterruptible,
-        );
-        if (committed.type === "failed") {
-          return yield* nonAbandonablePromise(() => handleContextLoaderFailure(options, session, committed.error));
+          if (committed.type === "failed") {
+            return yield* nonAbandonablePromise(() => handleContextLoaderFailure(options, session, committed.error));
+          }
+          if (committed.type === "stale_custody") {
+            session.state.clear();
+            return { type: "interrupted", discardHotState: true };
+          }
+          pendingInput = committed.durableMessages.length === 0
+            ? { type: "empty" }
+            : { type: "messages", messages: [...committed.durableMessages] };
+          acceptedContextCommitted = true;
         }
-        if (committed.type === "stale_custody") {
-          session.state.clear();
-          return { type: "interrupted", discardHotState: true };
-        }
-        pendingInput = committed.durableMessages.length === 0
-          ? { type: "empty" }
-          : { type: "messages", messages: [...committed.durableMessages] };
-        acceptedContextCommitted = true;
       }
       const pendingApprovalResume = yield* resumePendingApprovalToolJobsEffect(session, options, custody);
       if (pendingApprovalResume.type === "failed") {

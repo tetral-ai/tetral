@@ -1175,6 +1175,7 @@ async function activeCompactionRun(
   });
   const providerRelease = deferred<void>();
   const streamStarted = deferred<void>();
+  const requestEndStarted = deferred<void>();
   const requestEndAck = deferred<SessionEventWriterAppendResult>();
   const requests: LLMRequest[] = [];
   const appended: SessionEvent[] = [];
@@ -1214,6 +1215,7 @@ async function activeCompactionRun(
     return { ok: true, writeId: envelope.writeId, eventId, processedAt: createdAt };
   }, async (envelope) => {
     requestEndEnvelopes.push(envelope);
+    requestEndStarted.resolve();
     return requestEndAck.promise;
   });
   const runFiber = Effect.runFork(
@@ -1233,6 +1235,7 @@ async function activeCompactionRun(
   return {
     session,
     providerRelease,
+    requestEndStarted,
     requestEndAck,
     requests,
     appended,
@@ -3618,6 +3621,85 @@ Previous anchored summary.
     }
   });
 
+  test("task notification survives interrupted compaction and commits on the next run", async () => {
+    const active = await activeCompactionRun(new Session("sesn_task_interrupted_compaction"));
+    const taskMessage = runtimeNotificationMessage(
+      "msg_task_interrupted_compaction",
+      "task completed during interrupted compaction",
+    );
+    let commitCalls = 0;
+    expect(active.session.state.enqueueAcceptedInput({
+      requestId: "req_task_interrupted_compaction",
+      ...active.session.identity,
+      runtimeInputId: "rin_task_interrupted_compaction",
+      eventIds: [],
+      sequenceFrom: 0,
+      sequenceTo: 0,
+      kind: "task_notification",
+      taskId: "task_interrupted_compaction",
+      sourceToolUseEventId: "sevt_task_interrupted_compaction",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\",\"text\":\"task completed during interrupted compaction\"}",
+      commit: async () => {
+        commitCalls += 1;
+        return { ok: true, committedMessage: taskMessage };
+      },
+    })).toBe("applied");
+    const interruptCommand = acceptedInput("rin_task_compaction_interrupt");
+    active.session.state.beginUserInterrupt(interruptCommand, testControlCommit(interruptCommand));
+    active.session.state.discardQueuedAcceptedInputsBeforeFence(interruptCommand.sequenceTo);
+    const interrupt = Effect.runPromise(Fiber.interrupt(active.runFiber));
+
+    try {
+      await active.requestEndStarted.promise;
+      const requestEnd = active.requestEndEnvelopes[0];
+      if (requestEnd === undefined) {
+        throw new Error("missing interrupted compaction request end");
+      }
+      active.requestEndAck.resolve({
+        ok: true,
+        writeId: requestEnd.writeId,
+        eventId: `bridge-${requestEnd.writeId}`,
+        processedAt: createdAt,
+      });
+      await interrupt;
+
+      expect(commitCalls).toBe(0);
+      expect(active.session.state.peekAcceptedInput()).toMatchObject({
+        kind: "task_notification",
+        runtimeInputId: "rin_task_interrupted_compaction",
+      });
+      expect(JSON.stringify(active.session.state.contextManager.messages())).not.toContain("<conversation-checkpoint>");
+      expect(active.session.state.userInterruptRequested()).toBe(false);
+
+      const requests: LLMRequest[] = [];
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const agentLoop = yield* AgentLoop.Service;
+          return yield* agentLoop.run(active.session, testRunCustody());
+        }).pipe(
+          Effect.provide(
+            runtimeAgentLoopLayer(new RecordingContextLoader([], { type: "empty" }), {
+              onStream: (request) => {
+                requests.push(request);
+              },
+            }),
+          ),
+        ),
+      );
+
+      expect(result).toMatchObject({ type: "completed" });
+      expect(commitCalls).toBe(1);
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0]?.messages).match(/task completed during interrupted compaction/g)).toHaveLength(1);
+      expect(active.session.state.peekAcceptedInput()).toBeUndefined();
+    } finally {
+      active.requestEndAck.resolve({ ok: true, writeId: "cleanup", eventId: "cleanup", processedAt: createdAt });
+      active.providerRelease.resolve();
+      await interrupt;
+    }
+  });
+
   test("reviewer-thread compaction uses the reviewer credential kind and existing settlement kind", async () => {
     const session = new Session({
       workspaceId: "wksp_reviewer",
@@ -3884,6 +3966,130 @@ Previous anchored summary.
     expect(session.state.contextManager.messages().map((message) => message.id)).toContain("user-later");
     expect(session.state.lastRequestContextAnchorSequence()).toBe(2);
     expect(JSON.stringify(session.state.transientModelMessages())).not.toContain("note added during compaction");
+  });
+
+  test("task notification arriving during reactive compaction waits for the next durable turn", async () => {
+    const session = new Session("sesn_task_during_compaction");
+    session.state.recordBackgroundTool({
+      taskId: "task_during_compaction",
+      sourceToolUseEventId: "sevt_task_during_compaction",
+    });
+    const loader = new RecordingContextLoader(
+      [userMessage("user-old", 0, compactionHistory("old context before task completion"))],
+      { type: "messages", messages: [userMessage("user-new", 1, "start the compacted turn")] },
+    );
+    const requests: LLMRequest[] = [];
+    const order: string[] = [];
+    let commitCalls = 0;
+    const taskMessage = runtimeNotificationMessage("msg_task_during_compaction", "task completed while compaction was open");
+    const batches: readonly (readonly LLMEvent[])[] = [
+      [{
+        type: "provider-error",
+        error: runtimeFailureFromProviderError(normalizeProviderError({
+          code: "context_overflow",
+          message: "context window exceeded",
+          retryable: false,
+          fatal: true,
+        }), { type: "terminal" }),
+      }],
+      [
+        { type: "text-start", id: "summary-text" },
+        { type: "text-delta", id: "summary-text", text_delta: "Summary before the task notification." },
+        { type: "text-end", id: "summary-text" },
+        {
+          type: "finish",
+          finishReason: "stop",
+          usage: { inputTokens: 20, outputTokens: 5, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      ],
+      [
+        { type: "text-start", id: "first-answer" },
+        { type: "text-delta", id: "first-answer", text_delta: "first answer" },
+        { type: "text-end", id: "first-answer" },
+        {
+          type: "finish",
+          finishReason: "stop",
+          usage: { inputTokens: 9, outputTokens: 4, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          modelLimits: { contextWindowTokens: 100_000, outputTokenLimit: 4_096 },
+        },
+      ],
+      [
+        { type: "text-start", id: "follow-up-answer" },
+        { type: "text-delta", id: "follow-up-answer", text_delta: "follow-up answer" },
+        { type: "text-end", id: "follow-up-answer" },
+        {
+          type: "finish",
+          finishReason: "stop",
+          usage: { inputTokens: 11, outputTokens: 4, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      ],
+    ];
+    let streamIndex = 0;
+    const llm: LLMServiceInterface = {
+      stream(request) {
+        requests.push(request);
+        if (request.requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY) {
+          expect(session.state.enqueueAcceptedInput({
+            requestId: "req_task_during_compaction",
+            ...session.identity,
+            runtimeInputId: "rin_task_during_compaction",
+            eventIds: [],
+            sequenceFrom: 0,
+            sequenceTo: 0,
+            kind: "task_notification",
+            taskId: "task_during_compaction",
+            sourceToolUseEventId: "sevt_task_during_compaction",
+            status: "completed",
+            payloadJson: "{\"status\":\"completed\",\"text\":\"task completed while compaction was open\"}",
+            commit: async () => {
+              commitCalls += 1;
+              order.push("task-commit");
+              return { ok: true, committedMessage: taskMessage };
+            },
+          })).toBe("applied");
+        } else {
+          order.push(`provider-${requests.length}`);
+        }
+        const events = batches[streamIndex] ?? [];
+        streamIndex += 1;
+        return Stream.fromIterable(events);
+      },
+    };
+    const writer = writerFrom((envelope) => {
+      if (envelope.event.type === "session.status_running") {
+        order.push(`running-${order.filter((entry) => entry.startsWith("running-")).length + 1}`);
+      }
+      return {
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+      };
+    });
+    const layer = runtimeAgentLoopLayer(loader, { llmService: llm, writer, compaction: {} });
+    const run = async () => await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(await run()).toMatchObject({ type: "completed" });
+    expect(commitCalls).toBe(0);
+    expect(session.state.peekAcceptedInput()).toMatchObject({
+      kind: "task_notification",
+      runtimeInputId: "rin_task_during_compaction",
+    });
+    expect(JSON.stringify(requests[2]?.messages)).not.toContain("task completed while compaction was open");
+    expect(JSON.stringify(requests[2]?.messages)).toContain("<conversation-checkpoint>");
+
+    expect(await run()).toMatchObject({ type: "completed" });
+    expect(commitCalls).toBe(1);
+    expect(order.indexOf("running-2")).toBeLessThan(order.indexOf("task-commit"));
+    expect(order.indexOf("task-commit")).toBeLessThan(order.indexOf("provider-4"));
+    expect(JSON.stringify(requests[3]?.messages).match(/task completed while compaction was open/g)).toHaveLength(1);
+    expect(session.state.contextManager.messages().filter((message) => message.id === taskMessage.id)).toHaveLength(1);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
   });
 
   test("runtime layer finishes idle before normal provider request when compaction retries are exhausted", async () => {
@@ -5785,6 +5991,288 @@ Previous anchored summary.
       terminalNotification: expect.objectContaining({ runtimeInputId: "rin_task_1", status: "completed" }),
     });
     expect(session.state.contextManager.messages().at(-1)).toEqual(projection);
+  });
+
+  test("task notification commits after the running receipt and reaches the provider once", async () => {
+    const session = new Session("sesn_task_notification_turn");
+    const order: string[] = [];
+    const requests: LLMRequest[] = [];
+    const notification = runtimeNotificationMessage("msg_task_notification_turn", "task result for next turn");
+    session.state.recordBackgroundTool({
+      taskId: "task_notification_turn",
+      sourceToolUseEventId: "sevt_task_notification_tool",
+    });
+    expect(session.state.enqueueAcceptedInput({
+      requestId: "req_task_notification_turn",
+      ...session.identity,
+      runtimeInputId: "rin_task_notification_turn",
+      eventIds: [],
+      sequenceFrom: 0,
+      sequenceTo: 0,
+      kind: "task_notification",
+      taskId: "task_notification_turn",
+      sourceToolUseEventId: "sevt_task_notification_tool",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\",\"text\":\"task result for next turn\"}",
+      commit: async () => {
+        order.push("task-commit");
+        return { ok: true, committedMessage: notification };
+      },
+    })).toBe("applied");
+    const writer = writerFrom((envelope) => {
+      if (envelope.event.type === "session.status_running") {
+        order.push("running-receipt");
+      }
+      return {
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+      };
+    });
+    const loader = new RecordingContextLoader([], { type: "empty" });
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(
+        Effect.provide(
+          runtimeAgentLoopLayer(loader, {
+            writer,
+            llmService: llmService([
+              { type: "text-start", id: "answer-text" },
+              { type: "text-delta", id: "answer-text", text_delta: "acknowledged" },
+              { type: "text-end", id: "answer-text" },
+              { type: "finish", finishReason: "stop" },
+            ], (request) => {
+              order.push("provider");
+              requests.push(request);
+            }),
+          }),
+        ),
+      ),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(order.slice(0, 3)).toEqual(["running-receipt", "task-commit", "provider"]);
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0]?.messages).match(/task result for next turn/g)).toHaveLength(1);
+    expect(session.state.contextManager.messages().filter((message) => message.id === notification.id)).toHaveLength(1);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
+    expect(session.state.backgroundTool("task_notification_turn")).toMatchObject({
+      status: "terminal",
+      terminalNotification: expect.objectContaining({ runtimeInputId: "rin_task_notification_turn" }),
+    });
+  });
+
+  test("task notification replays an unknown commit outcome before provider work", async () => {
+    const session = new Session("sesn_task_notification_retryable_commit");
+    const committedMessage = runtimeNotificationMessage(
+      "msg_task_notification_retryable_commit",
+      "task result recovered from the replayed receipt",
+    );
+    let commitCalls = 0;
+    let providerCalls = 0;
+    expect(session.state.enqueueAcceptedInput({
+      requestId: "req_task_notification_retryable_commit",
+      ...session.identity,
+      runtimeInputId: "rin_task_notification_retryable_commit",
+      eventIds: [],
+      sequenceFrom: 0,
+      sequenceTo: 0,
+      kind: "task_notification",
+      taskId: "task_notification_retryable_commit",
+      sourceToolUseEventId: "sevt_task_notification_retryable_commit",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      commit: async () => {
+        commitCalls += 1;
+        return commitCalls === 1
+          ? {
+              ok: false as const,
+              retryable: true,
+              errorCode: "bridge_commit_unavailable",
+              message: "task notification durable commit failed",
+            }
+          : { ok: true as const, committedMessage };
+      },
+    })).toBe("applied");
+
+    const custody = testRunCustody();
+    const layer = runtimeAgentLoopLayer(new RecordingContextLoader([], { type: "empty" }), {
+      onStream: () => {
+        providerCalls += 1;
+      },
+    });
+    const first = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, custody);
+      }).pipe(
+        Effect.provide(layer),
+      ),
+    );
+
+    expect(first).toMatchObject({ type: "completed" });
+    expect(commitCalls).toBe(1);
+    expect(providerCalls).toBe(0);
+    expect(session.state.peekAcceptedInput()).toMatchObject({
+      kind: "task_notification",
+      runtimeInputId: "rin_task_notification_retryable_commit",
+    });
+    expect(session.state.contextManager.messages()).toEqual([]);
+
+    const second = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, custody);
+      }).pipe(
+        Effect.provide(layer),
+      ),
+    );
+
+    expect(second).toMatchObject({ type: "completed" });
+    expect(commitCalls).toBe(2);
+    expect(providerCalls).toBe(1);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
+    expect(session.state.contextManager.messages()).toContainEqual(committedMessage);
+  });
+
+  test("task notification arriving during provider reschedule waits for the next durable turn", async () => {
+    const session = new Session("sesn_task_notification_reschedule");
+    const taskMessage = runtimeNotificationMessage(
+      "msg_task_notification_reschedule",
+      "task result after the retried request",
+    );
+    let commitCalls = 0;
+    const requests: LLMRequest[] = [];
+    const streams: readonly (readonly LLMEvent[])[] = [
+      [{
+        type: "provider-error",
+        error: runtimeFailureFromProviderError(normalizeProviderError({
+          code: "provider_unavailable",
+          message: "retry the current request",
+          retryable: true,
+          fatal: false,
+        })),
+      }],
+      [
+        { type: "text-start", id: "current-answer" },
+        { type: "text-delta", id: "current-answer", text_delta: "current turn recovered" },
+        { type: "text-end", id: "current-answer" },
+        { type: "finish", finishReason: "stop" },
+      ],
+      [
+        { type: "text-start", id: "task-answer" },
+        { type: "text-delta", id: "task-answer", text_delta: "task acknowledged" },
+        { type: "text-end", id: "task-answer" },
+        { type: "finish", finishReason: "stop" },
+      ],
+    ];
+    let streamIndex = 0;
+    const llm: LLMServiceInterface = {
+      stream(request) {
+        requests.push(request);
+        if (streamIndex === 0) {
+          expect(session.state.enqueueAcceptedInput({
+            requestId: "req_task_notification_reschedule",
+            ...session.identity,
+            runtimeInputId: "rin_task_notification_reschedule",
+            eventIds: [],
+            sequenceFrom: 0,
+            sequenceTo: 0,
+            kind: "task_notification",
+            taskId: "task_notification_reschedule",
+            sourceToolUseEventId: "sevt_task_notification_reschedule",
+            status: "completed",
+            payloadJson: "{\"status\":\"completed\"}",
+            commit: async () => {
+              commitCalls += 1;
+              return { ok: true, committedMessage: taskMessage };
+            },
+          })).toBe("applied");
+        }
+        return Stream.fromIterable(streams[streamIndex++] ?? []);
+      },
+    };
+    const layer = runtimeAgentLoopLayer(
+      new RecordingContextLoader([], {
+        type: "messages",
+        messages: [userMessage("user-task-reschedule", 0, "finish the current request")],
+      }),
+      {
+        llmService: llm,
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+      },
+    );
+    const custody = testRunCustody();
+
+    const currentTurn = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, custody);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(currentTurn).toMatchObject({ type: "completed" });
+    expect(commitCalls).toBe(0);
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1]?.messages)).not.toContain("task result after the retried request");
+    expect(session.state.peekAcceptedInput()).toMatchObject({
+      kind: "task_notification",
+      runtimeInputId: "rin_task_notification_reschedule",
+    });
+
+    const taskTurn = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, custody);
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(taskTurn).toMatchObject({ type: "completed" });
+    expect(commitCalls).toBe(1);
+    expect(requests).toHaveLength(3);
+    expect(JSON.stringify(requests[2]?.messages).match(/task result after the retried request/g)).toHaveLength(1);
+  });
+
+  test("stale task notification custody discards the resident thread before provider work", async () => {
+    const session = new Session("sesn_stale_task_notification");
+    let providerCalls = 0;
+    expect(session.state.enqueueAcceptedInput({
+      requestId: "req_stale_task_notification",
+      ...session.identity,
+      runtimeInputId: "rin_stale_task_notification",
+      eventIds: [],
+      sequenceFrom: 0,
+      sequenceTo: 0,
+      kind: "task_notification",
+      taskId: "task_stale_task_notification",
+      sourceToolUseEventId: "sevt_stale_task_notification",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      commit: async () => ({ ok: true, stale: true }),
+    })).toBe("applied");
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(
+        Effect.provide(
+          runtimeAgentLoopLayer(new RecordingContextLoader([], { type: "empty" }), {
+            onStream: () => {
+              providerCalls += 1;
+            },
+          }),
+        ),
+      ),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(providerCalls).toBe(0);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
+    expect(session.state.contextManager.messages()).toEqual([]);
   });
 
   test("served request consumes its exact mixed-origin ride and preserves attachments appended in flight", async () => {

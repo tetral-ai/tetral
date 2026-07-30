@@ -376,7 +376,7 @@ func TestRuntimePodDirectDelivererSendsTaskNotificationRuntimeCommand(t *testing
 		t.Fatalf("delivery status = %s; want accepted", result.Status)
 	}
 	if len(sender.requests) != 1 || sender.requests[0].GetPayloadJson() != prepared.PayloadJson {
-		t.Fatalf("sent task notification payload = %#v; want committed payload", sender.requests)
+		t.Fatalf("sent task notification payload = %#v; want prepared transport payload", sender.requests)
 	}
 	if len(store.acceptedJobs) != 1 || store.acceptedJobs[0].RuntimeInputID != "task_notification:task_1" {
 		t.Fatalf("accepted jobs = %#v; want task notification marked accepted", store.acceptedJobs)

@@ -784,8 +784,34 @@ func enqueueAgentMailWakeTx(
 	preparationAttemptID string,
 	now time.Time,
 ) (bool, error) {
+	request, jobID, err := agentMailWakeEnqueueRequest(
+		workspaceID,
+		sessionID,
+		targetThreadID,
+		deliveryID,
+		preparationAttemptID,
+		now,
+	)
+	if err != nil {
+		return false, err
+	}
+	active, err := queue.EnqueueTx(ctx, tx, request)
+	if err != nil {
+		return false, err
+	}
+	return validateAgentMailWakeJob(active, jobID, workspaceID, sessionID, targetThreadID, deliveryID, preparationAttemptID)
+}
+
+func agentMailWakeEnqueueRequest(
+	workspaceID string,
+	sessionID string,
+	targetThreadID string,
+	deliveryID string,
+	preparationAttemptID string,
+	now time.Time,
+) (queue.EnqueueRequest, string, error) {
 	if preparationAttemptID == "" {
-		return false, status.Error(codes.FailedPrecondition, "agent mail wake has no birth preparation attempt")
+		return queue.EnqueueRequest{}, "", status.Error(codes.FailedPrecondition, "agent mail wake has no birth preparation attempt")
 	}
 	runtimeInputID := completionRuntimeInputID(deliveryID)
 	queuePayload, err := json.Marshal(map[string]any{
@@ -800,11 +826,11 @@ func enqueueAgentMailWakeTx(
 		"input_kind":             "agent_mail",
 	})
 	if err != nil {
-		return false, err
+		return queue.EnqueueRequest{}, "", err
 	}
 	ws := workspace.ID(workspaceID)
 	jobID := id.New(queue.JobIDPrefix)
-	active, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+	return queue.EnqueueRequest{
 		ID:             jobID,
 		WorkspaceID:    ws,
 		Kind:           queue.KindRuntimeInput,
@@ -814,10 +840,19 @@ func enqueueAgentMailWakeTx(
 		PayloadJSON:    queuePayload,
 		MaxAttempts:    queue.DefaultMaxAttempts,
 		Now:            now,
-	})
-	if err != nil {
-		return false, err
-	}
+	}, jobID, nil
+}
+
+func validateAgentMailWakeJob(
+	active *queue.Job,
+	jobID string,
+	workspaceID string,
+	sessionID string,
+	targetThreadID string,
+	deliveryID string,
+	preparationAttemptID string,
+) (bool, error) {
+	runtimeInputID := completionRuntimeInputID(deliveryID)
 	var activePayload struct {
 		WorkspaceID          string `json:"workspace_id"`
 		SessionID            string `json:"session_id"`

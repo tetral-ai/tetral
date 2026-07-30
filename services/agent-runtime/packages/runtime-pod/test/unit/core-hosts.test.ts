@@ -441,6 +441,7 @@ describe("Runtime core host production assembly", () => {
       }),
     });
     try {
+      let taskCommitCalls = 0;
       const scope = commandScope("sesn_singleflight");
       const interruptCommand = {
         ...scope,
@@ -474,10 +475,13 @@ describe("Runtime core host production assembly", () => {
         sourceToolUseEventId: "sevt_tool_singleflight",
         status: "completed",
         payloadJson: "{\"task_id\":\"task_singleflight\",\"source_tool_use_event_id\":\"sevt_tool_singleflight\",\"status\":\"completed\"}",
-      }, async () => ({
-        ok: true,
-        committedMessage: bridgeRuntimeMessage("sesn_singleflight", "task completed"),
-      }));
+      }, async () => {
+        taskCommitCalls += 1;
+        return {
+          ok: true,
+          committedMessage: bridgeRuntimeMessage("sesn_singleflight", "task completed"),
+        };
+      });
       await Promise.resolve();
       expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: true });
 
@@ -488,10 +492,11 @@ describe("Runtime core host production assembly", () => {
       expect(configResult).toEqual({ ok: false, sessionId: "sesn_singleflight", reason: "control_busy" });
       expect(taskResult).toMatchObject({ ok: true, sessionId: "sesn_singleflight", applied: true });
       expect(loadCount).toBe(1);
+      expect(taskCommitCalls).toBe(0);
       expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({
         ok: true,
         observed: true,
-        messages: expect.arrayContaining([expect.objectContaining({ id: "msg_sesn_singleflight_task_notification" })]),
+        messages: [],
       });
     } finally {
       await hosts.close();

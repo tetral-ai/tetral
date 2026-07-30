@@ -194,7 +194,8 @@ export type RuntimeAcceptedInputState =
   | RuntimeMessagesAcceptedInputState
   | RuntimeInterAgentAcceptedInputState
   | RuntimeApprovalReviewAcceptedInputState
-  | RuntimeRejectionAcceptedInputState;
+  | RuntimeRejectionAcceptedInputState
+  | RuntimeTaskNotificationAcceptedInputState;
 
 /** Exact durable identities represented by one cold baseline. */
 export interface RuntimeColdCoverage {
@@ -264,6 +265,19 @@ export interface RuntimeTaskNotificationCommandState extends RuntimeThreadContro
   readonly sourceToolUseEventId: string;
   readonly status: "completed" | "failed" | "cancelled" | "expired";
   readonly payloadJson: string;
+}
+
+/** Durable task-notification declaration invoked only by the owning thread run. */
+export type RuntimeTaskNotificationCommit = () => Promise<
+  | { readonly ok: true; readonly stale: true }
+  | { readonly ok: true; readonly committedMessage: RuntimeMessage }
+  | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
+>;
+
+/** Terminal task fact waiting for the next serialized semantic turn. */
+export interface RuntimeTaskNotificationAcceptedInputState extends RuntimeTaskNotificationCommandState {
+  readonly kind: "task_notification";
+  readonly commit: RuntimeTaskNotificationCommit;
 }
 
 /** Terminal background-task fact and its receipt-stamped message installed together in hot state. */
@@ -404,6 +418,7 @@ export class SessionState {
   discardQueuedAcceptedInputsBeforeFence(interruptFenceSequence: number): void {
     this.#acceptedInputs = this.#acceptedInputs.filter((input) =>
       input.kind === "inter_agent_message" ||
+      input.kind === "task_notification" ||
       input.runtimeInputId === this.#committingAcceptedInputId ||
       input.sequenceTo >= interruptFenceSequence
     );
@@ -415,6 +430,10 @@ export class SessionState {
 
   hasQueuedInterAgentMessage(): boolean {
     return this.#acceptedInputs.some((input) => input.kind === "inter_agent_message");
+  }
+
+  hasQueuedTaskNotification(): boolean {
+    return this.#acceptedInputs.some((input) => input.kind === "task_notification");
   }
 
   resolveToolConfirmation(state: RuntimeToolConfirmationState): "applied" | "duplicate" | "conflict" {
@@ -823,5 +842,6 @@ function cloneRuntimeMessage(message: RuntimeMessage): RuntimeMessage {
 }
 
 function sameAcceptedInput(left: RuntimeAcceptedInputState, right: RuntimeAcceptedInputState): boolean {
+  // Request ids and process-local commit callbacks do not change a durable input's identity.
   return JSON.stringify({ ...left, requestId: "" }) === JSON.stringify({ ...right, requestId: "" });
 }

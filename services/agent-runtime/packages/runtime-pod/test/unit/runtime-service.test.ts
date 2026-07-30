@@ -460,6 +460,9 @@ describe("RuntimeControlService command envelope", () => {
       );
       expect(response).toEqual(acceptedResponse({ runtimeInputId: command.runtimeInputId }));
     }
+    for (const commit of fixture.runHost.taskNotificationCommits) {
+      await commit();
+    }
 
     expect(fixture.runHost.sessionIds).toEqual([]);
     expect(fixture.runHost.interrupts).toEqual([
@@ -781,7 +784,7 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.controlInputCommitter.commits).toHaveLength(1);
   });
 
-  test("does not update hot task-notification state when durable Bridge ACK fails", async () => {
+  test("task-notification transport acceptance does not perform the semantic commit", async () => {
     const fixture = runtimeFixture({
       taskNotificationCommitter: new RecordingTaskNotificationCommitter({
         ok: false,
@@ -800,82 +803,14 @@ describe("RuntimeControlService command envelope", () => {
         }),
         authMetadata(),
       ),
-    ).resolves.toEqual(
-      rejectedResponse({
-        runtimeInputId: "rin_task",
-        retryable: true,
-        errorCode: "bridge_commit_unavailable",
-      }),
-    );
+    ).resolves.toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
 
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
+    expect(fixture.taskNotificationCommitter.commits).toHaveLength(0);
     expect(fixture.runHost.taskNotifications).toHaveLength(1);
-    expect(fixture.runHost.taskNotificationCommitResults).toEqual([expect.objectContaining({
-      ok: false,
-      retryable: true,
-      errorCode: "bridge_commit_unavailable",
-    })]);
-    expect(fixture.logger.records.at(-1)).toMatchObject({
-      event: "runtime_command_rejected",
-      retryable: true,
-      terminal: false,
-      "error.class": "runtime_command_rejected",
-      "error.code": "bridge_commit_unavailable",
-      "error.message_safe": "runtime command rejected",
-      "workspace.id": "wksp_1",
-      "session.id": "sesn_1",
-      "thread.id": "thrd_1",
-    });
+    expect(fixture.runHost.taskNotificationCommits).toHaveLength(1);
   });
 
-  test("returns in-band rejection when task-notification durable Bridge ACK fails terminally", async () => {
-    const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({
-        ok: false,
-        retryable: false,
-        errorCode: "bridge_commit_rejected",
-        message: "bridge rejected task notification",
-      }),
-    });
-
-    await expect(
-      fixture.service.acceptTaskNotification(
-        validCommand({
-          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-          runtimeInputId: "rin_task_terminal",
-          payloadJson: canonicalTaskNotificationPayloadJson({ taskId: "task_1", sourceToolUseEventId: "sevt_tool_1", status: "completed" }),
-        }),
-        authMetadata(),
-      ),
-    ).resolves.toEqual(
-      rejectedResponse({
-        runtimeInputId: "rin_task_terminal",
-        retryable: false,
-        errorCode: "bridge_commit_rejected",
-      }),
-    );
-
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toHaveLength(1);
-    expect(fixture.runHost.taskNotificationCommitResults).toEqual([expect.objectContaining({
-      ok: false,
-      retryable: false,
-      errorCode: "bridge_commit_rejected",
-    })]);
-    expect(fixture.logger.records.at(-1)).toMatchObject({
-      event: "runtime_command_rejected",
-      retryable: false,
-      terminal: true,
-      "error.class": "runtime_command_rejected",
-      "error.code": "bridge_commit_rejected",
-      "error.message_safe": "runtime command rejected",
-      "workspace.id": "wksp_1",
-      "session.id": "sesn_1",
-      "thread.id": "thrd_1",
-    });
-  });
-
-  test("returns in-band terminal rejection when task-notification hot apply is stale", async () => {
+  test("returns in-band terminal rejection when task-notification admission conflicts", async () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
         taskNotificationResult: {
@@ -903,7 +838,7 @@ describe("RuntimeControlService command envelope", () => {
       }),
     );
 
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
+    expect(fixture.taskNotificationCommitter.commits).toHaveLength(0);
     expect(fixture.runHost.taskNotifications).toHaveLength(1);
   });
 
@@ -1064,26 +999,6 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.runtimeConfigPatches).toEqual([]);
   });
 
-  test("accepts stale task notification ACKs without hot-state mutation", async () => {
-    const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, stale: true }),
-    });
-
-    const response = await fixture.service.acceptTaskNotification(
-      validCommand({
-        commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-        runtimeInputId: "rin_task",
-        payloadJson: canonicalTaskNotificationPayloadJson({ taskId: "task_1", sourceToolUseEventId: "sevt_tool_1", status: "completed" }),
-      }),
-      authMetadata(),
-    );
-
-    expect(response).toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toHaveLength(1);
-    expect(fixture.runHost.taskNotificationCommitResults).toEqual([{ ok: true, stale: true }]);
-  });
-
   test("rejects task notifications that omit either required stream snapshot", async () => {
     const fixture = runtimeFixture();
 
@@ -1118,7 +1033,7 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.taskNotifications).toEqual([]);
   });
 
-  test("canonicalizes task notification payload before durable commit and applies the stamped message to hot state", async () => {
+  test("defers the canonicalized task notification declaration to the owning loop", async () => {
     const runtimeMessage = bridgeRuntimeMessage({ text: "bridge-projected runtime notification" });
     const fixture = runtimeFixture({
       taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, committedMessage: runtimeMessage }),
@@ -1157,6 +1072,9 @@ describe("RuntimeControlService command envelope", () => {
       }),
       authMetadata(),
     );
+    expect(fixture.taskNotificationCommitter.commits).toEqual([]);
+    expect(fixture.runHost.taskNotificationCommits).toHaveLength(1);
+    const commitResult = await fixture.runHost.taskNotificationCommits[0]!();
 
     const expected = {
       task_id: "task_1",
@@ -1176,9 +1094,9 @@ describe("RuntimeControlService command envelope", () => {
       truncated: false,
       status: "completed",
     });
-    expect(fixture.runHost.taskNotificationCommitResults[0]).toEqual({ ok: true, committedMessage: runtimeMessage });
-    expect(fixture.runHost.taskNotificationCommitResults[0]?.ok === true && "committedMessage" in fixture.runHost.taskNotificationCommitResults[0]
-      ? fixture.runHost.taskNotificationCommitResults[0].committedMessage.parts[0]
+    expect(commitResult).toEqual({ ok: true, committedMessage: runtimeMessage });
+    expect(commitResult.ok === true && "committedMessage" in commitResult
+      ? commitResult.committedMessage.parts[0]
       : undefined).toMatchObject({
       type: "text",
       text: "bridge-projected runtime notification",
@@ -1472,7 +1390,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   readonly toolConfirmations: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1] }> = [];
   readonly toolConfirmationCommitResults: Array<Awaited<ReturnType<Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2]>>> = [];
   readonly taskNotifications: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1] }> = [];
-  readonly taskNotificationCommitResults: Array<Awaited<ReturnType<Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2]>>> = [];
+  readonly taskNotificationCommits: Array<Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2]> = [];
   readonly runtimeConfigPatches: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1] }> = [];
 
   constructor(
@@ -1596,20 +1514,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     commit: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2],
   ) {
     this.taskNotifications.push({ sessionId, command });
-    const committed = await commit();
-    this.taskNotificationCommitResults.push(committed);
-    if (!committed.ok) {
-      return {
-        ok: false as const,
-        sessionId,
-        reason: "commit_rejected" as const,
-        retryable: committed.retryable,
-        errorCode: committed.errorCode,
-      };
-    }
-    if ("stale" in committed) {
-      return { ok: true as const, sessionId, created: false, applied: false as const, stale: true as const };
-    }
+    this.taskNotificationCommits.push(commit);
     return this.taskNotificationResult;
   }
 

@@ -1119,6 +1119,235 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsAcceptedInboxWithoutLaterInput(t *
 	}
 }
 
+func TestPostgreSQLRuntimeDeliveryStoreRepairsAcknowledgedTaskNotificationFromRetainedPayload(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID            = "sesn_task_notification_repair"
+		threadID             = "thr_task_notification_repair"
+		runtimeInputID       = "task_notification:task_notification_repair"
+		taskID               = "task_notification_repair"
+		sourceToolUseEventID = "sevt_task_notification_repair_tool"
+		preparationAttemptID = "prep_task_notification_repair_birth"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_task_notification_repair", 1, "pod_task_notification_repair")
+	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, preparationAttemptID)
+	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:04:00Z")
+	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, threadID, "bind_task_notification_repair", taskID, sourceToolUseEventID)
+	payload := fmt.Sprintf(
+		`{"workspace_id":"default","session_id":%q,"session_thread_id":%q,"runtime_input_id":%q,"event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"task_notification","preparation_attempt_id":%q}`,
+		sessionID,
+		threadID,
+		runtimeInputID,
+		preparationAttemptID,
+	)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	now := time.Date(2026, 1, 1, 0, 4, 0, 0, time.UTC)
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store.Clock = func() time.Time { return now.Add(3 * time.Second) }
+	store.TaskNotificationResultReader = &recordingTaskNotificationResultReader{
+		resultJSON: `{"status":"completed","stdout":{"text":"repaired task result","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":0}`,
+	}
+	store.TargetResolver = &recordingRuntimeTargetResolver{binding: runtimeBindingForDelivery{
+		BindingID:         "bind_task_notification_repair",
+		BindingGeneration: 1,
+		Namespace:         "runtime-ns",
+		PodName:           "runtime-pod",
+		PodUID:            "pod_task_notification_repair",
+		PodIP:             "10.0.0.1",
+	}}
+	original, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID:    "default",
+		Kind:           queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey("default", sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey("default", sessionID, runtimeInputID),
+		PayloadVersion: 1,
+		PayloadJSON:    []byte(payload),
+		Priority:       7,
+		MaxAttempts:    6,
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue retained task notification: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID:   "default",
+		Kinds:         []string{queue.KindRuntimeInput},
+		LeaseOwner:    "bridge-task-repair-test",
+		MaxJobs:       1,
+		LeaseDuration: time.Minute,
+		Now:           now.Add(time.Second),
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease retained task notification = %d/%v; want one", len(leased), err)
+	}
+	originalJob, err := DecodeRuntimeJob(queueJobProto(leased[0]))
+	if err != nil {
+		t.Fatalf("decode original task notification: %v", err)
+	}
+	originalPlan, err := store.PrepareRuntimeCommand(context.Background(), originalJob)
+	if err != nil {
+		t.Fatalf("prepare original task notification: %v", err)
+	}
+	if originalPlan.TaskNotification == nil {
+		t.Fatalf("original task notification plan = %#v; want semantic task plan", originalPlan)
+	}
+	if err := store.MarkRuntimeInputAccepted(context.Background(), originalJob, originalPlan.Request); err != nil {
+		t.Fatalf("mark original task notification accepted: %v", err)
+	}
+	if ok, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: "default",
+		JobID:       original.ID,
+		LeaseToken:  leased[0].LeaseToken,
+		Now:         now.Add(2 * time.Second),
+	}); err != nil || !ok {
+		t.Fatalf("ack retained task notification = %v/%v; want true/nil", ok, err)
+	}
+
+	if repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10); err != nil || repaired != 1 {
+		t.Fatalf("RepairRuntimeInbox = %d/%v; want one task redelivery", repaired, err)
+	}
+	var (
+		jobCount        int
+		pendingCount    int
+		repairedPayload string
+		priority        int
+		maxAttempts     int
+	)
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*),
+		        count(*) FILTER (WHERE status = 'pending'),
+		        COALESCE(MAX(payload_json) FILTER (WHERE status = 'pending'), ''),
+		        COALESCE(MAX(priority) FILTER (WHERE status = 'pending'), 0),
+		        COALESCE(MAX(max_attempts) FILTER (WHERE status = 'pending'), 0)
+		   FROM queue_jobs
+		  WHERE workspace_id = 'default'
+		    AND kind = 'runtime_input'
+		    AND dedupe_key = $1`,
+		queue.FormatRuntimeInputDedupeKey("default", sessionID, runtimeInputID),
+	).Scan(&jobCount, &pendingCount, &repairedPayload, &priority, &maxAttempts); err != nil {
+		t.Fatalf("read repaired task notification queue rows: %v", err)
+	}
+	if jobCount != 2 || pendingCount != 1 || repairedPayload != payload || priority != 7 || maxAttempts != 6 {
+		t.Fatalf(
+			"repaired task notification rows = count %d pending %d payload %q priority %d max_attempts %d; want exact retained payload and policy",
+			jobCount,
+			pendingCount,
+			repairedPayload,
+			priority,
+			maxAttempts,
+		)
+	}
+	if repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10); err != nil || repaired != 0 {
+		t.Fatalf("RepairRuntimeInbox with pending redelivery = %d/%v; want reuse", repaired, err)
+	}
+	repairedLease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID:   "default",
+		Kinds:         []string{queue.KindRuntimeInput},
+		LeaseOwner:    "bridge-task-repair-test",
+		MaxJobs:       1,
+		LeaseDuration: time.Minute,
+		Now:           now.Add(4 * time.Second),
+	})
+	if err != nil || len(repairedLease) != 1 {
+		t.Fatalf("lease repaired task notification = %d/%v; want one", len(repairedLease), err)
+	}
+	if repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10); err != nil || repaired != 0 {
+		t.Fatalf("RepairRuntimeInbox with leased redelivery = %d/%v; want reuse", repaired, err)
+	}
+	repairedJob, err := DecodeRuntimeJob(queueJobProto(repairedLease[0]))
+	if err != nil {
+		t.Fatalf("decode repaired task notification: %v", err)
+	}
+	plan, err := store.PrepareRuntimeCommand(context.Background(), repairedJob)
+	if err != nil {
+		t.Fatalf("prepare repaired task notification: %v", err)
+	}
+	if plan.TaskNotification == nil ||
+		plan.Request.GetRuntimeInputId() != runtimeInputID ||
+		plan.TaskNotification.TaskID != taskID {
+		t.Fatalf("repaired task notification plan = %#v; want original runtime input and task", plan)
+	}
+	if ok, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: "default",
+		JobID:       repairedLease[0].ID,
+		LeaseToken:  repairedLease[0].LeaseToken,
+		Now:         now.Add(5 * time.Second),
+	}); err != nil || !ok {
+		t.Fatalf("ack repaired task notification = %v/%v; want true/nil", ok, err)
+	}
+	request := bridgeTaskNotificationRequestForTest(
+		t,
+		runtimeScopeFromCommandRequest(plan.Request),
+		runtimeInputID,
+		plan.TaskNotification.TaskID,
+		plan.TaskNotification.ResultJSON,
+	)
+	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	apiStore.Clock = func() time.Time { return now.Add(6 * time.Second) }
+	committed, err := apiStore.CommitTaskNotificationResult(context.Background(), request)
+	if err != nil {
+		t.Fatalf("commit repaired task notification: %v", err)
+	}
+	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("repaired task notification ack = %s; want committed", committed.GetAck().GetStatus())
+	}
+	replayed, err := apiStore.CommitTaskNotificationResult(context.Background(), request)
+	if err != nil {
+		t.Fatalf("replay repaired task notification: %v", err)
+	}
+	if replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+		t.Fatalf("repaired task notification replay ack = %s; want duplicate", replayed.GetAck().GetStatus())
+	}
+	var (
+		inboxStatus       string
+		terminalEventID   sql.NullString
+		notificationEvent int
+		notificationMsg   int
+	)
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT i.status, t.terminal_event_id
+		   FROM session_runtime_inbox i
+		   JOIN session_background_tasks t
+		     ON t.workspace_id = i.workspace_id
+		    AND t.session_id = i.session_id
+		    AND t.task_id = $3
+		  WHERE i.workspace_id = $1
+		    AND i.runtime_input_id = $2`,
+		"default",
+		runtimeInputID,
+		taskID,
+	).Scan(&inboxStatus, &terminalEventID); err != nil {
+		t.Fatalf("read repaired task settlement: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = $1 AND type = 'runtime_notification'`,
+		sessionID,
+	).Scan(&notificationEvent); err != nil {
+		t.Fatalf("count repaired task events: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_messages
+		  WHERE workspace_id = 'default' AND session_id = $1 AND kind = 'runtime_notification'`,
+		sessionID,
+	).Scan(&notificationMsg); err != nil {
+		t.Fatalf("count repaired task messages: %v", err)
+	}
+	if inboxStatus != "committed" || !terminalEventID.Valid || notificationEvent != 1 || notificationMsg != 1 {
+		t.Fatalf(
+			"repaired task settlement inbox=%q terminal=%v events=%d messages=%d; want committed/true/1/1",
+			inboxStatus,
+			terminalEventID.Valid,
+			notificationEvent,
+			notificationMsg,
+		)
+	}
+	if repaired, err := store.RepairRuntimeInbox(context.Background(), "default", 10); err != nil || repaired != 0 {
+		t.Fatalf("RepairRuntimeInbox after semantic commit = %d/%v; want inert", repaired, err)
+	}
+}
+
 func TestPostgreSQLRuntimeDeliveryStoreCancelsSupersededAcceptedInboxWithoutLaterInput(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inbox_standalone_superseded", "thr_bridge_inbox_standalone_superseded")

@@ -58,6 +58,9 @@ export function runtimeTurnOpenWriteId(input: {
 
 /** Converts one accepted command's semantic messages into deterministic drafts. */
 export function acceptedInputDrafts(input: RuntimeAcceptedInputState): readonly RuntimeMessageDraft[] {
+  if (input.kind === "task_notification") {
+    throw new Error("task notification uses its dedicated declaration boundary");
+  }
   const sourceKind = acceptedInputDeclarationKind(input);
   if (input.kind === "rejection") {
     if (input.eventIds.length === 0) {
@@ -205,6 +208,9 @@ export function applyAcceptedInputReceipt(
   drafts: readonly RuntimeMessageDraft[],
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
+  if (input.kind === "task_notification") {
+    throw new Error("task notification uses its dedicated declaration receipt");
+  }
   assertOrdinaryDeclarationReceipt(receipt);
   const sourceKind = acceptedInputDeclarationKind(input);
   if (
@@ -1763,6 +1769,9 @@ function uniqueMap<T>(
 }
 
 function acceptedInputMessages(input: RuntimeAcceptedInputState): readonly RuntimeMessage[] {
+  if (input.kind === "task_notification") {
+    return [];
+  }
   if (input.kind === "inter_agent_message") {
     return [RuntimeMessageSchema.parse(input.message)];
   }
@@ -1789,5 +1798,7 @@ function acceptedInputDraftKind(input: RuntimeAcceptedInputState): RuntimeMessag
       return "reviewer_input";
     case "rejection":
       return "rejection";
+    case "task_notification":
+      throw new Error("task notification uses its dedicated draft kind");
   }
 }
