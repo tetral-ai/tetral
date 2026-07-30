@@ -803,8 +803,8 @@ func TestDaytonaCommandFollowupPayloadUsesCurrentToolUseEventID(t *testing.T) {
 		t.Fatalf("uploads = %d; want one poll payload", len(client.fileSystem.uploads))
 	}
 	upload := client.fileSystem.uploads[0]
-	if upload.path != payloadRootPath+"/evt_followup_poll/"+payloadFileName {
-		t.Fatalf("payload path = %q; want current follow-up tool-use event directory", upload.path)
+	if upload.path != payloadStageRootPath+"/evt_followup_poll/"+payloadFileName {
+		t.Fatalf("payload path = %q; want current follow-up tool-use event stage directory", upload.path)
 	}
 	for _, required := range []string{
 		`"tool":"poll"`,
@@ -1001,21 +1001,28 @@ func TestDaytonaHelperExecutorFailsBeforeHelperWhenPayloadPermissionCommandFails
 	if len(client.process.commands) != 1 {
 		t.Fatalf("sandbox commands = %v; want permission command only", client.process.commands)
 	}
-	if !strings.Contains(client.process.commands[0], "chmod 0600") || !strings.Contains(client.process.commands[0], shellQuote(payloadRootPath+"/evt_read/"+payloadFileName)) {
-		t.Fatalf("permission command = %q; want payload chmod", client.process.commands[0])
-	}
 	for _, required := range []string{
-		"chown " + shellQuote(helperUser) + ":" + shellQuote(helperUser) + " " + shellQuote(payloadRootPath),
-		"chmod 0700 " + shellQuote(payloadRootPath),
-		"chown -R " + shellQuote(helperUser) + ":" + shellQuote(helperUser) + " " + shellQuote(payloadRootPath+"/evt_read"),
+		"sudo -n sh -c ",
+		"install -d -m 0700 -o " + shellQuote(helperUser) + " -g " + shellQuote(helperUser) + " -- " + shellQuote(payloadRootPath),
+		"mv -T -- " + shellQuote(payloadStageRootPath+"/evt_read") + " " + shellQuote(payloadRootPath+"/evt_read"),
+		"chown -R " + shellQuote(helperUser) + ":" + shellQuote(helperUser) + " -- " + shellQuote(payloadRootPath+"/evt_read"),
+		"chmod 0700 -- " + shellQuote(payloadRootPath+"/evt_read"),
+		"chmod 0600 -- " + shellQuote(payloadRootPath+"/evt_read/"+payloadFileName),
 	} {
-		if !strings.Contains(client.process.commands[0], required) {
+		if !strings.Contains(client.process.commands[0], shellEmbedded(required)) {
 			t.Fatalf("permission command = %q; missing %q", client.process.commands[0], required)
 		}
 	}
-	if len(client.fileSystem.deleted) != 1 || client.fileSystem.deleted[0] != payloadRootPath+"/evt_read" {
-		t.Fatalf("deleted payload dirs = %v; want cleanup of evt_read payload dir", client.fileSystem.deleted)
+	if len(client.fileSystem.deleted) != 1 || client.fileSystem.deleted[0] != payloadStageRootPath+"/evt_read" {
+		t.Fatalf("deleted payload dirs = %v; want cleanup of the evt_read stage dir", client.fileSystem.deleted)
 	}
+}
+
+// shellEmbedded rewrites a fragment to how it appears inside the freeze
+// command's outer sudo sh -c quoting, where every inner single quote becomes
+// the '"'"' escape sequence.
+func shellEmbedded(fragment string) string {
+	return strings.ReplaceAll(fragment, "'", `'"'"'`)
 }
 
 func TestSynthesizeHelperBackgroundTaskFromRunningEnvelope(t *testing.T) {

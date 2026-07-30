@@ -30,9 +30,17 @@ const (
 	helperPath = "/usr/local/bin/sandbox"
 	// The helper starts as root only long enough to read/unlink root-owned
 	// payload files; the helper CLI drops to RuntimeUser before tool execution.
-	helperUser      = "root"
-	payloadRootPath = "/tmp/tetral-runtime/tool-payloads"
-	payloadFileName = "payload.json"
+	helperUser = "root"
+	// Payload staging is two-rooted because the two transports act as
+	// different identities: Daytona's filesystem API writes as the runtime
+	// user (it cannot produce root-owned files), while the helper's
+	// openProtectedPayload refuses any payload whose root, directory, or file
+	// is not root-owned with group/other bits clear. Each call therefore
+	// uploads into the runtime-user stage root and a sudo freeze command
+	// moves the payload directory into the root-owned final root.
+	payloadRootPath      = "/tmp/tetral-runtime/tool-payloads"
+	payloadStageRootPath = "/tmp/tetral-runtime/tool-payloads-stage"
+	payloadFileName      = "payload.json"
 
 	helperSubcommandExec       = "exec"
 	helperSubcommandStdin      = "stdin"
@@ -653,6 +661,8 @@ func (e *DaytonaHelperExecutor) executeHelper(ctx context.Context, target ToolTa
 	if sandbox.Process == nil || sandbox.FileSystem == nil {
 		return helperResult{}, errors.New("daytona sandbox is missing process or filesystem service")
 	}
+	stageDir := path.Join(payloadStageRootPath, payloadID)
+	stagePath := path.Join(stageDir, payloadFileName)
 	payloadDir := path.Join(payloadRootPath, payloadID)
 	payloadPath := path.Join(payloadDir, payloadFileName)
 	encoded, err := json.Marshal(payload)
@@ -660,32 +670,47 @@ func (e *DaytonaHelperExecutor) executeHelper(ctx context.Context, target ToolTa
 		return helperResult{}, err
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
-		return sandbox.FileSystem.CreateFolder(ctx, payloadDir, options.WithMode("0700"))
+		return sandbox.FileSystem.CreateFolder(ctx, stageDir, options.WithMode("0700"))
 	}); err != nil {
 		return helperResult{}, err
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
-		return sandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), payloadPath)
+		return sandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), stagePath)
 	}); err != nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
+		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
 		return helperResult{}, err
 	}
+	// The freeze runs the privileged chain under one sudo sh -c so no
+	// intermediate state is observable: the final root is root-owned before
+	// the payload directory arrives, leftovers are cleared first, and
+	// ownership/mode land before the helper reads. There is deliberately no
+	// post-execution cleanup command: the helper unlinks the payload file
+	// itself, the runtime-user filesystem API cannot delete below the
+	// root-owned final root anyway, and the next call's sweep (rmdir of
+	// empty leftover directories plus rm -rf of this event id) reclaims what
+	// remains, so a session leaves at most one empty directory behind.
+	freezeScript := "install -d -m 0700 -o " + shellQuote(helperUser) + " -g " + shellQuote(helperUser) + " -- " + shellQuote(payloadRootPath) +
+		" && for leftover in " + shellQuote(payloadRootPath) + "/*/; do rmdir -- \"$leftover\" 2>/dev/null || true; done" +
+		" && rm -rf -- " + shellQuote(payloadDir) +
+		" && mv -T -- " + shellQuote(stageDir) + " " + shellQuote(payloadDir) +
+		" && chown -R " + shellQuote(helperUser) + ":" + shellQuote(helperUser) + " -- " + shellQuote(payloadDir) +
+		" && chmod 0700 -- " + shellQuote(payloadDir) +
+		" && chmod 0600 -- " + shellQuote(payloadPath)
 	permissionResponse, err := retryDaytonaTransient(ctx, func() (*types.ExecuteResponse, error) {
-		return sandbox.Process.ExecuteCommand(ctx, "chown "+shellQuote(helperUser)+":"+shellQuote(helperUser)+" "+shellQuote(payloadRootPath)+" && chmod 0700 "+shellQuote(payloadRootPath)+" && chown -R "+shellQuote(helperUser)+":"+shellQuote(helperUser)+" "+shellQuote(payloadDir)+" && chmod 0700 "+shellQuote(payloadDir)+" && chmod 0600 "+shellQuote(payloadPath))
+		return sandbox.Process.ExecuteCommand(ctx, "sudo -n sh -c "+shellQuote(freezeScript))
 	}, nil)
 	if err != nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
+		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
 		return helperResult{}, err
 	}
 	if permissionResponse == nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
+		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
 		return helperResult{}, errors.New("sandbox helper payload permission command returned no response")
 	}
 	if permissionResponse.ExitCode != 0 {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
+		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
 		return helperResult{}, fmt.Errorf("sandbox helper payload permission command exited with code %d", permissionResponse.ExitCode)
 	}
-	defer func() { _ = sandbox.FileSystem.DeleteFile(context.WithoutCancel(ctx), payloadDir, true) }()
 
 	response, err := sandbox.Process.ExecuteCommand(ctx, "sudo -n -u "+shellQuote(helperUser)+" "+shellQuote(helperPath)+" "+shellQuote(helperCommand)+" --payload "+shellQuote(payloadPath))
 	if err != nil {
