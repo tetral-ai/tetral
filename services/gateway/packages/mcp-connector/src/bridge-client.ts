@@ -540,7 +540,8 @@ function stableMcpMaterializationSourceId(
   return `stid_${createHash("sha256").update(framed).digest("hex")}`;
 }
 
-function mcpMaterializationDeclarationDigest(request: CommitMcpToolResultRequest): string {
+/** Returns the SHA-256 digest Bridge must echo for one MCP materialization declaration. */
+export function mcpMaterializationDeclarationDigest(request: CommitMcpToolResultRequest): string {
   const inlineMedia = request.inlineMedia.map((media) => ({
       content_sha256: createHash("sha256").update(media.data).digest("hex"),
       mime: media.mime,

@@ -109,12 +109,16 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		operationSourceKind, err := writeEventOperationSourceKindTx(ctx, tx, request.GetScope(), request.GetEventType())
+		if err != nil {
+			return err
+		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
 			request.GetScope(),
 			bridgeOpWriteEvent,
-			request.GetEventType(),
+			operationSourceKind,
 			key,
 		); err != nil {
 			return err
@@ -150,7 +154,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 		}
-		eventType := request.GetEventType()
+		eventType := operationSourceKind
 		eventPayloadJSON := payloadJSON
 		if eventType == "agent.thread_message_sent" {
 			eventPayloadJSON, err = publicSentInterAgentEventPayloadTx(ctx, tx, request.GetScope(), eventPayloadJSON)
@@ -158,8 +162,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 		}
-		if threadScope.role != "main" && request.GetEventType() == "session.status_running" {
-			eventType = "session.thread_status_running"
+		if operationSourceKind != request.GetEventType() {
 			eventPayloadJSON, err = threadStatusPayloadJSON(eventType, request.GetScope(), threadScope, "")
 			if err != nil {
 				return err
@@ -286,7 +289,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			tx,
 			request.GetScope(),
 			bridgeOpWriteEvent,
-			eventType,
+			operationSourceKind,
 			key,
 			declarationDigest,
 			receiptJSON,
@@ -336,6 +339,36 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			ApplicationDisposition:    observation.Disposition,
 		},
 	}, nil
+}
+
+func writeEventOperationSourceKindTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	eventType string,
+) (string, error) {
+	if eventType != "session.status_running" {
+		return eventType, nil
+	}
+	var role string
+	if err := tx.QueryRow(ctx,
+		`SELECT role
+		   FROM session_threads
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND id = $3`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	).Scan(&role); dbconnect.IsNoRows(err) {
+		return "", closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
+	} else if err != nil {
+		return "", err
+	}
+	if role != "main" {
+		return "session.thread_status_running", nil
+	}
+	return eventType, nil
 }
 
 type mcpMaterializationIdentity struct {

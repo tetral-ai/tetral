@@ -384,7 +384,8 @@ export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificati
         declaration.receipts.length === 1 &&
         bridgeReceipt !== undefined &&
         applicationDisposition === "stale_custody" &&
-        bridgeReceipt.declarationDigest === declarationDigest
+        bridgeReceipt.declarationDigest === declarationDigest &&
+        bridgeReceipt.compactedThroughMessageSequence === undefined
       ) {
         recordBridgeReceiptEvidence(this.options, {
           workspaceId: input.scope.workspaceId,
@@ -439,7 +440,7 @@ export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificati
         };
       }
       try {
-        const receipt = runtimeDeclarationReceipt(bridgeReceipt);
+        const receipt = ordinaryRuntimeDeclarationReceipt(bridgeReceipt);
         const messages = applyTaskNotificationReceipt({
           sessionId: input.scope.sessionId,
           sessionThreadId: input.scope.sessionThreadId,
@@ -803,6 +804,13 @@ export class BridgeAPIContextLoader implements ContextLoader {
         reason: "commit inputs returned a mismatched declaration digest",
       });
     }
+    if (receipt.compactedThroughMessageSequence !== undefined) {
+      throw normalizeContextLoaderError({
+        code: "schema_mismatch",
+        sessionId: input.sessionId,
+        reason: "commit inputs returned a compaction boundary on an ordinary receipt",
+      });
+    }
     const applicationDisposition = declaration.applicationDisposition ===
       ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY
       ? "current_custody"
@@ -995,7 +1003,8 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         receipt.declarationDigest !== declarationDigest ||
         receipt.events.length !== 1 ||
         receipt.events[0]?.eventId !== response.eventId ||
-        receipt.events[0]?.eventSequence !== response.sequence
+        receipt.events[0]?.eventSequence !== response.sequence ||
+        receipt.compactedThroughMessageSequence !== undefined
       ) {
         recordBridgeReceiptEvidence(this.options, {
           workspaceId: envelope.workspaceId,
@@ -1205,10 +1214,15 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         receipt.declarationDigest !== declarationDigest ||
         receipt.events.length < 1 ||
         (
+          request.compactedThroughMessageSequence === undefined &&
+          receipt.compactedThroughMessageSequence !== undefined
+        ) ||
+        (
           interruptRequest !== undefined &&
           (
             interruptReceipt === undefined ||
-            interruptReceipt.declarationDigest !== interruptDigest
+            interruptReceipt.declarationDigest !== interruptDigest ||
+            interruptReceipt.compactedThroughMessageSequence !== undefined
           )
         ) ||
         applicationDisposition === undefined ||
@@ -1458,6 +1472,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         bridgeReceipt === undefined ||
         applicationDisposition === undefined ||
         bridgeReceipt.declarationDigest !== declarationDigest ||
+        bridgeReceipt.compactedThroughMessageSequence !== undefined ||
         (
           applicationDisposition === "current_custody" &&
           (
@@ -1659,6 +1674,7 @@ export class BridgeAPIInternalToolRepairCommitter {
       receipt.declarationDigest !== declarationDigest ||
       receipt.events.length !== 1 ||
       receipt.events[0]?.eventId === undefined ||
+      receipt.compactedThroughMessageSequence !== undefined ||
       applicationDisposition === undefined ||
       (
         applicationDisposition === "current_custody" &&
@@ -1881,6 +1897,14 @@ function runtimeDraftKindForBridge(kind: CoreRuntimeMessageDraft["draftKind"]): 
   }
 }
 
+function ordinaryRuntimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDeclarationReceipt {
+  const parsed = runtimeDeclarationReceipt(receipt);
+  if (parsed.compactedThroughMessageSequence !== undefined) {
+    throw new Error("ordinary declaration receipt cannot carry a compaction boundary");
+  }
+  return parsed;
+}
+
 function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDeclarationReceipt {
   const requestReschedule = receipt.requestReschedule === undefined
     ? undefined
@@ -2041,7 +2065,7 @@ export function validateChildLifecycleDeclarationResponse(
   }
   let receipts: RuntimeDeclarationReceipt[];
   try {
-    receipts = declaration.receipts.map(runtimeDeclarationReceipt);
+    receipts = declaration.receipts.map(ordinaryRuntimeDeclarationReceipt);
   } catch {
     return {
       ok: false,

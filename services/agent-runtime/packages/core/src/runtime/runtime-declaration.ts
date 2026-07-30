@@ -32,6 +32,12 @@ export type { RuntimeDeclarationReceipt } from "../contracts/runtime.js";
 type ToolRuntimePart = Extract<RuntimePart, { readonly type: "tool" }>;
 type ToolRuntimePartDraft = Extract<RuntimePartDraft, { readonly type: "tool" }>;
 
+function assertOrdinaryDeclarationReceipt(receipt: RuntimeDeclarationReceipt): void {
+  if (receipt.compactedThroughMessageSequence !== undefined) {
+    throw new Error("ordinary declaration receipt cannot carry a compaction boundary");
+  }
+}
+
 /** Derives the stable declaration identity for one durable running interval. */
 export function runtimeTurnOpenWriteId(input: {
   readonly workspaceId: string;
@@ -162,6 +168,7 @@ export function applyAcceptedInputReceipt(
   drafts: readonly RuntimeMessageDraft[],
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
+  assertOrdinaryDeclarationReceipt(receipt);
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "commit_inputs" ||
@@ -265,6 +272,7 @@ export function applyInterruptInputReceipt(
   },
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
+  assertOrdinaryDeclarationReceipt(receipt);
   if (
     input.eventIds.length !== 1 ||
     receipt.sessionThreadId !== input.sessionThreadId ||
@@ -416,6 +424,7 @@ export function applyTaskNotificationReceipt(input: {
   readonly draft: RuntimeMessageDraft;
   readonly existingMessages: readonly DurableRuntimeMessage[];
 }, receipt: RuntimeDeclarationReceipt): readonly DurableRuntimeMessage[] {
+  assertOrdinaryDeclarationReceipt(receipt);
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "commit_task_notification_result" ||
@@ -1113,6 +1122,7 @@ export function applyInternalToolRepairReceipt(
   },
   receipt: RuntimeDeclarationReceipt,
 ): DurableRuntimeMessage {
+  assertOrdinaryDeclarationReceipt(receipt);
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "commit_internal_tool_repair" ||
@@ -1203,6 +1213,7 @@ export function applyRuntimeOutputReceipt(
   },
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
+  assertOrdinaryDeclarationReceipt(receipt);
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "write_event" ||
@@ -1245,6 +1256,7 @@ export function applyRuntimeRequestEndReceipt(
   },
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
+  assertOrdinaryDeclarationReceipt(receipt);
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "write_request_end" ||

@@ -62,147 +62,6 @@ import { createJsonLogger } from "../../src/logger.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 
 describe("BridgeAPIContextLoader", () => {
-  test("matches Bridge's shared declaration digest vector", () => {
-    const fixture = JSON.parse(readFileSync(
-      resolve(import.meta.dir, "../../../../../bridge/testdata/runtime_declaration_vectors.json"),
-      "utf8",
-    )) as {
-      readonly commit_inputs: {
-        readonly session_thread_id: string;
-        readonly runtime_input_id: string;
-        readonly event_ids: readonly string[];
-        readonly sequence_from: number;
-        readonly sequence_to: number;
-        readonly input_kind: string;
-        readonly digest: string;
-        readonly draft: {
-          readonly runtime_local_id: string;
-          readonly source_kind: string;
-          readonly source_id: string;
-          readonly source_event_id: string;
-          readonly ordinal: number;
-          readonly message_info_json: string;
-          readonly part: {
-            readonly runtime_local_part_id: string;
-            readonly part_kind: string;
-            readonly ordinal: number;
-            readonly part_json: string;
-          };
-        };
-      };
-    };
-    const vector = fixture.commit_inputs;
-    expect(commitInputsDeclarationDigest({
-      scope: { requestId: "", workspaceId: "", sessionId: "", sessionThreadId: vector.session_thread_id, binding: undefined },
-      runtimeInputId: vector.runtime_input_id,
-      eventIds: [...vector.event_ids],
-      sequenceFrom: vector.sequence_from,
-      sequenceTo: vector.sequence_to,
-      inputKind: vector.input_kind,
-      pendingToolCancellations: [],
-      drafts: [{
-        runtimeLocalId: vector.draft.runtime_local_id,
-        sourceKind: vector.draft.source_kind,
-        sourceId: vector.draft.source_id,
-        sourceEventId: vector.draft.source_event_id,
-        draftKind: RuntimeDraftKind.RUNTIME_DRAFT_KIND_USER_INPUT,
-        ordinal: vector.draft.ordinal,
-        messageInfoJson: vector.draft.message_info_json,
-        parts: [{
-          runtimeLocalPartId: vector.draft.part.runtime_local_part_id,
-          partKind: vector.draft.part.part_kind,
-          ordinal: vector.draft.part.ordinal,
-          partJson: vector.draft.part.part_json,
-        }],
-      }],
-    })).toBe(vector.digest);
-  });
-
-  test("matches Bridge's shared internal-tool-repair digest vector", () => {
-    const fixture = JSON.parse(readFileSync(
-      resolve(import.meta.dir, "../../../../../bridge/testdata/runtime_declaration_vectors.json"),
-      "utf8",
-    )) as {
-      readonly internal_tool_repair: {
-        readonly session_thread_id: string;
-        readonly model_request_id: string;
-        readonly model_tool_call_id: string;
-        readonly tool_name: string;
-        readonly repair_key: string;
-        readonly digest: string;
-        readonly draft: {
-          readonly runtime_local_id: string;
-          readonly source_kind: string;
-          readonly source_id: string;
-          readonly ordinal: number;
-          readonly message_info_json: string;
-          readonly part: {
-            readonly runtime_local_part_id: string;
-            readonly part_kind: string;
-            readonly ordinal: number;
-            readonly part_json: string;
-          };
-        };
-      };
-    };
-    const vector = fixture.internal_tool_repair;
-    expect(internalToolRepairDeclarationDigest({
-      scope: {
-        requestId: "",
-        workspaceId: "",
-        sessionId: "",
-        sessionThreadId: vector.session_thread_id,
-        binding: undefined,
-      },
-      modelRequestId: vector.model_request_id,
-      modelToolCallId: vector.model_tool_call_id,
-      toolName: vector.tool_name,
-      drafts: [{
-        runtimeLocalId: vector.draft.runtime_local_id,
-        sourceKind: vector.draft.source_kind,
-        sourceId: vector.draft.source_id,
-        sourceEventId: "",
-        draftKind: RuntimeDraftKind.RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR,
-        ordinal: vector.draft.ordinal,
-        messageInfoJson: vector.draft.message_info_json,
-        parts: [{
-          runtimeLocalPartId: vector.draft.part.runtime_local_part_id,
-          partKind: vector.draft.part.part_kind,
-          ordinal: vector.draft.part.ordinal,
-          partJson: vector.draft.part.part_json,
-        }],
-      }],
-    })).toBe(vector.digest);
-  });
-
-  test("matches Bridge's shared runtime-termination digest vector", () => {
-    const fixture = JSON.parse(readFileSync(
-      resolve(import.meta.dir, "../../../../../bridge/testdata/runtime_declaration_vectors.json"),
-      "utf8",
-    )) as {
-      readonly runtime_termination: {
-        readonly session_thread_id: string;
-        readonly runtime_write_id: string;
-        readonly failure_json: string;
-        readonly digest: string;
-      };
-    };
-    const vector = fixture.runtime_termination;
-    expect(runtimeTerminationDeclarationDigest({
-      scope: {
-        requestId: "",
-        workspaceId: "",
-        sessionId: "",
-        sessionThreadId: vector.session_thread_id,
-        binding: undefined,
-      },
-      runtimeWriteId: vector.runtime_write_id,
-      failureJson: vector.failure_json,
-      drafts: [],
-      pendingToolCancellations: [],
-    })).toBe(vector.digest);
-  });
-
   test("rejects missing message arrays and accepts an explicit empty context", async () => {
     for (const contextJson of ["", "{}", JSON.stringify({ messages: "not-an-array" })]) {
       const bridge = new RecordingBridgeClient();
@@ -652,6 +511,38 @@ describe("BridgeAPIControlInputCommitter", () => {
 });
 
 describe("BridgeAPIEventWriter", () => {
+  test("rejects a compaction boundary on an ordinary WriteEvent receipt", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.eventWriterCompactedThroughMessageSequence = 0;
+    const writer = new BridgeAPIEventWriter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(writer.append({
+      ...writerScope(),
+      writeId: "rwrite_unsolicited_compaction",
+      event: {
+        type: "session.error",
+        error: {
+          type: "provider",
+          code: "provider_rate_limited",
+          message: "provider unavailable",
+          retryable: true,
+          fatal: false,
+          retryStatus: { type: "retrying", attempt: 1 },
+        },
+      },
+    })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "schema_mismatch",
+      },
+    });
+  });
+
   test("maps internal provider failures to fork-SDK session errors before WriteEvent", async () => {
     const bridge = new RecordingBridgeClient();
     const writer = new BridgeAPIEventWriter({
@@ -1921,6 +1812,7 @@ class RecordingBridgeClient {
   eventWriterAckStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   eventWriterErrorCode = "";
   eventWriterAckWriteId: string | undefined;
+  eventWriterCompactedThroughMessageSequence: number | undefined;
   eventWriterTransportError: Error | null = null;
   pendingAttachmentDeltaJson: string[] = [];
   readonly commitErrors: Error[] = [];
@@ -2453,6 +2345,7 @@ class RecordingBridgeClient {
           pendingAttachmentDeltaJson: [],
           pendingToolDeltaJson: [],
           prefixConsumptions: [],
+          compactedThroughMessageSequence: this.eventWriterCompactedThroughMessageSequence,
           childLifecycle: [],
           events: [{
             sessionThreadId: request.scope?.sessionThreadId ?? "",

@@ -37,6 +37,16 @@ func stableRuntimeID(parts ...string) string {
 	return "stid_" + hex.EncodeToString(hasher.Sum(nil))
 }
 
+func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}), nil
+}
+
 func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
 	drafts, err := canonicalRuntimeDrafts(request.GetDrafts())
 	if err != nil {
@@ -52,7 +62,7 @@ func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputK
 			"tool_use_event_id": cancellation.GetToolUseEventId(),
 		})
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"drafts":                     drafts,
 		"event_ids":                  request.GetEventIds(),
 		"input_kind":                 inputKind,
@@ -83,7 +93,7 @@ func writeEventDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"drafts":     drafts,
 		"event_type": request.GetEventType(),
 		"mcp_materialization_handle": nullableDeclarationString(
@@ -168,7 +178,7 @@ func writeRequestEndDeclarationDigest(
 			"sequence_to":                value.GetSequenceTo(),
 		}
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"compacted_through_message_sequence": compactedThrough,
 		"compaction_event_payload":           compactionEventPayload,
 		"consumed_attachment_refs":           json.RawMessage(consumedTransientJSON),
@@ -203,7 +213,7 @@ func finishIdleDeclarationDigest(request *bridgev1.FinishIdleRequest, stopReason
 	if err != nil {
 		return "", err
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"drafts":            drafts,
 		"durable_turn_id":   request.GetDurableTurnId(),
 		"operation_kind":    bridgeOpFinishIdle,
@@ -238,7 +248,7 @@ func runtimeTerminationDeclarationDigest(
 			"tool_use_event_id": cancellation.GetToolUseEventId(),
 		})
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"drafts":                     drafts,
 		"failure":                    json.RawMessage(failureJSON),
 		"operation_kind":             bridgeOpCommitRuntimeTermination,
@@ -265,7 +275,7 @@ func childLifecycleDeclarationDigest(
 	sourceCommandID string,
 	requestedAt string,
 ) (string, error) {
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"action":            action,
 		"child_thread_id":   childThreadID,
 		"operation_kind":    operationKind,
@@ -290,7 +300,7 @@ func sealedAgentMailDeclarationDigest(
 	birthPreparationAttemptID string,
 	failedPreparationAttemptID string,
 ) (string, error) {
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"birth_preparation_attempt_id":  birthPreparationAttemptID,
 		"failed_preparation_attempt_id": failedPreparationAttemptID,
 		"operation_kind":                bridgeOpSettleSealedAgentMail,
@@ -315,7 +325,7 @@ func internalToolRepairDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"drafts":             drafts,
 		"model_request_id":   request.GetModelRequestId(),
 		"model_tool_call_id": request.GetModelToolCallId(),
@@ -346,7 +356,7 @@ func taskNotificationDeclarationDigest(
 		}
 		draft = drafts[0]
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"draft":             draft,
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
 		"result":            json.RawMessage(resultJSON),
@@ -394,7 +404,7 @@ func mcpMaterializationDeclarationDigest(request *bridgev1.CommitMcpToolResultRe
 			"suggested_filename": media.GetSuggestedFilename(),
 		})
 	}
-	raw, err := json.Marshal(map[string]any{
+	raw, err := marshalRuntimeDeclarationObject(map[string]any{
 		"inline_media":          inlineMedia,
 		"input":                 json.RawMessage(inputJSON),
 		"mcp_server_name":       request.GetMcpServerName(),

@@ -748,6 +748,45 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	if err != nil {
 		t.Fatalf("WriteEvent child running: %v", err)
 	}
+	runningReplay, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          childScope,
+		RuntimeWriteId: "rwrite_bridge_child_status_running",
+		EventType:      "session.status_running",
+		PayloadJson:    `{"type":"session.status_running"}`,
+		SessionVisible: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent child running replay: %v", err)
+	}
+	if runningReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		runningReplay.GetEventId() != running.GetEventId() ||
+		runningReplay.GetSequence() != running.GetSequence() {
+		t.Fatalf("child running replay = %+v; want duplicate for first event", runningReplay)
+	}
+	var runningEventCount, runningOperationCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT
+		    (SELECT count(*)
+		       FROM session_events
+		      WHERE workspace_id = 'default'
+		        AND session_id = 'sesn_bridge_child_status'
+		        AND session_thread_id = 'thr_bridge_child_status_worker'
+		        AND type = 'session.thread_status_running'
+		        AND runtime_write_id = 'rwrite_bridge_child_status_running'),
+		    (SELECT count(*)
+		       FROM session_bridge_operations
+		      WHERE workspace_id = 'default'
+		        AND session_id = 'sesn_bridge_child_status'
+		        AND session_thread_id = 'thr_bridge_child_status_worker'
+		        AND operation = 'write_event'
+		        AND source_kind = 'session.thread_status_running'
+		        AND idempotency_key = 'rwrite_bridge_child_status_running')`,
+	).Scan(&runningEventCount, &runningOperationCount); err != nil {
+		t.Fatalf("count child running replay rows: %v", err)
+	}
+	if runningEventCount != 1 || runningOperationCount != 1 {
+		t.Fatalf("child running replay rows = event %d operation %d; want 1/1", runningEventCount, runningOperationCount)
+	}
 	finishIdleRequest := &bridgev1.FinishIdleRequest{
 		Scope:          childScope,
 		DurableTurnId:  running.GetEventId(),
