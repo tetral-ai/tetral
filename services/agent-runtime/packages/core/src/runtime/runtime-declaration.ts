@@ -162,6 +162,42 @@ export function acceptedInputDrafts(input: RuntimeAcceptedInputState): readonly 
   });
 }
 
+function assertPendingToolCancellationDeltas(
+  expected: readonly {
+    readonly toolUseEventId: string;
+    readonly runtimeLocalId: string;
+  }[],
+  received: readonly string[],
+): void {
+  const pairKey = (runtimeLocalId: string, toolUseEventId: string): string =>
+    `${runtimeLocalId}\u0000${toolUseEventId}`;
+  const expectedPairs = new Set(
+    expected.map((cancellation) => pairKey(cancellation.runtimeLocalId, cancellation.toolUseEventId)),
+  );
+  const receivedPairs = new Set<string>();
+  for (const rawDelta of received) {
+    const delta = JSON.parse(rawDelta) as Record<string, unknown>;
+    const runtimeLocalId = typeof delta.runtime_local_id === "string" ? delta.runtime_local_id : "";
+    const toolUseEventId = typeof delta.tool_use_event_id === "string" ? delta.tool_use_event_id : "";
+    if (
+      runtimeLocalId.length === 0 ||
+      toolUseEventId.length === 0 ||
+      delta.status !== "cancelled" ||
+      typeof delta.result_event_id !== "string" ||
+      receivedPairs.has(pairKey(runtimeLocalId, toolUseEventId))
+    ) {
+      throw new Error("declaration receipt has an invalid pending-tool delta");
+    }
+    receivedPairs.add(pairKey(runtimeLocalId, toolUseEventId));
+  }
+  if (
+    receivedPairs.size !== expectedPairs.size ||
+    [...expectedPairs].some((pair) => !receivedPairs.has(pair))
+  ) {
+    throw new Error("declaration receipt pending-tool identity does not match");
+  }
+}
+
 /** Applies a complete current-custody receipt to the exact submitted drafts. */
 export function applyAcceptedInputReceipt(
   input: RuntimeAcceptedInputState,
@@ -268,10 +304,14 @@ export function applyInterruptInputReceipt(
     readonly runtimeInputId: string;
     readonly eventIds: readonly string[];
     readonly drafts: readonly RuntimeMessageDraft[];
-    readonly existingMessages: readonly DurableRuntimeMessage[];
+    readonly pendingToolCancellations: readonly {
+      readonly toolUseEventId: string;
+      readonly runtimeLocalId: string;
+    }[];
+    readonly existingMessages: readonly RuntimeMessage[];
   },
   receipt: RuntimeDeclarationReceipt,
-): readonly DurableRuntimeMessage[] {
+): readonly RuntimeMessage[] {
   assertOrdinaryDeclarationReceipt(receipt);
   if (
     input.eventIds.length !== 1 ||
@@ -293,7 +333,8 @@ export function applyInterruptInputReceipt(
   ) {
     throw new Error("interrupt declaration receipt event stamp is invalid");
   }
-  return applyRuntimeDraftStamps({
+  assertPendingToolCancellationDeltas(input.pendingToolCancellations, receipt.pendingToolDelta);
+  return applyCreatedControlDraftStamps({
     sessionId: input.sessionId,
     sessionThreadId: input.sessionThreadId,
     eventType: "user.interrupt",
@@ -301,6 +342,198 @@ export function applyInterruptInputReceipt(
     drafts: input.drafts,
     existingMessages: input.existingMessages,
   }, receipt.messages);
+}
+
+/** Builds the sole user-role declaration for one admitted approval decision. */
+export function toolConfirmationDraft(input: {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly runtimeInputId: string;
+  readonly sourceEventId: string;
+  readonly toolUseEventId: string;
+  readonly pendingTool: RuntimePendingApprovalToolJobState;
+  readonly decision: "allow" | "deny";
+  readonly denyMessage?: string | undefined;
+}): RuntimeMessageDraft {
+  if (
+    input.pendingTool.toolUseEventId !== input.toolUseEventId ||
+    input.pendingTool.toolPart.toolUseEventId !== input.toolUseEventId
+  ) {
+    throw new Error("tool confirmation does not identify the current pending tool");
+  }
+  const runtimeLocalId = stableRuntimeID(
+    "runtime_message_draft",
+    input.workspaceId,
+    input.sessionId,
+    input.sessionThreadId,
+    "tool_confirmation",
+    input.runtimeInputId,
+    "approval_input",
+    "0",
+  );
+  const text = input.decision === "allow"
+    ? "Approval allowed"
+    : input.denyMessage === undefined || input.denyMessage.length === 0
+      ? "Approval denied"
+      : `Approval denied: ${input.denyMessage}`;
+  return RuntimeMessageDraftSchema.parse({
+    runtimeLocalId,
+    sourceKind: "tool_confirmation",
+    sourceId: input.runtimeInputId,
+    sourceEventId: input.sourceEventId,
+    draftKind: "approval_input",
+    ordinal: 0,
+    role: "user",
+    origin: "user",
+    status: "completed",
+    parts: [{
+      runtimeLocalPartId: stableRuntimeID(
+        "runtime_message_part_draft",
+        runtimeLocalId,
+        "text",
+        "0",
+      ),
+      ordinal: 0,
+      type: "text",
+      text,
+      truncated: false,
+      status: "completed",
+    }],
+  });
+}
+
+/** Applies the database stamp for one admitted approval decision. */
+export function applyToolConfirmationReceipt(input: {
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly runtimeInputId: string;
+  readonly sourceEventId: string;
+  readonly draft: RuntimeMessageDraft;
+  readonly existingMessages: readonly RuntimeMessage[];
+}, receipt: RuntimeDeclarationReceipt): readonly RuntimeMessage[] {
+  assertOrdinaryDeclarationReceipt(receipt);
+  if (
+    receipt.sessionThreadId !== input.sessionThreadId ||
+    receipt.operationKind !== "commit_inputs" ||
+    receipt.sourceKind !== "tool_confirmation" ||
+    receipt.sourceId !== input.runtimeInputId ||
+    receipt.events.length !== 1 ||
+    receipt.messages.length !== 1
+  ) {
+    throw new Error("tool confirmation declaration receipt identity does not match");
+  }
+  const eventStamp = receipt.events[0];
+  if (
+    eventStamp === undefined ||
+    eventStamp.sessionThreadId !== input.sessionThreadId ||
+    eventStamp.sourceEventId !== input.sourceEventId ||
+    eventStamp.eventId !== input.sourceEventId ||
+    eventStamp.disposition !== "existing"
+  ) {
+    throw new Error("tool confirmation declaration receipt event stamp is invalid");
+  }
+  return applyCreatedControlDraftStamps({
+    sessionId: input.sessionId,
+    sessionThreadId: input.sessionThreadId,
+    eventType: "user.tool_confirmation",
+    eventStamp,
+    drafts: [input.draft],
+    existingMessages: input.existingMessages,
+  }, receipt.messages);
+}
+
+/** Builds cancellation declarations for pending tools settled by one admitted interrupt. */
+export function interruptPendingToolDeclarations(input: {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly runtimeInputId: string;
+  readonly sourceEventId: string;
+  readonly pendingTools: readonly RuntimePendingApprovalToolJobState[];
+  readonly failure: RuntimeFailure;
+  readonly completedAt: string;
+}): {
+  readonly drafts: readonly RuntimeMessageDraft[];
+  readonly pendingToolCancellations: readonly {
+    readonly toolUseEventId: string;
+    readonly runtimeLocalId: string;
+  }[];
+} {
+  const runtimeLocalId = stableRuntimeID(
+    "runtime_message_draft",
+    input.workspaceId,
+    input.sessionId,
+    input.sessionThreadId,
+    "interrupt_control",
+    input.runtimeInputId,
+    "cancellation",
+    "0",
+  );
+  const parts = input.pendingTools.map((pending, ordinal) => {
+    if (
+      pending.toolPart.toolUseEventId !== pending.toolUseEventId ||
+      (pending.toolPart.state.status !== "pending" && pending.toolPart.state.status !== "running")
+    ) {
+      throw new Error("interrupt pending tool is not cancellable");
+    }
+    const state = pending.toolPart.state.status === "running"
+      ? {
+          status: "cancelled" as const,
+          input: pending.toolPart.state.input,
+          error: {
+            type: input.failure.type,
+            message: input.failure.message,
+            retryable: input.failure.retryable,
+          },
+        }
+      : {
+          status: "cancelled" as const,
+          error: {
+            type: input.failure.type,
+            message: input.failure.message,
+            retryable: input.failure.retryable,
+          },
+        };
+    return {
+      runtimeLocalPartId: stableRuntimeID(
+        "runtime_message_part_draft",
+        runtimeLocalId,
+        "tool",
+        String(ordinal),
+      ),
+      ordinal,
+      type: "tool" as const,
+      toolCallId: pending.toolPart.toolCallId,
+      toolName: pending.toolPart.toolName,
+      toolUseEventId: pending.toolUseEventId,
+      ...(pending.toolPart.toolEvent === undefined ? {} : { toolEvent: pending.toolPart.toolEvent }),
+      state,
+      ...(pending.toolPart.startedAt === undefined ? {} : { startedAt: pending.toolPart.startedAt }),
+      completedAt: input.completedAt,
+    };
+  });
+  const drafts = parts.length === 0
+    ? []
+    : [RuntimeMessageDraftSchema.parse({
+        runtimeLocalId,
+        sourceKind: "interrupt_control",
+        sourceId: input.runtimeInputId,
+        sourceEventId: input.sourceEventId,
+        draftKind: "cancellation",
+        ordinal: 0,
+        role: "assistant",
+        origin: "agent",
+        status: "completed",
+        parts,
+      })];
+  return {
+    drafts,
+    pendingToolCancellations: input.pendingTools.map((pending) => ({
+      toolUseEventId: pending.toolUseEventId,
+      runtimeLocalId,
+    })),
+  };
 }
 
 /** Converts one live loop projection into the unstamped draft carried by WriteEvent. */
@@ -693,33 +926,7 @@ export function validateRuntimeTerminationReceipt(input: {
   ) {
     throw new Error("runtime termination declaration receipt has invalid terminal event stamps");
   }
-  const expectedCancellations = new Map(
-    input.pendingToolCancellations.map((cancellation) => [cancellation.runtimeLocalId, cancellation.toolUseEventId]),
-  );
-  const receivedCancellations = new Map<string, string>();
-  for (const rawDelta of receipt.pendingToolDelta) {
-    const delta = JSON.parse(rawDelta) as Record<string, unknown>;
-    const runtimeLocalId = typeof delta.runtime_local_id === "string" ? delta.runtime_local_id : "";
-    const toolUseEventId = typeof delta.tool_use_event_id === "string" ? delta.tool_use_event_id : "";
-    if (
-      runtimeLocalId.length === 0 ||
-      toolUseEventId.length === 0 ||
-      delta.status !== "cancelled" ||
-      typeof delta.result_event_id !== "string" ||
-      receivedCancellations.has(runtimeLocalId)
-    ) {
-      throw new Error("runtime termination declaration receipt has an invalid pending-tool delta");
-    }
-    receivedCancellations.set(runtimeLocalId, toolUseEventId);
-  }
-  if (
-    receivedCancellations.size !== expectedCancellations.size ||
-    [...expectedCancellations].some(([runtimeLocalId, toolUseEventId]) =>
-      receivedCancellations.get(runtimeLocalId) !== toolUseEventId
-    )
-  ) {
-    throw new Error("runtime termination declaration receipt pending-tool identity does not match");
-  }
+  assertPendingToolCancellationDeltas(input.pendingToolCancellations, receipt.pendingToolDelta);
 }
 
 /** Validates the durable closeout stamp and any child completion-mail stamps. */
@@ -1434,6 +1641,70 @@ function applyRuntimeDraftStamps(
       (message) => !input.existingMessages.some((existing) => existing.id === message.id),
     ),
   ];
+}
+
+function applyCreatedControlDraftStamps(
+  input: {
+    readonly sessionId: string;
+    readonly sessionThreadId: string;
+    readonly eventType: string;
+    readonly eventStamp: RuntimeDeclarationReceipt["events"][number];
+    readonly drafts: readonly RuntimeMessageDraft[];
+    readonly existingMessages: readonly RuntimeMessage[];
+  },
+  messageStamps: RuntimeDeclarationReceipt["messages"],
+): readonly RuntimeMessage[] {
+  const stamped = applyRuntimeDraftStamps({
+    sessionId: input.sessionId,
+    sessionThreadId: input.sessionThreadId,
+    eventType: input.eventType,
+    eventStamp: input.eventStamp,
+    drafts: input.drafts,
+    existingMessages: [],
+  }, messageStamps);
+  if (stamped.length === 0) {
+    return input.existingMessages;
+  }
+  const existingByID = uniqueMap(input.existingMessages, (message) => message.id, "existing message");
+  const existingStamped = stamped.filter((message) => existingByID.has(message.id));
+  if (existingStamped.length === 0) {
+    return [...input.existingMessages, ...stamped];
+  }
+  if (
+    existingStamped.length !== stamped.length ||
+    stamped.some((message) => !sameRuntimeValue(existingByID.get(message.id), message))
+  ) {
+    throw new Error("control declaration receipt conflicts with the installed durable projection");
+  }
+  return input.existingMessages;
+}
+
+function sameRuntimeValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => sameRuntimeValue(value, right[index]));
+  }
+  if (
+    left === null ||
+    right === null ||
+    typeof left !== "object" ||
+    typeof right !== "object"
+  ) {
+    return false;
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined).sort();
+  const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined).sort();
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) =>
+      key === rightKeys[index] && sameRuntimeValue(leftRecord[key], rightRecord[key])
+    );
 }
 
 function runtimeDeclarationPartMap(

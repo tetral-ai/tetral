@@ -11,15 +11,16 @@
  *   status in {completed,failed,cancelled} -> lowered; empty text and empty
  *                                        reasoning parts drop out, and a message
  *                                        that lowers to zero parts is omitted.
- *   tool part status pending|running -> rejected (pending_tool_state), unless it is
- *                                        an internal provider tool call, which
- *                                        lowers to nothing.
+ *   tool part status pending|running -> skipped only when a later message carries
+ *                                        the same tool-use identity in a terminal
+ *                                        state; otherwise rejected. Internal
+ *                                        provider tool calls lower to nothing.
  *
  * INVARIANTS:
  *   - Only non-streaming messages are projected. Text and reasoning part status is
- *     not rechecked here; pending/running tool state is rejected, while Provider
- *     deltas and Gateway raw stream chunks never reach this input. Message usage
- *     may be present but is ignored by lowering.
+ *     not rechecked here; unresolved pending/running tool state is rejected, while
+ *     Provider deltas and Gateway raw stream chunks never reach this input.
+ *     Message usage may be present but is ignored by lowering.
  *   - The sole retained provider-native field is a reasoning part's
  *     metadata, kept for reasoning round-trip; it is internal cold-start context and
  *     never surfaces on any public event or message API.
@@ -56,20 +57,37 @@ export function toGatewayRuntimeMessages(input: unknown): RuntimeGatewayMessages
   if (!Array.isArray(input) || input.length === 0) {
     return { ok: false, error: runtimeInputError("schema") };
   }
-  const messages: GatewayRuntimeMessage[] = [];
+  const parsedMessages: RuntimeMessage[] = [];
   for (const item of input) {
     const durable = DurableRuntimeMessageSchema.safeParse(item);
     const parsed = durable.success ? durable : RuntimeMessageSchema.safeParse(item);
     if (!parsed.success) {
       return { ok: false, error: runtimeInputError("schema") };
     }
-    if (parsed.data.role !== "user" && parsed.data.role !== "assistant") {
+    parsedMessages.push(parsed.data);
+  }
+  const terminalToolMessageIndex = new Map<string, number>();
+  for (const [messageIndex, message] of parsedMessages.entries()) {
+    for (const part of message.parts) {
+      if (
+        part.type === "tool" &&
+        part.toolUseEventId !== undefined &&
+        part.state.status !== "pending" &&
+        part.state.status !== "running"
+      ) {
+        terminalToolMessageIndex.set(part.toolUseEventId, messageIndex);
+      }
+    }
+  }
+  const messages: GatewayRuntimeMessage[] = [];
+  for (const [messageIndex, message] of parsedMessages.entries()) {
+    if (message.role !== "user" && message.role !== "assistant") {
       return { ok: false, error: runtimeInputError("unsupported_role") };
     }
-    if (parsed.data.status === "streaming") {
+    if (message.status === "streaming") {
       continue;
     }
-    const projected = projectRuntimeMessage(parsed.data);
+    const projected = projectRuntimeMessage(message, messageIndex, terminalToolMessageIndex);
     if (!projected.ok) {
       return { ok: false, error: runtimeInputError(projected.reason) };
     }
@@ -84,9 +102,21 @@ type ProjectionResult =
   | { readonly ok: true; readonly message: GatewayRuntimeMessage }
   | { readonly ok: false; readonly reason: string };
 
-function projectRuntimeMessage(message: RuntimeMessage): ProjectionResult {
+function projectRuntimeMessage(
+  message: RuntimeMessage,
+  messageIndex: number,
+  terminalToolMessageIndex: ReadonlyMap<string, number>,
+): ProjectionResult {
   const parts: GatewayRuntimePart[] = [];
   for (const part of [...message.parts].sort((left, right) => left.sequence - right.sequence)) {
+    if (
+      part.type === "tool" &&
+      (part.state.status === "pending" || part.state.status === "running") &&
+      part.toolUseEventId !== undefined &&
+      (terminalToolMessageIndex.get(part.toolUseEventId) ?? -1) > messageIndex
+    ) {
+      continue;
+    }
     const projected = projectRuntimePart(message, part);
     if (!projected.ok) {
       return projected;

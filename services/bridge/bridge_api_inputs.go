@@ -34,6 +34,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	now := s.now()
 	var ack *bridgev1.BridgeWriteAck
 	var receipt *bridgev1.DeclarationReceipt
+	var observation declarationApplicationObservation
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
 		// Serialize replay lookup before validating the current binding. A replacement
 		// binding may recover an ACK lost by its predecessor, while concurrent writers
@@ -65,7 +66,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 				return status.Error(codes.FailedPrecondition, "commit inputs receipt is invalid")
 			}
 			ack = duplicateAck(key, "")
-			return nil
+			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -96,12 +98,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 			return err
 		}
 		ack = committedAck(key, "")
-		return nil
+		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+		return err
 	}); err != nil {
-		return nil, err
-	}
-	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
-	if err != nil {
 		return nil, err
 	}
 	logRuntimeDeclaration(
@@ -211,7 +210,6 @@ func commitInputDeclarationTx(
 			request.GetScope(),
 			request.GetEventIds()[0],
 			request.GetPendingToolCancellations(),
-			request.GetDrafts(),
 			now,
 		)
 		if err != nil {
@@ -551,29 +549,10 @@ func cancelInterruptedPendingToolUsesTx(
 	scope *bridgev1.RuntimeScope,
 	interruptEventID string,
 	cancellations []*bridgev1.PendingToolCancellationDraft,
-	drafts []*bridgev1.RuntimeMessageDraft,
 	now time.Time,
 ) ([]string, error) {
-	draftsByLocalID := make(map[string]*bridgev1.RuntimeMessageDraft, len(drafts))
-	for _, draft := range drafts {
-		draftsByLocalID[draft.GetRuntimeLocalId()] = draft
-	}
-	seenTools := make(map[string]struct{}, len(cancellations))
 	deltas := make([]string, 0, len(cancellations))
 	for _, cancellation := range cancellations {
-		if cancellation == nil || cancellation.GetToolUseEventId() == "" || cancellation.GetRuntimeLocalId() == "" {
-			return nil, status.Error(codes.InvalidArgument, "pending tool cancellation is invalid")
-		}
-		if _, exists := seenTools[cancellation.GetToolUseEventId()]; exists {
-			return nil, status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
-		}
-		seenTools[cancellation.GetToolUseEventId()] = struct{}{}
-		draft, ok := draftsByLocalID[cancellation.GetRuntimeLocalId()]
-		if !ok ||
-			draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION ||
-			draft.GetSourceEventId() != interruptEventID {
-			return nil, status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
-		}
 		var statusValue string
 		if err := tx.QueryRow(ctx,
 			`SELECT status
@@ -633,6 +612,68 @@ func cancelInterruptedPendingToolUsesTx(
 	return deltas, nil
 }
 
+func cancellationDraftNamesPendingTool(draft *bridgev1.RuntimeMessageDraft, toolUseEventID string) bool {
+	if draft == nil {
+		return false
+	}
+	for _, part := range draft.GetParts() {
+		if part == nil || part.GetPartKind() != "tool" {
+			continue
+		}
+		var payload struct {
+			Type           string `json:"type"`
+			ToolUseEventID string `json:"toolUseEventId"`
+			State          struct {
+				Status string `json:"status"`
+			} `json:"state"`
+		}
+		if err := json.Unmarshal([]byte(part.GetPartJson()), &payload); err != nil {
+			continue
+		}
+		if payload.Type == "tool" &&
+			payload.ToolUseEventID == toolUseEventID &&
+			payload.State.Status == "cancelled" {
+			return true
+		}
+	}
+	return false
+}
+
+func validatePendingToolCancellationDrafts(
+	interruptEventID string,
+	cancellations []*bridgev1.PendingToolCancellationDraft,
+	drafts []*bridgev1.RuntimeMessageDraft,
+) error {
+	draftsByLocalID := make(map[string]*bridgev1.RuntimeMessageDraft, len(drafts))
+	for _, draft := range drafts {
+		if draft == nil || draft.GetRuntimeLocalId() == "" {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
+		if _, exists := draftsByLocalID[draft.GetRuntimeLocalId()]; exists {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is duplicated")
+		}
+		draftsByLocalID[draft.GetRuntimeLocalId()] = draft
+	}
+	seenTools := make(map[string]struct{}, len(cancellations))
+	for _, cancellation := range cancellations {
+		if cancellation == nil || cancellation.GetToolUseEventId() == "" || cancellation.GetRuntimeLocalId() == "" {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation is invalid")
+		}
+		if _, exists := seenTools[cancellation.GetToolUseEventId()]; exists {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
+		}
+		seenTools[cancellation.GetToolUseEventId()] = struct{}{}
+		draft, ok := draftsByLocalID[cancellation.GetRuntimeLocalId()]
+		if !ok ||
+			draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION ||
+			draft.GetSourceEventId() != interruptEventID ||
+			!cancellationDraftNamesPendingTool(draft, cancellation.GetToolUseEventId()) {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
+	}
+	return nil
+}
+
 func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInputsRequest) error {
 	switch inputKind {
 	case "messages":
@@ -644,10 +685,14 @@ func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInput
 		}
 		return nil
 	case "interrupt_control":
-		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != len(request.GetPendingToolCancellations()) {
+		if len(request.GetEventIds()) != 1 {
 			return status.Error(codes.InvalidArgument, "interrupt commit requires one event id")
 		}
-		return nil
+		return validatePendingToolCancellationDrafts(
+			request.GetEventIds()[0],
+			request.GetPendingToolCancellations(),
+			request.GetDrafts(),
+		)
 	case "tool_confirmation":
 		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 {
 			return status.Error(codes.InvalidArgument, "tool confirmation commit requires one approval draft")

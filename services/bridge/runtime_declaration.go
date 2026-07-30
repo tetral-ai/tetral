@@ -1884,30 +1884,41 @@ func (s *PostgreSQLBridgeAPIStore) declarationApplicationObservation(
 ) (declarationApplicationObservation, error) {
 	var observation declarationApplicationObservation
 	err := s.withScopeReadOnlyTx(ctx, scope, "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
-		var podUID string
-		err := tx.QueryRow(ctx,
-			`SELECT binding_id, binding_generation, agent_runtime_pod_uid
-			   FROM session_runtime_bindings
-			  WHERE workspace_id = $1
-			    AND session_id = $2`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-		).Scan(&observation.BindingID, &observation.BindingGeneration, &podUID)
-		if dbconnect.IsNoRows(err) {
-			observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if observation.BindingID == scope.GetBinding().GetBindingId() &&
-			observation.BindingGeneration == scope.GetBinding().GetBindingGeneration() &&
-			podUID == scope.GetBinding().GetTargetPodUid() {
-			observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY
-		} else {
-			observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
-		}
-		return nil
+		var err error
+		observation, err = declarationApplicationObservationTx(ctx, tx, scope)
+		return err
 	})
 	return observation, err
+}
+
+func declarationApplicationObservationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) (declarationApplicationObservation, error) {
+	var observation declarationApplicationObservation
+	var podUID string
+	err := tx.QueryRow(ctx,
+		`SELECT binding_id, binding_generation, agent_runtime_pod_uid
+		   FROM session_runtime_bindings
+		  WHERE workspace_id = $1
+		    AND session_id = $2`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+	).Scan(&observation.BindingID, &observation.BindingGeneration, &podUID)
+	if dbconnect.IsNoRows(err) {
+		observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
+		return observation, nil
+	}
+	if err != nil {
+		return declarationApplicationObservation{}, err
+	}
+	if observation.BindingID == scope.GetBinding().GetBindingId() &&
+		observation.BindingGeneration == scope.GetBinding().GetBindingGeneration() &&
+		podUID == scope.GetBinding().GetTargetPodUid() {
+		observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY
+	} else {
+		observation.Disposition = bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
+	}
+	return observation, nil
 }

@@ -40,8 +40,9 @@ import type {
   RuntimeThreadControlState,
   RuntimeThreadVisibilityState,
   RuntimeToolConfirmationState,
-  RuntimeInterruptInputCommit,
+  RuntimeControlInputCommit,
 } from "./session-state.js";
+import { normalizeRuntimeFailure } from "../contracts/runtime.js";
 import type { RuntimeMessage } from "../contracts/runtime.js";
 import { NoopRuntimeMetricsSink } from "../runtime/metrics.js";
 import type { RuntimeHotStateMetrics, RuntimeMetricsSink } from "../runtime/metrics.js";
@@ -89,12 +90,15 @@ export type InterruptControlResult =
       readonly created: boolean;
       readonly interrupted: boolean;
       readonly idleInterrupt: boolean;
+      readonly duplicate?: true | undefined;
       readonly stale?: true | undefined;
     }
   | {
       readonly ok: false;
       readonly sessionId: string;
       readonly reason: LocalSessionRejectionReason | "control_busy" | "context_load_failed";
+      readonly retryable?: boolean | undefined;
+      readonly errorCode?: string | number | undefined;
     };
 
 /** Common applied, duplicate, conflict, or capacity result for hot control commands. */
@@ -269,11 +273,11 @@ export type CleanupSessionResult =
 /** Command surface that exclusively owns resident session and thread lifecycles. */
 export interface Interface {
   readonly acceptInput: (command: RuntimeAcceptedInputState) => Effect.Effect<AcceptInputResult>;
-  readonly interruptControl: (sessionId: string, command: RuntimeInterruptControlCommand, commitInput: RuntimeInterruptInputCommit) => Effect.Effect<InterruptControlResult>;
+  readonly interruptControl: (sessionId: string, command: RuntimeInterruptControlCommand, commitInput: RuntimeControlInputCommit) => Effect.Effect<InterruptControlResult>;
   readonly resolveToolConfirmation: (
     sessionId: string,
     command: RuntimeToolConfirmationState,
-    commit: RuntimeInterruptInputCommit,
+    commit: RuntimeControlInputCommit,
   ) => Effect.Effect<RuntimeControlResult>;
   readonly commitTaskNotification: (
     sessionId: string,
@@ -1130,28 +1134,152 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           } as AcceptInputResult),
         );
 
+      const settleIdleInterrupt = (
+        sessionId: string,
+        command: RuntimeInterruptControlCommand,
+        commitInput: RuntimeControlInputCommit,
+        threadResult: ResidentThreadResult,
+      ): Effect.Effect<InterruptControlResult> =>
+        Effect.gen(function* () {
+          const threadEntry = threadResult.threadEntry;
+          if (threadEntry.session.state.userInterruptCloseoutCompleted(command.runtimeInputId)) {
+            return {
+              ok: true,
+              sessionId,
+              created: false,
+              interrupted: false,
+              idleInterrupt: true,
+              duplicate: true,
+            } as const;
+          }
+          const admitted = threadEntry.session.state.beginUserInterrupt(command, commitInput);
+          if (admitted === "conflict") {
+            return { ok: false, sessionId, reason: "control_busy" } as const;
+          }
+          if (command.eventIds.length !== 1) {
+            return { ok: false, sessionId, reason: "context_load_failed" } as const;
+          }
+          const pendingTools = threadEntry.session.state.pendingApprovalToolJobs();
+          const failure = normalizeRuntimeFailure({
+            type: "runtime",
+            code: "runtime_invalid_sequence",
+            retryable: false,
+            fatal: false,
+            reason: "aborted",
+            retryStatus: { type: "terminal" },
+            sessionId,
+          });
+          const declaration = AgentLoop.interruptPendingToolDeclarations({
+            workspaceId: command.workspaceId,
+            sessionId,
+            sessionThreadId: command.sessionThreadId,
+            runtimeInputId: command.runtimeInputId,
+            sourceEventId: command.eventIds[0]!,
+            pendingTools,
+            failure,
+            completedAt: options.now(),
+          });
+          const application = yield* Effect.promise(() =>
+            threadEntry.session.state.commitUserInterruptInput(declaration)
+          );
+          const committed = application.result;
+          if (!committed.ok) {
+            return { ok: false, sessionId, reason: "context_load_failed" } as const;
+          }
+          if ("receipt" in committed) {
+            const messages = AgentLoop.applyInterruptInputReceipt({
+              sessionId,
+              sessionThreadId: command.sessionThreadId,
+              runtimeInputId: command.runtimeInputId,
+              eventIds: command.eventIds,
+              drafts: application.declaration.drafts,
+              pendingToolCancellations: application.declaration.pendingToolCancellations,
+              existingMessages: threadEntry.session.state.contextManager.messages(),
+            }, committed.receipt);
+            threadEntry.session.state.contextManager.replaceMessages(messages);
+            for (const cancellation of application.declaration.pendingToolCancellations) {
+              if (threadEntry.session.state.pendingApprovalToolJobs().some(
+                (pending) => pending.toolUseEventId === cancellation.toolUseEventId,
+              )) {
+                threadEntry.session.state.removePendingApprovalToolJob(cancellation.toolUseEventId);
+                metrics.addPendingApprovals(-1);
+              }
+            }
+          }
+          threadEntry.session.state.completeUserInterrupt(command.runtimeInputId);
+          if ("stale" in committed) {
+            return {
+              ok: true,
+              sessionId,
+              created: false,
+              interrupted: false,
+              idleInterrupt: true,
+              stale: true,
+            } as const;
+          }
+          return { ok: true, sessionId, created: false, interrupted: false, idleInterrupt: true } as const;
+        });
+
       const interruptControl = (
         sessionId: string,
         command: RuntimeInterruptControlCommand,
-        commitInput: RuntimeInterruptInputCommit,
+        commitInput: RuntimeControlInputCommit,
       ): Effect.Effect<InterruptControlResult> =>
         Effect.gen(function* () {
           const sessionEntry = sessions.get(commandSessionKey(command));
           const threadEntry = sessionEntry?.threads.get(command.sessionThreadId);
           if (sessionEntry === undefined || threadEntry === undefined) {
-            return { ok: true, sessionId, created: false, interrupted: false, idleInterrupt: true };
+            let installedTarget: ResidentThreadResult | undefined;
+            const result = yield* submitInstalledThreadCommand<
+              InterruptControlResult
+            >(
+              command,
+              {},
+              (threadResult) => {
+                installedTarget = threadResult;
+                threadResult.threadEntry.session.updateIdentity(controlIdentity(command));
+                return settleIdleInterrupt(sessionId, command, commitInput, threadResult);
+              },
+              (reason) => ({
+                ok: false,
+                sessionId,
+                reason: reason === "thread_busy" ? "control_busy" : reason,
+              }),
+            );
+            if (
+              result.ok &&
+              "stale" in result &&
+              installedTarget !== undefined &&
+              installedTarget.sessionEntry.threads.get(command.sessionThreadId) === installedTarget.threadEntry
+            ) {
+              yield* discardThreadEntryForStaleCustody(installedTarget.sessionEntry, installedTarget.threadEntry);
+            }
+            return result;
           }
           threadEntry.session.updateIdentity(controlIdentity(command));
+          if (threadEntry.session.state.userInterruptCloseoutCompleted(command.runtimeInputId)) {
+            return {
+              ok: true,
+              sessionId,
+              created: false,
+              interrupted: false,
+              idleInterrupt: true,
+              duplicate: true,
+            };
+          }
           const runSlot = threadEntry.runSlot;
           if (runSlot?.ownerFiber !== undefined) {
-            let interruptCommitResult: Awaited<ReturnType<RuntimeInterruptInputCommit>> | undefined;
+            let interruptCommitResult: Awaited<ReturnType<RuntimeControlInputCommit>> | undefined;
             let interruptCloseoutCompleted = false;
             const admitted = yield* submitThreadCommand(
               threadEntry,
               Effect.sync(() => {
+                if (runSlot.stopping) {
+                  return "conflict" as const;
+                }
                 threadEntry.bridgeScope = command;
-                const result = threadEntry.session.state.beginUserInterrupt(command, async () => {
-                  interruptCommitResult = await commitInput();
+                const result = threadEntry.session.state.beginUserInterrupt(command, async (declaration) => {
+                  interruptCommitResult = await commitInput(declaration);
                   return interruptCommitResult;
                 }, () => {
                   interruptCloseoutCompleted = true;
@@ -1166,18 +1294,27 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
               "conflict" as const,
             );
             if (admitted === "conflict") {
-              return sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId) === threadEntry
-                ? { ok: false, sessionId, reason: "control_busy" }
-                : { ok: false, sessionId, reason: "context_load_failed" };
+              if (sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId) !== threadEntry) {
+                return { ok: false, sessionId, reason: "context_load_failed" };
+              }
+              yield* awaitRunSlot(runSlot);
+              if (sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId) !== threadEntry) {
+                return { ok: false, sessionId, reason: "control_busy" };
+              }
+              return yield* interruptControl(sessionId, command, commitInput);
             }
             yield* Fiber.interrupt(runSlot.ownerFiber).pipe(Effect.exit, Effect.asVoid);
             yield* awaitRunSlot(runSlot);
             const committed = interruptCommitResult ?? threadEntry.session.state.userInterruptCommitResult(command.runtimeInputId);
             if (committed?.ok !== true) {
-              return { ok: false, sessionId, reason: "context_load_failed" };
-            }
-            if (!interruptCloseoutCompleted && !threadEntry.session.state.userInterruptCloseoutCompleted(command.runtimeInputId)) {
-              return { ok: false, sessionId, reason: "control_busy" };
+              return {
+                ok: false,
+                sessionId,
+                reason: "context_load_failed",
+                ...(committed === undefined
+                  ? {}
+                  : { retryable: committed.retryable, errorCode: committed.errorCode }),
+              };
             }
             if ("stale" in committed) {
               yield* discardThreadEntryForStaleCustody(sessionEntry, threadEntry);
@@ -1190,31 +1327,18 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
                 stale: true,
               };
             }
+            if (!interruptCloseoutCompleted && !threadEntry.session.state.userInterruptCloseoutCompleted(command.runtimeInputId)) {
+              return { ok: false, sessionId, reason: "control_busy" };
+            }
             return { ok: true, sessionId, created: false, interrupted: true, idleInterrupt: false };
           }
           const result = yield* submitThreadCommand(
             threadEntry,
-            Effect.gen(function* () {
-              const admitted = threadEntry.session.state.beginUserInterrupt(command, commitInput);
-              if (admitted === "conflict") {
-                return { ok: false, sessionId, reason: "control_busy" } as const;
-              }
-              const committed = yield* Effect.promise(() => threadEntry.session.state.commitUserInterruptInput());
-              if (!committed.ok) {
-                return { ok: false, sessionId, reason: "context_load_failed" } as const;
-              }
-              threadEntry.session.state.completeUserInterrupt(command.runtimeInputId);
-              if ("stale" in committed) {
-                return {
-                  ok: true,
-                  sessionId,
-                  created: false,
-                  interrupted: false,
-                  idleInterrupt: true,
-                  stale: true,
-                } as const;
-              }
-              return { ok: true, sessionId, created: false, interrupted: false, idleInterrupt: true } as const;
+            settleIdleInterrupt(sessionId, command, commitInput, {
+              sessionEntry,
+              threadEntry,
+              sessionCreated: false,
+              threadCreated: false,
             }),
             { ok: false, sessionId, reason: "control_busy" } as const,
           );
@@ -1231,7 +1355,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
       const resolveToolConfirmation = (
         sessionId: string,
         command: RuntimeToolConfirmationState,
-        commit: RuntimeInterruptInputCommit,
+        commit: RuntimeControlInputCommit,
       ): Effect.Effect<RuntimeControlResult> =>
         Effect.gen(function* () {
           let staleTarget: ResidentThreadResult | undefined;
@@ -1239,7 +1363,39 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             command,
             {},
             (threadResult) => Effect.gen(function* () {
-              const committed = yield* Effect.promise(commit);
+              const existingConfirmation = threadResult.threadEntry.session.state.toolConfirmation(command.toolUseEventId);
+              if (existingConfirmation?.runtimeInputId === command.runtimeInputId) {
+                return {
+                  ok: true,
+                  sessionId,
+                  created: threadResult.sessionCreated,
+                  applied: false,
+                } as const;
+              }
+              const pendingTool = threadResult.threadEntry.session.state.pendingApprovalToolJobs()
+                .find((pending) => pending.toolUseEventId === command.toolUseEventId);
+              if (
+                pendingTool === undefined ||
+                command.eventIds.length !== 1 ||
+                command.eventIds[0] !== command.sourceEventId
+              ) {
+                return { ok: false, sessionId, reason: "control_conflict" } as const;
+              }
+              const draft = AgentLoop.toolConfirmationDraft({
+                workspaceId: command.workspaceId,
+                sessionId,
+                sessionThreadId: command.sessionThreadId,
+                runtimeInputId: command.runtimeInputId,
+                sourceEventId: command.sourceEventId,
+                toolUseEventId: command.toolUseEventId,
+                pendingTool,
+                decision: command.decision,
+                ...(command.denyMessage === undefined ? {} : { denyMessage: command.denyMessage }),
+              });
+              const committed = yield* Effect.promise(() => commit({
+                drafts: [draft],
+                pendingToolCancellations: [],
+              }));
               if (!committed.ok) {
                 return { ok: false, sessionId, reason: "context_load_failed" } as const;
               }
@@ -1253,6 +1409,18 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
                   stale: true,
                 } as const;
               }
+              if (!("receipt" in committed)) {
+                return { ok: false, sessionId, reason: "control_conflict" } as const;
+              }
+              const messages = AgentLoop.applyToolConfirmationReceipt({
+                sessionId,
+                sessionThreadId: command.sessionThreadId,
+                runtimeInputId: command.runtimeInputId,
+                sourceEventId: command.sourceEventId,
+                draft,
+                existingMessages: threadResult.threadEntry.session.state.contextManager.messages(),
+              }, committed.receipt);
+              threadResult.threadEntry.session.state.contextManager.replaceMessages(messages);
               threadResult.threadEntry.bridgeScope = command;
               const confirmation = threadResult.threadEntry.controlQueue.resolveToolConfirmation(command);
               if (confirmation === "conflict") {

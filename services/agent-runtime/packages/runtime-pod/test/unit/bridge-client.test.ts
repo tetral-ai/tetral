@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Metadata, status } from "@grpc/grpc-js";
+import type { CallOptions } from "@grpc/grpc-js";
 import {
   BridgeWriteStatus,
   ChildLifecycleDisposition,
@@ -29,6 +30,7 @@ import { ProviderMetadataSchema } from "@tetral/agent-runtime-core/src/contracts
 import {
   RuntimeMessageDraftSchema,
   RuntimeMessageSchema,
+  SessionEventWriterRetryPolicy,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeMessage,
@@ -428,7 +430,7 @@ describe("BridgeAPIContextLoader", () => {
 });
 
 describe("BridgeAPIControlInputCommitter", () => {
-  test("commits interrupt and tool-confirmation control inputs without message projection payloads", async () => {
+  test("commits frozen interrupt and tool-confirmation declarations", async () => {
     const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
     const committer = new BridgeAPIControlInputCommitter({
       address: "bridge.test:9090",
@@ -437,15 +439,68 @@ describe("BridgeAPIControlInputCommitter", () => {
       metadataFactory: async () => new Metadata(),
     });
     const scope = control("thr_main", "rin_interrupt", 7);
+    const cancellationDraft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId: "stid_interrupt_message",
+      sourceKind: "interrupt_control",
+      sourceId: "rin_interrupt",
+      sourceEventId: "sevt_7",
+      draftKind: "cancellation",
+      ordinal: 0,
+      role: "assistant",
+      origin: "agent",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: "stid_interrupt_part",
+        type: "tool",
+        ordinal: 0,
+        toolCallId: "call_interrupt",
+        toolName: "Bash",
+        toolUseEventId: "sevt_tool",
+        state: {
+          status: "cancelled",
+          error: { type: "runtime", message: "The tool was cancelled.", retryable: false },
+        },
+        completedAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+    const approvalDraft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId: "stid_approval_message",
+      sourceKind: "tool_confirmation",
+      sourceId: "rin_confirm",
+      sourceEventId: "sevt_confirm",
+      draftKind: "approval_input",
+      ordinal: 0,
+      role: "user",
+      origin: "user",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: "stid_approval_part",
+        type: "text",
+        ordinal: 0,
+        text: "Approval allowed",
+        truncated: false,
+        status: "completed",
+      }],
+    });
 
-    const interrupt = await committer.commitControlInput({ scope, inputKind: "interrupt_control" });
+    const interrupt = await committer.commitControlInput({
+      scope,
+      inputKind: "interrupt_control",
+      drafts: [cancellationDraft],
+      pendingToolCancellations: [{
+        toolUseEventId: "sevt_tool",
+        runtimeLocalId: cancellationDraft.runtimeLocalId,
+      }],
+    });
     const confirmation = await committer.commitControlInput({
       scope: { ...scope, runtimeInputId: "rin_confirm", eventIds: ["sevt_confirm"] },
       inputKind: "tool_confirmation",
+      drafts: [approvalDraft],
+      pendingToolCancellations: [],
     });
 
-    expect(interrupt).toEqual({ ok: true });
-    expect(confirmation).toEqual({ ok: true });
+    expect(interrupt).toEqual({ ok: true, receipt: expect.objectContaining({ messages: [expect.any(Object)] }) });
+    expect(confirmation).toEqual({ ok: true, receipt: expect.objectContaining({ messages: [expect.any(Object)] }) });
     expect(bridge.commitInputsRequests).toEqual([
       expect.objectContaining({
         runtimeInputId: "rin_interrupt",
@@ -453,7 +508,11 @@ describe("BridgeAPIControlInputCommitter", () => {
         eventIds: ["sevt_7"],
         sequenceFrom: 7,
         sequenceTo: 7,
-        drafts: [],
+        drafts: [expect.objectContaining({ runtimeLocalId: cancellationDraft.runtimeLocalId })],
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_tool",
+          runtimeLocalId: cancellationDraft.runtimeLocalId,
+        }],
       }),
       expect.objectContaining({
         runtimeInputId: "rin_confirm",
@@ -461,7 +520,8 @@ describe("BridgeAPIControlInputCommitter", () => {
         eventIds: ["sevt_confirm"],
         sequenceFrom: 7,
         sequenceTo: 7,
-        drafts: [],
+        drafts: [expect.objectContaining({ runtimeLocalId: approvalDraft.runtimeLocalId })],
+        pendingToolCancellations: [],
       }),
     ]);
   });
@@ -479,6 +539,8 @@ describe("BridgeAPIControlInputCommitter", () => {
     const result = await committer.commitControlInput({
       scope: control("thr_main", "rin_stale", 9),
       inputKind: "tool_confirmation",
+      drafts: [],
+      pendingToolCancellations: [],
     });
 
     expect(result).toMatchObject({
@@ -486,6 +548,77 @@ describe("BridgeAPIControlInputCommitter", () => {
       retryable: true,
       errorCode: "bridge_commit_unavailable",
     });
+  });
+
+  test("replays the identical frozen control declaration after an unknown transport result", async () => {
+    const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
+    bridge.commitErrors.push(Object.assign(new Error("response lost"), { code: status.INTERNAL }));
+    const committer = new BridgeAPIControlInputCommitter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+      sleep: async () => {},
+    });
+    const scope = control("thr_main", "rin_replay_control", 11);
+
+    await expect(committer.commitControlInput({
+      scope,
+      inputKind: "interrupt_control",
+      drafts: [],
+      pendingToolCancellations: [],
+    })).resolves.toEqual({ ok: true, receipt: expect.any(Object) });
+
+    expect(bridge.commitInputsRequests).toHaveLength(2);
+    expect(bridge.commitInputsRequests[1]).toEqual(bridge.commitInputsRequests[0]);
+  });
+
+  test("returns retryable after the bounded exact-declaration transport replay window", async () => {
+    const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
+    bridge.commitErrors.push(
+      Object.assign(new Error("response lost one"), { code: status.UNAVAILABLE }),
+      Object.assign(new Error("response lost two"), { code: status.DEADLINE_EXCEEDED }),
+      Object.assign(new Error("response lost three"), { code: status.INTERNAL }),
+    );
+    const sleeps: number[] = [];
+    const committer = new BridgeAPIControlInputCommitter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+      sleep: async (durationMs) => {
+        sleeps.push(durationMs);
+      },
+    });
+    const scope = control("thr_main", "rin_bounded_replay_control", 11);
+
+    const startedAt = Date.now();
+    await expect(committer.commitControlInput({
+      scope,
+      inputKind: "interrupt_control",
+      drafts: [],
+      pendingToolCancellations: [],
+    })).resolves.toMatchObject({
+      ok: false,
+      retryable: true,
+      errorCode: "bridge_commit_unavailable",
+    });
+    const finishedAt = Date.now();
+
+    expect(bridge.commitInputsRequests).toHaveLength(3);
+    expect(bridge.commitInputsRequests[1]).toEqual(bridge.commitInputsRequests[0]);
+    expect(bridge.commitInputsRequests[2]).toEqual(bridge.commitInputsRequests[0]);
+    expect(bridge.commitInputsCallOptions).toHaveLength(3);
+    for (const options of bridge.commitInputsCallOptions) {
+      expect(options.deadline).toBeNumber();
+      expect(options.deadline as number).toBeGreaterThanOrEqual(
+        startedAt + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+      );
+      expect(options.deadline as number).toBeLessThanOrEqual(
+        finishedAt + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+      );
+    }
+    expect(sleeps).toEqual([100, 300]);
   });
 
   test("returns a typed stale-custody result without applying a replayed control receipt", async () => {
@@ -506,6 +639,8 @@ describe("BridgeAPIControlInputCommitter", () => {
     await expect(committer.commitControlInput({
       scope: control("thr_main", "rin_stale_receipt", 9),
       inputKind: "tool_confirmation",
+      drafts: [],
+      pendingToolCancellations: [],
     })).resolves.toEqual({ ok: true, stale: true });
   });
 });
@@ -1798,6 +1933,7 @@ function jwtWithExpiry(exp: number): string {
 
 class RecordingBridgeClient {
   readonly commitInputsRequests: CommitInputsRequest[] = [];
+  readonly commitInputsCallOptions: CallOptions[] = [];
   readonly commitInternalToolRepairRequests: CommitInternalToolRepairRequest[] = [];
   readonly commitRuntimeTerminationRequests: CommitRuntimeTerminationRequest[] = [];
   readonly createChildThreadRequests: CreateChildThreadRequest[] = [];
@@ -1847,8 +1983,14 @@ class RecordingBridgeClient {
     } as unknown as AgentRuntimeBridgeServiceClient;
   }
 
-  private commitInputs(request: CommitInputsRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+  private commitInputs(
+    request: CommitInputsRequest,
+    _metadata: Metadata,
+    options: CallOptions,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
     this.commitInputsRequests.push(request);
+    this.commitInputsCallOptions.push(options);
     const queuedError = this.commitErrors.shift();
     if (queuedError !== undefined) {
       callback(queuedError, null);
@@ -1898,7 +2040,12 @@ class RecordingBridgeClient {
             })),
           })),
           pendingAttachmentDeltaJson: this.pendingAttachmentDeltaJson,
-          pendingToolDeltaJson: [],
+          pendingToolDeltaJson: request.pendingToolCancellations.map((cancellation) => JSON.stringify({
+            runtime_local_id: cancellation.runtimeLocalId,
+            tool_use_event_id: cancellation.toolUseEventId,
+            status: "cancelled",
+            result_event_id: request.eventIds[0],
+          })),
           prefixConsumptions: [],
           declarationDigest: commitInputsDeclarationDigest(request),
           requestReschedule: undefined,

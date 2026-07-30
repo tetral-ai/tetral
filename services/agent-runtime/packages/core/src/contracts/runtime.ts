@@ -1091,7 +1091,6 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
       context.addIssue({ code: "custom", message: "request-end interrupt settlement requires an interrupted terminal end" });
     }
     if (
-      cancellationDrafts.length !== envelope.interruptSettlement.pendingToolCancellations.length ||
       cancellationDrafts.some((draft) =>
         draft.sourceKind !== "interrupt_control" ||
         draft.sourceId !== envelope.interruptSettlement?.runtimeInputId ||
@@ -1101,8 +1100,12 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
       context.addIssue({ code: "custom", message: "request-end interrupt cancellation drafts are incomplete" });
     }
     const cancellationIDs = new Set(cancellationDrafts.map((draft) => draft.runtimeLocalId));
+    const pendingToolIDs = new Set(
+      envelope.interruptSettlement.pendingToolCancellations.map((pending) => pending.toolUseEventId),
+    );
     if (
       cancellationIDs.size !== cancellationDrafts.length ||
+      pendingToolIDs.size !== envelope.interruptSettlement.pendingToolCancellations.length ||
       envelope.interruptSettlement.pendingToolCancellations.some(
         (pending) => !cancellationIDs.has(pending.runtimeLocalId),
       )

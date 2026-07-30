@@ -33,6 +33,7 @@ import type {
 } from "../contracts/runtime.js";
 import type { LLMEvent } from "../llm/llm-event.js";
 import {
+  DurableRuntimeMessageSchema,
   SessionEventSchema,
   RuntimeMessageDraftSchema,
   RuntimeFailureSchema,
@@ -399,6 +400,7 @@ export class SessionProcessor {
       readonly eventIds: readonly string[];
     },
     failure: RuntimeFailure,
+    pendingToolUseEventIds: ReadonlySet<string>,
   ): RuntimeInterruptSettlementDraft {
     if (this.terminal || interrupt.eventIds.length !== 1) {
       throw new Error("interrupt settlement requires one open request and one admitted source event");
@@ -406,7 +408,36 @@ export class SessionProcessor {
     this.updateMessage({ status: "cancelled", error: failure });
     this.terminal = true;
     const terminalAssistantSeal = this.requestEndSeal(false);
-    const drafts: RuntimeMessageDraft[] = [];
+    const declaration = this.prepareInterruptToolDeclarations(interrupt, failure, pendingToolUseEventIds);
+    return {
+      ...(terminalAssistantSeal === undefined ? {} : { terminalAssistantSeal }),
+      ...declaration,
+    };
+  }
+
+  /** Freezes active-tool cancellations for a separate CommitInputs closeout. */
+  prepareInterruptToolDeclarations(
+    interrupt: {
+      readonly runtimeInputId: string;
+      readonly eventIds: readonly string[];
+    },
+    failure: RuntimeFailure,
+    pendingToolUseEventIds: ReadonlySet<string>,
+  ): Omit<RuntimeInterruptSettlementDraft, "terminalAssistantSeal"> {
+    if (interrupt.eventIds.length !== 1) {
+      throw new Error("interrupt tool declaration requires one admitted source event");
+    }
+    const runtimeLocalId = stableRuntimeID(
+      "runtime_message_draft",
+      this.options.workspaceId,
+      this.options.sessionId,
+      this.options.sessionThreadId,
+      "interrupt_control",
+      interrupt.runtimeInputId,
+      "cancellation",
+      "0",
+    );
+    const parts: RuntimeMessageDraft["parts"][number][] = [];
     const pendingToolCancellations: {
       readonly toolUseEventId: string;
       readonly runtimeLocalId: string;
@@ -421,17 +452,7 @@ export class SessionProcessor {
       ) {
         continue;
       }
-      const ordinal = drafts.length;
-      const runtimeLocalId = stableRuntimeID(
-        "runtime_message_draft",
-        this.options.workspaceId,
-        this.options.sessionId,
-        this.options.sessionThreadId,
-        "interrupt_control",
-        interrupt.runtimeInputId,
-        "cancellation",
-        String(ordinal),
-      );
+      const ordinal = parts.length;
       const terminalError = runtimeToolErrorFromFailure(failure);
       const cancelledPart = parseToolPart({
         ...part,
@@ -439,34 +460,35 @@ export class SessionProcessor {
           "runtime_message_part_draft",
           runtimeLocalId,
           "tool",
-          "0",
+          String(ordinal),
         ),
-        ordinal: 0,
+        ordinal,
         toolUseEventId,
         state: part.state.status === "running"
           ? { status: "cancelled", input: part.state.input, error: terminalError }
           : { status: "cancelled", error: terminalError },
         completedAt: this.options.now(),
       });
-      drafts.push(RuntimeMessageDraftSchema.parse({
-        runtimeLocalId,
-        sourceKind: "interrupt_control",
-        sourceId: interrupt.runtimeInputId,
-        sourceEventId: interrupt.eventIds[0],
-        draftKind: "cancellation",
-        ordinal,
-        role: "assistant",
-        origin: "agent",
-        status: "completed",
-        parts: [cancelledPart],
-      }));
-      pendingToolCancellations.push({ toolUseEventId, runtimeLocalId });
+      parts.push(cancelledPart);
+      if (pendingToolUseEventIds.has(toolUseEventId)) {
+        pendingToolCancellations.push({ toolUseEventId, runtimeLocalId });
+      }
     }
-    return {
-      ...(terminalAssistantSeal === undefined ? {} : { terminalAssistantSeal }),
-      drafts,
-      pendingToolCancellations,
-    };
+    const drafts = parts.length === 0
+      ? []
+      : [RuntimeMessageDraftSchema.parse({
+          runtimeLocalId,
+          sourceKind: "interrupt_control",
+          sourceId: interrupt.runtimeInputId,
+          sourceEventId: interrupt.eventIds[0],
+          draftKind: "cancellation",
+          ordinal: 0,
+          role: "assistant",
+          origin: "agent",
+          status: "completed",
+          parts,
+        })];
+    return { drafts, pendingToolCancellations };
   }
 
   /** Applies the interrupt receipt after its joined request-end receipt. */
@@ -485,8 +507,9 @@ export class SessionProcessor {
         runtimeInputId: interrupt.runtimeInputId,
         eventIds: interrupt.eventIds,
         drafts: settlement.drafts,
+        pendingToolCancellations: settlement.pendingToolCancellations,
         existingMessages: this.durableProjection,
-      }, receipt),
+      }, receipt).map((message) => DurableRuntimeMessageSchema.parse(message)),
     ];
   }
 

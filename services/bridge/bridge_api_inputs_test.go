@@ -453,23 +453,42 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			SequenceFrom:   3,
 			SequenceTo:     3,
 			Drafts: []*bridgev1.RuntimeMessageDraft{{
-				RuntimeLocalId: cancellationLocalID,
-				SourceKind:     "interrupt_control",
-				SourceId:       "rin_bridge_commit_interrupt",
-				SourceEventId:  "evt_bridge_commit_interrupt",
-				DraftKind:      bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
-				MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed",
-					"toolUseEventId":"evt_bridge_interrupted_tool"}`,
-				Parts: []*bridgev1.RuntimePartDraft{{
-					RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "text", "0"),
-					PartKind:           "text",
-					PartJson:           `{"type":"text","text":"The pending tool call was cancelled.","status":"completed"}`,
-				}},
+				RuntimeLocalId:  cancellationLocalID,
+				SourceKind:      "interrupt_control",
+				SourceId:        "rin_bridge_commit_interrupt",
+				SourceEventId:   "evt_bridge_commit_interrupt",
+				DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
+				Ordinal:         0,
+				MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
+				Parts: []*bridgev1.RuntimePartDraft{
+					{
+						RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "tool", "0"),
+						PartKind:           "tool",
+						Ordinal:            0,
+						PartJson:           `{"type":"tool","toolCallId":"tool-1","toolName":"Write","toolUseEventId":"evt_bridge_interrupted_tool","state":{"status":"cancelled","error":{"type":"runtime","message":"aborted","retryable":false}},"completedAt":"2026-07-30T00:00:00Z"}`,
+					},
+					{
+						RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "tool", "1"),
+						PartKind:           "tool",
+						Ordinal:            1,
+						PartJson:           `{"type":"tool","toolCallId":"tool-2","toolName":"Read","toolUseEventId":"evt_bridge_active_tool","state":{"status":"cancelled","error":{"type":"runtime","message":"aborted","retryable":false}},"completedAt":"2026-07-30T00:00:00Z"}`,
+					},
+				},
 			}},
 			PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
 				ToolUseEventId: "evt_bridge_interrupted_tool",
 				RuntimeLocalId: cancellationLocalID,
 			}},
+		}
+		mismatched := proto.Clone(request).(*bridgev1.CommitInputsRequest)
+		mismatched.Drafts[0].Parts[0].PartJson = strings.Replace(
+			mismatched.Drafts[0].Parts[0].GetPartJson(),
+			"evt_bridge_interrupted_tool",
+			"evt_bridge_other_tool",
+			1,
+		)
+		if _, err := store.CommitInputs(context.Background(), mismatched); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CommitInputs mismatched interrupt tool identity error=%v; want InvalidArgument", err)
 		}
 		response, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
@@ -512,7 +531,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			!pendingResultEventID.Valid || pendingResultEventID.String != "evt_bridge_commit_interrupt" || terminalResultCount != 0 ||
 			len(response.GetDeclaration().GetReceipts()) != 1 ||
 			len(response.GetDeclaration().GetReceipts()[0].GetPendingToolDeltaJson()) != 1 {
-			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d receipt=%#v; want one declared cancellation and no extra result event",
+			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d receipt=%#v; want one message with two cancellation parts, one pending transition, and no extra result event",
 				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, messageCount, pendingStatus, pendingResultEventID, terminalResultCount, response.GetDeclaration())
 		}
 	})

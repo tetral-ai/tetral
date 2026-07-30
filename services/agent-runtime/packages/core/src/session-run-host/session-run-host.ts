@@ -14,7 +14,7 @@ import * as SessionManager from "../session/session-manager.js";
 /** Command handlers exposed by Runtime Core to the pod service layer. */
 export interface Interface {
   readonly handleAcceptInput: (command: Parameters<SessionManager.Interface["acceptInput"]>[0]) => Effect.Effect<SessionManager.AcceptInputResult>;
-  readonly handleInterruptControl: (sessionId: string, command: SessionManager.RuntimeInterruptControlCommand, commitInput?: Parameters<SessionManager.Interface["interruptControl"]>[2]) => Effect.Effect<SessionManager.InterruptControlResult>;
+  readonly handleInterruptControl: (sessionId: string, command: SessionManager.RuntimeInterruptControlCommand, commitInput: Parameters<SessionManager.Interface["interruptControl"]>[2]) => Effect.Effect<SessionManager.InterruptControlResult>;
   readonly handleToolConfirmation: (
     sessionId: string,
     command: Parameters<SessionManager.Interface["resolveToolConfirmation"]>[1],
@@ -56,12 +56,10 @@ export const layer = Layer.effect(
     return Service.of({
       // Enqueues accepted input and starts or wakes the target thread run slot.
       handleAcceptInput: (command) => manager.acceptInput(command),
-      // Runtime control commands update hot state directly; they do not read persistent context or call the provider.
-      handleInterruptControl: (sessionId, command, commitInput) => manager.interruptControl(
-        sessionId,
-        command,
-        commitInput ?? (async () => ({ ok: false, retryable: true, errorCode: "interrupt_commit_unavailable" })),
-      ),
+      // Interrupt ingress installs cold state when needed, then settles through
+      // the supplied declaration committer without calling the provider.
+      handleInterruptControl: (sessionId, command, commitInput) =>
+        manager.interruptControl(sessionId, command, commitInput),
       handleToolConfirmation: (sessionId, command, commit) => manager.resolveToolConfirmation(sessionId, command, commit),
       handleTaskNotification: (sessionId, command, commit) => manager.commitTaskNotification(sessionId, command, commit),
       handleRuntimeConfigPatch: (sessionId, command) => manager.applyRuntimeConfigPatch(sessionId, command),

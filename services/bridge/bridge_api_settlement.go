@@ -463,6 +463,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		ack              *bridgev1.BridgeWriteAck
 		receipt          *bridgev1.DeclarationReceipt
 		interruptReceipt *bridgev1.DeclarationReceipt
+		observation      declarationApplicationObservation
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.write_request_end", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
@@ -509,7 +510,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 				}
 			}
 			ack = duplicateAck("", request.GetRuntimeWriteId())
-			return nil
+			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -714,16 +716,13 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			return err
 		}
 		ack = committedAck("", request.GetRuntimeWriteId())
-		return nil
+		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+		return err
 	}); err != nil {
 		return nil, err
 	}
 	if receipt == nil || len(receipt.GetEvents()) == 0 || (interruptRequest != nil && interruptReceipt == nil) {
 		return nil, status.Error(codes.FailedPrecondition, "request end receipt is invalid")
-	}
-	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
-	if err != nil {
-		return nil, err
 	}
 	logRuntimeDeclaration(
 		s.Logger,

@@ -6,6 +6,7 @@ import type {
   SessionEventEnvelope,
   SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
@@ -14,6 +15,7 @@ import {
   buildCoreHostsUserMessage as userMessage,
   buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
   buildCoreHostsBridgeRuntimeMessage as bridgeRuntimeMessage,
+  buildRuntimeControlCommitResult,
 } from "../../../core/test/unit/runtime-message-builders.js";
 import { acceptedInputReceipt } from "../../../core/test/unit/runtime-declaration-fixtures.js";
 
@@ -93,7 +95,7 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
-  test("cold interrupt stays residency-free while message config and task commands join one complete preload", async () => {
+  test("cold interrupt and sibling commands join one complete preload", async () => {
     const loadStarted = deferred<void>();
     const releaseLoad = deferred<void>();
     let loadCount = 0;
@@ -118,21 +120,23 @@ describe("Runtime core host production assembly", () => {
     });
     try {
       const scope = commandScope("sesn_singleflight");
-      const interrupt = await hosts.commandRunHost.handleInterruptControl("sesn_singleflight", {
+      const interruptCommand = {
         ...scope,
         runtimeInputId: "rin_interrupt_singleflight",
         eventIds: ["sevt_interrupt_singleflight"],
         sequenceFrom: 1,
         sequenceTo: 1,
-      }, async () => ({ ok: true }));
-      expect(interrupt).toEqual({ ok: true, sessionId: "sesn_singleflight", created: false, interrupted: false, idleInterrupt: true });
-      expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: false });
-
+      };
+      const interrupt = hosts.commandRunHost.handleInterruptControl(
+        "sesn_singleflight",
+        interruptCommand,
+        async (declaration) => buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration),
+      );
+      await loadStarted.promise;
       const message = hosts.commandRunHost.handleAcceptInput({
         ...acceptedInput("sesn_singleflight"),
         runtimeInputId: "rin_message_singleflight",
       });
-      await loadStarted.promise;
       const config = hosts.commandRunHost.handleRuntimeConfigPatch("sesn_singleflight", {
         ...scope,
         bindingId: "bind_singleflight_replacement",
@@ -156,7 +160,8 @@ describe("Runtime core host production assembly", () => {
       expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: true });
 
       releaseLoad.resolve();
-      const [messageResult, configResult, taskResult] = await Promise.all([message, config, task]);
+      const [interruptResult, messageResult, configResult, taskResult] = await Promise.all([interrupt, message, config, task]);
+      expect(interruptResult).toEqual({ ok: true, sessionId: "sesn_singleflight", created: false, interrupted: false, idleInterrupt: true });
       expect(messageResult).toMatchObject({ ok: true, sessionId: "sesn_singleflight" });
       expect(configResult).toEqual({ ok: false, sessionId: "sesn_singleflight", reason: "control_busy" });
       expect(taskResult).toMatchObject({ ok: true, sessionId: "sesn_singleflight", applied: true });
@@ -305,7 +310,7 @@ describe("Runtime core host production assembly", () => {
       }),
     });
     try {
-      const result = await hosts.commandRunHost.handleToolConfirmation("sesn_cold_confirm", {
+      const confirmationCommand = {
         ...replacementScope,
         requestId: "req_confirm_cold",
         runtimeInputId: "rin_confirm_cold",
@@ -315,7 +320,12 @@ describe("Runtime core host production assembly", () => {
         sourceEventId: "sevt_confirm_cold",
         toolUseEventId: "sevt_tool_1",
         decision: "allow",
-      }, async () => ({ ok: true }));
+      } as const;
+      const result = await hosts.commandRunHost.handleToolConfirmation(
+        "sesn_cold_confirm",
+        confirmationCommand,
+        async (declaration) => buildRuntimeControlCommitResult(confirmationCommand, "tool_confirmation", declaration),
+      );
 
       expect(result).toMatchObject({ ok: true, sessionId: "sesn_cold_confirm", applied: false });
       await terminalResultAppended.promise;
@@ -340,10 +350,8 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
-  test("tool confirmation cold-loads after a residency-free idle interrupt", async () => {
+  test("cold interrupt installs pending tools before committing their cancellation", async () => {
     const observations: string[] = [];
-    const runToolCalls: string[] = [];
-    const toolExecuted = deferred<void>();
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
       userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 0, "hello"),
@@ -393,51 +401,59 @@ describe("Runtime core host production assembly", () => {
             };
           },
         },
-        agentLoop: {
-          providerCallRuntime: {
-            systemInstructions: "cold confirmation system",
-            toolCatalog: createToolCatalog({ family: "claude", configs: [{ name: "Write", enabled: true, permissionPolicy: "always_ask" }] }),
-          },
-          runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
-          runTool: (request) => {
-            runToolCalls.push(`${request.modelRequestId}:${request.modelToolCallId}:${request.toolUseEventId}`);
-            expect(request.input).toEqual(pendingInput);
-            toolExecuted.resolve();
-            return { type: "completed", output: { text: "approved", truncated: false } };
-          },
-        },
       }),
     });
     try {
-      const interrupt = await hosts.commandRunHost.handleInterruptControl("sesn_interrupt_confirm", {
+      const interruptCommand = {
         ...commandScope("sesn_interrupt_confirm"),
         requestId: "req_interrupt_before_confirm",
         runtimeInputId: "rin_interrupt_before_confirm",
         eventIds: ["sevt_interrupt_before_confirm"],
         sequenceFrom: 2,
         sequenceTo: 2,
-      });
+      };
+      let committedDeclaration: RuntimeControlInputDeclaration | undefined;
+      const interrupt = await hosts.commandRunHost.handleInterruptControl(
+        "sesn_interrupt_confirm",
+        interruptCommand,
+        async (declaration) => {
+          committedDeclaration = declaration;
+          return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+        },
+      );
       const shell = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_interrupt_confirm"));
 
       expect(interrupt).toEqual({ ok: true, sessionId: "sesn_interrupt_confirm", created: false, interrupted: false, idleInterrupt: true });
-      expect(shell).toMatchObject({ ok: true, observed: false });
-
-      const result = await hosts.commandRunHost.handleToolConfirmation("sesn_interrupt_confirm", {
-        ...commandScope("sesn_interrupt_confirm"),
-        requestId: "req_confirm_after_interrupt",
-        runtimeInputId: "rin_confirm_after_interrupt",
-        eventIds: ["sevt_confirm_after_interrupt"],
-        sequenceFrom: 3,
-        sequenceTo: 3,
-        sourceEventId: "sevt_confirm_after_interrupt",
-        toolUseEventId: "sevt_tool_1",
-        decision: "allow",
-      }, async () => ({ ok: true }));
-
-      expect(result).toMatchObject({ ok: true, sessionId: "sesn_interrupt_confirm", applied: false });
-      expect(observations).toEqual(["load:rin_confirm_after_interrupt"]);
-      await toolExecuted.promise;
-      expect(runToolCalls).toEqual(["mrq_interrupt_confirm:tool-1:sevt_tool_1"]);
+      expect(observations).toEqual(["load:rin_interrupt_before_confirm"]);
+      expect(committedDeclaration).toMatchObject({
+        drafts: [{
+          sourceKind: "interrupt_control",
+          sourceId: "rin_interrupt_before_confirm",
+          sourceEventId: "sevt_interrupt_before_confirm",
+          draftKind: "cancellation",
+          parts: [{
+            type: "tool",
+            toolUseEventId: "sevt_tool_1",
+            state: { status: "cancelled" },
+          }],
+        }],
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_tool_1",
+        }],
+      });
+      expect(shell).toMatchObject({
+        ok: true,
+        observed: true,
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            parts: [expect.objectContaining({
+              type: "tool",
+              toolUseEventId: "sevt_tool_1",
+              state: expect.objectContaining({ status: "cancelled" }),
+            })],
+          }),
+        ]),
+      });
     } finally {
       await hosts.close();
     }

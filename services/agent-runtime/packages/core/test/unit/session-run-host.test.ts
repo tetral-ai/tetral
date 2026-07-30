@@ -27,6 +27,7 @@ import * as SessionRunHost from "../../src/session-run-host/session-run-host.js"
 import {
   buildSessionRunHostUserMessage as userMessage,
   buildSessionRunHostRuntimeNotificationMessage as runtimeNotificationMessage,
+  buildRuntimeControlCommitResult,
 } from "./runtime-message-builders.js";
 import { acceptedInputReceipt } from "./runtime-declaration-fixtures.js";
 
@@ -466,14 +467,32 @@ describe("SessionRunHost", () => {
       Effect.gen(function* () {
         const host = yield* SessionRunHost.Service;
         const accepted = yield* host.handleAcceptInput(acceptedInput("sesn_2"));
-        const interrupt = yield* host.handleInterruptControl("sesn_3", { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 });
-        const confirmation = yield* host.handleToolConfirmation("sesn_4", {
+        const interruptCommand = { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 };
+        const interrupt = yield* host.handleInterruptControl(
+          "sesn_3",
+          interruptCommand,
+          async (declaration) => buildRuntimeControlCommitResult(
+            interruptCommand,
+            "interrupt_control",
+            declaration,
+          ),
+        );
+        const confirmationCommand = {
           ...threadControl("sesn_4"),
           runtimeInputId: "rin_confirm",
           sourceEventId: "sevt_confirm_1",
           toolUseEventId: "sevt_tool_1",
           decision: "allow",
-        }, async () => ({ ok: true }));
+        } as const;
+        const confirmation = yield* host.handleToolConfirmation(
+          "sesn_4",
+          confirmationCommand,
+          async (declaration) => buildRuntimeControlCommitResult(
+            confirmationCommand,
+            "tool_confirmation",
+            declaration,
+          ),
+        );
         const task = yield* host.handleTaskNotification("sesn_5", {
           ...threadControl("sesn_5"),
           runtimeInputId: "rin_task",

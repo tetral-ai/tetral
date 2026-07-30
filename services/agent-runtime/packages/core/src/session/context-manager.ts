@@ -37,8 +37,8 @@ export interface ThreadContextPrefix {
 // limits. A terminal RuntimeMessage may also carry its own usage when the
 // WriteRequestEnd-gated projection replaces that message in this list.
 //
-// Exceptions that append NO user message: a tool-confirmation commit updates ToolJob
-// approval state after ACK; a task notification uses the background-task settlement
+// A tool-confirmation commit appends its database-stamped user decision before
+// waking the approved tool. A task notification uses the background-task settlement
 // path and projects a bounded runtime note. A fork seed is loaded from the CHILD
 // thread's durable context and is never rebuilt from the current parent. The
 // generation counter advances on any non-append-only rewrite (compaction or in-place

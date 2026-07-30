@@ -1,8 +1,83 @@
 // Shared RuntimeMessage fixtures preserve suite-specific wire values while keeping
 // schema construction in one auditable test module.
 
-import type { RuntimeJsonValue, RuntimeMessage, RuntimePart } from "../../src/contracts/runtime.js";
+import type {
+  RuntimeJsonValue,
+  RuntimeMessage,
+  RuntimeMessageDraft,
+  RuntimePart,
+} from "../../src/contracts/runtime.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "../../src/contracts/runtime.js";
+import type {
+  RuntimeControlInputCommitResult,
+  RuntimeControlInputDeclaration,
+  RuntimeThreadControlState,
+} from "../../src/session/session-state.js";
+
+export function buildRuntimeControlCommitResult(
+  scope: RuntimeThreadControlState,
+  inputKind: "interrupt_control" | "tool_confirmation",
+  declaration: RuntimeControlInputDeclaration,
+): RuntimeControlInputCommitResult {
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  return {
+    ok: true,
+    receipt: {
+      sessionThreadId: scope.sessionThreadId,
+      operationKind: "commit_inputs",
+      sourceKind: inputKind,
+      sourceId: scope.runtimeInputId,
+      declarationDigest: "digest_test",
+      events: scope.eventIds.map((eventId, index) => ({
+        sessionThreadId: scope.sessionThreadId,
+        sourceEventId: eventId,
+        eventId,
+        eventSequence: scope.sequenceFrom + index,
+        disposition: "existing" as const,
+      })),
+      messages: declaration.drafts.map((draft, index) =>
+        runtimeControlMessageStamp(scope, draft, index, createdAt)
+      ),
+      pendingAttachmentDelta: [],
+      pendingToolDelta: declaration.pendingToolCancellations.map((cancellation) => JSON.stringify({
+        runtime_local_id: cancellation.runtimeLocalId,
+        tool_use_event_id: cancellation.toolUseEventId,
+        status: "cancelled",
+        result_event_id: scope.eventIds[0],
+      })),
+      prefixConsumptions: [],
+      childLifecycle: [],
+    },
+  };
+}
+
+function runtimeControlMessageStamp(
+  scope: RuntimeThreadControlState,
+  draft: RuntimeMessageDraft,
+  index: number,
+  createdAt: string,
+) {
+  const messageId = `msg_control_${scope.runtimeInputId}_${index}`;
+  return {
+    runtimeLocalId: draft.runtimeLocalId,
+    sessionThreadId: scope.sessionThreadId,
+    owningEventId: draft.sourceEventId!,
+    messageId,
+    messageSequence: scope.sequenceTo + index + 1,
+    createdAt,
+    updatedAt: "",
+    disposition: "created" as const,
+    parts: draft.parts.map((part, partIndex) => ({
+      runtimeLocalPartId: part.runtimeLocalPartId,
+      partId: `part_control_${scope.runtimeInputId}_${index}_${partIndex}`,
+      messageId,
+      partSequence: partIndex,
+      createdAt,
+      updatedAt: "",
+      disposition: "created" as const,
+    })),
+  };
+}
 
 export function buildAgentLoopUserMessage(id: string, sequence: number, text: string): RuntimeMessage {
   const createdAt = "2026-06-14T00:00:00.000Z";

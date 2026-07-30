@@ -25,6 +25,10 @@ import type { RuntimePodLogRecord } from "../../src/logger.js";
 import {
   buildRuntimeServiceBridgeRuntimeMessage as bridgeRuntimeMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
+import { RuntimeMessageDraftSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type {
+  RuntimeControlInputDeclaration,
+} from "@tetral/agent-runtime-core/src/session/session-state.js";
 
 describe("RuntimeControlService command envelope", () => {
   test("authorizes before validation, lifecycle command runner, logs, or core effects", async () => {
@@ -528,7 +532,7 @@ describe("RuntimeControlService command envelope", () => {
         })],
       })),
     );
-    expect(fixture.controlInputCommitter.commits).toEqual([
+    expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_interrupt" }),
         inputKind: "interrupt_control",
@@ -577,7 +581,7 @@ describe("RuntimeControlService command envelope", () => {
           errorCode: "bridge_commit_unavailable",
           message: "control input durable commit failed",
         },
-        { ok: true },
+        testControlSuccess(commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), "interrupt_control"),
       ], events),
     });
     const command = validCommand({
@@ -603,7 +607,7 @@ describe("RuntimeControlService command envelope", () => {
         command: { ...commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), requestId: "req_retry" },
       },
     ]);
-    expect(fixture.controlInputCommitter.commits).toEqual([
+    expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }),
         inputKind: "interrupt_control",
@@ -623,7 +627,33 @@ describe("RuntimeControlService command envelope", () => {
     ]);
   });
 
-  test("idle interrupt commits its processed marker after the hot-state no-op", async () => {
+  test("preserves a joined interrupt declaration rejection without requesting redelivery", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        interruptResult: {
+          ok: false,
+          sessionId: "sesn_1",
+          reason: "context_load_failed",
+          retryable: false,
+          errorCode: "bridge_commit_rejected",
+        },
+      }),
+    });
+    const command = validCommand({
+      commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
+      runtimeInputId: "rin_joined_interrupt_rejected",
+    });
+
+    await expect(fixture.service.interrupt(command, authMetadata())).resolves.toEqual(
+      rejectedResponse({
+        runtimeInputId: "rin_joined_interrupt_rejected",
+        retryable: false,
+        errorCode: "bridge_commit_rejected",
+      }),
+    );
+  });
+
+  test("idle interrupt commits its admitted declaration through the host callback", async () => {
     const events: string[] = [];
     const fixture = runtimeFixture({
       events,
@@ -645,8 +675,8 @@ describe("RuntimeControlService command envelope", () => {
     );
     expect(events).toEqual([
       "runHost.interrupt:start:rin_idle_interrupt",
-      "runHost.interrupt:end:rin_idle_interrupt",
       "commit.interrupt_control:rin_idle_interrupt",
+      "runHost.interrupt:end:rin_idle_interrupt",
     ]);
   });
 
@@ -690,7 +720,7 @@ describe("RuntimeControlService command envelope", () => {
       expect.objectContaining({ ok: false, retryable: false }),
       expect.objectContaining({ ok: false, retryable: false }),
     ]);
-    expect(fixture.controlInputCommitter.commits).toEqual([
+    expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_confirm_stale" }),
         inputKind: "tool_confirmation",
@@ -914,6 +944,33 @@ describe("RuntimeControlService command envelope", () => {
     ).resolves.toMatchObject({
       status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
       runtimeInputId: "rin_config_busy",
+      retryable: true,
+      errorCode: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
+    });
+  });
+
+  test("returns the typed retryable control-busy disposition for an overlapping interrupt", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        interruptResult: {
+          ok: false,
+          sessionId: "sesn_1",
+          reason: "control_busy",
+        },
+      }),
+    });
+
+    await expect(
+      fixture.service.interrupt(
+        validCommand({
+          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
+          runtimeInputId: "rin_interrupt_busy",
+        }),
+        authMetadata(),
+      ),
+    ).resolves.toMatchObject({
+      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
+      runtimeInputId: "rin_interrupt_busy",
       retryable: true,
       errorCode: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
     });
@@ -1291,6 +1348,96 @@ class FixedAuthenticator implements RuntimeAuthenticator {
   }
 }
 
+function testControlDeclaration(
+  command: RuntimeCommandScope,
+  inputKind: "interrupt_control" | "tool_confirmation",
+): RuntimeControlInputDeclaration {
+  if (inputKind === "interrupt_control") {
+    return { drafts: [], pendingToolCancellations: [] };
+  }
+  const runtimeLocalId = `draft_${command.runtimeInputId}`;
+  return {
+    drafts: [RuntimeMessageDraftSchema.parse({
+      runtimeLocalId,
+      sourceKind: "tool_confirmation",
+      sourceId: command.runtimeInputId,
+      sourceEventId: command.eventIds[0],
+      draftKind: "approval_input",
+      ordinal: 0,
+      role: "user",
+      origin: "user",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: `part_${command.runtimeInputId}`,
+        ordinal: 0,
+        type: "text",
+        text: "Approval allowed",
+        truncated: false,
+        status: "completed",
+      }],
+    })],
+    pendingToolCancellations: [],
+  };
+}
+
+function testControlReceipt(
+  input: Parameters<RuntimeControlInputCommitter["commitControlInput"]>[0],
+): Extract<Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>, { readonly ok: true; readonly receipt: object }> {
+  return {
+    ok: true,
+    receipt: {
+      sessionThreadId: input.scope.sessionThreadId,
+      operationKind: "commit_inputs",
+      sourceKind: input.inputKind,
+      sourceId: input.scope.runtimeInputId,
+      declarationDigest: "digest_test",
+      events: input.scope.eventIds.map((eventId, index) => ({
+        sessionThreadId: input.scope.sessionThreadId,
+        sourceEventId: eventId,
+        eventId,
+        eventSequence: input.scope.sequenceFrom + index,
+        disposition: "existing" as const,
+      })),
+      messages: input.drafts.map((draft, index) => ({
+        runtimeLocalId: draft.runtimeLocalId,
+        sessionThreadId: input.scope.sessionThreadId,
+        owningEventId: draft.sourceEventId!,
+        messageId: `msg_${index}_${input.scope.runtimeInputId}`,
+        messageSequence: input.scope.sequenceTo + index + 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "",
+        disposition: "created" as const,
+        parts: draft.parts.map((part, partIndex) => ({
+          runtimeLocalPartId: part.runtimeLocalPartId,
+          partId: `part_${partIndex}_${input.scope.runtimeInputId}`,
+          messageId: `msg_${index}_${input.scope.runtimeInputId}`,
+          partSequence: partIndex,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "",
+          disposition: "created" as const,
+        })),
+      })),
+      pendingAttachmentDelta: [],
+      pendingToolDelta: input.pendingToolCancellations.map((cancellation) => JSON.stringify({
+        runtime_local_id: cancellation.runtimeLocalId,
+        tool_use_event_id: cancellation.toolUseEventId,
+        status: "cancelled",
+        result_event_id: input.scope.eventIds[0],
+      })),
+      prefixConsumptions: [],
+      childLifecycle: [],
+    },
+  };
+}
+
+function testControlSuccess(
+  scope: RuntimeCommandScope,
+  inputKind: "interrupt_control" | "tool_confirmation",
+) {
+  const declaration = testControlDeclaration(scope, inputKind);
+  return testControlReceipt({ scope, inputKind, ...declaration });
+}
+
 class RecordingRunHost implements RuntimeSessionRunHost {
   readonly sessionIds: string[] = [];
   readonly messageCommands: Array<Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]> = [];
@@ -1383,14 +1530,10 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   ) {
     this.interrupts.push({ sessionId, command });
     this.events?.push(`runHost.interrupt:start:${command.runtimeInputId}`);
-    if (this.interruptResult?.ok === true && this.interruptResult.idleInterrupt) {
-      this.events?.push(`runHost.interrupt:end:${command.runtimeInputId}`);
-      return this.interruptResult;
-    }
     if (commitInterruptInput === undefined) {
       throw new Error("missing interrupt input committer");
     }
-    const committed = await commitInterruptInput();
+    const committed = await commitInterruptInput(testControlDeclaration(command, "interrupt_control"));
     this.events?.push(`runHost.interrupt:end:${command.runtimeInputId}`);
     if (!committed.ok) {
       return { ok: false as const, sessionId, reason: "context_load_failed" as const };
@@ -1410,7 +1553,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     commit: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2],
   ) {
     this.toolConfirmations.push({ sessionId, command });
-    const committed = await commit();
+    const committed = await commit(testControlDeclaration(command, "tool_confirmation"));
     this.toolConfirmationCommitResults.push(committed);
     if (!committed.ok) {
       return { ok: false as const, sessionId, reason: "context_load_failed" as const };
@@ -1472,7 +1615,8 @@ class RecordingControlInputCommitter implements RuntimeControlInputCommitter {
   constructor(
     private readonly result:
       | Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>
-      | readonly Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>[] = { ok: true },
+      | readonly Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>[]
+      | undefined = undefined,
     private readonly events?: string[] | undefined,
   ) {}
 
@@ -1480,9 +1624,9 @@ class RecordingControlInputCommitter implements RuntimeControlInputCommitter {
     this.commits.push(input);
     this.events?.push(`commit.${input.inputKind}:${input.scope.runtimeInputId}`);
     if (Array.isArray(this.result)) {
-      return this.result[Math.min(this.commits.length - 1, this.result.length - 1)] ?? { ok: true as const };
+      return this.result[Math.min(this.commits.length - 1, this.result.length - 1)] ?? testControlReceipt(input);
     }
-    return this.result;
+    return this.result ?? testControlReceipt(input);
   }
 }
 

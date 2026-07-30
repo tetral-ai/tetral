@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   acceptedInputDrafts,
   applyAcceptedInputReceipt,
+  applyInterruptInputReceipt,
   applyRuntimeRequestEndReceipt,
   applyTaskNotificationReceipt,
+  applyToolConfirmationReceipt,
   runtimeTerminationToolDeclarations,
   taskNotificationDraft,
   taskNotificationSourceId,
@@ -15,6 +17,7 @@ import {
 } from "../../src/contracts/runtime.js";
 import { stableRuntimeID } from "../../src/runtime/runtime-identity.js";
 import { acceptedInputReceipt } from "./runtime-declaration-fixtures.js";
+import { buildRuntimeControlCommitResult } from "./runtime-message-builders.js";
 import type {
   RuntimeAcceptedInputState,
   RuntimePendingApprovalToolJobState,
@@ -39,6 +42,71 @@ describe("runtime declaration identity and message shapes", () => {
     expect(stableRuntimeID("runtime_message_part_draft", messageID, "text", "0")).toBe(
       "stid_080e946f2be6e403aaaeb2afab207746171d95850660f612af67de33f1ed5828",
     );
+  });
+
+  test("applies one interrupt message with multiple pending-tool receipt pairs", () => {
+    const scope = {
+      requestId: "req_interrupt_pairs",
+      workspaceId: "ws_1",
+      sessionId: "ses_1",
+      sessionThreadId: "thr_1",
+      bindingId: "bind_1",
+      bindingGeneration: 1,
+      targetPodUid: "pod_1",
+      runtimeInputId: "rin_interrupt_pairs",
+      eventIds: ["sevt_interrupt_pairs"],
+      sequenceFrom: 7,
+      sequenceTo: 7,
+    };
+    const runtimeLocalId = "stid_interrupt_pairs";
+    const draft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId,
+      sourceKind: "interrupt_control",
+      sourceId: scope.runtimeInputId,
+      sourceEventId: scope.eventIds[0],
+      draftKind: "cancellation",
+      ordinal: 0,
+      role: "assistant",
+      origin: "agent",
+      status: "completed",
+      parts: ["sevt_tool_1", "sevt_tool_2"].map((toolUseEventId, ordinal) => ({
+        runtimeLocalPartId: `stid_interrupt_part_${ordinal}`,
+        ordinal,
+        type: "tool" as const,
+        toolCallId: `call_${ordinal}`,
+        toolName: "Write",
+        toolUseEventId,
+        state: {
+          status: "cancelled" as const,
+          error: { type: "runtime" as const, message: "aborted", retryable: false },
+        },
+        completedAt: "2026-07-30T00:00:00.000Z",
+      })),
+    });
+    const declaration = {
+      drafts: [draft],
+      pendingToolCancellations: ["sevt_tool_1", "sevt_tool_2"].map((toolUseEventId) => ({
+        toolUseEventId,
+        runtimeLocalId,
+      })),
+    };
+    const committed = buildRuntimeControlCommitResult(scope, "interrupt_control", declaration);
+    if (!committed.ok || !("receipt" in committed)) {
+      throw new Error("test interrupt receipt is missing");
+    }
+
+    const messages = applyInterruptInputReceipt({
+      sessionId: scope.sessionId,
+      sessionThreadId: scope.sessionThreadId,
+      runtimeInputId: scope.runtimeInputId,
+      eventIds: scope.eventIds,
+      drafts: declaration.drafts,
+      pendingToolCancellations: declaration.pendingToolCancellations,
+      existingMessages: [],
+    }, committed.receipt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.parts).toHaveLength(2);
   });
 
   test("keeps drafts unstamped and durable messages database stamped", () => {
@@ -89,6 +157,83 @@ describe("runtime declaration identity and message shapes", () => {
       owningEventId: "sevt_1",
       eventSequence: 7,
     });
+  });
+
+  test("reapplying one approval receipt keeps a single durable projection", () => {
+    const draft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId: "stid_approval_message",
+      sourceKind: "tool_confirmation",
+      sourceId: "rin_approval",
+      sourceEventId: "sevt_approval",
+      draftKind: "approval_input",
+      ordinal: 0,
+      role: "user",
+      origin: "user",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: "stid_approval_part",
+        ordinal: 0,
+        type: "text",
+        text: "Approval allowed",
+        truncated: false,
+        status: "completed",
+      }],
+    });
+    const receipt = {
+      sessionThreadId: "thr_1",
+      operationKind: "commit_inputs",
+      sourceKind: "tool_confirmation",
+      sourceId: "rin_approval",
+      declarationDigest: "digest_approval",
+      events: [{
+        sessionThreadId: "thr_1",
+        sourceEventId: "sevt_approval",
+        eventId: "sevt_approval",
+        eventSequence: 5,
+        disposition: "existing" as const,
+      }],
+      messages: [{
+        runtimeLocalId: draft.runtimeLocalId,
+        sessionThreadId: "thr_1",
+        owningEventId: "sevt_approval",
+        messageId: "msg_approval",
+        messageSequence: 3,
+        createdAt: "2026-07-30T00:00:00.000Z",
+        updatedAt: "2026-07-30T00:00:00.000Z",
+        disposition: "created" as const,
+        parts: [{
+          runtimeLocalPartId: draft.parts[0]!.runtimeLocalPartId,
+          partId: "part_approval",
+          messageId: "msg_approval",
+          partSequence: 0,
+          createdAt: "2026-07-30T00:00:00.000Z",
+          updatedAt: "2026-07-30T00:00:00.000Z",
+          disposition: "created" as const,
+        }],
+      }],
+      pendingAttachmentDelta: [],
+      pendingToolDelta: [],
+      prefixConsumptions: [],
+      childLifecycle: [],
+    };
+    const application = {
+      sessionId: "ses_1",
+      sessionThreadId: "thr_1",
+      runtimeInputId: "rin_approval",
+      sourceEventId: "sevt_approval",
+      draft,
+    } as const;
+    const first = applyToolConfirmationReceipt({
+      ...application,
+      existingMessages: [],
+    }, receipt);
+    const replay = applyToolConfirmationReceipt({
+      ...application,
+      existingMessages: first,
+    }, receipt);
+
+    expect(first).toHaveLength(1);
+    expect(replay).toEqual(first);
   });
 
   test("authors a deterministic task notification and applies only its database receipt", () => {

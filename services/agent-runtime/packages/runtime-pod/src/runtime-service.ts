@@ -31,7 +31,15 @@ import type {
 import type { ServiceAccountIdentity } from "./auth.js";
 import type { RuntimePodLogger } from "./logger.js";
 import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeMessage, RuntimeMessageDraft } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type {
+  RuntimeDeclarationReceipt,
+  RuntimeMessage,
+  RuntimeMessageDraft,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type {
+  RuntimeControlInputCommitResult,
+  RuntimeControlInputDeclaration,
+} from "@tetral/agent-runtime-core/src/session/session-state.js";
 import { taskNotificationDraft } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { GrpcStatusError } from "./errors.js";
 
@@ -76,10 +84,16 @@ export interface RuntimeSessionRunHost {
   readonly handleInterruptControl: (
     sessionId: string,
     command: RuntimeCommandScope,
-    commitInterruptInput?: (() => Promise<{ readonly ok: true; readonly stale?: true | undefined } | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }>),
+    commitInterruptInput: (declaration: RuntimeControlInputDeclaration) => Promise<RuntimeControlInputCommitResult>,
   ) => Promise<
-    | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly interrupted: boolean; readonly idleInterrupt: boolean; readonly stale?: true | undefined }
-    | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "context_load_failed" }
+    | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly interrupted: boolean; readonly idleInterrupt: boolean; readonly duplicate?: true | undefined; readonly stale?: true | undefined }
+    | {
+        readonly ok: false;
+        readonly sessionId: string;
+        readonly reason: "local_session_capacity_exceeded" | "control_busy" | "context_load_failed";
+        readonly retryable?: boolean | undefined;
+        readonly errorCode?: string | number | undefined;
+      }
   >;
   readonly handleToolConfirmation: (
     sessionId: string,
@@ -89,10 +103,7 @@ export interface RuntimeSessionRunHost {
       readonly decision: "allow" | "deny";
       readonly denyMessage?: string | undefined;
     },
-    commit: () => Promise<
-      | { readonly ok: true; readonly stale?: true | undefined }
-      | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
-    >,
+    commit: (declaration: RuntimeControlInputDeclaration) => Promise<RuntimeControlInputCommitResult>,
   ) => Promise<
     | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly applied: boolean; readonly stale?: true | undefined }
     | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "control_busy" | "control_conflict" | "context_load_failed" }
@@ -202,8 +213,14 @@ export interface RuntimeControlInputCommitter {
   readonly commitControlInput: (input: {
     readonly scope: RuntimeCommandScope;
     readonly inputKind: "interrupt_control" | "tool_confirmation";
+    readonly drafts: readonly RuntimeMessageDraft[];
+    readonly pendingToolCancellations: readonly {
+      readonly toolUseEventId: string;
+      readonly runtimeLocalId: string;
+    }[];
   }) => Promise<
-    | { readonly ok: true; readonly stale?: true | undefined }
+    | { readonly ok: true; readonly stale: true }
+    | { readonly ok: true; readonly receipt: RuntimeDeclarationReceipt }
     | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string; readonly message: string }
   >;
 }
@@ -600,12 +617,13 @@ export class RuntimeControlService {
     //   losing either transport response is resolved by declaration replay.
     // - The interrupt receipt is the last input commit; only its FinishIdle may
     //   follow before the run slot is released.
-    // - When the target thread was already idle the host returns idleInterrupt and
-    //   this handler commits interrupt_control directly (the result.idleInterrupt
-    //   branch below) rather than through the closeout callback.
-    // - Queue redelivery of an uncommitted interrupt is idempotent: re-interrupting
-    //   an idle thread is a no-op, and the interrupt fence sequence rides the
-    //   command so redelivered events stay ordered.
+    // - The admitted user.interrupt event already exists. The host callback
+    //   commits the loop-authored cancellation declaration, marks that source
+    //   processed, and settles the named pending-tool rows without creating a
+    //   second interrupt event.
+    // - An admitted idle interrupt still commits its declaration. Only redelivery
+    //   after that exact closeout has completed is a no-op; the interrupt fence
+    //   sequence rides the command so redelivered events stay ordered.
     // - A late tool result for the interrupted request is never appended twice; it
     //   is dropped or folded into the already-committed cancellation receipt.
     if (effect === "interrupt") {
@@ -613,8 +631,8 @@ export class RuntimeControlService {
       const result = await this.options.runHost.handleInterruptControl(
         request.sessionId,
         commandScope(request),
-        async () => {
-          const committed = await this.commitControlInput(request, "interrupt_control");
+        async (declaration) => {
+          const committed = await this.commitControlInput(request, "interrupt_control", declaration);
           closeoutCommitResult = committed;
           return committed;
         },
@@ -623,25 +641,28 @@ export class RuntimeControlService {
         if (closeoutCommitResult?.ok === false) {
           return this.rejected(request, closeoutCommitResult.retryable, closeoutCommitResult.errorCode);
         }
+        if (result.errorCode !== undefined) {
+          return this.rejected(request, result.retryable === true, result.errorCode);
+        }
         const accepted = ensureRuntimeControlAccepted(result);
         if (accepted.ok) {
           throw new GrpcStatusError(status.INTERNAL, "invalid interrupt control result");
         }
-        return this.rejected(request, false, accepted.errorCode);
+        return this.rejected(request, accepted.retryable, accepted.errorCode);
+      }
+      if (result.duplicate === true) {
+        return this.duplicate(request);
       }
       if (result.idleInterrupt && closeoutCommitResult === undefined) {
-        const ack = await this.commitControlInput(request, "interrupt_control");
-        if (!ack.ok) {
-          return this.rejected(request, ack.retryable, ack.errorCode);
-        }
+        throw new GrpcStatusError(status.INTERNAL, "idle interrupt completed without a durable declaration");
       }
       return;
     }
     if (effect === "tool-confirmation") {
       const command = { ...commandScope(request), ...toolConfirmationFromPayload(request.runtimeInputId, request.payloadJson) };
       let commitResult: Awaited<ReturnType<typeof this.commitControlInput>> | undefined;
-      const result = await this.options.runHost.handleToolConfirmation(request.sessionId, command, async () => {
-        commitResult = await this.commitControlInput(request, "tool_confirmation");
+      const result = await this.options.runHost.handleToolConfirmation(request.sessionId, command, async (declaration) => {
+        commitResult = await this.commitControlInput(request, "tool_confirmation", declaration);
         return commitResult;
       });
       if (!result.ok && commitResult?.ok === false) {
@@ -728,16 +749,16 @@ export class RuntimeControlService {
   private async commitControlInput(
     request: RuntimeInputCommandRequest,
     inputKind: "interrupt_control" | "tool_confirmation",
-  ): Promise<
-    | { readonly ok: true; readonly stale?: true | undefined }
-    | { readonly ok: false; readonly retryable: boolean; readonly errorCode: RuntimeInputErrorCode }
-  > {
+    declaration: RuntimeControlInputDeclaration,
+  ): Promise<RuntimeControlInputCommitResult> {
     if (this.options.controlInputCommitter === undefined) {
       throw new GrpcStatusError(status.INTERNAL, "control input durable committer is unavailable");
     }
     const ack = await this.options.controlInputCommitter.commitControlInput({
       scope: commandScope(request),
       inputKind,
+      drafts: declaration.drafts,
+      pendingToolCancellations: declaration.pendingToolCancellations,
     });
     if (!ack.ok) {
       return {
@@ -746,7 +767,9 @@ export class RuntimeControlService {
         errorCode: runtimeInputErrorCodeOrGeneric(ack.errorCode),
       };
     }
-    return "stale" in ack ? { ok: true, stale: true } : { ok: true };
+    return "stale" in ack
+      ? { ok: true, stale: true }
+      : { ok: true, receipt: ack.receipt };
   }
 
   private async authorize(metadata: Metadata, method: string): Promise<{ readonly serviceAccount: ServiceAccountIdentity }> {

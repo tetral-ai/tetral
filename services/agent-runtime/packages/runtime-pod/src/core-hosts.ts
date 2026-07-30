@@ -159,7 +159,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       handleInterruptControl: async (sessionId, command, commitInput) => await Effect.runPromise(host.handleInterruptControl(
         sessionId,
         command,
-        commitInput ?? (async () => ({ ok: false, retryable: true, errorCode: "interrupt_commit_unavailable" })),
+        commitInput,
       )),
       handleToolConfirmation: async (sessionId, command, commit) =>
         await Effect.runPromise(host.handleToolConfirmation(sessionId, command, commit)),

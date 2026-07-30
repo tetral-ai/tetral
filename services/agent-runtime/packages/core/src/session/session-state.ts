@@ -49,7 +49,7 @@
  */
 import { ContextManager } from "./context-manager.js";
 import type { ThreadContextPrefix } from "./context-manager.js";
-import type { DurableRuntimeMessage, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
+import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageDraft, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ToolEntry } from "../tools/tool-catalog.js";
@@ -84,19 +84,38 @@ export interface RuntimeThreadControlState extends RuntimeCommandScopeState {
   readonly sequenceTo: number;
 }
 
-export type RuntimeInterruptInputCommitResult =
-  | { readonly ok: true; readonly stale?: true | undefined }
+export interface RuntimeControlInputDeclaration {
+  readonly drafts: readonly RuntimeMessageDraft[];
+  readonly pendingToolCancellations: readonly {
+    readonly toolUseEventId: string;
+    readonly runtimeLocalId: string;
+  }[];
+}
+
+export type RuntimeControlInputCommitResult =
+  | { readonly ok: true; readonly stale: true }
+  | { readonly ok: true; readonly joined: true }
+  | { readonly ok: true; readonly receipt: RuntimeDeclarationReceipt }
   | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number };
 
-export type RuntimeInterruptInputCommit = () => Promise<RuntimeInterruptInputCommitResult>;
+export type RuntimeControlInputCommit = (
+  declaration: RuntimeControlInputDeclaration,
+) => Promise<RuntimeControlInputCommitResult>;
+
+export interface RuntimeControlInputCommitApplication {
+  readonly declaration: RuntimeControlInputDeclaration;
+  readonly result: RuntimeControlInputCommitResult;
+}
 
 interface RuntimeUserInterruptState {
   readonly command: RuntimeThreadControlState;
-  readonly commitInput: RuntimeInterruptInputCommit;
+  readonly commitInput: RuntimeControlInputCommit;
   readonly completeCloseout: () => void;
   closeoutEligible: boolean;
-  commitPromise?: Promise<RuntimeInterruptInputCommitResult> | undefined;
-  commitResult?: RuntimeInterruptInputCommitResult | undefined;
+  receiptApplied: boolean;
+  declaration?: RuntimeControlInputDeclaration | undefined;
+  commitPromise?: Promise<RuntimeControlInputCommitApplication> | undefined;
+  commitResult?: RuntimeControlInputCommitResult | undefined;
 }
 
 export type RuntimeThreadRoleState = "main" | "subagent" | "approval_reviewer";
@@ -298,7 +317,7 @@ export class SessionState {
   #runtimeShutdownRequested = false;
   #cooperativeCancelRequested = false;
   #userInterrupt: RuntimeUserInterruptState | undefined;
-  #lastUserInterruptCommit: { readonly runtimeInputId: string; readonly result: RuntimeInterruptInputCommitResult } | undefined;
+  #lastUserInterruptCommit: { readonly runtimeInputId: string; readonly result: RuntimeControlInputCommitResult } | undefined;
   #lastCompletedUserInterruptId: string | undefined;
 
   constructor(sessionId: string) {
@@ -650,13 +669,19 @@ export class SessionState {
 
   beginUserInterrupt(
     command: RuntimeThreadControlState,
-    commitInput: RuntimeInterruptInputCommit,
+    commitInput: RuntimeControlInputCommit,
     completeCloseout: () => void = () => {},
   ): "applied" | "duplicate" | "conflict" {
     if (this.#userInterrupt !== undefined) {
       return this.#userInterrupt.command.runtimeInputId === command.runtimeInputId ? "duplicate" : "conflict";
     }
-    this.#userInterrupt = { command, commitInput, completeCloseout, closeoutEligible: false };
+    this.#userInterrupt = {
+      command,
+      commitInput,
+      completeCloseout,
+      closeoutEligible: false,
+      receiptApplied: false,
+    };
     return "applied";
   }
 
@@ -678,35 +703,65 @@ export class SessionState {
     return this.#userInterrupt?.closeoutEligible === true;
   }
 
-  async commitUserInterruptInput(): Promise<RuntimeInterruptInputCommitResult> {
+  userInterruptReceiptApplied(): boolean {
+    return this.#userInterrupt?.receiptApplied === true;
+  }
+
+  markUserInterruptReceiptApplied(): void {
+    if (this.#userInterrupt !== undefined) {
+      this.#userInterrupt.receiptApplied = true;
+    }
+  }
+
+  async commitUserInterruptInput(
+    declaration: RuntimeControlInputDeclaration,
+  ): Promise<RuntimeControlInputCommitApplication> {
     const interrupt = this.#userInterrupt;
     if (interrupt === undefined) {
-      return { ok: false, retryable: true, errorCode: "interrupt_closeout_missing" };
+      return {
+        declaration,
+        result: { ok: false, retryable: true, errorCode: "interrupt_closeout_missing" },
+      };
     }
+    interrupt.declaration ??= declaration;
     if (interrupt.commitResult !== undefined) {
-      return interrupt.commitResult;
+      return { declaration: interrupt.declaration, result: interrupt.commitResult };
     }
-    interrupt.commitPromise ??= interrupt.commitInput().then((result) => {
-      interrupt.commitResult = result;
-      this.#lastUserInterruptCommit = { runtimeInputId: interrupt.command.runtimeInputId, result };
-      return result;
-    });
+    if (interrupt.commitPromise === undefined) {
+      const commitPromise = interrupt.commitInput(interrupt.declaration).then((result) => {
+        if (result.ok || !result.retryable) {
+          interrupt.commitResult = result;
+          this.#lastUserInterruptCommit = { runtimeInputId: interrupt.command.runtimeInputId, result };
+        }
+        return { declaration: interrupt.declaration!, result };
+      }).finally(() => {
+        if (interrupt.commitPromise === commitPromise && interrupt.commitResult === undefined) {
+          interrupt.commitPromise = undefined;
+        }
+      });
+      interrupt.commitPromise = commitPromise;
+    }
     return await interrupt.commitPromise;
   }
 
-  acknowledgeJoinedUserInterrupt(runtimeInputId: string): boolean {
+  recordJoinedUserInterruptResult(
+    runtimeInputId: string,
+    result: RuntimeControlInputCommitResult = { ok: true, joined: true },
+    declaration: RuntimeControlInputDeclaration = { drafts: [], pendingToolCancellations: [] },
+  ): boolean {
     const interrupt = this.#userInterrupt;
     if (interrupt?.command.runtimeInputId !== runtimeInputId) {
       return false;
     }
-    const result = { ok: true } as const;
+    interrupt.declaration = declaration;
     interrupt.commitResult = result;
-    interrupt.commitPromise = Promise.resolve(result);
+    interrupt.commitPromise = Promise.resolve({ declaration, result });
+    interrupt.receiptApplied = result.ok && "joined" in result;
     this.#lastUserInterruptCommit = { runtimeInputId, result };
     return true;
   }
 
-  userInterruptCommitResult(runtimeInputId: string): RuntimeInterruptInputCommitResult | undefined {
+  userInterruptCommitResult(runtimeInputId: string): RuntimeControlInputCommitResult | undefined {
     return this.#lastUserInterruptCommit?.runtimeInputId === runtimeInputId ? this.#lastUserInterruptCommit.result : undefined;
   }
 

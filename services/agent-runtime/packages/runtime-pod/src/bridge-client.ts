@@ -8,7 +8,7 @@
  * populated projected JSON before exposing it, and keep per-thread scope bookkeeping local and disposable.
  */
 import { credentials, status } from "@grpc/grpc-js";
-import type { Metadata, ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, Metadata, ServiceError } from "@grpc/grpc-js";
 import {
   AgentRuntimeBridgeServiceClient,
   BridgeWriteStatus,
@@ -63,6 +63,7 @@ import {
   DurableRuntimeMessageSchema,
   RuntimeMessageSchema,
   RuntimeJsonValueSchema,
+  SessionEventWriterRetryPolicy,
   normalizeContextLoaderError,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
@@ -132,6 +133,7 @@ export interface BridgeAPIControlInputCommitterOptions extends BridgeDeclaration
   readonly tokenPath: string;
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   readonly client?: AgentRuntimeBridgeServiceClient;
+  readonly sleep?: (durationMs: number) => Promise<void>;
 }
 
 /**
@@ -142,13 +144,15 @@ export interface BridgeAPIControlInputCommitterOptions extends BridgeDeclaration
 export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommitter {
   private readonly client: AgentRuntimeBridgeServiceClient;
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
+  private readonly sleep: (durationMs: number) => Promise<void>;
 
   constructor(private readonly options: BridgeAPIControlInputCommitterOptions) {
     this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), grpcClientChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
+    this.sleep = options.sleep ?? (async (durationMs) => await new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
   }
 
-  /** Commits one interrupt or tool-confirmation input without projecting a message patch. */
+  /** Commits one frozen interrupt or tool-confirmation declaration. */
   async commitControlInput(input: Parameters<RuntimeControlInputCommitter["commitControlInput"]>[0]) {
     let metadata: Metadata;
     try {
@@ -168,20 +172,29 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
       sequenceFrom: input.scope.sequenceFrom,
       sequenceTo: input.scope.sequenceTo,
       inputKind: input.inputKind,
-      drafts: [],
-      pendingToolCancellations: [],
+      drafts: input.drafts.map(runtimeMessageDraftForBridge),
+      pendingToolCancellations: input.pendingToolCancellations.map((cancellation) => ({ ...cancellation })),
     };
     const declarationDigest = commitInputsDeclarationDigest(request);
-    let response: CommitInputsResponse;
-    try {
-      response = await commitInputs(this.client, request, metadata);
-    } catch (error) {
-      return {
-        ok: false as const,
-        retryable: bridgeCommitErrorRetryable(error),
-        errorCode: "bridge_commit_unavailable",
-        message: "control input durable commit failed",
-      };
+    let response: CommitInputsResponse | undefined;
+    for (let attempt = 0; response === undefined; attempt += 1) {
+      try {
+        response = await commitInputs(this.client, request, metadata);
+      } catch (error) {
+        if (
+          !bridgeDeclarationTransportUnknown(error) ||
+          attempt >= SessionEventWriterRetryPolicy.backoffMs.length
+        ) {
+          return {
+            ok: false as const,
+            retryable: bridgeCommitErrorRetryable(error),
+            errorCode: "bridge_commit_unavailable",
+            message: "control input durable commit failed",
+          };
+        }
+        const backoffMs = SessionEventWriterRetryPolicy.backoffMs[attempt]!;
+        await this.sleep(backoffMs);
+      }
     }
     if (bridgeAckAccepted(response.ack?.status)) {
       const declaration = response.declaration;
@@ -195,6 +208,7 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
       } catch {
         receipt = undefined;
       }
+      const draftByLocalId = new Map(input.drafts.map((draft) => [draft.runtimeLocalId, draft]));
       const receiptValid =
         declaration !== undefined &&
         declaration.receipts.length === 1 &&
@@ -205,9 +219,25 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
         receipt.sourceKind === input.inputKind &&
         receipt.sourceId === input.scope.runtimeInputId &&
         receipt.declarationDigest === declarationDigest &&
-        receipt.messages.length === 0 &&
+        draftByLocalId.size === input.drafts.length &&
+        receipt.messages.length === input.drafts.length &&
+        new Set(receipt.messages.map((message) => message.runtimeLocalId)).size === receipt.messages.length &&
+        receipt.messages.every((message) => {
+          const draft = draftByLocalId.get(message.runtimeLocalId);
+          const draftPartIds = new Set(draft?.parts.map((part) => part.runtimeLocalPartId));
+          return draft !== undefined &&
+            message.sessionThreadId === input.scope.sessionThreadId &&
+            message.owningEventId === draft.sourceEventId &&
+            draftPartIds.size === draft.parts.length &&
+            message.parts.length === draft.parts.length &&
+            new Set(message.parts.map((part) => part.runtimeLocalPartId)).size === message.parts.length &&
+            message.parts.every((part) =>
+              draftPartIds.has(part.runtimeLocalPartId) &&
+              part.messageId === message.messageId
+            );
+        }) &&
         receipt.pendingAttachmentDelta.length === 0 &&
-        receipt.pendingToolDelta.length === 0 &&
+        receipt.pendingToolDelta.length === input.pendingToolCancellations.length &&
         receipt.prefixConsumptions.length === 0 &&
         receipt.requestReschedule === undefined &&
         receipt.idleCloseout === undefined &&
@@ -283,6 +313,14 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
           message: "control input durable commit returned mismatched custody",
         };
       }
+      if (receipt === undefined) {
+        return {
+          ok: false as const,
+          retryable: false,
+          errorCode: "bridge_control_input_receipt_invalid",
+          message: "control input durable commit returned malformed receipt",
+        };
+      }
       recordBridgeReceiptEvidence(this.options, {
         workspaceId: input.scope.workspaceId,
         sessionId: input.scope.sessionId,
@@ -296,7 +334,7 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
         applicationDisposition,
         outcome: "applied",
       });
-      return { ok: true as const };
+      return { ok: true as const, receipt };
     }
     return {
       ok: false as const,
@@ -1771,7 +1809,10 @@ function commitInputs(
   metadata: Metadata,
 ): Promise<CommitInputsResponse> {
   return new Promise((resolve, reject) => {
-    client.commitInputs(request, metadata, (error: ServiceError | null, response: CommitInputsResponse) => {
+    const options: CallOptions = {
+      deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    };
+    client.commitInputs(request, metadata, options, (error: ServiceError | null, response: CommitInputsResponse) => {
       if (error !== null) {
         reject(error);
         return;
@@ -2362,6 +2403,14 @@ function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
 function bridgeCommitErrorRetryable(error: unknown): boolean {
   const code = typeof error === "object" && error !== null && "code" in error ? (error as { readonly code?: unknown }).code : undefined;
   return code !== status.INVALID_ARGUMENT && code !== status.ALREADY_EXISTS;
+}
+
+function bridgeDeclarationTransportUnknown(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null && "code" in error ? (error as { readonly code?: unknown }).code : undefined;
+  return code === status.UNAVAILABLE ||
+    code === status.DEADLINE_EXCEEDED ||
+    code === status.INTERNAL ||
+    code === status.UNKNOWN;
 }
 
 function bridgeStoreErrorCode(error: unknown): "unavailable" | "constraint_violation" {
