@@ -1,5 +1,5 @@
 import type { AcceptedInputCommitResult } from "../../src/context/context-loader.js";
-import { acceptedInputDrafts } from "../../src/runtime/runtime-declaration.js";
+import { acceptedInputDeclarationKind, acceptedInputDrafts } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeDeclarationReceipt } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeAcceptedInputState } from "../../src/session/session-state.js";
 
@@ -11,13 +11,11 @@ export function acceptedInputReceipt(
   inputDisposition: AcceptedInputCommitResult["inputDisposition"] = "committed",
   messageSequenceStart = 1,
 ): AcceptedInputCommitResult {
-  const drafts = input.kind === "inter_agent_message" && input.presentation === "pull"
-    ? []
-    : acceptedInputDrafts(input);
+  const drafts = acceptedInputDrafts(input);
   const receipt: RuntimeDeclarationReceipt = {
     sessionThreadId: input.sessionThreadId,
     operationKind: "commit_inputs",
-    sourceKind: input.kind,
+    sourceKind: acceptedInputDeclarationKind(input),
     sourceId: input.runtimeInputId,
     declarationDigest: `digest_${input.runtimeInputId}`,
     pendingAttachmentDelta: [],

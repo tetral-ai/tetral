@@ -195,30 +195,106 @@ func (s *PostgreSQLBridgeAPIStore) ListChildThreads(ctx context.Context, request
 }
 
 func (s *PostgreSQLBridgeAPIStore) ResolveInterAgentDelivery(ctx context.Context, request *bridgev1.ResolveInterAgentDeliveryRequest) (*bridgev1.ResolveInterAgentDeliveryResponse, error) {
-	if request.GetChildThreadId() == "" || request.GetDeliveryId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "child thread id and delivery id are required")
+	if request.GetChildThreadId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "child thread id is required")
 	}
-	response := &bridgev1.ResolveInterAgentDeliveryResponse{Ack: committedAck("", "")}
-	if err := s.withScopeReadOnlyTx(ctx, request.GetScope(), "agentruntimebridge.resolve_inter_agent_delivery", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
+	now := s.now()
+	var response *bridgev1.ResolveInterAgentDeliveryResponse
+	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.resolve_inter_agent_delivery", func(tx *dbconnect.Tx) error {
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		threadJSON, threadStatus, err := readChildThreadForDeliveryTx(ctx, tx, request.GetScope(), request.GetChildThreadId())
+		if _, _, err := readChildThreadForDeliveryTx(ctx, tx, request.GetScope(), request.GetChildThreadId()); err != nil {
+			return err
+		}
+		var envelope storedAgentMailEnvelope
+		var err error
+		if request.GetDeliveryId() == "" {
+			envelope, err = loadOldestUncommittedCompletionEnvelopeTx(
+				ctx,
+				tx,
+				request.GetScope().GetWorkspaceId(),
+				request.GetScope().GetSessionId(),
+				request.GetScope().GetSessionThreadId(),
+				request.GetChildThreadId(),
+			)
+		} else {
+			envelope, err = loadStoredAgentMailEnvelopeByDeliveryTx(
+				ctx,
+				tx,
+				request.GetScope().GetWorkspaceId(),
+				request.GetScope().GetSessionId(),
+				request.GetDeliveryId(),
+			)
+		}
 		if err != nil {
 			return err
 		}
-		sentExists, err := interAgentDeliveryEventExistsTx(ctx, tx, request.GetScope(), request.GetScope().GetSessionThreadId(), "agent.thread_message_sent", request.GetDeliveryId())
+		currentThreadID := request.GetScope().GetSessionThreadId()
+		childThreadID := request.GetChildThreadId()
+		directInstruction := envelope.SourceThreadID == currentThreadID && envelope.TargetThreadID == childThreadID
+		completionReturn := envelope.SourceThreadID == childThreadID && envelope.TargetThreadID == currentThreadID
+		if !directInstruction && !completionReturn {
+			return status.Error(codes.FailedPrecondition, "agent mail envelope does not match the parent-child relationship")
+		}
+		readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		)
 		if err != nil {
 			return err
 		}
-		receivedExists, err := interAgentDeliveryEventExistsTx(ctx, tx, request.GetScope(), request.GetChildThreadId(), "agent.thread_message_received", request.GetDeliveryId())
+		if !ok || readiness.PreparationAttemptID == "" {
+			return status.Error(codes.FailedPrecondition, "agent mail delivery has no active preparation")
+		}
+		binding, err := readRuntimeBindingForDeliveryTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		)
 		if err != nil {
 			return err
 		}
-		response.SentExists = sentExists
-		response.ReceivedExists = receivedExists
-		response.ChildReceivable = threadStatus != "closed_for_runtime" && threadStatus != "terminated" && threadStatus != "failed"
-		response.ChildThreadJson = threadJSON
+		targetScope := scopeForThread(request.GetScope(), envelope.TargetThreadID)
+		admitted, err := admitAgentMailDeliveryTx(
+			ctx,
+			tx,
+			targetScope,
+			envelope,
+			readiness.PreparationAttemptID,
+			binding,
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		if !admitted.Terminal {
+			if _, err := enqueueAgentMailWakeTx(
+				ctx,
+				tx,
+				targetScope.GetWorkspaceId(),
+				targetScope.GetSessionId(),
+				targetScope.GetSessionThreadId(),
+				envelope.DeliveryID,
+				admitted.PreparationAttemptID,
+				now,
+			); err != nil {
+				return err
+			}
+		}
+		response = &bridgev1.ResolveInterAgentDeliveryResponse{
+			Ack:                  committedAck("", ""),
+			DeliveryId:           envelope.DeliveryID,
+			SourceThreadId:       envelope.SourceThreadID,
+			TargetThreadId:       envelope.TargetThreadID,
+			SourceToolUseEventId: envelope.SourceToolUseEventID,
+			ReceivedEventId:      admitted.ReceivedEventID,
+			ReceivedSequence:     admitted.ReceivedSequence,
+			MessageJson:          string(envelope.MessageJSON),
+		}
 		return nil
 	}); err != nil {
 		return nil, err
@@ -1238,29 +1314,6 @@ func readChildThreadForDeliveryTx(ctx context.Context, tx *dbconnect.Tx, scope *
 		return "", "", err
 	}
 	return threadJSON, statusValue, nil
-}
-
-func interAgentDeliveryEventExistsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadID string, eventType string, deliveryID string) (bool, error) {
-	var exists bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_events
-			 WHERE workspace_id = $1
-			   AND session_id = $2
-			   AND session_thread_id = $3
-			   AND type = $4
-			   AND payload_json::jsonb ->> 'delivery_id' = $5
-		)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		threadID,
-		eventType,
-		deliveryID,
-	).Scan(&exists); err != nil {
-		return false, err
-	}
-	return exists, nil
 }
 
 func scanThreadJSON(scanner interface {

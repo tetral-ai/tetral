@@ -91,7 +91,6 @@ interface ManagerCall {
     | "interruptReviewerExecution"
     | "markThreadClosed"
     | "markThreadActive"
-    | "markAgentMailPulled"
     | "waitThread"
     | "waitReviewerExecution"
     | "inspectThread"
@@ -178,12 +177,6 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
       markThreadActive: (...args: readonly [Parameters<SessionManager.Interface["markThreadActive"]>[0], ...unknown[]]) =>
         Effect.sync(() => {
           calls.push({ method: "markThreadActive", args });
-          const command = args[0];
-          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
-        }),
-      markAgentMailPulled: (...args: readonly [Parameters<SessionManager.Interface["markAgentMailPulled"]>[0], string, ...unknown[]]) =>
-        Effect.sync(() => {
-          calls.push({ method: "markAgentMailPulled", args });
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
         }),
@@ -590,7 +583,6 @@ describe("SessionRunHost", () => {
       "handleInterruptControl",
       "handleInterruptReviewerExecution",
       "handleInterruptThread",
-      "handleMarkAgentMailPulled",
       "handleMarkThreadActive",
       "handleMarkThreadClosed",
       "handlePreloadThread",

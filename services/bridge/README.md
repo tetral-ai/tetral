@@ -51,7 +51,7 @@ stored ACK; the same identity with a divergent payload is a fatal conflict.
 | Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction; interrupt and tool-confirmation variants process their already-admitted source event, project the loop-authored cancellation or approval message, and settle the named pending-tool state in that same transaction; background-task settlement rides the shared compare-and-set row, never a second public tool result, and its record family also fences pre-inbox notification-delivery exhaustion |
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One semantic event plus its projection in one transaction; a public tool event may carry the anchored prefix of completed reasoning parts, and a web tool-result event may carry one fixed-shape `server_tool_use` usage attachment — both fold into the idempotency hash so replays are byte-identical or rejected; the event-less invalid-tool repair row is atomic and rehydratable |
 | Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` captures outputs then writes idle status as one boundary. `CommitRuntimeTermination` validates the open durable turn, atomically stores current-thread cancellation or abnormal-child mail declared by the live loop, closes started spans, writes terminal status, and returns the complete declaration receipt. |
-| Children | `CreateChildThread`, `ResolveChildThread`, `ListChildThreads`, `MarkChildThreadClosed`, `MarkChildThreadActive`, `ResolveInterAgentDelivery` | Child row plus fork-seed checkpoint; child lifecycle marks; read-only inter-agent delivery state (`sent_exists` / `received_exists` / `child_receivable`) for delivery-aware repair |
+| Children | `CreateChildThread`, `ResolveChildThread`, `ListChildThreads`, `MarkChildThreadClosed`, `MarkChildThreadActive`, `ResolveInterAgentDelivery` | Child row plus fork-seed checkpoint; child lifecycle marks; idempotent resolution of one stored inter-agent envelope into its received event, bound Runtime inbox, and durable queue wake |
 | Tools | `RunTool`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Sandbox-backed execution through the in-sandbox helper (a media result creates its transient-attachment rows inside the same durable-result transaction); background-command follow-ups by task id; durable memory writes with content-match conflict checks |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
 | MCP | `McpManifestChanged`, `ClaimMcpToolResult`, `CommitMcpToolResult` | Manifest capture-before-deliver and runtime redelivery; leased pre-execution reservation and refs-only durable result commit |
@@ -288,14 +288,14 @@ replacement must preserve, and the conformance suites that prove it.
   `...TextAndToolConvergeOnModelRequestAssistant`,
   `TestNormalizeStableReasoningPartsEnforcesExactBoundsAndCanonicalMetadata`.
 
-### Delivery and poke machinery
+### Delivery and durable wake machinery
 
 - **Contract.** The Job Runner (`job_runner.go`, `runtime_delivery.go`)
   reconciles durable job/event state, upserts `session_runtime_inbox`, sends
   typed commands to the bound pod, and maps replies onto queue transitions.
   Child completion returns to the parent through one
   `agent.thread_message_sent` envelope written in the child's settling
-  transaction (`completion_mail.go`), with a durable bare-poke wake job enqueued
+  transaction (`completion_mail.go`), with a durable agent-mail wake enqueued
   in the same transaction.
 - **Lifecycle.** Completion is decided by an event discriminator, never by stop
   reason alone: a clean `end_turn` mails a completed envelope; `retries_
@@ -468,7 +468,7 @@ never deletes durable history.
 | `output_capture_full_seam_test.go` | The no-follow, presence-only capture seam end to end |
 | `closeout_sentinel_test.go` | `scope_superseded` / `closeout_unrepairable` typing and `errorCode`-keyed ack mapping |
 | `job_runner_test.go`, `runtime_delivery_test.go`, `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go` | Queue reconcile, direct-to-pod delivery, inbox upsert, delivery-exhaustion fencing |
-| `completion_mail_test.go`, `completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-poke write |
+| `completion_mail_test.go`, `completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-wake write |
 | `runtime_pod_lost.go` suites (`runtime_pod_lost_release_fence_test.go`, `runtime_pod_lost_interrupt_fence_test.go`, `runtime_pod_lost_delivery_repair_test.go`, `runtime_pod_lost_store_test.go`) | Proven-gone repair, interrupted-then-lost quiet settlement, release-before-finalize fencing |
 | `runtime_session_cleanup_test.go` | Cleanup order, the tree fence claim proof, reschedule-at-both-points, the `reason=delete` inversion |
 | `release_handler_delete_integration_test.go`, `sandbox_release_client_test.go` | Sandbox-release handoff and the delete-path release identity |

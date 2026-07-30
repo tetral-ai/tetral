@@ -1781,55 +1781,6 @@ describe("SessionManager", () => {
     });
   });
 
-  test("pulling a queued completion mail cancels its pending wake instead of starting an empty run", async () => {
-    const agentLoop = makeInputConsumingControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop);
-    const sessionID = "sesn_pulled_agent_mail_wake";
-    const threadID = "thrd_pulled_agent_mail_wake_main";
-    const thread: RuntimeAcceptedThreadMetadataState = {
-      role: "main",
-      visibility: "public",
-      agentType: "general",
-      status: "idle",
-    };
-    await withSessionManager(layer, async (manager) => {
-      expect(await Effect.runPromise(manager.preloadThread({
-        ...threadControl(sessionID, "rin_preload_pulled_agent_mail_wake", threadID),
-        runtimeBindingToken: "runtime-binding-token",
-        coldCoverage: coldCoverage(),
-        messages: [],
-        thread,
-      }))).toMatchObject({ ok: true, applied: true });
-      expect(await Effect.runPromise(manager.acceptInput(
-        acceptedInput(sessionID, "rin_pulled_agent_mail_wake_first", threadID),
-      ))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(agentLoop, 1);
-
-      const mail = agentMailInput(
-        sessionID,
-        "agent_mail:delivery_pulled_agent_mail_wake",
-        threadID,
-        "thrd_pulled_agent_mail_wake_child",
-        thread,
-      );
-      expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
-        ok: true,
-        pendingWake: true,
-      });
-      expect(await Effect.runPromise(manager.markAgentMailPulled(
-        threadControl(sessionID, "rin_pull_agent_mail_wake", threadID),
-        mail.deliveryId,
-      ))).toMatchObject({ ok: true, applied: true });
-
-      agentLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
-      expect(await Effect.runPromise(manager.waitThread(
-        threadControl(sessionID, "rin_wait_pulled_agent_mail_wake", threadID),
-        undefined,
-      ))).toMatchObject({ ok: true, observed: true, timedOut: false });
-      expect(agentLoop.runs).toHaveLength(1);
-    });
-  });
-
   test("cold preload installs both pending attachment origins before the next run", async () => {
     const agentLoop = makeControlledAgentLoop();
     const pendingAttachments = [{
@@ -4086,7 +4037,6 @@ describe("SessionManager", () => {
       "interruptControl",
       "interruptReviewerExecution",
       "interruptThread",
-      "markAgentMailPulled",
       "markThreadActive",
       "markThreadClosed",
       "preloadThread",

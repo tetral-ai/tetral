@@ -37,7 +37,6 @@ export interface Interface {
   readonly handleMarkThreadClosed: (command: Parameters<SessionManager.Interface["markThreadClosed"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleMarkThreadActive: (command: Parameters<SessionManager.Interface["markThreadActive"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleWaitThread: (command: Parameters<SessionManager.Interface["waitThread"]>[0], timeoutMs: number | undefined) => Effect.Effect<SessionManager.ThreadWaitResult>;
-  readonly handleMarkAgentMailPulled: (command: Parameters<SessionManager.Interface["markAgentMailPulled"]>[0], deliveryId: string) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleWaitReviewerExecution: (command: Parameters<SessionManager.Interface["waitReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken, timeoutMs: number | undefined) => Effect.Effect<SessionManager.ReviewerExecutionWaitResult>;
   readonly handleInspectThread: (command: Parameters<SessionManager.Interface["inspectThread"]>[0]) => Effect.Effect<SessionManager.ThreadSnapshotResult>;
   readonly handleInspectReviewerExecution: (command: Parameters<SessionManager.Interface["inspectReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken) => Effect.Effect<SessionManager.ReviewerExecutionSnapshotResult>;
@@ -72,7 +71,6 @@ export const layer = Layer.effect(
       handleMarkThreadClosed: (command) => manager.markThreadClosed(command),
       handleMarkThreadActive: (command) => manager.markThreadActive(command),
       handleWaitThread: (command, timeoutMs) => manager.waitThread(command, timeoutMs),
-      handleMarkAgentMailPulled: (command, deliveryId) => manager.markAgentMailPulled(command, deliveryId),
       handleWaitReviewerExecution: (command, token, timeoutMs) => manager.waitReviewerExecution(command, token, timeoutMs),
       handleInspectThread: (command) => manager.inspectThread(command),
       handleInspectReviewerExecution: (command, token) => manager.inspectReviewerExecution(command, token),

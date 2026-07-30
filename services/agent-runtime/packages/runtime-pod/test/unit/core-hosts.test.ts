@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { status } from "@grpc/grpc-js";
 import { Stream } from "effect";
 import { RuntimeInternalToolRepairStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
@@ -38,6 +39,9 @@ describe("Runtime core host production assembly", () => {
       const mail = await hosts.commandRunHost.handleAgentMail?.({
         ...commandScope("sesn_1"),
         runtimeInputId: "agent_mail:delivery_warm_push",
+        eventIds: ["sevt_received_warm_push"],
+        sequenceFrom: 2,
+        sequenceTo: 2,
         deliveryId: "delivery_warm_push",
         sourceThreadId: "thrd_child",
         sourceToolUseEventId: "sevt_child_spawn",
@@ -47,6 +51,324 @@ describe("Runtime core host production assembly", () => {
 
       const cleanup = await waitForCleanup(hosts.cleanupRunHost, "sesn_1");
       expect(cleanup).toMatchObject({ ok: true, sessionId: "sesn_1" });
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("cold installation resolves pending mail in sent order before the triggering input", async () => {
+    const observations: string[] = [];
+    const descriptors = [
+      { deliveryId: "delivery_cold_1", sourceThreadId: "thrd_child_1", sourceToolUseEventId: "sevt_child_1" },
+      { deliveryId: "delivery_cold_2", sourceThreadId: "thrd_child_2", sourceToolUseEventId: "sevt_child_2" },
+    ] as const;
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => {
+            observations.push("load");
+            return {
+              messages: [],
+              thread: {
+                role: "main",
+                visibility: "public",
+                agentType: "general",
+                status: "idle",
+              },
+              runtimeBindingToken: "runtime-binding-token-cold-mail",
+              pendingAgentMail: descriptors,
+              coldCoverage: {
+                ...emptyColdCoverage,
+                undeliveredMailDeliveryIds: descriptors.map((mail) => mail.deliveryId),
+              },
+            };
+          },
+          resolveAgentMail: async (command, childThreadId, deliveryId) => {
+            observations.push(`resolve:${deliveryId}`);
+            const index = descriptors.findIndex((mail) =>
+              mail.deliveryId === deliveryId && mail.sourceThreadId === childThreadId
+            );
+            if (index < 0) {
+              throw new Error("unexpected cold agent-mail descriptor");
+            }
+            const descriptor = descriptors[index]!;
+            return {
+              ...descriptor,
+              targetThreadId: command.sessionThreadId,
+              receivedEventId: `sevt_received_${index + 1}`,
+              receivedSequence: index + 10,
+              message: bridgeRuntimeMessage(command.sessionId, `child result ${index + 1}`),
+              publicMessageJson: publicAgentMailJSON(
+                bridgeRuntimeMessage(command.sessionId, `child result ${index + 1}`),
+              ),
+            };
+          },
+          commitAcceptedInput: async (input) => {
+            observations.push(`commit:${input.runtimeInputId}`);
+            return acceptedInputReceipt(input);
+          },
+        },
+      }),
+    });
+    try {
+      expect(await hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_mail"))).toMatchObject({
+        ok: true,
+        sessionId: "sesn_cold_mail",
+      });
+      expect(observations.slice(0, 3)).toEqual([
+        "load",
+        "resolve:delivery_cold_1",
+        "resolve:delivery_cold_2",
+      ]);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("cold child installation resolves a direct instruction under its parent scope", async () => {
+    const observations: string[] = [];
+    const deliveryId = "delivery_cold_direct";
+    const parentThreadId = "thrd_cold_direct_parent";
+    const childThreadId = "thrd_1";
+    const message = bridgeRuntimeMessage("sesn_cold_direct", "parent instruction");
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            thread: {
+              parentThreadId,
+              role: "subagent",
+              visibility: "public",
+              taskName: "child",
+              agentType: "general",
+              status: "idle",
+            },
+            runtimeBindingToken: "runtime-binding-token-cold-direct",
+            pendingAgentMail: [{
+              deliveryId,
+              sourceThreadId: parentThreadId,
+              sourceToolUseEventId: "sevt_cold_direct_source",
+            }],
+            coldCoverage: {
+              ...emptyColdCoverage,
+              undeliveredMailDeliveryIds: [deliveryId],
+            },
+          }),
+          resolveAgentMail: async (command, peerThreadId, requestedDeliveryId) => {
+            observations.push(`resolve:${command.sessionThreadId}:${peerThreadId}:${requestedDeliveryId}`);
+            if (
+              command.sessionThreadId !== parentThreadId ||
+              peerThreadId !== childThreadId ||
+              requestedDeliveryId !== deliveryId
+            ) {
+              throw new Error("cold direct resolver orientation is invalid");
+            }
+            return {
+              deliveryId,
+              sourceThreadId: parentThreadId,
+              sourceToolUseEventId: "sevt_cold_direct_source",
+              targetThreadId: childThreadId,
+              receivedEventId: "sevt_cold_direct_received",
+              receivedSequence: 7,
+              message,
+              publicMessageJson: publicAgentMailJSON(message),
+            };
+          },
+          commitAcceptedInput: async (input) => acceptedInputReceipt(input),
+        },
+      }),
+    });
+    try {
+      expect(await hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_direct"))).toMatchObject({
+        ok: true,
+        sessionId: "sesn_cold_direct",
+      });
+      expect(observations).toEqual([
+        `resolve:${parentThreadId}:${childThreadId}:${deliveryId}`,
+      ]);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("cold mail fails before resolution when durable thread lineage is absent", async () => {
+    let resolveCalls = 0;
+    const message = bridgeRuntimeMessage("sesn_cold_mail_no_lineage", "parent instruction");
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            runtimeBindingToken: "runtime-binding-token-cold-no-lineage",
+            pendingAgentMail: [{
+              deliveryId: "delivery_cold_no_lineage",
+              sourceThreadId: "thrd_parent",
+              sourceToolUseEventId: "sevt_cold_no_lineage_source",
+            }],
+            coldCoverage: {
+              ...emptyColdCoverage,
+              undeliveredMailDeliveryIds: ["delivery_cold_no_lineage"],
+            },
+          }),
+          resolveAgentMail: async (command) => {
+            resolveCalls += 1;
+            return {
+              deliveryId: "delivery_cold_no_lineage",
+              sourceThreadId: "thrd_parent",
+              sourceToolUseEventId: "sevt_cold_no_lineage_source",
+              targetThreadId: command.sessionThreadId,
+              receivedEventId: "sevt_cold_no_lineage_received",
+              receivedSequence: 7,
+              message,
+              publicMessageJson: publicAgentMailJSON(message),
+            };
+          },
+        },
+      }),
+    });
+    try {
+      await expect(
+        hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_mail_no_lineage")),
+      ).resolves.toMatchObject({ ok: false });
+      expect(resolveCalls).toBe(0);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("cold agent-mail trigger starts the resolver-seeded input instead of ACKing it idle", async () => {
+    const deliveryId = "delivery_cold_trigger";
+    const sourceThreadId = "thrd_cold_trigger_child";
+    const message = bridgeRuntimeMessage("sesn_cold_trigger", "stored completion");
+    const committed = deferred<void>();
+    const commits: string[] = [];
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            thread: {
+              role: "main",
+              visibility: "public",
+              agentType: "general",
+              status: "idle",
+            },
+            runtimeBindingToken: "runtime-binding-token-cold-trigger",
+            pendingAgentMail: [{
+              deliveryId,
+              sourceThreadId,
+              sourceToolUseEventId: "sevt_cold_trigger_source",
+            }],
+            coldCoverage: {
+              ...emptyColdCoverage,
+              undeliveredMailDeliveryIds: [deliveryId],
+            },
+          }),
+          resolveAgentMail: async (command) => ({
+            deliveryId,
+            sourceThreadId,
+            sourceToolUseEventId: "sevt_cold_trigger_source",
+            targetThreadId: command.sessionThreadId,
+            receivedEventId: "sevt_cold_trigger_received",
+            receivedSequence: 9,
+            message,
+            publicMessageJson: publicAgentMailJSON(message),
+          }),
+          commitAcceptedInput: async (input) => {
+            commits.push(input.runtimeInputId);
+            committed.resolve();
+            return acceptedInputReceipt(input);
+          },
+        },
+      }),
+    });
+    try {
+      expect(await hosts.commandRunHost.handleAgentMail?.({
+        ...commandScope("sesn_cold_trigger"),
+        runtimeInputId: `agent_mail:${deliveryId}`,
+        eventIds: ["sevt_cold_trigger_received"],
+        sequenceFrom: 9,
+        sequenceTo: 9,
+        deliveryId,
+        sourceThreadId,
+        sourceToolUseEventId: "sevt_cold_trigger_source",
+        message,
+      })).toMatchObject({ ok: true, applied: true });
+      await committed.promise;
+      expect(commits).toEqual([`agent_mail:${deliveryId}`]);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("completion pull resolves the stored envelope without loading context", async () => {
+    const observations: string[] = [];
+    const message = bridgeRuntimeMessage("sesn_pull", "stored completion");
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => {
+            observations.push("load");
+            return {
+              messages: [],
+              runtimeBindingToken: "runtime-binding-token-pull",
+              coldCoverage: emptyColdCoverage,
+            };
+          },
+          resolveAgentMail: async (command, childThreadId, deliveryId) => {
+            observations.push(`resolve:${childThreadId}:${deliveryId ?? "oldest"}`);
+            return {
+              deliveryId: "delivery_pull",
+              sourceThreadId: childThreadId,
+              sourceToolUseEventId: "sevt_pull",
+              targetThreadId: command.sessionThreadId,
+              receivedEventId: "sevt_received_pull",
+              receivedSequence: 12,
+              message,
+              publicMessageJson: publicAgentMailJSON(message),
+            };
+          },
+        },
+      }),
+    });
+    try {
+      expect(await hosts.subAgentRunHost.pullAgentMail?.(commandScope("sesn_pull"), "thrd_child")).toEqual({
+        deliveryId: "delivery_pull",
+        finalMessage: "stored completion",
+      });
+      expect(observations).toEqual(["resolve:thrd_child:oldest"]);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("completion pull returns no message when the durable resolver has no uncommitted mail", async () => {
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          resolveAgentMail: async () => {
+            throw Object.assign(new Error("not found"), { code: status.NOT_FOUND });
+          },
+        },
+      }),
+    });
+    try {
+      await expect(
+        hosts.subAgentRunHost.pullAgentMail?.(commandScope("sesn_pull_empty"), "thrd_child"),
+      ).resolves.toBeUndefined();
     } finally {
       await hosts.close();
     }
@@ -605,6 +927,18 @@ function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function publicAgentMailJSON(message: ReturnType<typeof bridgeRuntimeMessage>): string {
+  return JSON.stringify({
+    ...message,
+    content: message.parts.map((part) => {
+      if (part.type !== "text") {
+        throw new Error("agent-mail fixture requires text parts");
+      }
+      return { type: "text", text: part.text };
+    }),
+  });
 }
 
 function testCoreDependencies(

@@ -296,7 +296,6 @@ export interface Interface {
   readonly markThreadClosed: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly markThreadActive: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly waitThread: (command: RuntimeThreadControlState, timeoutMs: number | undefined) => Effect.Effect<ThreadWaitResult>;
-  readonly markAgentMailPulled: (command: RuntimeThreadControlState, deliveryId: string) => Effect.Effect<ThreadLifecycleResult>;
   readonly waitReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken, timeoutMs: number | undefined) => Effect.Effect<ReviewerExecutionWaitResult>;
   readonly inspectThread: (command: RuntimeThreadControlState) => Effect.Effect<ThreadSnapshotResult>;
   readonly inspectReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionSnapshotResult>;
@@ -1088,11 +1087,17 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             if (command.kind === "approval_review") {
               return { ok: false, sessionId, reason: "reviewer_execution_unavailable" } as const;
             }
+            threadResult.threadEntry.bridgeScope = command;
+            const runSlot = threadResult.threadEntry.runSlot;
+            const started = runSlot === undefined &&
+              threadResult.threadEntry.session.state.peekAcceptedInput() !== undefined
+              ? yield* startThreadRun(threadResult.sessionEntry, threadResult.threadEntry)
+              : false;
             return {
               ok: true,
               sessionId,
               created: threadResult.sessionCreated,
-              started: false,
+              started,
               pendingWake: false,
               duplicate: true,
             } as const;
@@ -2057,32 +2062,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           };
         });
 
-      const markAgentMailPulled = (command: RuntimeThreadControlState, deliveryId: string): Effect.Effect<ThreadLifecycleResult> =>
-        Effect.gen(function* () {
-          const threadEntry = sessions.get(commandSessionKey(command))?.threads.get(command.sessionThreadId);
-          if (threadEntry === undefined) {
-            return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
-          }
-          return yield* submitThreadCommand(
-            threadEntry,
-            Effect.sync(() => {
-              threadEntry.bridgeScope = command;
-              threadEntry.session.state.discardAcceptedAgentMail(deliveryId);
-              const runSlot = threadEntry.runSlot;
-              if (
-                runSlot !== undefined &&
-                threadEntry.session.state.peekAcceptedInput() === undefined &&
-                !threadEntry.session.state.hasPendingApprovalToolJobs() &&
-                !runSlot.pendingTaskWake
-              ) {
-                runSlot.pendingWake = false;
-              }
-              return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true } as const;
-            }),
-            { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "thread_busy" } as const,
-          );
-        });
-
       const waitReviewerExecution = (
         command: RuntimeThreadControlState,
         token: ReviewerExecutionToken,
@@ -2252,7 +2231,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
         interruptControl,
         markThreadActive,
         markThreadClosed,
-        markAgentMailPulled,
         resolveToolConfirmation,
         waitThread,
         waitReviewerExecution,

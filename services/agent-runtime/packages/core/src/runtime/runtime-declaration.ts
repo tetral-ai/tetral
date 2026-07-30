@@ -58,6 +58,7 @@ export function runtimeTurnOpenWriteId(input: {
 
 /** Converts one accepted command's semantic messages into deterministic drafts. */
 export function acceptedInputDrafts(input: RuntimeAcceptedInputState): readonly RuntimeMessageDraft[] {
+  const sourceKind = acceptedInputDeclarationKind(input);
   if (input.kind === "rejection") {
     if (input.eventIds.length === 0) {
       throw new Error("rejection input must name at least one source event");
@@ -68,7 +69,7 @@ export function acceptedInputDrafts(input: RuntimeAcceptedInputState): readonly 
         input.workspaceId,
         input.sessionId,
         input.sessionThreadId,
-        input.kind,
+        sourceKind,
         input.runtimeInputId,
         "rejection",
         String(ordinal),
@@ -111,7 +112,7 @@ export function acceptedInputDrafts(input: RuntimeAcceptedInputState): readonly 
       input.workspaceId,
       input.sessionId,
       input.sessionThreadId,
-      input.kind,
+      sourceKind,
       input.runtimeInputId,
       draftKind,
       String(ordinal),
@@ -152,7 +153,7 @@ export function acceptedInputDrafts(input: RuntimeAcceptedInputState): readonly 
     return RuntimeMessageDraftSchema.parse({
       ...messageInfo,
       runtimeLocalId,
-      sourceKind: input.kind,
+      sourceKind,
       sourceId: input.runtimeInputId,
       sourceEventId,
       draftKind,
@@ -205,10 +206,11 @@ export function applyAcceptedInputReceipt(
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
   assertOrdinaryDeclarationReceipt(receipt);
+  const sourceKind = acceptedInputDeclarationKind(input);
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "commit_inputs" ||
-    receipt.sourceKind !== input.kind ||
+    receipt.sourceKind !== sourceKind ||
     receipt.sourceId !== input.runtimeInputId
   ) {
     throw new Error("declaration receipt identity does not match the accepted input");
@@ -294,6 +296,11 @@ export function applyAcceptedInputReceipt(
       parts,
     });
   });
+}
+
+/** Maps an internal accepted-input kind to the closed declaration kind carried on the Bridge wire. */
+export function acceptedInputDeclarationKind(input: RuntimeAcceptedInputState): string {
+  return input.kind === "inter_agent_message" ? "agent_mail" : input.kind;
 }
 
 /** Applies cancellation projections settled under one admitted interrupt event. */

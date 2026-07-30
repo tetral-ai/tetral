@@ -161,14 +161,13 @@ export interface RuntimeMessagesAcceptedInputState extends RuntimeThreadControlS
   readonly payloadJson: string;
 }
 
-/** Fenced inter-agent delivery carrying its already-projected user message. */
+/** Fenced inter-agent delivery carrying its durably sourced user-message draft. */
 export interface RuntimeInterAgentAcceptedInputState extends RuntimeThreadControlState {
   readonly kind: "inter_agent_message";
   readonly deliveryId: string;
   readonly sourceThreadId: string;
   readonly sourceToolUseEventId: string;
   readonly message: RuntimeMessage;
-  readonly presentation?: "push" | "pull" | undefined;
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
 }
 
@@ -384,13 +383,6 @@ export class SessionState {
       return;
     }
     this.#acceptedInputs = this.#acceptedInputs.filter((input) => input.runtimeInputId !== runtimeInputId);
-  }
-
-  discardAcceptedAgentMail(deliveryId: string): void {
-    this.#seenAgentMailDeliveryIds.add(deliveryId);
-    this.#acceptedInputs = this.#acceptedInputs.filter(
-      (input) => input.kind !== "inter_agent_message" || input.deliveryId !== deliveryId,
-    );
   }
 
   discardQueuedApprovalReview(reviewId: string): void {

@@ -1458,7 +1458,7 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
-  test("spawns a sub-agent by creating the child, writing parent sent event, and enqueueing child input", async () => {
+  test("spawns a sub-agent by creating the child and handing its stored instruction to durable delivery", async () => {
     const bridge = new RecordingBridgeClient();
     const subAgentHost = new RecordingSubAgentHost();
     const runner = makeRunner({ bridge, subAgentHost });
@@ -1492,7 +1492,7 @@ describe("RuntimePodToolRunner", () => {
         childThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
       }),
     ]);
-    expect(subAgentHost.actions).toEqual(["preload", "enqueue"]);
+    expect(subAgentHost.actions).toEqual(["preload"]);
     expect(subAgentHost.preloaded).toEqual([
       expect.objectContaining({
         sessionThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
@@ -1503,23 +1503,7 @@ describe("RuntimePodToolRunner", () => {
         }),
       }),
     ]);
-    expect(subAgentHost.enqueued).toEqual([
-      expect.objectContaining({
-        kind: "inter_agent_message",
-        sourceThreadId: "thrd_1",
-        sourceToolUseEventId: "sevt_tool_1",
-        message: expect.objectContaining({
-          origin: "runtime",
-          role: "user",
-        }),
-        thread: expect.objectContaining({
-          parentThreadId: "thrd_1",
-          role: "subagent",
-          taskName: "researcher",
-          agentType: "research",
-        }),
-      }),
-    ]);
+    expect(subAgentHost.enqueued).toEqual([]);
     expect(JSON.stringify(result)).not.toContain("delivery");
     expect(JSON.stringify(result)).not.toContain("binding-token");
   });
@@ -1549,9 +1533,8 @@ describe("RuntimePodToolRunner", () => {
     expect(send).toMatchObject({ type: "error", error: { retryable: false, message: "send_message requires task_name and message." } });
   });
 
-  test("replayed sub-agent delivery returns existing delivered result without enqueueing child input", async () => {
+  test("durable sub-agent delivery returns delivered without enqueueing child input", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.deliveryReceived = true;
     const subAgentHost = new RecordingSubAgentHost();
     const runner = makeRunner({ bridge, subAgentHost });
 
@@ -1571,6 +1554,29 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.writeEventRequests).toHaveLength(1);
     expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
     expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("send_message finishes durable admission after its sent event commits despite caller cancellation", async () => {
+    const bridge = new RecordingBridgeClient();
+    const abort = new AbortController();
+    bridge.afterWriteEventResponse = () => abort.abort();
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest(
+      "send_message",
+      { task_name: "worker", message: "keep going" },
+      "sevt_tool_send_cancel_after_sent",
+      abort.signal,
+    ));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: delivered"),
+      }),
+    });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+    expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
   });
 
   test("duplicate spawn_agent task names return a non-retryable tool error", async () => {
@@ -1594,7 +1600,7 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
-  test("send_message serializes child enqueue before a concurrent close releases hot state", async () => {
+  test("send_message serializes delivery resolution before a concurrent close releases hot state", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.deferResolveInterAgentDelivery = true;
     const subAgentHost = new RecordingSubAgentHost();
@@ -1604,7 +1610,7 @@ describe("RuntimePodToolRunner", () => {
       task_name: "worker",
       message: "keep going",
     }, "sevt_tool_send"));
-    await waitForCondition(() => bridge.resolveInterAgentDeliveryRequests.length === 1, "send delivery repair check");
+    await waitForCondition(() => bridge.resolveInterAgentDeliveryRequests.length === 1, "send delivery resolution");
 
     const close = runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1615,7 +1621,7 @@ describe("RuntimePodToolRunner", () => {
     expect(await send).toEqual({
       type: "completed",
       output: expect.objectContaining({
-        text: expect.stringContaining("status: accepted"),
+        text: expect.stringContaining("status: delivered"),
       }),
     });
     expect(await close).toEqual({
@@ -1624,7 +1630,7 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: closed_for_runtime"),
       }),
     });
-    expect(subAgentHost.actions).toEqual(["preload", "enqueue", "close"]);
+    expect(subAgentHost.actions).toEqual(["preload", "close"]);
   });
 
   test("close_agent commits durable closed projection before releasing hot child state", async () => {
@@ -1772,10 +1778,7 @@ describe("RuntimePodToolRunner", () => {
     bridge.completeDeferredListChildThreads();
     await Promise.all([first, second]);
 
-    expect(subAgentHost.enqueued.map((input) => input.kind === "inter_agent_message" ? input.sourceToolUseEventId : undefined)).toEqual([
-      "sevt_tool_send_1",
-      "sevt_tool_send_2",
-    ]);
+    expect(subAgentHost.enqueued).toEqual([]);
     expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
       "sevt_tool_send_1",
       "sevt_tool_send_2",
@@ -1814,7 +1817,7 @@ describe("RuntimePodToolRunner", () => {
     bridge.completeDeferredListChildThreads();
     await first;
 
-    expect(subAgentHost.enqueued).toHaveLength(1);
+    expect(subAgentHost.enqueued).toHaveLength(0);
     expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
       "sevt_tool_send_1",
     ]);
@@ -2370,8 +2373,6 @@ class RecordingBridgeClient {
   deferFirstListChildThreads = false;
   deferResolveInterAgentDelivery = false;
   createChildThreadErrorCode: GrpcStatus | undefined;
-  deliveryReceived = false;
-  childReceivable = true;
   childStatus = "idle";
   runToolResultJson = '{"status":"success","result":{"text":"ok"}}';
   runToolBackgroundTaskStarted = false;
@@ -2390,6 +2391,7 @@ class RecordingBridgeClient {
   deferMarkChildThreadActive = false;
   private readonly activeReceiptDispositionByOperationId = new Map<string, ChildLifecycleDisposition>();
   childLifecycleObservedBindingId: string | undefined;
+  afterWriteEventResponse: (() => void) | undefined;
 
   client(): Pick<AgentRuntimeBridgeServiceClient,
     | "runTool"
@@ -2559,13 +2561,7 @@ class RecordingBridgeClient {
 
   private resolveInterAgentDelivery(request: ResolveInterAgentDeliveryRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.resolveInterAgentDeliveryRequests.push(request);
-    const response = {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      sentExists: this.writeEventRequests.some((event) => event.eventType === "agent.thread_message_sent"),
-      receivedExists: this.deliveryReceived,
-      childReceivable: this.childReceivable,
-      childThreadJson: childThreadJson("worker", this.childStatus),
-    };
+    const response = this.resolvedInterAgentDelivery(request);
     if (this.deferResolveInterAgentDelivery) {
       this.deferredResolveInterAgentDelivery = (deferredResponse) => callback(null, deferredResponse);
       return grpcCall();
@@ -2581,13 +2577,52 @@ class RecordingBridgeClient {
     }
     this.deferResolveInterAgentDelivery = false;
     this.deferredResolveInterAgentDelivery = undefined;
-    complete({
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      sentExists: true,
-      receivedExists: this.deliveryReceived,
-      childReceivable: this.childReceivable,
-      childThreadJson: childThreadJson("worker", this.childStatus),
+    const request = this.resolveInterAgentDeliveryRequests.at(-1);
+    if (request === undefined) {
+      throw new Error("no deferred resolveInterAgentDelivery request");
+    }
+    complete(this.resolvedInterAgentDelivery(request));
+  }
+
+  private resolvedInterAgentDelivery(request: ResolveInterAgentDeliveryRequest): unknown {
+    const sent = this.writeEventRequests.find((event) => {
+      if (event.eventType !== "agent.thread_message_sent") {
+        return false;
+      }
+      const payload = JSON.parse(event.payloadJson) as { readonly delivery_id?: string };
+      return payload.delivery_id === request.deliveryId;
     });
+    const payload = sent === undefined
+      ? undefined
+      : JSON.parse(sent.payloadJson) as {
+          readonly delivery_id: string;
+          readonly source_thread_id: string;
+          readonly target_thread_id: string;
+          readonly source_tool_use_event_id: string;
+          readonly message: RuntimeMessage;
+        };
+    const message = payload?.message;
+    const publicMessage = message === undefined
+      ? ""
+      : JSON.stringify({
+          ...message,
+          content: message.parts.map((part) => {
+            if (part.type !== "text") {
+              throw new Error("agent mail fixture requires text parts");
+            }
+            return { type: "text", text: part.text };
+          }),
+        });
+    return {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      deliveryId: payload?.delivery_id ?? "",
+      sourceThreadId: payload?.source_thread_id ?? "",
+      targetThreadId: payload?.target_thread_id ?? "",
+      sourceToolUseEventId: payload?.source_tool_use_event_id ?? "",
+      receivedEventId: payload === undefined ? "" : `evt_received_${payload.delivery_id}`,
+      receivedSequence: payload === undefined ? 0 : 1,
+      messageJson: publicMessage,
+    };
   }
 
   private markChildThreadClosed(request: MarkChildThreadClosedRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
@@ -2707,6 +2742,7 @@ class RecordingBridgeClient {
       eventId: "evt_thread_message_sent",
       sequence: 1,
     });
+    this.afterWriteEventResponse?.();
     return grpcCall();
   }
 }

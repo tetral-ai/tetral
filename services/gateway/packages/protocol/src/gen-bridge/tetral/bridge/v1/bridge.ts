@@ -640,7 +640,6 @@ export interface LoadContextRequest {
   runtimeInputId: string;
   sequenceFrom: number;
   sequenceTo: number;
-  agentMailSourceThreadId: string;
 }
 
 export interface LoadContextResponse {
@@ -982,10 +981,13 @@ export interface ResolveInterAgentDeliveryRequest {
 
 export interface ResolveInterAgentDeliveryResponse {
   ack: BridgeWriteAck | undefined;
-  sentExists: boolean;
-  receivedExists: boolean;
-  childReceivable: boolean;
-  childThreadJson: string;
+  deliveryId: string;
+  sourceThreadId: string;
+  targetThreadId: string;
+  sourceToolUseEventId: string;
+  receivedEventId: string;
+  receivedSequence: number;
+  messageJson: string;
 }
 
 export interface MarkChildThreadClosedRequest {
@@ -3503,7 +3505,7 @@ export const BridgeWriteAck: MessageFns<BridgeWriteAck> = {
 };
 
 function createBaseLoadContextRequest(): LoadContextRequest {
-  return { scope: undefined, runtimeInputId: "", sequenceFrom: 0, sequenceTo: 0, agentMailSourceThreadId: "" };
+  return { scope: undefined, runtimeInputId: "", sequenceFrom: 0, sequenceTo: 0 };
 }
 
 export const LoadContextRequest: MessageFns<LoadContextRequest> = {
@@ -3519,9 +3521,6 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     }
     if (message.sequenceTo !== 0) {
       writer.uint32(32).int64(message.sequenceTo);
-    }
-    if (message.agentMailSourceThreadId !== "") {
-      writer.uint32(42).string(message.agentMailSourceThreadId);
     }
     return writer;
   },
@@ -3565,14 +3564,6 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
           message.sequenceTo = longToNumber(reader.int64());
           continue;
         }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.agentMailSourceThreadId = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3600,11 +3591,6 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
         : isSet(object.sequence_to)
         ? globalThis.Number(object.sequence_to)
         : 0,
-      agentMailSourceThreadId: isSet(object.agentMailSourceThreadId)
-        ? globalThis.String(object.agentMailSourceThreadId)
-        : isSet(object.agent_mail_source_thread_id)
-        ? globalThis.String(object.agent_mail_source_thread_id)
-        : "",
     };
   },
 
@@ -3622,9 +3608,6 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     if (message.sequenceTo !== 0) {
       obj.sequenceTo = Math.round(message.sequenceTo);
     }
-    if (message.agentMailSourceThreadId !== "") {
-      obj.agentMailSourceThreadId = message.agentMailSourceThreadId;
-    }
     return obj;
   },
 
@@ -3639,7 +3622,6 @@ export const LoadContextRequest: MessageFns<LoadContextRequest> = {
     message.runtimeInputId = object.runtimeInputId ?? "";
     message.sequenceFrom = object.sequenceFrom ?? 0;
     message.sequenceTo = object.sequenceTo ?? 0;
-    message.agentMailSourceThreadId = object.agentMailSourceThreadId ?? "";
     return message;
   },
 };
@@ -9530,7 +9512,16 @@ export const ResolveInterAgentDeliveryRequest: MessageFns<ResolveInterAgentDeliv
 };
 
 function createBaseResolveInterAgentDeliveryResponse(): ResolveInterAgentDeliveryResponse {
-  return { ack: undefined, sentExists: false, receivedExists: false, childReceivable: false, childThreadJson: "" };
+  return {
+    ack: undefined,
+    deliveryId: "",
+    sourceThreadId: "",
+    targetThreadId: "",
+    sourceToolUseEventId: "",
+    receivedEventId: "",
+    receivedSequence: 0,
+    messageJson: "",
+  };
 }
 
 export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeliveryResponse> = {
@@ -9538,17 +9529,26 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
     }
-    if (message.sentExists !== false) {
-      writer.uint32(16).bool(message.sentExists);
+    if (message.deliveryId !== "") {
+      writer.uint32(18).string(message.deliveryId);
     }
-    if (message.receivedExists !== false) {
-      writer.uint32(24).bool(message.receivedExists);
+    if (message.sourceThreadId !== "") {
+      writer.uint32(26).string(message.sourceThreadId);
     }
-    if (message.childReceivable !== false) {
-      writer.uint32(32).bool(message.childReceivable);
+    if (message.targetThreadId !== "") {
+      writer.uint32(34).string(message.targetThreadId);
     }
-    if (message.childThreadJson !== "") {
-      writer.uint32(42).string(message.childThreadJson);
+    if (message.sourceToolUseEventId !== "") {
+      writer.uint32(42).string(message.sourceToolUseEventId);
+    }
+    if (message.receivedEventId !== "") {
+      writer.uint32(50).string(message.receivedEventId);
+    }
+    if (message.receivedSequence !== 0) {
+      writer.uint32(56).int64(message.receivedSequence);
+    }
+    if (message.messageJson !== "") {
+      writer.uint32(66).string(message.messageJson);
     }
     return writer;
   },
@@ -9569,27 +9569,27 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
           continue;
         }
         case 2: {
-          if (tag !== 16) {
+          if (tag !== 18) {
             break;
           }
 
-          message.sentExists = reader.bool();
+          message.deliveryId = reader.string();
           continue;
         }
         case 3: {
-          if (tag !== 24) {
+          if (tag !== 26) {
             break;
           }
 
-          message.receivedExists = reader.bool();
+          message.sourceThreadId = reader.string();
           continue;
         }
         case 4: {
-          if (tag !== 32) {
+          if (tag !== 34) {
             break;
           }
 
-          message.childReceivable = reader.bool();
+          message.targetThreadId = reader.string();
           continue;
         }
         case 5: {
@@ -9597,7 +9597,31 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
             break;
           }
 
-          message.childThreadJson = reader.string();
+          message.sourceToolUseEventId = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.receivedEventId = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.receivedSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.messageJson = reader.string();
           continue;
         }
       }
@@ -9612,25 +9636,40 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
   fromJSON(object: any): ResolveInterAgentDeliveryResponse {
     return {
       ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
-      sentExists: isSet(object.sentExists)
-        ? globalThis.Boolean(object.sentExists)
-        : isSet(object.sent_exists)
-        ? globalThis.Boolean(object.sent_exists)
-        : false,
-      receivedExists: isSet(object.receivedExists)
-        ? globalThis.Boolean(object.receivedExists)
-        : isSet(object.received_exists)
-        ? globalThis.Boolean(object.received_exists)
-        : false,
-      childReceivable: isSet(object.childReceivable)
-        ? globalThis.Boolean(object.childReceivable)
-        : isSet(object.child_receivable)
-        ? globalThis.Boolean(object.child_receivable)
-        : false,
-      childThreadJson: isSet(object.childThreadJson)
-        ? globalThis.String(object.childThreadJson)
-        : isSet(object.child_thread_json)
-        ? globalThis.String(object.child_thread_json)
+      deliveryId: isSet(object.deliveryId)
+        ? globalThis.String(object.deliveryId)
+        : isSet(object.delivery_id)
+        ? globalThis.String(object.delivery_id)
+        : "",
+      sourceThreadId: isSet(object.sourceThreadId)
+        ? globalThis.String(object.sourceThreadId)
+        : isSet(object.source_thread_id)
+        ? globalThis.String(object.source_thread_id)
+        : "",
+      targetThreadId: isSet(object.targetThreadId)
+        ? globalThis.String(object.targetThreadId)
+        : isSet(object.target_thread_id)
+        ? globalThis.String(object.target_thread_id)
+        : "",
+      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
+        ? globalThis.String(object.sourceToolUseEventId)
+        : isSet(object.source_tool_use_event_id)
+        ? globalThis.String(object.source_tool_use_event_id)
+        : "",
+      receivedEventId: isSet(object.receivedEventId)
+        ? globalThis.String(object.receivedEventId)
+        : isSet(object.received_event_id)
+        ? globalThis.String(object.received_event_id)
+        : "",
+      receivedSequence: isSet(object.receivedSequence)
+        ? globalThis.Number(object.receivedSequence)
+        : isSet(object.received_sequence)
+        ? globalThis.Number(object.received_sequence)
+        : 0,
+      messageJson: isSet(object.messageJson)
+        ? globalThis.String(object.messageJson)
+        : isSet(object.message_json)
+        ? globalThis.String(object.message_json)
         : "",
     };
   },
@@ -9640,17 +9679,26 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
     }
-    if (message.sentExists !== false) {
-      obj.sentExists = message.sentExists;
+    if (message.deliveryId !== "") {
+      obj.deliveryId = message.deliveryId;
     }
-    if (message.receivedExists !== false) {
-      obj.receivedExists = message.receivedExists;
+    if (message.sourceThreadId !== "") {
+      obj.sourceThreadId = message.sourceThreadId;
     }
-    if (message.childReceivable !== false) {
-      obj.childReceivable = message.childReceivable;
+    if (message.targetThreadId !== "") {
+      obj.targetThreadId = message.targetThreadId;
     }
-    if (message.childThreadJson !== "") {
-      obj.childThreadJson = message.childThreadJson;
+    if (message.sourceToolUseEventId !== "") {
+      obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.receivedEventId !== "") {
+      obj.receivedEventId = message.receivedEventId;
+    }
+    if (message.receivedSequence !== 0) {
+      obj.receivedSequence = Math.round(message.receivedSequence);
+    }
+    if (message.messageJson !== "") {
+      obj.messageJson = message.messageJson;
     }
     return obj;
   },
@@ -9667,10 +9715,13 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
-    message.sentExists = object.sentExists ?? false;
-    message.receivedExists = object.receivedExists ?? false;
-    message.childReceivable = object.childReceivable ?? false;
-    message.childThreadJson = object.childThreadJson ?? "";
+    message.deliveryId = object.deliveryId ?? "";
+    message.sourceThreadId = object.sourceThreadId ?? "";
+    message.targetThreadId = object.targetThreadId ?? "";
+    message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.receivedEventId = object.receivedEventId ?? "";
+    message.receivedSequence = object.receivedSequence ?? 0;
+    message.messageJson = object.messageJson ?? "";
     return message;
   },
 };

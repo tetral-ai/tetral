@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -63,28 +64,28 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsFreshSignedSnapshot(t *testin
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreLoadContextRescansOnlyUnreceiptedCompletionMail(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionMail(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID = "sesn_bridge_completion_rescan"
-		mainID    = "thr_bridge_completion_rescan_main"
-		childID   = "thr_bridge_completion_rescan_child"
-		bindingID = "bind_bridge_completion_rescan"
-		podUID    = "pod_bridge_completion_rescan"
-		delivery  = "delivery_bridge_completion_rescan"
+		sessionID = "sesn_bridge_completion_baseline"
+		mainID    = "thr_bridge_completion_baseline_main"
+		childID   = "thr_bridge_completion_baseline_child"
+		bindingID = "bind_bridge_completion_baseline"
+		podUID    = "pod_bridge_completion_baseline"
+		delivery  = "delivery_bridge_completion_baseline"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_completion_rescan", completionMailEnvelope("main", "task_"+childID, "done"))
-	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_rescan_sent", 1, "agent.thread_message_sent",
-		bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_bridge_completion_rescan_spawn", messageJSON))
+	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_completion_baseline", completionMailEnvelope("main", "task_"+childID, "done"))
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_baseline_sent", 1, "agent.thread_message_sent",
+		bridgeInterAgentSentEventJSON(t, delivery, childID, mainID, "", "sevt_bridge_completion_baseline_spawn", messageJSON))
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-rescan-key-32b")
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-baseline-key-32b")
 
 	before, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		RuntimeInputId: "rin_bridge_completion_rescan_before",
+		RuntimeInputId: "rin_bridge_completion_baseline_before",
 	})
 	if err != nil {
 		t.Fatalf("LoadContext before completion receipt: %v", err)
@@ -96,6 +97,19 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRescansOnlyUnreceiptedCompletionMail
 	if len(beforePayload.PendingAgentMail) != 1 || beforePayload.PendingAgentMail[0].DeliveryID != delivery {
 		t.Fatalf("pending completion mail before receipt = %#v; want delivery", beforePayload.PendingAgentMail)
 	}
+	var rawBeforePayload struct {
+		PendingAgentMail []map[string]json.RawMessage `json:"pendingAgentMail"`
+	}
+	if err := json.Unmarshal([]byte(before.GetContextJson()), &rawBeforePayload); err != nil {
+		t.Fatalf("decode pending completion descriptor shape: %v", err)
+	}
+	if len(rawBeforePayload.PendingAgentMail) != 1 ||
+		len(rawBeforePayload.PendingAgentMail[0]) != 3 ||
+		rawBeforePayload.PendingAgentMail[0]["deliveryId"] == nil ||
+		rawBeforePayload.PendingAgentMail[0]["sourceThreadId"] == nil ||
+		rawBeforePayload.PendingAgentMail[0]["sourceToolUseEventId"] == nil {
+		t.Fatalf("pending completion descriptor = %#v; want identity fields only", rawBeforePayload.PendingAgentMail)
+	}
 
 	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
 		t,
@@ -104,14 +118,14 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRescansOnlyUnreceiptedCompletionMail
 		"agent_mail:"+delivery,
 		delivery,
 		childID,
-		"sevt_bridge_completion_rescan_spawn",
+		"sevt_bridge_completion_baseline_spawn",
 		messageJSON,
 	)); err != nil {
 		t.Fatalf("CommitInputs completion receipt: %v", err)
 	}
 	after, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		RuntimeInputId: "rin_bridge_completion_rescan_after",
+		RuntimeInputId: "rin_bridge_completion_baseline_after",
 	})
 	if err != nil {
 		t.Fatalf("LoadContext after completion receipt: %v", err)
@@ -125,7 +139,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRescansOnlyUnreceiptedCompletionMail
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreFilteredCompletionMailRefusesSupersededCourtesyRead(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionDescriptors(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_completion_currency"
@@ -166,37 +180,35 @@ func TestPostgreSQLBridgeAPIStoreFilteredCompletionMailRefusesSupersededCourtesy
 	}
 
 	current, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_bridge_completion_currency_current",
-		AgentMailSourceThreadId: childID,
+		Scope:          scope,
+		RuntimeInputId: "rin_bridge_completion_currency_current",
 	})
 	if err != nil {
-		t.Fatalf("load current courtesy read: %v", err)
+		t.Fatalf("load context after committed completion: %v", err)
 	}
 	var currentPayload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(current.GetContextJson()), &currentPayload); err != nil {
-		t.Fatalf("decode current courtesy read: %v", err)
+		t.Fatalf("decode context after committed completion: %v", err)
 	}
-	if len(currentPayload.PendingAgentMail) != 1 || currentPayload.PendingAgentMail[0].DeliveryID != delivery {
-		t.Fatalf("current courtesy read = %#v; want %s", currentPayload.PendingAgentMail, delivery)
+	if len(currentPayload.PendingAgentMail) != 0 {
+		t.Fatalf("pending mail after committed completion = %#v; want none", currentPayload.PendingAgentMail)
 	}
 
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_currency_newer_opener", 3,
 		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`)
 	superseded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_bridge_completion_currency_superseded",
-		AgentMailSourceThreadId: childID,
+		Scope:          scope,
+		RuntimeInputId: "rin_bridge_completion_currency_superseded",
 	})
 	if err != nil {
-		t.Fatalf("load superseded courtesy read: %v", err)
+		t.Fatalf("load context after a newer child event: %v", err)
 	}
 	var supersededPayload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(superseded.GetContextJson()), &supersededPayload); err != nil {
-		t.Fatalf("decode superseded courtesy read: %v", err)
+		t.Fatalf("decode context after a newer child event: %v", err)
 	}
 	if len(supersededPayload.PendingAgentMail) != 0 {
-		t.Fatalf("superseded courtesy read = %#v; want no body", supersededPayload.PendingAgentMail)
+		t.Fatalf("pending committed completion = %#v; want none", supersededPayload.PendingAgentMail)
 	}
 	var receiptCount int
 	if err := admin.QueryRowContext(context.Background(),
@@ -209,10 +221,10 @@ func TestPostgreSQLBridgeAPIStoreFilteredCompletionMailRefusesSupersededCourtesy
 		mainID,
 		delivery,
 	).Scan(&receiptCount); err != nil {
-		t.Fatalf("count courtesy-read receipts: %v", err)
+		t.Fatalf("count received completion events: %v", err)
 	}
 	if receiptCount != 1 {
-		t.Fatalf("courtesy-read receipts = %d; want original receipt only", receiptCount)
+		t.Fatalf("received completion events = %d; want original receipt only", receiptCount)
 	}
 
 	const owedDelivery = "delivery_bridge_completion_currency_owed"
@@ -228,9 +240,8 @@ func TestPostgreSQLBridgeAPIStoreFilteredCompletionMailRefusesSupersededCourtesy
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_currency_after_owed", 5,
 		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`)
 	owed, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_bridge_completion_currency_owed",
-		AgentMailSourceThreadId: childID,
+		Scope:          scope,
+		RuntimeInputId: "rin_bridge_completion_currency_owed",
 	})
 	if err != nil {
 		t.Fatalf("load owed completion after newer opener: %v", err)
@@ -244,7 +255,7 @@ func TestPostgreSQLBridgeAPIStoreFilteredCompletionMailRefusesSupersededCourtesy
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLetsPullFilterBypassWindow(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreLoadContextBoundsCompletionMailAcrossColdPasses(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_completion_window"
@@ -254,6 +265,8 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_completion_window")
+	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	for index := 1; index <= 6; index++ {
 		childID := "thr_bridge_completion_window_child_" + strconv.Itoa(index)
 		seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
@@ -269,6 +282,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-window-key-32b")
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 
 	unfiltered, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
@@ -286,6 +300,14 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 		t.Fatalf("unfiltered pending mail = %d; want %d", len(unfilteredPayload.PendingAgentMail), MailFetchMaxEnvelopes)
 	}
 	for _, mail := range unfilteredPayload.PendingAgentMail {
+		resolved, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
+			Scope:         scope,
+			ChildThreadId: mail.SourceThreadID,
+			DeliveryId:    mail.DeliveryID,
+		})
+		if err != nil {
+			t.Fatalf("resolve bounded completion %s: %v", mail.DeliveryID, err)
+		}
 		if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
 			t,
 			admin,
@@ -294,7 +316,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 			mail.DeliveryID,
 			mail.SourceThreadID,
 			mail.SourceToolUseEventID,
-			string(mail.Message),
+			resolved.GetMessageJson(),
 		)); err != nil {
 			t.Fatalf("commit bounded completion receipt %s: %v", mail.DeliveryID, err)
 		}
@@ -325,96 +347,36 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 		"agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, "delivery_bridge_completion_window_7", targetChildID, mainID, "", "sevt_bridge_completion_window_7", secondTargetMessageJSON))
 	filtered, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_bridge_completion_window_filtered",
-		AgentMailSourceThreadId: targetChildID,
+		Scope:          scope,
+		RuntimeInputId: "rin_bridge_completion_window_after_append",
 	})
 	if err != nil {
-		t.Fatalf("LoadContext filtered completion window: %v", err)
+		t.Fatalf("LoadContext completion window after append: %v", err)
 	}
 	var filteredPayload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(filtered.GetContextJson()), &filteredPayload); err != nil {
-		t.Fatalf("decode filtered completion window: %v", err)
+		t.Fatalf("decode completion window after append: %v", err)
 	}
-	if len(filteredPayload.PendingAgentMail) != 1 ||
-		filteredPayload.PendingAgentMail[0].SourceThreadID != targetChildID ||
-		filteredPayload.PendingAgentMail[0].DeliveryID != "delivery_bridge_completion_window_6" {
-		t.Fatalf("filtered pending mail = %#v; want oldest unread delivery from the selected child", filteredPayload.PendingAgentMail)
+	if len(filteredPayload.PendingAgentMail) != 3 ||
+		filteredPayload.PendingAgentMail[0].DeliveryID != "delivery_bridge_completion_window_5" ||
+		filteredPayload.PendingAgentMail[1].DeliveryID != "delivery_bridge_completion_window_6" ||
+		filteredPayload.PendingAgentMail[2].DeliveryID != "delivery_bridge_completion_window_7" {
+		t.Fatalf("pending mail after append = %#v; want remaining envelopes in sent order", filteredPayload.PendingAgentMail)
 	}
 
 	refiltered, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_bridge_completion_window_filtered",
-		AgentMailSourceThreadId: "thr_bridge_completion_window_child_5",
+		Scope:          scope,
+		RuntimeInputId: "rin_bridge_completion_window_replay",
 	})
 	if err != nil {
-		t.Fatalf("LoadContext fresh alternate filter: %v", err)
+		t.Fatalf("LoadContext replayed completion window: %v", err)
 	}
 	var refilteredPayload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(refiltered.GetContextJson()), &refilteredPayload); err != nil {
-		t.Fatalf("decode alternate filtered completion window: %v", err)
+		t.Fatalf("decode replayed completion window: %v", err)
 	}
-	if len(refilteredPayload.PendingAgentMail) != 1 ||
-		refilteredPayload.PendingAgentMail[0].SourceThreadID != "thr_bridge_completion_window_child_5" {
-		t.Fatalf("alternate filtered pending mail = %#v; want fresh selected-child snapshot", refilteredPayload.PendingAgentMail)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreLoadContextCompletionMailUsesBodyBudgetWithOneEnvelopeGuarantee(t *testing.T) {
-	tests := []struct {
-		name      string
-		bodyBytes []int
-		wantCount int
-	}{
-		{name: "second envelope crosses aggregate", bodyBytes: []int{3 * 1024 * 1024, 3 * 1024 * 1024}, wantCount: 1},
-		{name: "single over cap envelope travels alone", bodyBytes: []int{MailFetchMaxBodyBytes + 1, 8}, wantCount: 1},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			suffix := strings.ReplaceAll(test.name, " ", "_")
-			sessionID := "sesn_bridge_completion_bytes_" + suffix
-			mainID := "thr_bridge_completion_bytes_main_" + suffix
-			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_completion_bytes_"+suffix, 1, "pod_bridge_completion_bytes_"+suffix)
-			firstMessageJSON := ""
-			for index, bodyBytes := range test.bodyBytes {
-				childID := "thr_bridge_completion_bytes_child_" + suffix + "_" + strconv.Itoa(index)
-				seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-				messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_completion_bytes_"+suffix+"_"+strconv.Itoa(index), strings.Repeat("x", bodyBytes))
-				if index == 0 {
-					firstMessageJSON = messageJSON
-				}
-				seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_bytes_"+suffix+"_"+strconv.Itoa(index), int64(index+1),
-					"agent.thread_message_sent",
-					bridgeInterAgentSentEventJSON(t, "delivery_bridge_completion_bytes_"+suffix+"_"+strconv.Itoa(index), childID, mainID, "", "sevt_bridge_completion_bytes_"+suffix+"_"+strconv.Itoa(index), messageJSON))
-			}
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-bytes-key-32byt")
-			response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-				Scope:          bridgeAPIScope(sessionID, mainID, "bind_bridge_completion_bytes_"+suffix, 1, "pod_bridge_completion_bytes_"+suffix),
-				RuntimeInputId: "rin_bridge_completion_bytes_" + suffix,
-			})
-			if err != nil {
-				t.Fatalf("LoadContext completion byte bound: %v", err)
-			}
-			var payload bridgeLoadContextPayload
-			if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
-				t.Fatalf("decode completion byte bound: %v", err)
-			}
-			if len(payload.PendingAgentMail) != test.wantCount {
-				t.Fatalf("bounded pending mail = %d; want %d", len(payload.PendingAgentMail), test.wantCount)
-			}
-			if test.name == "single over cap envelope travels alone" {
-				wantDeliveryID := "delivery_bridge_completion_bytes_" + suffix + "_0"
-				if got := payload.PendingAgentMail[0].DeliveryID; got != wantDeliveryID {
-					t.Fatalf("bounded pending mail delivery id = %q; want oversized first row %q", got, wantDeliveryID)
-				}
-				if got := len(payload.PendingAgentMail[0].Message); got != len(firstMessageJSON) {
-					t.Fatalf("bounded pending mail message length = %d; want oversized first row length %d", got, len(firstMessageJSON))
-				}
-			}
-		})
+	if !reflect.DeepEqual(refilteredPayload.PendingAgentMail, filteredPayload.PendingAgentMail) {
+		t.Fatalf("replayed pending mail = %#v; want stable %#v", refilteredPayload.PendingAgentMail, filteredPayload.PendingAgentMail)
 	}
 }
 

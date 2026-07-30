@@ -316,7 +316,7 @@ thread sees tool use/result; child work stays child-thread-local.
   `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
 - Lifecycle: `spawn_agent` prepares a durable child row and fork seed before the
   first message; `send_message` resolves the child by `task_name`, delivering
-  in-process when the child is co-resident and through Bridge when cold;
+  every instruction through the stored envelope and durable Runtime input rail;
   `wait_agent`, `interrupt_agent`, `close_agent`, `resume_agent`, and
   `list_agents` operate over durable `session_threads`.
 
@@ -324,16 +324,16 @@ Invariants a replacement must preserve:
 
 - Child durable thread and fork seed exist before the initial message; a crash
   after `CreateChildThread` ACK reuses the same child and seed.
-- Inter-agent delivery is exactly-once by a deterministic `delivery_id`, ordered
-  parent-sent → enqueue → child-received, and repaired by `delivery_id` on the
-  hot path and inside pod-loss repair on the cold path.
+- Inter-agent delivery is exactly-once by `delivery_id`, ordered
+  sent envelope → received source/inbox → Runtime command → stamped input
+  receipt. Inbox repair recreates only the queue wake and reuses that identity.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
-- Completion return rides the durable wake/receipt rail: the child settlement
-  writes completion mail plus a bare-poke wake job; the parent's `CommitInputs`
-  writes `agent.thread_message_received` (replay-deduped by `delivery_id`); a
-  `wait_agent` pull carries a settled child's outcome and writes the receipt in
-  the same step so the push copy dedups away.
+- Completion return rides the same durable wake/receipt rail: the child
+  settlement writes one sent envelope and wake, admission creates or reuses the
+  received source and inbox, and the parent's `CommitInputs` projects it once.
+  `wait_agent` returns the exact stored envelope immediately while ensuring the
+  same delivery remains recoverable for the parent's next legal run.
 - `close_agent` freezes the complete descendant subtree, closes its
   non-terminal rows, preserves `failed` and `terminated` outcomes, and only
   then releases resident hot state. `resume_agent` reactivates only

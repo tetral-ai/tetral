@@ -7,18 +7,21 @@
  * ownership to SessionManager before control operations that require resident state. It exposes active-run
  * shutdown and scope release as separate operations that the process composition root orders.
  */
+import { status } from "@grpc/grpc-js";
+import type { ServiceError } from "@grpc/grpc-js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import * as AgentLoop from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
 import * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host/session-run-host.js";
 import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/session/session-state.js";
-import type { RuntimeLoadedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
+import { runtimeAgentMailText, runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
 /**
  * Groups the promise-based Runtime Core host surfaces and the two operations that end their shared
@@ -88,6 +91,29 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       ? {
           loadThreadContext: async (command: RuntimeThreadControlState): Promise<RuntimeThreadPreloadState> => {
             const context = await options.contextLoader.loadThreadContext!(command);
+            const pendingAgentMail: Array<Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }>> = [];
+            if ((context.pendingAgentMail?.length ?? 0) > 0 && context.thread === undefined) {
+              throw new Error("pending agent mail requires durable thread lineage");
+            }
+            for (const descriptor of context.pendingAgentMail ?? []) {
+              if (options.contextLoader.resolveAgentMail === undefined) {
+                throw new Error("agent mail resolver is unavailable");
+              }
+              // Resolver authority is parent-scoped even when the cold target is the child.
+              const currentIsChild = context.thread?.parentThreadId === descriptor.sourceThreadId;
+              const resolverCommand = currentIsChild
+                ? { ...command, sessionThreadId: descriptor.sourceThreadId }
+                : command;
+              const childThreadId = currentIsChild
+                ? command.sessionThreadId
+                : descriptor.sourceThreadId;
+              const resolved = await options.contextLoader.resolveAgentMail(
+                resolverCommand,
+                childThreadId,
+                descriptor.deliveryId,
+              );
+              pendingAgentMail.push(acceptedResolvedAgentMail(command, resolved, context.thread));
+            }
             return {
               ...command,
               ...(context.thread !== undefined ? { thread: context.thread } : {}),
@@ -100,7 +126,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               ...(context.pendingToolUses !== undefined ? { pendingToolUses: context.pendingToolUses } : {}),
               ...(context.backgroundTools !== undefined ? { backgroundTools: context.backgroundTools } : {}),
               ...(context.pendingAttachments !== undefined ? { pendingAttachments: context.pendingAttachments } : {}),
-              pendingAgentMail: (context.pendingAgentMail ?? []).map((mail) => acceptedAgentMail(command, mail, context.thread)),
+              pendingAgentMail,
               coldCoverage: context.coldCoverage,
             };
           },
@@ -182,6 +208,24 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         host.handleWaitThread(command, timeoutMs),
         abortSignal === undefined ? undefined : { signal: abortSignal },
       ),
+      pullAgentMail: async (command, sourceThreadId) => {
+        if (options.contextLoader.resolveAgentMail === undefined) {
+          throw new Error("agent mail resolver is unavailable");
+        }
+        let resolved: RuntimeResolvedAgentMail;
+        try {
+          resolved = await options.contextLoader.resolveAgentMail(command, sourceThreadId);
+        } catch (error) {
+          if (isGrpcStatus(error, status.NOT_FOUND)) {
+            return undefined;
+          }
+          throw error;
+        }
+        return {
+          deliveryId: resolved.deliveryId,
+          finalMessage: runtimeAgentMailText(runtimeMessageFromPublicAgentMail(resolved.publicMessageJson)),
+        };
+      },
       waitReviewerExecution: async (command, token, timeoutMs, abortSignal) => await Effect.runPromise(
         host.handleWaitReviewerExecution(command, token, timeoutMs),
         abortSignal === undefined ? undefined : { signal: abortSignal },
@@ -225,18 +269,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
   };
 }
 
-function acceptedAgentMail(
+function acceptedResolvedAgentMail(
   command: RuntimeThreadControlState,
-  mail: RuntimeLoadedAgentMail,
+  mail: RuntimeResolvedAgentMail,
   thread: RuntimeThreadPreloadState["thread"],
 ): Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }> {
   return {
     ...command,
     requestId: `agent_mail:${mail.deliveryId}`,
     runtimeInputId: `agent_mail:${mail.deliveryId}`,
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
+    eventIds: [mail.receivedEventId],
+    sequenceFrom: mail.receivedSequence,
+    sequenceTo: mail.receivedSequence,
     kind: "inter_agent_message",
     deliveryId: mail.deliveryId,
     sourceThreadId: mail.sourceThreadId,
@@ -252,8 +296,11 @@ function acceptedAgentMailCommand(
   return {
     ...command,
     kind: "inter_agent_message",
-    presentation: "push",
   };
+}
+
+function isGrpcStatus(error: unknown, code: status): boolean {
+  return typeof error === "object" && error !== null && (error as Partial<ServiceError>).code === code;
 }
 
 function runtimeAcceptedInputFromCommand(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]): RuntimeAcceptedInputState {

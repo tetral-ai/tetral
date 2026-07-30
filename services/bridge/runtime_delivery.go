@@ -419,7 +419,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 			plan = RuntimeCommandPlan{StaleAccepted: true}
 			return nil
 		}
-		if job.Kind == queue.KindRuntimeInput {
+		if job.Kind == queue.KindRuntimeInput && job.InputKind != "agent_mail" {
 			effectiveJob, err := effectiveRuntimeInputJobTx(ctx, tx, job)
 			if err != nil {
 				return err
@@ -664,9 +664,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	if job.Kind != queue.KindRuntimeInput {
 		return nil
 	}
-	if job.InputKind == "agent_mail" {
-		return nil
-	}
 	if s == nil || s.Client == nil {
 		return runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
@@ -863,11 +860,19 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeDelivery(ctx context.Con
 			if err != nil {
 				return err
 			}
+			replayed, found, err := replayAgentMailDeliveryFinalizationTx(ctx, tx, job)
+			if err != nil {
+				return err
+			}
+			if found {
+				finalized = replayed
+				return nil
+			}
 			if stale {
 				finalized = RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}
 				return nil
 			}
-			if err := insertRuntimeDeliveryExhaustionEventTx(ctx, tx, job, now); err != nil {
+			if err := settleAgentMailDeliveryExhaustionTx(ctx, tx, job, now); err != nil {
 				return err
 			}
 			finalized = runtimeDeliveryExhaustedResult()
@@ -1058,7 +1063,8 @@ func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail runtime input id is invalid", retryable: false}
 	}
 	var sent bool
-	var received bool
+	var receivedProcessed bool
+	var inboxCommitted bool
 	if err := tx.QueryRow(ctx,
 		`SELECT
 			EXISTS (
@@ -1073,18 +1079,75 @@ func replayAgentMailDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx
 				   AND session_thread_id=$4
 				   AND type='agent.thread_message_received'
 				   AND payload_json::jsonb ->> 'delivery_id'=$3
+				   AND processed_at IS NOT NULL
+			),
+			EXISTS (
+				SELECT 1 FROM session_runtime_inbox
+				 WHERE workspace_id=$1 AND session_id=$2
+				   AND session_thread_id=$4
+				   AND runtime_input_id='agent_mail:' || $3
+				   AND status='committed'
 			)`,
 		job.WorkspaceID,
 		job.SessionID,
 		deliveryID,
 		job.SessionThreadID,
-	).Scan(&sent, &received); err != nil {
+	).Scan(&sent, &receivedProcessed, &inboxCommitted); err != nil {
 		return RuntimeDeliveryResult{}, false, err
 	}
-	if received || !sent {
+	if !sent {
+		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail sent envelope is missing", retryable: false}
+	}
+	if receivedProcessed || inboxCommitted {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
 	}
 	return RuntimeDeliveryResult{}, false, nil
+}
+
+func settleAgentMailDeliveryExhaustionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	now time.Time,
+) error {
+	if err := insertRuntimeDeliveryExhaustionEventTx(ctx, tx, job, now); err != nil {
+		return err
+	}
+	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
+	if deliveryID == "" || deliveryID == job.RuntimeInputID {
+		return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail runtime input id is invalid", retryable: false}
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE session_events
+		    SET processed_at = COALESCE(processed_at, $5),
+		        updated_at = $5
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND type = 'agent.thread_message_received'
+		    AND payload_json::jsonb ->> 'delivery_id' = $4`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.SessionThreadID,
+		deliveryID,
+		now,
+	); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx,
+		`UPDATE session_runtime_inbox
+		    SET status = 'dead_lettered',
+		        updated_at = $4
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND runtime_input_id = $3
+		    AND status IN ('delivering', 'accepted')`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.RuntimeInputID,
+		now,
+	)
+	return err
 }
 
 func settleSealedAgentMailTx(
@@ -1130,14 +1193,14 @@ func settleSealedAgentMailTx(
 				retryable: false,
 			}
 		}
-		return nil
+		return cancelSealedAgentMailInboxTx(ctx, tx, job, now)
 	}
 	receipt := sealedAgentMailReceipt(job, readiness.PreparationAttemptID, sourceID, declarationDigest)
 	receiptJSON, err := marshalDeclarationReceipt(receipt)
 	if err != nil {
 		return err
 	}
-	return insertBridgeDeclarationOperationTx(
+	if err := insertBridgeDeclarationOperationTx(
 		ctx,
 		tx,
 		scope,
@@ -1147,7 +1210,39 @@ func settleSealedAgentMailTx(
 		declarationDigest,
 		receiptJSON,
 		now,
+	); err != nil {
+		return err
+	}
+	return cancelSealedAgentMailInboxTx(ctx, tx, job, now)
+}
+
+func cancelSealedAgentMailInboxTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE session_runtime_inbox
+		    SET status = 'cancelled',
+		        updated_at = $5
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND runtime_input_id = $3
+		    AND input_kind = 'agent_mail'
+		    AND status IN ('delivering', 'accepted')
+		    AND EXISTS (
+		        SELECT 1
+		          FROM jsonb_array_elements_text(session_runtime_inbox.event_ids_json::jsonb) source_ref(event_id)
+		          JOIN session_events source
+		            ON source.workspace_id = session_runtime_inbox.workspace_id
+		           AND source.session_id = session_runtime_inbox.session_id
+		           AND source.session_thread_id = session_runtime_inbox.session_thread_id
+		           AND source.event_id = source_ref.event_id
+		         WHERE source.preparation_attempt_id = $4
+		    )`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.RuntimeInputID,
+		job.PreparationAttemptID,
+		now,
 	)
+	return err
 }
 
 func replaySealedAgentMailTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
@@ -2255,6 +2350,56 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 	if err != nil {
 		return RuntimeCommandPlan{}, err
 	}
+	deliveryID := strings.TrimPrefix(job.RuntimeInputID, "agent_mail:")
+	if deliveryID == "" || deliveryID == job.RuntimeInputID {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail runtime input id is invalid", retryable: false}
+	}
+	envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID, deliveryID)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if envelope.TargetThreadID != job.SessionThreadID {
+		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "agent mail queue target does not match the stored envelope", retryable: false}
+	}
+	admitted, err := admitAgentMailDeliveryTx(
+		ctx,
+		tx,
+		runtimeScopeForDeliveryJob(job, binding),
+		envelope,
+		job.PreparationAttemptID,
+		binding,
+		now,
+	)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if admitted.Terminal {
+		return RuntimeCommandPlan{StaleAccepted: true}, nil
+	}
+	orderedJob := job
+	orderedJob.EventIDs = []string{admitted.ReceivedEventID}
+	orderedJob.SequenceFrom = admitted.ReceivedSequence
+	orderedJob.SequenceTo = admitted.ReceivedSequence
+	repaired, err := requeueEarlierPendingRuntimeInboxTx(ctx, tx, orderedJob, now)
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
+	if repaired {
+		return RuntimeCommandPlan{}, runtimePreparationRequeuedError{err: runtimeDeliveryPrepareError{
+			kind:      "runtime_inbox_repair_pending",
+			message:   "earlier runtime input is pending repair and was requeued before current delivery",
+			retryable: true,
+		}}
+	}
+	payloadJSON, err := marshalBridgeJSON(map[string]any{
+		"delivery_id":              envelope.DeliveryID,
+		"source_thread_id":         envelope.SourceThreadID,
+		"source_tool_use_event_id": envelope.SourceToolUseEventID,
+		"message":                  envelope.MessageJSON,
+	})
+	if err != nil {
+		return RuntimeCommandPlan{}, err
+	}
 	return RuntimeCommandPlan{
 		Target: RuntimePodTarget{
 			Namespace: binding.Namespace,
@@ -2275,8 +2420,11 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 			TargetPodUid:       binding.PodUID,
 			TargetPodIp:        binding.PodIP,
 			RuntimeInputId:     job.RuntimeInputID,
+			EventIds:           []string{admitted.ReceivedEventID},
+			SequenceFrom:       admitted.ReceivedSequence,
+			SequenceTo:         admitted.ReceivedSequence,
 			CommandKind:        job.CommandKind,
-			PayloadJson:        "{}",
+			PayloadJson:        payloadJSON,
 		},
 	}, nil
 }
@@ -3235,6 +3383,28 @@ func requeueEarlierPendingRuntimeInboxTx(ctx context.Context, tx *dbconnect.Tx, 
 	if settled {
 		return true, nil
 	}
+	if candidate.InputKind == "agent_mail" {
+		if !candidate.PreparationAttemptID.Valid || candidate.PreparationAttemptID.String == "" {
+			return false, runtimeDeliveryPrepareError{kind: "runtime_inbox_repair_invalid", message: "agent mail inbox repair has no birth preparation attempt", retryable: false}
+		}
+		deliveryID := strings.TrimPrefix(candidate.RuntimeInputID, "agent_mail:")
+		if deliveryID == "" || deliveryID == candidate.RuntimeInputID {
+			return false, runtimeDeliveryPrepareError{kind: "runtime_inbox_repair_invalid", message: "agent mail inbox repair has an invalid runtime input id", retryable: false}
+		}
+		if _, err := enqueueAgentMailWakeTx(
+			ctx,
+			tx,
+			job.WorkspaceID,
+			candidate.SessionID,
+			candidate.SessionThreadID,
+			deliveryID,
+			candidate.PreparationAttemptID.String,
+			now,
+		); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	payloadJSON, err := runtimeInputRepairPayloadJSON(job.WorkspaceID, job.SessionID, candidate)
 	if err != nil {
 		return false, err
@@ -3284,6 +3454,32 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 			}
 			if settled {
 				repaired++
+				continue
+			}
+			if candidate.InputKind == "agent_mail" {
+				if !candidate.PreparationAttemptID.Valid || candidate.PreparationAttemptID.String == "" {
+					return runtimeDeliveryPrepareError{kind: "runtime_inbox_repair_invalid", message: "agent mail inbox repair has no birth preparation attempt", retryable: false}
+				}
+				deliveryID := strings.TrimPrefix(candidate.RuntimeInputID, "agent_mail:")
+				if deliveryID == "" || deliveryID == candidate.RuntimeInputID {
+					return runtimeDeliveryPrepareError{kind: "runtime_inbox_repair_invalid", message: "agent mail inbox repair has an invalid runtime input id", retryable: false}
+				}
+				inserted, err := enqueueAgentMailWakeTx(
+					ctx,
+					tx,
+					workspaceID,
+					candidate.SessionID,
+					candidate.SessionThreadID,
+					deliveryID,
+					candidate.PreparationAttemptID.String,
+					now,
+				)
+				if err != nil {
+					return err
+				}
+				if inserted {
+					repaired++
+				}
 				continue
 			}
 			payloadJSON, err := runtimeInputRepairPayloadJSON(workspaceID, candidate.SessionID, candidate)
@@ -3443,10 +3639,26 @@ func pendingRuntimeInboxRepairCandidatesTx(ctx context.Context, tx *dbconnect.Tx
 		               AND se.event_id = event_id.value
 		        ) AS preparation_attempt_id
 		   FROM session_runtime_inbox inbox
-		  WHERE inbox.workspace_id = $1
-		    AND inbox.status IN ('delivering', 'accepted')
-		    AND inbox.input_kind <> 'task_notification'
-		    AND inbox.sequence_from IS NOT NULL
+			  WHERE inbox.workspace_id = $1
+			    AND inbox.status IN ('delivering', 'accepted')
+			    AND inbox.input_kind <> 'task_notification'
+			    AND (
+			        inbox.input_kind <> 'agent_mail'
+			        OR EXISTS (
+			            SELECT 1
+			              FROM sessions session_row
+			              JOIN session_threads target
+			                ON target.workspace_id = session_row.workspace_id
+			               AND target.session_id = session_row.id
+			               AND target.id = inbox.session_thread_id
+			               AND target.status NOT IN ('closed_for_runtime', 'terminated')
+			             WHERE session_row.workspace_id = inbox.workspace_id
+			               AND session_row.id = inbox.session_id
+			               AND session_row.status <> 'terminated'
+			               AND session_row.lifecycle_state <> 'deleted'
+			        )
+			    )
+			    AND inbox.sequence_from IS NOT NULL
 		    AND EXISTS (
 		        SELECT 1
 		          FROM jsonb_array_elements_text(inbox.event_ids_json::jsonb) event_id(value)

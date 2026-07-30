@@ -118,7 +118,7 @@ describe("SessionState", () => {
     expect(state.beginPendingAttachmentRide()).toEqual([nextRide]);
   });
 
-  test("agent-mail delivery identity deduplicates hot enqueue and cold rescan after ACK", () => {
+  test("agent-mail delivery identity deduplicates hot enqueue and cold resolution after ACK", () => {
     const state = new SessionState("sesn_agent_mail_dedup");
     const message = RuntimeMessageSchema.parse({
       id: "msg_agent_mail",
@@ -152,9 +152,9 @@ describe("SessionState", () => {
       bindingGeneration: 1,
       targetPodUid: "pod_agent_mail",
       runtimeInputId: "agent_mail:delivery_agent_mail",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
+      eventIds: ["sevt_agent_mail_received"],
+      sequenceFrom: 2,
+      sequenceTo: 2,
       kind: "inter_agent_message",
       deliveryId: "delivery_agent_mail",
       sourceThreadId: "thrd_agent_mail_child",
@@ -169,7 +169,7 @@ describe("SessionState", () => {
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
   });
 
-  test("interrupt fence preserves queued completion mail regardless of its synthetic sequence", () => {
+  test("interrupt fence preserves queued stamped completion mail", () => {
     const state = new SessionState("sesn_agent_mail_interrupt_fence");
     const message = RuntimeMessageSchema.parse({
       id: "msg_agent_mail_interrupt_fence",
@@ -203,9 +203,9 @@ describe("SessionState", () => {
       bindingGeneration: 1,
       targetPodUid: "pod_agent_mail_interrupt_fence",
       runtimeInputId: "agent_mail:delivery_interrupt_fence",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
+      eventIds: ["sevt_agent_mail_interrupt_received"],
+      sequenceFrom: 2,
+      sequenceTo: 2,
       kind: "inter_agent_message",
       deliveryId: "delivery_interrupt_fence",
       sourceThreadId: "thrd_agent_mail_child",

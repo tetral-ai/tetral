@@ -41,6 +41,8 @@ import type {
   MarkChildThreadClosedResponse,
   RefreshRuntimeBindingTokenRequest,
   RefreshRuntimeBindingTokenResponse,
+  ResolveInterAgentDeliveryRequest,
+  ResolveInterAgentDeliveryResponse,
   RuntimeScope,
   WriteEventRequest,
   WriteEventResponse,
@@ -48,7 +50,7 @@ import type {
   WriteRequestEndResponse,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { AcceptedInputCommitResult, ContextLoader, RuntimeLoadedAgentMail, RuntimeLoadedPendingToolUse } from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type { AcceptedInputCommitResult, ContextLoader, RuntimeLoadedAgentMail, RuntimeLoadedPendingToolUse, RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type {
   RuntimeAcceptedInputState,
   RuntimeAcceptedThreadMetadataState,
@@ -68,10 +70,7 @@ import {
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import {
-  MailFetchMaxBodyBytes,
-  MailFetchMaxEnvelopes,
-} from "@tetral/agent-runtime-protocol/src/bounds.js";
+import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
   RuntimeMessageDraft as CoreRuntimeMessageDraft,
   RuntimeInternalToolRepairCommit,
@@ -85,6 +84,7 @@ import type {
   SessionEventWriterRuntimeTerminationEnvelope,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
+  acceptedInputDeclarationKind,
   applyTaskNotificationReceipt,
   taskNotificationSourceId,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
@@ -114,6 +114,7 @@ import {
   writeRequestEndDeclarationDigest,
 } from "./runtime-declaration-wire.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
+import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
 interface BridgeDeclarationEvidenceOptions {
   readonly logger?: RuntimePodLogger | undefined;
@@ -736,7 +737,6 @@ export class BridgeAPIContextLoader implements ContextLoader {
   /** Loads and validates the complete cold-start projection for the supplied thread command. */
   async loadThreadContext(
     command: RuntimeThreadControlState,
-    options?: { readonly agentMailSourceThreadId?: string | undefined },
   ): Promise<{
     readonly messages: readonly RuntimeMessage[];
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
@@ -751,7 +751,73 @@ export class BridgeAPIContextLoader implements ContextLoader {
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
     readonly coldCoverage: RuntimeColdCoverage;
   }> {
-    return await this.loadContext(command, options);
+    return await this.loadContext(command);
+  }
+
+  /** Resolves and durably admits one stored inter-agent envelope. */
+  async resolveAgentMail(
+    command: RuntimeThreadControlState,
+    childThreadId: string,
+    deliveryId?: string,
+  ): Promise<RuntimeResolvedAgentMail> {
+    const metadata = await this.metadata();
+    const response = await resolveInterAgentDelivery(this.client, {
+      scope: bridgeScope(command),
+      childThreadId,
+      deliveryId: deliveryId ?? "",
+    }, metadata);
+    if (
+      !bridgeAckAccepted(response.ack?.status) ||
+      response.deliveryId.length === 0 ||
+      response.sourceThreadId.length === 0 ||
+      response.targetThreadId.length === 0 ||
+      response.sourceToolUseEventId.length === 0 ||
+      response.receivedEventId.length === 0 ||
+      response.receivedSequence <= 0 ||
+      response.messageJson.length === 0
+    ) {
+      throw normalizeContextLoaderError({
+        code: "schema_mismatch",
+        sessionId: command.sessionId,
+        reason: response.ack?.errorCode || "agent mail resolver returned an invalid envelope",
+      });
+    }
+    if (
+      !(
+        response.sourceThreadId === command.sessionThreadId &&
+        response.targetThreadId === childThreadId
+      ) &&
+      !(
+        response.sourceThreadId === childThreadId &&
+        response.targetThreadId === command.sessionThreadId
+      )
+    ) {
+      throw normalizeContextLoaderError({
+        code: "schema_mismatch",
+        sessionId: command.sessionId,
+        reason: "agent mail resolver returned an invalid thread relationship",
+      });
+    }
+    let message: RuntimeMessage;
+    try {
+      message = runtimeMessageFromPublicAgentMail(response.messageJson);
+    } catch {
+      throw normalizeContextLoaderError({
+        code: "schema_mismatch",
+        sessionId: command.sessionId,
+        reason: "agent mail resolver returned an invalid public message",
+      });
+    }
+    return {
+      deliveryId: response.deliveryId,
+      sourceThreadId: response.sourceThreadId,
+      targetThreadId: response.targetThreadId,
+      sourceToolUseEventId: response.sourceToolUseEventId,
+      receivedEventId: response.receivedEventId,
+      receivedSequence: response.receivedSequence,
+      message,
+      publicMessageJson: response.messageJson,
+    };
   }
 
   /**
@@ -765,6 +831,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     },
   ): Promise<AcceptedInputCommitResult> {
     const drafts = options?.drafts ?? [];
+    const sourceKind = acceptedInputDeclarationKind(input);
     const metadata = await this.metadata();
     const scope = bridgeScope(input);
     const request = {
@@ -773,7 +840,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
       eventIds: [...input.eventIds],
       sequenceFrom: input.sequenceFrom,
       sequenceTo: input.sequenceTo,
-      inputKind: input.kind,
+      inputKind: sourceKind,
       drafts: drafts.map(runtimeMessageDraftForBridge),
       pendingToolCancellations: [],
     };
@@ -810,7 +877,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
         sessionId: input.sessionId,
         sessionThreadId: input.sessionThreadId,
         operation: "commit_inputs",
-        sourceKind: input.kind,
+        sourceKind,
         sourceId: input.runtimeInputId,
         declarationDigest,
         bindingId: input.bindingId,
@@ -829,7 +896,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
         sessionId: input.sessionId,
         sessionThreadId: input.sessionThreadId,
         operation: "commit_inputs",
-        sourceKind: input.kind,
+        sourceKind,
         sourceId: input.runtimeInputId,
         declarationDigest,
         bindingId: input.bindingId,
@@ -861,7 +928,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
         sessionId: input.sessionId,
         sessionThreadId: input.sessionThreadId,
         operation: "commit_inputs",
-        sourceKind: input.kind,
+        sourceKind,
         sourceId: input.runtimeInputId,
         declarationDigest,
         bindingId: input.bindingId,
@@ -886,7 +953,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
         sessionId: input.sessionId,
         sessionThreadId: input.sessionThreadId,
         operation: "commit_inputs",
-        sourceKind: input.kind,
+        sourceKind,
         sourceId: input.runtimeInputId,
         declarationDigest,
         bindingId: declaration.observedBindingId,
@@ -905,7 +972,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
       sessionId: input.sessionId,
       sessionThreadId: input.sessionThreadId,
       operation: "commit_inputs",
-      sourceKind: input.kind,
+      sourceKind,
       sourceId: input.runtimeInputId,
       declarationDigest,
       bindingId: declaration.observedBindingId,
@@ -923,7 +990,6 @@ export class BridgeAPIContextLoader implements ContextLoader {
 
   private async loadContext(
     input: RuntimeThreadControlState,
-    options?: { readonly agentMailSourceThreadId?: string | undefined },
   ): Promise<{
     readonly messages: readonly RuntimeMessage[];
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
@@ -944,7 +1010,6 @@ export class BridgeAPIContextLoader implements ContextLoader {
       runtimeInputId: input.runtimeInputId,
       sequenceFrom: input.sequenceFrom,
       sequenceTo: input.sequenceTo,
-      agentMailSourceThreadId: options?.agentMailSourceThreadId ?? "",
     }, metadata);
     if (!bridgeAckAccepted(response.ack?.status)) {
       throw normalizeContextLoaderError({
@@ -953,11 +1018,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
         reason: response.ack?.errorCode || "load context rejected",
       });
     }
-    const parsed = parseContextPayload(
-      response.contextJson,
-      input,
-      options?.agentMailSourceThreadId !== undefined && options.agentMailSourceThreadId !== "",
-    );
+    const parsed = parseContextPayload(response.contextJson, input);
     return { ...parsed, runtimeBindingToken: response.runtimeBindingToken };
   }
 
@@ -1870,6 +1931,22 @@ function loadContext(
   });
 }
 
+function resolveInterAgentDelivery(
+  client: AgentRuntimeBridgeServiceClient,
+  request: ResolveInterAgentDeliveryRequest,
+  metadata: Metadata,
+): Promise<ResolveInterAgentDeliveryResponse> {
+  return new Promise((resolve, reject) => {
+    client.resolveInterAgentDelivery(request, metadata, (error: ServiceError | null, response: ResolveInterAgentDeliveryResponse) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
 function runtimeMessageDraftForBridge(draft: CoreRuntimeMessageDraft) {
   const {
     runtimeLocalId,
@@ -2435,7 +2512,7 @@ function internalToolRepairStoreFailure(
   };
 }
 
-function parseContextPayload(contextJson: string, input: RuntimeThreadControlState, agentMailPullFiltered = false): {
+function parseContextPayload(contextJson: string, input: RuntimeThreadControlState): {
   readonly messages: readonly RuntimeMessage[];
   readonly threadContextPrefix?: ThreadContextPrefix | undefined;
   readonly durableTurnId?: string | undefined;
@@ -2462,7 +2539,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
     const pendingToolUses = parsePendingToolUses(parsed.pendingToolUses);
     const backgroundTools = parseBackgroundTools(parsed.backgroundTools);
     const pendingAttachments = parsePendingAttachments(parsed.pendingAttachments);
-    const pendingAgentMail = parsePendingAgentMail(parsed.pendingAgentMail, agentMailPullFiltered);
+    const pendingAgentMail = parsePendingAgentMail(parsed.pendingAgentMail);
     const coldCoverage = parseColdCoverage(parsed.coldCoverage);
     return {
       messages,
@@ -2557,7 +2634,7 @@ function parseThreadMetadata(value: unknown): RuntimeAcceptedThreadMetadataState
   };
 }
 
-function parsePendingAgentMail(value: unknown, pullFiltered: boolean): readonly RuntimeLoadedAgentMail[] | undefined {
+function parsePendingAgentMail(value: unknown): readonly RuntimeLoadedAgentMail[] | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -2572,20 +2649,10 @@ function parsePendingAgentMail(value: unknown, pullFiltered: boolean): readonly 
       deliveryId: requiredStringField(item, "deliveryId"),
       sourceThreadId: requiredStringField(item, "sourceThreadId"),
       sourceToolUseEventId: requiredStringField(item, "sourceToolUseEventId"),
-      message: RuntimeMessageSchema.parse(item.message),
     };
   });
-  if (!pullFiltered) {
-    if (parsed.length > MailFetchMaxEnvelopes) {
-      throw new Error("load context pendingAgentMail exceeds the envelope bound");
-    }
-    const bodyBytes = parsed.reduce(
-      (total, mail) => total + new TextEncoder().encode(JSON.stringify(mail.message)).byteLength,
-      0,
-    );
-    if (parsed.length > 1 && bodyBytes > MailFetchMaxBodyBytes) {
-      throw new Error("load context pendingAgentMail exceeds the body-byte bound");
-    }
+  if (parsed.length > MailFetchMaxEnvelopes) {
+    throw new Error("load context pendingAgentMail exceeds the envelope bound");
   }
   return parsed;
 }

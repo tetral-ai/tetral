@@ -35,12 +35,11 @@ export const MaxSequenceValue = Number.MAX_SAFE_INTEGER;
 /** Maximum UTF-8 bytes accepted for one Runtime command payload JSON carrier. */
 export const MaxPayloadJsonBytes = 2 * 1024 * 1024;
 
-// Completion-mail context loads stay well below the transport ceiling so an
+// Completion-mail context loads expose only bounded durable descriptors so an
 // unreceipted backlog can drain incrementally.
 // UPDATE-WITH: services/bridge/completion_mail.go;
 //   integration/static/runtime_transport_bounds_test.go.
 export const MailFetchMaxEnvelopes = 4;
-export const MailFetchMaxBodyBytes = 4 * 1024 * 1024;
 
 /** The complete untrusted command envelope checked before Runtime dispatch. */
 export interface RuntimeInputCommandValidationInput {

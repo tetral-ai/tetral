@@ -23,7 +23,6 @@ import (
 
 const (
 	MailFetchMaxEnvelopes          = 4
-	MailFetchMaxBodyBytes          = 4 * 1024 * 1024
 	CompletionMailReconcilerMinAge = 300 * time.Second
 )
 
@@ -35,6 +34,25 @@ type pendingCompletionDelivery struct {
 	CreatedAt      time.Time
 }
 
+type storedAgentMailEnvelope struct {
+	SentEventID          string
+	SentSequence         int64
+	SentThreadID         string
+	DeliveryID           string
+	SourceThreadID       string
+	TargetThreadID       string
+	SourceToolUseEventID string
+	MessageJSON          json.RawMessage
+}
+
+type admittedAgentMailDelivery struct {
+	Envelope             storedAgentMailEnvelope
+	ReceivedEventID      string
+	ReceivedSequence     int64
+	PreparationAttemptID string
+	Terminal             bool
+}
+
 func completionDeliveryID(childThreadID string, runtimeWriteID string) string {
 	digest := sha256.Sum256([]byte(childThreadID + ":" + runtimeWriteID))
 	return "delivery_" + hex.EncodeToString(digest[:])[:32]
@@ -42,6 +60,494 @@ func completionDeliveryID(childThreadID string, runtimeWriteID string) string {
 
 func completionRuntimeInputID(deliveryID string) string {
 	return "agent_mail:" + deliveryID
+}
+
+func loadStoredAgentMailEnvelopeByDeliveryTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	deliveryID string,
+) (storedAgentMailEnvelope, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT event_id, sequence, session_thread_id, payload_json
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND type = 'agent.thread_message_sent'
+		    AND payload_json::jsonb ->> 'delivery_id' = $3
+		  ORDER BY sequence ASC, event_id ASC
+		  LIMIT 2
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		deliveryID,
+	)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	var envelope storedAgentMailEnvelope
+	var payloadJSON string
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return storedAgentMailEnvelope{}, err
+		}
+		return storedAgentMailEnvelope{}, status.Error(codes.NotFound, "agent mail envelope not found")
+	}
+	if err := rows.Scan(&envelope.SentEventID, &envelope.SentSequence, &envelope.SentThreadID, &payloadJSON); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	if rows.Next() {
+		return storedAgentMailEnvelope{}, status.Error(codes.AlreadyExists, "agent mail delivery id is not unique")
+	}
+	if err := rows.Err(); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	var payload struct {
+		DeliveryID           string          `json:"delivery_id"`
+		SourceThreadID       string          `json:"source_thread_id"`
+		TargetThreadID       string          `json:"target_thread_id"`
+		SourceToolUseEventID string          `json:"source_tool_use_event_id"`
+		Message              json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil ||
+		payload.DeliveryID == "" ||
+		payload.SourceThreadID == "" ||
+		payload.TargetThreadID == "" ||
+		payload.SourceToolUseEventID == "" ||
+		len(payload.Message) == 0 {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail envelope is malformed")
+	}
+	publicMessage, err := publicInterAgentMessageJSON(payload.Message)
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	envelope.DeliveryID = payload.DeliveryID
+	envelope.SourceThreadID = payload.SourceThreadID
+	envelope.TargetThreadID = payload.TargetThreadID
+	envelope.SourceToolUseEventID = payload.SourceToolUseEventID
+	envelope.MessageJSON = publicMessage
+	if envelope.SentThreadID != envelope.SourceThreadID {
+		return storedAgentMailEnvelope{}, status.Error(codes.FailedPrecondition, "agent mail sent event does not belong to its declared source")
+	}
+	if err := validateAgentMailEnvelopeRelationshipTx(ctx, tx, workspaceID, sessionID, envelope); err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+func validateAgentMailEnvelopeRelationshipTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	envelope storedAgentMailEnvelope,
+) error {
+	if envelope.SourceThreadID == envelope.TargetThreadID {
+		return status.Error(codes.FailedPrecondition, "agent mail source and target must differ")
+	}
+	var legal bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_threads child
+			 WHERE child.workspace_id = $1
+			   AND child.session_id = $2
+			   AND child.role = 'subagent'
+			   AND (
+			     (child.id = $3 AND child.parent_thread_id = $4)
+			     OR
+			     (child.id = $4 AND child.parent_thread_id = $3)
+			   )
+		)`,
+		workspaceID,
+		sessionID,
+		envelope.SourceThreadID,
+		envelope.TargetThreadID,
+	).Scan(&legal); err != nil {
+		return err
+	}
+	if !legal {
+		return status.Error(codes.FailedPrecondition, "agent mail envelope does not describe a parent-child delivery")
+	}
+	return nil
+}
+
+func loadOldestUncommittedCompletionEnvelopeTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	parentThreadID string,
+	childThreadID string,
+) (storedAgentMailEnvelope, error) {
+	var deliveryID string
+	err := tx.QueryRow(ctx,
+		`SELECT sent.payload_json::jsonb ->> 'delivery_id'
+		   FROM session_events sent
+		  WHERE sent.workspace_id = $1
+		    AND sent.session_id = $2
+		    AND sent.type = 'agent.thread_message_sent'
+		    AND sent.payload_json::jsonb ->> 'source_thread_id' = $3
+		    AND sent.payload_json::jsonb ->> 'target_thread_id' = $4
+		    AND EXISTS (
+		        SELECT 1
+		          FROM session_threads child
+		         WHERE child.workspace_id = sent.workspace_id
+		           AND child.session_id = sent.session_id
+		           AND child.id = $3
+		           AND child.parent_thread_id = $4
+		           AND child.role = 'subagent'
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events received
+		         WHERE received.workspace_id = sent.workspace_id
+		           AND received.session_id = sent.session_id
+		           AND received.session_thread_id = $4
+		           AND received.type = 'agent.thread_message_received'
+		           AND received.payload_json::jsonb ->> 'delivery_id' =
+		               sent.payload_json::jsonb ->> 'delivery_id'
+		           AND received.processed_at IS NOT NULL
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_runtime_inbox inbox
+		         WHERE inbox.workspace_id = sent.workspace_id
+		           AND inbox.session_id = sent.session_id
+		           AND inbox.session_thread_id = $4
+		           AND inbox.runtime_input_id =
+		               'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
+		           AND inbox.status = 'committed'
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events exhausted
+		         WHERE exhausted.workspace_id = sent.workspace_id
+		           AND exhausted.session_id = sent.session_id
+		           AND exhausted.event_id =
+		               'evt_runtime_exhausted_' || substr(encode(sha256(
+		                   convert_to(sent.workspace_id, 'UTF8') ||
+		                   decode('00', 'hex') ||
+		                   convert_to(sent.session_id, 'UTF8') ||
+		                   decode('00', 'hex') ||
+		                   convert_to(
+		                       'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
+		                       'UTF8'
+		                   ) ||
+		                   decode('00', 'hex') ||
+		                   convert_to('runtime_delivery_exhausted', 'UTF8')
+		               ), 'hex'), 1, 24)
+		           AND exhausted.type = 'session.error'
+		           AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
+		    )
+		  ORDER BY sent.sequence ASC, sent.event_id ASC
+		  LIMIT 1
+		  FOR UPDATE`,
+		workspaceID,
+		sessionID,
+		childThreadID,
+		parentThreadID,
+	).Scan(&deliveryID)
+	if dbconnect.IsNoRows(err) {
+		return storedAgentMailEnvelope{}, status.Error(codes.NotFound, "uncommitted child completion mail not found")
+	}
+	if err != nil {
+		return storedAgentMailEnvelope{}, err
+	}
+	return loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, workspaceID, sessionID, deliveryID)
+}
+
+func admitAgentMailDeliveryTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	targetScope *bridgev1.RuntimeScope,
+	envelope storedAgentMailEnvelope,
+	preparationAttemptID string,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) (admittedAgentMailDelivery, error) {
+	if preparationAttemptID == "" {
+		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery has no birth preparation attempt")
+	}
+	threadScope, err := lockThreadMutationTx(ctx, tx, targetScope)
+	if err != nil {
+		return admittedAgentMailDelivery{}, err
+	}
+	if threadScope.role != "main" && threadScope.role != "subagent" {
+		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail must target a main or sub-agent thread")
+	}
+	if envelope.TargetThreadID != targetScope.GetSessionThreadId() {
+		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target does not match the durable envelope")
+	}
+	exhausted, err := runtimeDeliveryExhaustionEventExistsTx(ctx, tx, RuntimeJob{
+		WorkspaceID:     targetScope.GetWorkspaceId(),
+		SessionID:       targetScope.GetSessionId(),
+		SessionThreadID: targetScope.GetSessionThreadId(),
+		RuntimeInputID:  completionRuntimeInputID(envelope.DeliveryID),
+		Kind:            queue.KindRuntimeInput,
+		InputKind:       "agent_mail",
+	})
+	if err != nil {
+		return admittedAgentMailDelivery{}, err
+	}
+	if exhausted {
+		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery is exhausted")
+	}
+	sealed, err := sealedAgentMailBirthDispositionExistsTx(
+		ctx,
+		tx,
+		targetScope,
+		completionRuntimeInputID(envelope.DeliveryID),
+		preparationAttemptID,
+	)
+	if err != nil {
+		return admittedAgentMailDelivery{}, err
+	}
+	if sealed {
+		return admittedAgentMailDelivery{}, status.Error(codes.Aborted, "agent mail delivery birth is sealed")
+	}
+	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, targetScope, envelope.SourceThreadID)
+	if err != nil {
+		return admittedAgentMailDelivery{}, err
+	}
+	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":                     "agent.thread_message_received",
+		"delivery_id":              envelope.DeliveryID,
+		"source_thread_id":         envelope.SourceThreadID,
+		"source_task_name":         nullableJSONString(sourceTaskName),
+		"source_tool_use_event_id": envelope.SourceToolUseEventID,
+		"message":                  envelope.MessageJSON,
+	})
+	if err != nil {
+		return admittedAgentMailDelivery{}, err
+	}
+	var (
+		receivedEventID     string
+		receivedSequence    int64
+		receivedPayloadJSON string
+		birthPreparationID  string
+		processedAt         sql.NullTime
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT event_id, sequence, payload_json, COALESCE(preparation_attempt_id, ''), processed_at
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND type = 'agent.thread_message_received'
+		    AND payload_json::jsonb ->> 'delivery_id' = $4
+		  ORDER BY sequence ASC, event_id ASC
+		  LIMIT 1
+		  FOR UPDATE`,
+		targetScope.GetWorkspaceId(),
+		targetScope.GetSessionId(),
+		targetScope.GetSessionThreadId(),
+		envelope.DeliveryID,
+	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON, &birthPreparationID, &processedAt)
+	if dbconnect.IsNoRows(err) {
+		if !threadReceivableTx(threadScope) {
+			return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
+		}
+		receivedEventID = stableRuntimeID(
+			"agent_mail_received_event",
+			targetScope.GetWorkspaceId(),
+			targetScope.GetSessionId(),
+			targetScope.GetSessionThreadId(),
+			envelope.DeliveryID,
+		)
+		receivedSequence, err = nextSessionEventSequenceTx(ctx, tx, targetScope)
+		if err != nil {
+			return admittedAgentMailDelivery{}, err
+		}
+		visibility, sessionVisible := threadScope.publicProjection("agent.thread_message_received")
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO session_events (
+				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+				visibility, session_visible, preparation_attempt_id, projection_json, created_at, updated_at, processed_at
+			) VALUES ($1, $2, $3, $4, $5, 'agent.thread_message_received', $6, $7, $8, $9, $6, $10, $10, NULL)`,
+			targetScope.GetWorkspaceId(),
+			targetScope.GetSessionId(),
+			targetScope.GetSessionThreadId(),
+			receivedEventID,
+			receivedSequence,
+			eventPayloadJSON,
+			visibility,
+			sessionVisible,
+			preparationAttemptID,
+			now,
+		); err != nil {
+			return admittedAgentMailDelivery{}, err
+		}
+		if _, err := appendSessionEventStreamChangeTx(ctx, tx, targetScope, receivedEventID, visibility, sessionVisible, now); err != nil {
+			return admittedAgentMailDelivery{}, err
+		}
+		birthPreparationID = preparationAttemptID
+		receivedPayloadJSON = eventPayloadJSON
+		processedAt = sql.NullTime{}
+	} else if err != nil {
+		return admittedAgentMailDelivery{}, err
+	}
+	if birthPreparationID == "" ||
+		normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
+		return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery replay conflicts with the admitted source")
+	}
+	var inboxStatus sql.NullString
+	err = tx.QueryRow(ctx,
+		`SELECT status
+		   FROM session_runtime_inbox
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND runtime_input_id = $4
+		  FOR UPDATE`,
+		targetScope.GetWorkspaceId(),
+		targetScope.GetSessionId(),
+		targetScope.GetSessionThreadId(),
+		completionRuntimeInputID(envelope.DeliveryID),
+	).Scan(&inboxStatus)
+	if err != nil && !dbconnect.IsNoRows(err) {
+		return admittedAgentMailDelivery{}, err
+	}
+	if dbconnect.IsNoRows(err) {
+		inboxStatus = sql.NullString{}
+	}
+	terminal := processedAt.Valid || inboxStatus.String == "committed"
+	if !terminal && !threadReceivableTx(threadScope) {
+		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
+	}
+	if !terminal && inboxStatus.String == "cancelled" {
+		sealed, err := sealedAgentMailBirthDispositionExistsTx(
+			ctx,
+			tx,
+			targetScope,
+			completionRuntimeInputID(envelope.DeliveryID),
+			birthPreparationID,
+		)
+		if err != nil {
+			return admittedAgentMailDelivery{}, err
+		}
+		if !sealed {
+			return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery birth conflicts with its cancelled inbox")
+		}
+		if birthPreparationID == preparationAttemptID {
+			return admittedAgentMailDelivery{}, status.Error(codes.Aborted, "agent mail delivery birth is sealed")
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE session_events
+			    SET preparation_attempt_id = $5,
+			        updated_at = $6
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND event_id = $4
+			    AND processed_at IS NULL`,
+			targetScope.GetWorkspaceId(),
+			targetScope.GetSessionId(),
+			targetScope.GetSessionThreadId(),
+			receivedEventID,
+			preparationAttemptID,
+			now,
+		); err != nil {
+			return admittedAgentMailDelivery{}, err
+		}
+		birthPreparationID = preparationAttemptID
+	}
+	if !terminal {
+		job := RuntimeJob{
+			WorkspaceID:          targetScope.GetWorkspaceId(),
+			SessionID:            targetScope.GetSessionId(),
+			SessionThreadID:      targetScope.GetSessionThreadId(),
+			RuntimeInputID:       completionRuntimeInputID(envelope.DeliveryID),
+			PreparationAttemptID: birthPreparationID,
+			Kind:                 queue.KindRuntimeInput,
+			InputKind:            "agent_mail",
+			EventIDs:             []string{receivedEventID},
+			SequenceFrom:         receivedSequence,
+			SequenceTo:           receivedSequence,
+		}
+		if err := upsertRuntimeInboxDeliveryTx(ctx, tx, job, binding, now); err != nil {
+			return admittedAgentMailDelivery{}, err
+		}
+	}
+	return admittedAgentMailDelivery{
+		Envelope:             envelope,
+		ReceivedEventID:      receivedEventID,
+		ReceivedSequence:     receivedSequence,
+		PreparationAttemptID: birthPreparationID,
+		Terminal:             terminal,
+	}, nil
+}
+
+func sealedAgentMailBirthDispositionExistsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	birthPreparationAttemptID string,
+) (bool, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT declaration_digest, receipt_json
+		   FROM session_bridge_operations
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND operation = $4
+		    AND source_kind = 'sealed_agent_mail'`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		bridgeOpSettleSealedAgentMail,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	type storedDisposition struct {
+		declarationDigest string
+		receiptJSON       string
+	}
+	stored := make([]storedDisposition, 0)
+	for rows.Next() {
+		var disposition storedDisposition
+		if err := rows.Scan(&disposition.declarationDigest, &disposition.receiptJSON); err != nil {
+			return false, err
+		}
+		stored = append(stored, disposition)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, disposition := range stored {
+		receipt, err := unmarshalDeclarationReceipt(disposition.receiptJSON)
+		if err != nil || receipt.GetSealedAgentMail() == nil {
+			continue
+		}
+		failedPreparationAttemptID := receipt.GetSealedAgentMail().GetFailedPreparationAttemptId()
+		sourceID := stableRuntimeID(
+			"sealed_agent_mail",
+			runtimeInputID,
+			birthPreparationAttemptID,
+			failedPreparationAttemptID,
+		)
+		if validSealedAgentMailReceipt(
+			receipt,
+			RuntimeJob{
+				WorkspaceID:          scope.GetWorkspaceId(),
+				SessionID:            scope.GetSessionId(),
+				SessionThreadID:      scope.GetSessionThreadId(),
+				RuntimeInputID:       runtimeInputID,
+				PreparationAttemptID: birthPreparationAttemptID,
+			},
+			failedPreparationAttemptID,
+			sourceID,
+			disposition.declarationDigest,
+		) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func appendDeclaredCompletionMailTx(
@@ -176,7 +682,7 @@ func appendDeclaredCompletionMailForSourceTx(
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return nil, nil, err
 	}
-	if err := enqueueCompletionMailWakeTx(
+	if _, err := enqueueCompletionMailWakeTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
@@ -217,8 +723,8 @@ func appendDeclaredCompletionMailForSourceTx(
 		}, nil
 }
 
-// enqueueCompletionMailWakeTx is single-flight per delivery: the runtime-input dedupe key
-// coalesces re-armed wakes, so a delivery with a live poke is never enqueued twice.
+// A current-birth seal suppresses rearming, and an active wake may be reused
+// only when its preparation identity matches the requested delivery birth.
 func enqueueCompletionMailWakeTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -227,13 +733,59 @@ func enqueueCompletionMailWakeTx(
 	targetThreadID string,
 	deliveryID string,
 	now time.Time,
-) error {
+) (bool, error) {
 	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, workspaceID, sessionID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ok || readiness.PreparationAttemptID == "" {
-		return status.Error(codes.FailedPrecondition, "sub-agent completion has no active preparation")
+		return false, status.Error(codes.FailedPrecondition, "sub-agent completion has no active preparation")
+	}
+	sealed, err := sealedAgentMailBirthDispositionExistsTx(
+		ctx,
+		tx,
+		&bridgev1.RuntimeScope{
+			WorkspaceId:     workspaceID,
+			SessionId:       sessionID,
+			SessionThreadId: targetThreadID,
+		},
+		completionRuntimeInputID(deliveryID),
+		readiness.PreparationAttemptID,
+	)
+	if err != nil {
+		return false, err
+	}
+	if sealed {
+		return false, nil
+	}
+	inserted, err := enqueueAgentMailWakeTx(
+		ctx,
+		tx,
+		workspaceID,
+		sessionID,
+		targetThreadID,
+		deliveryID,
+		readiness.PreparationAttemptID,
+		now,
+	)
+	if err != nil {
+		return false, err
+	}
+	return inserted, nil
+}
+
+func enqueueAgentMailWakeTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	targetThreadID string,
+	deliveryID string,
+	preparationAttemptID string,
+	now time.Time,
+) (bool, error) {
+	if preparationAttemptID == "" {
+		return false, status.Error(codes.FailedPrecondition, "agent mail wake has no birth preparation attempt")
 	}
 	runtimeInputID := completionRuntimeInputID(deliveryID)
 	queuePayload, err := json.Marshal(map[string]any{
@@ -241,18 +793,19 @@ func enqueueCompletionMailWakeTx(
 		"session_id":             sessionID,
 		"session_thread_id":      targetThreadID,
 		"runtime_input_id":       runtimeInputID,
-		"preparation_attempt_id": readiness.PreparationAttemptID,
+		"preparation_attempt_id": preparationAttemptID,
 		"event_ids":              []string{},
 		"sequence_from":          0,
 		"sequence_to":            0,
 		"input_kind":             "agent_mail",
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	ws := workspace.ID(workspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		ID:             id.New(queue.JobIDPrefix),
+	jobID := id.New(queue.JobIDPrefix)
+	active, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+		ID:             jobID,
 		WorkspaceID:    ws,
 		Kind:           queue.KindRuntimeInput,
 		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
@@ -262,7 +815,29 @@ func enqueueCompletionMailWakeTx(
 		MaxAttempts:    queue.DefaultMaxAttempts,
 		Now:            now,
 	})
-	return err
+	if err != nil {
+		return false, err
+	}
+	var activePayload struct {
+		WorkspaceID          string `json:"workspace_id"`
+		SessionID            string `json:"session_id"`
+		SessionThreadID      string `json:"session_thread_id"`
+		RuntimeInputID       string `json:"runtime_input_id"`
+		PreparationAttemptID string `json:"preparation_attempt_id"`
+		InputKind            string `json:"input_kind"`
+	}
+	if json.Unmarshal(active.PayloadJSON, &activePayload) != nil ||
+		activePayload.WorkspaceID != workspaceID ||
+		activePayload.SessionID != sessionID ||
+		activePayload.SessionThreadID != targetThreadID ||
+		activePayload.RuntimeInputID != runtimeInputID ||
+		activePayload.InputKind != "agent_mail" {
+		return false, status.Error(codes.AlreadyExists, "agent mail wake conflicts with the durable delivery")
+	}
+	if activePayload.PreparationAttemptID != preparationAttemptID {
+		return false, status.Error(codes.Aborted, "agent mail wake belongs to a prior preparation")
+	}
+	return active.ID == jobID, nil
 }
 
 func rearmPendingCompletionMailForThreadTx(
@@ -284,8 +859,9 @@ func rearmPendingCompletionMailForThreadTx(
 	if err != nil {
 		return 0, err
 	}
+	rearmed := 0
 	for _, delivery := range deliveries {
-		if err := enqueueCompletionMailWakeTx(
+		ensured, err := enqueueCompletionMailWakeTx(
 			ctx,
 			tx,
 			workspaceID,
@@ -293,11 +869,15 @@ func rearmPendingCompletionMailForThreadTx(
 			targetThreadID,
 			delivery.DeliveryID,
 			now,
-		); err != nil {
+		)
+		if err != nil {
 			return 0, err
 		}
+		if ensured {
+			rearmed++
+		}
 	}
-	return len(deliveries), nil
+	return rearmed, nil
 }
 
 func rearmPendingCompletionMailForSessionTx(
@@ -364,26 +944,52 @@ func pendingCompletionDeliveriesForThreadTx(
 		    AND session_row.id = sent.session_id
 		    AND session_row.status <> 'terminated'
 		    AND session_row.lifecycle_state <> 'deleted'
-		   JOIN session_threads source
-		     ON source.workspace_id = sent.workspace_id
-		    AND source.session_id = sent.session_id
-		    AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
-		    AND source.parent_thread_id = $3
-		    AND source.role = 'subagent'
-		  WHERE sent.workspace_id = $1
-		    AND sent.session_id = $2
-		    AND sent.type = 'agent.thread_message_sent'
-		    AND sent.payload_json::jsonb ->> 'target_thread_id' = $3
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_events received
-		         WHERE received.workspace_id = sent.workspace_id
-		           AND received.session_id = sent.session_id
-		           AND received.session_thread_id = $3
-		           AND received.type = 'agent.thread_message_received'
-		           AND received.payload_json::jsonb ->> 'delivery_id' =
-		               sent.payload_json::jsonb ->> 'delivery_id'
-		    )
+			   JOIN session_threads source
+			     ON source.workspace_id = sent.workspace_id
+			    AND source.session_id = sent.session_id
+			    AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
+			   JOIN session_threads target
+			     ON target.workspace_id = sent.workspace_id
+			    AND target.session_id = sent.session_id
+			    AND target.id = $3
+			  WHERE sent.workspace_id = $1
+			    AND sent.session_id = $2
+			    AND sent.type = 'agent.thread_message_sent'
+			    AND sent.payload_json::jsonb ->> 'target_thread_id' = $3
+			    AND (
+			        (source.role = 'subagent' AND source.parent_thread_id = target.id)
+			        OR (target.role = 'subagent' AND target.parent_thread_id = source.id)
+			    )
+			    AND (
+			        NOT EXISTS (
+			            SELECT 1
+			              FROM session_events received
+			             WHERE received.workspace_id = sent.workspace_id
+			               AND received.session_id = sent.session_id
+			               AND received.session_thread_id = $3
+			               AND received.type = 'agent.thread_message_received'
+			               AND received.payload_json::jsonb ->> 'delivery_id' =
+			                   sent.payload_json::jsonb ->> 'delivery_id'
+			        )
+			        OR EXISTS (
+			            SELECT 1
+			              FROM session_events received
+			              JOIN session_runtime_inbox inbox
+			                ON inbox.workspace_id = received.workspace_id
+			               AND inbox.session_id = received.session_id
+			               AND inbox.session_thread_id = received.session_thread_id
+			               AND inbox.runtime_input_id =
+			                   'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
+			               AND inbox.status = 'cancelled'
+			             WHERE received.workspace_id = sent.workspace_id
+			               AND received.session_id = sent.session_id
+			               AND received.session_thread_id = $3
+			               AND received.type = 'agent.thread_message_received'
+			               AND received.payload_json::jsonb ->> 'delivery_id' =
+			                   sent.payload_json::jsonb ->> 'delivery_id'
+			               AND received.processed_at IS NULL
+			        )
+			    )
 		    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events exhausted
@@ -466,7 +1072,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairCompletionMail(
 			return err
 		}
 		for _, candidate := range candidates {
-			if err := enqueueCompletionMailWakeTx(
+			ensured, err := enqueueCompletionMailWakeTx(
 				ctx,
 				tx,
 				workspaceID,
@@ -474,10 +1080,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairCompletionMail(
 				candidate.TargetThreadID,
 				candidate.DeliveryID,
 				now,
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
-			repaired++
+			if ensured {
+				repaired++
+			}
 		}
 		return nil
 	})
@@ -512,34 +1121,62 @@ func completionMailReconcileCandidatesTx(
 			   AND session_row.id = sent.session_id
 			   AND session_row.status <> 'terminated'
 			   AND session_row.lifecycle_state <> 'deleted'
-			  JOIN session_threads source
-			    ON source.workspace_id = sent.workspace_id
-			   AND source.session_id = sent.session_id
-			   AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
-			   AND source.parent_thread_id = sent.payload_json::jsonb ->> 'target_thread_id'
-			   AND source.role = 'subagent'
-			 WHERE sent.workspace_id = $1
-			   AND sent.type = 'agent.thread_message_sent'
-			   AND sent.created_at <= $2
+				  JOIN session_threads source
+				    ON source.workspace_id = sent.workspace_id
+				   AND source.session_id = sent.session_id
+				   AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
+				  JOIN session_threads target
+				    ON target.workspace_id = sent.workspace_id
+				   AND target.session_id = sent.session_id
+				   AND target.id = sent.payload_json::jsonb ->> 'target_thread_id'
+				   AND target.status NOT IN ('closed_for_runtime', 'terminated')
+				 WHERE sent.workspace_id = $1
+				   AND sent.type = 'agent.thread_message_sent'
+				   AND sent.created_at <= $2
+				   AND (
+				       (source.role = 'subagent' AND source.parent_thread_id = target.id)
+				       OR (target.role = 'subagent' AND target.parent_thread_id = source.id)
+				   )
+				   AND (
+				       NOT EXISTS (
+				           SELECT 1
+				             FROM session_events received
+				            WHERE received.workspace_id = sent.workspace_id
+				              AND received.session_id = sent.session_id
+				              AND received.session_thread_id =
+				                  sent.payload_json::jsonb ->> 'target_thread_id'
+				              AND received.type = 'agent.thread_message_received'
+				              AND received.payload_json::jsonb ->> 'delivery_id' =
+				                  sent.payload_json::jsonb ->> 'delivery_id'
+				       )
+				       OR EXISTS (
+				           SELECT 1
+				             FROM session_events received
+				             JOIN session_runtime_inbox inbox
+				               ON inbox.workspace_id = received.workspace_id
+				              AND inbox.session_id = received.session_id
+				              AND inbox.session_thread_id = received.session_thread_id
+				              AND inbox.runtime_input_id =
+				                  'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
+				              AND inbox.status = 'cancelled'
+				            WHERE received.workspace_id = sent.workspace_id
+				              AND received.session_id = sent.session_id
+				              AND received.session_thread_id =
+				                  sent.payload_json::jsonb ->> 'target_thread_id'
+				              AND received.type = 'agent.thread_message_received'
+				              AND received.payload_json::jsonb ->> 'delivery_id' =
+				                  sent.payload_json::jsonb ->> 'delivery_id'
+				              AND received.processed_at IS NULL
+				       )
+				   )
 			   AND NOT EXISTS (
 			       SELECT 1
-			         FROM session_events received
-			        WHERE received.workspace_id = sent.workspace_id
-			          AND received.session_id = sent.session_id
-			          AND received.session_thread_id =
-			              sent.payload_json::jsonb ->> 'target_thread_id'
-			          AND received.type = 'agent.thread_message_received'
-			          AND received.payload_json::jsonb ->> 'delivery_id' =
-			              sent.payload_json::jsonb ->> 'delivery_id'
-			   )
-			   AND NOT EXISTS (
-			       SELECT 1
-			         FROM queue_jobs live_poke
-			        WHERE live_poke.workspace_id = sent.workspace_id
-			          AND live_poke.dedupe_key =
+			         FROM queue_jobs active_wake
+			        WHERE active_wake.workspace_id = sent.workspace_id
+			          AND active_wake.dedupe_key =
 			              'runtime_input:' || sent.workspace_id || ':' || sent.session_id ||
 			              ':agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
-			          AND live_poke.status IN ('pending', 'leased')
+			          AND active_wake.status IN ('pending', 'leased')
 			   )
 			   AND NOT EXISTS (
 			       SELECT 1

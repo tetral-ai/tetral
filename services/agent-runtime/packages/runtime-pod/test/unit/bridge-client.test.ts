@@ -22,6 +22,7 @@ import type {
   LoadContextRequest,
   MarkChildThreadClosedRequest,
   RefreshRuntimeBindingTokenRequest,
+  ResolveInterAgentDeliveryRequest,
   WriteEventRequest,
   WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -167,6 +168,70 @@ describe("BridgeAPIContextLoader", () => {
     expect(sleeps).toEqual([100, 300]);
   });
 
+  test("resolves the exact public agent-mail envelope and rejects derived-content drift", async () => {
+    const bridge = new RecordingBridgeClient();
+    const storedMessage = runtimeMessage("msg_agent_mail_resolved", "stored completion");
+    bridge.resolveInterAgentDeliveryMessageJSON = JSON.stringify({
+      ...storedMessage,
+      content: [{ type: "text", text: "stored completion" }],
+    });
+    const loader = new BridgeAPIContextLoader({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(loader.resolveAgentMail(
+      control("thr_parent", "rin_agent_mail_resolve", 4),
+      "thr_child",
+      "delivery_resolved",
+    )).resolves.toEqual({
+      deliveryId: "delivery_resolved",
+      sourceThreadId: "thr_parent",
+      targetThreadId: "thr_child",
+      sourceToolUseEventId: "sevt_agent_mail_source",
+      receivedEventId: "sevt_agent_mail_received",
+      receivedSequence: 8,
+      message: storedMessage,
+      publicMessageJson: bridge.resolveInterAgentDeliveryMessageJSON,
+    });
+    expect(bridge.resolveInterAgentDeliveryRequests).toEqual([
+      expect.objectContaining({
+        childThreadId: "thr_child",
+        deliveryId: "delivery_resolved",
+      }),
+    ]);
+
+    bridge.resolveInterAgentDeliveryMessageJSON = JSON.stringify({
+      ...storedMessage,
+      content: [{ type: "text", text: "different derived text" }],
+    });
+    await expect(loader.resolveAgentMail(
+      control("thr_parent", "rin_agent_mail_resolve_bad", 5),
+      "thr_child",
+      "delivery_resolved",
+    )).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      fatal: true,
+    });
+
+    bridge.resolveInterAgentDeliveryMessageJSON = JSON.stringify({
+      ...storedMessage,
+      content: [{ type: "text", text: "stored completion", unsupported: "silently dropped" }],
+    });
+    await expect(loader.resolveAgentMail(
+      control("thr_parent", "rin_agent_mail_resolve_extra", 6),
+      "thr_child",
+      "delivery_resolved",
+    )).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      fatal: true,
+    });
+  });
+
   test("commits accepted input by thread and preserves inter-agent delivery payloads", async () => {
     const bridge = new RecordingBridgeClient();
     const lifecycleLogs: string[] = [];
@@ -241,7 +306,7 @@ describe("BridgeAPIContextLoader", () => {
       }),
       expect.objectContaining({
         event: "runtime_receipt_applied",
-        "declaration.source.kind": "inter_agent_message",
+        "declaration.source.kind": "agent_mail",
         "declaration.source.id": "rin_child",
       }),
     ]));
@@ -260,7 +325,7 @@ describe("BridgeAPIContextLoader", () => {
       throw new Error("missing child commit request");
     }
     expect(childCommit).toMatchObject({
-      inputKind: "inter_agent_message",
+      inputKind: "agent_mail",
       scope: {
         sessionId: "sesn_1",
         sessionThreadId: "thr_child",
@@ -270,7 +335,7 @@ describe("BridgeAPIContextLoader", () => {
       sequenceFrom: 2,
       sequenceTo: 2,
       drafts: [expect.objectContaining({
-        sourceKind: "inter_agent_message",
+        sourceKind: "agent_mail",
         sourceId: "rin_child",
       })],
     });
@@ -1941,10 +2006,12 @@ class RecordingBridgeClient {
   readonly loadContextRequests: LoadContextRequest[] = [];
   readonly markChildThreadClosedRequests: MarkChildThreadClosedRequest[] = [];
   readonly refreshRuntimeBindingTokenRequests: RefreshRuntimeBindingTokenRequest[] = [];
+  readonly resolveInterAgentDeliveryRequests: ResolveInterAgentDeliveryRequest[] = [];
   readonly refreshErrors: Error[] = [];
   readonly writeEventRequests: WriteEventRequest[] = [];
   readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
   loadContextJSON: string | undefined;
+  resolveInterAgentDeliveryMessageJSON = "";
   eventWriterAckStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   eventWriterErrorCode = "";
   eventWriterAckWriteId: string | undefined;
@@ -1978,9 +2045,35 @@ class RecordingBridgeClient {
       loadContext: this.loadContext.bind(this),
       markChildThreadClosed: this.markChildThreadClosed.bind(this),
       refreshRuntimeBindingToken: this.refreshRuntimeBindingToken.bind(this),
+      resolveInterAgentDelivery: this.resolveInterAgentDelivery.bind(this),
       writeEvent: this.writeEvent.bind(this),
       writeRequestEnd: this.writeRequestEnd.bind(this),
     } as unknown as AgentRuntimeBridgeServiceClient;
+  }
+
+  private resolveInterAgentDelivery(
+    request: ResolveInterAgentDeliveryRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    this.resolveInterAgentDeliveryRequests.push(request);
+    const completionPull = request.deliveryId.length === 0;
+    callback(null, {
+      ack: {
+        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
+        runtimeInputId: "",
+        runtimeWriteId: "",
+        errorCode: "",
+      },
+      deliveryId: completionPull ? "delivery_resolved" : request.deliveryId,
+      sourceThreadId: completionPull ? request.childThreadId : request.scope?.sessionThreadId ?? "",
+      targetThreadId: completionPull ? request.scope?.sessionThreadId ?? "" : request.childThreadId,
+      sourceToolUseEventId: "sevt_agent_mail_source",
+      receivedEventId: "sevt_agent_mail_received",
+      receivedSequence: 8,
+      messageJson: this.resolveInterAgentDeliveryMessageJSON,
+    });
+    return grpcCall();
   }
 
   private commitInputs(

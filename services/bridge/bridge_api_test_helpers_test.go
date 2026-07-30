@@ -180,21 +180,35 @@ func bridgeAgentMailCommitRequestForTest(
 	).Scan(&sequence); err != nil {
 		t.Fatalf("read admitted agent mail event sequence: %v", err)
 	}
-	seedBridgeAPIRuntimeInbox(
-		t,
-		db,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		runtimeInputID,
-		"agent_mail",
-		fmt.Sprintf("[%q]", eventID),
-		"accepted",
-		scope.GetBinding().GetBindingId(),
-		scope.GetBinding().GetTargetPodUid(),
-		sequence,
-		sequence,
-	)
+	var inboxExists bool
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_runtime_inbox
+			 WHERE workspace_id = $1
+			   AND runtime_input_id = $2
+		)`,
+		scope.GetWorkspaceId(), runtimeInputID,
+	).Scan(&inboxExists); err != nil {
+		t.Fatalf("find admitted agent mail inbox: %v", err)
+	}
+	if !inboxExists {
+		seedBridgeAPIRuntimeInbox(
+			t,
+			db,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			runtimeInputID,
+			"agent_mail",
+			fmt.Sprintf("[%q]", eventID),
+			"accepted",
+			scope.GetBinding().GetBindingId(),
+			scope.GetBinding().GetTargetPodUid(),
+			sequence,
+			sequence,
+		)
+	}
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_runtime_inbox
 		    SET binding_generation = $3
@@ -1213,28 +1227,6 @@ func bridgeInterAgentMessageJSON(t *testing.T, deliveryID string, sourceThreadID
 	})
 	if err != nil {
 		t.Fatalf("marshal inter-agent message: %v", err)
-	}
-	return string(raw)
-}
-
-func bridgeInterAgentMessagePresentationJSON(
-	t *testing.T,
-	deliveryID string,
-	sourceThreadID string,
-	sourceToolUseEventID string,
-	messageJSON string,
-	presentation string,
-) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"delivery_id":              deliveryID,
-		"source_thread_id":         sourceThreadID,
-		"source_tool_use_event_id": sourceToolUseEventID,
-		"message":                  json.RawMessage(messageJSON),
-		"presentation":             presentation,
-	})
-	if err != nil {
-		t.Fatalf("marshal inter-agent message presentation: %v", err)
 	}
 	return string(raw)
 }

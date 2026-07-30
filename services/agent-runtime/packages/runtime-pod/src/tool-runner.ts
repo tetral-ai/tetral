@@ -574,7 +574,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
     }
     const childThreadId = stableId("thr", `subagent:${request.toolUseEventId}`);
-    const childScope = scopeForChild(parentScope, childThreadId);
     const childMessage = runtimeUserMessage({
       sessionId: request.sessionId,
       messageId: stableId("msg", `subagent-message:${request.toolUseEventId}:0`),
@@ -623,33 +622,24 @@ export class RuntimePodToolRunner {
       if (!bridgeAckAccepted(sent.ack?.status)) {
         return toolFailure(request, sent.ack?.errorCode || "Bridge rejected sub-agent message send.", true);
       }
-      const repair = await resolveInterAgentDelivery(this.bridgeClient, {
+      const resolved = await resolveInterAgentDelivery(this.bridgeClient, {
         scope: parentScope,
         childThreadId,
         deliveryId: delivery.deliveryId,
-      }, metadata, request.abortSignal);
-      if (!bridgeAckAccepted(repair.ack?.status) || !repair.sentExists) {
-        return toolFailure(request, repair.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
+      }, metadata);
+      if (
+        !bridgeAckAccepted(resolved.ack?.status) ||
+        resolved.deliveryId !== delivery.deliveryId ||
+        resolved.sourceThreadId !== request.sessionThreadId ||
+        resolved.targetThreadId !== childThreadId ||
+        resolved.sourceToolUseEventId !== delivery.sourceToolUseEventId ||
+        resolved.receivedEventId.length === 0 ||
+        resolved.receivedSequence <= 0 ||
+        resolved.messageJson.length === 0
+      ) {
+        return toolFailure(request, resolved.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
       }
-      if (repair.receivedExists) {
-        return completedText(`task_name: ${taskName}\nsession_thread_id: ${createResponse.childThreadId || childThreadId}\nstatus: delivered`);
-      }
-      if (!repair.childReceivable) {
-        return toolFailure(request, `Sub-agent ${taskName} is not receivable.`, false);
-      }
-      throwIfToolRouteAborted(request.abortSignal);
-      const accepted = await host.enqueueThreadInput(interAgentAcceptedInput(request, childScope, delivery, childMessage, {
-        parentThreadId: request.sessionThreadId,
-        role: "subagent",
-        visibility: "public",
-        taskName,
-        agentType,
-        status: "idle",
-      }));
-      if (!accepted.ok) {
-        return toolFailure(request, `Sub-agent input was not accepted: ${accepted.reason}.`, accepted.reason === "local_session_capacity_exceeded");
-      }
-      return completedText(`task_name: ${taskName}\nsession_thread_id: ${createResponse.childThreadId || childThreadId}\nstatus: accepted`);
+      return completedText(`task_name: ${taskName}\nsession_thread_id: ${createResponse.childThreadId || childThreadId}\nstatus: delivered`);
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent spawn was cancelled.");
@@ -713,33 +703,24 @@ export class RuntimePodToolRunner {
           if (!bridgeAckAccepted(sent.ack?.status)) {
             return toolFailure(request, sent.ack?.errorCode || "Bridge rejected sub-agent message send.", true);
           }
-          const repair = await resolveInterAgentDelivery(this.bridgeClient, {
+          const resolved = await resolveInterAgentDelivery(this.bridgeClient, {
             scope: parentScope,
             childThreadId: currentChild.sessionThreadId,
             deliveryId: delivery.deliveryId,
-          }, metadata, request.abortSignal);
-          if (!bridgeAckAccepted(repair.ack?.status) || !repair.sentExists) {
-            return toolFailure(request, repair.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
+          }, metadata);
+          if (
+            !bridgeAckAccepted(resolved.ack?.status) ||
+            resolved.deliveryId !== delivery.deliveryId ||
+            resolved.sourceThreadId !== request.sessionThreadId ||
+            resolved.targetThreadId !== currentChild.sessionThreadId ||
+            resolved.sourceToolUseEventId !== delivery.sourceToolUseEventId ||
+            resolved.receivedEventId.length === 0 ||
+            resolved.receivedSequence <= 0 ||
+            resolved.messageJson.length === 0
+          ) {
+            return toolFailure(request, resolved.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
           }
-          if (repair.receivedExists) {
-            return completedText(`task_name: ${taskName}\nsession_thread_id: ${currentChild.sessionThreadId}\nstatus: delivered`);
-          }
-          if (!repair.childReceivable) {
-            return toolFailure(request, `Sub-agent ${taskName} is not receivable.`, false);
-          }
-          throwIfToolRouteAborted(request.abortSignal);
-          const accepted = await host.enqueueThreadInput(interAgentAcceptedInput(request, scopeForChild(parentScope, currentChild.sessionThreadId), delivery, childMessage, {
-            parentThreadId: request.sessionThreadId,
-            role: "subagent",
-            visibility: "public",
-            taskName: currentChild.taskName,
-            agentType: currentChild.agentType,
-            status: currentChild.status,
-          }));
-          if (!accepted.ok) {
-            return toolFailure(request, `Sub-agent input was not accepted: ${accepted.reason}.`, accepted.reason === "local_session_capacity_exceeded");
-          }
-          return completedText(`task_name: ${taskName}\nsession_thread_id: ${currentChild.sessionThreadId}\nstatus: accepted`);
+          return completedText(`task_name: ${taskName}\nsession_thread_id: ${currentChild.sessionThreadId}\nstatus: delivered`);
         });
       });
     } catch (error) {
@@ -1266,44 +1247,6 @@ function compareChildTaskOperationEntries(left: ChildTaskOperationQueueEntry, ri
   return left.sequence - right.sequence;
 }
 
-function scopeForChild(parentScope: RuntimeScope, childThreadId: string): RuntimeScope {
-  return {
-    requestId: parentScope.requestId,
-    workspaceId: parentScope.workspaceId,
-    sessionId: parentScope.sessionId,
-    sessionThreadId: childThreadId,
-    binding: parentScope.binding,
-  };
-}
-
-function interAgentAcceptedInput(
-  request: RuntimeToolExecutionRequest,
-  childScope: RuntimeScope,
-  delivery: DeliveryIdentity,
-  message: RuntimeMessage,
-  thread: Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }>["thread"],
-): RuntimeAcceptedInputState {
-  return {
-    requestId: stableId("req", `inter-agent:${delivery.deliveryId}`),
-    workspaceId: childScope.workspaceId,
-    sessionId: childScope.sessionId,
-    sessionThreadId: childScope.sessionThreadId,
-    bindingId: childScope.binding?.bindingId ?? request.bindingId,
-    bindingGeneration: childScope.binding?.bindingGeneration ?? request.bindingGeneration,
-    targetPodUid: childScope.binding?.targetPodUid ?? "",
-    runtimeInputId: stableId("rin", `inter-agent:${delivery.deliveryId}`),
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
-    kind: "inter_agent_message",
-    deliveryId: delivery.deliveryId,
-    sourceThreadId: request.sessionThreadId,
-    sourceToolUseEventId: delivery.sourceToolUseEventId,
-    message,
-    thread,
-  };
-}
-
 async function preloadChildThread(
   host: RuntimeSubAgentRunHost,
   request: RuntimeToolExecutionRequest,
@@ -1596,9 +1539,8 @@ function resolveInterAgentDelivery(
   client: Pick<AgentRuntimeBridgeServiceClient, "resolveInterAgentDelivery">,
   request: ResolveInterAgentDeliveryRequest,
   metadata: Metadata,
-  abortSignal: AbortSignal,
 ): Promise<ResolveInterAgentDeliveryResponse> {
-  return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
+  return unaryCall(request, metadata, (unaryRequest, unaryMetadata, callback) =>
     client.resolveInterAgentDelivery(unaryRequest, unaryMetadata, callback)
   );
 }
@@ -1668,6 +1610,26 @@ type UnaryInvoker<Request, Response> = (
   metadata: Metadata,
   callback: UnaryCallback<Response>,
 ) => ClientUnaryCall;
+
+function unaryCall<Request, Response>(
+  request: Request,
+  metadata: Metadata,
+  invoke: UnaryInvoker<Request, Response>,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    try {
+      invoke(request, metadata, (error: ServiceError | null, response: Response) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
 
 class ToolRouteAborted extends Error {
   constructor() {

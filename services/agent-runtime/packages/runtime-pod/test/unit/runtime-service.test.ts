@@ -88,9 +88,9 @@ describe("RuntimeControlService command envelope", () => {
     const request = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
       runtimeInputId: "agent_mail:delivery_1",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
+      eventIds: ["sevt_agent_mail_1"],
+      sequenceFrom: 7,
+      sequenceTo: 7,
       payloadJson: agentMailPayloadJson("delivery_1"),
     });
 
@@ -108,6 +108,23 @@ describe("RuntimeControlService command envelope", () => {
     });
   });
 
+  test("rejects agent-mail content that diverges from its authoritative Runtime parts", async () => {
+    const fixture = runtimeFixture();
+    const payload = JSON.parse(agentMailPayloadJson("delivery_drift")) as {
+      message: { content: Array<{ type: string; text: string }> };
+    };
+    payload.message.content[0]!.text = "different derived text";
+    await expectGrpcCode(fixture.service.acceptAgentMail(validCommand({
+      commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
+      runtimeInputId: "agent_mail:delivery_drift",
+      eventIds: ["sevt_agent_mail_drift"],
+      sequenceFrom: 7,
+      sequenceTo: 7,
+      payloadJson: JSON.stringify(payload),
+    }), authMetadata()), status.INVALID_ARGUMENT);
+    expect(fixture.runHost.agentMailCommands).toEqual([]);
+  });
+
   test("returns a retryable in-band rejection when agent-mail context loading is transiently unavailable", async () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
@@ -117,9 +134,9 @@ describe("RuntimeControlService command envelope", () => {
     const request = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
       runtimeInputId: "agent_mail:delivery_retry",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
+      eventIds: ["sevt_agent_mail_retry"],
+      sequenceFrom: 8,
+      sequenceTo: 8,
       payloadJson: agentMailPayloadJson("delivery_retry"),
     });
 
@@ -1276,13 +1293,22 @@ function canonicalTaskNotificationPayloadJson(input: {
 }
 
 function agentMailPayloadJson(deliveryId: string): string {
+  const message = bridgeRuntimeMessage({
+    text: "child completion",
+  });
   return JSON.stringify({
     delivery_id: deliveryId,
     source_thread_id: "thrd_child",
     source_tool_use_event_id: "sevt_child_tool",
-    message: bridgeRuntimeMessage({
-      text: "child completion",
-    }),
+    message: {
+      ...message,
+      content: message.parts.map((part) => {
+        if (part.type !== "text") {
+          throw new Error("agent mail fixture requires text parts");
+        }
+        return { type: "text", text: part.text };
+      }),
+    },
   });
 }
 

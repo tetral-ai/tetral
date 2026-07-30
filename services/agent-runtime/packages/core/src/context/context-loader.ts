@@ -33,7 +33,6 @@ export interface ContextLoader {
    */
   readonly loadThreadContext?: (
     command: RuntimeThreadControlState,
-    options?: { readonly agentMailSourceThreadId?: string | undefined },
   ) => Promise<{
     readonly messages: readonly RuntimeMessage[];
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
@@ -63,6 +62,12 @@ export interface ContextLoader {
       readonly drafts?: readonly RuntimeMessageDraft[] | undefined;
     },
   ) => Promise<AcceptedInputCommitResult>;
+  /** Resolves one durable sent envelope into its database-stamped input source. */
+  readonly resolveAgentMail?: (
+    command: RuntimeThreadControlState,
+    childThreadId: string,
+    deliveryId?: string | undefined,
+  ) => Promise<RuntimeResolvedAgentMail>;
 }
 
 /** Result of committing one accepted command before mutating its hot thread state. */
@@ -92,7 +97,15 @@ export interface RuntimeLoadedAgentMail {
   readonly deliveryId: string;
   readonly sourceThreadId: string;
   readonly sourceToolUseEventId: string;
+}
+
+/** Database-stamped agent-mail input returned by the durable resolver. */
+export interface RuntimeResolvedAgentMail extends RuntimeLoadedAgentMail {
+  readonly targetThreadId: string;
+  readonly receivedEventId: string;
+  readonly receivedSequence: number;
   readonly message: RuntimeMessage;
+  readonly publicMessageJson: string;
 }
 
 /** Effect service tag through which orchestration obtains the active context loader. */

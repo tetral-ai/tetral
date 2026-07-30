@@ -30,7 +30,6 @@ import type {
 } from "@tetral/agent-runtime-protocol/src/gen/tetral/agent_runtime/v1/agent_runtime.js";
 import type { ServiceAccountIdentity } from "./auth.js";
 import type { RuntimePodLogger } from "./logger.js";
-import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeDeclarationReceipt,
   RuntimeMessage,
@@ -42,6 +41,7 @@ import type {
 } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import { taskNotificationDraft } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { GrpcStatusError } from "./errors.js";
+import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
 export { GrpcStatusError } from "./errors.js";
 
@@ -175,7 +175,7 @@ export type RuntimeMessagesCommand = RuntimeCommandScope & (
     }
 );
 
-/** Stored child-completion envelope delivered by Bridge without a context rescan. */
+/** Stored child-completion envelope delivered from its database-stamped input source. */
 export interface RuntimeAgentMailCommand extends RuntimeCommandScope {
   readonly deliveryId: string;
   readonly sourceThreadId: string;
@@ -343,7 +343,7 @@ export class RuntimeControlService {
     );
   }
 
-  /** Rescans durable completion mail for one target thread and wakes it when mail is pending. */
+  /** Accepts one database-stamped agent-mail command and wakes its target thread. */
   async acceptAgentMail(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
     return await this.runRuntimeCommand(
       request,
@@ -577,7 +577,7 @@ export class RuntimeControlService {
     if (effect === "agent-mail") {
       const result = await this.options.runHost.handleAgentMail({
         ...commandScope(request),
-        ...agentMailFromPayload(request.runtimeInputId, request.payloadJson),
+        ...agentMailFromPayload(request),
       });
       if (!result.ok) {
         if (result.reason === "local_session_capacity_exceeded") {
@@ -1105,20 +1105,30 @@ function toolConfirmationFromPayload(
 }
 
 function agentMailFromPayload(
-  runtimeInputId: string,
-  payloadJson: string,
+  request: RuntimeInputCommandRequest,
 ): Pick<RuntimeAgentMailCommand, "deliveryId" | "sourceThreadId" | "sourceToolUseEventId" | "message"> {
-  const payload = parseObjectPayload(payloadJson, "agent mail");
+  if (
+    request.eventIds.length !== 1 ||
+    request.sequenceFrom <= 0 ||
+    request.sequenceFrom !== request.sequenceTo
+  ) {
+    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid agent mail payload");
+  }
+  const payload = parseObjectPayload(request.payloadJson, "agent mail");
   const deliveryId = stringField(payload, "delivery_id");
   const sourceThreadId = stringField(payload, "source_thread_id");
   const sourceToolUseEventId = stringField(payload, "source_tool_use_event_id");
-  const message = RuntimeMessageSchema.safeParse(payload.message);
+  let message: RuntimeMessage;
+  try {
+    message = runtimeMessageFromPublicAgentMail(JSON.stringify(payload.message));
+  } catch {
+    throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid agent mail payload");
+  }
   if (
     deliveryId === undefined ||
     sourceThreadId === undefined ||
     sourceToolUseEventId === undefined ||
-    !message.success ||
-    runtimeInputId !== `agent_mail:${deliveryId}`
+    request.runtimeInputId !== `agent_mail:${deliveryId}`
   ) {
     throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid agent mail payload");
   }
@@ -1126,7 +1136,7 @@ function agentMailFromPayload(
     deliveryId,
     sourceThreadId,
     sourceToolUseEventId,
-    message: message.data,
+    message,
   };
 }
 

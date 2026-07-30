@@ -853,19 +853,10 @@ func insertRuntimePodLostToolResultTx(ctx context.Context, tx *dbconnect.Tx, wor
 }
 
 type runtimePodLostSubAgentDelivery struct {
-	ToolUse     runtimeOrphanToolUse
-	ToolName    string
-	SentEvent   string
-	SentPayload string
-}
-
-type runtimePodLostSentDeliveryPayload struct {
-	DeliveryID           string          `json:"delivery_id"`
-	SourceThreadID       string          `json:"source_thread_id"`
-	TargetThreadID       string          `json:"target_thread_id"`
-	TargetTaskName       string          `json:"target_task_name"`
-	SourceToolUseEventID string          `json:"source_tool_use_event_id"`
-	Message              json.RawMessage `json:"message"`
+	ToolUse   runtimeOrphanToolUse
+	ToolName  string
+	SentEvent string
+	Delivery  string
 }
 
 func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
@@ -880,7 +871,7 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 		} else if exists {
 			continue
 		}
-		if delivery.SentEvent == "" {
+		if delivery.SentEvent == "" || delivery.Delivery == "" {
 			inserted, err := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
 				"Sub-agent delivery could not be recovered because its durable delivery anchor is missing.", now)
 			if err != nil {
@@ -892,11 +883,26 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 			continue
 		}
 
-		var sent runtimePodLostSentDeliveryPayload
-		if err := json.Unmarshal([]byte(delivery.SentPayload), &sent); err != nil ||
-			sent.DeliveryID == "" || sent.SourceThreadID != delivery.ToolUse.SessionThreadID ||
-			sent.TargetThreadID == "" || sent.SourceToolUseEventID != delivery.ToolUse.EventID ||
-			len(sent.Message) == 0 || !json.Valid(sent.Message) {
+		envelope, err := loadStoredAgentMailEnvelopeByDeliveryTx(ctx, tx, workspaceID, sessionID, delivery.Delivery)
+		if err != nil {
+			switch status.Code(err) {
+			case codes.AlreadyExists, codes.FailedPrecondition, codes.NotFound:
+				inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
+					"Sub-agent delivery could not be recovered because its durable delivery anchor is invalid.", now)
+				if insertErr != nil {
+					return 0, insertErr
+				}
+				if inserted {
+					repaired++
+				}
+				continue
+			default:
+				return 0, err
+			}
+		}
+		if envelope.SentEventID != delivery.SentEvent ||
+			envelope.SourceThreadID != delivery.ToolUse.SessionThreadID ||
+			envelope.SourceToolUseEventID != delivery.ToolUse.EventID {
 			inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
 				"Sub-agent delivery could not be recovered because its durable delivery anchor is invalid.", now)
 			if insertErr != nil {
@@ -908,58 +914,44 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 			continue
 		}
 
-		parentScope := runtimePodLostRepairScope(workspaceID, sessionID, delivery.ToolUse.SessionThreadID, binding, sent.DeliveryID)
-		received, err := interAgentDeliveryEventExistsTx(ctx, tx, parentScope, sent.TargetThreadID, "agent.thread_message_received", sent.DeliveryID)
-		if err != nil {
+		parentScope := runtimePodLostRepairScope(workspaceID, sessionID, delivery.ToolUse.SessionThreadID, binding, envelope.DeliveryID)
+		if err := requireAgentMailInputTargetTx(ctx, tx, scopeForThread(parentScope, envelope.TargetThreadID)); err != nil {
+			switch status.Code(err) {
+			case codes.FailedPrecondition, codes.NotFound:
+				inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
+					"Sub-agent delivery could not be recovered because the target child is not receivable.", now)
+				if insertErr != nil {
+					return 0, insertErr
+				}
+				if inserted {
+					repaired++
+				}
+				continue
+			default:
+				return 0, err
+			}
+		}
+		if _, err := enqueueCompletionMailWakeTx(
+			ctx,
+			tx,
+			workspaceID,
+			sessionID,
+			envelope.TargetThreadID,
+			envelope.DeliveryID,
+			now,
+		); err != nil {
 			return 0, err
 		}
-		if !received {
-			childScope := scopeForThread(parentScope, sent.TargetThreadID)
-			redrivePayload, err := marshalBridgeJSON(interAgentMessagePayload{
-				DeliveryID:           sent.DeliveryID,
-				SourceThreadID:       sent.SourceThreadID,
-				SourceToolUseEventID: sent.SourceToolUseEventID,
-				Message:              sent.Message,
-			})
-			if err != nil {
-				return 0, err
-			}
-			if err := commitInterAgentMessageTx(ctx, tx, childScope, redrivePayload, now); err != nil {
-				switch status.Code(err) {
-				case codes.FailedPrecondition, codes.NotFound:
-					inserted, insertErr := insertRuntimePodLostSubAgentDeliveryErrorTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse,
-						"Sub-agent delivery could not be recovered because the target child is not receivable.", now)
-					if insertErr != nil {
-						return 0, insertErr
-					}
-					if inserted {
-						repaired++
-					}
-					continue
-				default:
-					return 0, err
-				}
-			}
-			received, err = interAgentDeliveryEventExistsTx(ctx, tx, parentScope, sent.TargetThreadID, "agent.thread_message_received", sent.DeliveryID)
-			if err != nil {
-				return 0, err
-			}
-			if !received {
-				return 0, status.Error(codes.Internal, "sub-agent delivery re-drive did not commit a durable receipt")
-			}
-		}
 
-		taskName := sent.TargetTaskName
-		if taskName == "" {
-			if err := tx.QueryRow(ctx,
-				`SELECT COALESCE(task_name, '')
-				   FROM session_threads
-				  WHERE workspace_id = $1 AND session_id = $2 AND id = $3`,
-				workspaceID, sessionID, sent.TargetThreadID).Scan(&taskName); err != nil && !dbconnect.IsNoRows(err) {
-				return 0, err
-			}
+		var taskName string
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(task_name, '')
+			   FROM session_threads
+			  WHERE workspace_id = $1 AND session_id = $2 AND id = $3`,
+			workspaceID, sessionID, envelope.TargetThreadID).Scan(&taskName); err != nil {
+			return 0, err
 		}
-		resultText := "task_name: " + defaultString(taskName, "subagent") + "\nsession_thread_id: " + sent.TargetThreadID + "\nstatus: delivered"
+		resultText := "task_name: " + defaultString(taskName, "subagent") + "\nsession_thread_id: " + envelope.TargetThreadID + "\nstatus: delivered"
 		inserted, err := insertRuntimePodLostSubAgentDeliveredResultTx(ctx, tx, workspaceID, sessionID, binding, delivery.ToolUse, resultText, now)
 		if err != nil {
 			return 0, err
@@ -979,7 +971,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		        tool_use.payload_json,
 		        COALESCE(tool_use.payload_json::jsonb ->> 'name', ''),
 		        COALESCE(sent.event_id, ''),
-		        COALESCE(sent.payload_json, '')
+		        COALESCE(sent.payload_json::jsonb ->> 'delivery_id', '')
 		   FROM session_events tool_use
 		   LEFT JOIN LATERAL (
 		       SELECT candidate.event_id, candidate.payload_json
@@ -1027,7 +1019,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 			&delivery.ToolUse.PayloadJSON,
 			&delivery.ToolName,
 			&delivery.SentEvent,
-			&delivery.SentPayload,
+			&delivery.Delivery,
 		); err != nil {
 			return nil, err
 		}

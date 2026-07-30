@@ -37,7 +37,6 @@ func (s *PostgreSQLBridgeAPIStore) LoadContext(ctx context.Context, request *bri
 			request.GetScope(),
 			s.providerRescheduleBudget(),
 			s.compactionRescheduleBudget(),
-			request.GetAgentMailSourceThreadId(),
 		)
 		if err != nil {
 			return err
@@ -119,10 +118,9 @@ type bridgeLoadContextThread struct {
 }
 
 type bridgeLoadContextAgentMail struct {
-	DeliveryID           string          `json:"deliveryId"`
-	SourceThreadID       string          `json:"sourceThreadId"`
-	SourceToolUseEventID string          `json:"sourceToolUseEventId"`
-	Message              json.RawMessage `json:"message"`
+	DeliveryID           string `json:"deliveryId"`
+	SourceThreadID       string `json:"sourceThreadId"`
+	SourceToolUseEventID string `json:"sourceToolUseEventId"`
 }
 
 type bridgeLoadContextPendingAttachment struct {
@@ -216,7 +214,6 @@ func loadThreadContextJSONTx(
 	scope *bridgev1.RuntimeScope,
 	providerRescheduleBudget int64,
 	compactionRescheduleBudget int64,
-	agentMailSourceThreadID string,
 ) (string, error) {
 	runtimeConfig, err := loadThreadRuntimeConfigTx(ctx, tx, scope)
 	if err != nil {
@@ -240,7 +237,7 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
-	pendingAgentMail, err := loadThreadPendingAgentMailTx(ctx, tx, scope, agentMailSourceThreadID)
+	pendingAgentMail, err := loadThreadPendingAgentMailTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
 	}
@@ -595,130 +592,91 @@ func loadThreadPendingAgentMailTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
-	sourceThreadID string,
 ) ([]bridgeLoadContextAgentMail, error) {
-	query := `SELECT sent.payload_json::jsonb ->> 'delivery_id',
+	rows, err := tx.Query(ctx,
+		`SELECT sent.payload_json::jsonb ->> 'delivery_id',
 		        sent.payload_json::jsonb ->> 'source_thread_id',
-		        sent.payload_json::jsonb ->> 'source_tool_use_event_id',
-		        sent.payload_json::jsonb -> 'message'
+		        sent.payload_json::jsonb ->> 'source_tool_use_event_id'
 		   FROM session_events sent
-		   JOIN session_threads source
-		     ON source.workspace_id=sent.workspace_id
-		    AND source.session_id=sent.session_id
-		    AND source.id=sent.payload_json::jsonb ->> 'source_thread_id'
-		    AND source.parent_thread_id=$3
-		    AND source.role='subagent'
-			  WHERE sent.workspace_id=$1
-			    AND sent.session_id=$2
-			    AND sent.type='agent.thread_message_sent'
-			    AND sent.payload_json::jsonb ->> 'target_thread_id'=$3
-			    AND sent.payload_json::jsonb ->> 'source_thread_id'=$4
-			    AND (
-			      NOT EXISTS (
-			        SELECT 1
-			          FROM session_events received
-			         WHERE received.workspace_id=sent.workspace_id
-			           AND received.session_id=sent.session_id
-			           AND received.session_thread_id=$3
-			           AND received.type='agent.thread_message_received'
-			           AND received.payload_json::jsonb ->> 'delivery_id'=sent.payload_json::jsonb ->> 'delivery_id'
-			      )
-			      OR NOT EXISTS (
-			        SELECT 1
-			          FROM session_events child_received
-			         WHERE child_received.workspace_id=sent.workspace_id
-			           AND child_received.session_id=sent.session_id
-			           AND child_received.session_thread_id=$4
-			           AND child_received.type='agent.thread_message_received'
-			           AND child_received.sequence > sent.sequence
-			      )
-			    )
-			  ORDER BY
-		    CASE WHEN NOT EXISTS (
-			SELECT 1
-			  FROM session_events received
-			 WHERE received.workspace_id=sent.workspace_id
-			   AND received.session_id=sent.session_id
-			   AND received.session_thread_id=$3
-			   AND received.type='agent.thread_message_received'
-			   AND received.payload_json::jsonb ->> 'delivery_id'=sent.payload_json::jsonb ->> 'delivery_id'
-		    ) THEN 0 ELSE 1 END ASC,
-		    CASE WHEN NOT EXISTS (
-			SELECT 1
-			  FROM session_events received
-			 WHERE received.workspace_id=sent.workspace_id
-			   AND received.session_id=sent.session_id
-			   AND received.session_thread_id=$3
-			   AND received.type='agent.thread_message_received'
-			   AND received.payload_json::jsonb ->> 'delivery_id'=sent.payload_json::jsonb ->> 'delivery_id'
-		    ) THEN sent.sequence END ASC,
-		    CASE WHEN EXISTS (
-			SELECT 1
-			  FROM session_events received
-			 WHERE received.workspace_id=sent.workspace_id
-			   AND received.session_id=sent.session_id
-			   AND received.session_thread_id=$3
-			   AND received.type='agent.thread_message_received'
-			   AND received.payload_json::jsonb ->> 'delivery_id'=sent.payload_json::jsonb ->> 'delivery_id'
-		    ) THEN sent.sequence END DESC,
-		    sent.event_id DESC
-		  LIMIT 1`
-	if sourceThreadID == "" {
-		query = `SELECT sent.payload_json::jsonb ->> 'delivery_id',
-			        sent.payload_json::jsonb ->> 'source_thread_id',
-			        sent.payload_json::jsonb ->> 'source_tool_use_event_id',
-			        sent.payload_json::jsonb -> 'message'
-			   FROM session_events sent
 			   JOIN session_threads source
-			     ON source.workspace_id=sent.workspace_id
-			    AND source.session_id=sent.session_id
-			    AND source.id=sent.payload_json::jsonb ->> 'source_thread_id'
-			    AND source.parent_thread_id=$3
-			    AND source.role='subagent'
-			  WHERE sent.workspace_id=$1
-			    AND sent.session_id=$2
-			    AND sent.type='agent.thread_message_sent'
-			    AND sent.payload_json::jsonb ->> 'target_thread_id'=$3
-			    AND NOT EXISTS (
-				SELECT 1
-				  FROM session_events received
-				 WHERE received.workspace_id=sent.workspace_id
-				   AND received.session_id=sent.session_id
-				   AND received.session_thread_id=$3
-				   AND received.type='agent.thread_message_received'
-				   AND received.payload_json::jsonb ->> 'delivery_id'=sent.payload_json::jsonb ->> 'delivery_id'
+			     ON source.workspace_id = sent.workspace_id
+			    AND source.session_id = sent.session_id
+			    AND source.id = sent.session_thread_id
+			    AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
+			   JOIN session_threads target
+			     ON target.workspace_id = sent.workspace_id
+			    AND target.session_id = sent.session_id
+			    AND target.id = $3
+			  WHERE sent.workspace_id = $1
+			    AND sent.session_id = $2
+			    AND sent.type = 'agent.thread_message_sent'
+			    AND sent.payload_json::jsonb ->> 'target_thread_id' = $3
+			    AND (
+			        (source.role = 'subagent' AND source.parent_thread_id = target.id)
+			        OR (target.role = 'subagent' AND target.parent_thread_id = source.id)
 			    )
-			  ORDER BY sent.sequence ASC, sent.event_id ASC
-			  LIMIT 4`
-	}
-	queryArgs := []any{
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events received
+		         WHERE received.workspace_id = sent.workspace_id
+		           AND received.session_id = sent.session_id
+		           AND received.session_thread_id = $3
+		           AND received.type = 'agent.thread_message_received'
+		           AND received.payload_json::jsonb ->> 'delivery_id' =
+		               sent.payload_json::jsonb ->> 'delivery_id'
+		           AND received.processed_at IS NOT NULL
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_runtime_inbox inbox
+		         WHERE inbox.workspace_id = sent.workspace_id
+		           AND inbox.session_id = sent.session_id
+		           AND inbox.session_thread_id = $3
+		           AND inbox.runtime_input_id =
+		               'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
+		           AND inbox.status = 'committed'
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events exhausted
+		         WHERE exhausted.workspace_id = sent.workspace_id
+		           AND exhausted.session_id = sent.session_id
+		           AND exhausted.event_id =
+		               'evt_runtime_exhausted_' || substr(encode(sha256(
+		                   convert_to(sent.workspace_id, 'UTF8') ||
+		                   decode('00', 'hex') ||
+		                   convert_to(sent.session_id, 'UTF8') ||
+		                   decode('00', 'hex') ||
+		                   convert_to(
+		                       'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
+		                       'UTF8'
+		                   ) ||
+		                   decode('00', 'hex') ||
+		                   convert_to('runtime_delivery_exhausted', 'UTF8')
+		               ), 'hex'), 1, 24)
+		           AND exhausted.type = 'session.error'
+		           AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
+		    )
+		  ORDER BY sent.sequence ASC, sent.event_id ASC
+		  LIMIT 4`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-	}
-	if sourceThreadID != "" {
-		queryArgs = append(queryArgs, sourceThreadID)
-	}
-	rows, err := tx.Query(ctx, query, queryArgs...)
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	pending := make([]bridgeLoadContextAgentMail, 0)
-	bodyBytes := 0
 	for rows.Next() {
 		var mail bridgeLoadContextAgentMail
-		if err := rows.Scan(&mail.DeliveryID, &mail.SourceThreadID, &mail.SourceToolUseEventID, &mail.Message); err != nil {
+		if err := rows.Scan(&mail.DeliveryID, &mail.SourceThreadID, &mail.SourceToolUseEventID); err != nil {
 			return nil, err
 		}
-		if mail.DeliveryID == "" || mail.SourceThreadID == "" || mail.SourceToolUseEventID == "" || len(mail.Message) == 0 || !json.Valid(mail.Message) {
+		if mail.DeliveryID == "" || mail.SourceThreadID == "" || mail.SourceToolUseEventID == "" {
 			return nil, status.Error(codes.FailedPrecondition, "pending agent mail is malformed")
 		}
-		if sourceThreadID == "" && len(pending) > 0 && bodyBytes+len(mail.Message) > MailFetchMaxBodyBytes {
-			break
-		}
 		pending = append(pending, mail)
-		bodyBytes += len(mail.Message)
 	}
 	return pending, rows.Err()
 }

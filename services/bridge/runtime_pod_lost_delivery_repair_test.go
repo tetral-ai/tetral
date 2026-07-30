@@ -24,6 +24,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 		withTerminal    bool
 		withRequestEnd  bool
 		wantReceived    int
+		wantWake        int
 		wantResultError bool
 		wantResultText  string
 	}{
@@ -35,6 +36,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			withReceived:   true,
 			withRequestEnd: true,
 			wantReceived:   1,
+			wantWake:       1,
 			wantResultText: "status: delivered",
 		},
 		{
@@ -42,7 +44,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			toolName:       "spawn_agent",
 			childStatus:    "idle",
 			withSent:       true,
-			wantReceived:   1,
+			wantWake:       1,
 			wantResultText: "status: delivered",
 		},
 		{
@@ -50,7 +52,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			toolName:       "send_message",
 			childStatus:    "running",
 			withSent:       true,
-			wantReceived:   1,
+			wantWake:       1,
 			wantResultText: "status: delivered",
 		},
 		{
@@ -92,6 +94,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			var sentCount int
 			var receivedCount int
 			var childCount int
+			var wakeCount int
 			if err := admin.QueryRowContext(context.Background(),
 				`SELECT count(*) FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1
@@ -112,8 +115,21 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 				fixture.sessionID, fixture.parentThreadID).Scan(&childCount); err != nil {
 				t.Fatalf("count child threads: %v", err)
 			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*)
+				   FROM queue_jobs
+				  WHERE workspace_id = 'default'
+				    AND kind = 'runtime_input'
+				    AND payload_json::jsonb ->> 'runtime_input_id' = $1`,
+				completionRuntimeInputID(fixture.deliveryID),
+			).Scan(&wakeCount); err != nil {
+				t.Fatalf("count durable agent-mail wakes: %v", err)
+			}
 			if sentCount != boolCount(tc.withSent) || receivedCount != tc.wantReceived || childCount != 1 {
 				t.Fatalf("delivery facts sent=%d received=%d children=%d; want %d/%d/1", sentCount, receivedCount, childCount, boolCount(tc.withSent), tc.wantReceived)
+			}
+			if wakeCount != tc.wantWake {
+				t.Fatalf("durable agent-mail wakes = %d; want %d", wakeCount, tc.wantWake)
 			}
 
 			var resultCount int
@@ -144,8 +160,8 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 					fixture.sessionID, fixture.childThreadID).Scan(&messageCount); err != nil {
 					t.Fatalf("count re-driven child messages: %v", err)
 				}
-				if messageCount != 1 {
-					t.Fatalf("re-driven child messages = %d; want exactly one", messageCount)
+				if messageCount != 0 {
+					t.Fatalf("pre-delivery child messages = %d; want none before the child commits input", messageCount)
 				}
 			}
 		})
@@ -305,9 +321,8 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 
 	current, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_pod_loss_wait_current",
-		AgentMailSourceThreadId: fixture.childThreadID,
+		Scope:          scope,
+		RuntimeInputId: "rin_pod_loss_wait_current",
 	})
 	if err != nil {
 		t.Fatalf("load current completion after pod loss: %v", err)
@@ -316,16 +331,15 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	if err := json.Unmarshal([]byte(current.GetContextJson()), &currentPayload); err != nil {
 		t.Fatalf("decode current completion after pod loss: %v", err)
 	}
-	if len(currentPayload.PendingAgentMail) != 1 || currentPayload.PendingAgentMail[0].DeliveryID != completionDeliveryID {
-		t.Fatalf("current completion after pod loss = %#v; want %s", currentPayload.PendingAgentMail, completionDeliveryID)
+	if len(currentPayload.PendingAgentMail) != 0 {
+		t.Fatalf("current completion after committed receipt = %#v; want none", currentPayload.PendingAgentMail)
 	}
 
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_newer_opener", 3,
 		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
 	superseded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_pod_loss_wait_superseded",
-		AgentMailSourceThreadId: fixture.childThreadID,
+		Scope:          scope,
+		RuntimeInputId: "rin_pod_loss_wait_superseded",
 	})
 	if err != nil {
 		t.Fatalf("load superseded completion after pod loss: %v", err)
@@ -359,14 +373,16 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementCommitsBeforeRelease(t *testi
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 23, "spawn_agent", "idle", true, false, false, true, false)
 	releaser := &recordingSandboxReleaseClient{
 		beforeRelease: func(SandboxReleaseRequest) error {
-			var receivedCount int
+			var wakeCount int
 			var resultCount int
 			var bindingCount int
 			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_events
-				  WHERE workspace_id = 'default' AND session_id = $1
-				    AND type = 'agent.thread_message_received'
-				    AND payload_json::jsonb ->> 'delivery_id' = $2`, fixture.sessionID, fixture.deliveryID).Scan(&receivedCount); err != nil {
+				`SELECT count(*) FROM queue_jobs
+				  WHERE workspace_id = 'default'
+				    AND kind = 'runtime_input'
+				    AND payload_json::jsonb ->> 'runtime_input_id' = $1`,
+				completionRuntimeInputID(fixture.deliveryID),
+			).Scan(&wakeCount); err != nil {
 				return err
 			}
 			if err := admin.QueryRowContext(context.Background(),
@@ -382,8 +398,8 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementCommitsBeforeRelease(t *testi
 				fixture.sessionID, fixture.binding.BindingID, fixture.binding.BindingGeneration).Scan(&bindingCount); err != nil {
 				return err
 			}
-			if receivedCount != 1 || resultCount != 1 || bindingCount != 1 {
-				return fmt.Errorf("release observed received=%d results=%d binding=%d; want 1/1/1", receivedCount, resultCount, bindingCount)
+			if wakeCount != 1 || resultCount != 1 || bindingCount != 1 {
+				return fmt.Errorf("release observed wakes=%d results=%d binding=%d; want 1/1/1", wakeCount, resultCount, bindingCount)
 			}
 			return nil
 		},

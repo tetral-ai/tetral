@@ -242,7 +242,8 @@ message LoadContextRequest {
   string runtime_input_id = 2;
   int64 sequence_from = 3;
   int64 sequence_to = 4;
-  string agent_mail_source_thread_id = 5;
+  reserved 5;
+  reserved "agent_mail_source_thread_id";
 }
 
 message LoadContextResponse {
@@ -599,10 +600,13 @@ message ResolveInterAgentDeliveryRequest {
 
 message ResolveInterAgentDeliveryResponse {
   BridgeWriteAck ack = 1;
-  bool sent_exists = 2;
-  bool received_exists = 3;
-  bool child_receivable = 4;
-  string child_thread_json = 5;
+  string delivery_id = 2;
+  string source_thread_id = 3;
+  string target_thread_id = 4;
+  string source_tool_use_event_id = 5;
+  string received_event_id = 6;
+  int64 received_sequence = 7;
+  string message_json = 8;
 }
 
 message MarkChildThreadClosedRequest {
