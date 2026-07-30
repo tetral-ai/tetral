@@ -345,139 +345,188 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		return nil, err
 	}
 	repairKey := internalToolRepairKey(request.GetModelRequestId(), request.GetModelToolCallId(), request.GetToolName())
-	dataJSON := stripInternalProviderFields(request.GetDataJson())
-	requestHash := bridgeRequestHash(bridgeOpCommitInternalToolRepair, repairKey, dataJSON)
+	declarationDigest, err := internalToolRepairDeclarationDigest(request, repairKey)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
-	var response *bridgev1.CommitInternalToolRepairResponse
+	var (
+		ack     *bridgev1.BridgeWriteAck
+		receipt *bridgev1.DeclarationReceipt
+	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_internal_tool_repair", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInternalToolRepair,
+			"internal_tool_repair",
+			repairKey,
+		); err != nil {
+			return err
+		} else if ok {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
+				return status.Error(codes.AlreadyExists, "internal tool repair idempotency conflict")
+			}
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+			}
+			ack = duplicateAck("", repairKey)
+			return nil
+		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitInternalToolRepair, repairKey); err != nil {
-			return err
-		} else if ok {
-			if existing.RequestHash != requestHash {
-				return status.Error(codes.AlreadyExists, "internal tool repair idempotency conflict")
-			}
-			response = &bridgev1.CommitInternalToolRepairResponse{Ack: duplicateAck("", repairKey)}
-			return nil
-		}
-		if err := insertInternalToolRepairMessageTx(ctx, tx, request.GetScope(), repairKey, dataJSON, now); err != nil {
+		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpCommitInternalToolRepair,
-			IdempotencyKey: repairKey,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeWriteID: sql.NullString{String: repairKey, Valid: true},
-			ResultJSON:     `{"status":"committed"}`,
-			Now:            now,
-		}); err != nil {
+		eventID, eventSequence, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
+		if err != nil {
 			return err
 		}
-		response = &bridgev1.CommitInternalToolRepairResponse{Ack: committedAck("", repairKey)}
+		receipt, err = commitInternalToolRepairDraftTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			repairKey,
+			eventID,
+			eventSequence,
+			request.GetModelToolCallId(),
+			request.GetToolName(),
+			request.GetDrafts()[0],
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		receipt.DeclarationDigest = declarationDigest
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		if err != nil {
+			return err
+		}
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInternalToolRepair,
+			"internal_tool_repair",
+			repairKey,
+			declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
+			return err
+		}
+		ack = committedAck("", repairKey)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return response, nil
+	if receipt == nil || len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 {
+		return nil, status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+	}
+	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpCommitInternalToolRepair,
+		"internal_tool_repair",
+		repairKey,
+		declarationDigest,
+		ack,
+		observation,
+	)
+	return &bridgev1.CommitInternalToolRepairResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
 func validateInternalToolRepairRequest(request *bridgev1.CommitInternalToolRepairRequest) error {
 	if err := validateRuntimeScope(request.GetScope()); err != nil {
 		return err
 	}
-	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetDataJson() == "" {
+	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || len(request.GetDrafts()) != 1 {
 		return status.Error(codes.InvalidArgument, "invalid internal tool repair request")
 	}
 	if len([]byte(request.GetModelToolCallId())) > internalToolRepairIDMaxBytes || len([]byte(request.GetToolName())) > internalToolRepairIDMaxBytes {
 		return status.Error(codes.InvalidArgument, "internal tool repair identifiers are too large")
 	}
-	if len([]byte(request.GetDataJson())) > internalToolRepairDataMaxBytes {
-		return status.Error(codes.InvalidArgument, "internal tool repair data is too large")
-	}
-	if !json.Valid([]byte(request.GetDataJson())) {
-		return status.Error(codes.InvalidArgument, "internal tool repair data must be JSON")
-	}
-	return validateInternalToolRepairData(request.GetScope(), request.GetModelToolCallId(), request.GetToolName(), request.GetDataJson())
-}
-
-type internalToolRepairData struct {
-	ID        string `json:"id"`
-	SessionID string `json:"sessionId"`
-	Role      string `json:"role"`
-	Origin    string `json:"origin"`
-	Status    string `json:"status"`
-	Parts     []struct {
-		ID             string  `json:"id"`
-		SessionID      string  `json:"sessionId"`
-		MessageID      string  `json:"messageId"`
-		Type           string  `json:"type"`
-		ToolCallID     string  `json:"toolCallId"`
-		ToolName       string  `json:"toolName"`
-		ToolUseEventID *string `json:"toolUseEventId"`
-		State          struct {
-			Status string `json:"status"`
-		} `json:"state"`
-	} `json:"parts"`
-}
-
-func validateInternalToolRepairData(scope *bridgev1.RuntimeScope, modelToolCallID string, toolName string, dataJSON string) error {
-	var message internalToolRepairData
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
-		return status.Error(codes.InvalidArgument, "internal tool repair data is malformed")
-	}
-	if message.ID == "" || message.SessionID != scope.GetSessionId() || message.Role != "assistant" || message.Origin != "agent" || message.Status != "completed" || len(message.Parts) != 1 {
-		return status.Error(codes.InvalidArgument, "internal tool repair message is invalid")
-	}
-	part := message.Parts[0]
-	if part.ID == "" || part.SessionID != scope.GetSessionId() || part.MessageID != message.ID || part.Type != "tool" {
-		return status.Error(codes.InvalidArgument, "internal tool repair part is invalid")
-	}
-	if part.ToolCallID != modelToolCallID || part.ToolName != toolName || part.State.Status != "error" {
-		return status.Error(codes.InvalidArgument, "internal tool repair payload does not match request")
-	}
-	if part.ToolUseEventID != nil && *part.ToolUseEventID != "" {
-		return status.Error(codes.InvalidArgument, "internal tool repair must not carry a public tool use event id")
-	}
 	return nil
 }
 
-func insertInternalToolRepairMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, repairKey string, dataJSON string, now time.Time) error {
-	var message internalToolRepairData
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
-		return status.Error(codes.InvalidArgument, "internal tool repair data is malformed")
+func insertInternalToolRepairEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.CommitInternalToolRepairRequest,
+	threadScope threadMutationScope,
+	repairKey string,
+	now time.Time,
+) (string, int64, error) {
+	scope := request.GetScope()
+	payloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":               "agent.tool_result",
+		"model_tool_call_id": request.GetModelToolCallId(),
+		"tool_name":          request.GetToolName(),
+		"repair_kind":        "invalid_tool",
+	})
+	if err != nil {
+		return "", 0, err
 	}
-	var sequence int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
+	eventID := id.New("evt_")
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return "", 0, err
+	}
+	visibility, sessionVisible := threadScope.publicProjection("agent.tool_result")
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+			created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, '{}', $11, $11, $11)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-	).Scan(&sequence); err != nil {
-		return err
-	}
-	timestamp := now
-	_, err := tx.Exec(ctx,
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, repair_key, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, NULL, NULL, $7, $8, $8)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		message.ID,
+		eventID,
 		sequence,
-		dataJSON,
+		payloadJSON,
+		visibility,
+		sessionVisible,
 		repairKey,
-		timestamp,
-	)
-	return err
+		request.GetModelRequestId(),
+		now,
+	); err != nil {
+		return "", 0, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return "", 0, err
+	}
+	return eventID, sequence, nil
 }
 
 func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolName string) string {
@@ -908,15 +957,17 @@ func memoryProjectionOps(paths []string, heads map[string]memoryProjectionHead) 
 func updateMemoryProjectionStateTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, state sql.NullString, resultJSON string, now time.Time) error {
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
-		    SET memory_projection_state = $4,
-		        result_json = $5,
-		        updated_at = $6
+		    SET memory_projection_state = $5,
+		        result_json = $6,
+		        updated_at = $7
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND tool_use_event_id = $3
+		    AND session_thread_id = $3
+		    AND tool_use_event_id = $4
 		    AND tool_kind = 'memory'`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 		toolUseEventID,
 		state,
 		resultJSON,

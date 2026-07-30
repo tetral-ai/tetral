@@ -15,7 +15,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -32,12 +31,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim", "bind_bridge_cleanup_preclaim", 7, "pod_uid_cleanup_preclaim"),
-		RuntimeWriteId: "rwrite_bridge_cleanup_preclaim_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim", "bind_bridge_cleanup_preclaim", 7, "pod_uid_cleanup_preclaim"),
+		"evt_bridge_cleanup_preclaim_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -48,7 +48,15 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 		    AND session_id = 'sesn_bridge_cleanup_preclaim'`); err != nil {
 		t.Fatalf("mark cleanup enqueued: %v", err)
 	}
-	seedBridgeAPIUserMessageEvent(t, admin, "default", "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim", "sevt_cleanup_before_claim", 2)
+	seedBridgeAPIUserMessageEvent(
+		t,
+		admin,
+		"default",
+		"sesn_bridge_cleanup_preclaim",
+		"thr_bridge_cleanup_preclaim",
+		"sevt_cleanup_before_claim",
+		nextBridgeAPIEventSequenceForTest(t, admin, "sesn_bridge_cleanup_preclaim", "thr_bridge_cleanup_preclaim"),
+	)
 
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
@@ -106,12 +114,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupActiveSessionClaimsSettlesReleases
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_cleanup", "thr_bridge_cleanup", "bind_bridge_cleanup", 7, "pod_uid_cleanup"),
-		RuntimeWriteId: "rwrite_bridge_cleanup_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_cleanup", "thr_bridge_cleanup", "bind_bridge_cleanup", 7, "pod_uid_cleanup"),
+		"evt_bridge_cleanup_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -158,7 +167,15 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupActiveSessionClaimsSettlesReleases
 	if !claimedAt.Valid {
 		t.Fatal("cleanup claim did not set cleanup_claimed_at before Runtime command")
 	}
-	seedBridgeAPIUserMessageEvent(t, admin, "default", "sesn_bridge_cleanup", "thr_bridge_cleanup", "sevt_cleanup_after_claim", 3)
+	seedBridgeAPIUserMessageEvent(
+		t,
+		admin,
+		"default",
+		"sesn_bridge_cleanup",
+		"thr_bridge_cleanup",
+		"sevt_cleanup_after_claim",
+		nextBridgeAPIEventSequenceForTest(t, admin, "sesn_bridge_cleanup", "thr_bridge_cleanup"),
+	)
 	retryPlan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand cleanup retry after claim: %v", err)
@@ -290,10 +307,13 @@ func TestPostgreSQLRuntimeDeliveryStoreSessionDeleteCleanupClearsHotStateBeforeP
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 17, "pod_uid_hard_delete"),
-		RuntimeWriteId: "rwrite_bridge_hard_delete_idle", IdleSince: "2026-01-01T00:00:45Z", StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, threadID, bindingID, 17, "pod_uid_hard_delete"),
+		"evt_bridge_hard_delete_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -369,10 +389,13 @@ func TestPostgreSQLRuntimeDeliveryStoreSessionDeleteCleanupRetriesReleaseAfterBi
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_hard_delete_retry", 18, "pod_uid_hard_delete_retry"),
-		RuntimeWriteId: "rwrite_bridge_hard_delete_retry_idle", IdleSince: "2026-01-01T00:00:45Z", StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, threadID, "bind_bridge_hard_delete_retry", 18, "pod_uid_hard_delete_retry"),
+		"evt_bridge_hard_delete_retry_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted', delete_cleanup_id=$2 WHERE id=$1`, sessionID, deleteCleanupID); err != nil {
@@ -419,7 +442,7 @@ func TestPostgreSQLSessionDeleteCleanupCrashAfterHotClearBeforeSettlementReplays
 	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, "thr_delete_crash_hot_clear", bindingID, "task_delete_crash_hot_clear", "sevt_delete_crash_hot_clear_tool")
 	seedBridgeAPIPendingApproval(t, admin, "default", sessionID, "thr_delete_crash_hot_clear", "sevt_delete_crash_hot_clear_wait", 1)
-	finishBridgeDeleteFixtureIdle(t, runtime, sessionID, "thr_delete_crash_hot_clear", bindingID, 21, "pod_uid_delete_crash_hot_clear")
+	finishBridgeDeleteFixtureIdle(t, runtime, admin, sessionID, "thr_delete_crash_hot_clear", bindingID, 21, "pod_uid_delete_crash_hot_clear")
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted',delete_cleanup_id=$2 WHERE id=$1`, sessionID, deleteCleanupID); err != nil {
 		t.Fatalf("tombstone session: %v", err)
 	}
@@ -463,7 +486,7 @@ func TestPostgreSQLSessionDeleteCleanupSettlementAndBindingFinalizationRollbackA
 	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, "thr_delete_atomic_settlement", bindingID, "task_delete_atomic_settlement", "sevt_delete_atomic_settlement_tool")
 	seedBridgeAPIPendingApproval(t, admin, "default", sessionID, "thr_delete_atomic_settlement", "sevt_delete_atomic_settlement_wait", 1)
-	finishBridgeDeleteFixtureIdle(t, runtime, sessionID, "thr_delete_atomic_settlement", bindingID, 22, "pod_uid_delete_atomic_settlement")
+	finishBridgeDeleteFixtureIdle(t, runtime, admin, sessionID, "thr_delete_atomic_settlement", bindingID, 22, "pod_uid_delete_atomic_settlement")
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted',delete_cleanup_id=$2 WHERE id=$1`, sessionID, deleteCleanupID); err != nil {
 		t.Fatalf("tombstone session: %v", err)
 	}
@@ -510,7 +533,7 @@ func TestPostgreSQLSessionDeleteCleanupCrashAfterBindingFinalizationBeforeReleas
 	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, "thr_delete_crash_before_release", bindingID, "task_delete_crash_before_release", "sevt_delete_crash_before_release_tool")
 	seedBridgeAPIPendingApproval(t, admin, "default", sessionID, "thr_delete_crash_before_release", "sevt_delete_crash_before_release_wait", 1)
-	finishBridgeDeleteFixtureIdle(t, runtime, sessionID, "thr_delete_crash_before_release", bindingID, 23, "pod_uid_delete_crash_before_release")
+	finishBridgeDeleteFixtureIdle(t, runtime, admin, sessionID, "thr_delete_crash_before_release", bindingID, 23, "pod_uid_delete_crash_before_release")
 	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions SET lifecycle_state='deleted',delete_cleanup_id=$2 WHERE id=$1`, sessionID, deleteCleanupID); err != nil {
 		t.Fatalf("tombstone session: %v", err)
 	}
@@ -763,12 +786,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main", "bind_bridge_cleanup_confirm", 7, "pod_uid_cleanup_confirm"),
-		RuntimeWriteId: "rwrite_bridge_cleanup_confirm_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_cleanup_confirm", "thr_bridge_cleanup_confirm_main", "bind_bridge_cleanup_confirm", 7, "pod_uid_cleanup_confirm"),
+		"evt_bridge_cleanup_confirm_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -862,12 +886,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main", "bind_bridge_cleanup_preidle", 7, "pod_uid_cleanup_preidle"),
-		RuntimeWriteId: "rwrite_bridge_cleanup_preidle_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_cleanup_preidle", "thr_bridge_cleanup_preidle_main", "bind_bridge_cleanup_preidle", 7, "pod_uid_cleanup_preidle"),
+		"evt_bridge_cleanup_preidle_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -911,12 +936,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputBy
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main", "bind_bridge_cleanup_child_postidle", 7, "pod_uid_cleanup_child_postidle"),
-		RuntimeWriteId: "rwrite_bridge_cleanup_child_postidle_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_cleanup_child_postidle", "thr_bridge_cleanup_child_postidle_main", "bind_bridge_cleanup_child_postidle", 7, "pod_uid_cleanup_child_postidle"),
+		"evt_bridge_cleanup_child_postidle_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -1141,12 +1167,13 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
-		RuntimeWriteId: "rwrite_bridge_cleanup_gone_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
+		"evt_bridge_cleanup_gone_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -1267,12 +1294,13 @@ func seedBridgeCleanupTreeFixture(t *testing.T, runtime *sql.DB, admin *sql.DB, 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(sessionID, mainThreadID, "bind_"+sessionID, 7, "pod_uid_"+sessionID),
-		RuntimeWriteId: "rwrite_" + sessionID + "_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
+	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, mainThreadID, "bind_"+sessionID, 7, "pod_uid_"+sessionID),
+		"evt_"+sessionID+"_running",
+		`{"type":"end_turn"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle cleanup tree fixture: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),

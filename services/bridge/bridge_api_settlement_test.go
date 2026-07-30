@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
@@ -201,6 +201,140 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreWriteRequestEndSettlesOpenInterruptAtomically(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_bridge_request_interrupt"
+		threadID        = "thr_bridge_request_interrupt"
+		bindingID       = "bind_bridge_request_interrupt"
+		podUID          = "pod_uid_request_interrupt"
+		modelRequestID  = "mreq_bridge_request_interrupt"
+		runtimeInputID  = "rin_bridge_request_interrupt"
+		interruptEvent  = "evt_bridge_request_interrupt"
+		toolUseEventID  = "evt_bridge_request_interrupt_tool"
+		requestEndWrite = "rwrite_bridge_request_interrupt_end"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIPendingApproval(t, admin, "default", sessionID, threadID, toolUseEventID, 1)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 3, "user.interrupt", `{"type":"user.interrupt"}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 3, 3)
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_bridge_request_interrupt_start",
+		ModelRequestId: modelRequestID,
+		EventType:      "span.model_request_start",
+		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent start: %v", err)
+	}
+	cancellationLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		"default",
+		sessionID,
+		threadID,
+		"interrupt_control",
+		runtimeInputID,
+		"cancellation",
+		"0",
+	)
+	request := &bridgev1.WriteRequestEndRequest{
+		Scope:                    scope,
+		RuntimeWriteId:           requestEndWrite,
+		ModelRequestId:           modelRequestID,
+		ModelRequestStartEventId: start.GetEventId(),
+		IsError:                  true,
+		ErrorKind:                "runtime_interrupted",
+		FinishReason:             "cancelled",
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId: cancellationLocalID,
+			SourceKind:     "interrupt_control",
+			SourceId:       runtimeInputID,
+			SourceEventId:  interruptEvent,
+			DraftKind:      bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
+			MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed",
+				"toolUseEventId":"` + toolUseEventID + `"}`,
+			Parts: []*bridgev1.RuntimePartDraft{{
+				RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "text", "0"),
+				PartKind:           "text",
+				PartJson:           `{"type":"text","text":"The pending tool call was cancelled.","status":"completed","truncated":false}`,
+			}},
+		}},
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
+			RuntimeInputId: runtimeInputID,
+			EventIds:       []string{interruptEvent},
+			SequenceFrom:   3,
+			SequenceTo:     3,
+			PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
+				ToolUseEventId: toolUseEventID,
+				RuntimeLocalId: cancellationLocalID,
+			}},
+		},
+	}
+	response, err := store.WriteRequestEnd(context.Background(), request)
+	if err != nil {
+		t.Fatalf("WriteRequestEnd: %v", err)
+	}
+	replay, err := store.WriteRequestEnd(context.Background(), request)
+	if err != nil {
+		t.Fatalf("WriteRequestEnd replay: %v", err)
+	}
+
+	var inboxStatus string
+	var processedAt sql.NullString
+	var pendingStatus string
+	var requestEndCount int
+	var cancellationMessageCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = $1`,
+		runtimeInputID,
+	).Scan(&inboxStatus); err != nil {
+		t.Fatalf("read interrupt inbox: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT processed_at FROM session_events WHERE workspace_id = 'default' AND event_id = $1`,
+		interruptEvent,
+	).Scan(&processedAt); err != nil {
+		t.Fatalf("read interrupt event: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_pending_tool_uses WHERE workspace_id = 'default' AND tool_use_event_id = $1`,
+		toolUseEventID,
+	).Scan(&pendingStatus); err != nil {
+		t.Fatalf("read pending tool: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = $1 AND type = 'span.model_request_end'`,
+		sessionID,
+	).Scan(&requestEndCount); err != nil {
+		t.Fatalf("read request end count: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_messages
+		  WHERE workspace_id = 'default' AND session_id = $1 AND source_event_id = $2`,
+		sessionID,
+		interruptEvent,
+	).Scan(&cancellationMessageCount); err != nil {
+		t.Fatalf("read cancellation message count: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		len(response.GetDeclaration().GetReceipts()) != 2 ||
+		len(replay.GetDeclaration().GetReceipts()) != 2 ||
+		inboxStatus != "committed" || !processedAt.Valid || pendingStatus != "cancelled" ||
+		requestEndCount != 1 || cancellationMessageCount != 1 {
+		t.Fatalf("request-end interrupt settlement ack=%s replay=%s receipts=%d/%d inbox=%q processed=%v pending=%q ends=%d cancellations=%d; want one atomic settlement and exact replay",
+			response.GetAck().GetStatus(), replay.GetAck().GetStatus(),
+			len(response.GetDeclaration().GetReceipts()), len(replay.GetDeclaration().GetReceipts()),
+			inboxStatus, processedAt.Valid, pendingStatus, requestEndCount, cancellationMessageCount)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsWebToolCounters(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_end_web_usage", "thr_bridge_request_end_web_usage")
@@ -249,6 +383,28 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
 	}
+	terminalMessageLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		"default",
+		"sesn_bridge_reasoning_settle",
+		"thr_bridge_reasoning_settle",
+		"model_request",
+		"mreq_bridge_reasoning_settle",
+		"assistant_text",
+		"0",
+	)
+	firstReasoningLocalID := stableRuntimeID(
+		"runtime_message_part_draft",
+		terminalMessageLocalID,
+		"reasoning",
+		"0",
+	)
+	secondReasoningLocalID := stableRuntimeID(
+		"runtime_message_part_draft",
+		terminalMessageLocalID,
+		"reasoning",
+		"1",
+	)
 	request := &bridgev1.WriteRequestEndRequest{
 		Scope:                    scope,
 		RuntimeWriteId:           "rwrite_bridge_reasoning_settle_end",
@@ -257,9 +413,29 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		FinishReason:             "stop",
 		UsageJson:                `{"input_tokens":4,"output_tokens":3}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{
-			{ReasoningPartId: "reason_bridge_settle_1", ProviderPartId: "provider_reason_1", PartSequence: 0, Text: "first private thought", MetadataJson: `{"anthropic":{"signature":"sig_signed"}}`},
-			{ReasoningPartId: "reason_bridge_settle_2", ProviderPartId: "provider_reason_2", PartSequence: 1, Text: "second private thought", MetadataJson: `{"openai":{"encrypted_content":"ciphertext"}}`, Truncated: true},
+			{ReasoningPartId: firstReasoningLocalID, ProviderPartId: "provider_reason_1", PartSequence: 0, Text: "first private thought", MetadataJson: `{"anthropic":{"signature":"sig_signed"}}`},
+			{ReasoningPartId: secondReasoningLocalID, ProviderPartId: "provider_reason_2", PartSequence: 1, Text: "second private thought", MetadataJson: `{"openai":{"encrypted_content":"ciphertext"}}`, Truncated: true},
 		},
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  terminalMessageLocalID,
+			SourceKind:      "model_request",
+			SourceId:        "mreq_bridge_reasoning_settle",
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_ASSISTANT_TEXT,
+			MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed","finishReason":"stop"}`,
+			Parts: []*bridgev1.RuntimePartDraft{
+				{
+					RuntimeLocalPartId: firstReasoningLocalID,
+					PartKind:           "reasoning",
+					PartJson:           `{"type":"reasoning","providerPartId":"provider_reason_1","text":"first private thought","providerMetadata":{"anthropic":{"signature":"sig_signed"}},"truncated":false,"status":"completed"}`,
+				},
+				{
+					RuntimeLocalPartId: secondReasoningLocalID,
+					PartKind:           "reasoning",
+					Ordinal:            1,
+					PartJson:           `{"type":"reasoning","providerPartId":"provider_reason_2","text":"second private thought","providerMetadata":{"openai":{"encrypted_content":"ciphertext"}},"truncated":true,"status":"completed"}`,
+				},
+			},
+		}},
 	}
 	response, err := store.WriteRequestEnd(context.Background(), request)
 	if err != nil {
@@ -267,6 +443,15 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 	}
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("stable reasoning ack = %s; want committed", response.GetAck().GetStatus())
+	}
+	if len(response.GetDeclaration().GetReceipts()) != 1 ||
+		len(response.GetDeclaration().GetReceipts()[0].GetMessages()) != 1 ||
+		len(response.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetParts()) != 2 {
+		t.Fatalf("stable reasoning receipt = %+v; want one sealed message with two part stamps", response.GetDeclaration())
+	}
+	sealedMessageStamp := response.GetDeclaration().GetReceipts()[0].GetMessages()[0]
+	if sealedMessageStamp.GetDisposition() != bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED {
+		t.Fatalf("reasoning-only sealed message disposition = %s; want created", sealedMessageStamp.GetDisposition())
 	}
 
 	var messageID, modelRequestID, dataJSON string
@@ -295,8 +480,10 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		t.Fatalf("decode settled assistant row: %v", err)
 	}
 	if message.ID != messageID || len(message.Parts) != 2 ||
-		message.Parts[0].ID != "reason_bridge_settle_1" || message.Parts[0].Sequence != 0 || message.Parts[0].MessageID != messageID ||
-		message.Parts[1].ID != "reason_bridge_settle_2" || message.Parts[1].Sequence != 1 || message.Parts[1].MessageID != messageID {
+		message.Parts[0].ID != sealedMessageStamp.GetParts()[0].GetPartId() || message.Parts[0].ID == firstReasoningLocalID ||
+		message.Parts[0].Sequence != 0 || message.Parts[0].MessageID != messageID ||
+		message.Parts[1].ID != sealedMessageStamp.GetParts()[1].GetPartId() || message.Parts[1].ID == secondReasoningLocalID ||
+		message.Parts[1].Sequence != 1 || message.Parts[1].MessageID != messageID {
 		t.Fatalf("settled reasoning message = %+v; want two ordered Bridge-owned parts", message)
 	}
 	if anthropic, ok := message.Parts[0].ProviderMetadata["anthropic"].(map[string]any); !ok || anthropic["signature"] != "sig_signed" {
@@ -341,11 +528,11 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		t.Fatalf("LoadContext stable reasoning cold round trip: %v", err)
 	}
 	contextJSON := loaded.GetContextJson()
-	firstIndex := strings.Index(contextJSON, `"id":"reason_bridge_settle_1"`)
-	secondIndex := strings.Index(contextJSON, `"id":"reason_bridge_settle_2"`)
+	firstIndex := strings.Index(contextJSON, `"id":"`+message.Parts[0].ID+`"`)
+	secondIndex := strings.Index(contextJSON, `"id":"`+message.Parts[1].ID+`"`)
 	if firstIndex < 0 || secondIndex <= firstIndex ||
-		strings.Count(contextJSON, `"id":"reason_bridge_settle_1"`) != 1 ||
-		strings.Count(contextJSON, `"id":"reason_bridge_settle_2"`) != 1 ||
+		strings.Count(contextJSON, `"id":"`+message.Parts[0].ID+`"`) != 1 ||
+		strings.Count(contextJSON, `"id":"`+message.Parts[1].ID+`"`) != 1 ||
 		strings.Count(contextJSON, `"signature":"sig_signed"`) != 1 ||
 		strings.Count(contextJSON, `"encrypted_content":"ciphertext"`) != 1 {
 		t.Fatalf("cold context = %s; want ordered signed/encrypted stable reasoning", contextJSON)
@@ -354,6 +541,14 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 	replay, err := store.WriteRequestEnd(context.Background(), proto.Clone(request).(*bridgev1.WriteRequestEndRequest))
 	if err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("stable reasoning replay = %+v err=%v; want duplicate", replay, err)
+	}
+	replayMessages := replay.GetDeclaration().GetReceipts()[0].GetMessages()
+	if len(replayMessages) != 1 ||
+		replayMessages[0].GetMessageId() != sealedMessageStamp.GetMessageId() ||
+		len(replayMessages[0].GetParts()) != 2 ||
+		replayMessages[0].GetParts()[0].GetPartId() != sealedMessageStamp.GetParts()[0].GetPartId() ||
+		replayMessages[0].GetParts()[1].GetPartId() != sealedMessageStamp.GetParts()[1].GetPartId() {
+		t.Fatalf("stable reasoning replay stamps = %+v; want original terminal seal stamps", replayMessages)
 	}
 	divergent := map[string]func(*bridgev1.WriteRequestEndRequest){
 		"changed": func(candidate *bridgev1.WriteRequestEndRequest) {
@@ -497,21 +692,64 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTextAndToolConvergeOnModelReques
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
 			}
+			reasoningPart := bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: `{"type":"reasoning","providerPartId":"provider_converge","providerMetadata":{},"text":"private","truncated":false,"status":"completed"}`,
+			}
+			textPart := bridgeRuntimePartDraftForTest{
+				kind: "text",
+				json: `{"type":"text","text":"answer","truncated":false,"status":"completed"}`,
+			}
 			writeText := func() {
+				parts := []bridgeRuntimePartDraftForTest{textPart}
+				if !test.textFirst {
+					parts = []bridgeRuntimePartDraftForTest{
+						reasoningPart,
+						textPart,
+						{
+							kind: "tool",
+							json: `{"type":"tool","toolCallId":"call_converge","toolName":"Read","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`,
+						},
+					}
+				}
 				if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 					Scope: scope, RuntimeWriteId: "rwrite_text_" + suffix, ModelRequestId: modelRequestID,
 					EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"answer"}]}`,
-					ProjectionJson: `{"type":"runtime_text_projection","message_id":"msg_client_text","part_id":"part_converge_text","part_sequence":1,"truncated":false}`,
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+						t,
+						scope,
+						"rwrite_text_"+suffix,
+						"agent.message",
+						"streaming",
+						parts...,
+					)},
 				}); err != nil {
 					t.Fatalf("WriteEvent text: %v", err)
 				}
 			}
 			writeToolUse := func() *bridgev1.WriteEventResponse {
+				parts := []bridgeRuntimePartDraftForTest{
+					reasoningPart,
+					{
+						kind: "tool",
+						json: `{"type":"tool","toolCallId":"call_converge","toolName":"Read","state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`,
+					},
+				}
+				if test.textFirst {
+					parts = []bridgeRuntimePartDraftForTest{reasoningPart, textPart, parts[1]}
+				}
 				response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 					Scope: scope, RuntimeWriteId: "rwrite_tool_use_" + suffix, ModelRequestId: modelRequestID,
 					EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{"path":"a.txt"},"evaluated_permission":"allow"}`,
-					ProjectionJson:       `{"type":"runtime_tool_projection","message_id":"msg_client_tool_use","part_id":"part_converge_tool","part_sequence":2,"model_tool_call_id":"call_converge","tool_name":"Read","input":{"path":"a.txt"},"state":"running"}`,
 					StableReasoningParts: []*bridgev1.StableReasoningPart{{ReasoningPartId: "part_converge_reasoning", ProviderPartId: "provider_converge", PartSequence: 0, Text: "private", MetadataJson: `{}`}},
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+						t,
+						scope,
+						"rwrite_tool_use_"+suffix,
+						"agent.tool_use",
+						"streaming",
+						parts...,
+					)},
 				})
 				if err != nil {
 					t.Fatalf("WriteEvent tool use: %v", err)
@@ -529,31 +767,75 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTextAndToolConvergeOnModelReques
 			if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_tool_result_" + suffix, ModelRequestId: modelRequestID,
 				EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"file body"}],"is_error":false}`,
-				ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_client_tool_result","part_id":"part_converge_tool","part_sequence":2,"model_tool_call_id":"call_converge","tool_name":"Read","input":{"path":"a.txt"},"state":"completed","output":{"text":"file body","truncated":false}}`,
+				Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+					t,
+					scope,
+					"rwrite_tool_result_"+suffix,
+					"agent.tool_result",
+					"streaming",
+					reasoningPart,
+					textPart,
+					bridgeRuntimePartDraftForTest{
+						kind: "tool",
+						json: `{"type":"tool","toolCallId":"call_converge","toolName":"Read","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false},"output":{"text":"file body","truncated":false}}}`,
+					},
+				)},
 			}); err != nil {
 				t.Fatalf("WriteEvent tool result: %v", err)
+			}
+			var preSealMessageID, preSealSourceEventID, preSealStatus string
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT message_id, source_event_id, data_json::jsonb->>'status'
+				   FROM session_messages
+				  WHERE workspace_id = $1
+				    AND session_id = $2
+				    AND session_thread_id = $3
+				    AND model_request_id = $4`,
+				"default", sessionID, threadID, modelRequestID,
+			).Scan(&preSealMessageID, &preSealSourceEventID, &preSealStatus); err != nil {
+				t.Fatalf("read pre-seal assistant row: %v", err)
+			}
+			if preSealMessageID == "" || preSealSourceEventID == "" || preSealStatus != "streaming" {
+				t.Fatalf("pre-seal assistant identity/status = %q/%q/%q; want one durable streaming row", preSealMessageID, preSealSourceEventID, preSealStatus)
 			}
 			now = now.Add(time.Minute)
 			if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_end_" + suffix, ModelRequestId: modelRequestID, ModelRequestStartEventId: start.GetEventId(),
 				FinishReason: "stop", UsageJson: `{"input_tokens":2,"output_tokens":2}`,
 				StableReasoningParts: []*bridgev1.StableReasoningPart{{ReasoningPartId: "part_converge_reasoning", ProviderPartId: "provider_converge", PartSequence: 0, Text: "private", MetadataJson: `{}`}},
+				Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRequestEndDraftForTest(
+					t,
+					scope,
+					modelRequestID,
+					"completed",
+					reasoningPart,
+					textPart,
+					bridgeRuntimePartDraftForTest{
+						kind: "tool",
+						json: `{"type":"tool","toolCallId":"call_converge","toolName":"Read","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false},"output":{"text":"file body","truncated":false}}}`,
+					},
+				)},
 			}); err != nil {
 				t.Fatalf("WriteRequestEnd reasoning: %v", err)
 			}
 
 			var rowCount, associatedRowCount int
-			var messageID, dataJSON string
+			var messageID, sourceEventID, messageStatus, dataJSON string
 			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*), count(*) FILTER (WHERE model_request_id = $4), max(message_id), max(data_json)
+				`SELECT count(*), count(*) FILTER (WHERE model_request_id = $4),
+				        max(message_id), max(source_event_id), max(data_json::jsonb->>'status'), max(data_json)
 				   FROM session_messages
 				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND kind = 'assistant'`,
 				"default", sessionID, threadID, modelRequestID,
-			).Scan(&rowCount, &associatedRowCount, &messageID, &dataJSON); err != nil {
+			).Scan(&rowCount, &associatedRowCount, &messageID, &sourceEventID, &messageStatus, &dataJSON); err != nil {
 				t.Fatalf("read converged assistant row: %v", err)
 			}
-			if rowCount != 1 || associatedRowCount != 1 || messageID == "msg_client_text" || messageID == "msg_client_tool_use" || messageID == "msg_client_tool_result" {
-				t.Fatalf("converged row count/associated/id = %d/%d/%q; want one Bridge-owned associated row", rowCount, associatedRowCount, messageID)
+			if rowCount != 1 || associatedRowCount != 1 ||
+				messageID != preSealMessageID || sourceEventID != preSealSourceEventID ||
+				messageStatus != "completed" ||
+				messageID == "msg_client_text" || messageID == "msg_client_tool_use" || messageID == "msg_client_tool_result" {
+				t.Fatalf("sealed row count/associated/id/source/status = %d/%d/%q/%q/%q; want the same Bridge-owned row completed",
+					rowCount, associatedRowCount, messageID, sourceEventID, messageStatus)
 			}
 			var message struct {
 				Parts []struct {
@@ -565,17 +847,13 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTextAndToolConvergeOnModelReques
 			if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
 				t.Fatalf("decode converged assistant row: %v", err)
 			}
-			wantParts := []struct{ id, partType string }{
-				{id: "part_converge_reasoning", partType: "reasoning"},
-				{id: "part_converge_text", partType: "text"},
-				{id: "part_converge_tool", partType: "tool"},
-			}
+			wantParts := []string{"reasoning", "text", "tool"}
 			if len(message.Parts) != len(wantParts) {
 				t.Fatalf("converged parts = %+v; want %+v", message.Parts, wantParts)
 			}
-			for index, wantPart := range wantParts {
-				if message.Parts[index].ID != wantPart.id || message.Parts[index].Type != wantPart.partType || message.Parts[index].MessageID != messageID {
-					t.Fatalf("converged part %d = %+v; want id/type/message %q/%q/%q", index, message.Parts[index], wantPart.id, wantPart.partType, messageID)
+			for index, wantType := range wantParts {
+				if message.Parts[index].ID == "" || message.Parts[index].Type != wantType || message.Parts[index].MessageID != messageID {
+					t.Fatalf("converged part %d = %+v; want Bridge id/type/message %q/%q", index, message.Parts[index], wantType, messageID)
 				}
 			}
 			assertStableReasoningProjectionCoveredByEventLedger(t, admin, sessionID, modelRequestID)
@@ -591,7 +869,6 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 	var fixture struct {
 		ModelRequestID string          `json:"model_request_id"`
 		Event          json.RawMessage `json:"event"`
-		ProjectionJSON string          `json:"projection_json"`
 		Parts          []struct {
 			ReasoningPartID string `json:"reasoning_part_id"`
 			ProviderPartID  string `json:"provider_part_id"`
@@ -600,7 +877,6 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 			MetadataJSON    string `json:"metadata_json"`
 			Truncated       bool   `json:"truncated"`
 		} `json:"stable_reasoning_parts"`
-		ExpectedPartIDs []string `json:"expected_assistant_part_ids"`
 	}
 	if err := json.Unmarshal(encoded, &fixture); err != nil {
 		t.Fatalf("decode shared stable reasoning vector: %v", err)
@@ -610,6 +886,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_shared_anchor", "bind_shared_anchor", 1, "pod_shared_anchor")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	requestParts := make([]*bridgev1.StableReasoningPart, 0, len(fixture.Parts))
+	draftParts := make([]bridgeRuntimePartDraftForTest, 0, len(fixture.Parts)+1)
 	for _, part := range fixture.Parts {
 		requestParts = append(requestParts, &bridgev1.StableReasoningPart{
 			ReasoningPartId: part.ReasoningPartID,
@@ -619,16 +896,40 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 			MetadataJson:    part.MetadataJSON,
 			Truncated:       part.Truncated,
 		})
+		draftParts = append(draftParts, bridgeRuntimePartDraftForTest{
+			kind: "reasoning",
+			json: fmt.Sprintf(
+				`{"type":"reasoning","providerPartId":%q,"providerMetadata":%s,"text":%q,"truncated":%t,"status":"completed"}`,
+				part.ProviderPartID,
+				part.MetadataJSON,
+				part.Text,
+				part.Truncated,
+			),
+		})
 	}
-	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:                bridgeAPIScope("sesn_shared_anchor", "thr_shared_anchor", "bind_shared_anchor", 1, "pod_shared_anchor"),
+	draftParts = append(draftParts, bridgeRuntimePartDraftForTest{
+		kind: "tool",
+		json: `{"type":"tool","toolCallId":"call_shared_anchor","toolName":"Read","state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`,
+	})
+	scope := bridgeAPIScope("sesn_shared_anchor", "thr_shared_anchor", "bind_shared_anchor", 1, "pod_shared_anchor")
+	draft := bridgeRuntimeOutputDraftForTest(
+		t,
+		scope,
+		"rwrite_shared_anchor",
+		"agent.tool_use",
+		"streaming",
+		draftParts...,
+	)
+	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:                scope,
 		RuntimeWriteId:       "rwrite_shared_anchor",
 		ModelRequestId:       fixture.ModelRequestID,
 		EventType:            "agent.tool_use",
 		PayloadJson:          string(fixture.Event),
-		ProjectionJson:       fixture.ProjectionJSON,
 		StableReasoningParts: requestParts,
-	}); err != nil {
+		Drafts:               []*bridgev1.RuntimeMessageDraft{draft},
+	})
+	if err != nil {
 		t.Fatalf("WriteEvent shared stable reasoning vector: %v", err)
 	}
 	normalized, err := normalizeStableReasoningParts(&bridgev1.WriteEventRequest{StableReasoningParts: requestParts})
@@ -660,6 +961,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 	var message struct {
 		Parts []struct {
 			ID               string         `json:"id"`
+			Type             string         `json:"type"`
 			ProviderPartID   string         `json:"providerPartId"`
 			Sequence         int32          `json:"sequence"`
 			Text             string         `json:"text"`
@@ -670,27 +972,28 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
 		t.Fatalf("decode shared stable reasoning assistant row: %v", err)
 	}
-	partIDs := make([]string, 0, len(message.Parts))
-	for _, part := range message.Parts {
-		partIDs = append(partIDs, part.ID)
+	receiptParts := response.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetParts()
+	if len(message.Parts) != len(draft.GetParts()) || len(receiptParts) != len(draft.GetParts()) {
+		t.Fatalf("shared stable reasoning part counts message/receipt/draft = %d/%d/%d", len(message.Parts), len(receiptParts), len(draft.GetParts()))
 	}
-	if !slices.Equal(partIDs, fixture.ExpectedPartIDs) {
-		t.Fatalf("shared stable reasoning assistant part ids = %v; want %v", partIDs, fixture.ExpectedPartIDs)
-	}
-	for index, part := range message.Parts {
-		if index >= len(fixture.Parts) {
-			t.Fatalf("shared stable reasoning assistant has unexpected part %d: %+v", index, part)
+	for index, part := range message.Parts[:len(fixture.Parts)] {
+		if receiptParts[index].GetRuntimeLocalPartId() != draft.GetParts()[index].GetRuntimeLocalPartId() ||
+			receiptParts[index].GetPartId() != part.ID {
+			t.Fatalf("shared stable reasoning receipt part %d = %+v; draft/message ids %q/%q", index, receiptParts[index], draft.GetParts()[index].GetRuntimeLocalPartId(), part.ID)
 		}
 		expected := fixture.Parts[index]
 		var expectedMetadata map[string]any
 		if err := json.Unmarshal([]byte(expected.MetadataJSON), &expectedMetadata); err != nil {
 			t.Fatalf("decode shared stable reasoning metadata %d: %v", index, err)
 		}
-		if part.ID != expected.ReasoningPartID || part.ProviderPartID != expected.ProviderPartID ||
+		if part.Type != "reasoning" || part.ProviderPartID != expected.ProviderPartID ||
 			part.Sequence != expected.PartSequence || part.Text != expected.Text ||
 			part.Truncated != expected.Truncated || !reflect.DeepEqual(part.ProviderMetadata, expectedMetadata) {
 			t.Fatalf("shared stable reasoning assistant part %d = %+v; want fixture %+v metadata=%v", index, part, expected, expectedMetadata)
 		}
+	}
+	if message.Parts[len(message.Parts)-1].Type != "tool" {
+		t.Fatalf("shared stable reasoning final part = %+v; want tool", message.Parts[len(message.Parts)-1])
 	}
 	assertStableReasoningProjectionCoveredByEventLedger(t, admin, "sesn_shared_anchor", fixture.ModelRequestID)
 }
@@ -749,7 +1052,11 @@ func assertStableReasoningProjectionCoveredByEventLedger(t *testing.T, db *sql.D
 			t.Fatalf("decode stable reasoning event ledger: %v", err)
 		}
 		for _, part := range parts {
-			ledger[part.ReasoningPartID] = part
+			key := part.ProviderPartID
+			if key == "" {
+				key = strconv.FormatInt(int64(part.PartSequence), 10)
+			}
+			ledger[key] = part
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -761,7 +1068,11 @@ func assertStableReasoningProjectionCoveredByEventLedger(t *testing.T, db *sql.D
 			continue
 		}
 		reasoningCount++
-		got, ok := ledger[part.ID]
+		key := part.ProviderPartID
+		if key == "" {
+			key = strconv.FormatInt(int64(part.Sequence), 10)
+		}
+		got, ok := ledger[key]
 		if !ok || got.ProviderPartID != part.ProviderPartID || got.PartSequence != part.Sequence ||
 			got.Text != part.Text || got.Truncated != part.Truncated || !reflect.DeepEqual(got.Metadata, part.ProviderMetadata) {
 			t.Fatalf("projected stable reasoning part %+v has ledger match %+v present=%v", part, got, ok)
@@ -782,7 +1093,6 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningRejectsToolEventWithoutModelRequ
 		RuntimeWriteId: "rwrite_reasoning_missing_model",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"ignored","part_id":"part_tool","part_sequence":1,"model_tool_call_id":"call_missing_model","tool_name":"Read","input":{},"state":"running"}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{{
 			ReasoningPartId: "part_missing_model", PartSequence: 0, Text: "private", MetadataJson: `{}`,
 		}},
@@ -808,18 +1118,44 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t
 		t.Fatalf("WriteEvent start: %v", err)
 	}
 	part := &bridgev1.StableReasoningPart{ReasoningPartId: "part_settlement_first", ProviderPartId: "provider_settlement_first", PartSequence: 0, Text: "private", MetadataJson: `{"signature":"sig"}`}
-	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+	endResponse, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_settlement_first_end", ModelRequestId: "mreq_settlement_first", ModelRequestStartEventId: start.GetEventId(),
 		FinishReason: "stop", UsageJson: `{}`, StableReasoningParts: []*bridgev1.StableReasoningPart{part},
-	}); err != nil {
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRequestEndDraftForTest(
+			t,
+			scope,
+			"mreq_settlement_first",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: `{"type":"reasoning","providerPartId":"provider_settlement_first","providerMetadata":{"signature":"sig"},"text":"private","truncated":false,"status":"completed"}`,
+			},
+		)},
+	})
+	if err != nil {
 		t.Fatalf("WriteRequestEnd: %v", err)
 	}
+	reasoningPartID := endResponse.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetParts()[0].GetPartId()
 	now = now.Add(time.Minute)
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_settlement_first_tool", ModelRequestId: "mreq_settlement_first",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		ProjectionJson:       `{"type":"runtime_tool_projection","message_id":"ignored","part_id":"part_settlement_tool","part_sequence":1,"model_tool_call_id":"call_settlement","tool_name":"Read","input":{},"state":"running"}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{part},
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_settlement_first_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: `{"type":"reasoning","providerPartId":"provider_settlement_first","providerMetadata":{"signature":"sig"},"text":"private","truncated":false,"status":"completed"}`,
+			},
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_settlement","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`,
+			},
+		)},
 	}); err != nil {
 		t.Fatalf("WriteEvent anchor after settlement: %v", err)
 	}
@@ -827,7 +1163,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t
 	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND model_request_id = 'mreq_settlement_first'`).Scan(&dataJSON); err != nil {
 		t.Fatalf("read assistant row: %v", err)
 	}
-	if strings.Count(dataJSON, `"id":"part_settlement_first"`) != 1 || !strings.Contains(dataJSON, `"createdAt":"2026-07-16T11:00:00Z"`) {
+	if strings.Count(dataJSON, `"id":"`+reasoningPartID+`"`) != 1 || !strings.Contains(dataJSON, `"createdAt":"2026-07-16T11:00:00Z"`) {
 		t.Fatalf("settlement-first row = %s; want one reasoning part with first-writer timestamp", dataJSON)
 	}
 }
@@ -841,7 +1177,6 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningRejectsNonToolEventBeforeMutatio
 		Scope:          bridgeAPIScope("sesn_reasoning_invalid_event", "thr_reasoning_invalid_event", "bind_reasoning_invalid_event", 1, "pod_reasoning_invalid_event"),
 		RuntimeWriteId: "rwrite_reasoning_invalid_event", ModelRequestId: "mreq_reasoning_invalid_event",
 		EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"answer"}]}`,
-		ProjectionJson:       `{"type":"runtime_text_projection","message_id":"ignored","part_id":"part_text","part_sequence":1,"truncated":false}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{{ReasoningPartId: "part_invalid", PartSequence: 0, Text: "private", MetadataJson: `{}`}},
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -878,11 +1213,40 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementCannotOmitAnchor(t *te
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
 	}
+	toolMessageLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		"default",
+		"sesn_reasoning_missing_anchor",
+		"thr_reasoning_missing_anchor",
+		"agent.tool_use",
+		"rwrite_missing_anchor_tool",
+		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TOOL_USE),
+		"0",
+	)
+	reasoningPartLocalID := stableRuntimeID("runtime_message_part_draft", toolMessageLocalID, "reasoning", "0")
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_missing_anchor_tool", ModelRequestId: "mreq_missing_anchor",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		ProjectionJson:       `{"type":"runtime_tool_projection","message_id":"ignored","part_id":"part_missing_tool","part_sequence":1,"model_tool_call_id":"call_missing","tool_name":"Read","input":{},"state":"running"}`,
-		StableReasoningParts: []*bridgev1.StableReasoningPart{{ReasoningPartId: "part_anchored", PartSequence: 0, Text: "private", MetadataJson: `{}`}},
+		StableReasoningParts: []*bridgev1.StableReasoningPart{{ReasoningPartId: reasoningPartLocalID, PartSequence: 0, Text: "private", MetadataJson: `{}`}},
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  toolMessageLocalID,
+			SourceKind:      "agent.tool_use",
+			SourceId:        "rwrite_missing_anchor_tool",
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TOOL_USE,
+			MessageInfoJson: `{"role":"assistant","origin":"agent","status":"streaming"}`,
+			Parts: []*bridgev1.RuntimePartDraft{
+				{
+					RuntimeLocalPartId: reasoningPartLocalID,
+					PartKind:           "reasoning",
+					PartJson:           `{"type":"reasoning","text":"private","providerMetadata":{},"truncated":false,"status":"completed"}`,
+				},
+				{
+					RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", toolMessageLocalID, "tool", "0"),
+					PartKind:           "tool",
+					PartJson:           `{"type":"tool","toolCallId":"call_missing_anchor","toolName":"Read","state":{"status":"running","input":{}}}`,
+				},
+			},
+		}},
 	}); err != nil {
 		t.Fatalf("WriteEvent anchor: %v", err)
 	}
@@ -902,6 +1266,102 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementCannotOmitAnchor(t *te
 	}
 	if ends != 0 || usage != 0 {
 		t.Fatalf("missing-anchor writes end/usage = %d/%d; want zero", ends, usage)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreFailedRequestEndPreservesToolAnchoredReasoning(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_reasoning_failed_end", "thr_reasoning_failed_end")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_reasoning_failed_end", "bind_reasoning_failed_end", 1, "pod_reasoning_failed_end")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_reasoning_failed_end", "thr_reasoning_failed_end", "bind_reasoning_failed_end", 1, "pod_reasoning_failed_end")
+	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_reasoning_failed_start", ModelRequestId: "mreq_reasoning_failed",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_failed"}`,
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent start: %v", err)
+	}
+	toolMessageLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		"default",
+		"sesn_reasoning_failed_end",
+		"thr_reasoning_failed_end",
+		"agent.tool_use",
+		"rwrite_reasoning_failed_tool",
+		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TOOL_USE),
+		"0",
+	)
+	reasoningPartLocalID := stableRuntimeID("runtime_message_part_draft", toolMessageLocalID, "reasoning", "0")
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_reasoning_failed_tool", ModelRequestId: "mreq_reasoning_failed",
+		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
+		StableReasoningParts: []*bridgev1.StableReasoningPart{{
+			ReasoningPartId: reasoningPartLocalID, PartSequence: 0, Text: "private", MetadataJson: `{}`,
+		}},
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  toolMessageLocalID,
+			SourceKind:      "agent.tool_use",
+			SourceId:        "rwrite_reasoning_failed_tool",
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TOOL_USE,
+			MessageInfoJson: `{"role":"assistant","origin":"agent","status":"streaming"}`,
+			Parts: []*bridgev1.RuntimePartDraft{
+				{
+					RuntimeLocalPartId: reasoningPartLocalID,
+					PartKind:           "reasoning",
+					PartJson:           `{"type":"reasoning","text":"private","providerMetadata":{},"truncated":false,"status":"completed"}`,
+				},
+				{
+					RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", toolMessageLocalID, "tool", "0"),
+					PartKind:           "tool",
+					PartJson:           `{"type":"tool","toolCallId":"call_reasoning_failed","toolName":"Read","state":{"status":"running","input":{}}}`,
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent anchor: %v", err)
+	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_reasoning_failed_end", ModelRequestId: "mreq_reasoning_failed", ModelRequestStartEventId: start.GetEventId(),
+		IsError: true, ErrorKind: "provider_error", FinishReason: "error", UsageJson: `{}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRequestEndDraftForTest(
+			t,
+			scope,
+			"mreq_reasoning_failed",
+			"failed",
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: `{"type":"reasoning","text":"private","providerMetadata":{},"truncated":false,"status":"completed"}`,
+			},
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: fmt.Sprintf(
+					`{"type":"tool","toolCallId":"call_reasoning_failed","toolName":"Read","toolUseEventId":%q,"toolEvent":{"kind":"tool"},"state":{"status":"running","input":{}}}`,
+					toolUse.GetEventId(),
+				),
+			},
+		)},
+	}); err != nil {
+		t.Fatalf("WriteRequestEnd failed settlement: %v", err)
+	}
+	var endCount int
+	if err := admin.QueryRowContext(context.Background(), `
+		SELECT count(*) FROM session_events
+		WHERE workspace_id = 'default' AND session_id = 'sesn_reasoning_failed_end' AND type = 'span.model_request_end'
+	`).Scan(&endCount); err != nil {
+		t.Fatalf("count request ends: %v", err)
+	}
+	var dataJSON string
+	if err := admin.QueryRowContext(context.Background(), `
+		SELECT data_json FROM session_messages
+		WHERE workspace_id = 'default' AND session_id = 'sesn_reasoning_failed_end'
+		  AND model_request_id = 'mreq_reasoning_failed'
+	`).Scan(&dataJSON); err != nil {
+		t.Fatalf("read anchored reasoning message: %v", err)
+	}
+	if endCount != 1 || !strings.Contains(dataJSON, `"status":"failed"`) || !strings.Contains(dataJSON, `"type":"reasoning"`) || !strings.Contains(dataJSON, `"text":"private"`) {
+		t.Fatalf("failed settlement end/message = %d/%s; want one end retaining anchored reasoning", endCount, dataJSON)
 	}
 }
 
@@ -933,19 +1393,49 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningUnifiesBudgetAcrossAnchors(t *te
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_reasoning_unified")
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_reasoning_unified")
-			writeTool := func(writeID, partID, callID string, sequence int, parts []*bridgev1.StableReasoningPart) error {
+			anchoredParts := make([]*bridgev1.StableReasoningPart, 0, len(test.first)+len(test.second))
+			writeTool := func(writeID, callID string, parts []*bridgev1.StableReasoningPart) error {
+				allParts := append(append([]*bridgev1.StableReasoningPart{}, anchoredParts...), parts...)
+				draftParts := make([]bridgeRuntimePartDraftForTest, 0, len(allParts)+1)
+				for _, reasoning := range allParts {
+					draftParts = append(draftParts, bridgeRuntimePartDraftForTest{
+						kind: "reasoning",
+						json: fmt.Sprintf(
+							`{"type":"reasoning","text":%q,"truncated":%t,"status":"completed"}`,
+							reasoning.GetText(),
+							reasoning.GetTruncated(),
+						),
+					})
+				}
+				draftParts = append(draftParts, bridgeRuntimePartDraftForTest{
+					kind: "tool",
+					json: fmt.Sprintf(
+						`{"type":"tool","toolCallId":%q,"toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`,
+						callID,
+					),
+				})
 				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 					Scope: scope, RuntimeWriteId: writeID, ModelRequestId: modelRequestID,
 					EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-					ProjectionJson:       fmt.Sprintf(`{"type":"runtime_tool_projection","message_id":"ignored","part_id":%q,"part_sequence":%d,"model_tool_call_id":%q,"tool_name":"Read","input":{},"state":"running"}`, partID, sequence, callID),
 					StableReasoningParts: parts,
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+						t,
+						scope,
+						writeID,
+						"agent.tool_use",
+						"streaming",
+						draftParts...,
+					)},
 				})
+				if err == nil {
+					anchoredParts = allParts
+				}
 				return err
 			}
-			if err := writeTool("rwrite_unified_first", "part_tool_first", "call_first", test.firstToolSeq, test.first); err != nil {
+			if err := writeTool("rwrite_unified_first", "call_first", test.first); err != nil {
 				t.Fatalf("first anchor: %v", err)
 			}
-			if err := writeTool("rwrite_unified_second", "part_tool_second", "call_second", test.secondToolSeq, test.second); status.Code(err) != codes.InvalidArgument {
+			if err := writeTool("rwrite_unified_second", "call_second", test.second); status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("second anchor err = %v; want InvalidArgument", err)
 			}
 			var toolEvents int
@@ -981,7 +1471,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningLaterMergeFailureRollsBackWholeS
 	}
 	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_second_reasoning_part() RETURNS trigger AS $$
 		BEGIN
-			IF NEW.data_json LIKE '%reason_rollback_2%' THEN
+			IF NEW.data_json LIKE '%provider_rollback_2%' THEN
 				RAISE EXCEPTION 'forced later stable reasoning merge failure';
 			END IF;
 			RETURN NEW;
@@ -995,13 +1485,29 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningLaterMergeFailureRollsBackWholeS
 		t.Fatalf("create later merge failure trigger: %v", err)
 	}
 
+	reasoningOne := "first"
+	reasoningTwo := "second"
 	_, err = store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_rollback_end", ModelRequestId: "mreq_reasoning_rollback", ModelRequestStartEventId: start.GetEventId(),
 		FinishReason: "stop", UsageJson: `{"input_tokens":9,"output_tokens":5}`, ConsumedAttachmentRefs: []string{attachment.GetAttachmentRef()},
 		StableReasoningParts: []*bridgev1.StableReasoningPart{
-			{ReasoningPartId: "reason_rollback_1", ProviderPartId: "provider_rollback_1", PartSequence: 0, Text: "first", MetadataJson: `{}`},
-			{ReasoningPartId: "reason_rollback_2", ProviderPartId: "provider_rollback_2", PartSequence: 1, Text: "second", MetadataJson: `{}`},
+			{ReasoningPartId: "reason_rollback_1", ProviderPartId: "provider_rollback_1", PartSequence: 0, Text: reasoningOne, MetadataJson: `{}`},
+			{ReasoningPartId: "reason_rollback_2", ProviderPartId: "provider_rollback_2", PartSequence: 1, Text: reasoningTwo, MetadataJson: `{}`},
 		},
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRequestEndDraftForTest(
+			t,
+			scope,
+			"mreq_reasoning_rollback",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider_rollback_1","providerMetadata":{},"text":%q,"truncated":false,"status":"completed"}`, reasoningOne),
+			},
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider_rollback_2","providerMetadata":{},"text":%q,"truncated":false,"status":"completed"}`, reasoningTwo),
+			},
+		)},
 	})
 	if err == nil {
 		t.Fatal("WriteRequestEnd forced later merge failure succeeded")
@@ -1127,13 +1633,29 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningExactAggregateBoundCommits(t *te
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
 	}
+	firstText := strings.Repeat("a", 1024*1024-2)
+	secondText := strings.Repeat("b", 1024*1024-2)
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_exact_end", ModelRequestId: "mreq_reasoning_exact", ModelRequestStartEventId: start.GetEventId(),
 		FinishReason: "stop", UsageJson: `{}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{
-			{ReasoningPartId: "reason_exact_1", ProviderPartId: "provider_exact_1", PartSequence: 0, Text: strings.Repeat("a", 1024*1024-2), MetadataJson: `{}`},
-			{ReasoningPartId: "reason_exact_2", ProviderPartId: "provider_exact_2", PartSequence: 1, Text: strings.Repeat("b", 1024*1024-2), MetadataJson: `{}`},
+			{ReasoningPartId: "reason_exact_1", ProviderPartId: "provider_exact_1", PartSequence: 0, Text: firstText, MetadataJson: `{}`},
+			{ReasoningPartId: "reason_exact_2", ProviderPartId: "provider_exact_2", PartSequence: 1, Text: secondText, MetadataJson: `{}`},
 		},
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRequestEndDraftForTest(
+			t,
+			scope,
+			"mreq_reasoning_exact",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider_exact_1","providerMetadata":{},"text":%q,"truncated":false,"status":"completed"}`, firstText),
+			},
+			bridgeRuntimePartDraftForTest{
+				kind: "reasoning",
+				json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider_exact_2","providerMetadata":{},"text":%q,"truncated":false,"status":"completed"}`, secondText),
+			},
+		)},
 	}); err != nil {
 		t.Fatalf("WriteRequestEnd exact aggregate: %v", err)
 	}
@@ -1143,71 +1665,6 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningExactAggregateBoundCommits(t *te
 	}
 	if messageCount != 1 {
 		t.Fatalf("exact-bound assistant rows = %d; want 1", messageCount)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreStableReasoningRejectsExistingPartIdentityAndSequenceCollisions(t *testing.T) {
-	for _, collision := range []string{"part_id", "sequence"} {
-		t.Run(collision, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			sessionID := "sesn_reasoning_collision_" + collision
-			threadID := "thr_reasoning_collision_" + collision
-			bindingID := "bind_reasoning_collision_" + collision
-			podUID := "pod_reasoning_collision_" + collision
-			modelRequestID := "mreq_reasoning_collision_" + collision
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope: scope, RuntimeWriteId: "rwrite_collision_start_" + collision, ModelRequestId: modelRequestID,
-				EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
-			})
-			if err != nil {
-				t.Fatalf("WriteEvent start: %v", err)
-			}
-			if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope: scope, RuntimeWriteId: "rwrite_collision_text_" + collision, ModelRequestId: modelRequestID,
-				EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"answer"}]}`,
-				ProjectionJson: `{"type":"runtime_text_projection","message_id":"msg_client_collision","part_id":"part_existing","part_sequence":1,"truncated":false}`,
-			}); err != nil {
-				t.Fatalf("WriteEvent text: %v", err)
-			}
-			partID := "part_reasoning_new"
-			sequence := int32(1)
-			if collision == "part_id" {
-				partID = "part_existing"
-				sequence = 0
-			}
-			_, err = store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
-				Scope: scope, RuntimeWriteId: "rwrite_collision_end_" + collision, ModelRequestId: modelRequestID, ModelRequestStartEventId: start.GetEventId(),
-				FinishReason: "stop", UsageJson: `{"input_tokens":1,"output_tokens":1}`,
-				StableReasoningParts: []*bridgev1.StableReasoningPart{{ReasoningPartId: partID, ProviderPartId: "provider_collision", PartSequence: sequence, Text: "private", MetadataJson: `{}`}},
-			})
-			if status.Code(err) != codes.AlreadyExists {
-				t.Fatalf("WriteRequestEnd %s collision err = %v; want AlreadyExists", collision, err)
-			}
-			var endCount, usageCount, operationCount int
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND model_request_id = $1 AND type = 'span.model_request_end'`, modelRequestID).Scan(&endCount); err != nil {
-				t.Fatalf("count request ends: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM request_usage_details WHERE workspace_id = 'default' AND model_request_id = $1`, modelRequestID).Scan(&usageCount); err != nil {
-				t.Fatalf("count usage rows: %v", err)
-			}
-			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND operation = 'write_request_end' AND idempotency_key = $1`, modelRequestID+":"+"rwrite_collision_end_"+collision).Scan(&operationCount); err != nil {
-				t.Fatalf("count operation rows: %v", err)
-			}
-			if endCount != 0 || usageCount != 0 || operationCount != 0 {
-				t.Fatalf("rows after %s collision end/usage/operation = %d/%d/%d; want 0/0/0", collision, endCount, usageCount, operationCount)
-			}
-			var dataJSON string
-			if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND model_request_id = $1`, modelRequestID).Scan(&dataJSON); err != nil {
-				t.Fatalf("read existing assistant row: %v", err)
-			}
-			if strings.Count(dataJSON, `"id":"part_existing"`) != 1 || strings.Contains(dataJSON, `"type":"reasoning"`) {
-				t.Fatalf("assistant row after collision = %s; want unchanged text part", dataJSON)
-			}
-		})
 	}
 }
 
@@ -1256,8 +1713,9 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	if err != nil {
 		t.Fatalf("WriteRequestEnd accepted reschedule: %v", err)
 	}
-	disposition := response.GetRescheduleDisposition()
-	if disposition.GetStatus() != "accepted" || disposition.GetAttempt() != 1 ||
+	disposition := response.GetDeclaration().GetReceipts()[0].GetRequestReschedule()
+	if disposition.GetDisposition() != bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED ||
+		disposition.GetAttempt() != 1 ||
 		disposition.GetEffectiveDeadline() != now.Add(120*time.Second).Format(time.RFC3339Nano) {
 		t.Fatalf("accepted disposition = %+v; want attempt 1 clamped to 120 seconds", disposition)
 	}
@@ -1266,7 +1724,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 		t.Fatalf("WriteRequestEnd accepted replay: %v", err)
 	}
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		replay.GetRescheduleDisposition().GetEffectiveDeadline() != disposition.GetEffectiveDeadline() {
+		replay.GetDeclaration().GetReceipts()[0].GetRequestReschedule().GetEffectiveDeadline() != disposition.GetEffectiveDeadline() {
 		t.Fatalf("replay = %+v; want duplicate with stored disposition", replay)
 	}
 
@@ -1310,7 +1768,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	if err != nil {
 		t.Fatalf("WriteRequestEnd attempt mismatch: %v", err)
 	}
-	if got := mismatchResponse.GetRescheduleDisposition(); got.GetStatus() != "denied" || got.GetDenialReason() != "attempt_mismatch" {
+	if got := mismatchResponse.GetDeclaration().GetReceipts()[0].GetRequestReschedule(); got.GetDisposition() != bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH {
 		t.Fatalf("attempt mismatch disposition = %+v", got)
 	}
 
@@ -1323,7 +1781,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	if err != nil {
 		t.Fatalf("WriteRequestEnd exhausted: %v", err)
 	}
-	if got := exhaustedResponse.GetRescheduleDisposition(); got.GetStatus() != "denied" || got.GetDenialReason() != "budget_exhausted" {
+	if got := exhaustedResponse.GetDeclaration().GetReceipts()[0].GetRequestReschedule(); got.GetDisposition() != bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED {
 		t.Fatalf("budget exhausted disposition = %+v", got)
 	}
 	if err := admin.QueryRowContext(context.Background(),
@@ -1336,12 +1794,12 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteRequestEndLosesSymmetricallyToExistingTerminal(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsDivergentCloseAfterExistingTerminal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_stale_terminal", "thr_bridge_request_stale_terminal")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_request_stale_terminal", "bind_bridge_request_stale_terminal", 1, "pod_uid_request_stale_terminal")
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_divergent_close", "thr_bridge_request_divergent_close")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_request_divergent_close", "bind_bridge_request_divergent_close", 1, "pod_uid_request_divergent_close")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_request_stale_terminal", "thr_bridge_request_stale_terminal", "bind_bridge_request_stale_terminal", 1, "pod_uid_request_stale_terminal")
+	scope := bridgeAPIScope("sesn_bridge_request_divergent_close", "thr_bridge_request_divergent_close", "bind_bridge_request_divergent_close", 1, "pod_uid_request_divergent_close")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_stale_start", ModelRequestId: "mreq_bridge_stale",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_stale"}`,
@@ -1361,24 +1819,24 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndLosesSymmetricallyToExistingTerm
 	loser.RuntimeWriteId = "rwrite_bridge_stale_loser"
 	loser.ErrorKind = "provider_error"
 	loser.Reschedule = &bridgev1.RequestEndReschedule{Attempt: 1, Deadline: time.Now().UTC().Format(time.RFC3339Nano)}
-	response, err := store.WriteRequestEnd(context.Background(), loser)
-	if err != nil {
-		t.Fatalf("WriteRequestEnd loser: %v", err)
+	if _, err := store.WriteRequestEnd(context.Background(), loser); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("WriteRequestEnd divergent loser err = %v; want AlreadyExists", err)
 	}
-	if got := response.GetRescheduleDisposition(); got.GetStatus() != "denied" || got.GetDenialReason() != "stale_terminal" {
-		t.Fatalf("stale terminal disposition = %+v", got)
-	}
-	var endCount, retryRows int
+	var endCount, retryRows, operationRows int
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_request_stale_terminal' AND type = 'span.model_request_end'`).Scan(&endCount); err != nil {
+		`SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_request_divergent_close' AND type = 'span.model_request_end'`).Scan(&endCount); err != nil {
 		t.Fatalf("count terminal events: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_turn_retries WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_request_stale_terminal'`).Scan(&retryRows); err != nil {
+		`SELECT count(*) FROM session_turn_retries WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_request_divergent_close'`).Scan(&retryRows); err != nil {
 		t.Fatalf("count retry rows: %v", err)
 	}
-	if endCount != 1 || retryRows != 0 {
-		t.Fatalf("stale terminal effects = ends %d retry rows %d; want 1/0", endCount, retryRows)
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_request_divergent_close' AND operation = 'write_request_end'`).Scan(&operationRows); err != nil {
+		t.Fatalf("count request-end operations: %v", err)
+	}
+	if endCount != 1 || retryRows != 0 || operationRows != 1 {
+		t.Fatalf("divergent terminal effects = ends %d retry rows %d operations %d; want 1/0/1", endCount, retryRows, operationRows)
 	}
 }
 
@@ -1425,6 +1883,20 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 				{ReasoningPartId: "reason_race_1", ProviderPartId: "provider_race_1", PartSequence: 0, Text: "first", MetadataJson: `{}`},
 				{ReasoningPartId: "reason_race_2", ProviderPartId: "provider_race_2", PartSequence: 1, Text: "second", MetadataJson: `{}`},
 			},
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRequestEndDraftForTest(
+				t,
+				f.scope,
+				f.modelRequestID,
+				"completed",
+				bridgeRuntimePartDraftForTest{
+					kind: "reasoning",
+					json: `{"type":"reasoning","providerPartId":"provider_race_1","providerMetadata":{},"text":"first","truncated":false,"status":"completed"}`,
+				},
+				bridgeRuntimePartDraftForTest{
+					kind: "reasoning",
+					json: `{"type":"reasoning","providerPartId":"provider_race_2","providerMetadata":{},"text":"second","truncated":false,"status":"completed"}`,
+				},
+			)},
 		}
 	}
 	repairClose := func(t *testing.T, f fixture) bool {
@@ -1449,7 +1921,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		}
 		return inserted
 	}
-	assertCounts := func(t *testing.T, f fixture, wantMessages int) {
+	assertCounts := func(t *testing.T, f fixture, wantMessages int, wantOperations int) {
 		t.Helper()
 		var endCount, usageCount, messageCount, operationCount, retryCount, rescheduledCount int
 		queries := []struct {
@@ -1459,7 +1931,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 			{&endCount, `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND model_request_id = $1 AND type = 'span.model_request_end'`},
 			{&usageCount, `SELECT count(*) FROM request_usage_details WHERE workspace_id = 'default' AND model_request_id = $1`},
 			{&messageCount, `SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND model_request_id = $1`},
-			{&operationCount, `SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND operation = 'write_request_end' AND idempotency_key LIKE $1 || ':%'`},
+			{&operationCount, `SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND operation = 'write_request_end' AND idempotency_key = $1`},
 			{&retryCount, `SELECT count(*) FROM session_turn_retries WHERE workspace_id = 'default' AND session_id = $1`},
 			{&rescheduledCount, `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND model_request_id = $1 AND type = 'session.status_rescheduled'`},
 		}
@@ -1472,8 +1944,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 				t.Fatalf("read terminal race count: %v", err)
 			}
 		}
-		if endCount != 1 || usageCount != 1 || messageCount != wantMessages || operationCount != 1 || retryCount != 0 || rescheduledCount != 0 {
-			t.Fatalf("terminal race counts end/usage/message/operation/retry/rescheduled = %d/%d/%d/%d/%d/%d; want 1/1/%d/1/0/0", endCount, usageCount, messageCount, operationCount, retryCount, rescheduledCount, wantMessages)
+		if endCount != 1 || usageCount != 1 || messageCount != wantMessages || operationCount != wantOperations || retryCount != 0 || rescheduledCount != 0 {
+			t.Fatalf("terminal race counts end/usage/message/operation/retry/rescheduled = %d/%d/%d/%d/%d/%d; want 1/1/%d/%d/0/0", endCount, usageCount, messageCount, operationCount, retryCount, rescheduledCount, wantMessages, wantOperations)
 		}
 	}
 
@@ -1482,14 +1954,10 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		if !repairClose(t, f) {
 			t.Fatal("repair-first close did not win")
 		}
-		response, err := f.store.WriteRequestEnd(context.Background(), podClose(f, "rwrite_reasoning_race_pod_loser"))
-		if err != nil {
-			t.Fatalf("late pod close: %v", err)
+		if _, err := f.store.WriteRequestEnd(context.Background(), podClose(f, "rwrite_reasoning_race_pod_loser")); status.Code(err) != codes.AlreadyExists {
+			t.Fatalf("late pod close err = %v; want AlreadyExists", err)
 		}
-		if disposition := response.GetRescheduleDisposition(); disposition.GetStatus() != "denied" || disposition.GetDenialReason() != "stale_terminal" {
-			t.Fatalf("late pod disposition = %+v; want stale terminal", disposition)
-		}
-		assertCounts(t, f, 0)
+		assertCounts(t, f, 0, 0)
 	})
 
 	t.Run("pod first", func(t *testing.T) {
@@ -1501,7 +1969,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		if repairClose(t, f) {
 			t.Fatal("late repair inserted a second request end")
 		}
-		assertCounts(t, f, 1)
+		assertCounts(t, f, 1, 1)
 		var dataJSON string
 		if err := f.admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND model_request_id = $1`, f.modelRequestID).Scan(&dataJSON); err != nil {
 			t.Fatalf("read pod-first reasoning row: %v", err)
@@ -1514,7 +1982,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		if _, err := f.store.WriteRequestEnd(context.Background(), divergent); status.Code(err) != codes.AlreadyExists {
 			t.Fatalf("pod-first divergent replay err = %v; want AlreadyExists", err)
 		}
-		assertCounts(t, f, 1)
+		assertCounts(t, f, 1, 1)
 	})
 }
 
@@ -1567,17 +2035,65 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
 	}
+	const (
+		modelRequestID = "mreq_bridge_compaction_usage"
+		checkpointText = "<conversation-checkpoint><summary>Older turns were compacted.</summary><recent-context></recent-context></conversation-checkpoint>"
+	)
+	checkpointLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		"default",
+		"sesn_bridge_compaction_usage",
+		"thr_bridge_compaction_usage",
+		"agent.thread_context_compacted",
+		modelRequestID,
+		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT),
+		"0",
+	)
+	compactedThrough := int64(0)
 	request := &bridgev1.WriteRequestEndRequest{
 		Scope:                    scope,
 		RuntimeWriteId:           "rwrite_bridge_compaction_usage_end",
-		ModelRequestId:           "mreq_bridge_compaction_usage",
+		ModelRequestId:           modelRequestID,
 		ModelRequestStartEventId: start.GetEventId(),
 		RequestKind:              "compaction_summary",
 		FinishReason:             "stop",
 		UsageJson:                `{"input_tokens":3,"output_tokens":2}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  checkpointLocalID,
+			SourceKind:      "agent.thread_context_compacted",
+			SourceId:        modelRequestID,
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT,
+			MessageInfoJson: `{"role":"user","origin":"runtime","status":"completed"}`,
+			Parts: []*bridgev1.RuntimePartDraft{{
+				RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", checkpointLocalID, "text", "0"),
+				PartKind:           "text",
+				PartJson:           `{"type":"text","text":"` + checkpointText + `","truncated":false,"status":"completed"}`,
+			}},
+		}},
+		CompactedThroughMessageSequence: &compactedThrough,
+		CompactionEventPayloadJson:      `{"type":"agent.thread_context_compacted","summary":"Older turns were compacted.","recent_context":[]}`,
 	}
-	if _, err := store.WriteRequestEnd(context.Background(), request); err != nil {
+	response, err := store.WriteRequestEnd(context.Background(), request)
+	if err != nil {
 		t.Fatalf("WriteRequestEnd compaction: %v", err)
+	}
+	receipts := response.GetDeclaration().GetReceipts()
+	if len(receipts) != 1 || len(receipts[0].GetEvents()) != 2 || len(receipts[0].GetMessages()) != 1 {
+		t.Fatalf("compaction receipt = %+v; want request-end event, compaction event, and checkpoint message", response.GetDeclaration())
+	}
+	receipt := receipts[0]
+	checkpoint := receipt.GetMessages()[0]
+	if receipt.GetCompactedThroughMessageSequence() != 0 ||
+		checkpoint.GetRuntimeLocalId() != checkpointLocalID ||
+		checkpoint.GetMessageSequence() != 1 ||
+		checkpoint.GetOwningEventId() != receipt.GetEvents()[1].GetEventId() {
+		t.Fatalf("compaction receipt = %+v; want boundary 0 and DB-stamped checkpoint sequence 1 owned by the compaction event", receipt)
+	}
+	replay, err := store.WriteRequestEnd(context.Background(), request)
+	if err != nil ||
+		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		!proto.Equal(replay.GetDeclaration(), response.GetDeclaration()) {
+		t.Fatalf("WriteRequestEnd compaction replay = %+v err=%v; want duplicate with the original receipt", replay, err)
 	}
 	var requestKind string
 	var payloadJSON string
@@ -1596,6 +2112,27 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 	}
 	if requestKind != "compaction_summary" || testJSONPathString(t, payloadJSON, "request_kind") != "compaction_summary" {
 		t.Fatalf("request kind detail/event = %q/%s; want compaction_summary", requestKind, payloadJSON)
+	}
+	var checkpointCount, compactionEventCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_messages
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_compaction_usage'
+		    AND kind = 'compaction'
+		    AND sequence = 1`).Scan(&checkpointCount); err != nil {
+		t.Fatalf("count compaction checkpoint: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_events
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_compaction_usage'
+		    AND type = 'agent.thread_context_compacted'`).Scan(&compactionEventCount); err != nil {
+		t.Fatalf("count compaction event: %v", err)
+	}
+	if checkpointCount != 1 || compactionEventCount != 1 {
+		t.Fatalf("atomic compaction rows = checkpoint %d event %d; want one each after replay", checkpointCount, compactionEventCount)
 	}
 	invalid := proto.Clone(request).(*bridgev1.WriteRequestEndRequest)
 	invalid.RuntimeWriteId = "rwrite_bridge_compaction_usage_invalid"
@@ -1827,12 +2364,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	request := &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_finish_idle", "thr_bridge_finish_idle", "bind_bridge_finish_idle", 1, "pod_uid_finish_idle"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}
+	request := bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_finish_idle", "thr_bridge_finish_idle", "bind_bridge_finish_idle", 1, "pod_uid_finish_idle"),
+		"evt_bridge_finish_idle_running",
+		`{"type":"end_turn"}`,
+	)
 	response, err := store.FinishIdle(context.Background(), request)
 	if err != nil {
 		t.Fatalf("FinishIdle: %v", err)
@@ -1840,8 +2378,8 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
 	}
-	if response.GetAck().GetRuntimeWriteId() != request.GetRuntimeWriteId() {
-		t.Fatalf("finish-idle committed ack write id = %q; want %q", response.GetAck().GetRuntimeWriteId(), request.GetRuntimeWriteId())
+	if response.GetAck().GetRuntimeWriteId() != request.GetDurableTurnId() {
+		t.Fatalf("finish-idle committed ack write id = %q; want %q", response.GetAck().GetRuntimeWriteId(), request.GetDurableTurnId())
 	}
 	replay, err := store.FinishIdle(context.Background(), request)
 	if err != nil {
@@ -1850,8 +2388,8 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("replay ack = %s; want duplicate", replay.GetAck().GetStatus())
 	}
-	if replay.GetAck().GetRuntimeWriteId() != request.GetRuntimeWriteId() {
-		t.Fatalf("finish-idle duplicate ack write id = %q; want %q", replay.GetAck().GetRuntimeWriteId(), request.GetRuntimeWriteId())
+	if replay.GetAck().GetRuntimeWriteId() != request.GetDurableTurnId() {
+		t.Fatalf("finish-idle duplicate ack write id = %q; want %q", replay.GetAck().GetRuntimeWriteId(), request.GetDurableTurnId())
 	}
 
 	var eventID string
@@ -1956,12 +2494,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRequiresActionPreservesTurnRetryCount
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
-	if _, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_requires_action", "thr_bridge_requires_action", "bind_bridge_requires_action", 1, "pod_uid_requires_action"),
-		RuntimeWriteId: "rwrite_bridge_requires_action",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"requires_action"}`,
-	}); err != nil {
+	if _, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_requires_action", "thr_bridge_requires_action", "bind_bridge_requires_action", 1, "pod_uid_requires_action"),
+		"evt_bridge_requires_action_running",
+		`{"type":"requires_action"}`,
+	)); err != nil {
 		t.Fatalf("FinishIdle requires_action: %v", err)
 	}
 
@@ -1982,6 +2521,7 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRequiresActionPreservesTurnRetryCount
 func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomically(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_sibling")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate", "bind_bridge_terminate", 1, "pod_uid_terminate")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
@@ -1997,6 +2537,15 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	scope := bridgeAPIScope("sesn_bridge_terminate", "thr_bridge_terminate", "bind_bridge_terminate", 1, "pod_uid_terminate")
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate")
+	siblingScope := bridgeAPIScope("sesn_bridge_terminate", "thr_bridge_terminate_sibling", "bind_bridge_terminate", 1, "pod_uid_terminate")
+	seedBridgeAPIOpenDurableTurn(t, admin, siblingScope, "rwrite_terminate_sibling")
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sibling_start", ModelRequestId: "mreq_terminate_sibling",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate_sibling"}`, SessionVisible: true,
+	}); err != nil {
+		t.Fatalf("WriteEvent sibling request start: %v", err)
+	}
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_start", ModelRequestId: "mreq_terminate",
 		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate"}`, SessionVisible: true,
@@ -2007,16 +2556,42 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_tool", ModelRequestId: "mreq_terminate",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"ask"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"call_terminate","tool_name":"Bash","input":{"command":"sleep 10"},"state":"running"}`,
 		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_terminate_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent tool use: %v", err)
 	}
 
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
+	terminationDraft := bridgeRuntimeTerminationDraftForTest(
+		scope,
+		"rwrite_terminate",
+		0,
+		"assistant",
+		"agent",
+		bridgeRuntimePartDraftForTest{
+			kind: "tool",
+			json: `{"type":"tool","toolCallId":"call_terminate","toolName":"Bash","toolUseEventId":"` + toolUse.GetEventId() + `","state":{"status":"cancelled","error":{"type":"runtime","code":"runtime_terminated","message":"Loop-authored terminal cancellation.","retryable":false,"fatal":true}}}`,
+		},
+	)
 	request := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate", FailureJson: failureJSON,
+		Drafts: []*bridgev1.RuntimeMessageDraft{terminationDraft},
+		PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
+			ToolUseEventId: toolUse.GetEventId(),
+			RuntimeLocalId: terminationDraft.GetRuntimeLocalId(),
+		}},
 	}
 	response, err := store.CommitRuntimeTermination(context.Background(), request)
 	if err != nil {
@@ -2028,6 +2603,16 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	if response.GetAck().GetRuntimeWriteId() != request.GetRuntimeWriteId() {
 		t.Fatalf("termination committed ack write id = %q; want %q", response.GetAck().GetRuntimeWriteId(), request.GetRuntimeWriteId())
 	}
+	if len(response.GetDeclaration().GetReceipts()) != 1 {
+		t.Fatalf("termination declaration receipts = %d; want 1", len(response.GetDeclaration().GetReceipts()))
+	}
+	receipt := response.GetDeclaration().GetReceipts()[0]
+	if receipt.GetOperationKind() != bridgeOpCommitRuntimeTermination ||
+		receipt.GetSourceKind() != "runtime_termination" ||
+		receipt.GetSourceId() != request.GetRuntimeWriteId() ||
+		len(receipt.GetMessages()) != 1 {
+		t.Fatalf("termination declaration receipt = %+v; want loop-authored cancellation receipt", receipt)
+	}
 	replay, err := store.CommitRuntimeTermination(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitRuntimeTermination replay: %v", err)
@@ -2037,6 +2622,16 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	}
 	if replay.GetAck().GetRuntimeWriteId() != request.GetRuntimeWriteId() {
 		t.Fatalf("termination duplicate ack write id = %q; want %q", replay.GetAck().GetRuntimeWriteId(), request.GetRuntimeWriteId())
+	}
+	if !proto.Equal(response.GetDeclaration(), replay.GetDeclaration()) {
+		t.Fatalf("termination replay declaration differs: first=%+v replay=%+v", response.GetDeclaration(), replay.GetDeclaration())
+	}
+	wrongCaller := internalgrpcauth.ContextWithIdentity(context.Background(), internalgrpcauth.Identity{
+		ServiceAccount:   internalgrpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"},
+		KubernetesPodUID: "pod_uid_other",
+	})
+	if _, err := store.CommitRuntimeTermination(wrongCaller, request); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("termination replay from wrong pod err = %v; want PermissionDenied", err)
 	}
 
 	var sessionStatus, threadStatus, waitStatus string
@@ -2051,6 +2646,34 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	}
 	if sessionStatus != "terminated" || threadStatus != "failed" || waitStatus != "cancelled" {
 		t.Fatalf("terminal states = session:%q thread:%q wait:%q; want terminated/failed/cancelled", sessionStatus, threadStatus, waitStatus)
+	}
+	var siblingStatus string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_sibling'`,
+	).Scan(&siblingStatus); err != nil {
+		t.Fatalf("read live sibling status: %v", err)
+	}
+	if siblingStatus != "running" {
+		t.Fatalf("live sibling status = %q; want running until its custody is lost", siblingStatus)
+	}
+	var siblingRequestEnds int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_events
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND session_thread_id = 'thr_bridge_terminate_sibling'
+		    AND model_request_id = 'mreq_terminate_sibling'
+		    AND type = 'span.model_request_end'`,
+	).Scan(&siblingRequestEnds); err != nil {
+		t.Fatalf("count live sibling request ends: %v", err)
+	}
+	if siblingRequestEnds != 0 {
+		t.Fatalf("live sibling request ends = %d; want zero", siblingRequestEnds)
 	}
 
 	for eventType, want := range map[string]int{
@@ -2091,6 +2714,39 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	}
 	if strings.Contains(errorPayload, `"code"`) || strings.Contains(errorPayload, `"retryable"`) || strings.Contains(errorPayload, `"fatal"`) {
 		t.Fatalf("terminal public error leaked internal fields: %s", errorPayload)
+	}
+	var toolResultMessage string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT data_json
+		   FROM session_messages
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND session_thread_id = 'thr_bridge_terminate'
+		    AND source_event_id IN (
+		        SELECT event_id
+		          FROM session_events
+		         WHERE workspace_id = 'default'
+		           AND session_id = 'sesn_bridge_terminate'
+		           AND type = 'agent.tool_result'
+		    )`,
+	).Scan(&toolResultMessage); err != nil {
+		t.Fatalf("read loop-authored terminal tool result: %v", err)
+	}
+	var toolResultProjection struct {
+		Parts []struct {
+			State struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			} `json:"state"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(toolResultMessage), &toolResultProjection); err != nil {
+		t.Fatalf("decode loop-authored terminal tool result: %v", err)
+	}
+	if len(toolResultProjection.Parts) != 1 ||
+		toolResultProjection.Parts[0].State.Error.Message != "Loop-authored terminal cancellation." {
+		t.Fatalf("terminal tool result projection = %+v; want loop-authored content", toolResultProjection)
 	}
 	var completionWakeJobs int
 	if err := admin.QueryRowContext(context.Background(),
@@ -2133,10 +2789,62 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
 
-	_, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_child_terminate", "thr_bridge_child_terminate", "bind_bridge_child_terminate", 1, "pod_uid_child_terminate"),
+	scope := bridgeAPIScope("sesn_bridge_child_terminate", "thr_bridge_child_terminate", "bind_bridge_child_terminate", 1, "pod_uid_child_terminate")
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_child_terminate")
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_child_terminate_start", ModelRequestId: "mreq_child_terminate",
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_child_terminate"}`, SessionVisible: true,
+	}); err != nil {
+		t.Fatalf("WriteEvent child request start: %v", err)
+	}
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_child_terminate_tool", ModelRequestId: "mreq_child_terminate",
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"ask"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_child_terminate_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_child_terminate","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent child tool use: %v", err)
+	}
+	terminationDraft := bridgeRuntimeTerminationDraftForTest(
+		scope,
+		"rwrite_child_terminate",
+		0,
+		"assistant",
+		"agent",
+		bridgeRuntimePartDraftForTest{
+			kind: "tool",
+			json: `{"type":"tool","toolCallId":"call_child_terminate","toolName":"Bash","toolUseEventId":"` + toolUse.GetEventId() + `","state":{"status":"cancelled","error":{"type":"runtime","code":"runtime_terminated","message":"Loop-authored child cancellation.","retryable":false,"fatal":true}}}`,
+		},
+	)
+	envelope := completionMailEnvelope(
+		"main",
+		"task_thr_bridge_child_terminate",
+		"Agent errored: Loop-authored child failure.\n\nThis agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task.",
+	)
+	_, err = store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+		Scope:          scope,
 		RuntimeWriteId: "rwrite_child_terminate",
 		FailureJson:    `{"type":"provider","code":"provider_invalid_request","message":"Provider request failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"}}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{
+			terminationDraft,
+			bridgeRuntimeTerminationCompletionMailDraftForTest(scope, "rwrite_child_terminate", 1, envelope),
+		},
+		PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
+			ToolUseEventId: toolUse.GetEventId(),
+			RuntimeLocalId: terminationDraft.GetRuntimeLocalId(),
+		}},
 	})
 	if err != nil {
 		t.Fatalf("CommitRuntimeTermination child: %v", err)
@@ -2151,8 +2859,22 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_threads WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_child_terminate' AND id = 'thr_bridge_child_terminate'`).Scan(&childStatus); err != nil {
 		t.Fatalf("read child terminal status: %v", err)
 	}
-	if sessionStatus != "idle" || mainStatus != "idle" || childStatus != "failed" {
-		t.Fatalf("child blast radius = session:%q main:%q child:%q; want idle/idle/failed", sessionStatus, mainStatus, childStatus)
+	if sessionStatus != "running" || mainStatus != "idle" || childStatus != "failed" {
+		t.Fatalf("child blast radius = session:%q main:%q child:%q; want running/idle/failed", sessionStatus, mainStatus, childStatus)
+	}
+	var pendingToolStatus string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_child_terminate'
+		    AND tool_use_event_id = $1`,
+		toolUse.GetEventId(),
+	).Scan(&pendingToolStatus); err != nil {
+		t.Fatalf("read child terminal pending tool: %v", err)
+	}
+	if pendingToolStatus != "cancelled" {
+		t.Fatalf("child terminal pending tool status = %q; want cancelled", pendingToolStatus)
 	}
 	var childEvents, sessionEvents int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_child_terminate' AND type = 'session.thread_status_terminated'`).Scan(&childEvents); err != nil {
@@ -2205,11 +2927,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	if len(completion.Message.Parts) != 1 {
 		t.Fatalf("child termination completion parts = %d; want 1", len(completion.Message.Parts))
 	}
-	if message := completion.Message.Parts[0].Text; message != completionMailEnvelope(
-		"main",
-		"task_thr_bridge_child_terminate",
-		completionMailErrorPayload("Provider request failed."),
-	) {
+	if message := completion.Message.Parts[0].Text; message != envelope {
 		t.Fatalf("child termination completion envelope = %q", message)
 	}
 	var childTerminatedPayload string
@@ -2268,12 +2986,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRecordsScanAbortAndCommitsIdle(t *tes
 		Kind:    "permission_denied",
 		Message: "capture mode requires root",
 	}})
-	response, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_finish_idle_capture_fail", "thr_bridge_finish_idle_capture_fail", "bind_bridge_finish_idle_capture_fail", 1, "pod_uid_finish_idle_capture_fail"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_capture_fail",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
+	response, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_finish_idle_capture_fail", "thr_bridge_finish_idle_capture_fail", "bind_bridge_finish_idle_capture_fail", 1, "pod_uid_finish_idle_capture_fail"),
+		"evt_bridge_finish_idle_capture_fail_running",
+		`{"type":"end_turn"}`,
+	))
 	if err != nil {
 		t.Fatalf("FinishIdle scan abort: %v", err)
 	}
@@ -2348,12 +3067,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleFailsOnCapturePersistenceError(t *tes
 	store.OutputCapturer = outputcapture.NewCapturer(blobStore, &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
 		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
 	}})
-	_, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(sessionID, "thr_bridge_finish_idle_capture_persist", "bind_bridge_finish_idle_capture_persist", 1, "pod_uid_finish_idle_capture_persist"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_capture_persist",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
+	_, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, "thr_bridge_finish_idle_capture_persist", "bind_bridge_finish_idle_capture_persist", 1, "pod_uid_finish_idle_capture_persist"),
+		"evt_bridge_finish_idle_capture_persist_running",
+		`{"type":"end_turn"}`,
+	))
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("FinishIdle blob persistence err = %v; want Internal", err)
 	}
@@ -2397,13 +3117,15 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleDisconnectDuringCaptureRollsBackAndCl
 	}})
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
+	request := bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, "thr_bridge_finish_idle_capture_disconnect", "bind_bridge_finish_idle_capture_disconnect", 1, "pod_uid_finish_idle_capture_disconnect"),
+		"evt_bridge_finish_idle_capture_disconnect_running",
+		`{"type":"end_turn"}`,
+	)
 	go func() {
-		_, err := store.FinishIdle(ctx, &bridgev1.FinishIdleRequest{
-			Scope:          bridgeAPIScope(sessionID, "thr_bridge_finish_idle_capture_disconnect", "bind_bridge_finish_idle_capture_disconnect", 1, "pod_uid_finish_idle_capture_disconnect"),
-			RuntimeWriteId: "rwrite_bridge_finish_idle_capture_disconnect",
-			IdleSince:      "2026-01-01T00:00:45Z",
-			StopReasonJson: `{"type":"end_turn"}`,
-		})
+		_, err := store.FinishIdle(ctx, request)
 		result <- err
 	}()
 	<-putStarted
@@ -2445,12 +3167,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleDowngradesOldHelperRootTransportFailu
 	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), newOldHelperRootFailureOutputCaptureScanner())
-	response, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(sessionID, "thr_bridge_finish_idle_old_helper", "bind_bridge_finish_idle_old_helper", 1, "pod_uid_finish_idle_old_helper"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_old_helper",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
+	response, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, "thr_bridge_finish_idle_old_helper", "bind_bridge_finish_idle_old_helper", 1, "pod_uid_finish_idle_old_helper"),
+		"evt_bridge_finish_idle_old_helper_running",
+		`{"type":"end_turn"}`,
+	))
 	if err != nil {
 		t.Fatalf("FinishIdle old-helper root failure: %v", err)
 	}
@@ -2479,12 +3202,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRequeuesStaleSandboxPreparation(t *te
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
 		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
 	}})
-	_, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_finish_idle_stale", "thr_bridge_finish_idle_stale", "bind_bridge_finish_idle_stale", 1, "pod_uid_finish_idle_stale"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_stale",
-		IdleSince:      "2026-01-01T00:02:00Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
+	_, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_finish_idle_stale", "thr_bridge_finish_idle_stale", "bind_bridge_finish_idle_stale", 1, "pod_uid_finish_idle_stale"),
+		"evt_bridge_finish_idle_stale_running",
+		`{"type":"end_turn"}`,
+	))
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("FinishIdle stale sandbox err = %v; want FailedPrecondition", err)
 	}
@@ -2518,12 +3242,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRequeuesExpiringResourceCredential(t 
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
 		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
 	}})
-	_, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_finish_idle_cred_expiring", "thr_bridge_finish_idle_cred_expiring", "bind_bridge_finish_idle_cred_expiring", 1, "pod_uid_finish_idle_cred_expiring"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_cred_expiring",
-		IdleSince:      "2026-01-01T00:05:00Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
+	_, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_finish_idle_cred_expiring", "thr_bridge_finish_idle_cred_expiring", "bind_bridge_finish_idle_cred_expiring", 1, "pod_uid_finish_idle_cred_expiring"),
+		"evt_bridge_finish_idle_cred_expiring_running",
+		`{"type":"end_turn"}`,
+	))
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("FinishIdle expiring resource credential err = %v; want FailedPrecondition", err)
 	}
@@ -2558,12 +3283,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleCapturesOutputs(t *testing.T) {
 	store.SandboxStatusFreshnessWindow = 5 * time.Minute
 	store.OutputCapturer = outputcapture.NewCapturer(blobStore, scanner)
 
-	request := &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_finish_idle_outputs", "thr_bridge_finish_idle_outputs", "bind_bridge_finish_idle_outputs", 1, "pod_uid_finish_idle_outputs"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_outputs",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	}
+	request := bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_finish_idle_outputs", "thr_bridge_finish_idle_outputs", "bind_bridge_finish_idle_outputs", 1, "pod_uid_finish_idle_outputs"),
+		"evt_bridge_finish_idle_outputs_running",
+		`{"type":"end_turn"}`,
+	)
 	response, err := store.FinishIdle(context.Background(), request)
 	if err != nil {
 		t.Fatalf("FinishIdle capture outputs: %v", err)
@@ -2643,12 +3369,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleCommitsAndLogsSkippedOutput(t *testin
 	store.SandboxStatusFreshnessWindow = 5 * time.Minute
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), newRealOutputCaptureScanner(t))
 
-	response, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_finish_idle_skip", "thr_bridge_finish_idle_skip", "bind_bridge_finish_idle_skip", 1, "pod_uid_finish_idle_skip"),
-		RuntimeWriteId: "rwrite_bridge_finish_idle_skip",
-		IdleSince:      "2026-01-01T00:00:45Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
+	response, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_finish_idle_skip", "thr_bridge_finish_idle_skip", "bind_bridge_finish_idle_skip", 1, "pod_uid_finish_idle_skip"),
+		"evt_bridge_finish_idle_skip_running",
+		`{"type":"end_turn"}`,
+	))
 	if err != nil {
 		t.Fatalf("FinishIdle skipped output: %v", err)
 	}
@@ -2745,7 +3472,6 @@ func TestPostgreSQLBridgeAPIStoreConcurrentSameWriteFinishIdleSerializesBeforeCa
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const suffix = "concurrent_same_write"
 	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
-	seedCompletionFinalAssistantMessage(t, admin, suffix, "completed once")
 	scanner := newBlockingOutputScanner()
 	defer scanner.Release()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -3192,8 +3918,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndDoesNotConsumeAttachmentsOnResch
 	if err != nil {
 		t.Fatalf("WriteRequestEnd reschedule: %v", err)
 	}
-	if response.GetRescheduleDisposition().GetStatus() != "accepted" {
-		t.Fatalf("reschedule disposition = %+v; want accepted", response.GetRescheduleDisposition())
+	if got := response.GetDeclaration().GetReceipts()[0].GetRequestReschedule(); got.GetDisposition() != bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED {
+		t.Fatalf("reschedule disposition = %+v; want accepted", got)
 	}
 	var fileConsumptionCount int
 	if err := admin.QueryRowContext(context.Background(),

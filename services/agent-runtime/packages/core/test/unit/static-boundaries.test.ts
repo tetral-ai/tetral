@@ -139,7 +139,8 @@ describe("static Runtime Pod Gateway boundaries", () => {
     expect(text).toContain("requestTurnScope,");
     expect(text).toContain("Effect.forkIn(state.requestTurnScope)");
     expect(text).toContain("Scope.close(requestTurnScope, Exit.void)");
-    expect(text).toContain("Effect.timeoutOption(\"25 millis\")");
+    expect(text).toContain("const RequestTurnScopeCloseTimeoutMs = ToolRouteCancelJoinTimeoutMs + 50");
+    expect(text).toContain("Effect.timeoutOption(`${RequestTurnScopeCloseTimeoutMs} millis`)");
   });
 
   test("compaction owns its provider stream without creating a RequestTurn", async () => {

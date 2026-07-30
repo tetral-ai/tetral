@@ -185,9 +185,9 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementFailurePreventsRelease(t *tes
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 21, "spawn_agent", "idle", true, true, false, true, false)
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_events SET projection_json = '{}'
-		  WHERE workspace_id = 'default' AND session_id = $1 AND event_id = $2`, fixture.sessionID, fixture.toolUseEventID); err != nil {
-		t.Fatalf("break spawn projection: %v", err)
+		`UPDATE session_messages SET data_json = '{}'
+		  WHERE workspace_id = 'default' AND session_id = $1 AND source_event_id = $2`, fixture.sessionID, fixture.toolUseEventID); err != nil {
+		t.Fatalf("break durable spawn tool message: %v", err)
 	}
 	releaser := &recordingSandboxReleaseClient{}
 	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
@@ -246,7 +246,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 25, "wait_agent", "idle", false, false, false, false, true)
 	const completionDeliveryID = "delivery_pod_loss_wait_completion"
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_opener", 1,
-		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, `{"type":"agent.thread_message_received"}`, "public", true)
+		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
 	messageJSON := bridgeRuntimeNotificationMessageJSON(
 		t,
 		fixture.sessionID,
@@ -263,7 +263,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 		messageJSON,
 	)
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_completion", 2,
-		"agent.thread_message_sent", sentPayload, sentPayload, "public", true)
+		"agent.thread_message_sent", sentPayload, "public", true)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("pod-loss-wait-currency-key")
@@ -274,12 +274,16 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 		fixture.binding.BindingGeneration,
 		fixture.binding.PodUID,
 	)
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:                 scope,
-		RuntimeInputId:        "agent_mail:" + completionDeliveryID,
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessageJSON(t, completionDeliveryID, fixture.childThreadID, "sevt_pod_loss_wait_spawn", messageJSON),
-	}); err != nil {
+	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		scope,
+		"agent_mail:"+completionDeliveryID,
+		completionDeliveryID,
+		fixture.childThreadID,
+		"sevt_pod_loss_wait_spawn",
+		messageJSON,
+	)); err != nil {
 		t.Fatalf("commit pre-loss wait receipt: %v", err)
 	}
 	if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtime, fixture.sessionID, fixture.binding, fixture.now); err != nil {
@@ -317,7 +321,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_newer_opener", 3,
-		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, `{"type":"agent.thread_message_received"}`, "public", true)
+		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
 	superseded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:                   scope,
 		RuntimeInputId:          "rin_pod_loss_wait_superseded",
@@ -502,45 +506,54 @@ func seedRuntimePodLostDeliveryFixture(
 	if withOpenRequest || withRequestEnd {
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_start_"+fixture.toolUseEventID, sequence, "span.model_request_start",
 			fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q,"request_kind":"agent_provider_request"}`, fixture.modelRequestID),
-			fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q,"request_kind":"agent_provider_request"}`, fixture.modelRequestID), "internal", false)
+			"internal", false)
 		sequence++
 	}
 	toolPayload := fmt.Sprintf(`{"type":"agent.tool_use","name":%q,"input":{"task_name":"worker"},"evaluated_permission":"allow"}`, toolName)
-	toolProjection := fmt.Sprintf(`{"type":"runtime_tool_projection","model_tool_call_id":%q,"tool_name":%q,"input":{"task_name":"worker"},"state":"running"}`, "call_"+fixture.toolUseEventID, toolName)
-	seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, fixture.toolUseEventID, sequence, "agent.tool_use", toolPayload, toolProjection, "public", true)
+	seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, fixture.toolUseEventID, sequence, "agent.tool_use", toolPayload, "public", true)
+	seedBridgeAPIDurableToolMessage(
+		t,
+		db,
+		"default",
+		fixture.sessionID,
+		fixture.parentThreadID,
+		fixture.modelRequestID,
+		fixture.toolUseEventID,
+		"call_"+fixture.toolUseEventID,
+		toolName,
+	)
 	sequence++
 	if withSent {
 		messageJSON := bridgeRuntimeUserMessageJSON(t, fixture.sessionID, "msg_"+fixture.deliveryID, "hello worker")
 		sentPayload := bridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
-		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, sentPayload, "public", true)
+		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, "public", true)
 		sequence++
 		if withReceived {
 			receivedPayload := bridgeInterAgentMessageJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.toolUseEventID, messageJSON)
-			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, "evt_received_"+fixture.toolUseEventID, 1, "agent.thread_message_received", receivedPayload, receivedPayload, "public", true)
+			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, "evt_received_"+fixture.toolUseEventID, 1, "agent.thread_message_received", receivedPayload, "public", true)
 		}
 	}
 	if withTerminal {
 		payload := fmt.Sprintf(`{"type":"agent.tool_result","tool_use_event_id":%q,"content":[{"type":"text","text":"existing terminal"}],"is_error":false}`, fixture.toolUseEventID)
-		projection := fmt.Sprintf(`{"type":"runtime_tool_projection","model_tool_call_id":%q,"tool_name":%q,"input":{"task_name":"worker"},"state":"completed","output":{"text":"existing terminal","truncated":false}}`, "call_"+fixture.toolUseEventID, toolName)
-		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_result_"+fixture.toolUseEventID, sequence, "agent.tool_result", payload, projection, "public", true)
+		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_result_"+fixture.toolUseEventID, sequence, "agent.tool_result", payload, "public", true)
 		sequence++
 	}
 	if withRequestEnd {
 		payload := fmt.Sprintf(`{"type":"span.model_request_end","model_request_id":%q,"request_kind":"agent_provider_request","is_error":false,"finish_reason":"stop","usage":{}}`, fixture.modelRequestID)
-		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_end_"+fixture.toolUseEventID, sequence, "span.model_request_end", payload, payload, "internal", false)
+		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_end_"+fixture.toolUseEventID, sequence, "span.model_request_end", payload, "internal", false)
 	}
 	return fixture
 }
 
-func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture, threadID string, eventID string, sequence int64, eventType string, payloadJSON string, projectionJSON string, visibility string, sessionVisible bool) {
+func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture, threadID string, eventID string, sequence int64, eventType string, payloadJSON string, visibility string, sessionVisible bool) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, '{}',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON); err != nil {
+		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID); err != nil {
 		t.Fatalf("seed %s event %s: %v", eventType, eventID, err)
 	}
 }

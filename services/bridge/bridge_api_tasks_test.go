@@ -1199,12 +1199,13 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
-	request := &bridgev1.CommitTaskNotificationResultRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
-		RuntimeInputId: "rin_bridge_task_notify",
-		TaskId:         "task_bridge_notify",
-		ResultJson:     `{"task_id":"task_bridge_notify","source_tool_use_event_id":"sevt_tool_notify","status":"expired","stdout":{"text":"","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":null}`,
-	}
+	request := bridgeTaskNotificationRequestForTest(
+		t,
+		bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
+		"rin_bridge_task_notify",
+		"task_bridge_notify",
+		`{"task_id":"task_bridge_notify","source_tool_use_event_id":"sevt_tool_notify","status":"expired","stdout":{"text":"","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":null}`,
+	)
 	response, err := store.CommitTaskNotificationResult(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult: %v", err)
@@ -1218,6 +1219,11 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	}
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("replay ack = %s; want duplicate", replay.GetAck().GetStatus())
+	}
+	if len(response.GetDeclaration().GetReceipts()) != 1 ||
+		len(replay.GetDeclaration().GetReceipts()) != 1 ||
+		!proto.Equal(response.GetDeclaration().GetReceipts()[0], replay.GetDeclaration().GetReceipts()[0]) {
+		t.Fatalf("task notification replay receipts diverged: committed=%#v replay=%#v", response.GetDeclaration(), replay.GetDeclaration())
 	}
 
 	var taskStatus string
@@ -1270,31 +1276,11 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 		t.Fatalf("settlement status=%q terminal=%v inbox=%q messages=%d events=%d; want expired/event/committed/1/1",
 			taskStatus, terminalEventID.Valid, inboxStatus, notificationMessages, notificationEvents)
 	}
-	if response.GetRuntimeMessageJson() != notificationDataJSON {
-		t.Fatalf("runtime_message_json = %s; want projected session message %s", response.GetRuntimeMessageJson(), notificationDataJSON)
-	}
-	if replay.GetRuntimeMessageJson() != notificationDataJSON {
-		t.Fatalf("replay runtime_message_json = %s; want projected session message %s", replay.GetRuntimeMessageJson(), notificationDataJSON)
-	}
-	_, err = admin.ExecContext(context.Background(),
-		`UPDATE session_bridge_operations
-		    SET result_json = $1
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_task_notify'
-		    AND operation = 'commit_task_notification_result'
-		    AND idempotency_key = 'task_bridge_notify:rin_bridge_task_notify'`,
-		request.GetResultJson(),
-	)
-	if err != nil {
-		t.Fatalf("downgrade task notification operation result to legacy shape: %v", err)
-	}
-	legacyReplay, err := store.CommitTaskNotificationResult(context.Background(), request)
-	if err != nil {
-		t.Fatalf("CommitTaskNotificationResult legacy replay: %v", err)
-	}
-	if legacyReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		legacyReplay.GetRuntimeMessageJson() != notificationDataJSON {
-		t.Fatalf("legacy replay = %#v projection=%s; want duplicate with projected session message", legacyReplay.GetAck(), legacyReplay.GetRuntimeMessageJson())
+	receipt := response.GetDeclaration().GetReceipts()[0]
+	if len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 ||
+		receipt.GetEvents()[0].GetEventId() != terminalEventID.String ||
+		receipt.GetMessages()[0].GetOwningEventId() != terminalEventID.String {
+		t.Fatalf("task notification receipt = %#v; want one event and its loop-authored message", receipt)
 	}
 	var notificationMessage struct {
 		Role   string `json:"role"`
@@ -1317,12 +1303,13 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	}
 
 	seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_notify", "thr_bridge_task_notify", "rin_bridge_task_notify_late", "bind_bridge_task_notify", "pod_uid_task_notify")
-	lateRequest := &bridgev1.CommitTaskNotificationResultRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
-		RuntimeInputId: "rin_bridge_task_notify_late",
-		TaskId:         "task_bridge_notify",
-		ResultJson:     `{"task_id":"task_bridge_notify","source_tool_use_event_id":"sevt_tool_notify","status":"expired","stdout":{"text":"late","truncated":false},"stderr":{"text":"","truncated":false}}`,
-	}
+	lateRequest := bridgeTaskNotificationRequestForTest(
+		t,
+		bridgeAPIScope("sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify"),
+		"rin_bridge_task_notify_late",
+		"task_bridge_notify",
+		`{"task_id":"task_bridge_notify","source_tool_use_event_id":"sevt_tool_notify","status":"expired","stdout":{"text":"late","truncated":false},"stderr":{"text":"","truncated":false}}`,
+	)
 	late, err := store.CommitTaskNotificationResult(context.Background(), lateRequest)
 	if err != nil {
 		t.Fatalf("late CommitTaskNotificationResult: %v", err)
@@ -1330,8 +1317,8 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if late.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || late.GetAck().GetErrorCode() != "task_notification_stale" {
 		t.Fatalf("late task notification ack = %#v; want stale rejected", late.GetAck())
 	}
-	if late.GetRuntimeMessageJson() != "" {
-		t.Fatalf("late task notification runtime_message_json = %s; want empty stale ACK projection", late.GetRuntimeMessageJson())
+	if late.GetDeclaration() != nil {
+		t.Fatalf("late task notification declaration = %#v; want no stale projection", late.GetDeclaration())
 	}
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*)
@@ -1351,8 +1338,8 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	if replayedLate.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_REJECTED || replayedLate.GetAck().GetErrorCode() != "task_notification_stale" {
 		t.Fatalf("late task notification replay ack = %#v; want stale rejected", replayedLate.GetAck())
 	}
-	if replayedLate.GetRuntimeMessageJson() != "" {
-		t.Fatalf("late task notification replay runtime_message_json = %s; want empty stale ACK projection", replayedLate.GetRuntimeMessageJson())
+	if replayedLate.GetDeclaration() != nil {
+		t.Fatalf("late task notification replay declaration = %#v; want no stale projection", replayedLate.GetDeclaration())
 	}
 }
 
@@ -1366,12 +1353,13 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 		seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "rin_task_source_fence", "bind_bridge_task_source_fence", "pod_uid_task_source_fence")
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		response, err := store.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "bind_bridge_task_source_fence", 1, "pod_uid_task_source_fence"),
-			RuntimeInputId: "rin_task_source_fence",
-			TaskId:         "task_source_fence",
-			ResultJson:     `{"task_id":"task_source_fence","source_tool_use_event_id":"sevt_tool_other","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
-		})
+		response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+			t,
+			bridgeAPIScope("sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "bind_bridge_task_source_fence", 1, "pod_uid_task_source_fence"),
+			"rin_task_source_fence",
+			"task_source_fence",
+			`{"task_id":"task_source_fence","source_tool_use_event_id":"sevt_tool_other","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
+		))
 		if err != nil {
 			t.Fatalf("CommitTaskNotificationResult source mismatch: %v", err)
 		}
@@ -1394,17 +1382,19 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 		}
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		response, err := store.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_task_sandbox_fence", "thr_bridge_task_sandbox_fence", "bind_bridge_task_sandbox_fence", 1, "pod_uid_task_sandbox_fence"),
-			RuntimeInputId: "rin_task_sandbox_fence",
-			TaskId:         "task_sandbox_fence",
-			ResultJson:     `{"task_id":"task_sandbox_fence","source_tool_use_event_id":"sevt_tool_sandbox","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
-		})
+		response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+			t,
+			bridgeAPIScope("sesn_bridge_task_sandbox_fence", "thr_bridge_task_sandbox_fence", "bind_bridge_task_sandbox_fence", 1, "pod_uid_task_sandbox_fence"),
+			"rin_task_sandbox_fence",
+			"task_sandbox_fence",
+			`{"task_id":"task_sandbox_fence","source_tool_use_event_id":"sevt_tool_sandbox","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
+		))
 		if err != nil {
 			t.Fatalf("CommitTaskNotificationResult sandbox mismatch: %v", err)
 		}
-		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || response.GetRuntimeMessageJson() == "" {
-			t.Fatalf("released sandbox ack = %#v message=%s; want committed terminal winner", response.GetAck(), response.GetRuntimeMessageJson())
+		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+			len(response.GetDeclaration().GetReceipts()) != 1 {
+			t.Fatalf("released sandbox response = %#v; want committed terminal receipt", response)
 		}
 		var taskStatus string
 		var terminalEventID sql.NullString
@@ -1427,12 +1417,13 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 		seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence", "rin_task_inbox_fence", "bind_bridge_task_inbox_fence", "pod_uid_other")
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		_, err := store.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence", "bind_bridge_task_inbox_fence", 1, "pod_uid_task_inbox_fence"),
-			RuntimeInputId: "rin_task_inbox_fence",
-			TaskId:         "task_inbox_fence",
-			ResultJson:     `{"task_id":"task_inbox_fence","source_tool_use_event_id":"sevt_tool_inbox","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
-		})
+		_, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+			t,
+			bridgeAPIScope("sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence", "bind_bridge_task_inbox_fence", 1, "pod_uid_task_inbox_fence"),
+			"rin_task_inbox_fence",
+			"task_inbox_fence",
+			`{"task_id":"task_inbox_fence","source_tool_use_event_id":"sevt_tool_inbox","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
+		))
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("inbox pod mismatch err = %v; want FailedPrecondition", err)
 		}

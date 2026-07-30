@@ -43,7 +43,7 @@ import (
 //     cancelled_by_cleanup keeps a silent stale-ACK; the fence applies only while
 //     the task row exists and is running.
 func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
-	if request.GetRuntimeInputId() == "" || request.GetTaskId() == "" || request.GetResultJson() == "" {
+	if request.GetRuntimeInputId() == "" || request.GetTaskId() == "" || request.GetResultJson() == "" || request.GetDraft() == nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid task notification result request")
 	}
 	resultJSON := stripInternalProviderFields(request.GetResultJson())
@@ -66,12 +66,22 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	key := request.GetTaskId() + ":" + request.GetRuntimeInputId()
-	requestHash := bridgeRequestHash(bridgeOpCommitTaskNotificationResult, key, resultJSON)
+	sourceID := stableRuntimeID("task_notification", request.GetRuntimeInputId(), request.GetTaskId())
+	if err := validateTaskNotificationDraft(request, sourceID, resultJSON); err != nil {
+		return nil, err
+	}
+	declarationDigest, err := taskNotificationDeclarationDigest(request, resultJSON)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
 	var ack *bridgev1.BridgeWriteAck
-	var runtimeMessageJSON string
+	var receipt *bridgev1.DeclarationReceipt
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_task_notification_result", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
 		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitTaskNotificationResult, key); err != nil {
@@ -81,26 +91,36 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 				ack = rejectedAck(defaultString(existing.ErrorCode, "task_notification_delivery_exhausted"))
 				return nil
 			}
-			if existing.RequestHash != requestHash {
-				return status.Error(codes.AlreadyExists, "task notification idempotency conflict")
-			}
 			if existing.AckStatus == bridgeAckRejected {
 				ack = rejectedAck(defaultString(existing.ErrorCode, "task_notification_stale"))
 				return nil
 			}
-			runtimeMessageJSON, err = taskNotificationRuntimeMessageFromOperationResultTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				request.GetTaskId(),
-				sourceToolUseEventID,
-				existing.ResultJSON,
-			)
-			if err != nil {
-				return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitTaskNotificationResult,
+			"task_notification",
+			sourceID,
+		); err != nil {
+			return err
+		} else if ok {
+			if existing.DeclarationDigest != declarationDigest || existing.ReceiptJSON == "" {
+				return status.Error(codes.AlreadyExists, "task notification idempotency conflict")
 			}
-			ack = duplicateAck(request.GetRuntimeInputId(), "")
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "task notification receipt is invalid")
+			}
+			ack = duplicateAck(sourceID, "")
 			return nil
+		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := lockThreadMutationOnlyTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_inbox
@@ -131,7 +151,16 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 		if !rowsAffected(result) {
 			return status.Error(codes.FailedPrecondition, "task notification input is not deliverable")
 		}
-		settled, committedRuntimeMessageJSON, err := settleBackgroundTaskTx(ctx, tx, request.GetScope(), request.GetTaskId(), sourceToolUseEventID, terminalStatus, resultJSON, now)
+		settled, committedReceipt, err := commitTaskNotificationDeclarationTx(
+			ctx,
+			tx,
+			request,
+			sourceID,
+			sourceToolUseEventID,
+			terminalStatus,
+			resultJSON,
+			now,
+		)
 		if err != nil {
 			return err
 		}
@@ -147,7 +176,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
 				Operation:      bridgeOpCommitTaskNotificationResult,
 				IdempotencyKey: key,
-				RequestHash:    requestHash,
+				RequestHash:    declarationDigest,
 				AckStatus:      bridgeAckRejected,
 				RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
 				ErrorCode:      sql.NullString{String: "task_notification_stale", Valid: true},
@@ -159,28 +188,55 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			ack = rejectedAck("task_notification_stale")
 			return nil
 		}
-		runtimeMessageJSON = committedRuntimeMessageJSON
-		operationResultJSON, err := taskNotificationOperationResultJSON(resultJSON, runtimeMessageJSON)
+		receipt = committedReceipt
+		receipt.DeclarationDigest = declarationDigest
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpCommitTaskNotificationResult,
-			IdempotencyKey: key,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeInputID: sql.NullString{String: request.GetRuntimeInputId(), Valid: true},
-			ResultJSON:     operationResultJSON,
-			Now:            now,
-		}); err != nil {
+		if err := insertTaskNotificationDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			sourceID,
+			request.GetRuntimeInputId(),
+			declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
 			return err
 		}
-		ack = committedAck(request.GetRuntimeInputId(), "")
+		ack = committedAck(sourceID, "")
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return &bridgev1.CommitTaskNotificationResultResponse{Ack: ack, RuntimeMessageJson: runtimeMessageJSON}, nil
+	if receipt == nil {
+		return &bridgev1.CommitTaskNotificationResultResponse{Ack: ack}, nil
+	}
+	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpCommitTaskNotificationResult,
+		"task_notification",
+		sourceID,
+		declarationDigest,
+		ack,
+		observation,
+	)
+	return &bridgev1.CommitTaskNotificationResultResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {
@@ -920,12 +976,15 @@ func insertRuntimeNotificationTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 	); err != nil {
 		return "", "", err
 	}
-	if err := projectRuntimeEventTx(ctx, tx, scope, runtimeEventProjection{
-		EventID:        eventID,
-		EventType:      "runtime_notification",
-		PayloadJSON:    notificationJSON,
-		ProjectionJSON: notificationJSON,
-	}, now); err != nil {
+	if err := insertSessionMessageProjectionTx(
+		ctx,
+		tx,
+		scope,
+		eventID,
+		"runtime_notification",
+		notificationJSON,
+		now,
+	); err != nil {
 		return "", "", err
 	}
 	runtimeMessageJSON, err := readRuntimeNotificationMessageTx(ctx, tx, scope, eventID)
@@ -972,57 +1031,216 @@ func runtimeNotificationJSON(taskID string, sourceToolUseEventID string, termina
 	})
 }
 
-func taskNotificationOperationResultJSON(resultJSON string, runtimeMessageJSON string) (string, error) {
-	if !json.Valid([]byte(resultJSON)) || !json.Valid([]byte(runtimeMessageJSON)) {
-		return "", status.Error(codes.Internal, "task notification operation result is invalid")
+func validateTaskNotificationDraft(
+	request *bridgev1.CommitTaskNotificationResultRequest,
+	sourceID string,
+	resultJSON string,
+) error {
+	draft := request.GetDraft()
+	if draft == nil ||
+		draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TASK_NOTIFICATION ||
+		draft.GetOrdinal() != 0 ||
+		draft.GetSourceKind() != "task_notification" ||
+		draft.GetSourceId() != sourceID ||
+		draft.GetSourceEventId() != "" ||
+		len(draft.GetParts()) != 1 {
+		return status.Error(codes.InvalidArgument, "task notification draft identity is invalid")
 	}
-	return marshalBridgeJSON(map[string]any{
-		"result_json":          json.RawMessage(resultJSON),
-		"runtime_message_json": json.RawMessage(runtimeMessageJSON),
-	})
+	expectedMessageID := stableRuntimeID(
+		"runtime_message_draft",
+		request.GetScope().GetWorkspaceId(),
+		request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(),
+		"task_notification",
+		sourceID,
+		runtimeDraftKindToken(draft.GetDraftKind()),
+		"0",
+	)
+	if draft.GetRuntimeLocalId() != expectedMessageID {
+		return status.Error(codes.InvalidArgument, "task notification draft id is invalid")
+	}
+	var messageInfo map[string]any
+	if err := json.Unmarshal([]byte(draft.GetMessageInfoJson()), &messageInfo); err != nil ||
+		len(messageInfo) != 3 ||
+		messageInfo["role"] != "user" ||
+		messageInfo["origin"] != "runtime" ||
+		messageInfo["status"] != "completed" {
+		return status.Error(codes.InvalidArgument, "task notification draft message is invalid")
+	}
+	part := draft.GetParts()[0]
+	if part == nil ||
+		part.GetPartKind() != "text" ||
+		part.GetOrdinal() != 0 ||
+		part.GetRuntimeLocalPartId() != stableRuntimeID("runtime_message_part_draft", expectedMessageID, "text", "0") {
+		return status.Error(codes.InvalidArgument, "task notification draft part identity is invalid")
+	}
+	var partInfo map[string]any
+	if err := json.Unmarshal([]byte(part.GetPartJson()), &partInfo); err != nil ||
+		len(partInfo) != 4 ||
+		partInfo["type"] != "text" ||
+		partInfo["text"] != resultJSON ||
+		partInfo["truncated"] != false ||
+		partInfo["status"] != "completed" {
+		return status.Error(codes.InvalidArgument, "task notification draft part is invalid")
+	}
+	return nil
 }
 
-func taskNotificationRuntimeMessageFromOperationResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, taskID string, sourceToolUseEventID string, resultJSON string) (string, error) {
-	var result struct {
-		RuntimeMessageJSON json.RawMessage `json:"runtime_message_json"`
-	}
-	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-		return "", status.Error(codes.Internal, "task notification operation result is invalid")
-	}
-	if len(result.RuntimeMessageJSON) > 0 {
-		if !json.Valid(result.RuntimeMessageJSON) {
-			return "", status.Error(codes.Internal, "task notification runtime message projection is invalid")
-		}
-		return string(result.RuntimeMessageJSON), nil
-	}
-	var terminalEventID sql.NullString
-	err := tx.QueryRow(ctx,
-		`SELECT terminal_event_id
-		   FROM session_background_tasks
+func commitTaskNotificationDeclarationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.CommitTaskNotificationResultRequest,
+	sourceID string,
+	sourceToolUseEventID string,
+	terminalStatus string,
+	resultJSON string,
+	now time.Time,
+) (bool, *bridgev1.DeclarationReceipt, error) {
+	scope := request.GetScope()
+	result, err := tx.Exec(ctx,
+		`UPDATE session_background_tasks
+		    SET status = $7,
+		        terminal_at = COALESCE(terminal_at, $8),
+		        updated_at = $8
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND task_id = $4
 		    AND source_tool_use_event_id = $5
 		    AND binding_id = $6
-		  FOR UPDATE`,
+		    AND status = 'running'`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		taskID,
+		request.GetTaskId(),
 		sourceToolUseEventID,
 		scope.GetBinding().GetBindingId(),
-	).Scan(&terminalEventID)
-	if dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.Internal, "task notification operation projection source is missing")
-	}
+		terminalStatus,
+		now,
+	)
 	if err != nil {
-		return "", err
+		return false, nil, err
 	}
-	if !terminalEventID.Valid || terminalEventID.String == "" {
-		return "", status.Error(codes.Internal, "task notification terminal event projection is missing")
+	if !rowsAffected(result) {
+		return false, nil, nil
 	}
-	return readRuntimeNotificationMessageTx(ctx, tx, scope, terminalEventID.String)
+	notificationJSON, err := runtimeNotificationJSON(
+		request.GetTaskId(),
+		sourceToolUseEventID,
+		terminalStatus,
+		resultJSON,
+	)
+	if err != nil {
+		return false, nil, err
+	}
+	eventID := id.New("evt_")
+	eventSequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return false, nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'runtime_notification', $6, 'internal', false, $7, $6, $8, $8)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		eventID,
+		eventSequence,
+		notificationJSON,
+		sourceID,
+		now,
+	); err != nil {
+		return false, nil, err
+	}
+	messageStamp, err := upsertRuntimeOutputDraftTx(
+		ctx,
+		tx,
+		scope,
+		sourceID,
+		"task_notification",
+		eventID,
+		"",
+		0,
+		request.GetDraft(),
+		runtimeOutputWritePolicy{AllowNewParts: true},
+		now,
+	)
+	if err != nil {
+		return false, nil, err
+	}
+	result, err = tx.Exec(ctx,
+		`UPDATE session_background_tasks
+		    SET terminal_event_id = COALESCE(terminal_event_id, $7),
+		        updated_at = $8
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND task_id = $4
+		    AND source_tool_use_event_id = $5
+		    AND binding_id = $6`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		request.GetTaskId(),
+		sourceToolUseEventID,
+		scope.GetBinding().GetBindingId(),
+		eventID,
+		now,
+	)
+	if err != nil {
+		return false, nil, err
+	}
+	if !rowsAffected(result) {
+		return false, nil, status.Error(codes.Internal, "background task terminal event fence failed")
+	}
+	return true, &bridgev1.DeclarationReceipt{
+		SessionThreadId: scope.GetSessionThreadId(),
+		OperationKind:   bridgeOpCommitTaskNotificationResult,
+		SourceKind:      "task_notification",
+		SourceId:        sourceID,
+		Events: []*bridgev1.DurableEventStamp{{
+			SessionThreadId: scope.GetSessionThreadId(),
+			SourceEventId:   sourceID,
+			EventId:         eventID,
+			EventSequence:   eventSequence,
+			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+		}},
+		Messages: []*bridgev1.DurableMessageStamp{messageStamp},
+	}, nil
+}
+
+func insertTaskNotificationDeclarationOperationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	sourceID string,
+	runtimeInputID string,
+	declarationDigest string,
+	receiptJSON string,
+	now time.Time,
+) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO session_bridge_operations (
+			workspace_id, session_id, session_thread_id, operation, source_kind,
+			idempotency_key, request_hash, declaration_digest, receipt_json,
+			ack_status, runtime_input_id, result_json, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, 'task_notification', $5, $6, $6, $7, $8, $9, '{}', $10, $10
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		bridgeOpCommitTaskNotificationResult,
+		sourceID,
+		declarationDigest,
+		receiptJSON,
+		bridgeAckCommitted,
+		runtimeInputID,
+		now,
+	)
+	return err
 }
 
 func taskNotificationResultIdentity(resultJSON string) (string, string, error) {

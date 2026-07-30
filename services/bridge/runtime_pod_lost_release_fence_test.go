@@ -485,13 +485,15 @@ func TestPostgreSQLRuntimeDeliveryStoreRuntimePodLossLateTaskCompletionAndFailur
 			runtimeInputID := "rin_late_" + taskID
 			seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, runtimeInputID, bindingID, "pod_uid_"+sessionID)
 			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			response, err := apiStore.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_"+sessionID),
-				RuntimeInputId: runtimeInputID,
-				TaskId:         taskID,
-				ResultJson: fmt.Sprintf(`{"task_id":%q,"source_tool_use_event_id":%q,"status":%q,"stdout":{"text":"late","truncated":false},"stderr":{"text":"","truncated":false}}`,
-					taskID, sourceToolUseEventID, terminalStatus),
-			})
+			resultJSON := fmt.Sprintf(`{"task_id":%q,"source_tool_use_event_id":%q,"status":%q,"stdout":{"text":"late","truncated":false},"stderr":{"text":"","truncated":false}}`,
+				taskID, sourceToolUseEventID, terminalStatus)
+			response, err := apiStore.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+				t,
+				bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_"+sessionID),
+				runtimeInputID,
+				taskID,
+				resultJSON,
+			))
 			if err != nil {
 				t.Fatalf("late CommitTaskNotificationResult: %v", err)
 			}
@@ -545,10 +547,21 @@ func seedRuntimePodLostReleaseFenceFixture(t *testing.T, db *sql.DB, sessionID s
 		"mrq_"+sessionID,
 		"sevt_orphan_tool_"+sessionID,
 		`{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"allow"}`,
-		`{"type":"runtime_tool_projection","model_tool_call_id":"tool-call-pod-loss","tool_name":"Write","input":{"file_path":"src/a.ts"},"state":"running"}`,
+		`{}`,
 	); err != nil {
 		t.Fatalf("seed runtime pod-loss terminal facts: %v", err)
 	}
+	seedBridgeAPIDurableToolMessage(
+		t,
+		db,
+		"default",
+		sessionID,
+		threadID,
+		"mrq_"+sessionID,
+		"sevt_orphan_tool_"+sessionID,
+		"tool-call-pod-loss",
+		"Write",
+	)
 	seedBridgeAPIBackgroundTask(t, db, "default", sessionID, threadID, bindingID, taskID, "sevt_tool_"+taskID)
 	seedRuntimePodLostStatusFence(t, db, sessionID, bindingID, generation)
 }

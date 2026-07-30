@@ -678,6 +678,125 @@ func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.
 	}
 }
 
+func TestJobRunnerDefersSDKConfigRejectionWithoutConsumingAttemptBudget(t *testing.T) {
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{{
+		Id:             "qjob_config_busy",
+		WorkspaceId:    "ws_bridge",
+		Kind:           "runtime_config_update",
+		LeaseToken:     "lease_config_busy",
+		AttemptCount:   1,
+		MaxAttempts:    5,
+		PayloadVersion: 1,
+		PayloadJson:    `{"workspace_id":"ws_bridge","session_id":"sesn_1","config_generation":7}`,
+	}}}
+	deliverer := &recordingDeliverer{
+		result: RuntimeDeliveryResult{
+			Status:       RuntimeDeliveryRejected,
+			Retryable:    false,
+			ErrorKind:    "runtime_control_not_accepted",
+			ErrorMessage: "runtime rejected config",
+		},
+	}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"defer:qjob_config_busy"}) {
+		t.Fatalf("queue transitions = %v; want non-exhausting config defer", queueClient.transitions)
+	}
+	if len(deliverer.finalizations) != 0 {
+		t.Fatalf("config finalizations = %#v; want none", deliverer.finalizations)
+	}
+}
+
+func TestJobRunnerDefersBusyMCPManifestWithoutConsumingAttemptBudget(t *testing.T) {
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{{
+		Id:             "qjob_manifest_busy",
+		WorkspaceId:    "ws_bridge",
+		Kind:           "runtime_config_update",
+		LeaseToken:     "lease_manifest_busy",
+		AttemptCount:   5,
+		MaxAttempts:    5,
+		PayloadVersion: 2,
+		PayloadJson:    `{"workspace_id":"ws_bridge","session_id":"sesn_1","mcp_server_name":"github","manifest_generation":7}`,
+	}}}
+	deliverer := &recordingDeliverer{
+		result: RuntimeDeliveryResult{
+			Status:       RuntimeDeliveryRejected,
+			Retryable:    true,
+			ErrorKind:    "control_busy",
+			ErrorMessage: "runtime config installation is busy",
+		},
+	}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"defer:qjob_manifest_busy"}) {
+		t.Fatalf("queue transitions = %v; want busy MCP defer", queueClient.transitions)
+	}
+	if len(deliverer.finalizations) != 0 {
+		t.Fatalf("busy MCP finalizations = %#v; want none", deliverer.finalizations)
+	}
+}
+
+func TestJobRunnerSeparatesSDKAndMCPConfigDeliveryBudgets(t *testing.T) {
+	tests := []struct {
+		name       string
+		job        *queuev1.QueueJob
+		deliverer  *recordingDeliverer
+		transition string
+	}{
+		{
+			name: "SDK transport failure defers",
+			job: &queuev1.QueueJob{
+				Id: "qjob_sdk_transport", WorkspaceId: "ws_bridge", Kind: "runtime_config_update",
+				LeaseToken: "lease_sdk_transport", AttemptCount: 1, MaxAttempts: 5, PayloadVersion: 1,
+				PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","config_generation":7}`,
+			},
+			deliverer:  &recordingDeliverer{err: errors.New("runtime unavailable")},
+			transition: "defer:qjob_sdk_transport",
+		},
+		{
+			name: "MCP transport failure retries",
+			job: &queuev1.QueueJob{
+				Id: "qjob_mcp_transport", WorkspaceId: "ws_bridge", Kind: "runtime_config_update",
+				LeaseToken: "lease_mcp_transport", AttemptCount: 1, MaxAttempts: 5, PayloadVersion: 2,
+				PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","mcp_server_name":"github","manifest_generation":7}`,
+			},
+			deliverer:  &recordingDeliverer{err: errors.New("runtime unavailable")},
+			transition: "retry:qjob_mcp_transport:runtime_transport_error",
+		},
+		{
+			name: "MCP terminal runtime rejection defers",
+			job: &queuev1.QueueJob{
+				Id: "qjob_mcp_invariant", WorkspaceId: "ws_bridge", Kind: "runtime_config_update",
+				LeaseToken: "lease_mcp_invariant", AttemptCount: 1, MaxAttempts: 5, PayloadVersion: 2,
+				PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","mcp_server_name":"github","manifest_generation":7}`,
+			},
+			deliverer: &recordingDeliverer{result: RuntimeDeliveryResult{
+				Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "runtime_control_not_accepted",
+			}},
+			transition: "defer:qjob_mcp_invariant",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{test.job}}
+			runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: test.deliverer}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if !reflect.DeepEqual(queueClient.transitions, []string{test.transition}) {
+				t.Fatalf("queue transitions = %v; want %s", queueClient.transitions, test.transition)
+			}
+		})
+	}
+}
+
 func TestJobRunnerDeadLettersStringRuntimeConfigGeneration(t *testing.T) {
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{
 		{ //nolint:gosec // Test lease token fixture, not a secret.
@@ -724,13 +843,12 @@ func TestRuntimeConfigUpdateDecodesReferenceOnlyMCPManifestIntent(t *testing.T) 
 		decoded.ConfigGeneration != "" ||
 		decoded.MCPServerName != "github" ||
 		decoded.MCPManifestGeneration != "7" ||
-		decoded.MCPManifestETag != "" ||
 		decoded.AttemptCount != 3 || decoded.MaxAttempts != 5 {
 		t.Fatalf("decoded refs-only MCP manifest job = %#v", decoded)
 	}
 }
 
-func TestRuntimeConfigUpdateStillDecodesLegacyFatMCPManifestIntent(t *testing.T) {
+func TestRuntimeConfigUpdateRejectsMaterializedMCPManifestQueuePayload(t *testing.T) {
 	job := &queuev1.QueueJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		Id:           "qjob_manifest",
 		WorkspaceId:  "ws_bridge",
@@ -741,21 +859,8 @@ func TestRuntimeConfigUpdateStillDecodesLegacyFatMCPManifestIntent(t *testing.T)
 		MaxAttempts:  5,
 	}
 
-	decoded, err := DecodeRuntimeJob(job)
-	if err != nil {
-		t.Fatalf("DecodeRuntimeJob MCP manifest: %v", err)
-	}
-	if decoded.Kind != "runtime_config_update" ||
-		decoded.CommandKind != agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH ||
-		decoded.RuntimeInputID != "runtime_config_update:mcp_manifest:sesn_1:github:1" ||
-		decoded.ConfigGeneration != "" ||
-		decoded.MCPServerName != "github" ||
-		decoded.MCPManifestETag != "etag_1" ||
-		decoded.MCPManifestGeneration != "1" ||
-		decoded.MCPManifestReadiness != "ready" ||
-		decoded.AttemptCount != 3 || decoded.MaxAttempts != 5 ||
-		decoded.PayloadJSON != job.GetPayloadJson() {
-		t.Fatalf("decoded MCP manifest job = %#v", decoded)
+	if _, err := DecodeRuntimeJob(job); err == nil {
+		t.Fatal("DecodeRuntimeJob materialized MCP payload succeeded; want refs-only queue shape")
 	}
 }
 
@@ -763,8 +868,8 @@ func TestJobRunnerFinalManifestAttemptFinalizesBeforeQueueDeadLetter(t *testing.
 	steps := []string{}
 	job := &queuev1.QueueJob{ //nolint:gosec // Test lease token fixture, not a secret.
 		Id: "qjob_manifest_final", WorkspaceId: "ws_bridge", Kind: "runtime_config_update", LeaseToken: "lease_manifest_final",
-		AttemptCount: 5, MaxAttempts: 5,
-		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","mcp_manifest":{"mcp_server_name":"github","manifest_etag":"etag_1","manifest_generation":1,"readiness":"ready","diagnostic":null,"tools":[]}}`,
+		AttemptCount: 5, MaxAttempts: 5, PayloadVersion: 2,
+		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","mcp_server_name":"github","manifest_generation":1}`,
 	}
 	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{job}, steps: &steps}
 	deliverer := &recordingDeliverer{
@@ -783,8 +888,8 @@ func TestJobRunnerFinalManifestAttemptFinalizesBeforeQueueDeadLetter(t *testing.
 	if got.AttemptCount != 5 || got.MaxAttempts != 5 || got.MCPServerName != "github" || got.MCPManifestGeneration != "1" {
 		t.Fatalf("finalized manifest job = %#v", got)
 	}
-	if !reflect.DeepEqual(steps, []string{"deliver:qjob_manifest_final", "finalize:qjob_manifest_final", "dead:qjob_manifest_final"}) {
-		t.Fatalf("steps = %v; want manifest finalization before dead-letter", steps)
+	if !reflect.DeepEqual(steps, []string{"deliver:qjob_manifest_final", "finalize:qjob_manifest_final", "defer:qjob_manifest_final"}) {
+		t.Fatalf("steps = %v; want manifest finalization before same-job defer", steps)
 	}
 }
 
@@ -897,6 +1002,20 @@ func TestRuntimeDeliveryResultFromResponse(t *testing.T) {
 				Status:       RuntimeDeliveryRejected,
 				Retryable:    true,
 				ErrorKind:    "binding_identity_mismatch",
+				ErrorMessage: "runtime rejected input",
+			},
+		},
+		{
+			name: "control busy",
+			response: &agentruntimev1.RuntimeInputCommandResponse{
+				Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
+				Retryable: true,
+				ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
+			},
+			want: RuntimeDeliveryResult{
+				Status:       RuntimeDeliveryRejected,
+				Retryable:    true,
+				ErrorKind:    "control_busy",
 				ErrorMessage: "runtime rejected input",
 			},
 		},
@@ -1167,6 +1286,14 @@ func (c *recordingQueueClient) Retry(_ context.Context, request *queuev1.RetryRe
 	return &queuev1.TransitionResponse{Updated: true}, nil
 }
 
+func (c *recordingQueueClient) Defer(_ context.Context, request *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
+	c.transitions = append(c.transitions, "defer:"+request.GetJobId())
+	if c.steps != nil {
+		*c.steps = append(*c.steps, "defer:"+request.GetJobId())
+	}
+	return &queuev1.TransitionResponse{Updated: true}, nil
+}
+
 func (c *recordingQueueClient) DeadLetter(_ context.Context, request *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error) {
 	c.transitions = append(c.transitions, "dead:"+request.GetJobId()+":"+request.GetErrorKind())
 	if c.steps != nil {
@@ -1308,6 +1435,10 @@ func (c pollFailingQueueClient) Ack(context.Context, *queuev1.AckRequest) (*queu
 
 func (c pollFailingQueueClient) Retry(context.Context, *queuev1.RetryRequest) (*queuev1.TransitionResponse, error) {
 	return nil, errors.New("unexpected retry")
+}
+
+func (c pollFailingQueueClient) Defer(context.Context, *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
+	return nil, errors.New("unexpected defer")
 }
 
 func (c pollFailingQueueClient) DeadLetter(context.Context, *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error) {

@@ -36,18 +36,27 @@ func TestPostgreSQLBridgeAPIStoreRequeueResetsExpiredLeasedSessionPrepareJob(t *
 	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale_leased", "2026-01-01T00:00:00Z")
 
 	ws := workspace.ID("default")
+	partitionKey := queue.FormatSessionPartitionKey(ws, "sesn_bridge_tool_stale_leased")
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO queue_partition_counters (
+			workspace_id, partition_key, last_sequence, created_at, updated_at
+		 ) VALUES ('default', $1, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		partitionKey,
+	); err != nil {
+		t.Fatalf("seed session_prepare partition sequence: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, status,
+			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, status,
 			payload_json, lease_token, leased_by, leased_at, leased_until,
 			available_at, created_at, updated_at
 		) VALUES (
-			'qjob_bridge_tool_stale_leased_existing', 'default', 'session_prepare', $1, $2, 'leased',
+			'qjob_bridge_tool_stale_leased_existing', 'default', 'session_prepare', $1, 1, $2, 'leased',
 			'{"preparation_attempt_id":"old_payload"}', 'lease_old_prepare', 'sandbox-service',
 			'2026-01-01T00:00:10Z', '2026-01-01T00:01:10Z',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z'
 		)`,
-		queue.FormatSessionPartitionKey(ws, "sesn_bridge_tool_stale_leased"),
+		partitionKey,
 		queue.FormatSessionPrepareDedupeKey(ws, "sesn_bridge_tool_stale_leased", "prep_bridge_tool_stale_leased"),
 	); err != nil {
 		t.Fatalf("seed leased session_prepare job: %v", err)
@@ -105,7 +114,6 @@ func TestBridgeSessionMessageProjectionInsertsAreConflictSafe(t *testing.T) {
 
 	for filename, signatures := range map[string][]string{
 		"bridge_api_events.go": {
-			"func insertToolResultMessageProjectionTx",
 			"func insertSessionMessageProjectionTx",
 		},
 	} {

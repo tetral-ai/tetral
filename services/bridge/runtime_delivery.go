@@ -36,7 +36,7 @@ import (
 type RuntimeDeliveryStore interface {
 	PrepareRuntimeCommand(context.Context, RuntimeJob) (RuntimeCommandPlan, error)
 	MarkRuntimeInputAccepted(context.Context, RuntimeJob, *agentruntimev1.RuntimeInputCommandRequest) error
-	RecordRuntimeInputRejected(context.Context, RuntimeJob, RuntimeDeliveryResult) error
+	PrepareRuntimeInputRejection(context.Context, RuntimeJob, RuntimeDeliveryResult) (bool, error)
 }
 
 type RuntimeInputSealStore interface {
@@ -226,14 +226,22 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		if deliveryErr != nil {
 			return result, deliveryErr
 		}
-		if err := d.recordRuntimeInputRejected(ctx, job, result); err != nil {
+		converted, err := d.prepareRuntimeInputRejection(ctx, job, result)
+		if err != nil {
 			return runtimeDeliveryResultFromPrepareError(err), nil
+		}
+		if converted {
+			return d.DeliverRuntimeJob(ctx, job)
 		}
 		return result, nil
 	}
 	result := RuntimeDeliveryResultFromResponseForRequest(response, plan.Request)
-	if err := d.recordRuntimeInputRejected(ctx, job, result); err != nil {
+	converted, err := d.prepareRuntimeInputRejection(ctx, job, result)
+	if err != nil {
 		return runtimeDeliveryResultFromPrepareError(err), nil
+	}
+	if converted {
+		return d.DeliverRuntimeJob(ctx, job)
 	}
 	if job.Kind == queue.KindRuntimeInput && (result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
 		if err := d.Store.MarkRuntimeInputAccepted(ctx, job, plan.Request); err != nil {
@@ -255,11 +263,11 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 	return result, nil
 }
 
-func (d RuntimePodDirectDeliverer) recordRuntimeInputRejected(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {
+func (d RuntimePodDirectDeliverer) prepareRuntimeInputRejection(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (bool, error) {
 	if job.Kind != queue.KindRuntimeInput || result.Status != RuntimeDeliveryRejected || result.Retryable {
-		return nil
+		return false, nil
 	}
-	return d.Store.RecordRuntimeInputRejected(ctx, job, result)
+	return d.Store.PrepareRuntimeInputRejection(ctx, job, result)
 }
 
 // runtimeDeliveryResultFromSendError separates two RESOURCE_EXHAUSTED-shaped
@@ -410,6 +418,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 		if deleted {
 			plan = RuntimeCommandPlan{StaleAccepted: true}
 			return nil
+		}
+		if job.Kind == queue.KindRuntimeInput {
+			effectiveJob, err := effectiveRuntimeInputJobTx(ctx, tx, job)
+			if err != nil {
+				return err
+			}
+			job = effectiveJob
 		}
 		if job.Kind == queue.KindCleanupSession {
 			cleanupPlan, err := s.prepareCleanupSessionCommandTx(ctx, tx, job, port, now)
@@ -696,27 +711,29 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 	})
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) RecordRuntimeInputRejected(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {
+func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeInputRejection(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (bool, error) {
 	if job.Kind != queue.KindRuntimeInput {
-		return nil
+		return false, nil
 	}
-	if job.InputKind == "agent_mail" {
-		return nil
+	reasonCode, eligible := boundedRuntimeRejectionReason(result)
+	if !eligible || job.InputKind != "messages" {
+		return false, nil
 	}
 	if s == nil || s.Client == nil {
-		return runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
+		return false, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
 	if job.WorkspaceID == "" || job.SessionID == "" || job.SessionThreadID == "" || job.RuntimeInputID == "" {
-		return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime input rejection identity is incomplete", retryable: false}
+		return false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime input rejection identity is incomplete", retryable: false}
 	}
 	now := storage.Now()
 	if s.Clock != nil {
 		now = s.Clock().UTC()
 	}
-	return s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.record_runtime_input_rejected", func(tx *dbconnect.Tx) error {
-		var inboxStatus string
+	converted := false
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.prepare_runtime_input_rejection", func(tx *dbconnect.Tx) error {
+		var inboxStatus, inboxKind string
 		err := tx.QueryRow(ctx,
-			`SELECT status
+			`SELECT status, input_kind
 			   FROM session_runtime_inbox
 			  WHERE workspace_id = $1
 			    AND session_id = $2
@@ -725,80 +742,35 @@ func (s *PostgreSQLRuntimeDeliveryStore) RecordRuntimeInputRejected(ctx context.
 			job.WorkspaceID,
 			job.SessionID,
 			job.RuntimeInputID,
-		).Scan(&inboxStatus)
+		).Scan(&inboxStatus, &inboxKind)
 		if dbconnect.IsNoRows(err) {
 			return runtimeDeliveryPrepareError{kind: "runtime_inbox_rejection_missing", message: "runtime inbox row is missing for rejected input", retryable: true}
 		}
 		if err != nil {
 			return err
 		}
-		if inboxStatus != "delivering" {
+		if inboxKind == "rejection" || inboxStatus != "delivering" {
 			return nil
 		}
-		if len(job.EventIDs) > 0 {
-			if err := markRuntimeInputEventsProcessedByIDTx(ctx, tx, job.WorkspaceID, job.SessionID, job.EventIDs, now); err != nil {
-				return err
-			}
-		}
-		scope := &bridgev1.RuntimeScope{
-			WorkspaceId:     job.WorkspaceID,
-			SessionId:       job.SessionID,
-			SessionThreadId: job.SessionThreadID,
-		}
-		threadScope, err := lockThreadMutationTx(ctx, tx, scope)
-		if err != nil {
-			return err
-		}
-		visibility, sessionVisible := threadScope.publicProjection("session.error")
-		message := runtimeInputRejectedUserMessage()
-		payloadJSON, err := runtimeInputRejectedPayloadJSON(job, message)
-		if err != nil {
-			return err
-		}
-		eventID := id.New("evt_")
-		sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, 'session.error', $6, $7, $8, $6, $9, $9, $9)`,
-			job.WorkspaceID,
-			job.SessionID,
-			job.SessionThreadID,
-			eventID,
-			sequence,
-			payloadJSON,
-			visibility,
-			sessionVisible,
-			now,
-		); err != nil {
-			return err
-		}
-		if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-			return err
-		}
-		messageJSON, err := runtimeInputRejectedMessageJSON(scope, message)
-		if err != nil {
-			return err
-		}
-		if err := insertSessionMessageProjectionTx(ctx, tx, scope, eventID, "assistant", messageJSON, now); err != nil {
-			return err
+		if inboxKind != job.InputKind {
+			return runtimeDeliveryPrepareError{kind: "runtime_inbox_payload_conflict", message: "runtime input rejection conflicts with the durable inbox row", retryable: false}
 		}
 		updateResult, err := tx.Exec(ctx,
 			`UPDATE session_runtime_inbox
-			    SET status = 'dead_lettered',
-			        updated_at = $4
+			    SET input_kind = 'rejection',
+			        rejection_reason_code = $4,
+			        updated_at = $5
 			  WHERE workspace_id = $1
 			    AND session_id = $2
 			    AND runtime_input_id = $3
-			    AND status = 'delivering'`,
+			    AND status = 'delivering'
+			    AND input_kind = $6`,
 			job.WorkspaceID,
 			job.SessionID,
 			job.RuntimeInputID,
+			reasonCode,
 			now,
+			job.InputKind,
 		)
 		if err != nil {
 			return err
@@ -806,8 +778,21 @@ func (s *PostgreSQLRuntimeDeliveryStore) RecordRuntimeInputRejected(ctx context.
 		if !rowsAffected(updateResult) {
 			return runtimeDeliveryPrepareError{kind: "runtime_inbox_rejection_missing", message: "runtime inbox row is missing for rejected input", retryable: true}
 		}
+		converted = true
 		return nil
 	})
+	return converted, err
+}
+
+func boundedRuntimeRejectionReason(result RuntimeDeliveryResult) (string, bool) {
+	switch result.ErrorKind {
+	case "runtime_command_payload_too_large":
+		return "runtime_command_payload_too_large", true
+	case "runtime_contract_failure", "runtime_command_invalid_argument", "runtime_rejected_input":
+		return "runtime_command_rejected", true
+	default:
+		return "", false
+	}
 }
 
 // FinalizeRuntimeDelivery decides settle-vs-dead_letter for a runtime_input job
@@ -972,7 +957,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeMCPManifestDelivery(ctx context
 		if err != nil {
 			return err
 		}
-		_, err = transitionMCPManifestUnreadyTx(ctx, tx, job.WorkspaceID, job.SessionID, job.MCPServerName, current, true, mcpManifestDiagnosticDeliveryExhausted, toolset, now)
+		_, err = transitionMCPManifestDeliveryExhaustedTx(
+			ctx, tx, job.WorkspaceID, job.SessionID, job.MCPServerName, current, toolset, now,
+		)
 		return err
 	})
 	if err != nil {
@@ -1108,17 +1095,35 @@ func settleSealedAgentMailTx(
 	now time.Time,
 ) error {
 	scope := bridgeSessionScope(job.WorkspaceID, job.SessionID, job.SessionThreadID)
-	key := sealedAgentMailOperationKey(job)
-	requestHash := bridgeRequestHash(
-		bridgeOpSettleSealedAgentMail,
-		key,
+	sourceID := stableRuntimeID(
+		"sealed_agent_mail",
+		job.RuntimeInputID,
 		job.PreparationAttemptID,
 		readiness.PreparationAttemptID,
 	)
-	if existing, ok, err := readBridgeOperationTx(ctx, tx, scope, bridgeOpSettleSealedAgentMail, key); err != nil {
+	declarationDigest, err := sealedAgentMailDeclarationDigest(
+		job.SessionThreadID,
+		job.RuntimeInputID,
+		job.PreparationAttemptID,
+		readiness.PreparationAttemptID,
+	)
+	if err != nil {
+		return err
+	}
+	if existing, ok, err := readBridgeDeclarationOperationTx(
+		ctx,
+		tx,
+		scope,
+		bridgeOpSettleSealedAgentMail,
+		"sealed_agent_mail",
+		sourceID,
+	); err != nil {
 		return err
 	} else if ok {
-		if existing.RequestHash != requestHash || existing.AckStatus != bridgeAckCommitted {
+		receipt, receiptErr := unmarshalDeclarationReceipt(existing.ReceiptJSON)
+		if existing.DeclarationDigest != declarationDigest ||
+			receiptErr != nil ||
+			!validSealedAgentMailReceipt(receipt, job, readiness.PreparationAttemptID, sourceID, declarationDigest) {
 			return runtimeDeliveryPrepareError{
 				kind:      "runtime_delivery_idempotency_conflict",
 				message:   "sealed agent mail disposition conflicts with the stored result",
@@ -1127,37 +1132,74 @@ func settleSealedAgentMailTx(
 		}
 		return nil
 	}
-	resultJSON, err := marshalBridgeJSON(map[string]any{
-		"disposition":            "sealed",
-		"preparation_attempt_id": readiness.PreparationAttemptID,
-	})
+	receipt := sealedAgentMailReceipt(job, readiness.PreparationAttemptID, sourceID, declarationDigest)
+	receiptJSON, err := marshalDeclarationReceipt(receipt)
 	if err != nil {
 		return err
 	}
-	return insertBridgeOperationTx(ctx, tx, scope, bridgeOperationInsert{
-		Operation:      bridgeOpSettleSealedAgentMail,
-		IdempotencyKey: key,
-		RequestHash:    requestHash,
-		AckStatus:      bridgeAckCommitted,
-		RuntimeInputID: sql.NullString{String: job.RuntimeInputID, Valid: true},
-		ResultJSON:     resultJSON,
-		Now:            now,
-	})
-}
-
-func replaySealedAgentMailTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
-	scope := bridgeSessionScope(job.WorkspaceID, job.SessionID, job.SessionThreadID)
-	existing, ok, err := readBridgeOperationTx(
+	return insertBridgeDeclarationOperationTx(
 		ctx,
 		tx,
 		scope,
 		bridgeOpSettleSealedAgentMail,
-		sealedAgentMailOperationKey(job),
+		"sealed_agent_mail",
+		sourceID,
+		declarationDigest,
+		receiptJSON,
+		now,
+	)
+}
+
+func replaySealedAgentMailTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
+	failedPreparationAttemptID := job.SealedPreparationAttemptID
+	if failedPreparationAttemptID == "" {
+		readiness, found, err := loadEarliestFailedPreparationAtOrAfterTx(
+			ctx,
+			tx,
+			job.WorkspaceID,
+			job.SessionID,
+			job.PreparationAttemptID,
+			false,
+		)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
+		}
+		failedPreparationAttemptID = readiness.PreparationAttemptID
+	}
+	scope := bridgeSessionScope(job.WorkspaceID, job.SessionID, job.SessionThreadID)
+	sourceID := stableRuntimeID(
+		"sealed_agent_mail",
+		job.RuntimeInputID,
+		job.PreparationAttemptID,
+		failedPreparationAttemptID,
+	)
+	declarationDigest, err := sealedAgentMailDeclarationDigest(
+		job.SessionThreadID,
+		job.RuntimeInputID,
+		job.PreparationAttemptID,
+		failedPreparationAttemptID,
+	)
+	if err != nil {
+		return false, err
+	}
+	existing, ok, err := readBridgeDeclarationOperationTx(
+		ctx,
+		tx,
+		scope,
+		bridgeOpSettleSealedAgentMail,
+		"sealed_agent_mail",
+		sourceID,
 	)
 	if err != nil || !ok {
 		return false, err
 	}
-	if existing.AckStatus != bridgeAckCommitted {
+	receipt, receiptErr := unmarshalDeclarationReceipt(existing.ReceiptJSON)
+	if existing.DeclarationDigest != declarationDigest ||
+		receiptErr != nil ||
+		!validSealedAgentMailReceipt(receipt, job, failedPreparationAttemptID, sourceID, declarationDigest) {
 		return false, runtimeDeliveryPrepareError{
 			kind:      "runtime_delivery_disposition_invalid",
 			message:   "sealed agent mail disposition is invalid",
@@ -1167,12 +1209,56 @@ func replaySealedAgentMailTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJ
 	return true, nil
 }
 
-func sealedAgentMailOperationKey(job RuntimeJob) string {
-	return bridgeRequestHash(
-		bridgeOpSettleSealedAgentMail,
-		job.RuntimeInputID,
-		job.PreparationAttemptID,
-	)
+func sealedAgentMailReceipt(
+	job RuntimeJob,
+	failedPreparationAttemptID string,
+	sourceID string,
+	declarationDigest string,
+) *bridgev1.DeclarationReceipt {
+	return &bridgev1.DeclarationReceipt{
+		SessionThreadId:   job.SessionThreadID,
+		OperationKind:     bridgeOpSettleSealedAgentMail,
+		SourceKind:        "sealed_agent_mail",
+		SourceId:          sourceID,
+		DeclarationDigest: declarationDigest,
+		SealedAgentMail: &bridgev1.SealedAgentMailStamp{
+			RuntimeInputId:             job.RuntimeInputID,
+			BirthPreparationAttemptId:  job.PreparationAttemptID,
+			FailedPreparationAttemptId: failedPreparationAttemptID,
+			Disposition:                bridgev1.SealedAgentMailDisposition_SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH,
+		},
+	}
+}
+
+func validSealedAgentMailReceipt(
+	receipt *bridgev1.DeclarationReceipt,
+	job RuntimeJob,
+	failedPreparationAttemptID string,
+	sourceID string,
+	declarationDigest string,
+) bool {
+	if receipt == nil {
+		return false
+	}
+	stamp := receipt.GetSealedAgentMail()
+	return receipt.GetSessionThreadId() == job.SessionThreadID &&
+		receipt.GetOperationKind() == bridgeOpSettleSealedAgentMail &&
+		receipt.GetSourceKind() == "sealed_agent_mail" &&
+		receipt.GetSourceId() == sourceID &&
+		receipt.GetDeclarationDigest() == declarationDigest &&
+		len(receipt.GetEvents()) == 0 &&
+		len(receipt.GetMessages()) == 0 &&
+		len(receipt.GetPendingAttachmentDeltaJson()) == 0 &&
+		len(receipt.GetPendingToolDeltaJson()) == 0 &&
+		len(receipt.GetPrefixConsumptions()) == 0 &&
+		receipt.GetRequestReschedule() == nil &&
+		receipt.GetIdleCloseout() == nil &&
+		receipt.GetCompactedThroughMessageSequence() == 0 &&
+		len(receipt.GetChildLifecycle()) == 0 &&
+		stamp.GetRuntimeInputId() == job.RuntimeInputID &&
+		stamp.GetBirthPreparationAttemptId() == job.PreparationAttemptID &&
+		stamp.GetFailedPreparationAttemptId() == failedPreparationAttemptID &&
+		stamp.GetDisposition() == bridgev1.SealedAgentMailDisposition_SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH
 }
 
 func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
@@ -1707,6 +1793,12 @@ func runtimeCommandPayloadForJobTx(ctx context.Context, tx *dbconnect.Tx, job Ru
 	case "messages":
 		payload, err := acceptedMessageCommandPayloadTx(ctx, tx, job)
 		return payload, job.RuntimeInputID, err
+	case "rejection":
+		payload, err := marshalBridgeDataJSON(map[string]any{
+			"input_kind":  "rejection",
+			"reason_code": job.RejectionReasonCode,
+		})
+		return payload, job.RuntimeInputID, err
 	case "interrupt_control":
 		payload, err := interruptControlCommandPayloadTx(ctx, tx, job)
 		return payload, job.RuntimeInputID, err
@@ -1716,6 +1808,44 @@ func runtimeCommandPayloadForJobTx(ctx context.Context, tx *dbconnect.Tx, job Ru
 	default:
 		return job.PayloadJSON, job.RuntimeInputID, nil
 	}
+}
+
+func effectiveRuntimeInputJobTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (RuntimeJob, error) {
+	var inputKind string
+	var rejectionReason sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT input_kind, rejection_reason_code
+		   FROM session_runtime_inbox
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND runtime_input_id = $3
+		  FOR UPDATE`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.RuntimeInputID,
+	).Scan(&inputKind, &rejectionReason)
+	if dbconnect.IsNoRows(err) {
+		return job, nil
+	}
+	if err != nil {
+		return RuntimeJob{}, err
+	}
+	if inputKind != "rejection" {
+		return job, nil
+	}
+	if !rejectionReason.Valid ||
+		(rejectionReason.String != "runtime_command_payload_too_large" &&
+			rejectionReason.String != "runtime_command_rejected") {
+		return RuntimeJob{}, runtimeDeliveryPrepareError{
+			kind:      "runtime_inbox_payload_conflict",
+			message:   "runtime rejection inbox row has an invalid reason code",
+			retryable: false,
+		}
+	}
+	job.InputKind = "rejection"
+	job.RejectionReasonCode = rejectionReason.String
+	job.CommandKind = agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES
+	return job, nil
 }
 
 func runtimeMCPManifestCommandPayloadTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (string, string, error) {
@@ -3146,6 +3276,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		enqueueRequests := make([]queue.EnqueueRequest, 0, len(candidates))
 		for _, candidate := range candidates {
 			settled, err := settleSupersededRuntimeInboxRepairCandidateTx(ctx, tx, workspaceID, candidate, now)
 			if err != nil {
@@ -3160,7 +3291,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 				return err
 			}
 			ws := workspace.ID(workspaceID)
-			if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+			enqueueRequests = append(enqueueRequests, queue.EnqueueRequest{
 				WorkspaceID:    ws,
 				Kind:           queue.KindRuntimeInput,
 				PartitionKey:   queue.FormatSessionPartitionKey(ws, candidate.SessionID),
@@ -3169,11 +3300,12 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 				PayloadJSON:    payloadJSON,
 				Priority:       runtimeInputRepairPriority(candidate.InputKind),
 				Now:            now,
-			}); err != nil {
-				return err
-			}
-			repaired++
+			})
 		}
+		if _, err := queue.EnqueueBatchTx(ctx, tx, enqueueRequests); err != nil {
+			return err
+		}
+		repaired += len(enqueueRequests)
 		return nil
 	})
 	if err != nil {
@@ -3579,10 +3711,10 @@ func upsertRuntimeInboxDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job Run
 	var statusValue string
 	err = tx.QueryRow(ctx,
 		`INSERT INTO session_runtime_inbox (
-			workspace_id, session_id, session_thread_id, runtime_input_id, input_kind, event_ids_json,
+			workspace_id, session_id, session_thread_id, runtime_input_id, input_kind, rejection_reason_code, event_ids_json,
 			sequence_from, sequence_to, status, binding_id, binding_generation, target_pod_uid,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'delivering', $9, $10, $11, $12, $12)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'delivering', $10, $11, $12, $13, $13)
 		ON CONFLICT (workspace_id, runtime_input_id) DO UPDATE SET
 			status = CASE
 				WHEN session_runtime_inbox.status = 'committed' THEN session_runtime_inbox.status
@@ -3599,6 +3731,7 @@ func upsertRuntimeInboxDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job Run
 		WHERE session_runtime_inbox.session_id = EXCLUDED.session_id
 		  AND session_runtime_inbox.session_thread_id = EXCLUDED.session_thread_id
 		  AND session_runtime_inbox.input_kind = EXCLUDED.input_kind
+		  AND session_runtime_inbox.rejection_reason_code IS NOT DISTINCT FROM EXCLUDED.rejection_reason_code
 		  AND session_runtime_inbox.event_ids_json = EXCLUDED.event_ids_json
 		  AND session_runtime_inbox.sequence_from IS NOT DISTINCT FROM EXCLUDED.sequence_from
 		  AND session_runtime_inbox.sequence_to IS NOT DISTINCT FROM EXCLUDED.sequence_to
@@ -3608,6 +3741,7 @@ func upsertRuntimeInboxDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job Run
 		job.SessionThreadID,
 		job.RuntimeInputID,
 		job.InputKind,
+		sql.NullString{String: job.RejectionReasonCode, Valid: job.RejectionReasonCode != ""},
 		string(events),
 		sql.NullInt64{Int64: job.SequenceFrom, Valid: job.SequenceFrom > 0},
 		sql.NullInt64{Int64: job.SequenceTo, Valid: job.SequenceTo > 0},

@@ -258,16 +258,16 @@ message RefreshRuntimeBindingTokenResponse {
 }
 
 message CommitInputsRequest {
+  reserved 6, 8, 9;
+  reserved "hot_context_patch_json", "inter_agent_message_json", "approval_review_json";
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
   repeated string event_ids = 3;
   int64 sequence_from = 4;
   int64 sequence_to = 5;
-  string hot_context_patch_json = 6;
   string input_kind = 7;
-  string inter_agent_message_json = 8;
-  string approval_review_json = 9;
   repeated RuntimeMessageDraft drafts = 10;
+  repeated PendingToolCancellationDraft pending_tool_cancellations = 11;
 }
 
 message CommitInputsResponse {
@@ -275,16 +275,22 @@ message CommitInputsResponse {
   DeclarationResponse declaration = 2;
 }
 
+message PendingToolCancellationDraft {
+  string tool_use_event_id = 1;
+  string runtime_local_id = 2;
+}
+
 message CommitTaskNotificationResultRequest {
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
   string task_id = 3;
   string result_json = 4;
+  RuntimeMessageDraft draft = 5;
 }
 
 message CommitTaskNotificationResultResponse {
   BridgeWriteAck ack = 1;
-  string runtime_message_json = 2;
+  DeclarationResponse declaration = 3;
 }
 
 message McpManifestChangedRequest {
@@ -310,6 +316,8 @@ message ClaimMcpToolResultRequest {
 message ClaimMcpToolResultResponse {
   BridgeWriteAck ack = 1;
   string result_json = 2;
+  optional string materialization_handle = 3;
+  DeclarationResponse declaration = 4;
 }
 
 message CommitMcpToolResultRequest {
@@ -332,6 +340,8 @@ message McpInlineMedia {
 message CommitMcpToolResultResponse {
   BridgeWriteAck ack = 1;
   string refs_only_result_json = 2;
+  optional string materialization_handle = 3;
+  DeclarationResponse declaration = 4;
 }
 
 message CommitInternalToolRepairRequest {
@@ -339,21 +349,25 @@ message CommitInternalToolRepairRequest {
   string model_request_id = 2;
   string model_tool_call_id = 3;
   string tool_name = 4;
-  string data_json = 5;
+  repeated RuntimeMessageDraft drafts = 5;
 }
 
 message CommitInternalToolRepairResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message CommitRuntimeTerminationRequest {
   RuntimeScope scope = 1;
   string runtime_write_id = 2;
   string failure_json = 3;
+  repeated RuntimeMessageDraft drafts = 4;
+  repeated PendingToolCancellationDraft pending_tool_cancellations = 5;
 }
 
 message CommitRuntimeTerminationResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message TransientAttachmentRef {
@@ -445,10 +459,12 @@ message WriteEventRequest {
   string model_request_id = 3;
   string event_type = 4;
   string payload_json = 5;
-  string projection_json = 6;
+  reserved 6;
   bool session_visible = 7;
   repeated StableReasoningPart stable_reasoning_parts = 8;
   ServerToolUseUsage server_tool_use = 9;
+  repeated RuntimeMessageDraft drafts = 10;
+  optional string mcp_materialization_handle = 11;
 }
 
 message ServerToolUseUsage {
@@ -460,6 +476,7 @@ message WriteEventResponse {
   BridgeWriteAck ack = 1;
   string event_id = 2;
   int64 sequence = 3;
+  DeclarationResponse declaration = 4;
 }
 
 message WriteRequestEndRequest {
@@ -476,6 +493,19 @@ message WriteRequestEndRequest {
   RequestEndReschedule reschedule = 11;
   repeated StableReasoningPart stable_reasoning_parts = 12;
   repeated FileAttachmentPair consumed_file_attachments = 13;
+  repeated RuntimeMessageDraft drafts = 14;
+  PrefixConsumptionDraft prefix_consumption = 15;
+  optional int64 compacted_through_message_sequence = 16;
+  string compaction_event_payload_json = 17;
+  RequestEndInterruptSettlement interrupt_settlement = 18;
+}
+
+message RequestEndInterruptSettlement {
+  string runtime_input_id = 1;
+  repeated string event_ids = 2;
+  int64 sequence_from = 3;
+  int64 sequence_to = 4;
+  repeated PendingToolCancellationDraft pending_tool_cancellations = 5;
 }
 
 message StableReasoningPart {
@@ -489,7 +519,8 @@ message StableReasoningPart {
 
 message WriteRequestEndResponse {
   BridgeWriteAck ack = 1;
-  RequestEndRescheduleDisposition reschedule_disposition = 2;
+  reserved 2;
+  DeclarationResponse declaration = 3;
 }
 
 message RequestEndReschedule {
@@ -507,13 +538,15 @@ message RequestEndRescheduleDisposition {
 
 message FinishIdleRequest {
   RuntimeScope scope = 1;
-  string runtime_write_id = 2;
-  string idle_since = 3;
+  reserved 2, 3;
   string stop_reason_json = 4;
+  string durable_turn_id = 5;
+  repeated RuntimeMessageDraft drafts = 6;
 }
 
 message FinishIdleResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message CreateChildThreadRequest {
@@ -574,20 +607,31 @@ message MarkChildThreadClosedRequest {
   RuntimeScope scope = 1;
   string child_thread_id = 2;
   string closed_at = 3;
+  ChildLifecycleSource source = 4;
 }
 
 message MarkChildThreadClosedResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message MarkChildThreadActiveRequest {
   RuntimeScope scope = 1;
   string child_thread_id = 2;
   string active_at = 3;
+  ChildLifecycleSource source = 4;
 }
 
 message MarkChildThreadActiveResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
+}
+
+message ChildLifecycleSource {
+  oneof identity {
+    string source_tool_use_event_id = 1;
+    string reviewer_review_id = 2;
+  }
 }
 
 message RunToolRequest {

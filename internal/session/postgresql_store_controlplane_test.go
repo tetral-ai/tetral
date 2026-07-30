@@ -1183,9 +1183,10 @@ func seedThreadRuntimeInputQueueJob(t *testing.T, db *sql.DB, ws workspace.ID, s
 	}
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, payload_version, status, payload_json,
-			priority, attempt_count, max_attempts, available_at, created_at, updated_at
-		) VALUES ($1, $2, 'runtime_input', $3, $4, 1, $5, $6, 0, 0, 10, $7, $7, $7)`,
+			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key,
+			payload_version, status, payload_json, priority, attempt_count, max_attempts,
+			available_at, created_at, updated_at
+		) VALUES ($1, $2, 'runtime_input', $3, 1, $4, 1, $5, $6, 0, 0, 10, $7, $7, $7)`,
 		"qjob_"+runtimeInputID,
 		string(ws),
 		"session:"+string(ws)+":"+sessionID,

@@ -67,7 +67,7 @@ export interface RuntimeApprovalReviewerThreadCreator {
     input: ApprovalReviewerThreadCreation,
   ) => Promise<
     | { readonly ok: true }
-    | { readonly ok: false; readonly message: string }
+    | { readonly ok: false; readonly message: string; readonly discardHotState?: boolean }
   >;
 }
 
@@ -105,7 +105,6 @@ export function createRuntimeApprovalReviewer(
     readonly now?: () => string;
     readonly waitTimeoutMs?: number;
     readonly failureCommitTimeoutMs?: number;
-    readonly registerCommitScope?: (input: Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>) => () => void;
     readonly logger?: RuntimePodLogger;
     readonly assets?: ApprovalReviewerAssets;
   },
@@ -190,7 +189,6 @@ export function createRuntimeApprovalReviewer(
       feed.reanchored,
     );
     const trunkCommitInput = { ...input, sessionThreadId: trunkThreadId };
-    const unregisterCommitScope = options.registerCommitScope?.(trunkCommitInput);
     let sidecarCreated = false;
     let releaseInFinally = true;
     let resourcesReleased = false;
@@ -199,7 +197,6 @@ export function createRuntimeApprovalReviewer(
         return;
       }
       resourcesReleased = true;
-      unregisterCommitScope?.();
       lease.release();
     };
     const settleCancellation = (): Effect.Effect<void> => Effect.gen(function* () {
@@ -395,7 +392,21 @@ export function createRuntimeApprovalReviewer(
           currentParentBoundaryEventId,
         );
       } else {
-        yield* closeApprovalReviewerSidecarEffect(host, options.threadCreator, executionCreation, control, options.logger, request, reviewId);
+        const closeOutcome = yield* closeApprovalReviewerSidecarEffect(
+          host,
+          options.threadCreator,
+          executionCreation,
+          control,
+          options.logger,
+          request,
+          reviewId,
+        );
+        if (closeOutcome === "stale_custody") {
+          return { type: "stale_custody" as const };
+        }
+        if (closeOutcome === "failed") {
+          return failWithLog("runtime_failure", "approval reviewer sidecar close failed");
+        }
       }
       manager.rememberDecision(cacheKey, decision);
       return decision;
@@ -719,19 +730,22 @@ function closeApprovalReviewerSidecarEffect(
   logger: RuntimePodLogger | undefined,
   request: RuntimeApprovalReviewRequest,
   reviewId: string,
-): Effect.Effect<void> {
+): Effect.Effect<"closed" | "failed" | "stale_custody"> {
   return Effect.gen(function* () {
     const durable = yield* Effect.promise(() => threadCreator.closeApprovalReviewerThread(creation));
     if (!durable.ok) {
       logApprovalReviewFailure(logger, request, reviewId, "runtime_failure", durable.message);
-      return;
+      return durable.discardHotState === true ? "stale_custody" as const : "failed" as const;
     }
     const hot = yield* Effect.promise(() => host.markThreadClosed(control));
     if (!hot.ok) {
       logApprovalReviewFailure(logger, request, reviewId, "runtime_failure", "approval reviewer sidecar hot close failed");
+      return "failed" as const;
     }
+    return "closed" as const;
   }).pipe(Effect.catchCause(() => Effect.sync(() => {
     logApprovalReviewFailure(logger, request, reviewId, "runtime_failure", "approval reviewer sidecar close failed");
+    return "failed" as const;
   })));
 }
 

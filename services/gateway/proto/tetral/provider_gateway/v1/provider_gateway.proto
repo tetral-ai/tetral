@@ -112,6 +112,7 @@ enum McpErrorKind {
   MCP_ERROR_KIND_COMMIT_FAILED = 8;
   MCP_ERROR_KIND_CREDENTIAL_REQUIRED = 9;
   MCP_ERROR_KIND_INTERNAL = 10;
+  MCP_ERROR_KIND_CUSTODY_LOST = 11;
 }
 
 enum McpRetryStatus {
@@ -391,6 +392,7 @@ message RunMcpToolResponse {
   repeated McpAttachmentRef attachments = 3;
   optional McpErrorKind error_kind = 4;
   optional McpRetryStatus retry_status = 5;
+  optional string materialization_handle = 6;
 }
 
 message McpAttachmentRef {

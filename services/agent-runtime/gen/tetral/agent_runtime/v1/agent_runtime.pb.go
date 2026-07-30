@@ -152,6 +152,7 @@ const (
 	RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED                 RuntimeInputErrorCode = 9
 	RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED                RuntimeInputErrorCode = 10
 	RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT                      RuntimeInputErrorCode = 11
+	RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY                                RuntimeInputErrorCode = 12
 )
 
 // Enum value maps for RuntimeInputErrorCode.
@@ -169,6 +170,7 @@ var (
 		9:  "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED",
 		10: "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED",
 		11: "RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT",
+		12: "RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY",
 	}
 	RuntimeInputErrorCode_value = map[string]int32{
 		"RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED":                                 0,
@@ -183,6 +185,7 @@ var (
 		"RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED":                 9,
 		"RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED":                10,
 		"RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT":                      11,
+		"RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY":                                12,
 	}
 )
 
@@ -520,7 +523,7 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"\"RUNTIME_COMMAND_STATUS_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fRUNTIME_COMMAND_STATUS_ACCEPTED\x10\x01\x12$\n" +
 	" RUNTIME_COMMAND_STATUS_DUPLICATE\x10\x02\x12#\n" +
-	"\x1fRUNTIME_COMMAND_STATUS_REJECTED\x10\x03*\xc3\x05\n" +
+	"\x1fRUNTIME_COMMAND_STATUS_REJECTED\x10\x03*\xee\x05\n" +
 	"\x15RuntimeInputErrorCode\x12(\n" +
 	"$RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED\x10\x00\x12;\n" +
 	"7RUNTIME_INPUT_ERROR_CODE_SELECTED_POD_IDENTITY_MISMATCH\x10\x01\x12<\n" +
@@ -534,7 +537,8 @@ const file_tetral_agent_runtime_v1_agent_runtime_proto_rawDesc = "" +
 	"4RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED\x10\t\x129\n" +
 	"5RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED\x10\n" +
 	"\x123\n" +
-	"/RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT\x10\v2\x93\a\n" +
+	"/RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT\x10\v\x12)\n" +
+	"%RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY\x10\f2\x93\a\n" +
 	"\x16AgentRuntimePodService\x12x\n" +
 	"\vAcceptInput\x123.tetral.agent_runtime.v1.RuntimeInputCommandRequest\x1a4.tetral.agent_runtime.v1.RuntimeInputCommandResponse\x12|\n" +
 	"\x0fAcceptAgentMail\x123.tetral.agent_runtime.v1.RuntimeInputCommandRequest\x1a4.tetral.agent_runtime.v1.RuntimeInputCommandResponse\x12\x83\x01\n" +

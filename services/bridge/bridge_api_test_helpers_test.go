@@ -62,28 +62,503 @@ func assertCommitInputsConflictDidNotAdvance(t *testing.T, admin *sql.DB, sessio
 }
 
 func bridgeUserInputDraftForTest(workspaceID string, sessionID string, threadID string, runtimeInputID string, eventID string, text string) *bridgev1.RuntimeMessageDraft {
-	runtimeLocalID := stableRuntimeID(
-		"runtime_message_draft",
+	return bridgeInputDraftForTest(
 		workspaceID,
 		sessionID,
 		threadID,
 		"messages",
 		runtimeInputID,
-		"user_input",
-		"0",
+		eventID,
+		bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
+		"user",
+		text,
+	)
+}
+
+func bridgeApprovalInputDraftForTest(workspaceID string, sessionID string, threadID string, runtimeInputID string, eventID string, text string) *bridgev1.RuntimeMessageDraft {
+	return bridgeInputDraftForTest(
+		workspaceID,
+		sessionID,
+		threadID,
+		"tool_confirmation",
+		runtimeInputID,
+		eventID,
+		bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_APPROVAL_INPUT,
+		"user",
+		text,
+	)
+}
+
+func bridgeAgentMailCommitRequestForTest(
+	t *testing.T,
+	db *sql.DB,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	deliveryID string,
+	sourceThreadID string,
+	sourceToolUseEventID string,
+	messageJSON string,
+) *bridgev1.CommitInputsRequest {
+	t.Helper()
+	eventID := stableRuntimeID(
+		"agent_mail_received_event",
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		deliveryID,
+	)
+	var existing int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND event_id = $4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID,
+	).Scan(&existing); err != nil {
+		t.Fatalf("find admitted agent mail event: %v", err)
+	}
+	var sequence int64
+	if existing == 0 {
+		publicMessage, err := publicInterAgentMessageJSON(json.RawMessage(messageJSON))
+		if err != nil {
+			t.Fatalf("normalize admitted agent mail message: %v", err)
+		}
+		var sourceTaskName sql.NullString
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT CASE WHEN role = 'main' THEN NULL ELSE task_name END
+			   FROM session_threads
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND id = $3`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), sourceThreadID,
+		).Scan(&sourceTaskName); err != nil {
+			t.Fatalf("read agent mail source task name: %v", err)
+		}
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT COALESCE(MAX(sequence), 0) + 1
+			   FROM session_events
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+		).Scan(&sequence); err != nil {
+			t.Fatalf("allocate agent mail event sequence: %v", err)
+		}
+		payload, err := json.Marshal(map[string]any{
+			"type":                     "agent.thread_message_received",
+			"delivery_id":              deliveryID,
+			"source_thread_id":         sourceThreadID,
+			"source_task_name":         nullableJSONString(sourceTaskName),
+			"source_tool_use_event_id": sourceToolUseEventID,
+			"message":                  publicMessage,
+		})
+		if err != nil {
+			t.Fatalf("marshal admitted agent mail event: %v", err)
+		}
+		seedBridgeAPIEvent(
+			t,
+			db,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			eventID,
+			sequence,
+			"agent.thread_message_received",
+			string(payload),
+		)
+		seedBridgeAPIStreamChange(t, db, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, 1, "public", true)
+	} else if err := db.QueryRowContext(context.Background(),
+		`SELECT sequence
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND event_id = $4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID,
+	).Scan(&sequence); err != nil {
+		t.Fatalf("read admitted agent mail event sequence: %v", err)
+	}
+	seedBridgeAPIRuntimeInbox(
+		t,
+		db,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		runtimeInputID,
+		"agent_mail",
+		fmt.Sprintf("[%q]", eventID),
+		"accepted",
+		scope.GetBinding().GetBindingId(),
+		scope.GetBinding().GetTargetPodUid(),
+		sequence,
+		sequence,
+	)
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE session_runtime_inbox
+		    SET binding_generation = $3
+		  WHERE workspace_id = $1
+		    AND runtime_input_id = $2`,
+		scope.GetWorkspaceId(), runtimeInputID, scope.GetBinding().GetBindingGeneration()); err != nil {
+		t.Fatalf("align agent mail inbox binding generation: %v", err)
+	}
+	var message struct {
+		Origin string `json:"origin"`
+		Parts  []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(messageJSON), &message); err != nil || len(message.Parts) != 1 || message.Parts[0].Text == "" {
+		t.Fatalf("decode agent mail message: %v", err)
+	}
+	draft := bridgeInputDraftForTest(
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		"agent_mail",
+		runtimeInputID,
+		eventID,
+		bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT,
+		"user",
+		message.Parts[0].Text,
+	)
+	draft.MessageInfoJson = fmt.Sprintf(
+		`{"role":"user","origin":%q,"status":"completed"}`,
+		defaultString(message.Origin, "runtime"),
+	)
+	return &bridgev1.CommitInputsRequest{
+		Scope:          scope,
+		RuntimeInputId: runtimeInputID,
+		InputKind:      "agent_mail",
+		EventIds:       []string{eventID},
+		SequenceFrom:   sequence,
+		SequenceTo:     sequence,
+		Drafts:         []*bridgev1.RuntimeMessageDraft{draft},
+	}
+}
+
+func bridgeInputDraftForTest(
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	sourceKind string,
+	sourceID string,
+	eventID string,
+	draftKind bridgev1.RuntimeDraftKind,
+	role string,
+	text string,
+) *bridgev1.RuntimeMessageDraft {
+	return bridgeInputDraftForTestOrdinal(
+		workspaceID, sessionID, threadID, sourceKind, sourceID, eventID, draftKind, role, text, 0,
+	)
+}
+
+func bridgeInputDraftForTestOrdinal(
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	sourceKind string,
+	sourceID string,
+	eventID string,
+	draftKind bridgev1.RuntimeDraftKind,
+	role string,
+	text string,
+	ordinal int,
+) *bridgev1.RuntimeMessageDraft {
+	runtimeLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		workspaceID,
+		sessionID,
+		threadID,
+		sourceKind,
+		sourceID,
+		runtimeDraftKindToken(draftKind),
+		strconv.Itoa(ordinal),
 	)
 	return &bridgev1.RuntimeMessageDraft{
 		RuntimeLocalId:  runtimeLocalID,
-		SourceKind:      "messages",
-		SourceId:        runtimeInputID,
+		SourceKind:      sourceKind,
+		SourceId:        sourceID,
 		SourceEventId:   eventID,
-		DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
-		MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
+		DraftKind:       draftKind,
+		Ordinal:         int32(ordinal),
+		MessageInfoJson: fmt.Sprintf(`{"role":%q,"origin":%q,"status":"completed"}`, role, role),
 		Parts: []*bridgev1.RuntimePartDraft{{
 			RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
 			PartKind:           "text",
 			PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, text),
 		}},
+	}
+}
+
+func bridgeCompletionMailDraftForTest(
+	scope *bridgev1.RuntimeScope,
+	durableTurnID string,
+	envelope string,
+) *bridgev1.RuntimeMessageDraft {
+	const sourceKind = "finish_idle"
+	runtimeLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		sourceKind,
+		durableTurnID,
+		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPLETION_MAIL),
+		"0",
+	)
+	return &bridgev1.RuntimeMessageDraft{
+		RuntimeLocalId:  runtimeLocalID,
+		SourceKind:      sourceKind,
+		SourceId:        durableTurnID,
+		DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPLETION_MAIL,
+		MessageInfoJson: `{"role":"user","origin":"runtime","status":"completed"}`,
+		Parts: []*bridgev1.RuntimePartDraft{{
+			RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
+			PartKind:           "text",
+			PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, envelope),
+		}},
+	}
+}
+
+func bridgeRuntimeTerminationDraftForTest(
+	scope *bridgev1.RuntimeScope,
+	durableTurnID string,
+	ordinal int32,
+	role string,
+	origin string,
+	parts ...bridgeRuntimePartDraftForTest,
+) *bridgev1.RuntimeMessageDraft {
+	const sourceKind = "runtime_termination"
+	runtimeLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		sourceKind,
+		durableTurnID,
+		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TERMINATION),
+		strconv.FormatInt(int64(ordinal), 10),
+	)
+	partOrdinals := make(map[string]int32)
+	partDrafts := make([]*bridgev1.RuntimePartDraft, 0, len(parts))
+	for _, part := range parts {
+		partOrdinal := partOrdinals[part.kind]
+		partOrdinals[part.kind] = partOrdinal + 1
+		partDrafts = append(partDrafts, &bridgev1.RuntimePartDraft{
+			RuntimeLocalPartId: stableRuntimeID(
+				"runtime_message_part_draft",
+				runtimeLocalID,
+				part.kind,
+				strconv.FormatInt(int64(partOrdinal), 10),
+			),
+			PartKind: part.kind,
+			Ordinal:  partOrdinal,
+			PartJson: part.json,
+		})
+	}
+	return &bridgev1.RuntimeMessageDraft{
+		RuntimeLocalId:  runtimeLocalID,
+		SourceKind:      sourceKind,
+		SourceId:        durableTurnID,
+		DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TERMINATION,
+		Ordinal:         ordinal,
+		MessageInfoJson: fmt.Sprintf(`{"role":%q,"origin":%q,"status":"completed"}`, role, origin),
+		Parts:           partDrafts,
+	}
+}
+
+func bridgeRuntimeTerminationCompletionMailDraftForTest(
+	scope *bridgev1.RuntimeScope,
+	durableTurnID string,
+	ordinal int32,
+	envelope string,
+) *bridgev1.RuntimeMessageDraft {
+	draft := bridgeRuntimeTerminationDraftForTest(
+		scope,
+		durableTurnID,
+		ordinal,
+		"user",
+		"runtime",
+		bridgeRuntimePartDraftForTest{
+			kind: "text",
+			json: fmt.Sprintf(
+				`{"type":"text","text":%q,"truncated":false,"status":"completed"}`,
+				envelope,
+			),
+		},
+	)
+	draft.DraftKind = bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPLETION_MAIL
+	draft.RuntimeLocalId = stableRuntimeID(
+		"runtime_message_draft",
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		draft.GetSourceKind(),
+		durableTurnID,
+		runtimeDraftKindToken(draft.GetDraftKind()),
+		strconv.FormatInt(int64(ordinal), 10),
+	)
+	draft.Parts[0].RuntimeLocalPartId = stableRuntimeID(
+		"runtime_message_part_draft",
+		draft.GetRuntimeLocalId(),
+		"text",
+		"0",
+	)
+	return draft
+}
+
+type bridgeRuntimePartDraftForTest struct {
+	kind string
+	json string
+}
+
+func bridgeRuntimeOutputDraftForTest(
+	t *testing.T,
+	scope *bridgev1.RuntimeScope,
+	runtimeWriteID string,
+	eventType string,
+	messageStatus string,
+	parts ...bridgeRuntimePartDraftForTest,
+) *bridgev1.RuntimeMessageDraft {
+	t.Helper()
+	class, ok := runtimeOutputDraftClassForEvent(eventType)
+	if !ok {
+		t.Fatalf("event type %q has no runtime output draft class", eventType)
+	}
+	return bridgeRuntimeDeclarationDraftForTest(t, scope, eventType, runtimeWriteID, messageStatus, class, parts...)
+}
+
+func bridgeTaskNotificationDraftForTest(
+	t *testing.T,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	taskID string,
+	resultJSON string,
+) *bridgev1.RuntimeMessageDraft {
+	t.Helper()
+	terminalStatus, err := terminalStatusFromResultJSON(resultJSON)
+	if err != nil {
+		t.Fatalf("task notification terminal status: %v", err)
+	}
+	_, sourceToolUseEventID, err := taskNotificationResultIdentity(resultJSON)
+	if err != nil {
+		t.Fatalf("task notification identity: %v", err)
+	}
+	payloadJSON, err := canonicalTaskNotificationPayloadJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
+	if err != nil {
+		t.Fatalf("canonical task notification payload: %v", err)
+	}
+	partJSON, err := json.Marshal(map[string]any{
+		"type":      "text",
+		"text":      payloadJSON,
+		"truncated": false,
+		"status":    "completed",
+	})
+	if err != nil {
+		t.Fatalf("marshal task notification part: %v", err)
+	}
+	class, ok := runtimeOutputDraftClassForEvent("task_notification")
+	if !ok {
+		t.Fatal("task notification has no runtime output draft class")
+	}
+	sourceID := stableRuntimeID("task_notification", runtimeInputID, taskID)
+	return bridgeRuntimeDeclarationDraftForTest(
+		t,
+		scope,
+		"task_notification",
+		sourceID,
+		"completed",
+		class,
+		bridgeRuntimePartDraftForTest{kind: "text", json: string(partJSON)},
+	)
+}
+
+func bridgeTaskNotificationRequestForTest(
+	t *testing.T,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	taskID string,
+	resultJSON string,
+) *bridgev1.CommitTaskNotificationResultRequest {
+	t.Helper()
+	return &bridgev1.CommitTaskNotificationResultRequest{
+		Scope:          scope,
+		RuntimeInputId: runtimeInputID,
+		TaskId:         taskID,
+		ResultJson:     resultJSON,
+		Draft:          bridgeTaskNotificationDraftForTest(t, scope, runtimeInputID, taskID, resultJSON),
+	}
+}
+
+func bridgeRequestEndDraftForTest(
+	t *testing.T,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	messageStatus string,
+	parts ...bridgeRuntimePartDraftForTest,
+) *bridgev1.RuntimeMessageDraft {
+	t.Helper()
+	class, ok := runtimeOutputDraftClassForEvent("model_request")
+	if !ok {
+		t.Fatal("model request has no runtime output draft class")
+	}
+	return bridgeRuntimeDeclarationDraftForTest(t, scope, "model_request", modelRequestID, messageStatus, class, parts...)
+}
+
+func bridgeRuntimeDeclarationDraftForTest(
+	t *testing.T,
+	scope *bridgev1.RuntimeScope,
+	sourceKind string,
+	sourceID string,
+	messageStatus string,
+	class runtimeOutputDraftClass,
+	parts ...bridgeRuntimePartDraftForTest,
+) *bridgev1.RuntimeMessageDraft {
+	t.Helper()
+	runtimeLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		sourceKind,
+		sourceID,
+		runtimeDraftKindToken(class.DraftKind),
+		"0",
+	)
+	partOrdinals := make(map[string]int32)
+	drafts := make([]*bridgev1.RuntimePartDraft, 0, len(parts))
+	for _, part := range parts {
+		if !json.Valid([]byte(part.json)) {
+			t.Fatalf("runtime output part %q is not valid JSON", part.kind)
+		}
+		ordinal := partOrdinals[part.kind]
+		partOrdinals[part.kind] = ordinal + 1
+		drafts = append(drafts, &bridgev1.RuntimePartDraft{
+			RuntimeLocalPartId: stableRuntimeID(
+				"runtime_message_part_draft",
+				runtimeLocalID,
+				part.kind,
+				strconv.FormatInt(int64(ordinal), 10),
+			),
+			PartKind: part.kind,
+			Ordinal:  ordinal,
+			PartJson: part.json,
+		})
+	}
+	return &bridgev1.RuntimeMessageDraft{
+		RuntimeLocalId: runtimeLocalID,
+		SourceKind:     sourceKind,
+		SourceId:       sourceID,
+		DraftKind:      class.DraftKind,
+		MessageInfoJson: fmt.Sprintf(
+			`{"role":%q,"origin":%q,"status":%q}`,
+			class.Role,
+			class.Origin,
+			messageStatus,
+		),
+		Parts: drafts,
 	}
 }
 
@@ -127,20 +602,138 @@ func bridgeTransientAttachmentStatus(t *testing.T, db *sql.DB, attachmentRef str
 	return statusValue
 }
 
+func seedBridgeAPIOpenDurableTurn(
+	t *testing.T,
+	db *sql.DB,
+	scope *bridgev1.RuntimeScope,
+	durableTurnID string,
+) {
+	t.Helper()
+	var exists bool
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_events
+			 WHERE workspace_id=$1
+			   AND session_id=$2
+			   AND session_thread_id=$3
+			   AND event_id=$4
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		durableTurnID,
+	).Scan(&exists); err != nil {
+		t.Fatalf("inspect open durable turn: %v", err)
+	}
+	if exists {
+		return
+	}
+	var role string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT role
+		   FROM session_threads
+		  WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	).Scan(&role); err != nil {
+		t.Fatalf("read durable turn thread role: %v", err)
+	}
+	var sequence int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(MAX(sequence), 0) + 1
+		   FROM session_events
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	).Scan(&sequence); err != nil {
+		t.Fatalf("allocate durable turn fixture sequence: %v", err)
+	}
+	eventType := "session.thread_status_running"
+	if role == "main" {
+		eventType = "session.status_running"
+	}
+	seedBridgeAPIEvent(
+		t,
+		db,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		durableTurnID,
+		sequence,
+		eventType,
+		`{"type":"`+eventType+`"}`,
+	)
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status='running'
+		  WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	); err != nil {
+		t.Fatalf("mark durable turn thread running: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE sessions
+		    SET status='running'
+		  WHERE workspace_id=$1 AND id=$2`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+	); err != nil {
+		t.Fatalf("mark durable turn session running: %v", err)
+	}
+}
+
+func nextBridgeAPIEventSequenceForTest(t *testing.T, db *sql.DB, sessionID string, threadID string) int64 {
+	t.Helper()
+	var sequence int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(MAX(sequence), 0) + 1
+		   FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2`,
+		sessionID,
+		threadID,
+	).Scan(&sequence); err != nil {
+		t.Fatalf("allocate event fixture sequence: %v", err)
+	}
+	return sequence
+}
+
+func bridgeAPIFinishIdleRequest(
+	t *testing.T,
+	db *sql.DB,
+	scope *bridgev1.RuntimeScope,
+	durableTurnID string,
+	stopReasonJSON string,
+) *bridgev1.FinishIdleRequest {
+	t.Helper()
+	seedBridgeAPIOpenDurableTurn(t, db, scope, durableTurnID)
+	return &bridgev1.FinishIdleRequest{
+		Scope:          scope,
+		DurableTurnId:  durableTurnID,
+		StopReasonJson: stopReasonJSON,
+	}
+}
+
 func deleteCleanupRuntimeJob(sessionID string, deleteCleanupID string) RuntimeJob {
 	return RuntimeJob{JobID: "qjob_" + sessionID, LeaseToken: "lease_" + sessionID, Kind: queue.KindSessionDeleteCleanup,
 		WorkspaceID: "default", SessionID: sessionID, RuntimeInputID: "session_delete_cleanup:" + deleteCleanupID,
 		CleanupJobID: deleteCleanupID, DeleteCleanupID: deleteCleanupID, CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION}
 }
 
-func finishBridgeDeleteFixtureIdle(t *testing.T, runtime *sql.DB, sessionID string, threadID string, bindingID string, generation int64, podUID string) {
+func finishBridgeDeleteFixtureIdle(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, threadID string, bindingID string, generation int64, podUID string) {
 	t.Helper()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
 	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, generation, podUID)
+	durableTurnID := "evt_running_" + sessionID
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
 	if _, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope: bridgeAPIScope(sessionID, threadID, bindingID, generation, podUID), RuntimeWriteId: "rwrite_idle_" + sessionID,
-		IdleSince: "2026-01-01T00:00:45Z", StopReasonJson: `{"type":"end_turn"}`,
+		Scope: scope, DurableTurnId: durableTurnID, StopReasonJson: `{"type":"end_turn"}`,
 	}); err != nil {
 		t.Fatalf("FinishIdle fixture: %v", err)
 	}
@@ -335,47 +928,43 @@ func bridgeAPIScope(sessionID string, threadID string, bindingID string, generat
 	}
 }
 
-func bridgeInternalToolRepairMessageJSON(t *testing.T, sessionID string, messageID string, partID string, toolCallID string, toolName string, message string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"id":        messageID,
-		"sessionId": sessionID,
-		"role":      "assistant",
-		"origin":    "agent",
-		"sequence":  float64(2),
-		"status":    "completed",
-		"createdAt": "2026-01-01T00:00:00Z",
-		"parts": []map[string]any{
-			{
-				"id":          partID,
-				"sessionId":   sessionID,
-				"messageId":   messageID,
-				"sequence":    float64(0),
-				"createdAt":   "2026-01-01T00:00:00Z",
-				"type":        "tool",
-				"toolCallId":  toolCallID,
-				"toolName":    toolName,
-				"completedAt": "2026-01-01T00:00:00Z",
-				"state": map[string]any{
-					"status": "error",
-					"input": map[string]any{
-						"value":     map[string]any{"q": "x"},
-						"preview":   `{"q":"x"}`,
-						"truncated": false,
-					},
-					"error": map[string]any{
-						"type":      "provider_tool_protocol_error",
-						"message":   message,
-						"retryable": false,
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal internal repair message: %v", err)
+func bridgeInternalToolRepairDraftForTest(
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	repairKey string,
+	toolCallID string,
+	toolName string,
+	message string,
+) *bridgev1.RuntimeMessageDraft {
+	const sourceKind = "internal_tool_repair"
+	runtimeLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		workspaceID,
+		sessionID,
+		threadID,
+		sourceKind,
+		repairKey,
+		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR),
+		"0",
+	)
+	return &bridgev1.RuntimeMessageDraft{
+		RuntimeLocalId:  runtimeLocalID,
+		SourceKind:      sourceKind,
+		SourceId:        repairKey,
+		DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR,
+		MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
+		Parts: []*bridgev1.RuntimePartDraft{{
+			RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", runtimeLocalID, "tool", "0"),
+			PartKind:           "tool",
+			PartJson: fmt.Sprintf(
+				`{"type":"tool","toolCallId":%q,"toolName":%q,"completedAt":"2026-01-01T00:00:00Z","state":{"status":"error","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"error":{"type":"provider_tool_protocol_error","message":%q,"retryable":false}}}`,
+				toolCallID,
+				toolName,
+				message,
+			),
+		}},
 	}
-	return string(raw)
 }
 
 func bridgeInternalToolCallMessageJSON(t *testing.T, sessionID string, messageID string, partID string, toolCallID string, toolName string) string {
@@ -388,6 +977,7 @@ func bridgeInternalToolCallMessageJSON(t *testing.T, sessionID string, messageID
 		"sequence":  float64(1),
 		"status":    "completed",
 		"createdAt": "2026-01-01T00:00:00Z",
+		"updatedAt": "2026-01-01T00:00:00Z",
 		"parts": []map[string]any{
 			{
 				"id":         partID,
@@ -395,6 +985,7 @@ func bridgeInternalToolCallMessageJSON(t *testing.T, sessionID string, messageID
 				"messageId":  messageID,
 				"sequence":   float64(0),
 				"createdAt":  "2026-01-01T00:00:00Z",
+				"updatedAt":  "2026-01-01T00:00:00Z",
 				"type":       "tool",
 				"toolCallId": toolCallID,
 				"toolName":   toolName,
@@ -983,19 +1574,122 @@ func seedBridgeAPISession(t *testing.T, db *sql.DB, workspaceID string, sessionI
 
 func seedBridgeAPIInternalToolCallMessage(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, messageID string, partID string, toolCallID string, toolName string, sequence int64) {
 	t.Helper()
+	eventID := "evt_" + messageID
+	var eventSequence int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(MAX(sequence), 0) + 1
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3`,
+		workspaceID, sessionID, threadID,
+	).Scan(&eventSequence); err != nil {
+		t.Fatalf("allocate internal tool call event sequence: %v", err)
+	}
+	seedBridgeAPIEvent(
+		t,
+		db,
+		workspaceID,
+		sessionID,
+		threadID,
+		eventID,
+		eventSequence,
+		"agent.tool_use",
+		fmt.Sprintf(`{"type":"agent.tool_use","model_tool_call_id":%q,"tool_name":%q}`, toolCallID, toolName),
+	)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_messages (
 			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
 			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		sessionID,
 		threadID,
 		messageID,
 		sequence,
 		bridgeInternalToolCallMessageJSON(t, sessionID, messageID, partID, toolCallID, toolName),
+		eventID,
 	); err != nil {
 		t.Fatalf("seed bridge api internal tool call message: %v", err)
+	}
+}
+
+func seedBridgeAPIDurableToolMessage(
+	t *testing.T,
+	db *sql.DB,
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	modelRequestID string,
+	toolUseEventID string,
+	toolCallID string,
+	toolName string,
+) {
+	t.Helper()
+	var messageSequence int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COALESCE(MAX(sequence), 0) + 1
+		   FROM session_messages
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3`,
+		workspaceID, sessionID, threadID,
+	).Scan(&messageSequence); err != nil {
+		t.Fatalf("allocate durable tool message sequence: %v", err)
+	}
+	messageID := "msg_" + toolUseEventID
+	partID := "part_" + toolUseEventID
+	timestamp := "2026-01-01T00:00:00Z"
+	dataJSON, err := json.Marshal(map[string]any{
+		"id":        messageID,
+		"sessionId": sessionID,
+		"role":      "assistant",
+		"origin":    "agent",
+		"sequence":  messageSequence,
+		"status":    "streaming",
+		"createdAt": timestamp,
+		"updatedAt": timestamp,
+		"parts": []map[string]any{{
+			"id":             partID,
+			"sessionId":      sessionID,
+			"messageId":      messageID,
+			"sequence":       0,
+			"createdAt":      timestamp,
+			"updatedAt":      timestamp,
+			"type":           "tool",
+			"toolCallId":     toolCallID,
+			"toolName":       toolName,
+			"toolUseEventId": toolUseEventID,
+			"toolEvent":      map[string]any{"kind": "tool"},
+			"state": map[string]any{
+				"status": "running",
+				"input": map[string]any{
+					"value":     map[string]any{},
+					"preview":   "{}",
+					"truncated": false,
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal durable tool message: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_messages (
+			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
+			data_json, source_event_id, last_event_id, model_request_id, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, $8, $9, $9)`,
+		workspaceID,
+		sessionID,
+		threadID,
+		messageID,
+		messageSequence,
+		string(dataJSON),
+		toolUseEventID,
+		modelRequestID,
+		timestamp,
+	); err != nil {
+		t.Fatalf("seed durable tool message: %v", err)
 	}
 }
 
@@ -1080,20 +1774,40 @@ func seedBridgeAPIChildFinishIdleFailureFixture(t *testing.T, db *sql.DB, suffix
 		    AND session_id = $1`, sessionID); err != nil {
 		t.Fatalf("seed child FinishIdle failure threads running: %v", err)
 	}
-}
-
-func bridgeAPIChildFinishIdleFailureRequest(suffix string) *bridgev1.FinishIdleRequest {
-	return &bridgev1.FinishIdleRequest{
-		Scope: bridgeAPIScope(
-			"sesn_bridge_child_finish_idle_"+suffix,
-			"thr_bridge_child_finish_idle_"+suffix,
+	seedBridgeAPIOpenDurableTurn(
+		t,
+		db,
+		bridgeAPIScope(
+			sessionID,
+			childThreadID,
 			"bind_bridge_child_finish_idle_"+suffix,
 			1,
 			"pod_uid_child_finish_idle_"+suffix,
 		),
-		RuntimeWriteId: "rwrite_bridge_child_finish_idle_" + suffix,
-		IdleSince:      "2026-01-01T00:00:45Z",
+		"evt_bridge_child_finish_idle_running_"+suffix,
+	)
+}
+
+func bridgeAPIChildFinishIdleFailureRequest(suffix string) *bridgev1.FinishIdleRequest {
+	scope := bridgeAPIScope(
+		"sesn_bridge_child_finish_idle_"+suffix,
+		"thr_bridge_child_finish_idle_"+suffix,
+		"bind_bridge_child_finish_idle_"+suffix,
+		1,
+		"pod_uid_child_finish_idle_"+suffix,
+	)
+	durableTurnID := "evt_bridge_child_finish_idle_running_" + suffix
+	return &bridgev1.FinishIdleRequest{
+		Scope:          scope,
+		DurableTurnId:  durableTurnID,
 		StopReasonJson: `{"type":"end_turn"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{
+			bridgeCompletionMailDraftForTest(
+				scope,
+				durableTurnID,
+				completionMailEnvelope("main", "task_"+"thr_bridge_child_finish_idle_"+suffix, "completed"),
+			),
+		},
 	}
 }
 

@@ -8,11 +8,16 @@ const hostileText = "UNIT5_DUMMY_TOKEN_CANARY authorization: bearer raw-secret r
 
 function envelope(writeId = "write-1"): SessionEventEnvelope {
   return {
+    requestId: "request-1",
     workspaceId: "workspace-1",
     sessionId: "session-1",
     sessionThreadId: "thread-1",
+    bindingId: "binding-1",
+    bindingGeneration: 1,
+    targetPodUid: "pod-1",
     writeId,
     event: { type: "agent.message", content: [{ type: "text", text: "hello" }] },
+    drafts: [],
   };
 }
 

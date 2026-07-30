@@ -41,6 +41,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -70,88 +73,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := lockThreadMutationOnlyTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		inboxStatus := ""
-		if commitInputsKindUsesRuntimeInbox(inputKind) {
-			var err error
-			inboxStatus, err = lockAndValidateRuntimeInboxCommitTx(ctx, tx, request, inputKind)
-			if err != nil {
-				return err
-			}
-		}
-		if inboxStatus == "committed" {
-			return status.Error(codes.FailedPrecondition, "committed runtime input is missing idempotency state")
-		}
-		switch inputKind {
-		case "messages":
-			if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-				return err
-			}
-			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-			receipt, err = commitInputDraftsTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				inputKind,
-				key,
-				request.GetEventIds(),
-				request.GetDrafts(),
-				now,
-			)
-			if err != nil {
-				return err
-			}
-			receipt.PendingAttachmentDeltaJson, err = loadCommittedInputAttachmentDeltaTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				request.GetEventIds(),
-			)
-			if err != nil {
-				return err
-			}
-		case "interrupt_control":
-			if err := requireCommitInputEventTypesTx(ctx, tx, request.GetScope(), request.GetEventIds(), "user.interrupt"); err != nil {
-				return err
-			}
-			if err := cancelInterruptedPendingToolUsesTx(ctx, tx, request.GetScope(), now); err != nil {
-				return err
-			}
-			if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-				return err
-			}
-			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-		case "tool_confirmation":
-			if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-				return err
-			}
-			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-			if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-		case "inter_agent_message":
-			if err := commitInterAgentMessageTx(ctx, tx, request.GetScope(), request.GetInterAgentMessageJson(), now); err != nil {
-				return err
-			}
-		case "approval_review":
-			if err := commitApprovalReviewInputTx(ctx, tx, request.GetScope(), request.GetApprovalReviewJson(), now); err != nil {
-				return err
-			}
-		default:
-			return status.Error(codes.InvalidArgument, "unsupported commit inputs kind")
-		}
-		if receipt == nil {
-			receipt = &bridgev1.DeclarationReceipt{
-				SessionThreadId: request.GetScope().GetSessionThreadId(),
-				OperationKind:   bridgeOpCommitInputs,
-				SourceKind:      inputKind,
-				SourceId:        key,
-			}
+		receipt, err = commitInputDeclarationTx(ctx, tx, request, inputKind, key, now)
+		if err != nil {
+			return err
 		}
 		receipt.DeclarationDigest = declarationDigest
 		resultJSON, err := marshalDeclarationReceipt(receipt)
@@ -180,6 +104,16 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	if err != nil {
 		return nil, err
 	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpCommitInputs,
+		inputKind,
+		key,
+		declarationDigest,
+		ack,
+		observation,
+	)
 	return &bridgev1.CommitInputsResponse{
 		Ack: ack,
 		Declaration: &bridgev1.DeclarationResponse{
@@ -191,8 +125,109 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	}, nil
 }
 
+func commitInputDeclarationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.CommitInputsRequest,
+	inputKind string,
+	key string,
+	now time.Time,
+) (*bridgev1.DeclarationReceipt, error) {
+	inboxStatus := ""
+	if commitInputsKindUsesRuntimeInbox(inputKind) {
+		var err error
+		inboxStatus, err = lockAndValidateRuntimeInboxCommitTx(ctx, tx, request, inputKind)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if inboxStatus == "committed" {
+		return nil, status.Error(codes.FailedPrecondition, "committed runtime input is missing idempotency state")
+	}
+	if expectedEventType := commitInputEventType(inputKind); expectedEventType != "" {
+		if err := requireCommitInputEventTypesTx(ctx, tx, request.GetScope(), request.GetEventIds(), expectedEventType); err != nil {
+			return nil, err
+		}
+	}
+	if inputKind == "approval_review" {
+		if err := requireApprovalReviewerInputTargetTx(ctx, tx, request.GetScope()); err != nil {
+			return nil, err
+		}
+	}
+	if inputKind == "agent_mail" {
+		if err := requireAgentMailInputTargetTx(ctx, tx, request.GetScope()); err != nil {
+			return nil, err
+		}
+	}
+	if commitInputsKindUsesRuntimeInbox(inputKind) {
+		if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
+			return nil, err
+		}
+	}
+	if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+		return nil, err
+	}
+	if inputKind == "tool_confirmation" {
+		if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+			return nil, err
+		}
+	}
+	receipt, err := commitInputDraftsTx(
+		ctx,
+		tx,
+		request.GetScope(),
+		inputKind,
+		key,
+		request.GetEventIds(),
+		request.GetDrafts(),
+		now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil {
+		receipt = &bridgev1.DeclarationReceipt{
+			SessionThreadId: request.GetScope().GetSessionThreadId(),
+			OperationKind:   bridgeOpCommitInputs,
+			SourceKind:      inputKind,
+			SourceId:        key,
+		}
+	}
+	if inputKind == "messages" {
+		receipt.PendingAttachmentDeltaJson, err = loadCommittedInputAttachmentDeltaTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			request.GetEventIds(),
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if inputKind == "interrupt_control" {
+		receipt.PendingToolDeltaJson, err = cancelInterruptedPendingToolUsesTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			request.GetEventIds()[0],
+			request.GetPendingToolCancellations(),
+			request.GetDrafts(),
+			now,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return receipt, nil
+}
+
 func commitInputsKindUsesRuntimeInbox(inputKind string) bool {
-	return inputKind == "messages" || inputKind == "interrupt_control" || inputKind == "tool_confirmation"
+	switch inputKind {
+	case "messages", "interrupt_control", "tool_confirmation", "agent_mail", "rejection":
+		return true
+	default:
+		return false
+	}
 }
 
 func lockAndValidateRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
@@ -510,51 +545,55 @@ func settleToolConfirmationEventsTx(ctx context.Context, tx *dbconnect.Tx, scope
 	return nil
 }
 
-func cancelInterruptedPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
-	if _, err := lockThreadMutationTx(ctx, tx, scope); err != nil {
-		return err
+func cancelInterruptedPendingToolUsesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	interruptEventID string,
+	cancellations []*bridgev1.PendingToolCancellationDraft,
+	drafts []*bridgev1.RuntimeMessageDraft,
+	now time.Time,
+) ([]string, error) {
+	draftsByLocalID := make(map[string]*bridgev1.RuntimeMessageDraft, len(drafts))
+	for _, draft := range drafts {
+		draftsByLocalID[draft.GetRuntimeLocalId()] = draft
 	}
-	rows, err := tx.Query(ctx,
-		`SELECT p.tool_use_event_id, p.model_tool_call_id, p.tool_name, p.input_json,
-		        e.type, COALESCE(e.payload_json::jsonb ->> 'mcp_server_name', '')
-		   FROM session_pending_tool_uses p
-		   JOIN session_events e
-		     ON e.workspace_id = p.workspace_id
-		    AND e.session_id = p.session_id
-		    AND e.session_thread_id = p.session_thread_id
-		    AND e.event_id = p.tool_use_event_id
-		  WHERE p.workspace_id = $1
-		    AND p.session_id = $2
-		    AND p.session_thread_id = $3
-		    AND p.kind = 'approval'
-		    AND p.status IN ('pending', 'resolving')
-		  ORDER BY e.sequence ASC, p.tool_use_event_id ASC
-		  FOR UPDATE OF p`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	waits := make([]cleanupPendingWait, 0)
-	for rows.Next() {
-		wait := cleanupPendingWait{ThreadID: scope.GetSessionThreadId()}
-		if err := rows.Scan(&wait.ToolUseEventID, &wait.ModelToolCallID, &wait.ToolName, &wait.InputJSON, &wait.EventType, &wait.MCPServerName); err != nil {
-			return err
+	seenTools := make(map[string]struct{}, len(cancellations))
+	deltas := make([]string, 0, len(cancellations))
+	for _, cancellation := range cancellations {
+		if cancellation == nil || cancellation.GetToolUseEventId() == "" || cancellation.GetRuntimeLocalId() == "" {
+			return nil, status.Error(codes.InvalidArgument, "pending tool cancellation is invalid")
 		}
-		waits = append(waits, wait)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	terminal := pendingToolTerminal{
-		PartStatus: "cancelled",
-		ErrorType:  "runtime_interrupted",
-		Message:    "Tool call cancelled by user interrupt.",
-	}
-	for _, wait := range waits {
-		eventID, err := insertPendingToolTerminalResultTx(ctx, tx, scope, wait, terminal, now)
-		if err != nil {
-			return err
+		if _, exists := seenTools[cancellation.GetToolUseEventId()]; exists {
+			return nil, status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
+		}
+		seenTools[cancellation.GetToolUseEventId()] = struct{}{}
+		draft, ok := draftsByLocalID[cancellation.GetRuntimeLocalId()]
+		if !ok ||
+			draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION ||
+			draft.GetSourceEventId() != interruptEventID {
+			return nil, status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
+		var statusValue string
+		if err := tx.QueryRow(ctx,
+			`SELECT status
+			   FROM session_pending_tool_uses
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND tool_use_event_id = $4
+			  FOR UPDATE`,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			cancellation.GetToolUseEventId(),
+		).Scan(&statusValue); dbconnect.IsNoRows(err) {
+			return nil, status.Error(codes.FailedPrecondition, "interrupted pending tool use is missing")
+		} else if err != nil {
+			return nil, err
+		}
+		if statusValue != "pending" && statusValue != "resolving" {
+			return nil, status.Error(codes.FailedPrecondition, "interrupted pending tool use is stale")
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_pending_tool_uses
@@ -567,16 +606,31 @@ func cancelInterruptedPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 			    AND session_thread_id = $3
 			    AND tool_use_event_id = $4
 			    AND status IN ('pending', 'resolving')`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), wait.ToolUseEventID,
-			eventID, now)
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			cancellation.GetToolUseEventId(),
+			interruptEventID,
+			now,
+		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !rowsAffected(result) {
-			return status.Error(codes.FailedPrecondition, "interrupted pending tool use is stale")
+			return nil, status.Error(codes.FailedPrecondition, "interrupted pending tool use is stale")
 		}
+		delta, err := marshalBridgeJSON(map[string]any{
+			"result_event_id":   interruptEventID,
+			"runtime_local_id":  cancellation.GetRuntimeLocalId(),
+			"status":            "cancelled",
+			"tool_use_event_id": cancellation.GetToolUseEventId(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		deltas = append(deltas, delta)
 	}
-	return nil
+	return deltas, nil
 }
 
 func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInputsRequest) error {
@@ -585,30 +639,78 @@ func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInput
 		if len(request.GetEventIds()) == 0 || len(request.GetDrafts()) != len(request.GetEventIds()) {
 			return status.Error(codes.InvalidArgument, "message commit requires one user draft per event")
 		}
+		if len(request.GetPendingToolCancellations()) != 0 {
+			return status.Error(codes.InvalidArgument, "message commit cannot cancel pending tools")
+		}
 		return nil
 	case "interrupt_control":
-		if len(request.GetEventIds()) != 1 {
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != len(request.GetPendingToolCancellations()) {
 			return status.Error(codes.InvalidArgument, "interrupt commit requires one event id")
 		}
 		return nil
 	case "tool_confirmation":
-		if len(request.GetEventIds()) != 1 {
-			return status.Error(codes.InvalidArgument, "tool confirmation commit requires one event id")
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 {
+			return status.Error(codes.InvalidArgument, "tool confirmation commit requires one approval draft")
 		}
 		return nil
-	case "inter_agent_message":
-		if request.GetInterAgentMessageJson() == "" || !json.Valid([]byte(request.GetInterAgentMessageJson())) {
-			return status.Error(codes.InvalidArgument, "inter-agent message commit requires JSON payload")
+	case "agent_mail":
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 {
+			return status.Error(codes.InvalidArgument, "agent mail commit requires one mail draft")
 		}
 		return nil
 	case "approval_review":
-		if request.GetApprovalReviewJson() == "" || !json.Valid([]byte(request.GetApprovalReviewJson())) {
-			return status.Error(codes.InvalidArgument, "approval review commit requires JSON payload")
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 {
+			return status.Error(codes.InvalidArgument, "approval review commit requires one reviewer draft")
+		}
+		return nil
+	case "rejection":
+		if len(request.GetEventIds()) == 0 || len(request.GetDrafts()) != len(request.GetEventIds()) || len(request.GetPendingToolCancellations()) != 0 {
+			return status.Error(codes.InvalidArgument, "rejection commit requires one rejection draft per event")
 		}
 		return nil
 	default:
 		return status.Error(codes.InvalidArgument, "unsupported commit inputs kind")
 	}
+}
+
+func commitInputEventType(inputKind string) string {
+	switch inputKind {
+	case "messages":
+		return "user.message"
+	case "interrupt_control":
+		return "user.interrupt"
+	case "tool_confirmation":
+		return "user.tool_confirmation"
+	case "agent_mail":
+		return "agent.thread_message_received"
+	default:
+		return ""
+	}
+}
+
+func requireApprovalReviewerInputTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if threadScope.role != "approval_reviewer" || threadScope.visibility != "internal" {
+		return status.Error(codes.FailedPrecondition, "approval review input must target an internal reviewer thread")
+	}
+	return nil
+}
+
+func requireAgentMailInputTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if threadScope.role != "main" && threadScope.role != "subagent" {
+		return status.Error(codes.FailedPrecondition, "agent mail must target a main or sub-agent thread")
+	}
+	if !threadReceivableTx(threadScope) {
+		return status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
+	}
+	return nil
 }
 
 type interAgentMessagePayload struct {
@@ -956,18 +1058,6 @@ func onlyJSONFields(object map[string]json.RawMessage, fields ...string) bool {
 	return true
 }
 
-func commitApprovalReviewInputTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, payloadJSON string, now time.Time) error {
-	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
-	if err != nil {
-		return err
-	}
-	if threadScope.role != "approval_reviewer" || threadScope.visibility != "internal" {
-		return status.Error(codes.FailedPrecondition, "approval review input must target an internal reviewer thread")
-	}
-	messageJSON := approvalReviewMessageJSON(payloadJSON)
-	return insertSessionMessageProjectionTx(ctx, tx, scope, id.New("approval_review_"), "user", messageJSON, now)
-}
-
 func threadReceivableTx(threadScope threadMutationScope) bool {
 	switch threadScope.status {
 	case "closed_for_runtime", "terminated", "failed":
@@ -987,16 +1077,6 @@ func normalizeJSONForCompare(raw json.RawMessage) string {
 		return string(raw)
 	}
 	return string(normalized)
-}
-
-func approvalReviewMessageJSON(payloadJSON string) string {
-	var payload struct {
-		Message json.RawMessage `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil && len(payload.Message) > 0 && json.Valid(payload.Message) {
-		return string(payload.Message)
-	}
-	return payloadJSON
 }
 
 func recordPendingToolConfirmationDecisionTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, payloadJSON string, now time.Time) error {

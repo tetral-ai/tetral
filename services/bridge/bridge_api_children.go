@@ -230,116 +230,600 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 	if request.GetChildThreadId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "child thread id is required")
 	}
-	if err := s.markChildThreadTreeClosed(ctx, request.GetScope(), request.GetChildThreadId(), request.GetClosedAt()); err != nil {
+	command, err := parseChildLifecycleCommand(
+		request.GetScope(),
+		request.GetChildThreadId(),
+		request.GetClosedAt(),
+		request.GetSource(),
+		bridgeOpMarkChildThreadClosed,
+		"close",
+	)
+	if err != nil {
 		return nil, err
 	}
-	return &bridgev1.MarkChildThreadClosedResponse{Ack: committedAck("", "")}, nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) markChildThreadTreeClosed(
-	ctx context.Context,
-	scope *bridgev1.RuntimeScope,
-	childThreadID string,
-	closedAt string,
-) error {
 	now := s.now()
-	timestamp, err := defaultTime(closedAt, now)
-	if err != nil {
-		return status.Error(codes.InvalidArgument, "closed at must be an RFC 3339 timestamp")
-	}
-	return s.withScopeTx(ctx, scope, "agentruntimebridge."+bridgeOpMarkChildThreadClosed, func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
+	var (
+		ack      *bridgev1.BridgeWriteAck
+		receipts []*bridgev1.DeclarationReceipt
+	)
+	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadClosed, func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
-		rootScope := scopeForThread(scope, childThreadID)
-		rootThread, err := lockThreadMutationTx(ctx, tx, rootScope)
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := validateChildLifecycleSourceTx(ctx, tx, request.GetScope(), request.GetChildThreadId(), command); err != nil {
+			return err
+		}
+		if existingReceipts, ok, err := readChildLifecycleOperationReceiptSetTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			command,
+			bridgeOpMarkChildThreadClosed,
+		); err != nil {
+			return err
+		} else if ok {
+			receipts = existingReceipts
+			ack = duplicateAck("", command.operationID)
+			return nil
+		}
+		targetIDs, err := childLifecycleSubtreeIDsTx(ctx, tx, request.GetScope(), request.GetChildThreadId())
 		if err != nil {
 			return err
 		}
-		if rootThread.role == "main" {
-			return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
-		type lockedChildThread struct {
-			id       string
-			mutation threadMutationScope
-		}
-		lockedThreads := []lockedChildThread{{id: childThreadID, mutation: rootThread}}
-		for parentIndex := 0; parentIndex < len(lockedThreads); parentIndex++ {
-			rows, err := tx.Query(ctx,
-				`SELECT id
-				   FROM session_threads
-				  WHERE workspace_id=$1
-				    AND session_id=$2
-				    AND parent_thread_id=$3
-				    AND role <> 'main'
-				  ORDER BY id
-				  FOR UPDATE`,
-				scope.GetWorkspaceId(),
-				scope.GetSessionId(),
-				lockedThreads[parentIndex].id,
-			)
+		lockedThreads := make(map[string]threadMutationScope, len(targetIDs))
+		for _, targetID := range targetIDs {
+			mutation, err := lockThreadMutationTx(ctx, tx, scopeForThread(request.GetScope(), targetID))
 			if err != nil {
 				return err
 			}
-			var childIDs []string
-			for rows.Next() {
-				var childID string
-				if err := rows.Scan(&childID); err != nil {
-					_ = rows.Close()
+			if mutation.role == "main" {
+				return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
+			}
+			lockedThreads[targetID] = mutation
+		}
+		for _, threadID := range targetIDs {
+			childScope := scopeForThread(request.GetScope(), threadID)
+			threadScope := lockedThreads[threadID]
+			disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
+			if threadScope.status == "closed_for_runtime" {
+				// The per-target receipt still records this target in the frozen subtree.
+			} else {
+				if _, err := tx.Exec(ctx,
+					`UPDATE session_threads
+					    SET status='closed_for_runtime',
+					        closed_at=COALESCE(closed_at, $4),
+					        updated_at=$5
+					  WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND role <> 'main'`,
+					request.GetScope().GetWorkspaceId(),
+					request.GetScope().GetSessionId(),
+					threadID,
+					command.requestedTime,
+					now,
+				); err != nil {
 					return err
 				}
-				childIDs = append(childIDs, childID)
+				runtimeWriteID := stableRuntimeID("child_close_status", command.operationID, threadID)
+				if err := insertChildThreadIdleStatusEventTx(ctx, tx, childScope, threadScope, runtimeWriteID, `{"type":"closed_for_runtime"}`, now); err != nil {
+					return err
+				}
+				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED
 			}
-			if err := rows.Close(); err != nil {
+			receipt := childLifecycleReceipt(childScope, command, bridgeOpMarkChildThreadClosed, threadID, disposition)
+			receiptJSON, err := marshalDeclarationReceipt(receipt)
+			if err != nil {
 				return err
 			}
-			for _, childID := range childIDs {
-				childScope := scopeForThread(scope, childID)
-				childMutation, err := lockThreadMutationTx(ctx, tx, childScope)
-				if err != nil {
-					return err
-				}
-				lockedThreads = append(lockedThreads, lockedChildThread{id: childID, mutation: childMutation})
-			}
-		}
-		for _, lockedThread := range lockedThreads {
-			threadID := lockedThread.id
-			childScope := scopeForThread(scope, threadID)
-			threadScope := lockedThread.mutation
-			if threadScope.status == "closed_for_runtime" {
-				continue
-			}
-			if _, err := tx.Exec(ctx,
-				`UPDATE session_threads
-				    SET status='closed_for_runtime',
-				        closed_at=COALESCE(closed_at, $4),
-				        updated_at=$5
-				  WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND role <> 'main'`,
-				scope.GetWorkspaceId(),
-				scope.GetSessionId(),
-				threadID,
-				timestamp,
+			if err := insertBridgeDeclarationOperationTx(
+				ctx,
+				tx,
+				childScope,
+				bridgeOpMarkChildThreadClosed,
+				command.operationSourceKind,
+				command.operationID,
+				command.declarationDigest,
+				receiptJSON,
 				now,
 			); err != nil {
 				return err
 			}
-			runtimeWriteID := bridgeOpMarkChildThreadClosed + ":" + threadID + ":" + now.UTC().Format(time.RFC3339Nano)
-			if err := insertChildThreadIdleStatusEventTx(ctx, tx, childScope, threadScope, runtimeWriteID, `{"type":"closed_for_runtime"}`, now); err != nil {
-				return err
-			}
+			receipts = append(receipts, receipt)
 		}
+		ack = committedAck("", command.operationID)
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
+	declaration, err := s.childLifecycleDeclarationResponse(ctx, request.GetScope(), receipts, ack)
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.MarkChildThreadClosedResponse{Ack: ack, Declaration: declaration}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, request *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error) {
 	if request.GetChildThreadId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "child thread id is required")
 	}
-	if err := s.markChildThreadStatus(ctx, request.GetScope(), request.GetChildThreadId(), bridgeOpMarkChildThreadActive, "idle", request.GetActiveAt()); err != nil {
+	command, err := parseChildLifecycleCommand(
+		request.GetScope(),
+		request.GetChildThreadId(),
+		request.GetActiveAt(),
+		request.GetSource(),
+		bridgeOpMarkChildThreadActive,
+		"resume",
+	)
+	if err != nil {
 		return nil, err
 	}
-	return &bridgev1.MarkChildThreadActiveResponse{Ack: committedAck("", "")}, nil
+	now := s.now()
+	var (
+		ack      *bridgev1.BridgeWriteAck
+		receipts []*bridgev1.DeclarationReceipt
+	)
+	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadActive, func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := validateChildLifecycleSourceTx(ctx, tx, request.GetScope(), request.GetChildThreadId(), command); err != nil {
+			return err
+		}
+		childScope := scopeForThread(request.GetScope(), request.GetChildThreadId())
+		if existingReceipts, ok, err := readChildLifecycleOperationReceiptsTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			[]string{request.GetChildThreadId()},
+			command,
+			bridgeOpMarkChildThreadActive,
+		); err != nil {
+			return err
+		} else if ok {
+			receipts = existingReceipts
+			ack = duplicateAck("", command.operationID)
+			return nil
+		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)
+		if err != nil {
+			return err
+		}
+		if threadScope.role == "main" {
+			return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
+		}
+		disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
+		if threadScope.status == "closed_for_runtime" {
+			result, err := tx.Exec(ctx,
+				`UPDATE session_threads
+				    SET status = 'idle',
+				        closed_at = NULL,
+				        last_active_at = $4,
+				        updated_at = $5
+				  WHERE workspace_id = $1
+				    AND session_id = $2
+				    AND id = $3
+				    AND role <> 'main'
+				    AND status = 'closed_for_runtime'`,
+				request.GetScope().GetWorkspaceId(),
+				request.GetScope().GetSessionId(),
+				request.GetChildThreadId(),
+				command.requestedTime,
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			if !rowsAffected(result) {
+				return status.Error(codes.FailedPrecondition, "child resume status update failed")
+			}
+			disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED
+		}
+		receipt := childLifecycleReceipt(childScope, command, bridgeOpMarkChildThreadActive, request.GetChildThreadId(), disposition)
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		if err != nil {
+			return err
+		}
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			childScope,
+			bridgeOpMarkChildThreadActive,
+			command.operationSourceKind,
+			command.operationID,
+			command.declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
+			return err
+		}
+		receipts = []*bridgev1.DeclarationReceipt{receipt}
+		ack = committedAck("", command.operationID)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	declaration, err := s.childLifecycleDeclarationResponse(ctx, request.GetScope(), receipts, ack)
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.MarkChildThreadActiveResponse{Ack: ack, Declaration: declaration}, nil
+}
+
+type childLifecycleCommand struct {
+	action              string
+	sourceKind          string
+	sourceCommandID     string
+	operationSourceKind string
+	operationID         string
+	requestedAt         string
+	requestedTime       time.Time
+	declarationDigest   string
+}
+
+func parseChildLifecycleCommand(
+	scope *bridgev1.RuntimeScope,
+	childThreadID string,
+	requestedAt string,
+	source *bridgev1.ChildLifecycleSource,
+	operationKind string,
+	action string,
+) (childLifecycleCommand, error) {
+	if requestedAt == "" {
+		return childLifecycleCommand{}, status.Error(codes.InvalidArgument, "child lifecycle timestamp is required")
+	}
+	requestedTime, err := time.Parse(time.RFC3339Nano, requestedAt)
+	if err != nil {
+		return childLifecycleCommand{}, status.Error(codes.InvalidArgument, "child lifecycle timestamp must be RFC 3339")
+	}
+	var sourceKind, sourceCommandID string
+	switch identity := source.GetIdentity().(type) {
+	case *bridgev1.ChildLifecycleSource_SourceToolUseEventId:
+		sourceKind = "tool_use"
+		sourceCommandID = identity.SourceToolUseEventId
+	case *bridgev1.ChildLifecycleSource_ReviewerReviewId:
+		sourceKind = "approval_review"
+		sourceCommandID = identity.ReviewerReviewId
+	default:
+		return childLifecycleCommand{}, status.Error(codes.InvalidArgument, "child lifecycle source is required")
+	}
+	if sourceCommandID == "" {
+		return childLifecycleCommand{}, status.Error(codes.InvalidArgument, "child lifecycle source identity is required")
+	}
+	operationSourceKind := "child_close_command"
+	operationIDParts := []string{"child_tree_close", sourceCommandID, childThreadID}
+	if action == "resume" {
+		operationSourceKind = "child_resume_command"
+		operationIDParts[0] = "child_resume"
+	}
+	operationID := stableRuntimeID(operationIDParts...)
+	declarationDigest, err := childLifecycleDeclarationDigest(
+		operationKind,
+		action,
+		scope.GetSessionThreadId(),
+		childThreadID,
+		sourceKind,
+		sourceCommandID,
+		requestedAt,
+	)
+	if err != nil {
+		return childLifecycleCommand{}, err
+	}
+	return childLifecycleCommand{
+		action:              action,
+		sourceKind:          sourceKind,
+		sourceCommandID:     sourceCommandID,
+		operationSourceKind: operationSourceKind,
+		operationID:         operationID,
+		requestedAt:         requestedAt,
+		requestedTime:       requestedTime.UTC(),
+		declarationDigest:   declarationDigest,
+	}, nil
+}
+
+func validateChildLifecycleSourceTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	childThreadID string,
+	command childLifecycleCommand,
+) error {
+	if command.sourceKind == "approval_review" {
+		if childThreadID != approvalReviewerSidecarThreadID(scope, scope.GetSessionThreadId(), command.sourceCommandID) {
+			return status.Error(codes.FailedPrecondition, "child lifecycle reviewer source does not own the child")
+		}
+		var role, visibility, parentThreadID string
+		if err := tx.QueryRow(ctx,
+			`SELECT role, visibility, parent_thread_id
+			   FROM session_threads
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND id = $3
+			  FOR SHARE`,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			childThreadID,
+		).Scan(&role, &visibility, &parentThreadID); dbconnect.IsNoRows(err) {
+			return status.Error(codes.FailedPrecondition, "child lifecycle reviewer thread is missing")
+		} else if err != nil {
+			return err
+		}
+		if role != "approval_reviewer" || visibility != "internal" || parentThreadID != scope.GetSessionThreadId() {
+			return status.Error(codes.FailedPrecondition, "child lifecycle reviewer source does not match the durable reviewer thread")
+		}
+		return nil
+	}
+	var role, visibility, parentThreadID string
+	if err := tx.QueryRow(ctx,
+		`SELECT role, visibility, parent_thread_id
+		   FROM session_threads
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND id = $3
+		  FOR SHARE`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		childThreadID,
+	).Scan(&role, &visibility, &parentThreadID); dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "child lifecycle target is missing")
+	} else if err != nil {
+		return err
+	}
+	if role != "subagent" || visibility != "public" || parentThreadID != scope.GetSessionThreadId() {
+		return status.Error(codes.FailedPrecondition, "child lifecycle tool source does not own the durable child")
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_events
+			 WHERE workspace_id = $1
+			   AND session_id = $2
+			   AND session_thread_id = $3
+			   AND event_id = $4
+			   AND type = 'agent.tool_use'
+			   AND visibility = 'public'
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		command.sourceCommandID,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return status.Error(codes.FailedPrecondition, "child lifecycle tool source is invalid")
+	}
+	return nil
+}
+
+func readChildLifecycleOperationReceiptSetTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	callerScope *bridgev1.RuntimeScope,
+	command childLifecycleCommand,
+	operationKind string,
+) ([]*bridgev1.DeclarationReceipt, bool, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT session_thread_id, COALESCE(declaration_digest, ''), COALESCE(receipt_json, '')
+		   FROM session_bridge_operations
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND operation = $3
+		    AND source_kind = $4
+		    AND idempotency_key = $5
+		  ORDER BY session_thread_id
+		  FOR UPDATE`,
+		callerScope.GetWorkspaceId(),
+		callerScope.GetSessionId(),
+		operationKind,
+		command.operationSourceKind,
+		command.operationID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = rows.Close() }()
+	var receipts []*bridgev1.DeclarationReceipt
+	for rows.Next() {
+		var targetID, declarationDigest, receiptJSON string
+		if err := rows.Scan(&targetID, &declarationDigest, &receiptJSON); err != nil {
+			return nil, false, err
+		}
+		if declarationDigest != command.declarationDigest || receiptJSON == "" {
+			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
+		}
+		receipt, err := unmarshalDeclarationReceipt(receiptJSON)
+		if err != nil || !validStoredChildLifecycleReceipt(receipt, targetID, operationKind, command) {
+			return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt is invalid")
+		}
+		receipts = append(receipts, receipt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	return receipts, len(receipts) > 0, nil
+}
+
+func readChildLifecycleOperationReceiptsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	callerScope *bridgev1.RuntimeScope,
+	targetIDs []string,
+	command childLifecycleCommand,
+	operationKind string,
+) ([]*bridgev1.DeclarationReceipt, bool, error) {
+	receipts := make([]*bridgev1.DeclarationReceipt, 0, len(targetIDs))
+	existingCount := 0
+	for _, targetID := range targetIDs {
+		targetScope := scopeForThread(callerScope, targetID)
+		existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			targetScope,
+			operationKind,
+			command.operationSourceKind,
+			command.operationID,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			continue
+		}
+		existingCount++
+		if existing.DeclarationDigest != command.declarationDigest || existing.ReceiptJSON == "" {
+			return nil, false, status.Error(codes.AlreadyExists, "child lifecycle idempotency conflict")
+		}
+		receipt, err := unmarshalDeclarationReceipt(existing.ReceiptJSON)
+		if err != nil || !validStoredChildLifecycleReceipt(receipt, targetID, operationKind, command) {
+			return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt is invalid")
+		}
+		receipts = append(receipts, receipt)
+	}
+	if existingCount == 0 {
+		return nil, false, nil
+	}
+	if existingCount != len(targetIDs) {
+		return nil, false, status.Error(codes.FailedPrecondition, "child lifecycle receipt set is incomplete")
+	}
+	return receipts, true, nil
+}
+
+func validStoredChildLifecycleReceipt(
+	receipt *bridgev1.DeclarationReceipt,
+	targetID string,
+	operationKind string,
+	command childLifecycleCommand,
+) bool {
+	if receipt == nil ||
+		receipt.GetSessionThreadId() != targetID ||
+		receipt.GetOperationKind() != operationKind ||
+		receipt.GetSourceKind() != command.operationSourceKind ||
+		receipt.GetSourceId() != command.operationID ||
+		receipt.GetDeclarationDigest() != command.declarationDigest ||
+		len(receipt.GetChildLifecycle()) != 1 {
+		return false
+	}
+	stamp := receipt.GetChildLifecycle()[0]
+	if stamp.GetChildThreadId() != targetID || stamp.GetEffectiveAt() != command.requestedAt {
+		return false
+	}
+	if command.action == "close" {
+		return stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED ||
+			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
+	}
+	return stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED ||
+		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
+}
+
+func childLifecycleReceipt(
+	targetScope *bridgev1.RuntimeScope,
+	command childLifecycleCommand,
+	operationKind string,
+	targetID string,
+	disposition bridgev1.ChildLifecycleDisposition,
+) *bridgev1.DeclarationReceipt {
+	return &bridgev1.DeclarationReceipt{
+		SessionThreadId:   targetScope.GetSessionThreadId(),
+		OperationKind:     operationKind,
+		SourceKind:        command.operationSourceKind,
+		SourceId:          command.operationID,
+		DeclarationDigest: command.declarationDigest,
+		ChildLifecycle: []*bridgev1.ChildLifecycleStamp{{
+			ChildThreadId: targetID,
+			Disposition:   disposition,
+			EffectiveAt:   command.requestedAt,
+		}},
+	}
+}
+
+func childLifecycleSubtreeIDsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	rootChildThreadID string,
+) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`WITH RECURSIVE child_tree(id) AS (
+			SELECT id
+			  FROM session_threads
+			 WHERE workspace_id = $1
+			   AND session_id = $2
+			   AND id = $3
+			   AND role <> 'main'
+			UNION ALL
+			SELECT child.id
+			  FROM session_threads child
+			  JOIN child_tree parent ON child.parent_thread_id = parent.id
+			 WHERE child.workspace_id = $1
+			   AND child.session_id = $2
+			   AND child.role <> 'main'
+		)
+		SELECT id FROM child_tree ORDER BY id`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		rootChildThreadID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var threadID string
+		if err := rows.Scan(&threadID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, threadID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, status.Error(codes.NotFound, "child thread not found")
+	}
+	return ids, nil
+}
+
+func (s *PostgreSQLBridgeAPIStore) childLifecycleDeclarationResponse(
+	ctx context.Context,
+	scope *bridgev1.RuntimeScope,
+	receipts []*bridgev1.DeclarationReceipt,
+	ack *bridgev1.BridgeWriteAck,
+) (*bridgev1.DeclarationResponse, error) {
+	observation, err := s.declarationApplicationObservation(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(receipts) > 0 {
+		receipt := receipts[0]
+		logRuntimeDeclaration(
+			s.Logger,
+			scope,
+			receipt.GetOperationKind(),
+			receipt.GetSourceKind(),
+			receipt.GetSourceId(),
+			receipt.GetDeclarationDigest(),
+			ack,
+			observation,
+		)
+	}
+	return &bridgev1.DeclarationResponse{
+		Receipts:                  receipts,
+		ObservedBindingId:         observation.BindingID,
+		ObservedBindingGeneration: observation.BindingGeneration,
+		ApplicationDisposition:    observation.Disposition,
+	}, nil
 }
 
 func defaultChildAgentType(role string, requested string) string {
@@ -717,82 +1201,6 @@ func (s *PostgreSQLBridgeAPIStore) readChildThread(ctx context.Context, scope *b
 		return "", err
 	}
 	return threadJSON, nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) markChildThreadStatus(ctx context.Context, scope *bridgev1.RuntimeScope, childThreadID string, operation string, nextStatus string, at string) error {
-	now := s.now()
-	timestamp, err := defaultTime(at, now)
-	if err != nil {
-		return status.Error(codes.InvalidArgument, "status timestamp must be an RFC 3339 timestamp")
-	}
-	return s.withScopeTx(ctx, scope, "agentruntimebridge."+operation, func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
-			return err
-		}
-		childScope := scopeForThread(scope, childThreadID)
-		threadScope, err := lockThreadMutationTx(ctx, tx, childScope)
-		if err != nil {
-			return err
-		}
-		if threadScope.role == "main" {
-			return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
-		}
-		if nextStatus != "closed_for_runtime" && threadScope.status != "closed_for_runtime" {
-			return nil
-		}
-		var result sql.Result
-		if nextStatus == "closed_for_runtime" {
-			result, err = tx.Exec(ctx,
-				`UPDATE session_threads
-				    SET status = 'closed_for_runtime',
-				        closed_at = COALESCE(closed_at, $4),
-				        updated_at = $5
-				  WHERE workspace_id = $1
-				    AND session_id = $2
-				    AND id = $3
-				    AND role <> 'main'`,
-				scope.GetWorkspaceId(),
-				scope.GetSessionId(),
-				childThreadID,
-				timestamp,
-				now,
-			)
-		} else {
-			result, err = tx.Exec(ctx,
-				`UPDATE session_threads
-				    SET status = 'idle',
-				        closed_at = NULL,
-				        last_active_at = $4,
-				        updated_at = $5
-				  WHERE workspace_id = $1
-				    AND session_id = $2
-				    AND id = $3
-				    AND role <> 'main'
-				    AND status = 'closed_for_runtime'`,
-				scope.GetWorkspaceId(),
-				scope.GetSessionId(),
-				childThreadID,
-				timestamp,
-				now,
-			)
-		}
-		if err != nil {
-			return err
-		}
-		if !rowsAffected(result) {
-			if nextStatus != "closed_for_runtime" {
-				return nil
-			}
-			return status.Error(codes.NotFound, "child thread not found")
-		}
-		if nextStatus == "closed_for_runtime" && threadScope.status != "closed_for_runtime" {
-			runtimeWriteID := bridgeOpMarkChildThreadClosed + ":" + childThreadID + ":" + now.UTC().Format(time.RFC3339Nano)
-			if err := insertChildThreadIdleStatusEventTx(ctx, tx, childScope, threadScope, runtimeWriteID, `{"type":"closed_for_runtime"}`, now); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 func readChildThreadForDeliveryTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID string) (string, string, error) {

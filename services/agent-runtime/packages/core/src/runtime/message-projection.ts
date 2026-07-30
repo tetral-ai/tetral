@@ -1,11 +1,9 @@
 /**
  * @packageDocumentation
- * Projects the RuntimeMessage view that a provider request is assembled from,
- * and mirrors acknowledged message/part operations into an in-memory projection.
+ * Projects the durable RuntimeMessage view that a provider request is assembled
+ * from.
  *
  * OWNS:
- *   - RuntimeMessageProjection: the hot mirror of store-acknowledged messages and
- *     parts, advanced only after the paired operation succeeds.
  *   - toGatewayRuntimeMessages: the RuntimeMessage -> Gateway RuntimeMessage lowering.
  *
  * STATE MACHINE (per message, at lowering time):
@@ -25,17 +23,12 @@
  *   - The sole retained provider-native field is a reasoning part's
  *     metadata, kept for reasoning round-trip; it is internal cold-start context and
  *     never surfaces on any public event or message API.
- *   - The in-memory projection mutates only when its paired store operation is
- *     acknowledged; production durability is gated separately by Bridge event
- *     writes, and a failed operation leaves the projection unchanged.
- *
  * UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts,
  *              services/agent-runtime/packages/core/src/runtime/accumulator.ts
  *
- * AgentLoop calls toGatewayRuntimeMessages while assembling provider requests. The exported hot
- * projection wrapper has no production consumer in this tree; when used, it calls an injected
- * RuntimeMessageStore and advances only after successful writes. Lowering calls the generated
- * Gateway message protocol shapes for provider request assembly.
+ * AgentLoop calls toGatewayRuntimeMessages while assembling provider requests.
+ * Lowering calls the generated Gateway message protocol shapes for provider
+ * request assembly.
  */
 import {
   RuntimeMessageRole,
@@ -45,20 +38,11 @@ import type {
   RuntimeMessage as GatewayRuntimeMessage,
   RuntimePart as GatewayRuntimePart,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type {
-  RuntimeMessageStore,
-  RuntimeMessageStoreOperationControls,
-  RuntimeMessageStoreWriteMessageResult,
-  RuntimeMessageStoreWritePartResult,
-  RuntimeMessage,
-  RuntimeMessageInfo,
-  RuntimePart,
-} from "../contracts/runtime.js";
+import type { RuntimeMessage, RuntimePart } from "../contracts/runtime.js";
 import type { ProviderError } from "../contracts/provider.js";
 import {
   DurableRuntimeMessageSchema,
   RuntimeMessageSchema,
-  boundRuntimePartForStableWrite,
 } from "../contracts/runtime.js";
 import { normalizeProviderError } from "../contracts/provider.js";
 
@@ -66,44 +50,6 @@ import { normalizeProviderError } from "../contracts/provider.js";
 export type RuntimeGatewayMessagesResult =
   | { readonly ok: true; readonly messages: readonly GatewayRuntimeMessage[] }
   | { readonly ok: false; readonly error: ProviderError };
-
-/** Hot mirror that advances only after its paired message-store operation succeeds. */
-export class RuntimeMessageProjection {
-  private projection: RuntimeMessage[] = [];
-
-  messages(): readonly RuntimeMessage[] {
-    return [...this.projection];
-  }
-
-  async writeMessageAndUpdate(
-    store: RuntimeMessageStore,
-    message: RuntimeMessageInfo,
-    controls: RuntimeMessageStoreOperationControls,
-  ): Promise<RuntimeMessageStoreWriteMessageResult> {
-    const result = await store.writeMessage(message, controls);
-    if (result.ok) {
-      this.projection = upsertMessageInfo(this.projection, message);
-    }
-    return result;
-  }
-
-  async writePartAndUpdate(
-    store: RuntimeMessageStore,
-    part: RuntimePart,
-    controls: RuntimeMessageStoreOperationControls,
-  ): Promise<RuntimeMessageStoreWritePartResult> {
-    const stablePart = boundRuntimePartForStableWrite(part, controls.maxNormalizedTextPreviewBytes);
-    const result = await store.writePart(stablePart, controls);
-    if (result.ok) {
-      this.projection = upsertMessagePart(this.projection, stablePart);
-    }
-    return result;
-  }
-
-  discard(): void {
-    this.projection = [];
-  }
-}
 
 /** Lowers completed, failed, and cancelled Runtime history into provider-request messages. */
 export function toGatewayRuntimeMessages(input: unknown): RuntimeGatewayMessagesResult {
@@ -226,8 +172,7 @@ function projectToolPart(part: Extract<RuntimePart, { readonly type: "tool" }>):
     return { ok: false, reason: "pending_tool_state" };
   }
   const internalRepair = part.state.status === "error" &&
-    isInternalProviderToolCall(part) &&
-    /^part_repair_[0-9a-f]{64}$/.test(part.id);
+    isInternalProviderToolCall(part);
   if (!internalRepair && (part.toolUseEventId === undefined || part.toolUseEventId.length === 0)) {
     return { ok: false, reason: "missing_tool_use_event_id" };
   }
@@ -281,27 +226,6 @@ function toolOutputOrErrorJson(part: Extract<RuntimePart, { readonly type: "tool
     case "running":
       return "{}";
   }
-}
-
-function upsertMessageInfo(messages: readonly RuntimeMessage[], messageInfo: RuntimeMessageInfo): RuntimeMessage[] {
-  const existing = messages.find((message) => message.id === messageInfo.id);
-  if (existing === undefined) {
-    return [...messages, RuntimeMessageSchema.parse({ ...messageInfo, parts: [] })];
-  }
-  return messages.map((message) =>
-    message.id === messageInfo.id ? RuntimeMessageSchema.parse({ ...messageInfo, parts: message.parts }) : message,
-  );
-}
-
-function upsertMessagePart(messages: readonly RuntimeMessage[], part: RuntimePart): RuntimeMessage[] {
-  return messages.map((message) => {
-    if (message.id !== part.messageId) {
-      return message;
-    }
-    const parts = [...message.parts.filter((currentPart) => currentPart.id !== part.id), part]
-      .sort((left, right) => left.sequence - right.sequence);
-    return RuntimeMessageSchema.parse({ ...message, parts });
-  });
 }
 
 function runtimeInputError(reason: string): ProviderError {

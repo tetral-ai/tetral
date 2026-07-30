@@ -1,20 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import type {
-  RuntimeMessageInfo,
-  RuntimeMessageStoreWriteMessageResult,
-  RuntimeMessageStoreWritePartResult,
+  RuntimeMessageDraft,
   RuntimeInternalToolRepairCommit,
-  RuntimePart,
+  RuntimeInternalToolRepairCommitResult,
   SessionEvent,
   SessionEventWriterAppendResult,
   SessionEventWriterStableReasoningPart,
 } from "../../src/contracts/runtime.js";
 import type { LLMEvent } from "../../src/llm/llm-event.js";
 import { LLMEventSchema } from "../../src/llm/llm-event.js";
-import { normalizeRuntimeMessageStoreError } from "../../src/contracts/runtime.js";
 import { runtimeFailureFromProviderError } from "../../src/llm/llm-event.js";
 import { normalizeProviderError } from "../../src/contracts/provider.js";
 import { internalToolRepairKey, SessionProcessor } from "../../src/runtime/accumulator.js";
+import {
+  runtimeOutputDraft,
+  runtimeWorkingAssistantDraft,
+} from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeProcessorSource } from "../../src/runtime/accumulator.js";
 import { toGatewayRuntimeMessages } from "../../src/runtime/message-projection.js";
 
@@ -51,60 +52,135 @@ function providerFailure(input: Parameters<typeof normalizeProviderError>[0]): R
   return runtimeFailureFromProviderError(normalizeProviderError(input));
 }
 
-function assistantShell(): RuntimeMessageInfo {
-  return {
-    id: "message-1",
+function assistantShell(): RuntimeMessageDraft {
+  return runtimeWorkingAssistantDraft({
+    workspaceId: "workspace-1",
     sessionId: "session-1",
-    role: "assistant",
-    origin: "agent",
-    sequence: 1,
-    status: "streaming",
-    createdAt,
-  };
+    sessionThreadId: "thread-1",
+    modelRequestId: "model-request-1",
+  });
 }
 
 function createProcessor(options: {
   readonly maxBytes?: number;
-  readonly writeMessage?: (message: RuntimeMessageInfo) => Promise<RuntimeMessageStoreWriteMessageResult>;
-  readonly writePart?: (part: RuntimePart) => Promise<RuntimeMessageStoreWritePartResult>;
-  readonly commitInternalToolRepair?: (repair: RuntimeInternalToolRepairCommit) => Promise<RuntimeMessageStoreWritePartResult>;
+  readonly commitInternalToolRepair?: (repair: RuntimeInternalToolRepairCommit) => Promise<RuntimeInternalToolRepairCommitResult>;
   readonly appendEvent?: (
     event: SessionEvent,
-    projectionJson?: string,
+    output?: {
+      readonly draftKind: RuntimeMessageDraft["draftKind"];
+      readonly message: RuntimeMessageDraft;
+    },
     stableReasoningParts?: readonly SessionEventWriterStableReasoningPart[],
     modelRequestId?: string,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
   ) => Promise<SessionEventWriterAppendResult>;
   readonly writes?: string[];
 } = {}): SessionProcessor {
-  let counter = 0;
+  let durableMessageCreated = false;
+  let owningEventId = "";
+  let eventSequence = 0;
+  const partIds = new Map<string, string>();
   const writes = options.writes;
   return new SessionProcessor({
-    messageId: "message-1",
     modelRequestId: "model-request-1",
+    requestId: "request-1",
     workspaceId: "workspace-1",
     sessionId: "session-1",
     sessionThreadId: "thread-1",
+    bindingId: "binding-1",
+    bindingGeneration: 1,
+    targetPodUid: "pod-1",
     message: assistantShell(),
     ...(options.maxBytes !== undefined ? { maxNormalizedTextPreviewBytes: options.maxBytes } : {}),
     now: () => createdAt,
-    createId: (prefix) => `${prefix}-${++counter}`,
     writer: {
-      writeMessage: async (message) => {
-        writes?.push(`write-message:${message.status}`);
-        return options.writeMessage?.(message) ?? { ok: true, messageId: message.id, operation: "writeMessage" };
-      },
-      writePart: async (part) => {
-        writes?.push(`write-part:${part.type}`);
-        return options.writePart?.(part) ?? { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
-      },
-      appendEvent: async (event, _source, projectionJson, stableReasoningParts, modelRequestId, serverToolUse) => {
+      appendEvent: async (event, _source, output, stableReasoningParts, modelRequestId, serverToolUse) => {
         writes?.push(`append-event:${event.type}`);
-        return options.appendEvent?.(event, projectionJson, stableReasoningParts, modelRequestId, serverToolUse) ?? {
+        const writeId = `write-${writes?.filter((write) => write.startsWith("append-event")).length ?? 1}`;
+        const eventId = event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use"
+          ? "bridge-tool-use-1"
+          : `bridge-event-${eventSequence + 1}`;
+        const custom = await options.appendEvent?.(event, output, stableReasoningParts, modelRequestId, serverToolUse);
+        const result = custom ?? {
           ok: true,
-          writeId: `write-${writes?.filter((write) => write.startsWith("append-event")).length ?? 1}`,
-          eventId: event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use" ? "bridge-tool-use-1" : "bridge-event-1",
+          writeId,
+          eventId,
           processedAt: createdAt,
+        };
+        if (!result.ok || output === undefined || result.declaration !== undefined) {
+          return result;
+        }
+        eventSequence += 1;
+        const draft = runtimeOutputDraft({
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          sessionThreadId: "thread-1",
+          runtimeWriteId: result.writeId,
+          eventType: event.type,
+          draftKind: output.draftKind,
+          message: output.message,
+        });
+        if (!durableMessageCreated) {
+          owningEventId = result.eventId;
+        }
+        const messageDisposition = durableMessageCreated ? "updated" as const : "created" as const;
+        const partStamps = draft.parts.map((part) => {
+          const association = part.type === "tool"
+            ? `tool:${part.toolCallId}`
+            : part.type === "reasoning" && part.providerPartId !== undefined
+              ? `reasoning:${part.providerPartId}`
+              : `${part.type}:${part.ordinal}`;
+          const existingId = partIds.get(association);
+          const partId = existingId ?? `durable-part-${partIds.size + 1}`;
+          partIds.set(association, partId);
+          return {
+            runtimeLocalPartId: part.runtimeLocalPartId,
+            partId,
+            messageId: "durable-message-1",
+            partSequence: [...partIds.keys()].indexOf(association),
+            createdAt,
+            updatedAt: createdAt,
+            disposition: existingId === undefined ? "created" as const : "updated" as const,
+          };
+        });
+        durableMessageCreated = true;
+        return {
+          ...result,
+          declaration: {
+            applicationDisposition: "current_custody" as const,
+            observedBindingId: "binding-1",
+            observedBindingGeneration: 1,
+            receipt: {
+              sessionThreadId: "thread-1",
+              operationKind: "write_event",
+              sourceKind: event.type,
+              sourceId: result.writeId,
+              declarationDigest: "test-digest",
+              pendingAttachmentDelta: [],
+              pendingToolDelta: [],
+              prefixConsumptions: [],
+
+              childLifecycle: [],
+              events: [{
+                sessionThreadId: "thread-1",
+                sourceEventId: result.writeId,
+                eventId: result.eventId,
+                eventSequence,
+                disposition: "created" as const,
+              }],
+              messages: [{
+                runtimeLocalId: draft.runtimeLocalId,
+                sessionThreadId: "thread-1",
+                owningEventId,
+                messageId: "durable-message-1",
+                messageSequence: 1,
+                createdAt,
+                updatedAt: createdAt,
+                disposition: messageDisposition,
+                parts: partStamps,
+              }],
+            },
+          },
         };
       },
       commitInternalToolRepair: async (repair) => {
@@ -112,12 +188,53 @@ function createProcessor(options: {
         if (options.commitInternalToolRepair !== undefined) {
           return await options.commitInternalToolRepair(repair);
         }
-        const part = repair.message.parts[0];
+        const part = repair.draft.parts[0];
         return {
           ok: true,
-          messageId: repair.message.id,
-          partId: part?.id ?? "",
-          operation: "writePart",
+          eventId: "bridge-internal-repair-event",
+          declaration: {
+            applicationDisposition: "current_custody",
+            observedBindingId: "binding-1",
+            observedBindingGeneration: 1,
+            receipt: {
+              sessionThreadId: "thread-1",
+              operationKind: "commit_internal_tool_repair",
+              sourceKind: "internal_tool_repair",
+              sourceId: repair.repairKey,
+              declarationDigest: "repair-digest",
+              pendingAttachmentDelta: [],
+              pendingToolDelta: [],
+              prefixConsumptions: [],
+
+              childLifecycle: [],
+              events: [{
+                sessionThreadId: "thread-1",
+                sourceEventId: repair.repairKey,
+                eventId: "bridge-internal-repair-event",
+                eventSequence: 20,
+                disposition: "created",
+              }],
+              messages: [{
+                runtimeLocalId: repair.draft.runtimeLocalId,
+                sessionThreadId: "thread-1",
+                owningEventId: "bridge-internal-repair-event",
+                messageId: "durable-repair-message",
+                messageSequence: 2,
+                createdAt,
+                updatedAt: createdAt,
+                disposition: "created",
+                parts: [{
+                  runtimeLocalPartId: part?.runtimeLocalPartId ?? "",
+                  partId: "durable-repair-part",
+                  messageId: "durable-repair-message",
+                  partSequence: 0,
+                  createdAt,
+                  updatedAt: createdAt,
+                  disposition: "created",
+                }],
+              }],
+            },
+          },
         };
       },
     },
@@ -127,11 +244,11 @@ function createProcessor(options: {
 describe("SessionProcessor", () => {
   test("reasoning-start durably emits one content-less thinking event without projection", async () => {
     const writes: string[] = [];
-    const projections: Array<string | undefined> = [];
+    const outputs: Array<RuntimeMessageDraft | undefined> = [];
     const processor = createProcessor({
       writes,
-      appendEvent: async (_event, projectionJson) => {
-        projections.push(projectionJson);
+      appendEvent: async (_event, output) => {
+        outputs.push(output?.message);
         return { ok: true, writeId: "write-thinking", eventId: "sevt_thinking", processedAt: createdAt };
       },
     });
@@ -142,7 +259,7 @@ describe("SessionProcessor", () => {
     expect(first).toEqual({ ok: true, events: [{ type: "agent.thinking" }] });
     expect(duplicate).toEqual({ ok: true, events: [] });
     expect(writes).toEqual(["append-event:agent.thinking"]);
-    expect(projections).toEqual([undefined]);
+    expect(outputs).toEqual([undefined]);
   });
 
   test("internal repair identities are bounded, tuple-safe, and stable across implementations", () => {
@@ -152,12 +269,12 @@ describe("SessionProcessor", () => {
     expect(internalToolRepairKey("请求", "调用", "工具")).toMatch(/^internal_invalid_tool_[0-9a-f]{64}$/);
   });
 
-  test("provider text chunks produce one stable message event after durable writes", async () => {
+  test("provider text chunks produce one durable message event", async () => {
     const writes: string[] = [];
     const modelRequestIds: Array<string | undefined> = [];
     const processor = createProcessor({
       writes,
-      appendEvent: async (event, _projectionJson, _stableReasoningParts, modelRequestId) => {
+      appendEvent: async (event, _output, _stableReasoningParts, modelRequestId) => {
         modelRequestIds.push(modelRequestId);
         return { ok: true, writeId: "write-text", eventId: "sevt_text", processedAt: createdAt };
       },
@@ -169,7 +286,7 @@ describe("SessionProcessor", () => {
     events.push(...(await processor.process(envelope({ type: "text-end", id: "text-1" }))).events);
     events.push(...(await processor.process(envelope({ type: "finish", finishReason: "stop" }))).events);
 
-    expect(writes).toEqual(["write-part:text", "append-event:agent.message", "write-message:completed"]);
+    expect(writes).toEqual(["append-event:agent.message"]);
     expect(events.map((event) => event.type)).toEqual([
       "agent.message",
     ]);
@@ -209,7 +326,7 @@ describe("SessionProcessor", () => {
   test("anchors only the completed preceding not-yet-durable reasoning prefix on public tools", async () => {
     const anchors: Array<{ type: string; parts: readonly SessionEventWriterStableReasoningPart[] }> = [];
     const processor = createProcessor({
-      appendEvent: async (event, _projectionJson, stableReasoningParts) => {
+      appendEvent: async (event, _output, stableReasoningParts) => {
         if (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use") {
           anchors.push({ type: event.type, parts: stableReasoningParts ?? [] });
         }
@@ -225,20 +342,22 @@ describe("SessionProcessor", () => {
     await processor.commitPublicToolUse(source, "tool-2", "allow", { kind: "mcp", mcpServerName: "github" });
 
     expect(anchors).toEqual([
-      { type: "agent.tool_use", parts: [expect.objectContaining({ reasoningPartId: "part-1", partSequence: 0, text: "first" })] },
+      { type: "agent.tool_use", parts: [expect.objectContaining({ partSequence: 0, text: "first" })] },
       { type: "agent.mcp_tool_use", parts: [] },
     ]);
-    expect(processor.isReasoningPartDurable("part-1")).toBe(true);
+    const reasoningPartId = anchors[0]?.parts[0]?.reasoningPartId;
+    expect(reasoningPartId).toMatch(/^stid_[0-9a-f]{64}$/);
+    expect(processor.isReasoningPartDurable(reasoningPartId ?? "")).toBe(true);
   });
 
-  test("tool events carry internal projection metadata for Bridge durable context", async () => {
+  test("tool events carry loop-authored message drafts for Bridge durable context", async () => {
     const projections: unknown[] = [];
     const modelRequestIds: Array<{ readonly type: string; readonly modelRequestId: string | undefined }> = [];
     const processor = createProcessor({
-      appendEvent: async (event, projectionJson, _stableReasoningParts, modelRequestId) => {
+      appendEvent: async (event, output, _stableReasoningParts, modelRequestId) => {
         modelRequestIds.push({ type: event.type, modelRequestId });
-        if (projectionJson !== undefined) {
-          projections.push(JSON.parse(projectionJson));
+        if (output !== undefined) {
+          projections.push(output.message);
         }
         return {
           ok: true,
@@ -261,31 +380,35 @@ describe("SessionProcessor", () => {
       output: { text: "done", truncated: false },
     });
 
-    expect(projections).toEqual([
-      {
-        type: "runtime_tool_projection",
-        message_id: "message-1",
-        part_id: "part-1",
-        part_sequence: 0,
-        model_tool_call_id: "tool-1",
-        tool_name: "search",
-        input: { q: "x" },
-        state: "running",
-      },
-      {
-        type: "runtime_tool_projection",
-        message_id: "message-1",
-        part_id: "part-1",
-        part_sequence: 0,
-        model_tool_call_id: "tool-1",
-        tool_name: "search",
-        input: { q: "x" },
-        state: "completed",
-        output: { text: "done", truncated: false },
-      },
-    ]);
+    expect(projections).toHaveLength(2);
+    expect(projections[0]).toMatchObject({
+      role: "assistant",
+      origin: "agent",
+      parts: [{
+        type: "tool",
+        toolCallId: "tool-1",
+        toolName: "search",
+        state: {
+          status: "running",
+          input: { value: { q: "x" } },
+        },
+      }],
+    });
+    expect(projections[1]).toMatchObject({
+      role: "assistant",
+      origin: "agent",
+      parts: [{
+        type: "tool",
+        toolCallId: "tool-1",
+        toolName: "search",
+        state: {
+          status: "completed",
+          output: { text: "done", truncated: false },
+        },
+      }],
+    });
     expect(modelRequestIds).toEqual([
-      { type: "agent.tool_use", modelRequestId: undefined },
+      { type: "agent.tool_use", modelRequestId: "model-request-1" },
       { type: "agent.tool_result", modelRequestId: "model-request-1" },
     ]);
   });
@@ -293,7 +416,7 @@ describe("SessionProcessor", () => {
   test("MCP tools emit fork-SDK MCP tool use and result events", async () => {
     const modelRequestIds: Array<{ readonly type: string; readonly modelRequestId: string | undefined }> = [];
     const processor = createProcessor({
-      appendEvent: async (event, _projectionJson, _stableReasoningParts, modelRequestId) => {
+      appendEvent: async (event, _output, _stableReasoningParts, modelRequestId) => {
         modelRequestIds.push({ type: event.type, modelRequestId });
         return {
           ok: true,
@@ -334,7 +457,7 @@ describe("SessionProcessor", () => {
       content: [{ type: "text", text: "created" }],
     });
     expect(modelRequestIds).toEqual([
-      { type: "agent.mcp_tool_use", modelRequestId: undefined },
+      { type: "agent.mcp_tool_use", modelRequestId: "model-request-1" },
       { type: "agent.mcp_tool_result", modelRequestId: "model-request-1" },
     ]);
   });
@@ -437,7 +560,7 @@ describe("SessionProcessor", () => {
     expect(writes).toEqual([]);
   });
 
-  test("step start and finish are stable writes without public append events", async () => {
+  test("step start and finish remain request-local without public append events", async () => {
     const writes: string[] = [];
     const processor = createProcessor({ writes });
 
@@ -446,47 +569,7 @@ describe("SessionProcessor", () => {
 
     expect(stepStarted).toEqual({ ok: true, events: [] });
     expect(stepFinished).toEqual({ ok: true, events: [] });
-    expect(writes).toEqual([
-      "write-part:step-start",
-      "write-part:step-finish",
-      "write-message:streaming",
-    ]);
-  });
-
-  test("step finish message update failure becomes persistence failure without public events", async () => {
-    const writes: string[] = [];
-    const processor = createProcessor({
-      writes,
-      writeMessage: async (message) => {
-        if (message.status === "streaming") {
-          return {
-            ok: false,
-            error: normalizeRuntimeMessageStoreError({
-              code: "unavailable",
-              operation: "writeMessage",
-              sessionId: message.sessionId,
-              messageId: message.id,
-            }),
-          };
-        }
-        return { ok: true, messageId: message.id, operation: "writeMessage" };
-      },
-    });
-
-    await processor.process(envelope({ type: "step-start", stepIndex: 1 }));
-    const result = await processor.process(envelope({ type: "step-finish", finishReason: "stop" }));
-
-    expect(result.ok).toBe(false);
-    expect(result.events).toEqual([]);
-    expect(result).toMatchObject({
-      error: { type: "message-store", operation: "writeMessage", code: "unavailable" },
-    });
-    expect(writes).toEqual([
-      "write-part:step-start",
-      "write-part:step-finish",
-      "write-message:streaming",
-      "write-message:failed",
-    ]);
+    expect(writes).toEqual([]);
   });
 
   test("stable tool event append uses Bridge tool_use id for matching tool_result", async () => {
@@ -530,10 +613,7 @@ describe("SessionProcessor", () => {
       { type: "agent.tool_result", tool_use_id: "bridge-event-tool-use", content: [{ type: "text", text: "done" }] },
     ]);
     expect(writes).toEqual([
-      "write-part:tool",
       "append-event:agent.tool_use",
-      "write-part:tool",
-      "write-part:tool",
       "append-event:agent.tool_result",
     ]);
   });
@@ -541,7 +621,7 @@ describe("SessionProcessor", () => {
   test("web usage follows only the matching durable tool-result append", async () => {
     const attachments: Array<{ type: string; usage: unknown }> = [];
     const processor = createProcessor({
-      appendEvent: async (event, _projectionJson, _stableReasoningParts, _modelRequestId, serverToolUse) => {
+      appendEvent: async (event, _output, _stableReasoningParts, _modelRequestId, serverToolUse) => {
         attachments.push({ type: event.type, usage: serverToolUse });
         return {
           ok: true,
@@ -617,7 +697,7 @@ describe("SessionProcessor", () => {
   });
 
   test("internal invalid-tool repair hot projection waits for durable ack", async () => {
-    let releaseCommit: ((result: RuntimeMessageStoreWritePartResult) => void) | undefined;
+    let releaseCommit: ((result: RuntimeInternalToolRepairCommitResult) => void) | undefined;
     let startedRepair: ((repair: RuntimeInternalToolRepairCommit) => void) | undefined;
     const commitStarted = new Promise<RuntimeInternalToolRepairCommit>((resolve) => {
       releaseCommit = undefined;
@@ -626,7 +706,7 @@ describe("SessionProcessor", () => {
     const processor = createProcessor({
       commitInternalToolRepair: async (repair) => {
         startedRepair?.(repair);
-        return await new Promise<RuntimeMessageStoreWritePartResult>((commitResolve) => {
+        return await new Promise<RuntimeInternalToolRepairCommitResult>((commitResolve) => {
           releaseCommit = commitResolve;
         });
       },
@@ -647,17 +727,59 @@ describe("SessionProcessor", () => {
 
     const repair = await commitStarted;
     expect(repair.repairKey).toMatch(/^internal_invalid_tool_[0-9a-f]{64}$/);
-    expect(repair.message.id).toMatch(/^msg_repair_[0-9a-f]{64}$/);
-    expect(repair.message.parts[0]?.id).toMatch(/^part_repair_[0-9a-f]{64}$/);
-    expect(processor.messages().some((message) => message.id === repair.message.id)).toBe(false);
+    expect(repair.draft.runtimeLocalId).toMatch(/^stid_[0-9a-f]{64}$/);
+    expect(repair.draft).not.toHaveProperty("id");
+    expect(repair.draft.parts[0]).not.toHaveProperty("id");
+    expect(processor.messages()).toEqual([]);
     releaseCommit?.({
       ok: true,
-      messageId: repair.message.id,
-      partId: repair.message.parts[0]?.id ?? "",
-      operation: "writePart",
+      eventId: "bridge-internal-repair-event",
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: "binding-1",
+        observedBindingGeneration: 1,
+        receipt: {
+          sessionThreadId: "thread-1",
+          operationKind: "commit_internal_tool_repair",
+          sourceKind: "internal_tool_repair",
+          sourceId: repair.repairKey,
+          declarationDigest: "repair-digest",
+          pendingAttachmentDelta: [],
+              pendingToolDelta: [],
+              prefixConsumptions: [],
+
+              childLifecycle: [],
+          events: [{
+            sessionThreadId: "thread-1",
+            sourceEventId: repair.repairKey,
+            eventId: "bridge-internal-repair-event",
+            eventSequence: 20,
+            disposition: "created",
+          }],
+          messages: [{
+            runtimeLocalId: repair.draft.runtimeLocalId,
+            sessionThreadId: "thread-1",
+            owningEventId: "bridge-internal-repair-event",
+            messageId: "durable-repair-message",
+            messageSequence: 2,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created",
+            parts: [{
+              runtimeLocalPartId: repair.draft.parts[0]?.runtimeLocalPartId ?? "",
+              partId: "durable-repair-part",
+              messageId: "durable-repair-message",
+              partSequence: 0,
+              createdAt,
+              updatedAt: createdAt,
+              disposition: "created",
+            }],
+          }],
+        },
+      },
     });
     await expect(pendingRepair).resolves.toMatchObject({ ok: true });
-    expect(processor.messages().some((message) => message.id === repair.message.id)).toBe(true);
+    expect(processor.messages().map((message) => message.id)).toEqual(["durable-repair-message"]);
   });
 
   test("orphan text and reasoning deltas do not write or emit events", async () => {
@@ -690,7 +812,7 @@ describe("SessionProcessor", () => {
         code: "runtime_invalid_sequence",
       }),
     }));
-    expect(writes).toEqual(["write-message:failed"]);
+    expect(writes).toEqual([]);
   });
 
   test("post-terminal provider events remain protocol failures", async () => {
@@ -720,11 +842,18 @@ describe("SessionProcessor", () => {
   });
 
   test("tool payloads stay verbatim while provider failure events are redacted", async () => {
-    const successfulToolParts: RuntimePart[] = [];
+    const successfulToolDrafts: RuntimeMessageDraft[] = [];
     const successProcessor = createProcessor({
-      writePart: async (part) => {
-        successfulToolParts.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
+      appendEvent: async (_event, output) => {
+        if (output !== undefined) {
+          successfulToolDrafts.push(output.message);
+        }
+        return {
+          ok: true,
+          writeId: `write-${successfulToolDrafts.length}`,
+          eventId: successfulToolDrafts.length === 1 ? "bridge-tool-use-1" : "bridge-tool-result-1",
+          processedAt: createdAt,
+        };
       },
     });
     const successEvents: SessionEvent[] = [];
@@ -743,7 +872,7 @@ describe("SessionProcessor", () => {
 
     expect(successEvents.map((event) => event.type)).toEqual(["agent.tool_use", "agent.tool_result"]);
     expect(JSON.stringify(successEvents)).toContain(hostileText);
-    expect(JSON.stringify(successfulToolParts)).toContain(hostileText);
+    expect(JSON.stringify(successfulToolDrafts)).toContain(hostileText);
 
     const processor = createProcessor();
     const events: SessionEvent[] = [];
@@ -786,11 +915,18 @@ describe("SessionProcessor", () => {
   });
 
   test("preserves tool-route bounded output through durable settlement", async () => {
-    const written: RuntimePart[] = [];
+    const outputDrafts: RuntimeMessageDraft[] = [];
     const processor = createProcessor({
-      writePart: async (part) => {
-        written.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
+      appendEvent: async (event, output) => {
+        if (output !== undefined) {
+          outputDrafts.push(output.message);
+        }
+        return {
+          ok: true,
+          writeId: `write-${outputDrafts.length}`,
+          eventId: event.type === "agent.tool_use" ? "bridge-tool-use-1" : "bridge-tool-result-1",
+          processedAt: createdAt,
+        };
       },
     });
     await processor.process(envelope({ type: "tool-input-start", id: "tool-large", toolName: "Read" }));
@@ -808,34 +944,10 @@ describe("SessionProcessor", () => {
       output: { text: output, truncated: false },
     });
 
-    const completed = written.findLast((part) => part.type === "tool" && part.state.status === "completed");
+    const completed = outputDrafts.at(-1)?.parts.findLast(
+      (part) => part.type === "tool" && part.state.status === "completed",
+    );
     expect(completed?.type === "tool" && completed.state.status === "completed" ? completed.state.output.text : "").toBe(output);
-  });
-
-  test("hostile store writer failures are sanitized before processor failure output", async () => {
-    const processor = createProcessor({
-      writePart: async () => ({
-        ok: false,
-        error: {
-          type: "message-store",
-          code: "schema_mismatch",
-          operation: "writePart",
-          message: hostileText,
-          retryable: false,
-          fatal: true,
-          constraint: hostileText,
-          messageId: hostileText,
-          partId: hostileText,
-          sessionId: hostileText,
-        },
-      }),
-    });
-
-    await processor.process(envelope({ type: "text-start", id: "text-1" }));
-    const result = await processor.process(envelope({ type: "text-end", id: "text-1" }));
-
-    expect(result.ok).toBe(false);
-    expectHostileTextRedacted(result);
   });
 
   test("text delta updates only processor-local state before stable text write", async () => {
@@ -851,12 +963,48 @@ describe("SessionProcessor", () => {
     expect(JSON.stringify(ended.events)).not.toContain("SECRET");
   });
 
-  test("reasoning lifecycle preserves provider metadata before persistent part writes", async () => {
-    const writtenParts: RuntimePart[] = [];
+  test("stable text writes exclude completed reasoning until a tool anchors it", async () => {
+    const drafts: RuntimeMessageDraft[] = [];
     const processor = createProcessor({
-      writePart: async (part) => {
-        writtenParts.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
+      appendEvent: async (_event, output) => {
+        if (output !== undefined) {
+          drafts.push(output.message);
+        }
+        return {
+          ok: true,
+          writeId: "write-text",
+          eventId: "bridge-text-1",
+          processedAt: createdAt,
+        };
+      },
+    });
+
+    await processor.process(envelope({ type: "reasoning-start", id: "reasoning-1" }));
+    await processor.process(envelope({ type: "reasoning-delta", id: "reasoning-1", text_delta: "private thought" }));
+    await processor.process(envelope({ type: "reasoning-end", id: "reasoning-1" }));
+    await processor.process(envelope({ type: "text-start", id: "text-1" }));
+    await processor.process(envelope({ type: "text-delta", id: "text-1", text_delta: "answer" }));
+    await processor.process(envelope({ type: "text-end", id: "text-1" }));
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]?.parts).toEqual([
+      expect.objectContaining({ type: "text", text: "answer" }),
+    ]);
+  });
+
+  test("reasoning lifecycle preserves provider metadata locally before public anchoring", async () => {
+    const anchoredReasoning: SessionEventWriterStableReasoningPart[] = [];
+    const processor = createProcessor({
+      appendEvent: async (event, _output, stableReasoningParts) => {
+        if (event.type === "agent.tool_use") {
+          anchoredReasoning.push(...(stableReasoningParts ?? []));
+        }
+        return {
+          ok: true,
+          writeId: "write-tool-use",
+          eventId: "bridge-tool-use-1",
+          processedAt: createdAt,
+        };
       },
     });
 
@@ -871,21 +1019,18 @@ describe("SessionProcessor", () => {
       id: "reasoning-1",
       providerMetadata: { anthropic: { signature: "sig_1" } },
     }));
+    await processor.process(envelope({
+      type: "tool-call",
+      id: "tool-1",
+      toolName: "search",
+      input: { value: {}, preview: "{}", truncated: false },
+    }));
+    await processor.commitPublicToolUse(source, "tool-1", "allow");
 
-    expect(writtenParts.map((part) => part.type)).toEqual(["reasoning"]);
-    expect(writtenParts.at(-1)).toMatchObject({
-      type: "reasoning",
+    expect(anchoredReasoning).toEqual([expect.objectContaining({
       text: "think",
       providerMetadata: { anthropic: { redactedData: "red_1", signature: "sig_1" } },
-      status: "completed",
-    });
-    expect(processor.messages()[0]?.parts).toEqual([
-      expect.objectContaining({
-        type: "reasoning",
-        text: "think",
-        providerMetadata: { anthropic: { redactedData: "red_1", signature: "sig_1" } },
-      }),
-    ]);
+    })]);
   });
 
   test("reasoning provider metadata is accepted at the normalized LLM event boundary", async () => {
@@ -904,41 +1049,11 @@ describe("SessionProcessor", () => {
     }
   });
 
-  test("failed stable writes do not emit the failed update event and become session errors", async () => {
-    const processor = createProcessor({
-      writePart: async () => ({
-        ok: false,
-        error: normalizeRuntimeMessageStoreError({
-          code: "unavailable",
-          operation: "writePart",
-          sessionId: "session-1",
-          messageId: "message-1",
-          partId: "part-2",
-        }),
-      }),
-    });
-
-    await processor.process(envelope({ type: "text-start", id: "text-1" }));
-    const result = await processor.process(envelope({ type: "text-end", id: "text-1" }));
-
-    expect(result.ok).toBe(false);
-    if (result.ok) {
-      throw new Error("expected failed result");
-    }
-    expect(result.events.map((event) => event.type)).toEqual([]);
-    expect(result.error.type).toBe("message-store");
-  });
-
-  test("provider error terminalizes active draft without projecting agent.message", async () => {
+  test("provider error discards an active text draft without projecting agent.message", async () => {
     const writes: string[] = [];
-    const parts: RuntimePart[] = [];
     const appended: SessionEvent[] = [];
     const processor = createProcessor({
       writes,
-      writePart: async (part) => {
-        parts.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
-      },
       appendEvent: async (event) => {
         appended.push(event);
         return { ok: true, writeId: "write-failed-draft", eventId: "sevt-failed-draft", processedAt: createdAt };
@@ -959,24 +1074,18 @@ describe("SessionProcessor", () => {
     }));
 
     expect(result.ok).toBe(true);
-    expect(parts).toEqual([expect.objectContaining({ type: "text", text: "visible", status: "failed" })]);
-    expect(writes).toEqual(["write-part:text", "write-message:failed"]);
+    expect(writes).toEqual([]);
     expect(appended).toEqual([]);
     expect(result.events.map((event) => event.type)).toEqual(["session.error"]);
     expect(JSON.stringify(result.events)).not.toContain("raw-secret-body");
     expect(JSON.stringify(result.events)).not.toContain("https://secret.example/path");
   });
 
-  test("cancellation terminalizes active draft without projecting agent.message", async () => {
+  test("cancellation discards an active text draft without projecting agent.message", async () => {
     const writes: string[] = [];
-    const parts: RuntimePart[] = [];
     const appended: SessionEvent[] = [];
     const processor = createProcessor({
       writes,
-      writePart: async (part) => {
-        parts.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
-      },
       appendEvent: async (event) => {
         appended.push(event);
         return { ok: true, writeId: "write-cancelled-draft", eventId: "sevt-cancelled-draft", processedAt: createdAt };
@@ -994,22 +1103,14 @@ describe("SessionProcessor", () => {
     }));
 
     expect(result.ok).toBe(true);
-    expect(parts).toEqual([expect.objectContaining({ type: "text", text: "cancelled draft", status: "cancelled" })]);
-    expect(writes).toEqual(["write-part:text", "write-message:cancelled"]);
+    expect(writes).toEqual([]);
     expect(appended).toEqual([]);
     expect(result.events.map((event) => event.type)).toEqual(["session.error"]);
   });
 
-  test("provider error terminalizes open reasoning before failed message", async () => {
+  test("provider error discards open reasoning after its public thinking marker", async () => {
     const writes: string[] = [];
-    const parts: RuntimePart[] = [];
-    const processor = createProcessor({
-      writes,
-      writePart: async (part) => {
-        parts.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
-      },
-    });
+    const processor = createProcessor({ writes });
 
     await processor.process(envelope({ type: "reasoning-start", id: "reasoning-1" }));
     await processor.process(envelope({ type: "reasoning-delta", id: "reasoning-1", text_delta: "thinking" }));
@@ -1019,14 +1120,7 @@ describe("SessionProcessor", () => {
     }));
 
     expect(result.ok).toBe(true);
-    expect(parts).toEqual([
-      expect.objectContaining({ type: "reasoning", text: "thinking", status: "failed" }),
-    ]);
-    expect(writes).toEqual([
-      "append-event:agent.thinking",
-      "write-part:reasoning",
-      "write-message:failed",
-    ]);
+    expect(writes).toEqual(["append-event:agent.thinking"]);
     expect(result.events.map((event) => event.type)).toEqual(["session.error"]);
   });
 
@@ -1061,13 +1155,8 @@ describe("SessionProcessor", () => {
 
     expect(result.ok).toBe(true);
     expect(writes).toEqual([
-      "write-part:tool",
       "append-event:agent.tool_use",
-      "write-part:tool",
-      "write-part:tool",
-      "write-part:tool",
       "append-event:agent.tool_result",
-      "write-message:failed",
     ]);
     expect(appended).toEqual([
       expect.objectContaining({ type: "agent.tool_use", name: "search", evaluated_permission: "allow" }),

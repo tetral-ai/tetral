@@ -79,7 +79,7 @@ describe("RuntimeControlService command envelope", () => {
     }
   });
 
-  test("accepts an agent-mail bare poke through its dedicated rescan effect", async () => {
+  test("accepts a declared agent-mail envelope through its dedicated effect", async () => {
     const fixture = runtimeFixture();
     const request = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
@@ -87,7 +87,7 @@ describe("RuntimeControlService command envelope", () => {
       eventIds: [],
       sequenceFrom: 0,
       sequenceTo: 0,
-      payloadJson: "{}",
+      payloadJson: agentMailPayloadJson("delivery_1"),
     });
 
     const response = await fixture.service.acceptAgentMail(request, authMetadata());
@@ -116,29 +116,63 @@ describe("RuntimeControlService command envelope", () => {
       eventIds: [],
       sequenceFrom: 0,
       sequenceTo: 0,
-      payloadJson: "{}",
+      payloadJson: agentMailPayloadJson("delivery_retry"),
     });
 
     const response = await fixture.service.acceptAgentMail(request, authMetadata());
 
     expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED);
     expect(response.retryable).toBe(true);
-    expect(response.errorCode).toBe(runtimeInputErrorCodeOrGeneric("context_load_failed"));
+    expect(response.errorCode).toBe(runtimeInputErrorCodeOrGeneric("runtime_context_load_failed"));
   });
 
   test("deduplicates the same runtime_input_id across RPC attempt request_id changes", async () => {
-    const fixture = runtimeFixture();
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        acceptInputResults: [
+          { ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false },
+          { ok: true, sessionId: "sesn_1", created: false, started: false, pendingWake: false, duplicate: true },
+        ],
+      }),
+    });
 
     const first = await fixture.service.acceptInput(validCommand(), authMetadata());
     const duplicate = await fixture.service.acceptInput({ ...validCommand(), requestId: "req_2" }, authMetadata());
 
     expect(first.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED);
     expect(duplicate).toEqual({ ...acceptedResponse(), status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE });
-    expect(fixture.runHost.sessionIds).toEqual(["sesn_1"]);
+    expect(fixture.runHost.sessionIds).toEqual(["sesn_1", "sesn_1"]);
+  });
+
+  test("delivers a bounded rejection fact without the rejected input body", async () => {
+    const fixture = runtimeFixture();
+    const response = await fixture.service.acceptInput(validCommand({
+      payloadJson: JSON.stringify({
+        input_kind: "rejection",
+        reason_code: "runtime_command_payload_too_large",
+      }),
+    }), authMetadata());
+
+    expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED);
+    expect(fixture.runHost.messageCommands).toEqual([
+      expect.objectContaining({
+        kind: "rejection",
+        reasonCode: "runtime_command_payload_too_large",
+      }),
+    ]);
+    expect(fixture.runHost.messageCommands[0]).not.toHaveProperty("payloadJson");
   });
 
   test("deduplicates a config patch rebuilt under a fresh active binding by input id and payload", async () => {
-    const fixture = runtimeFixture();
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        runtimeConfigPatchResults: [
+          { ok: true, sessionId: "sesn_1", created: false, applied: true },
+          { ok: true, sessionId: "sesn_1", created: false, applied: true },
+          { ok: true, sessionId: "sesn_1", created: false, applied: false },
+        ],
+      }),
+    });
     const payloadJson = JSON.stringify({ config_generation: 7 });
     const first = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
@@ -178,7 +212,7 @@ describe("RuntimeControlService command envelope", () => {
       status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE,
       runtimeInputId: "rin_config_rebuilt",
     });
-    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(2);
+    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(3);
 
     const staleBinding = await fixture.service.applyRuntimeConfig({
       ...first,
@@ -189,7 +223,7 @@ describe("RuntimeControlService command envelope", () => {
       retryable: true,
       errorCode: runtimeInputErrorCodeOrGeneric("binding_identity_mismatch"),
     });
-    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(2);
+    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(3);
   });
 
   test("scopes runtime_input_id idempotency by workspace", async () => {
@@ -209,19 +243,29 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.sessionIds).toEqual(["sesn_1", "sesn_2"]);
   });
 
-  test("rejects conflicting runtime_input_id identity without a second core effect", async () => {
-    const fixture = runtimeFixture();
+  test("reports conflicting runtime_input_id identity from the thread-owned receipt", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        acceptInputResults: [
+          { ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false },
+          { ok: false, sessionId: "sesn_1", reason: "control_conflict" },
+        ],
+      }),
+    });
 
     await fixture.service.acceptInput(validCommand(), authMetadata());
-    const conflict = await fixture.service.acceptInput({ ...validCommand(), bindingId: "bind_other" }, authMetadata());
+    const conflict = await fixture.service.acceptInput(
+      { ...validCommand(), payloadJson: JSON.stringify({ changed: true }) },
+      authMetadata(),
+    );
 
     expect(conflict).toEqual({
-      ...acceptedResponse({ bindingId: "bind_other" }),
+      ...acceptedResponse(),
       status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
       retryable: false,
       errorCode: runtimeInputErrorCodeOrGeneric("runtime_input_identity_conflict"),
     });
-    expect(fixture.runHost.sessionIds).toEqual(["sesn_1"]);
+    expect(fixture.runHost.sessionIds).toEqual(["sesn_1", "sesn_1"]);
   });
 
   test("rejects fresh commands for a hot session when binding generation mismatches", async () => {
@@ -424,7 +468,6 @@ describe("RuntimeControlService command envelope", () => {
             sourceToolUseEventId: "sevt_tool_1",
             status: "completed",
           }),
-          bridgeProjection: bridgeRuntimeMessage(),
         },
       },
       {
@@ -439,11 +482,13 @@ describe("RuntimeControlService command envelope", () => {
             sourceToolUseEventId: "sevt_tool_expired",
             status: "expired",
           }),
-          bridgeProjection: bridgeRuntimeMessage(),
         },
       },
     ]);
-    expect(fixture.taskNotificationCommitter.commits.map((commit) => commit.command)).toEqual([
+    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => {
+      const { draft: _draft, ...fields } = command;
+      return fields;
+    })).toEqual([
       {
         runtimeInputId: "rin_task",
         taskId: "task_1",
@@ -467,6 +512,22 @@ describe("RuntimeControlService command envelope", () => {
         }),
       },
     ]);
+    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => command.draft)).toEqual(
+      fixture.taskNotificationCommitter.commits.map(({ command }) => expect.objectContaining({
+        sourceKind: "task_notification",
+        sourceId: expect.any(String),
+        draftKind: "task_notification",
+        role: "user",
+        origin: "runtime",
+        status: "completed",
+        parts: [expect.objectContaining({
+          type: "text",
+          text: command.payloadJson,
+          truncated: false,
+          status: "completed",
+        })],
+      })),
+    );
     expect(fixture.controlInputCommitter.commits).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_interrupt" }),
@@ -624,10 +685,18 @@ describe("RuntimeControlService command envelope", () => {
       }),
     );
 
-    expect(fixture.runHost.toolConfirmations).toHaveLength(0);
+    expect(fixture.runHost.toolConfirmations).toHaveLength(2);
+    expect(fixture.runHost.toolConfirmationCommitResults).toEqual([
+      expect.objectContaining({ ok: false, retryable: false }),
+      expect.objectContaining({ ok: false, retryable: false }),
+    ]);
     expect(fixture.controlInputCommitter.commits).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_confirm_stale" }),
+        inputKind: "tool_confirmation",
+      },
+      {
+        scope: { ...commandScope({ runtimeInputId: "rin_confirm_stale" }), requestId: "req_2" },
         inputKind: "tool_confirmation",
       },
     ]);
@@ -693,7 +762,12 @@ describe("RuntimeControlService command envelope", () => {
     );
 
     expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toEqual([]);
+    expect(fixture.runHost.taskNotifications).toHaveLength(1);
+    expect(fixture.runHost.taskNotificationCommitResults).toEqual([expect.objectContaining({
+      ok: false,
+      retryable: true,
+      errorCode: "bridge_commit_unavailable",
+    })]);
     expect(fixture.logger.records.at(-1)).toMatchObject({
       event: "runtime_command_rejected",
       retryable: true,
@@ -735,7 +809,12 @@ describe("RuntimeControlService command envelope", () => {
     );
 
     expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toEqual([]);
+    expect(fixture.runHost.taskNotifications).toHaveLength(1);
+    expect(fixture.runHost.taskNotificationCommitResults).toEqual([expect.objectContaining({
+      ok: false,
+      retryable: false,
+      errorCode: "bridge_commit_rejected",
+    })]);
     expect(fixture.logger.records.at(-1)).toMatchObject({
       event: "runtime_command_rejected",
       retryable: false,
@@ -804,12 +883,40 @@ describe("RuntimeControlService command envelope", () => {
     ).resolves.toEqual(
       rejectedResponse({
         runtimeInputId: "rin_config_context_failed",
-        retryable: false,
+        retryable: true,
         errorCode: "runtime_context_load_failed",
       }),
     );
 
     expect(fixture.runHost.runtimeConfigPatches).toHaveLength(1);
+  });
+
+  test("returns the typed retryable control-busy disposition for deferred runtime config", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        runtimeConfigPatchResult: {
+          ok: false,
+          sessionId: "sesn_1",
+          reason: "control_busy",
+        },
+      }),
+    });
+
+    await expect(
+      fixture.service.applyRuntimeConfig(
+        validCommand({
+          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
+          runtimeInputId: "rin_config_busy",
+          payloadJson: JSON.stringify({ config_generation: 7 }),
+        }),
+        authMetadata(),
+      ),
+    ).resolves.toMatchObject({
+      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
+      runtimeInputId: "rin_config_busy",
+      retryable: true,
+      errorCode: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
+    });
   });
 
   test("rejects malformed MCP manifest runtime config patch before hot-state mutation", async () => {
@@ -899,7 +1006,8 @@ describe("RuntimeControlService command envelope", () => {
 
     expect(response).toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
     expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toEqual([]);
+    expect(fixture.runHost.taskNotifications).toHaveLength(1);
+    expect(fixture.runHost.taskNotificationCommitResults).toEqual([{ ok: true, stale: true }]);
   });
 
   test("rejects task notifications that omit either required stream snapshot", async () => {
@@ -936,10 +1044,10 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.taskNotifications).toEqual([]);
   });
 
-  test("canonicalizes task notification payload before Bridge commit and applies Bridge runtime projection to hot state", async () => {
+  test("canonicalizes task notification payload before durable commit and applies the stamped message to hot state", async () => {
     const runtimeMessage = bridgeRuntimeMessage({ text: "bridge-projected runtime notification" });
     const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, runtimeMessage }),
+      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, committedMessage: runtimeMessage }),
     });
     const payloadJson = JSON.stringify({
       task_id: "task_1",
@@ -988,8 +1096,16 @@ describe("RuntimeControlService command envelope", () => {
     const applied = fixture.runHost.taskNotifications[0]?.command.payloadJson;
     expect(JSON.parse(committed ?? "{}")).toEqual(expected);
     expect(JSON.parse(applied ?? "{}")).toEqual(expected);
-    expect(fixture.runHost.taskNotifications[0]?.command.bridgeProjection).toEqual(runtimeMessage);
-    expect(fixture.runHost.taskNotifications[0]?.command.bridgeProjection.parts[0]).toMatchObject({
+    expect(fixture.taskNotificationCommitter.commits[0]?.command.draft.parts[0]).toMatchObject({
+      type: "text",
+      text: committed,
+      truncated: false,
+      status: "completed",
+    });
+    expect(fixture.runHost.taskNotificationCommitResults[0]).toEqual({ ok: true, committedMessage: runtimeMessage });
+    expect(fixture.runHost.taskNotificationCommitResults[0]?.ok === true && "committedMessage" in fixture.runHost.taskNotificationCommitResults[0]
+      ? fixture.runHost.taskNotificationCommitResults[0].committedMessage.parts[0]
+      : undefined).toMatchObject({
       type: "text",
       text: "bridge-projected runtime notification",
     });
@@ -1102,6 +1218,17 @@ function canonicalTaskNotificationPayloadJson(input: {
   });
 }
 
+function agentMailPayloadJson(deliveryId: string): string {
+  return JSON.stringify({
+    delivery_id: deliveryId,
+    source_thread_id: "thrd_child",
+    source_tool_use_event_id: "sevt_child_tool",
+    message: bridgeRuntimeMessage({
+      text: "child completion",
+    }),
+  });
+}
+
 function acceptedResponse(overrides: {
   readonly runtimeInputId?: string;
   readonly bindingId?: string;
@@ -1170,7 +1297,9 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   readonly agentMailCommands: Array<Parameters<RuntimeSessionRunHost["handleAgentMail"]>[0]> = [];
   readonly interrupts: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleInterruptControl"]>[1] }> = [];
   readonly toolConfirmations: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1] }> = [];
+  readonly toolConfirmationCommitResults: Array<Awaited<ReturnType<Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2]>>> = [];
   readonly taskNotifications: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1] }> = [];
+  readonly taskNotificationCommitResults: Array<Awaited<ReturnType<Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2]>>> = [];
   readonly runtimeConfigPatches: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1] }> = [];
 
   constructor(
@@ -1178,9 +1307,11 @@ class RecordingRunHost implements RuntimeSessionRunHost {
       | Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>
       | {
           readonly acceptInputResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>;
+          readonly acceptInputResults?: readonly Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>[];
           readonly toolConfirmationResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleToolConfirmation"]>>;
           readonly taskNotificationResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleTaskNotification"]>>;
           readonly runtimeConfigPatchResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>>;
+          readonly runtimeConfigPatchResults?: readonly Awaited<ReturnType<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>>[];
           readonly interruptResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleInterruptControl"]>>;
           readonly agentMailResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleAgentMail"]>>;
         } = {},
@@ -1191,9 +1322,11 @@ class RecordingRunHost implements RuntimeSessionRunHost {
       return;
     }
     this.acceptInputResult = result.acceptInputResult ?? this.acceptInputResult;
+    this.acceptInputResults = [...(result.acceptInputResults ?? [])];
     this.toolConfirmationResult = result.toolConfirmationResult ?? this.toolConfirmationResult;
     this.taskNotificationResult = result.taskNotificationResult ?? this.taskNotificationResult;
     this.runtimeConfigPatchResult = result.runtimeConfigPatchResult ?? this.runtimeConfigPatchResult;
+    this.runtimeConfigPatchResults = [...(result.runtimeConfigPatchResults ?? [])];
     this.interruptResult = result.interruptResult ?? this.interruptResult;
     this.agentMailResult = result.agentMailResult ?? this.agentMailResult;
   }
@@ -1205,6 +1338,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     started: true,
     pendingWake: false,
   };
+  private readonly acceptInputResults: Array<Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>> = [];
   private readonly toolConfirmationResult: Awaited<ReturnType<RuntimeSessionRunHost["handleToolConfirmation"]>> = {
     ok: true,
     sessionId: "sesn_1",
@@ -1223,6 +1357,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     created: false,
     applied: true,
   };
+  private readonly runtimeConfigPatchResults: Array<Awaited<ReturnType<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>>> = [];
   private readonly interruptResult: Awaited<ReturnType<RuntimeSessionRunHost["handleInterruptControl"]>> | undefined;
   private readonly agentMailResult: Awaited<ReturnType<RuntimeSessionRunHost["handleAgentMail"]>> = {
     ok: true,
@@ -1233,7 +1368,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   async handleAcceptInput(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]) {
     this.messageCommands.push(command);
     this.sessionIds.push(command.sessionId);
-    return this.acceptInputResult;
+    return this.acceptInputResults.shift() ?? this.acceptInputResult;
   }
 
   async handleAgentMail(command: Parameters<RuntimeSessionRunHost["handleAgentMail"]>[0]) {
@@ -1269,19 +1404,49 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     };
   }
 
-  async handleToolConfirmation(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1]) {
+  async handleToolConfirmation(
+    sessionId: string,
+    command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1],
+    commit: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2],
+  ) {
     this.toolConfirmations.push({ sessionId, command });
+    const committed = await commit();
+    this.toolConfirmationCommitResults.push(committed);
+    if (!committed.ok) {
+      return { ok: false as const, sessionId, reason: "context_load_failed" as const };
+    }
+    if ("stale" in committed) {
+      return { ok: true as const, sessionId, created: false, applied: false as const, stale: true as const };
+    }
     return this.toolConfirmationResult;
   }
 
-  async handleTaskNotification(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1]) {
+  async handleTaskNotification(
+    sessionId: string,
+    command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1],
+    commit: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2],
+  ) {
     this.taskNotifications.push({ sessionId, command });
+    const committed = await commit();
+    this.taskNotificationCommitResults.push(committed);
+    if (!committed.ok) {
+      return {
+        ok: false as const,
+        sessionId,
+        reason: "commit_rejected" as const,
+        retryable: committed.retryable,
+        errorCode: committed.errorCode,
+      };
+    }
+    if ("stale" in committed) {
+      return { ok: true as const, sessionId, created: false, applied: false as const, stale: true as const };
+    }
     return this.taskNotificationResult;
   }
 
   async handleRuntimeConfigPatch(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1]) {
     this.runtimeConfigPatches.push({ sessionId, command });
-    return this.runtimeConfigPatchResult;
+    return this.runtimeConfigPatchResults.shift() ?? this.runtimeConfigPatchResult;
   }
 }
 
@@ -1291,7 +1456,7 @@ class RecordingTaskNotificationCommitter implements RuntimeTaskNotificationCommi
   constructor(
     private readonly result: Awaited<ReturnType<RuntimeTaskNotificationCommitter["commitTaskNotification"]>> = {
       ok: true,
-      runtimeMessage: bridgeRuntimeMessage(),
+      committedMessage: bridgeRuntimeMessage(),
     },
   ) {}
 

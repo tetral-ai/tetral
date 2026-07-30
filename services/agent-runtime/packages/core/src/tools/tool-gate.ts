@@ -63,6 +63,9 @@ export type ApprovalReviewerOutcome =
   | {
       readonly type: "failed";
       readonly message?: string;
+    }
+  | {
+      readonly type: "stale_custody";
     };
 
 /** Catalog, tool identity, and approval context required to evaluate one tool call. */
@@ -154,7 +157,7 @@ export function evaluateEnabledToolGate(input: {
     };
   }
 
-  if (input.reviewerOutcome.type === "failed") {
+  if (input.reviewerOutcome.type !== "decision") {
     return {
       type: "ask",
       evaluatedPermission: "ask",

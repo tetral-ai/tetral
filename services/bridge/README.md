@@ -50,7 +50,7 @@ stored ACK; the same identity with a divergent payload is a fatal conflict.
 | Context | `LoadContext` | Cold-start one thread: messages from the newest compaction boundary forward, unresolved pending tool waits with any recorded decision, the per-server MCP manifests in-band (or an unready server's diagnostic with no tools), and the thread's pending media for both origins (active transient rows plus the file-backed derivation) |
 | Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction; interrupt and tool-confirmation variants stamp control state without projecting a message; background-task settlement rides the shared compare-and-set row, never a second public tool result, and its record family also fences pre-inbox notification-delivery exhaustion |
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One semantic event plus its projection in one transaction; a public tool event may carry the anchored prefix of completed reasoning parts, and a web tool-result event may carry one fixed-shape `server_tool_use` usage attachment — both fold into the idempotency hash so replays are byte-identical or rejected; the event-less invalid-tool repair row is atomic and rehydratable |
-| Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction (a successful end merges the request's full reasoning set; a retryable failure carries the reschedule leg, incrementing the durable per-thread retry budget and writing rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields); `FinishIdle` captures outputs then writes idle status as one boundary; `CommitRuntimeTermination` is the terminal closeout — close any started span, settle every open public tool use and pending wait, flip the durable status, append the `session.error` plus the single terminated event, atomically |
+| Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` captures outputs then writes idle status as one boundary. `CommitRuntimeTermination` validates the open durable turn, atomically stores current-thread cancellation or abnormal-child mail declared by the live loop, closes started spans, writes terminal status, and returns the complete declaration receipt. |
 | Children | `CreateChildThread`, `ResolveChildThread`, `ListChildThreads`, `MarkChildThreadClosed`, `MarkChildThreadActive`, `ResolveInterAgentDelivery` | Child row plus fork-seed checkpoint; child lifecycle marks; read-only inter-agent delivery state (`sent_exists` / `received_exists` / `child_receivable`) for delivery-aware repair |
 | Tools | `RunTool`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Sandbox-backed execution through the in-sandbox helper (a media result creates its transient-attachment rows inside the same durable-result transaction); background-command follow-ups by task id; durable memory writes with content-match conflict checks |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
@@ -179,23 +179,24 @@ replacement must preserve, and the conformance suites that prove it.
 
 ### Event-writer boundary
 
-- **Contract.** `WriteEvent` persists one `session_events` row plus its
-  whitelisted projection into `session_messages` in one transaction. Usage,
+- **Contract.** `WriteEvent` persists one `session_events` row plus the
+  loop-authored message declaration into `session_messages` in one transaction. Usage,
   transport metadata, raw provider payloads, request ids, and raw attachment
   bytes never project. Opening or resolving an external wait updates
   `session_pending_tool_uses` in the same transaction: the trigger is the tool
   event's `evaluated_permission` — `ask` upserts the `kind='approval'`,
-  `status='pending'` row (`projectToolUseEventTx` in `bridge_api_events.go`),
+  `status='pending'` row (`applyWriteEventToolBookkeepingTx` in `bridge_api_events.go`),
   while `allow` and `deny` write no row. A public tool event may
   carry an anchored reasoning prefix; a web tool-result event may carry one
   `server_tool_use` usage attachment that increments `sessions.usage`
   exactly once per event identity (insert-wins).
 - **Lifecycle.** Idempotency-keyed by `runtime_write_id`; the attached
   reasoning set and usage block fold into the request hash. Runtime updates
-  hot state only after ACK; if Bridge commits but the pod cannot update hot
-  state, the pod clears and cold-starts from durable projection.
-- **Invariants a replacement must preserve.** Event and projection are atomic;
-  projection is whitelisted by event type; a replay is byte-identical or a
+  hot state only after applying the declaration receipt. An unknown transport
+  result retries the same frozen declaration and receives the committed
+  receipt without reconstructing content.
+- **Invariants a replacement must preserve.** Event and message declaration are atomic;
+  the declaration class is whitelisted by event type; a replay is byte-identical or a
   fatal conflict; no double-count on replay; per-request stable-reasoning
   byte/part budgets validated before any write.
 - **Conformance.** `bridge_api_events_test.go`, the stable-reasoning cases in
@@ -206,22 +207,36 @@ replacement must preserve, and the conformance suites that prove it.
 - **Contract.** `WriteRequestEnd`, `FinishIdle`, and `CommitRuntimeTermination`
   are the request/model-usage and idle/terminal writers. `WriteRequestEnd`
   inserts the request-end span, inserts request usage detail idempotently, and
-  updates `sessions.usage` only when the detail insert wins; the reschedule leg
-  increments `session_turn_retries` and writes rescheduled status only when the
-  ceiling admits. `FinishIdle` captures outputs into `session_output_captures`
-  then writes `session.status_idle`. `CommitRuntimeTermination` settles every
-  open scope and flips the terminal status atomically.
+  updates `sessions.usage` only when the detail insert wins. It also seals the
+  existing assistant projection for that model request without replacing the
+  projection's owning event, and its receipt returns the sealed message and
+  every part stamp before Runtime may rebase or issue another provider request.
+  A no-content end still returns and applies its declaration receipt so a stale
+  custodian cannot continue merely because there is no assistant projection.
+  An interrupt received while the request is open carries the admitted source,
+  loop-authored cancellation drafts, and pending-tool changes in this same
+  transaction. The response returns one receipt for the request and one for the
+  interrupt; callers match them by operation and source identity, never by
+  response order.
+  The reschedule leg increments `session_turn_retries` and writes rescheduled
+  status only when the ceiling admits. `FinishIdle` captures outputs into `session_output_captures`
+  then writes `session.status_idle`. `CommitRuntimeTermination` accepts only the
+  live loop's current-thread declarations under the open durable-turn identity,
+  persists those declarations with failure and terminal status, and returns
+  their database-assigned stamps atomically.
 - **Lifecycle.** At most one terminal end per `model_request_id` (pod close and
   repair close both check inside the transaction, serialized on the start-row
-  lock; the loser yields `denied(stale_terminal)`). `FinishIdle` and
-  `CommitRuntimeTermination` are idempotent on `runtime_write_id`: settle-all-
-  then-flip or nothing. A child thread's settling transaction also writes its
-  completion-return envelope (see delivery seam) atomically with the status.
+  lock; a divergent loser is rejected and cold-recovers the durable winner). `FinishIdle` and
+  `CommitRuntimeTermination` are idempotent on the database-named durable turn:
+  declaration-and-close or nothing. A live child loop supplies its errored
+  completion-return envelope in that transaction. Content belonging to another
+  thread is never inferred by this writer; once its custodian is mechanically
+  gone, the pod-loss and cleanup repair paths own the postmortem closeout.
 - **Invariants a replacement must preserve.** The request-end transaction is
   the sole provider/model-usage writer (web `server_tool_use` counters arrive
   on `WriteEvent`, not here); output capture is best-effort and never gates
-  idle; cumulative usage never double-counts; the closeout is atomic and
-  totally settling.
+  idle; cumulative usage never double-counts; current-thread live closeout is
+  atomic, and postmortem writers remain disjoint from live loop authorship.
 - **Conformance.** `bridge_api_settlement_test.go`, `runtime_termination.go`
   with `session_runtime_lifecycle_test.go`, `output_capture_full_seam_test.go`,
   `closeout_sentinel_test.go`.
@@ -229,42 +244,44 @@ replacement must preserve, and the conformance suites that prove it.
 ### Stable reasoning commit (two write vectors)
 
 - **Contract.** Completed reasoning parts of a model request become durable
-  through two independent vectors that land in ONE assistant message row:
+  through two independent event-ledger vectors that describe ONE assistant
+  message row:
   the ANCHORED vector — `WriteEvent` (`bridge_api_events.go`) on a public tool
   event (`agent.tool_use` or `agent.mcp_tool_use`, no other event type)
-  attaches the ordered prefix of completed parts preceding that tool IN THE
-  SAME REQUEST and merges it in the same transaction as the event insert and
-  its projection — and the SETTLEMENT vector — the successful
+  attaches the ordered prefix of completed parts preceding that tool in the
+  same request — and the SETTLEMENT vector — the successful
   `WriteRequestEnd` (`bridge_api_settlement.go`) carries the full ordered set
-  and merges it in the settlement transaction. Both resolve the owning row by
-  `model_request_id` (one assistant message per model request) and merge
-  create-if-absent, so a reasoning-only request still has a defined row and
-  the turn's text and tool projections land in that same row with
-  intra-message part order preserved. The row's Bridge-minted `message_id` is
-  resolved through the `model_request_id` association. Both share
-  `mergeAssistantMessagePartTx` and `normalizedStableReasoningPart`.
+  in the settlement transaction. The loop-authored cumulative draft is the
+  sole message content carrier on both paths; Bridge stores the reasoning
+  ledger beside the owning event, validates it against the draft, and updates
+  the row resolved by `model_request_id`. A reasoning-only successful request
+  therefore creates its row from the terminal draft, while text and tool
+  updates converge on the same row. Bridge assigns the durable message and
+  part ids and returns them in the declaration receipt. A
+  `reasoning_part_id` is a declaration/ledger identity, never a predicted
+  database `part_id`.
 - **Budget.** `MaxStableReasoningPartsPerRequest` (16) and
   `MaxStableReasoningBytesPerRequest` (2 MiB) are one budget enforced ACROSS
   both vectors, not per vector; an attached set or a settlement that breaches
   either limit is rejected as a contract violation before any durable write.
 - **Invariants a replacement must preserve.** Idempotency is symmetric and
-  order-agnostic: either vector may write a part first (reviewer-gated tools
-  anchor AFTER settlement, ordinary stable tools BEFORE). The later writer
-  no-ops on a CONTENT-IDENTICAL part — identity, order, text, provider
-  metadata, and truncation marker must match; writer-stamped timestamps are
-  excluded from the comparison and the first writer's are preserved — and
-  fatally conflicts on ANY divergence. The attached set folds into the tool
-  event's request hash, so a replay with a divergent attached set is a
-  conflict; the settlement hash covers the full ordered set for the request,
-  which must contain every part either vector durably wrote — a missing part
-  is a divergence, never a silent partial merge.
+  order-agnostic: either ledger vector may arrive first (reviewer-gated tools
+  anchor after settlement, ordinary stable tools before). Every later
+  cumulative draft must preserve database-assigned identities and first-writer
+  timestamps while returning the current database-assigned part order in its
+  receipt. Reasoning identity, order, text, provider metadata, and truncation
+  marker must agree with the ledger; any divergence is fatal. The attached set
+  folds into the tool event's request hash, so a replay with a divergent set is
+  a conflict; the settlement hash covers the full ordered set for the request,
+  which must contain every part an anchor ledger recorded.
 - **Failure behavior.** An error or pod-lost request-end carries no reasoning
   parts. Parts left UNANCHORED at such an end — buffered in pod memory,
   attached to no committed tool — are discarded with the turn, and the retry
   regenerates its own reasoning. Parts ANCHORED by a committed tool are
   already durable and SURVIVE the failed turn, because their committed tool is
-  their anchor. A failed turn can therefore leave a durable anchored prefix
-  while its unanchored suffix is discarded.
+  their anchor. Error and reschedule closeout therefore preserve that prefix
+  without re-submitting it as the successful settlement set; a failed turn can
+  leave a durable anchored prefix while its unanchored suffix is discarded.
 - **Conformance.** `bridge_api_settlement_test.go` covers both vectors:
   `TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector`,
   `...SettlementFirstToolAnchorNoOps`, `...SettlementIsAtomic`,
@@ -418,8 +435,8 @@ projection; `session_pending_tool_uses`; `session_background_tasks`;
 and the `sessions.usage` projection; `session_output_captures`;
 `session_transient_attachments` and the file-attachment consumption records;
 `session_mcp_manifests`; `session_turn_retries`;
-`session_runtime_tool_results` (including the `tool_kind = mcp` claim/lease
-rows); `session_runtime_status` (running/idle writes and cleanup finalization)
+`session_runtime_tool_results` (including the `tool_kind = mcp`
+claim/stage/consume lifecycle); `session_runtime_status` (running/idle writes and cleanup finalization)
 and the runtime-side writes on `session_threads` (child lifecycle; public
 archive admission stays with api). Through its RPCs it also writes the
 memory tables (`RunMemory`), the event change-log rows that ride every public

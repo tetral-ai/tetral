@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -149,27 +150,126 @@ type enqueueTransaction interface {
 }
 
 func EnqueueTx(ctx context.Context, tx enqueueTransaction, request EnqueueRequest) (*Job, error) {
-	request, err := NormalizeEnqueueRequest(request)
+	jobs, err := EnqueueBatchTx(ctx, tx, []EnqueueRequest{request})
 	if err != nil {
 		return nil, err
+	}
+	return jobs[0], nil
+}
+
+type queuePartitionCounterKey struct {
+	workspaceID  workspace.ID
+	partitionKey string
+}
+
+// EnqueueBatchTx validates the complete request set and locks every partition
+// counter in deterministic order before allocating jobs in caller order.
+func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []EnqueueRequest) ([]*Job, error) {
+	normalized := make([]EnqueueRequest, len(requests))
+	for index, request := range requests {
+		var err error
+		normalized[index], err = NormalizeEnqueueRequest(request)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(normalized) == 0 {
+		return nil, nil
 	}
 	if tx == nil {
 		return nil, &ValidationError{Message: "queue transaction is required"}
 	}
+	distinct := make(map[queuePartitionCounterKey]struct{}, len(normalized))
+	for _, request := range normalized {
+		distinct[queuePartitionCounterKey{workspaceID: request.WorkspaceID, partitionKey: request.PartitionKey}] = struct{}{}
+	}
+	keys := make([]queuePartitionCounterKey, 0, len(distinct))
+	for key := range distinct {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool {
+		if keys[left].workspaceID != keys[right].workspaceID {
+			return keys[left].workspaceID < keys[right].workspaceID
+		}
+		return keys[left].partitionKey < keys[right].partitionKey
+	})
+	for _, key := range keys {
+		var insertedSequence int64
+		err := tx.QueryRowScanner(ctx,
+			`INSERT INTO queue_partition_counters (
+				workspace_id, partition_key, last_sequence, created_at, updated_at
+			) VALUES ($1, $2, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT (workspace_id, partition_key) DO NOTHING
+			RETURNING last_sequence`,
+			string(key.workspaceID),
+			key.partitionKey,
+		).Scan(&insertedSequence)
+		if err != nil && !dbconnect.IsNoRows(err) {
+			return nil, err
+		}
+		var lockedSequence int64
+		if err := tx.QueryRowScanner(ctx,
+			`SELECT last_sequence
+			   FROM queue_partition_counters
+			  WHERE workspace_id = $1 AND partition_key = $2
+			  FOR UPDATE`,
+			string(key.workspaceID),
+			key.partitionKey,
+		).Scan(&lockedSequence); err != nil {
+			return nil, err
+		}
+	}
+
+	jobs := make([]*Job, 0, len(normalized))
+	for _, request := range normalized {
+		if request.DedupeKey != "" {
+			existing, err := existingActiveDedupeJob(ctx, tx, request.WorkspaceID, request.DedupeKey)
+			if err == nil {
+				jobs = append(jobs, existing)
+				continue
+			}
+			if !dbconnect.IsNoRows(err) {
+				return nil, err
+			}
+		}
+		var partitionSequence int64
+		if err := tx.QueryRowScanner(ctx,
+			`UPDATE queue_partition_counters
+			    SET last_sequence = last_sequence + 1,
+			        updated_at = CURRENT_TIMESTAMP
+			  WHERE workspace_id = $1 AND partition_key = $2
+			RETURNING last_sequence`,
+			string(request.WorkspaceID),
+			request.PartitionKey,
+		).Scan(&partitionSequence); err != nil {
+			return nil, err
+		}
+		job, err := insertQueueJobTx(ctx, tx, request, partitionSequence)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, nil
+}
+
+func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request EnqueueRequest, partitionSequence int64) (*Job, error) {
 	payload := append(json.RawMessage(nil), request.PayloadJSON...)
 	row := tx.QueryRowScanner(ctx,
 		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, payload_version, status, payload_json,
-			priority, attempt_count, max_attempts, available_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, 0, $9, $10, $11, $11)
+			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key,
+			payload_version, status, payload_json, priority, attempt_count, max_attempts,
+			available_at, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, 0, $10, $11, $12, $12)
 		ON CONFLICT (workspace_id, dedupe_key) WHERE status IN ('pending', 'leased') DO NOTHING
-		RETURNING id, workspace_id, kind, partition_key, dedupe_key, payload_version,
+		RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
 		          status, payload_json, priority, available_at, leased_by, lease_token,
 		          leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`,
 		request.ID,
 		string(request.WorkspaceID),
 		request.Kind,
 		request.PartitionKey,
+		partitionSequence,
 		nullableString(request.DedupeKey),
 		request.PayloadVersion,
 		string(payload),
@@ -193,14 +293,14 @@ func existingActiveDedupeJob(ctx context.Context, tx enqueueTransaction, workspa
 		return nil, &ValidationError{Message: "queue transaction is required"}
 	}
 	return scanJob(tx.QueryRowScanner(ctx,
-		`SELECT id, workspace_id, kind, partition_key, dedupe_key, payload_version,
+		`SELECT id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
 		        status, payload_json, priority, available_at, leased_by, lease_token,
 		        leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at
 		   FROM queue_jobs
 		  WHERE workspace_id = $1
 		    AND dedupe_key = $2
 		    AND status IN ('pending', 'leased')
-		  ORDER BY created_at ASC, id ASC
+		  ORDER BY queue_partition_sequence ASC
 		  LIMIT 1`,
 		string(workspaceID),
 		dedupeKey,
@@ -221,7 +321,9 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 	var leased []*Job
 	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.lease", func(tx *dbconnect.Tx) error {
 		kindPredicate, args := leaseKindPredicate(request.Kinds, 4)
-		query := `SELECT candidate.id, candidate.partition_key, candidate.kind, candidate.priority, candidate.available_at, candidate.created_at
+		query := `SELECT candidate.id, candidate.partition_key, candidate.kind, candidate.priority,
+		                candidate.available_at, candidate.queue_partition_sequence,
+		                COALESCE(candidate.payload_json::jsonb ->> 'input_kind', '')
 			   FROM queue_jobs candidate
 			  WHERE candidate.workspace_id = $1
 			    AND candidate.kind IN (` + kindPredicate + `)
@@ -234,7 +336,15 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			           AND pending.partition_key = candidate.partition_key
 			           AND pending.status = 'pending'
 			           AND pending.id <> candidate.id
-			           AND pending.available_at <= $2
+			           AND (
+			                pending.available_at <= $2
+			                OR (
+			                    candidate.kind = 'runtime_input'
+			                    AND candidate.payload_json::jsonb ->> 'input_kind' IS DISTINCT FROM 'interrupt_control'
+			                    AND pending.kind = 'runtime_config_update'
+			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence
+			                )
+			           )
 			           AND (
 			                (candidate.kind = 'runtime_input'
 			                 AND pending.kind = 'runtime_input'
@@ -242,8 +352,7 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			                      pending.priority > candidate.priority
 			                      OR (
 			                         pending.priority = candidate.priority
-			                         AND (pending.available_at, pending.created_at, pending.id)
-			                             < (candidate.available_at, candidate.created_at, candidate.id)
+			                         AND pending.queue_partition_sequence < candidate.queue_partition_sequence
 			                      )
 			                 )
 			                 AND NOT EXISTS (
@@ -253,21 +362,33 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 			                        AND barrier.partition_key = candidate.partition_key
 			                        AND barrier.status = 'pending'
 			                        AND barrier.kind <> 'runtime_input'
-			                        AND barrier.available_at <= $2
-			                        AND (barrier.available_at, barrier.created_at, barrier.id)
-			                            < (pending.available_at, pending.created_at, pending.id)
+			                        AND NOT (
+			                            candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+			                            AND barrier.kind = 'runtime_config_update'
+			                        )
+			                        AND (
+			                            barrier.available_at <= $2
+			                            OR (
+			                                candidate.payload_json::jsonb ->> 'input_kind' IS DISTINCT FROM 'interrupt_control'
+			                                AND barrier.kind = 'runtime_config_update'
+			                            )
+			                        )
+			                        AND barrier.queue_partition_sequence < pending.queue_partition_sequence
 			                 )
 			                )
 			                OR (candidate.kind = 'runtime_input'
 			                    AND pending.kind <> 'runtime_input'
-			                    AND (pending.available_at, pending.created_at, pending.id)
-			                        < (candidate.available_at, candidate.created_at, candidate.id))
+			                    AND NOT (
+			                        candidate.payload_json::jsonb ->> 'input_kind' = 'interrupt_control'
+			                        AND pending.kind = 'runtime_config_update'
+			                    )
+			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
 			                OR (candidate.kind <> 'runtime_input'
-			                    AND (pending.available_at, pending.created_at, pending.id)
-			                        < (candidate.available_at, candidate.created_at, candidate.id))
+			                    AND pending.queue_partition_sequence < candidate.queue_partition_sequence)
 			           )
 			    )
-			  ORDER BY candidate.priority DESC, candidate.available_at ASC, candidate.created_at ASC, candidate.id ASC
+			  ORDER BY candidate.priority DESC, candidate.available_at ASC,
+			           candidate.partition_key ASC, candidate.queue_partition_sequence ASC
 			  FOR UPDATE SKIP LOCKED
 			  LIMIT $3`
 		queryArgs := append([]any{
@@ -283,7 +404,15 @@ func (s *PostgreSQLQueueStore) Lease(ctx context.Context, request LeaseRequest) 
 		var candidates []leaseCandidateRow
 		for rows.Next() {
 			var candidate leaseCandidateRow
-			if err := rows.Scan(&candidate.id, &candidate.partitionKey, &candidate.kind, &candidate.priority, &candidate.availableAt, &candidate.createdAt); err != nil {
+			if err := rows.Scan(
+				&candidate.id,
+				&candidate.partitionKey,
+				&candidate.kind,
+				&candidate.priority,
+				&candidate.availableAt,
+				&candidate.partitionSequence,
+				&candidate.inputKind,
+			); err != nil {
 				return err
 			}
 			candidates = append(candidates, candidate)
@@ -326,12 +455,13 @@ func leaseKindPredicate(kinds []string, placeholderStart int) (string, []any) {
 }
 
 type leaseCandidateRow struct {
-	id           string
-	partitionKey string
-	kind         string
-	priority     int
-	availableAt  time.Time
-	createdAt    time.Time
+	id                string
+	partitionKey      string
+	kind              string
+	priority          int
+	availableAt       time.Time
+	partitionSequence int64
+	inputKind         string
 }
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
@@ -351,7 +481,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		    AND kind = $3
 		    AND status = 'pending'
 		    AND available_at = $9
-		    AND created_at = $10
+		    AND queue_partition_sequence = $10
 		    AND NOT EXISTS (
 		        SELECT 1
 		          FROM queue_jobs leased
@@ -366,7 +496,15 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		           AND pending.partition_key = $4
 		           AND pending.status = 'pending'
 		           AND pending.id <> $2
-		           AND pending.available_at <= $7
+		           AND (
+		                pending.available_at <= $7
+		                OR (
+		                    $3 = 'runtime_input'
+		                    AND $12 <> 'interrupt_control'
+		                    AND pending.kind = 'runtime_config_update'
+		                    AND pending.queue_partition_sequence < $10
+		                )
+		           )
 		           AND (
 		                ($3 = 'runtime_input'
 		                 AND pending.kind = 'runtime_input'
@@ -374,8 +512,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		                      pending.priority > $11
 		                      OR (
 		                         pending.priority = $11
-		                         AND (pending.available_at, pending.created_at, pending.id)
-		                             < ($9, $10, $2)
+		                         AND pending.queue_partition_sequence < $10
 		                      )
 		                 )
 		                 AND NOT EXISTS (
@@ -385,21 +522,32 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		                        AND barrier.partition_key = $4
 		                        AND barrier.status = 'pending'
 		                        AND barrier.kind <> 'runtime_input'
-		                        AND barrier.available_at <= $7
-		                        AND (barrier.available_at, barrier.created_at, barrier.id)
-		                            < (pending.available_at, pending.created_at, pending.id)
+		                        AND NOT (
+		                            $12 = 'interrupt_control'
+		                            AND barrier.kind = 'runtime_config_update'
+		                        )
+		                        AND (
+		                            barrier.available_at <= $7
+		                            OR (
+		                                $12 <> 'interrupt_control'
+		                                AND barrier.kind = 'runtime_config_update'
+		                            )
+		                        )
+		                        AND barrier.queue_partition_sequence < pending.queue_partition_sequence
 		                 )
 		                )
 		                OR ($3 = 'runtime_input'
 		                    AND pending.kind <> 'runtime_input'
-		                    AND (pending.available_at, pending.created_at, pending.id)
-		                        < ($9, $10, $2))
+		                    AND NOT (
+		                        $12 = 'interrupt_control'
+		                        AND pending.kind = 'runtime_config_update'
+		                    )
+		                    AND pending.queue_partition_sequence < $10)
 		                OR ($3 <> 'runtime_input'
-		                    AND (pending.available_at, pending.created_at, pending.id)
-		                        < ($9, $10, $2))
+		                    AND pending.queue_partition_sequence < $10)
 		           )
 		    )
-		  RETURNING id, workspace_id, kind, partition_key, dedupe_key, payload_version,
+		  RETURNING id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, payload_version,
 		            status, payload_json, priority, available_at, leased_by, lease_token,
 		            leased_at, leased_until, attempt_count, max_attempts, created_at, updated_at`,
 		string(request.WorkspaceID),
@@ -411,8 +559,9 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		leasedAt,
 		leasedUntil,
 		candidate.availableAt,
-		candidate.createdAt,
+		candidate.partitionSequence,
 		candidate.priority,
+		candidate.inputKind,
 	)
 	job, err := scanJob(row)
 	if dbconnect.IsNoRows(err) {
@@ -687,9 +836,13 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 	var updated bool
 	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.defer", func(tx *dbconnect.Tx) error {
 		var kind string
+		var partitionKey string
+		var dedupeKey sql.NullString
+		var payloadVersion int
+		var payloadJSON string
 		var attemptCount int
 		if err := tx.QueryRow(ctx,
-			`SELECT kind, attempt_count
+			`SELECT kind, partition_key, dedupe_key, payload_version, payload_json, attempt_count
 			   FROM queue_jobs
 			  WHERE workspace_id = $1
 			    AND id = $2
@@ -699,18 +852,72 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
-		).Scan(&kind, &attemptCount); dbconnect.IsNoRows(err) {
+		).Scan(&kind, &partitionKey, &dedupeKey, &payloadVersion, &payloadJSON, &attemptCount); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
 			return err
 		}
-		if kind != KindSessionPrepare {
+		if kind != KindSessionPrepare && kind != KindRuntimeConfigUpdate {
 			return &ValidationError{Message: "queue job kind cannot be deferred"}
 		}
 		if attemptCount < 1 {
 			return errors.New("queue: leased job has invalid attempt count")
 		}
 		now := request.Now.UTC()
+		if kind == KindRuntimeConfigUpdate {
+			if err := validateCanonicalQueueShape(EnqueueRequest{
+				ID:             request.JobID,
+				WorkspaceID:    request.WorkspaceID,
+				Kind:           kind,
+				PartitionKey:   partitionKey,
+				DedupeKey:      dedupeKey.String,
+				PayloadVersion: payloadVersion,
+				PayloadJSON:    json.RawMessage(payloadJSON),
+			}); err != nil {
+				return err
+			}
+			var deferCount int
+			if err := tx.QueryRow(ctx,
+				`SELECT defer_count
+				   FROM queue_jobs
+				  WHERE workspace_id = $1
+				    AND id = $2
+				    AND lease_token = $3
+				    AND status = 'leased'`,
+				string(request.WorkspaceID),
+				request.JobID,
+				request.LeaseToken,
+			).Scan(&deferCount); err != nil {
+				return err
+			}
+			deferDelay := queueRetryDelay(s.retryPolicy, deferCount+1)
+			result, err := tx.Exec(ctx,
+				`UPDATE queue_jobs
+				    SET status = 'pending',
+				        available_at = $4,
+				        attempt_count = attempt_count - 1,
+				        defer_count = defer_count + 1,
+				        lease_token = NULL,
+				        leased_by = NULL,
+				        leased_at = NULL,
+				        leased_until = NULL,
+				        updated_at = $5
+				  WHERE workspace_id = $1
+				    AND id = $2
+				    AND lease_token = $3
+				    AND status = 'leased'`,
+				string(request.WorkspaceID),
+				request.JobID,
+				request.LeaseToken,
+				now.Add(deferDelay),
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			updated = rowsAffected(result)
+			return nil
+		}
 		deferDelay := queueRetryDelay(s.retryPolicy, attemptCount)
 		result, err := tx.Exec(ctx,
 			`UPDATE queue_jobs
@@ -747,11 +954,12 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 // queueRetryDelay is the Queue-owned retry/defer backoff. Retry carries no
 // client delay authority: RetryRequest reports only the failure (ErrorKind,
 // ErrorMessage) and has no retry_after field, so the durable available_at is
-// derived here from the leased row's attempt_count as capped exponential backoff
-// with full jitter. The doubling loop yields capDelay =
-// min(MaxDelay, BaseDelay*2^(attemptCount-1)), saturating at MaxDelay, and the
+// derived here from the transition-owned counter as capped exponential backoff
+// with full jitter. Retry and session_prepare Defer supply attempt_count;
+// runtime_config_update Defer supplies its scoped defer_count. The doubling
+// loop yields capDelay = min(MaxDelay, BaseDelay*2^(count-1)), saturating at MaxDelay, and the
 // returned delay is uniform in [0, capDelay] (RandomInt64(capDelay+1) makes the
-// cap inclusive). Retry and Defer share this computation; the RetryPolicy inputs
+// cap inclusive). The transitions share this computation; the RetryPolicy inputs
 // (BaseDelay 1s, MaxDelay 1m, MaxAttempts DefaultMaxAttempts) are filled by
 // normalizeRetryPolicy.
 //
@@ -885,6 +1093,7 @@ func scanJob(row interface{ Scan(dest ...any) error }) (*Job, error) {
 		&workspaceID,
 		&job.Kind,
 		&job.PartitionKey,
+		&job.QueuePartitionSequence,
 		&dedupeKey,
 		&job.PayloadVersion,
 		&job.Status,

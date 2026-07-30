@@ -106,12 +106,11 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(client)
 	if _, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:               lifecycleScope(sessionID, threadID, bindingID, 1, podUID),
-		RuntimeInputId:      runtimeInputJob.RuntimeInputID,
-		EventIds:            []string{messageEventID},
-		SequenceFrom:        sender.requests[0].GetSequenceFrom(),
-		SequenceTo:          sender.requests[0].GetSequenceTo(),
-		HotContextPatchJson: sender.requests[0].GetPayloadJson(),
+		Scope:          lifecycleScope(sessionID, threadID, bindingID, 1, podUID),
+		RuntimeInputId: runtimeInputJob.RuntimeInputID,
+		EventIds:       []string{messageEventID},
+		SequenceFrom:   sender.requests[0].GetSequenceFrom(),
+		SequenceTo:     sender.requests[0].GetSequenceTo(),
 		Drafts: []*bridgev1.RuntimeMessageDraft{
 			bridgeUserInputDraftForTest(string(ws), sessionID, threadID, runtimeInputJob.RuntimeInputID, messageEventID, "build report"),
 		},
@@ -127,10 +126,11 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blobStore, &lifecycleOutputScanner{files: []outputcapture.SandboxOutputFile{
 		lifecycleCapturedOutput("/mnt/session/outputs/report.txt", "report body"),
 	}})
+	idleScope := lifecycleScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, adminDB, idleScope, "evt_lifecycle_running")
 	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          lifecycleScope(sessionID, threadID, bindingID, 1, podUID),
-		RuntimeWriteId: "rwrite_lifecycle_idle",
-		IdleSince:      "2026-01-01T00:01:00Z",
+		Scope:          idleScope,
+		DurableTurnId:  "evt_lifecycle_running",
 		StopReasonJson: `{"type":"end_turn"}`,
 	}); err != nil {
 		t.Fatalf("FinishIdle: %v", err)

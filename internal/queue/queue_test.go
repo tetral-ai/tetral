@@ -90,6 +90,37 @@ func TestNormalizeEnqueueRequestAcceptsOnlyBareAgentMailPokes(t *testing.T) {
 	}
 }
 
+func TestNormalizeEnqueueRequestAcceptsOnlyRefsOnlyRuntimeConfigPayloads(t *testing.T) {
+	ws := workspace.ID("ws_config_refs")
+	sessionID := "sesn_config_refs"
+	requests := []EnqueueRequest{
+		{
+			WorkspaceID:  ws,
+			Kind:         KindRuntimeConfigUpdate,
+			PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+			DedupeKey:    FormatRuntimeConfigUpdateDedupeKey(ws, sessionID, "7"),
+			PayloadJSON:  []byte(`{"workspace_id":"ws_config_refs","session_id":"sesn_config_refs","config_generation":7}`),
+		},
+		{
+			WorkspaceID:  ws,
+			Kind:         KindRuntimeConfigUpdate,
+			PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+			DedupeKey:    FormatRuntimeMCPManifestUpdateDedupeKey(ws, sessionID, "github", "3"),
+			PayloadJSON:  []byte(`{"workspace_id":"ws_config_refs","session_id":"sesn_config_refs","mcp_server_name":"github","manifest_generation":3}`),
+		},
+	}
+	for _, request := range requests {
+		if _, err := NormalizeEnqueueRequest(request); err != nil {
+			t.Fatalf("NormalizeEnqueueRequest(%s): %v", request.DedupeKey, err)
+		}
+	}
+	contentBearing := requests[0]
+	contentBearing.PayloadJSON = []byte(`{"workspace_id":"ws_config_refs","session_id":"sesn_config_refs","config_generation":7,"approval_mode":"full_access"}`)
+	if _, err := NormalizeEnqueueRequest(contentBearing); !IsValidationError(err) {
+		t.Fatalf("NormalizeEnqueueRequest(content-bearing config) = %v; want validation error", err)
+	}
+}
+
 func TestNormalizeEnqueueRequestRejectsOversizedPayloadForEveryJobKind(t *testing.T) {
 	kinds := []string{
 		KindRuntimeInput,

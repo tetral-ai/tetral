@@ -389,7 +389,7 @@ func (s *PostgreSQLBridgeAPIStore) markTransientAttachmentsForDeletion(ctx conte
 				  FROM session_transient_attachments
 				 WHERE status = 'deleting'
 				    OR status = 'consumed'
-				    OR (status = 'active' AND expires_at <= $1)
+				    OR (status IN ('staged', 'active') AND expires_at <= $1)
 				 ORDER BY storage_sequence
 				 LIMIT $2
 				 FOR UPDATE SKIP LOCKED
@@ -948,6 +948,23 @@ func insertTransientAttachmentTx(ctx context.Context, tx *dbconnect.Tx, create t
 	return err
 }
 
+func insertStagedTransientAttachmentTx(ctx context.Context, tx *dbconnect.Tx, create transientAttachmentCreate, attachment *bridgev1.TransientAttachmentRef, blobPointer string, now time.Time) error {
+	metadataJSON, err := transientAttachmentMetadataJSON(create)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO session_transient_attachments (
+			workspace_id, attachment_ref, session_id, session_thread_id,
+			source_tool_use_event_id, blob_pointer, mime, metadata_json,
+			status, expires_at, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'staged', $9, $10, $10)`,
+		create.Scope.GetWorkspaceId(), attachment.GetAttachmentRef(), create.Scope.GetSessionId(),
+		create.Scope.GetSessionThreadId(), create.SourceToolUseEventID, blobPointer, create.Mime, metadataJSON,
+		now.Add(defaultTransientAttachmentTTL), now)
+	return err
+}
+
 func insertTransientAttachmentForDeletionTx(ctx context.Context, tx *dbconnect.Tx, create transientAttachmentCreate, attachment *bridgev1.TransientAttachmentRef, blobPointer string, now time.Time) error {
 	metadataJSON, err := transientAttachmentMetadataJSON(create)
 	if err != nil {
@@ -1119,6 +1136,7 @@ func validateTransientAttachmentsForConsumptionTx(
 //
 //	status      meaning                                     transitions
 //	uploading   bytes being written through blob APIs        (never written)
+//	staged      committed by MCP, not yet model-visible       -> active | deleting
 //	active      resolvable by the Gateway; may be consumed    -> consumed | deleting
 //	consumed    spent by a settled-output request-end        (GC-eligible)
 //	expired     TTL passed before consumption                (never written)
@@ -1126,10 +1144,10 @@ func validateTransientAttachmentsForConsumptionTx(
 //	deleted     blob released                                 (terminal)
 //	failed      write failed                                  (never written)
 //
-// Only 'active', 'consumed', 'deleting', and 'deleted' are ever written. The
-// other three are permitted by the status CHECK constraint and reserved for
-// future writers; the GC sweep reclaims 'deleting', 'consumed', and 'active'
-// rows past their TTL, which is the whole reachable set.
+// Only 'staged', 'active', 'consumed', 'deleting', and 'deleted' are ever
+// written. The other three are permitted by the status CHECK constraint and
+// reserved for future writers; the GC sweep reclaims 'deleting', 'consumed',
+// and staged or active rows past their TTL, which is the whole reachable set.
 //
 // The UPDATE flips 'active' -> 'consumed' ONLY (WHERE status = 'active'). A ref
 // the caller already validated as present but in ANY non-active in-scope status

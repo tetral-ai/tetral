@@ -66,7 +66,16 @@ export type IdempotencyClaim =
   | { readonly status: "replay"; readonly stored: StoredRunMcpToolResponse }
   | { readonly status: "wait"; readonly stored: Promise<StoredRunMcpToolResponse | undefined> }
   | { readonly status: "in_flight" }
+  | { readonly status: "stale_custody" }
   | { readonly status: "conflict" };
+
+/** Signals that Bridge durably committed an MCP result for an older Runtime binding. */
+export class McpIdempotencyStaleCustodyError extends Error {
+  constructor() {
+    super("mcp tool result belongs to stale runtime custody");
+    this.name = "McpIdempotencyStaleCustodyError";
+  }
+}
 
 /**
  * Defines the claim, commit, and failure lifecycle surrounding one external MCP side effect.
@@ -103,14 +112,15 @@ type CompletedResponse = {
 export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
   readonly #responses = new Map<string, InFlightResponse | CompletedResponse>();
 
-  claim(key: IdempotencyKey, _context?: McpIdempotencyContext): IdempotencyClaim {
-    const existing = this.#responses.get(key.toolUseEventId);
+  claim(key: IdempotencyKey, context?: McpIdempotencyContext): IdempotencyClaim {
+    const mapKey = idempotencyMapKey(key, context);
+    const existing = this.#responses.get(mapKey);
     if (existing === undefined) {
       let resolve!: (stored: StoredRunMcpToolResponse | undefined) => void;
       const promise = new Promise<StoredRunMcpToolResponse | undefined>((settle) => {
         resolve = settle;
       });
-      this.#responses.set(key.toolUseEventId, {
+      this.#responses.set(mapKey, {
         status: "in_flight",
         inputHash: key.normalizedInputHash,
         promise,
@@ -130,7 +140,7 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
     return { status: "replay", stored: cloneStoredResponse(existing.stored) };
   }
 
-  store(key: IdempotencyKey, stored: PendingStoredRunMcpToolResponse, _context?: McpIdempotencyContext): RunMcpToolResponse {
+  store(key: IdempotencyKey, stored: PendingStoredRunMcpToolResponse, context?: McpIdempotencyContext): RunMcpToolResponse {
     if (stored.response.attachments.length > 0) {
       throw new Error("in-memory MCP idempotency cannot materialize media refs");
     }
@@ -144,13 +154,14 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
       },
       contentItems: stored.contentItems,
       refreshTriggered: stored.refreshTriggered,
-    });
+    }, context);
   }
 
-  storeCompleted(key: IdempotencyKey, stored: StoredRunMcpToolResponse): RunMcpToolResponse {
+  storeCompleted(key: IdempotencyKey, stored: StoredRunMcpToolResponse, context?: McpIdempotencyContext): RunMcpToolResponse {
+    const mapKey = idempotencyMapKey(key, context);
     const frozen = cloneStoredResponse(stored);
-    const existing = this.#responses.get(key.toolUseEventId);
-    this.#responses.set(key.toolUseEventId, {
+    const existing = this.#responses.get(mapKey);
+    this.#responses.set(mapKey, {
       status: "completed",
       inputHash: key.normalizedInputHash,
       stored: frozen,
@@ -161,13 +172,21 @@ export class InMemoryMcpIdempotencyStore implements McpIdempotencyStore {
     return cloneResponse(frozen.response);
   }
 
-  fail(key: IdempotencyKey, _context?: McpIdempotencyContext): void {
-    const existing = this.#responses.get(key.toolUseEventId);
+  fail(key: IdempotencyKey, context?: McpIdempotencyContext): void {
+    const mapKey = idempotencyMapKey(key, context);
+    const existing = this.#responses.get(mapKey);
     if (existing?.status === "in_flight" && existing.inputHash === key.normalizedInputHash) {
-      this.#responses.delete(key.toolUseEventId);
+      this.#responses.delete(mapKey);
       existing.resolve(undefined);
     }
   }
+}
+
+function idempotencyMapKey(key: IdempotencyKey, context?: McpIdempotencyContext): string {
+  if (context === undefined) {
+    return key.toolUseEventId;
+  }
+  return `${context.workspaceId}\u0000${context.sessionId}\u0000${context.sessionThreadId}\u0000${key.toolUseEventId}`;
 }
 
 /** Parses an MCP argument object, canonicalizes it, and returns its lowercase SHA-256 identity. */
@@ -257,6 +276,7 @@ export function parseStoredRunMcpToolResponse(value: string): StoredRunMcpToolRe
       attachments: attachments.map((attachment) => parseStoredAttachment(attachment)),
       errorKind: typeof responseRecord.error_kind === "number" ? responseRecord.error_kind : undefined,
       retryStatus: typeof responseRecord.retry_status === "number" ? responseRecord.retry_status : undefined,
+      materializationHandle: "",
     },
     contentItems: record.content_items,
     refreshTriggered: record.refresh_triggered,
@@ -296,6 +316,7 @@ export function cloneResponse(response: RunMcpToolResponse): RunMcpToolResponse 
     })),
     errorKind: response.errorKind,
     retryStatus: response.retryStatus,
+    materializationHandle: response.materializationHandle,
   };
 }
 

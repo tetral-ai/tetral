@@ -10,7 +10,7 @@ describe("provider-gateway schema verification", () => {
     const sql = schemaSQL(queries, [
       [{ exists: true }],
       [
-        { version: 1, checksum: "0e350b887454d95a13e54adf4251ad8ce5babbe52862204716a48227660f0ebe" },
+        { version: 1, checksum: "afb5f913c2f846d7c559965ec20869c5aec84a984f708b0218ddbadc0190ab2a" },
       ],
     ]);
 
@@ -23,12 +23,12 @@ describe("provider-gateway schema verification", () => {
     { name: "missing", responses: [[{ exists: false }]], kind: "schema_missing" },
     { name: "behind", responses: [[{ exists: true }], []], kind: "schema_behind" },
     { name: "gap", responses: [[{ exists: true }], [{ version: 2, checksum: "a".repeat(64) }]], kind: "schema_history_gap" },
-    { name: "duplicate", responses: [[{ exists: true }], [{ version: 1, checksum: "0e350b887454d95a13e54adf4251ad8ce5babbe52862204716a48227660f0ebe" }, { version: 1, checksum: "0e350b887454d95a13e54adf4251ad8ce5babbe52862204716a48227660f0ebe" }]], kind: "schema_history_duplicate" },
+    { name: "duplicate", responses: [[{ exists: true }], [{ version: 1, checksum: "afb5f913c2f846d7c559965ec20869c5aec84a984f708b0218ddbadc0190ab2a" }, { version: 1, checksum: "afb5f913c2f846d7c559965ec20869c5aec84a984f708b0218ddbadc0190ab2a" }]], kind: "schema_history_duplicate" },
     { name: "drift", responses: [[{ exists: true }], [{ version: 1, checksum: "a".repeat(64) }]], kind: "schema_checksum_drift" },
     {
       name: "ahead",
       responses: [[{ exists: true }], [
-        { version: 1, checksum: "0e350b887454d95a13e54adf4251ad8ce5babbe52862204716a48227660f0ebe" },
+        { version: 1, checksum: "afb5f913c2f846d7c559965ec20869c5aec84a984f708b0218ddbadc0190ab2a" },
         { version: 2, checksum: "a".repeat(64) },
       ]],
       kind: "schema_ahead",

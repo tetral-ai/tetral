@@ -34,6 +34,29 @@ func TestMigrateSchemaCreatesAndStampsBaselineAtomically(t *testing.T) {
 	assertTableExists(t, db, "session_mcp_manifests", true)
 }
 
+func TestMigrateSchemaCreatesQueuePartitionSequenceSchema(t *testing.T) {
+	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
+	ctx := context.Background()
+	if err := storage.MigrateSchema(ctx, db); err != nil {
+		t.Fatalf("MigrateSchema: %v", err)
+	}
+	var schema string
+	if err := db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatalf("current_schema: %v", err)
+	}
+	assertQueuePartitionSequenceSchema(t, db, schema)
+	var version int64
+	var checksum string
+	if err := db.QueryRowContext(ctx,
+		`SELECT version, checksum FROM tetral_schema_migrations`,
+	).Scan(&version, &checksum); err != nil {
+		t.Fatalf("read schema migration stamp: %v", err)
+	}
+	if version != 1 || checksum != storage.PostgreSQLSchemaVersionOneChecksum {
+		t.Fatalf("schema migration stamp = version %d checksum %q; want baseline checksum", version, checksum)
+	}
+}
+
 func TestMigrateSchemaVersionSixCreatesSessionMCPManifestsShapeAndRLS(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
@@ -118,7 +141,7 @@ func TestMigrateSchemaVersionSevenCreatesStableReasoningMessageAssociation(t *te
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "1d0d49961ae132ce19174da7aefd53ee8b396f43e9cfd2ef92460fe0fd5e4b04"
+	const want = "afb5f913c2f846d7c559965ec20869c5aec84a984f708b0218ddbadc0190ab2a"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}

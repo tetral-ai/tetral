@@ -221,6 +221,7 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 		"services/bridge/bridge_api_events.go:userMessageDataJSON":                 true,
 		"services/bridge/bridge_api_mcp.go:runtimeMCPManifestCommandPayload":       true,
 		"services/bridge/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
+		"services/bridge/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
 		"services/bridge/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
 	}
 	got := map[string]bool{}

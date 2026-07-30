@@ -353,6 +353,9 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 		"interrupt_control",
 		"tool_confirmation",
 		"task_notification",
+		"agent_mail",
+		"approval_review",
+		"rejection",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("session_runtime_inbox_kind_shape missing runtime input kind %q: %s", required, definition)
@@ -364,6 +367,29 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 	} {
 		if strings.Contains(definition, forbidden) {
 			t.Fatalf("session_runtime_inbox_kind_shape still admits command-only kind %q: %s", forbidden, definition)
+		}
+	}
+}
+
+func TestSessionRuntimeInboxStatusShapeIncludesParkedDelivery(t *testing.T) {
+	db, schema := newIsolatedPostgreSQLSchemaDB(t)
+	definition := readCheckConstraintDefinition(t, db, schema, "session_runtime_inbox", "session_runtime_inbox_status_shape")
+	for _, required := range []string{
+		"delivering",
+		"accepted",
+		"parked",
+		"committed",
+		"cancelled",
+		"dead_lettered",
+	} {
+		if !strings.Contains(definition, required) {
+			t.Fatalf("session_runtime_inbox_status_shape missing status %q: %s", required, definition)
+		}
+	}
+	predicate := readIndexPredicate(t, db, schema, "idx_session_runtime_inbox_repair")
+	for _, required := range []string{"delivering", "accepted", "parked"} {
+		if !strings.Contains(predicate, required) {
+			t.Fatalf("runtime inbox repair predicate missing status %q: %s", required, predicate)
 		}
 	}
 }
@@ -569,7 +595,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_runtime_inbox": {
 			"workspace_id", "session_id", "session_thread_id", "runtime_input_id",
-			"input_kind", "event_ids_json", "sequence_from", "sequence_to", "status",
+			"input_kind", "rejection_reason_code", "event_ids_json", "sequence_from", "sequence_to", "status",
 			"binding_id", "binding_generation", "target_pod_uid", "created_at",
 			"updated_at", "committed_at",
 		},
@@ -623,12 +649,15 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			"created_at", "updated_at",
 		},
 		"queue_jobs": {
-			"id", "workspace_id", "kind", "partition_key", "dedupe_key",
+			"id", "workspace_id", "kind", "partition_key", "queue_partition_sequence", "dedupe_key",
 			"payload_version", "status", "payload_json", "priority",
 			"lease_token", "leased_by", "leased_at", "leased_until",
-			"attempt_count", "max_attempts", "available_at", "created_at",
+			"attempt_count", "defer_count", "max_attempts", "available_at", "created_at",
 			"updated_at", "acknowledged_at", "cancelled_at",
 			"dead_lettered_at", "last_error_kind", "last_error_message",
+		},
+		"queue_partition_counters": {
+			"workspace_id", "partition_key", "last_sequence", "created_at", "updated_at",
 		},
 	}
 	for table, wantColumns := range required {
@@ -639,6 +668,143 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			}
 			assertTableRLSForced(t, db, schema, table)
 		})
+	}
+}
+
+func TestQueuePartitionSequenceSchema(t *testing.T) {
+	_, admin, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	assertQueuePartitionSequenceSchema(t, admin, schema)
+}
+
+func assertQueuePartitionSequenceSchema(t *testing.T, db *sql.DB, schema string) {
+	t.Helper()
+	assertTableRLSForced(t, db, schema, "queue_partition_counters")
+	assertTableRLSForced(t, db, schema, "queue_jobs")
+	assertPrimaryKeyColumns(t, db, schema, "queue_partition_counters", []string{"workspace_id", "partition_key"})
+
+	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_partition_sequence"); !equalStringSlices(columns, []string{"workspace_id", "partition_key", "queue_partition_sequence"}) {
+		t.Fatalf("queue partition sequence index columns = %v; want workspace_id, partition_key, queue_partition_sequence", columns)
+	}
+	if !readIndexIsUnique(t, db, schema, "idx_queue_jobs_partition_sequence") {
+		t.Fatal("queue partition sequence index is not unique")
+	}
+	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_available"); !equalStringSlices(columns, []string{
+		"workspace_id", "kind", "status", "partition_key", "priority", "available_at", "queue_partition_sequence",
+	}) {
+		t.Fatalf("queue available index columns = %v; want queue scan order", columns)
+	}
+	if predicate := readIndexPredicate(t, db, schema, "idx_queue_jobs_available"); !strings.Contains(predicate, "status = 'pending'") {
+		t.Fatalf("queue available index predicate = %q; want pending jobs only", predicate)
+	}
+
+	for _, constraint := range []struct {
+		table    string
+		name     string
+		fragment string
+	}{
+		{table: "queue_partition_counters", name: "queue_partition_counters_partition_shape", fragment: "partition_key <> ''"},
+		{table: "queue_partition_counters", name: "queue_partition_counters_sequence_shape", fragment: "last_sequence >= 0"},
+		{table: "queue_jobs", name: "queue_jobs_partition_sequence_shape", fragment: "queue_partition_sequence > 0"},
+		{table: "queue_jobs", name: "queue_jobs_defer_count_shape", fragment: "defer_count >= 0"},
+	} {
+		definition := readCheckConstraintDefinition(t, db, schema, constraint.table, constraint.name)
+		if !strings.Contains(definition, constraint.fragment) {
+			t.Fatalf("%s definition = %q; want %q", constraint.name, definition, constraint.fragment)
+		}
+	}
+
+	var nullable string
+	var defaultValue sql.NullString
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT is_nullable, column_default
+		   FROM information_schema.columns
+		  WHERE table_schema = $1
+		    AND table_name = 'queue_jobs'
+		    AND column_name = 'queue_partition_sequence'`,
+		schema,
+	).Scan(&nullable, &defaultValue); err != nil {
+		t.Fatalf("read queue partition sequence column shape: %v", err)
+	}
+	if nullable != "NO" || defaultValue.Valid {
+		t.Fatalf("queue partition sequence column nullable=%q default=%q; want required with no default", nullable, defaultValue.String)
+	}
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT is_nullable, column_default
+		   FROM information_schema.columns
+		  WHERE table_schema = $1
+		    AND table_name = 'queue_jobs'
+		    AND column_name = 'defer_count'`,
+		schema,
+	).Scan(&nullable, &defaultValue); err != nil {
+		t.Fatalf("read queue defer count column shape: %v", err)
+	}
+	if nullable != "NO" || !defaultValue.Valid || defaultValue.String != "0" {
+		t.Fatalf("queue defer count column nullable=%q default=%q; want required default zero", nullable, defaultValue.String)
+	}
+
+	const (
+		workspaceID = "workspace_queue_sequence"
+		partition   = "session:workspace_queue_sequence:sesn_queue_sequence"
+		now         = "2026-07-29T00:00:00Z"
+	)
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO queue_partition_counters (
+			workspace_id, partition_key, last_sequence, created_at, updated_at
+		) VALUES ($1, $2, 1, $3, $3)`,
+		workspaceID,
+		partition,
+		now,
+	); err != nil {
+		t.Fatalf("insert queue partition counter: %v", err)
+	}
+	insertJob := func(id string, sequence int64) error {
+		t.Helper()
+		_, err := db.ExecContext(context.Background(),
+			`INSERT INTO queue_jobs (
+				id, workspace_id, kind, partition_key, queue_partition_sequence,
+				payload_version, status, payload_json, priority, attempt_count,
+				defer_count, max_attempts, available_at, created_at, updated_at
+			) VALUES ($1, $2, 'cleanup_session', $3, $4, 1, 'pending', '{}', 0, 0, 0, 10, $5, $5, $5)`,
+			id,
+			workspaceID,
+			partition,
+			sequence,
+			now,
+		)
+		return err
+	}
+	if err := insertJob("qjob_queue_sequence_one", 1); err != nil {
+		t.Fatalf("insert first queue sequence: %v", err)
+	}
+	if err := insertJob("qjob_queue_sequence_duplicate", 1); err == nil {
+		t.Fatal("duplicate queue partition sequence inserted successfully")
+	}
+	if err := insertJob("qjob_queue_sequence_zero", 0); err == nil {
+		t.Fatal("nonpositive queue partition sequence inserted successfully")
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO queue_jobs (
+			id, workspace_id, kind, partition_key, queue_partition_sequence,
+			payload_version, status, payload_json, priority, attempt_count,
+			defer_count, max_attempts, available_at, created_at, updated_at
+		) VALUES (
+			'qjob_queue_negative_defer', $1, 'cleanup_session', $2, 2,
+			1, 'pending', '{}', 0, 0, -1, 10, $3, $3, $3
+		)`,
+		workspaceID,
+		partition,
+		now,
+	); err == nil {
+		t.Fatal("negative queue defer count inserted successfully")
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO queue_partition_counters (
+			workspace_id, partition_key, last_sequence, created_at, updated_at
+		) VALUES ($1, 'session:invalid', -1, $2, $2)`,
+		workspaceID,
+		now,
+	); err == nil {
+		t.Fatal("negative queue partition counter inserted successfully")
 	}
 }
 
@@ -883,8 +1049,20 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 			'hash_mcp_claim', 'github/create_issue', '{}', 'committed', '{}',
 			'in_flight', 'req_claim', '2026-01-01T00:03:00Z',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
-		)`); err != nil {
+	)`); err != nil {
 		t.Fatalf("insert in-flight MCP claim: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			mcp_claim_status, created_at, updated_at
+		) VALUES (
+			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_mcp_consumed', 'mcp',
+			'hash_mcp_consumed', 'github/create_issue', '{}', 'committed', '{}',
+			'consumed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		)`); err != nil {
+		t.Fatalf("insert consumed MCP materialization: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_tool_results (
@@ -1716,6 +1894,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"memory_versions",
 		"platform_provider_keys",
 		"queue_jobs",
+		"queue_partition_counters",
 		"request_usage_details",
 		"sandbox_release_idempotency_keys",
 		"sandboxes",
@@ -2126,6 +2305,24 @@ func readIndexColumns(t *testing.T, db *sql.DB, schema string, indexName string)
 		t.Fatalf("index column rows: %v", err)
 	}
 	return columns
+}
+
+func readIndexIsUnique(t *testing.T, db *sql.DB, schema string, indexName string) bool {
+	t.Helper()
+	var unique bool
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT indexes.indisunique
+		   FROM pg_index indexes
+		   JOIN pg_class index_class ON index_class.oid = indexes.indexrelid
+		   JOIN pg_namespace namespace ON namespace.oid = index_class.relnamespace
+		  WHERE namespace.nspname = $1
+		    AND index_class.relname = $2`,
+		schema,
+		indexName,
+	).Scan(&unique); err != nil {
+		t.Fatalf("query index uniqueness: %v", err)
+	}
+	return unique
 }
 
 func readBaseTableNames(t *testing.T, db *sql.DB, schema string) []string {

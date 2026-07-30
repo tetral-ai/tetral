@@ -116,6 +116,7 @@ function validateRunMcpToolResponseCommon(response: Pick<RunMcpToolResponse, "st
       McpErrorKind.MCP_ERROR_KIND_TIMEOUT,
       McpErrorKind.MCP_ERROR_KIND_CREDENTIAL_REQUIRED,
       McpErrorKind.MCP_ERROR_KIND_INTERNAL,
+      McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST,
     )
   ) {
     return invalidRequest();

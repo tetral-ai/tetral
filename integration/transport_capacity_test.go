@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -183,6 +186,20 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 	if err != nil {
 		return nil, err
 	}
+	var payload struct {
+		Messages []struct {
+			Parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(request.GetPayloadJson()), &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 1 || payload.Messages[0].Parts[0].Type != "text" {
+		return nil, fmt.Errorf("runtime input payload does not contain one text message")
+	}
 	scope := &bridgev1.RuntimeScope{
 		RequestId:       "req_transport_" + s.suffix,
 		WorkspaceId:     request.GetWorkspaceId(),
@@ -194,13 +211,35 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 			TargetPodUid:      s.podUID,
 		},
 	}
+	runtimeLocalID := transportStableRuntimeID(
+		"runtime_message_draft",
+		request.GetWorkspaceId(),
+		request.GetSessionId(),
+		s.threadID,
+		"messages",
+		request.GetRuntimeInputId(),
+		"user_input",
+		"0",
+	)
 	if _, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
-		Scope:               scope,
-		RuntimeInputId:      request.GetRuntimeInputId(),
-		EventIds:            request.GetEventIds(),
-		SequenceFrom:        request.GetSequenceFrom(),
-		SequenceTo:          request.GetSequenceTo(),
-		HotContextPatchJson: request.GetPayloadJson(),
+		Scope:          scope,
+		RuntimeInputId: request.GetRuntimeInputId(),
+		EventIds:       request.GetEventIds(),
+		SequenceFrom:   request.GetSequenceFrom(),
+		SequenceTo:     request.GetSequenceTo(),
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  runtimeLocalID,
+			SourceKind:      "messages",
+			SourceId:        request.GetRuntimeInputId(),
+			SourceEventId:   request.GetEventIds()[0],
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
+			MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
+			Parts: []*bridgev1.RuntimePartDraft{{
+				RuntimeLocalPartId: transportStableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
+				PartKind:           "text",
+				PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, payload.Messages[0].Parts[0].Text),
+			}},
+		}},
 	}); err != nil {
 		return nil, err
 	}
@@ -226,6 +265,17 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 		return nil, err
 	}
 	return response, nil
+}
+
+func transportStableRuntimeID(parts ...string) string {
+	hasher := sha256.New()
+	var length [4]byte
+	for _, part := range parts {
+		binary.BigEndian.PutUint32(length[:], uint32(len([]byte(part)))) // #nosec G115 -- test identifiers are bounded below uint32.
+		_, _ = hasher.Write(length[:])
+		_, _ = hasher.Write([]byte(part))
+	}
+	return "stid_" + hex.EncodeToString(hasher.Sum(nil))
 }
 
 func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID string, bindingID string, podUID string, preparationID string) {

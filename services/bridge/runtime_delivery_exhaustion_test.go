@@ -235,12 +235,13 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationExhaustionReplaysAndPermi
 			assertExhaustedRuntimeDeliveryResult(t, replayed)
 			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			apiStore.Clock = store.Clock
-			exhaustedReplay, err := apiStore.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
-				RuntimeInputId: runtimeInputID,
-				TaskId:         taskID,
-				ResultJson:     taskNotificationCompletedResult(taskID, sourceEventID),
-			})
+			exhaustedReplay, err := apiStore.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+				t,
+				bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+				runtimeInputID,
+				taskID,
+				taskNotificationCompletedResult(taskID, sourceEventID),
+			))
 			if err != nil {
 				t.Fatalf("CommitTaskNotificationResult exhausted replay: %v", err)
 			}
@@ -251,12 +252,13 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationExhaustionReplaysAndPermi
 
 			pollInputID := "task_notification_poll:" + taskID
 			seedBridgeAPITaskNotificationInbox(t, admin, "default", sessionID, threadID, pollInputID, bindingID, podUID)
-			settled, err := apiStore.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
-				RuntimeInputId: pollInputID,
-				TaskId:         taskID,
-				ResultJson:     taskNotificationCompletedResult(taskID, sourceEventID),
-			})
+			settled, err := apiStore.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+				t,
+				bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+				pollInputID,
+				taskID,
+				taskNotificationCompletedResult(taskID, sourceEventID),
+			))
 			if err != nil {
 				t.Fatalf("CommitTaskNotificationResult later poll: %v", err)
 			}
@@ -387,7 +389,7 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationExistingInboxExhaustionUs
 	assertExhaustedTaskNotificationRowsWithInbox(t, admin, job, taskID, 1)
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationPostInboxTerminalRejectionDoesNotEmitSecondError(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationTerminalFinalizationWritesOneExhaustionRecord(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const sessionID = "sesn_task_terminal_inbox"
 	const threadID = "thr_task_terminal_inbox"
@@ -407,9 +409,6 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationPostInboxTerminalRejectio
 	job := exhaustionRuntimeJob(sessionID, threadID, runtimeInputID, "task_notification", nil)
 	terminal := RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, ErrorKind: "runtime_contract_failure", ErrorMessage: "runtime rejected task notification"}
 
-	if err := store.RecordRuntimeInputRejected(context.Background(), job, terminal); err != nil {
-		t.Fatalf("RecordRuntimeInputRejected: %v", err)
-	}
 	result, err := store.FinalizeRuntimeDelivery(context.Background(), job, terminal)
 	if err != nil {
 		t.Fatalf("FinalizeRuntimeDelivery: %v", err)
@@ -425,8 +424,8 @@ func TestPostgreSQLRuntimeDeliveryStoreTaskNotificationPostInboxTerminalRejectio
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='commit_task_notification_result'`, sessionID).Scan(&operations); err != nil {
 		t.Fatalf("count terminal task operations: %v", err)
 	}
-	if errorsCount != 1 || operations != 0 {
-		t.Fatalf("terminal task errors=%d exhaustion operations=%d; want one ordinary error and no second exhaustion record", errorsCount, operations)
+	if errorsCount != 1 || operations != 1 {
+		t.Fatalf("terminal task errors=%d exhaustion operations=%d; want one exhaustion event and operation", errorsCount, operations)
 	}
 }
 

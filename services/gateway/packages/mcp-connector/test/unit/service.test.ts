@@ -9,9 +9,10 @@ import { McpConnectorError } from "../../src/errors.js";
 import { McpConnectorMetricsRegistry } from "../../src/metrics.js";
 import { MCP_MANIFEST_NOTIFY_RETRY_DELAYS_MS, McpConnectorServiceShell, GrpcStatusError } from "../../src/service.js";
 import type { ClaimMcpToolResultRequest, ClaimMcpToolResultResponse, CommitMcpToolResultRequest, CommitMcpToolResultResponse } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { BridgeWriteStatus } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
+import { BridgeWriteStatus, ReceiptApplicationDisposition } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { McpAuthenticator, McpClient, McpClientTool, McpConnectorLogger } from "../../src/service.js";
 import { InMemoryMcpIdempotencyStore } from "../../src/idempotency.js";
+import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import { canonicalJson } from "../../src/idempotency.js";
 import type { McpIdempotencyStore } from "../../src/idempotency.js";
 import type { RuntimeBindingRequestIdentity } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -303,6 +304,28 @@ describe("McpConnectorServiceShell", () => {
     expect(bridge.commitCalls).toHaveLength(1);
   });
 
+  test("retries a lost commit acknowledgement without repeating the external MCP call", async () => {
+    const bridge = new RecordingMcpToolResultBridgeClient();
+    bridge.commitTransportFailuresRemaining = 1;
+    const client = new RecordingMcpClient();
+    client.resultText = "created";
+    const service = createService(
+      client,
+      new RecordingManifestChangeNotifier(),
+      new MemoryLogger(),
+      undefined,
+      bridgeBackedStore(bridge),
+    );
+
+    await expect(service.runMcpTool(validRunRequest(), authorizationMetadata())).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "created",
+    });
+    expect(client.calls).toEqual(["callTool"]);
+    expect(bridge.commitCalls).toHaveLength(2);
+    expect(bridge.commitCalls[0]).toBe(bridge.commitCalls[1]);
+  });
+
   test("commits inline media through Bridge and returns refs only", async () => {
     const bridge = new RecordingMcpToolResultBridgeClient();
     const client = new RecordingMcpClient();
@@ -347,6 +370,28 @@ describe("McpConnectorServiceShell", () => {
     expect(client.calls).toEqual([]);
     expect(bridge.claimCalls).toHaveLength(1);
     expect(bridge.commitCalls).toHaveLength(0);
+  });
+
+  test("stops stale-custody MCP claims before external tool execution", async () => {
+    const client = new RecordingMcpClient();
+    const service = createService(
+      client,
+      new RecordingManifestChangeNotifier(),
+      new MemoryLogger(),
+      undefined,
+      new StaleCustodyIdempotencyStore(),
+    );
+
+    const response = await service.runMcpTool(validRunRequest(), authorizationMetadata());
+
+    expect(response).toEqual({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool execution lost runtime custody.",
+      attachments: [],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST,
+      retryStatus: undefined,
+    });
+    expect(client.calls).toEqual([]);
   });
 
   test("fences same-replica concurrent Bridge-backed delivery before second MCP call", async () => {
@@ -646,6 +691,7 @@ describe("McpConnectorServiceShell", () => {
       attachments: [],
       errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
       retryStatus: undefined,
+      materializationHandle: "sevt_tool_1",
     });
     expect(bridge.commitCalls).toHaveLength(1);
     expect(logger.records).toContainEqual(expect.objectContaining({
@@ -833,6 +879,7 @@ function bridgeBackedStore(client: RecordingMcpToolResultBridgeClient): BridgeAP
       metadata.set("authorization", "bearer projected-token");
       return metadata;
     },
+    sleep: async () => undefined,
   });
 }
 
@@ -976,12 +1023,28 @@ class ThrowingClaimIdempotencyStore implements McpIdempotencyStore {
   }
 }
 
+class StaleCustodyIdempotencyStore implements McpIdempotencyStore {
+  claim(): ReturnType<McpIdempotencyStore["claim"]> {
+    return { status: "stale_custody" };
+  }
+
+  store(): ReturnType<McpIdempotencyStore["store"]> {
+    throw new Error("stale custody must not execute or store");
+  }
+
+  fail(): ReturnType<McpIdempotencyStore["fail"]> {
+    return undefined;
+  }
+}
+
 class RecordingMcpToolResultBridgeClient {
   readonly claimCalls: ClaimMcpToolResultRequest[] = [];
   readonly commitCalls: CommitMcpToolResultRequest[] = [];
   readonly stored = new Map<string, CommitMcpToolResultRequest>();
+  readonly declarations = new Map<string, ReturnType<typeof fakeMcpMaterializationDeclaration>>();
   readonly claims = new Map<string, ClaimMcpToolResultRequest>();
   inFlight = false;
+  commitTransportFailuresRemaining = 0;
 
   claimMcpToolResult(
     request: ClaimMcpToolResultRequest,
@@ -991,7 +1054,7 @@ class RecordingMcpToolResultBridgeClient {
   ) {
     this.claimCalls.push(request);
     if (this.inFlight) {
-      callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "mcp_claim_in_flight" }, resultJson: "" });
+      callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "mcp_claim_in_flight" }, resultJson: "", declaration: undefined });
       return;
     }
     const existing = this.stored.get(bridgeResultKey(request));
@@ -999,21 +1062,26 @@ class RecordingMcpToolResultBridgeClient {
       const claim = this.claims.get(bridgeResultKey(request));
       if (claim !== undefined) {
         if (!sameBridgeMcpResult(claim, request)) {
-          callback(grpcServiceError(status.ALREADY_EXISTS), { ack: undefined, resultJson: "" });
+          callback(grpcServiceError(status.ALREADY_EXISTS), { ack: undefined, resultJson: "", declaration: undefined });
           return;
         }
-        callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "mcp_claim_in_flight" }, resultJson: "" });
+        callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "mcp_claim_in_flight" }, resultJson: "", declaration: undefined });
         return;
       }
       this.claims.set(bridgeResultKey(request), request);
-      callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" }, resultJson: "" });
+      callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" }, resultJson: "", declaration: undefined });
       return;
     }
     if (!sameBridgeMcpResult(existing, request)) {
-      callback(grpcServiceError(status.ALREADY_EXISTS), { ack: undefined, resultJson: "" });
+      callback(grpcServiceError(status.ALREADY_EXISTS), { ack: undefined, resultJson: "", declaration: undefined });
       return;
     }
-    callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE, runtimeInputId: "", runtimeWriteId: "", errorCode: "" }, resultJson: existing.resultJson });
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: existing.resultJson,
+      materializationHandle: request.toolUseEventId,
+      declaration: this.declarations.get(bridgeResultKey(request)),
+    });
   }
 
   commitMcpToolResult(
@@ -1023,26 +1091,135 @@ class RecordingMcpToolResultBridgeClient {
     callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
   ) {
     this.commitCalls.push(request);
+    if (this.commitTransportFailuresRemaining > 0) {
+      this.commitTransportFailuresRemaining -= 1;
+      callback(grpcServiceError(status.UNAVAILABLE), {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
     const key = bridgeResultKey(request);
     const existing = this.stored.get(key);
     if (existing !== undefined) {
       if (!sameBridgeMcpResult(existing, request)) {
-        callback(grpcServiceError(status.ALREADY_EXISTS), { ack: undefined, refsOnlyResultJson: "" });
+        callback(grpcServiceError(status.ALREADY_EXISTS), { ack: undefined, refsOnlyResultJson: "", declaration: undefined });
         return;
       }
-      callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE, runtimeInputId: "", runtimeWriteId: "", errorCode: "" }, refsOnlyResultJson: existing.resultJson });
+      callback(null, {
+        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+        refsOnlyResultJson: existing.resultJson,
+        materializationHandle: request.toolUseEventId,
+        declaration: this.declarations.get(key),
+      });
       return;
     }
     const claim = this.claims.get(key);
     if (claim === undefined || claim.scope?.requestId !== request.scope?.requestId || !sameBridgeMcpResult(claim, request)) {
-      callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "mcp_claim_not_owned" }, refsOnlyResultJson: "" });
+      callback(null, {
+        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "mcp_claim_not_owned" },
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
       return;
     }
     this.claims.delete(key);
     const refsOnlyResultJson = fakeBridgeCompleteMcpAttachmentRefs(request);
+    const declaration = fakeMcpMaterializationDeclaration(request, refsOnlyResultJson);
     this.stored.set(key, { ...request, resultJson: refsOnlyResultJson, inlineMedia: [] });
-    callback(null, { ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" }, refsOnlyResultJson });
+    this.declarations.set(key, declaration);
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      refsOnlyResultJson,
+      materializationHandle: request.toolUseEventId,
+      declaration,
+    });
   }
+}
+
+function fakeMcpMaterializationDeclaration(request: CommitMcpToolResultRequest, refsOnlyResultJson: string) {
+  const parsed = JSON.parse(refsOnlyResultJson) as {
+    response: {
+      attachments: Array<{
+        attachment_ref: string;
+        mime: string;
+        suggested_filename: string;
+      }>;
+    };
+  };
+  return {
+    receipts: [{
+      sessionThreadId: request.scope?.sessionThreadId ?? "",
+      operationKind: "commit_mcp_tool_result",
+      sourceKind: "mcp_tool_execution",
+      sourceId: fakeMcpMaterializationSourceId(request),
+      events: [],
+      messages: [],
+      pendingAttachmentDeltaJson: parsed.response.attachments.map((attachment) => JSON.stringify({
+        origin: {
+          transient: {
+            attachmentRef: attachment.attachment_ref,
+            sourceToolUseEventId: request.toolUseEventId,
+            sourcePath: `mcp:${request.mcpServerName}/${attachment.suggested_filename}`,
+            detail: "auto",
+          },
+        },
+        mime: attachment.mime,
+        filename: attachment.suggested_filename,
+      })),
+      pendingToolDeltaJson: [],
+      prefixConsumptions: [],
+      declarationDigest: fakeMcpMaterializationDeclarationDigest(request),
+      requestReschedule: undefined,
+      childLifecycle: [],
+      sealedAgentMail: undefined,
+      idleCloseout: undefined,
+      compactedThroughMessageSequence: undefined,
+    }],
+    observedBindingId: request.scope?.binding?.bindingId ?? "",
+    observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+    applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+  };
+}
+
+function fakeMcpMaterializationSourceId(request: CommitMcpToolResultRequest): string {
+  const encoder = new TextEncoder();
+  const parts = [
+    "mcp_tool_execution",
+    request.toolUseEventId,
+    request.normalizedInputHash,
+  ].map((part) => encoder.encode(part));
+  const framed = new Uint8Array(parts.reduce((total, part) => total + 4 + part.byteLength, 0));
+  const view = new DataView(framed.buffer);
+  let offset = 0;
+  for (const part of parts) {
+    view.setUint32(offset, part.byteLength, false);
+    offset += 4;
+    framed.set(part, offset);
+    offset += part.byteLength;
+  }
+  return `stid_${createHash("sha256").update(framed).digest("hex")}`;
+}
+
+function fakeMcpMaterializationDeclarationDigest(request: CommitMcpToolResultRequest): string {
+  const inlineMedia = request.inlineMedia.map((media) => ({
+      content_sha256: createHash("sha256").update(media.data).digest("hex"),
+      mime: media.mime,
+      suggested_filename: media.suggestedFilename,
+    }));
+  const declaration = `{
+    "inline_media":${JSON.stringify(inlineMedia)},
+    "input":${canonicalRunToolJSON(request.inputJson)},
+    "mcp_server_name":${JSON.stringify(request.mcpServerName)},
+    "normalized_input_hash":${JSON.stringify(request.normalizedInputHash)},
+    "operation_kind":"commit_mcp_tool_result",
+    "result":${canonicalRunToolJSON(request.resultJson)},
+    "session_thread_id":${JSON.stringify(request.scope?.sessionThreadId ?? "")},
+    "tool_name":${JSON.stringify(request.toolName)},
+    "tool_use_event_id":${JSON.stringify(request.toolUseEventId)}
+  }`;
+  return createHash("sha256").update(canonicalRunToolJSON(declaration), "utf8").digest("hex");
 }
 
 class DeadlineClaimBridgeClient {
@@ -1055,7 +1232,7 @@ class DeadlineClaimBridgeClient {
     callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
   ) {
     this.claimOptions.push(options);
-    callback(grpcServiceError(status.DEADLINE_EXCEEDED), { ack: undefined, resultJson: "" });
+    callback(grpcServiceError(status.DEADLINE_EXCEEDED), { ack: undefined, resultJson: "", declaration: undefined });
   }
 
   commitMcpToolResult() {
@@ -1075,7 +1252,7 @@ function fakeBridgeCompleteMcpAttachmentRefs(request: CommitMcpToolResultRequest
 }
 
 function bridgeResultKey(request: ClaimMcpToolResultRequest | CommitMcpToolResultRequest): string {
-  return `${request.scope?.workspaceId}/${request.scope?.sessionId}/${request.toolUseEventId}`;
+  return `${request.scope?.workspaceId}/${request.scope?.sessionId}/${request.scope?.sessionThreadId}/${request.toolUseEventId}`;
 }
 
 function sameBridgeMcpResult(left: ClaimMcpToolResultRequest | CommitMcpToolResultRequest, right: ClaimMcpToolResultRequest | CommitMcpToolResultRequest): boolean {

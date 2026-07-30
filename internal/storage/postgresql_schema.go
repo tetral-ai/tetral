@@ -441,6 +441,7 @@ const (
 		session_thread_id TEXT NOT NULL,
 		runtime_input_id TEXT NOT NULL,
 		input_kind TEXT NOT NULL,
+		rejection_reason_code TEXT,
 		event_ids_json TEXT NOT NULL DEFAULT '[]',
 		sequence_from BIGINT,
 		sequence_to BIGINT,
@@ -453,8 +454,8 @@ const (
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification')),
-		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('delivering', 'accepted', 'committed', 'cancelled', 'dead_lettered')),
+		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection')),
+		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
 			OR (sequence_from IS NOT NULL AND sequence_to IS NOT NULL AND sequence_from <= sequence_to)
@@ -591,6 +592,7 @@ const (
 			'run_memory',
 			'create_transient_attachment',
 			'mcp_manifest_changed',
+			'commit_mcp_tool_result',
 			'commit_internal_tool_repair',
 			'commit_stable_reasoning_part',
 			'commit_runtime_termination'
@@ -619,7 +621,7 @@ const (
 		mcp_claim_lease_expires_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (workspace_id, session_id, tool_use_event_id),
+		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'memory', 'mcp')),
 		CONSTRAINT session_runtime_tool_results_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
@@ -627,11 +629,12 @@ const (
 			memory_projection_state IS NULL
 			OR memory_projection_state IN ('pending', 'refreshed', 'skipped_cold')
 		),
-		CONSTRAINT session_runtime_tool_results_mcp_claim_status_shape CHECK (mcp_claim_status IN ('stored', 'in_flight')),
+		CONSTRAINT session_runtime_tool_results_mcp_claim_status_shape CHECK (mcp_claim_status IN ('stored', 'in_flight', 'consumed')),
 		CONSTRAINT session_runtime_tool_results_mcp_claim_shape CHECK (
 			(tool_kind <> 'mcp' AND mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 			OR (tool_kind = 'mcp' AND (
 				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'consumed' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
 			))
 		),
@@ -698,7 +701,7 @@ const (
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, attachment_ref),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_transient_attachments_status_shape CHECK (status IN ('uploading', 'active', 'consumed', 'expired', 'deleting', 'deleted', 'failed')),
+		CONSTRAINT session_transient_attachments_status_shape CHECK (status IN ('uploading', 'staged', 'active', 'consumed', 'expired', 'deleting', 'deleted', 'failed')),
 		CONSTRAINT session_transient_attachments_mime_shape CHECK (mime IN ('application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'))
 	)`
 
@@ -772,6 +775,7 @@ const (
 		workspace_id TEXT NOT NULL,
 		kind TEXT NOT NULL,
 		partition_key TEXT NOT NULL,
+		queue_partition_sequence BIGINT NOT NULL,
 		dedupe_key TEXT,
 		payload_version INTEGER NOT NULL DEFAULT 1,
 		status TEXT NOT NULL,
@@ -782,6 +786,7 @@ const (
 		leased_at TIMESTAMPTZ,
 		leased_until TIMESTAMPTZ,
 		attempt_count INTEGER NOT NULL DEFAULT 0,
+		defer_count INTEGER NOT NULL DEFAULT 0,
 		max_attempts INTEGER NOT NULL DEFAULT 10,
 		available_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
@@ -796,12 +801,25 @@ const (
 		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_prepare', 'environment_build', 'environment_ready_fanout')),
 		CONSTRAINT queue_jobs_status_shape CHECK (status IN ('pending', 'leased', 'acknowledged', 'cancelled', 'dead_lettered')),
 		CONSTRAINT queue_jobs_payload_version_shape CHECK (payload_version > 0),
+		CONSTRAINT queue_jobs_partition_sequence_shape CHECK (queue_partition_sequence > 0),
 		CONSTRAINT queue_jobs_attempt_count_shape CHECK (attempt_count >= 0),
+		CONSTRAINT queue_jobs_defer_count_shape CHECK (defer_count >= 0),
 		CONSTRAINT queue_jobs_max_attempts_shape CHECK (max_attempts >= 0),
 		CONSTRAINT queue_jobs_lease_shape CHECK (
 			(status = 'leased' AND lease_token IS NOT NULL AND leased_by IS NOT NULL AND leased_at IS NOT NULL AND leased_until IS NOT NULL)
 			OR (status <> 'leased')
 		)
+	)`
+
+	createPostgreSQLQueuePartitionCountersTable = `CREATE TABLE IF NOT EXISTS queue_partition_counters (
+		workspace_id TEXT NOT NULL,
+		partition_key TEXT NOT NULL,
+		last_sequence BIGINT NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, partition_key),
+		CONSTRAINT queue_partition_counters_partition_shape CHECK (partition_key <> ''),
+		CONSTRAINT queue_partition_counters_sequence_shape CHECK (last_sequence >= 0)
 	)`
 
 	createPostgreSQLSessionResourcesTable = `CREATE TABLE IF NOT EXISTS session_resources (
@@ -1315,7 +1333,7 @@ END $$`
 	createPostgreSQLSessionMessagesRepairKeyIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_repair_key_unique ON session_messages(workspace_id, session_id, session_thread_id, repair_key) WHERE repair_key IS NOT NULL`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status, expires_at)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
-	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('delivering', 'accepted')`
+	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('delivering', 'accepted', 'parked')`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`
 	createPostgreSQLRuntimeStatusCleanupDueIndex            = `CREATE INDEX IF NOT EXISTS idx_session_runtime_status_cleanup_due ON session_runtime_status(workspace_id, cleanup_after, cleanup_job_id) WHERE status = 'idle' AND binding_id IS NOT NULL`
 	createPostgreSQLBridgeOperationsRuntimeWriteIndex       = `CREATE INDEX IF NOT EXISTS idx_session_bridge_operations_runtime_write ON session_bridge_operations(workspace_id, session_id, runtime_write_id) WHERE runtime_write_id IS NOT NULL`
@@ -1329,7 +1347,8 @@ END $$`
 	createPostgreSQLPlatformProviderKeysProviderStatusIndex = `CREATE INDEX IF NOT EXISTS idx_platform_provider_keys_provider_status ON platform_provider_keys(provider_id, status, priority, key_id)` //nolint:gosec // Provider key-pool index name, not a secret value.
 	createPostgreSQLQueueJobsActiveDedupeIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_active_dedupe ON queue_jobs(workspace_id, dedupe_key) WHERE status IN ('pending', 'leased')`
 	createPostgreSQLQueueJobsLeasedPartitionIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_partition ON queue_jobs(workspace_id, partition_key) WHERE status = 'leased'`
-	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, partition_key, priority DESC, available_at, created_at, id) WHERE status = 'pending'`
+	createPostgreSQLQueueJobsPartitionSequenceIndex         = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_partition_sequence ON queue_jobs(workspace_id, partition_key, queue_partition_sequence)`
+	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, partition_key, priority DESC, available_at, queue_partition_sequence) WHERE status = 'pending'`
 	createPostgreSQLSessionResourcesSessionSeqIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resources_session_seq ON session_resources(workspace_id, session_id, storage_sequence)`
 	createPostgreSQLSessionResourcesTypeIndex               = `CREATE INDEX IF NOT EXISTS idx_session_resources_type ON session_resources(workspace_id, session_id, type, detached_at)`
 	createPostgreSQLSessionGitTicketsLiveIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_git_tickets_live ON session_git_tickets(workspace_id, session_id) WHERE status = 'live'`
@@ -1383,13 +1402,14 @@ BEGIN
 	   AND mcp_claim_status IS NULL;
 	ALTER TABLE session_runtime_tool_results
 		ADD CONSTRAINT session_runtime_tool_results_mcp_claim_status_shape
-		CHECK (mcp_claim_status IS NULL OR mcp_claim_status IN ('stored', 'in_flight'));
+		CHECK (mcp_claim_status IS NULL OR mcp_claim_status IN ('stored', 'in_flight', 'consumed'));
 	ALTER TABLE session_runtime_tool_results
 		ADD CONSTRAINT session_runtime_tool_results_mcp_claim_shape
 		CHECK (
 			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 			OR (tool_kind = 'mcp' AND (
 				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'consumed' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
 			))
 		);
@@ -1405,6 +1425,7 @@ BEGIN
 			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 			OR (tool_kind = 'mcp' AND mcp_claim_status IS NOT NULL AND (
 				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'consumed' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
 			))
 		);
@@ -1462,6 +1483,7 @@ var rlsTargets = []string{
 	"session_output_captures",
 	"request_usage_details",
 	"session_provider_auth",
+	"queue_partition_counters",
 	"queue_jobs",
 	"agents",
 	"agent_versions",
@@ -1585,6 +1607,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_request_usage_details", createPostgreSQLRequestUsageDetailsTable},
 		{"create_session_provider_auth", createPostgreSQLSessionProviderAuthTable},
 		{"create_platform_provider_keys", createPostgreSQLPlatformProviderKeysTable},
+		{"create_queue_partition_counters", createPostgreSQLQueuePartitionCountersTable},
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
 
 		// Environment shape cleanup. The service has no migration-compatibility
@@ -1628,6 +1651,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_platform_provider_keys_provider_status", createPostgreSQLPlatformProviderKeysProviderStatusIndex},
 		{"index_queue_jobs_active_dedupe", createPostgreSQLQueueJobsActiveDedupeIndex},
 		{"index_queue_jobs_leased_partition", createPostgreSQLQueueJobsLeasedPartitionIndex},
+		{"index_queue_jobs_partition_sequence", createPostgreSQLQueueJobsPartitionSequenceIndex},
 		{"index_queue_jobs_available", createPostgreSQLQueueJobsAvailableIndex},
 		{"index_session_resources_session_seq", createPostgreSQLSessionResourcesSessionSeqIndex},
 		{"index_session_resources_type", createPostgreSQLSessionResourcesTypeIndex},
@@ -1884,6 +1908,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 				'run_memory',
 				'create_transient_attachment',
 				'mcp_manifest_changed',
+				'commit_mcp_tool_result',
 				'commit_internal_tool_repair',
 				'commit_runtime_termination'
 			)) NOT VALID`},
@@ -2109,6 +2134,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 				'run_memory',
 				'create_transient_attachment',
 				'mcp_manifest_changed',
+				'commit_mcp_tool_result',
 				'commit_internal_tool_repair',
 				'commit_runtime_termination',
 				'settle_sealed_agent_mail'

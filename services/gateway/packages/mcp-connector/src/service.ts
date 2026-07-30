@@ -35,7 +35,7 @@ import { catalogEntryByName } from "./catalog.js";
 import { validateListMcpToolsRequest, validateListMcpToolsResponse, validatePendingRunMcpToolResponse, validateRunMcpToolRequest } from "./bounds.js";
 import { McpConnectorError, mcpErrorKind } from "./errors.js";
 import { formatMcpToolResult } from "./formatter.js";
-import { canonicalJson, normalizedInputHash } from "./idempotency.js";
+import { McpIdempotencyStaleCustodyError, canonicalJson, normalizedInputHash } from "./idempotency.js";
 import { McpConnectorMetricsRegistry } from "./metrics.js";
 import type { McpConnectorErrorCode } from "./errors.js";
 import type { McpCallToolResult } from "./formatter.js";
@@ -401,6 +401,14 @@ export class McpConnectorServiceShell {
       const execution = { contentItems: 0, refreshTriggered: false };
       return this.finishRunMcpTool(request, response, execution, started);
     }
+    if (claim.status === "stale_custody") {
+      return this.finishRunMcpTool(
+        request,
+        mcpIdempotencyRuntimeError("mcp_custody_lost", "MCP tool execution lost runtime custody."),
+        { contentItems: 0, refreshTriggered: false },
+        started,
+      );
+    }
     if (claim.status === "conflict") {
       return this.finishRunMcpTool(request, mcpIdempotencyRuntimeError("mcp_claim_conflict", "MCP tool idempotency conflict."), { contentItems: 0, refreshTriggered: false }, started);
     }
@@ -419,8 +427,16 @@ export class McpConnectorServiceShell {
           refreshTriggered: execution.refreshTriggered,
         }, idempotencyContext);
         return this.finishRunMcpTool(request, storedResponse, execution, started);
-      } catch {
+      } catch (error) {
         await this.#idempotencyStore.fail(idempotencyKey, idempotencyContext);
+        if (error instanceof McpIdempotencyStaleCustodyError) {
+          return this.finishRunMcpTool(
+            request,
+            mcpIdempotencyRuntimeError("mcp_custody_lost", "MCP tool execution lost runtime custody."),
+            execution,
+            started,
+          );
+        }
         return this.finishRunMcpTool(request, mcpIdempotencyRuntimeError("mcp_commit_failed", "MCP tool result could not be committed."), execution, started);
       }
     } catch (error) {
@@ -771,6 +787,8 @@ function mcpErrorKindName(kind: McpErrorKind): McpConnectorErrorCode | "" {
       return "mcp_in_flight";
     case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:
       return "mcp_commit_failed";
+    case McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST:
+      return "mcp_custody_lost";
     case McpErrorKind.MCP_ERROR_KIND_INTERNAL:
       return "mcp_internal_error";
     default:
@@ -778,13 +796,17 @@ function mcpErrorKindName(kind: McpErrorKind): McpConnectorErrorCode | "" {
   }
 }
 
-function mcpIdempotencyRuntimeError(code: "mcp_claim_conflict" | "mcp_in_flight" | "mcp_commit_failed", message: string): RunMcpToolResponse {
+function mcpIdempotencyRuntimeError(code: "mcp_claim_conflict" | "mcp_in_flight" | "mcp_commit_failed" | "mcp_custody_lost", message: string): RunMcpToolResponse {
   return {
     status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
     resultText: message,
     attachments: [],
     errorKind: mcpErrorKind(code),
-    retryStatus: code === "mcp_claim_conflict" ? McpRetryStatus.MCP_RETRY_STATUS_TERMINAL : McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
+    retryStatus: code === "mcp_custody_lost"
+      ? undefined
+      : code === "mcp_claim_conflict"
+        ? McpRetryStatus.MCP_RETRY_STATUS_TERMINAL
+        : McpRetryStatus.MCP_RETRY_STATUS_RETRYING,
   };
 }
 

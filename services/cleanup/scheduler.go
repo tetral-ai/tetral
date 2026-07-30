@@ -66,6 +66,12 @@ func (s *Scheduler) ClaimDue(ctx context.Context, request ClaimDueRequest) ([]Cl
 		if err != nil {
 			return err
 		}
+		type cleanupEnqueue struct {
+			sessionID    string
+			cleanupJobID string
+			request      queue.EnqueueRequest
+		}
+		enqueues := make([]cleanupEnqueue, 0, len(sessionIDs))
 		for _, sessionID := range sessionIDs {
 			cleanupJobID := s.newID("cleanup_")
 			queueJobID := s.newID(queue.JobIDPrefix)
@@ -80,25 +86,36 @@ func (s *Scheduler) ClaimDue(ctx context.Context, request ClaimDueRequest) ([]Cl
 			if err != nil {
 				return err
 			}
-			job, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-				ID:             queueJobID,
-				WorkspaceID:    request.WorkspaceID,
-				Kind:           queue.KindCleanupSession,
-				PartitionKey:   queue.FormatSessionPartitionKey(request.WorkspaceID, sessionID),
-				DedupeKey:      queue.FormatCleanupSessionDedupeKey(request.WorkspaceID, sessionID, cleanupJobID),
-				PayloadVersion: 1,
-				PayloadJSON:    payload,
-				AvailableAt:    now,
-				Now:            now,
+			enqueues = append(enqueues, cleanupEnqueue{
+				sessionID:    sessionID,
+				cleanupJobID: cleanupJobID,
+				request: queue.EnqueueRequest{
+					ID:             queueJobID,
+					WorkspaceID:    request.WorkspaceID,
+					Kind:           queue.KindCleanupSession,
+					PartitionKey:   queue.FormatSessionPartitionKey(request.WorkspaceID, sessionID),
+					DedupeKey:      queue.FormatCleanupSessionDedupeKey(request.WorkspaceID, sessionID, cleanupJobID),
+					PayloadVersion: 1,
+					PayloadJSON:    payload,
+					AvailableAt:    now,
+					Now:            now,
+				},
 			})
-			if err != nil {
-				return err
-			}
+		}
+		requests := make([]queue.EnqueueRequest, len(enqueues))
+		for index := range enqueues {
+			requests[index] = enqueues[index].request
+		}
+		jobs, err := queue.EnqueueBatchTx(ctx, tx, requests)
+		if err != nil {
+			return err
+		}
+		for index, enqueue := range enqueues {
 			claimed = append(claimed, ClaimedCleanupJob{
 				WorkspaceID:  request.WorkspaceID,
-				SessionID:    sessionID,
-				CleanupJobID: cleanupJobID,
-				QueueJobID:   job.ID,
+				SessionID:    enqueue.sessionID,
+				CleanupJobID: enqueue.cleanupJobID,
+				QueueJobID:   jobs[index].ID,
 			})
 		}
 		return nil

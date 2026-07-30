@@ -66,10 +66,6 @@ describe("Runtime approval reviewer", () => {
       threadCreator,
       now: () => createdAt,
       waitTimeoutMs: 10,
-      registerCommitScope: (input) => {
-        steps.push(`register-scope:${input.sessionThreadId}`);
-        return () => steps.push(`unregister-scope:${input.sessionThreadId}`);
-      },
     });
 
     const result = await reviewer(validReviewRequest());
@@ -108,10 +104,8 @@ describe("Runtime approval reviewer", () => {
     });
     expect(steps).toEqual([
       "create-thread",
-      `register-scope:${input.sessionThreadId}`,
       "preload-thread",
       "enqueue-input",
-      `unregister-scope:${input.sessionThreadId}`,
     ]);
     expect(threadCreator.creations).toHaveLength(1);
     expect(threadCreator.creations[0]).toMatchObject({
@@ -387,6 +381,47 @@ describe("Runtime approval reviewer", () => {
     await busyReview;
   });
 
+  test("returns stale custody when the durable sidecar close receipt cannot be applied", async () => {
+    const blocked = deferred<void>();
+    const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")], {
+      waitGate: async (command) => {
+        const input = host.inputs.findLast((candidate) => candidate.sessionThreadId === command.sessionThreadId);
+        if (input?.kind === "approval_review" && input.targetModelToolCallId === "tool_call_busy") {
+          await blocked.promise;
+        }
+      },
+    });
+    const threadCreator = new RecordingReviewerThreadCreator([], undefined, {
+      ok: false,
+      message: "scope_superseded",
+      discardHotState: true,
+    });
+    const reviewer = createRuntimeApprovalReviewer(() => host, {
+      model: platformReviewerModel,
+      threadCreator,
+      now: () => createdAt,
+      waitTimeoutMs: 100,
+    });
+    const approvalReviewerManager = new AutoApprovalReviewerManager();
+    const parent = userMessage("sesn_1", "msg_parent", "parent");
+    const busyReview = reviewer(validReviewRequest({
+      approvalReviewerManager,
+      targetModelToolCallId: "tool_call_busy",
+      parentTranscript: { generation: 1, messages: [parent] },
+    }));
+    await waitFor(() => host.waits.length >= 1);
+
+    await expect(reviewer(validReviewRequest({
+      approvalReviewerManager,
+      targetModelToolCallId: "tool_call_sidecar",
+      parentTranscript: { generation: 1, messages: [parent] },
+    }))).resolves.toEqual({ type: "stale_custody" });
+    expect(host.closedThreads).toHaveLength(0);
+
+    blocked.resolve(undefined);
+    await busyReview;
+  });
+
   test("creates the first overlapping sidecar unseeded with a full parent feed", async () => {
     const blocked = deferred<void>();
     const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")], {
@@ -523,7 +558,7 @@ describe("Runtime approval reviewer", () => {
     expect(host.failures).toHaveLength(0);
     expect(threadCreator.closes).toHaveLength(0);
 
-    manager.dispose();
+    await Effect.runPromise(manager.dispose());
     expect(manager.executionState(input.reviewId)).toBeUndefined();
   });
 
@@ -585,7 +620,7 @@ describe("Runtime approval reviewer", () => {
     expect(host.closedThreads).toContain(sidecarInput.sessionThreadId);
     trunkGate.resolve(undefined);
     await trunk;
-    manager.dispose();
+    await Effect.runPromise(manager.dispose());
   });
 
   test("retains a tokenless accepted trunk until manager disposal without fabricating an outcome", async () => {
@@ -622,7 +657,7 @@ describe("Runtime approval reviewer", () => {
     expect(host.failures).toHaveLength(0);
     expect(threadCreator.closes).toHaveLength(0);
 
-    manager.dispose();
+    await Effect.runPromise(manager.dispose());
     expect(manager.executionState(input.reviewId)).toBeUndefined();
   });
 
@@ -684,7 +719,7 @@ describe("Runtime approval reviewer", () => {
     await trunk;
     expect(manager.ephemeralReviewIds()).toContain(sidecarInput.reviewId);
     expect(threadCreator.closes.filter((creation) => creation.reviewId === sidecarInput.reviewId)).toHaveLength(0);
-    manager.dispose();
+    await Effect.runPromise(manager.dispose());
     expect(manager.ephemeralReviewIds()).not.toContain(sidecarInput.reviewId);
     expect(threadCreator.closes.filter((creation) => creation.reviewId === sidecarInput.reviewId)).toHaveLength(0);
   });
@@ -886,7 +921,7 @@ describe("Runtime approval reviewer", () => {
     const request = validReviewRequest();
 
     await firstReviewer(request);
-    request.approvalReviewerManager.dispose();
+    await Effect.runPromise(request.approvalReviewerManager.dispose());
     await secondReviewer({ ...request, approvalReviewerManager: new AutoApprovalReviewerManager() });
 
     expect(host.inputs).toHaveLength(2);
@@ -1006,7 +1041,7 @@ describe("Runtime approval reviewer", () => {
     expect(overlapLease.kind).toBe("sidecar");
     overlapLease.release();
     expect(host.failures).toHaveLength(1);
-    manager.dispose();
+    await Effect.runPromise(manager.dispose());
   });
 
   test("records parse_failure approval_review.failure for malformed reviewer output", async () => {
@@ -1412,7 +1447,7 @@ class RecordingReviewerHost {
     };
   }
 
-  async preloadThread(input: Omit<RuntimeThreadPreloadState, "messages" | "runtimeBindingToken" | "pendingToolUses">): Promise<SessionManager.ThreadLifecycleResult> {
+  async preloadThread(input: Omit<RuntimeThreadPreloadState, "messages" | "runtimeBindingToken" | "pendingToolUses" | "coldCoverage">): Promise<SessionManager.ThreadLifecycleResult> {
     this.options.steps?.push("preload-thread");
     if (this.options.throwAt === "preload") {
       throw new Error("secret preload failure");
@@ -1607,7 +1642,13 @@ class RecordingReviewerThreadCreator {
   readonly creations: ApprovalReviewerThreadCreation[] = [];
   readonly closes: ApprovalReviewerThreadCreation[] = [];
 
-  constructor(private readonly steps: string[] = [], private readonly closeGate?: Promise<void>) {}
+  constructor(
+    private readonly steps: string[] = [],
+    private readonly closeGate?: Promise<void>,
+    private readonly closeResult:
+      | { readonly ok: true }
+      | { readonly ok: false; readonly message: string; readonly discardHotState?: boolean } = { ok: true },
+  ) {}
 
   async createApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     this.steps.push("create-thread");
@@ -1618,7 +1659,7 @@ class RecordingReviewerThreadCreator {
   async closeApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     this.closes.push(input);
     await this.closeGate;
-    return { ok: true as const };
+    return this.closeResult;
   }
 }
 

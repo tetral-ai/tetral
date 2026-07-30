@@ -81,7 +81,8 @@ import type { RuntimeAcceptedInputState, RuntimeThreadStatusState } from "@tetra
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
-import { canonicalRunToolJSON } from "./run-tool-canonical-json.js";
+import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import { validateChildLifecycleDeclarationResponse } from "./bridge-client.js";
 
 // MEMORY_PROJECTION_REPLAY_DELAY_MS bounds the wait between reissues of the same
 // tool_use_event_id after a memory tool result reports projection_refresh_failed
@@ -124,7 +125,6 @@ export interface RuntimePodToolRunnerOptions {
   readonly webAddress: string;
   readonly mcpConnectorAddress: string;
   readonly tokenPath: string;
-  readonly scopeForThread: (workspaceId: string, sessionId: string, sessionThreadId: string) => RuntimeAcceptedInputState | undefined;
   readonly subAgentRunHost?: () => RuntimeSubAgentRunHost | undefined;
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   readonly sleep?: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
@@ -192,6 +192,7 @@ export class RuntimePodToolRunner {
   private readonly sleep: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
   private readonly childOperationLocks = new Map<string, Promise<void>>();
   private readonly childTaskOperationQueues = new Map<string, ChildTaskOperationQueueState>();
+  private readonly pendingChildLifecycleTimestamps = new Map<string, string>();
   private nextChildTaskOperationSequence = 0;
 
   /**
@@ -486,9 +487,18 @@ export class RuntimePodToolRunner {
         bindingGeneration: request.bindingGeneration,
         runtimeBindingToken: request.runtimeBindingToken,
       }, await this.metadata(), request.abortSignal);
+      if (response.errorKind === McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST) {
+        return { type: "stale_custody" };
+      }
       if (response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED) {
         const attachments = response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment));
-        return { ...completedText(response.resultText), ...(attachments.length > 0 ? { attachments } : {}) };
+        return {
+          ...completedText(response.resultText),
+          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(response.materializationHandle !== undefined && response.materializationHandle.length > 0
+            ? { mcpMaterializationHandle: response.materializationHandle }
+            : {}),
+        };
       }
       const attachments = response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR
         ? response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment))
@@ -504,6 +514,10 @@ export class RuntimePodToolRunner {
         runtimeRetryStatusFromMcp(response.retryStatus),
         publicMcpErrorEventFromResponse(response, mcpServerName, message),
         attachments,
+        undefined,
+        response.materializationHandle !== undefined && response.materializationHandle.length > 0
+          ? response.materializationHandle
+          : undefined,
       );
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
@@ -816,23 +830,50 @@ export class RuntimePodToolRunner {
         return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
       }
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
+        const lifecycleKey = childLifecycleRequestKey("close", request, child.sessionThreadId);
+        const closedAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
+        this.pendingChildLifecycleTimestamps.set(lifecycleKey, closedAt);
         const response = await markChildThreadClosed(this.bridgeClient, {
           scope: parentScope,
           childThreadId: child.sessionThreadId,
-          closedAt: new Date().toISOString(),
+          closedAt,
+          source: { sourceToolUseEventId: request.toolUseEventId },
         }, metadata, request.abortSignal);
-        if (!bridgeAckAccepted(response.ack?.status)) {
-          return toolFailure(request, response.ack?.errorCode || "Bridge rejected sub-agent close.", true);
+        const declaration = validateChildLifecycleDeclarationResponse({
+          action: "close",
+          sessionThreadId: request.sessionThreadId,
+          childThreadId: child.sessionThreadId,
+          sourceKind: "tool_use",
+          sourceCommandId: request.toolUseEventId,
+          requestedAt: closedAt,
+          bindingId: request.bindingId,
+          bindingGeneration: request.bindingGeneration,
+        }, response);
+        if (!declaration.ok) {
+          if (declaration.discardHotState) {
+            return { type: "stale_custody" };
+          }
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+          return toolFailure(request, declaration.errorCode, true);
         }
-        const lifecycle = await host.markThreadClosed(threadControlFromRequest(request, parentScope, child.sessionThreadId));
-        if (!lifecycle.ok) {
-          return toolFailure(request, `Sub-agent close was not accepted: ${lifecycle.reason}.`, true);
+        let rootRunExitOutcome: string | undefined;
+        for (const stamp of declaration.dispositions) {
+          const lifecycle = await host.markThreadClosed(
+            threadControlFromRequest(request, parentScope, stamp.childThreadId),
+          );
+          if (!lifecycle.ok) {
+            return toolFailure(request, `Sub-agent close was not accepted: ${lifecycle.reason}.`, true);
+          }
+          if (stamp.childThreadId === child.sessionThreadId) {
+            rootRunExitOutcome = lifecycle.runExitOutcome;
+          }
         }
+        this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
         return completedText([
           `task_name: ${child.taskName}`,
           `session_thread_id: ${child.sessionThreadId}`,
           "status: closed_for_runtime",
-          ...(lifecycle.runExitOutcome === undefined ? [] : [`run_outcome: ${lifecycle.runExitOutcome}`]),
+          ...(rootRunExitOutcome === undefined ? [] : [`run_outcome: ${rootRunExitOutcome}`]),
         ].join("\n"));
       });
     });
@@ -851,27 +892,44 @@ export class RuntimePodToolRunner {
         if (!inspected.ok) {
           return toolFailure(request, `Sub-agent resume inspection failed: ${inspected.reason}.`, true);
         }
+        const lifecycleKey = childLifecycleRequestKey("resume", request, child.sessionThreadId);
+        const activeAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
+        this.pendingChildLifecycleTimestamps.set(lifecycleKey, activeAt);
+        const response = await markChildThreadActive(this.bridgeClient, {
+          scope: parentScope,
+          childThreadId: child.sessionThreadId,
+          activeAt,
+          source: { sourceToolUseEventId: request.toolUseEventId },
+        }, metadata, request.abortSignal);
+        const declaration = validateChildLifecycleDeclarationResponse({
+          action: "resume",
+          sessionThreadId: request.sessionThreadId,
+          childThreadId: child.sessionThreadId,
+          sourceKind: "tool_use",
+          sourceCommandId: request.toolUseEventId,
+          requestedAt: activeAt,
+          bindingId: request.bindingId,
+          bindingGeneration: request.bindingGeneration,
+        }, response);
+        if (!declaration.ok) {
+          if (declaration.discardHotState) {
+            return { type: "stale_custody" };
+          }
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+          return toolFailure(request, declaration.errorCode, true);
+        }
         if (child.status !== "closed_for_runtime" && inspected.observed) {
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return completedText([
             `task_name: ${child.taskName}`,
             `session_thread_id: ${child.sessionThreadId}`,
             `status: ${child.status}`,
           ].join("\n"));
         }
-        if (child.status === "closed_for_runtime") {
-          const response = await markChildThreadActive(this.bridgeClient, {
-            scope: parentScope,
-            childThreadId: child.sessionThreadId,
-            activeAt: new Date().toISOString(),
-          }, metadata, request.abortSignal);
-          if (!bridgeAckAccepted(response.ack?.status)) {
-            return toolFailure(request, response.ack?.errorCode || "Bridge rejected sub-agent resume.", true);
-          }
-          if (inspected.observed) {
-            const lifecycle = await host.markThreadActive(control);
-            if (!lifecycle.ok) {
-              return toolFailure(request, `Sub-agent resume was not accepted: ${lifecycle.reason}.`, true);
-            }
+        if (child.status === "closed_for_runtime" && inspected.observed) {
+          const lifecycle = await host.markThreadActive(control);
+          if (!lifecycle.ok) {
+            return toolFailure(request, `Sub-agent resume was not accepted: ${lifecycle.reason}.`, true);
           }
         }
         const preloaded = await preloadChildThread(host, request, parentScope, child.sessionThreadId, {
@@ -885,6 +943,7 @@ export class RuntimePodToolRunner {
         if (!preloaded.ok) {
           return toolFailure(request, `Sub-agent resume context preload failed: ${preloaded.reason}.`, true);
         }
+        this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
         return completedText(`task_name: ${child.taskName}\nsession_thread_id: ${child.sessionThreadId}\nstatus: idle`);
       });
     });
@@ -1124,20 +1183,16 @@ export class RuntimePodToolRunner {
     }
   }
 
-  private scope(request: RuntimeToolExecutionRequest): RuntimeScope | undefined {
-    const input = this.options.scopeForThread(request.workspaceId, request.sessionId, request.sessionThreadId);
-    if (input === undefined || input.sessionThreadId !== request.sessionThreadId) {
-      return undefined;
-    }
+  private scope(request: RuntimeToolExecutionRequest): RuntimeScope {
     return {
-      requestId: input.requestId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sessionThreadId: input.sessionThreadId,
+      requestId: stableId("req", `tool:${request.modelRequestId}:${request.modelToolCallId}`),
+      workspaceId: request.workspaceId,
+      sessionId: request.sessionId,
+      sessionThreadId: request.sessionThreadId,
       binding: {
-        bindingId: input.bindingId,
-        bindingGeneration: input.bindingGeneration,
-        targetPodUid: input.targetPodUid,
+        bindingId: request.bindingId,
+        bindingGeneration: request.bindingGeneration,
+        targetPodUid: request.targetPodUid,
       },
     };
   }
@@ -1263,10 +1318,10 @@ async function writeThreadMessageSent(
       source_tool_use_event_id: delivery.sourceToolUseEventId,
       message,
     }),
-    projectionJson: "{}",
     sessionVisible: true,
     stableReasoningParts: [],
     serverToolUse: undefined,
+    drafts: [],
   }, metadata, abortSignal);
 }
 
@@ -1402,6 +1457,21 @@ function threadControlFromRequest(
     sequenceFrom: 0,
     sequenceTo: 0,
   };
+}
+
+function childLifecycleRequestKey(
+  action: "close" | "resume",
+  request: RuntimeToolExecutionRequest,
+  childThreadId: string,
+): string {
+  return [
+    action,
+    request.workspaceId,
+    request.sessionId,
+    request.sessionThreadId,
+    request.toolUseEventId,
+    childThreadId,
+  ].join("\u0000");
 }
 
 function recordInput(input: RuntimeJsonValue): Record<string, RuntimeJsonValue> {
@@ -2029,6 +2099,7 @@ function toolFailure(
   publicErrorEvent?: PublicMcpErrorEvent | undefined,
   attachments?: readonly ProviderRequestAttachment[],
   serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
+  mcpMaterializationHandle?: string,
 ): RuntimeToolExecutionResult {
   return {
     type: "error",
@@ -2036,6 +2107,7 @@ function toolFailure(
     ...(publicErrorEvent !== undefined ? { publicErrorEvent } : {}),
     ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     ...(serverToolUse !== undefined ? { serverToolUse } : {}),
+    ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
   };
 }
 
@@ -2113,6 +2185,7 @@ function publicMcpErrorEventFromResponse(
     case McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT:
     case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:
     case McpErrorKind.MCP_ERROR_KIND_INTERNAL:
+    case McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST:
     case McpErrorKind.MCP_ERROR_KIND_UNSPECIFIED:
     case undefined:
     case McpErrorKind.UNRECOGNIZED:

@@ -247,21 +247,37 @@ func TestEnvironmentArtifactStoreFanoutMovesWaitingRowsAndEnqueuesPrepare(t *tes
 	seedEnvironmentArtifactStoreEnvironment(t, admin, "ws_env_store", "env_build")
 	seedEnvironmentArtifact(t, admin, "ws_env_store", "env_build", 7, "ready", "snapshot_ready", `{"pip":["pandas==2.2.0"]}`)
 	seedEnvironmentArtifactStoreSession(t, admin, "ws_env_store", "sesn_waiting", "env_build")
+	seedEnvironmentArtifactStoreSession(t, admin, "ws_env_store", "sesn_waiting_second", "env_build")
 	seedEnvironmentArtifactStorePreparation(t, admin, "ws_env_store", "sesn_waiting", "prep_waiting", "env_build", 7, "waiting_environment")
+	seedEnvironmentArtifactStorePreparation(t, admin, "ws_env_store", "sesn_waiting_second", "prep_waiting_second", "env_build", 7, "waiting_environment")
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 
 	advanced, err := store.FanoutReadyEnvironment(ctx, EnvironmentReadyFanoutJob{WorkspaceID: "ws_env_store", EnvironmentID: "env_build", Generation: 7}, fixedEnvironmentStoreTime)
 	if err != nil {
 		t.Fatalf("FanoutReadyEnvironment: %v", err)
 	}
-	if advanced != 1 {
-		t.Fatalf("advanced = %d; want 1", advanced)
+	if advanced != 2 {
+		t.Fatalf("advanced = %d; want 2", advanced)
 	}
 	status, _ := readPreparationStatusAndReason(t, admin, "ws_env_store", "sesn_waiting", "prep_waiting")
 	if status != "pending" {
 		t.Fatalf("preparation status = %q; want pending", status)
 	}
-	assertQueueJobCount(t, admin, "ws_env_store", "session_prepare", 1)
+	assertQueueJobCount(t, admin, "ws_env_store", "session_prepare", 2)
+	var firstPartitionJobs int
+	if err := admin.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		   FROM queue_jobs
+		  WHERE workspace_id = $1
+		    AND kind = 'session_prepare'
+		    AND queue_partition_sequence = 1`,
+		"ws_env_store",
+	).Scan(&firstPartitionJobs); err != nil {
+		t.Fatalf("read preparation partition sequences: %v", err)
+	}
+	if firstPartitionJobs != 2 {
+		t.Fatalf("preparation jobs with first partition sequence = %d; want 2", firstPartitionJobs)
+	}
 }
 
 func newEnvironmentArtifactStoreTestDB(t *testing.T) (runtime *sql.DB, admin *sql.DB) {

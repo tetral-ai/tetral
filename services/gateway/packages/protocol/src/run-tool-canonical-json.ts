@@ -2,27 +2,16 @@
  * Canonicalizes JSON tool inputs for cross-service idempotency hashing. The
  * canonical form removes insignificant whitespace and sorts object members by
  * the UTF-8 bytes of their original quoted key tokens while preserving scalar
- * token spelling and array order. It validates the complete input with `JSON.parse`, then constructs
- * canonical output from the original scalar tokens without decoding and re-encoding them. It rejects
- * nesting beyond the local bound and performs no I/O.
- *
- * `RuntimePodToolRunner` calls this module before hashing Bridge tool inputs and
- * before sending canonical JSON payloads to Bridge and MCP Connector.
+ * token spelling and array order. It validates the complete input with
+ * `JSON.parse`, then constructs canonical output from the original scalar
+ * tokens without decoding and re-encoding them.
  */
 const RunToolCanonicalJSONMaxDepth = 256;
 
 // Keep mechanically identical to Bridge's run_tool_canonical_json.go. Scalar
 // tokens are never decoded: only insignificant whitespace and object-member
 // order change.
-/**
- * Produces the compact canonical representation of one JSON document.
- *
- * @param raw - A complete JSON document whose scalar token spelling must remain
- * unchanged.
- * @returns Canonical JSON with recursively sorted object members.
- * @throws `SyntaxError` for invalid JSON and `Error` for input that exceeds the
- * nesting bound or cannot be fully consumed by the canonical parser.
- */
+/** Produces the compact canonical representation of one JSON document. */
 export function canonicalRunToolJSON(raw: string): string {
   JSON.parse(raw);
   const parser = new CanonicalJSONParser(raw);

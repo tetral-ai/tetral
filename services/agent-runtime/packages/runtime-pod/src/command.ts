@@ -8,13 +8,11 @@
  * payloads into the tool catalog and provider behavior consumed by Agent Loop.
  */
 import type { Metadata } from "@grpc/grpc-js";
-import { RuntimeMessageStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeInternalToolRepairStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeInternalToolRepairCommit,
-  RuntimeMessageInfo,
-  RuntimeMessageStoreOperationControls,
-  RuntimeMessageStoreWritePartResult,
-  RuntimePart,
+  RuntimeInternalToolRepairCommitResult,
+  RuntimeDeclarationOperationControls,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/agent-loop/provider-call-assembly.js";
 import type { MemoryStorePromptEntry, SkillGuidanceIndexEntry } from "@tetral/agent-runtime-core/src/agent-loop/provider-call-assembly.js";
@@ -147,6 +145,8 @@ export async function buildRuntimePodCommandDependencies(input: {
     address: input.config.bridgeApiGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
+    logger: input.logger,
+    metrics,
   });
   const gatewayClient = new RuntimePodGatewayClient({
     address: input.config.gatewayGrpcAddress,
@@ -160,15 +160,15 @@ export async function buildRuntimePodCommandDependencies(input: {
     address: input.config.bridgeApiGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
-    releaseThreadScope: (workspaceId, sessionId, sessionThreadId) =>
-      bridgeContextLoader.releaseAcceptedInputForThread(workspaceId, sessionId, sessionThreadId),
+    logger: input.logger,
+    metrics,
   });
   const internalToolRepairCommitter = new BridgeAPIInternalToolRepairCommitter({
     address: input.config.bridgeApiGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
-    scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
-      bridgeContextLoader.acceptedInputForThread(workspaceId, sessionId, sessionThreadId),
+    logger: input.logger,
+    metrics,
   });
   let subAgentRunHost: RuntimeCoreHosts["subAgentRunHost"] | undefined;
   const toolRunner = new RuntimePodToolRunner({
@@ -177,8 +177,6 @@ export async function buildRuntimePodCommandDependencies(input: {
     mcpConnectorAddress: input.config.mcpConnectorGrpcAddress,
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
-    scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
-      bridgeContextLoader.acceptedInputForThread(workspaceId, sessionId, sessionThreadId),
     subAgentRunHost: () => subAgentRunHost,
   });
   const streamTimeoutOptions = providerStreamTimeoutOptions(input.config);
@@ -188,7 +186,6 @@ export async function buildRuntimePodCommandDependencies(input: {
     maxConcurrentTools: 8,
     now: () => new Date().toISOString(),
     contextLoader: bridgeContextLoader,
-    registerAcceptedInput: (input) => bridgeContextLoader.registerAcceptedInput(input),
     metrics,
     recordCloseoutEvent: (event) => {
       try {
@@ -204,13 +201,13 @@ export async function buildRuntimePodCommandDependencies(input: {
       }
     },
     agentLoop: {
-      messageStore: new RuntimeHotMessageStore(internalToolRepairCommitter),
+      internalToolRepairStore: new BridgeInternalToolRepairStore(internalToolRepairCommitter),
       sessionEventWriter: new BridgeAPIEventWriter({
         address: input.config.bridgeApiGrpcAddress,
         tokenPath: input.config.outboundInternalGrpcTokenPath,
         metadataFactory: outboundMetadataFactory,
-        scopeForThread: (workspaceId, sessionId, sessionThreadId) =>
-          bridgeContextLoader.acceptedInputForThread(workspaceId, sessionId, sessionThreadId),
+        logger: input.logger,
+        metrics,
       }),
       runtime: {
         now: () => new Date().toISOString(),
@@ -242,14 +239,14 @@ export async function buildRuntimePodCommandDependencies(input: {
       runtimeModel: (session) =>
         runtimeModelForThread(
           session.identity.threadRole,
-          session.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
+          session.configuration.patches().map((patch) => patch.payloadJson),
           input.config.platformModels.approvalReviewer,
         ),
       runtimePolicy: (session) =>
         runtimeToolPolicyForThread(
           session.identity.threadRole,
-          session.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
-          session.state.installedBuiltinFamily(),
+          session.configuration.patches().map((patch) => patch.payloadJson),
+          session.configuration.installedBuiltinFamily(),
           approvalReviewerToolCatalog,
         ),
       runTool: (request) => toolRunner.runTool(request),
@@ -257,7 +254,6 @@ export async function buildRuntimePodCommandDependencies(input: {
         model: input.config.platformModels.approvalReviewer,
         threadCreator: approvalReviewerThreadCreator,
         createId: createRuntimeId,
-        registerCommitScope: (command) => bridgeContextLoader.registerScopedAcceptedInput(command),
         logger: input.logger,
         assets: approvalReviewerAssets,
       }),
@@ -277,6 +273,8 @@ export async function buildRuntimePodCommandDependencies(input: {
       address: input.config.bridgeApiGrpcAddress,
       tokenPath: input.config.outboundInternalGrpcTokenPath,
       metadataFactory: outboundMetadataFactory,
+      logger: input.logger,
+      metrics,
     });
   const controlInputCommitter =
     input.builderOptions?.controlInputCommitterFactory?.({ config: input.config, metadataFactory: outboundMetadataFactory }) ??
@@ -666,32 +664,15 @@ interface MCPManifestToolsetConfig {
 }
 
 interface RuntimeInternalToolRepairCommitter {
-  readonly commitInternalToolRepair: (repair: RuntimeInternalToolRepairCommit) => Promise<RuntimeMessageStoreWritePartResult>;
+  readonly commitInternalToolRepair: (repair: RuntimeInternalToolRepairCommit) => Promise<RuntimeInternalToolRepairCommitResult>;
 }
 
-class RuntimeHotMessageStore extends RuntimeMessageStore {
+class BridgeInternalToolRepairStore extends RuntimeInternalToolRepairStore {
   constructor(private readonly internalToolRepairCommitter: RuntimeInternalToolRepairCommitter) {
     super();
   }
 
-  protected async writeMessageRecord(message: RuntimeMessageInfo, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-    return {
-      ok: true,
-      messageId: message.id,
-      operation: "writeMessage",
-    };
-  }
-
-  protected async writePartRecord(part: RuntimePart, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-    return {
-      ok: true,
-      messageId: part.messageId,
-      partId: part.id,
-      operation: "writePart",
-    };
-  }
-
-  protected async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
+  protected async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit, _controls: RuntimeDeclarationOperationControls): Promise<unknown> {
     return await this.internalToolRepairCommitter.commitInternalToolRepair(repair);
   }
 }

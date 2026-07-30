@@ -1169,7 +1169,7 @@ func (t *postgresqlTransaction) rejectRuntimeConfigUpdateRaces(ctx context.Conte
 		    AND partition_key = $2
 		    AND kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session')
 		    AND status IN ('pending', 'leased')
-		  ORDER BY created_at ASC, id ASC
+		  ORDER BY queue_partition_sequence ASC
 		  LIMIT 1`,
 		string(t.workspaceID),
 		queue.FormatSessionPartitionKey(t.workspaceID, sessionID),
@@ -1195,7 +1195,7 @@ func (t *postgresqlTransaction) rejectRuntimeConfigUpdateRaces(ctx context.Conte
 			  FROM session_runtime_inbox
 			 WHERE workspace_id = $1
 			   AND session_id = $2
-			   AND status IN ('delivering', 'accepted')
+			   AND status IN ('accepted', 'delivering', 'parked')
 		)`,
 		string(t.workspaceID),
 		sessionID,

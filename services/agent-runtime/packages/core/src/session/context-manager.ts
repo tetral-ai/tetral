@@ -103,6 +103,10 @@ export class ContextManager {
     this.#messages = [...this.#messages, message];
   }
 
+  message(messageId: string): RuntimeMessage | undefined {
+    return this.#messages.find((message) => message.id === messageId);
+  }
+
   updateMessage(message: RuntimeMessage): void {
     this.#messages = this.#messages.map((existingMessage) => (existingMessage.id === message.id ? message : existingMessage));
     this.#generation += 1;

@@ -92,3 +92,93 @@ func TestCommitInputsDeclarationDigestMatchesSharedVector(t *testing.T) {
 		t.Fatalf("declaration digest = %q; want %q", got, vector.Digest)
 	}
 }
+
+func TestInternalToolRepairDeclarationDigestMatchesSharedVector(t *testing.T) {
+	raw, err := os.ReadFile("testdata/runtime_declaration_vectors.json") //nolint:gosec // Repository-owned fixture.
+	if err != nil {
+		t.Fatalf("read declaration vectors: %v", err)
+	}
+	var fixture struct {
+		InternalToolRepair struct {
+			SessionThreadID string `json:"session_thread_id"`
+			ModelRequestID  string `json:"model_request_id"`
+			ModelToolCallID string `json:"model_tool_call_id"`
+			ToolName        string `json:"tool_name"`
+			RepairKey       string `json:"repair_key"`
+			Draft           struct {
+				RuntimeLocalID  string `json:"runtime_local_id"`
+				SourceKind      string `json:"source_kind"`
+				SourceID        string `json:"source_id"`
+				Ordinal         int32  `json:"ordinal"`
+				MessageInfoJSON string `json:"message_info_json"`
+				Part            struct {
+					RuntimeLocalPartID string `json:"runtime_local_part_id"`
+					PartKind           string `json:"part_kind"`
+					Ordinal            int32  `json:"ordinal"`
+					PartJSON           string `json:"part_json"`
+				} `json:"part"`
+			} `json:"draft"`
+			Digest string `json:"digest"`
+		} `json:"internal_tool_repair"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode declaration vectors: %v", err)
+	}
+	vector := fixture.InternalToolRepair
+	got, err := internalToolRepairDeclarationDigest(&bridgev1.CommitInternalToolRepairRequest{
+		Scope:           &bridgev1.RuntimeScope{SessionThreadId: vector.SessionThreadID},
+		ModelRequestId:  vector.ModelRequestID,
+		ModelToolCallId: vector.ModelToolCallID,
+		ToolName:        vector.ToolName,
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  vector.Draft.RuntimeLocalID,
+			SourceKind:      vector.Draft.SourceKind,
+			SourceId:        vector.Draft.SourceID,
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR,
+			Ordinal:         vector.Draft.Ordinal,
+			MessageInfoJson: vector.Draft.MessageInfoJSON,
+			Parts: []*bridgev1.RuntimePartDraft{{
+				RuntimeLocalPartId: vector.Draft.Part.RuntimeLocalPartID,
+				PartKind:           vector.Draft.Part.PartKind,
+				Ordinal:            vector.Draft.Part.Ordinal,
+				PartJson:           vector.Draft.Part.PartJSON,
+			}},
+		}},
+	}, vector.RepairKey)
+	if err != nil {
+		t.Fatalf("digest internal tool repair vector: %v", err)
+	}
+	if got != vector.Digest {
+		t.Fatalf("internal tool repair digest = %q; want %q", got, vector.Digest)
+	}
+}
+
+func TestRuntimeTerminationDeclarationDigestMatchesSharedVector(t *testing.T) {
+	raw, err := os.ReadFile("testdata/runtime_declaration_vectors.json") //nolint:gosec // Repository-owned fixture.
+	if err != nil {
+		t.Fatalf("read declaration vectors: %v", err)
+	}
+	var fixture struct {
+		RuntimeTermination struct {
+			SessionThreadID string `json:"session_thread_id"`
+			RuntimeWriteID  string `json:"runtime_write_id"`
+			FailureJSON     string `json:"failure_json"`
+			Digest          string `json:"digest"`
+		} `json:"runtime_termination"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode declaration vectors: %v", err)
+	}
+	vector := fixture.RuntimeTermination
+	got, err := runtimeTerminationDeclarationDigest(&bridgev1.CommitRuntimeTerminationRequest{
+		Scope:          &bridgev1.RuntimeScope{SessionThreadId: vector.SessionThreadID},
+		RuntimeWriteId: vector.RuntimeWriteID,
+		FailureJson:    vector.FailureJSON,
+	}, vector.FailureJSON)
+	if err != nil {
+		t.Fatalf("digest runtime termination vector: %v", err)
+	}
+	if got != vector.Digest {
+		t.Fatalf("runtime termination digest = %q; want %q", got, vector.Digest)
+	}
+}

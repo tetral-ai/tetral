@@ -9,8 +9,6 @@
  */
 import { createHash } from "node:crypto";
 import type {
-  RuntimeMessageStoreWriteMessageResult,
-  RuntimeMessageStoreWritePartResult,
   RuntimeMessageStoreError,
   RuntimeBoundedJson,
   RuntimeBoundedText,
@@ -19,9 +17,13 @@ import type {
   RuntimeProcessorSource,
   RuntimeToolSettlement,
   RuntimeInternalToolRepairCommit,
+  RuntimeInternalToolRepairCommitResult,
+  DurableRuntimeMessage,
   RuntimeMessage,
-  RuntimeMessageInfo,
+  RuntimeMessageDraft,
+  RuntimeDeclarationReceipt,
   RuntimePart,
+  RuntimePartDraft,
   RuntimeJsonValue,
   RuntimeToolError,
   PublicMcpErrorEvent,
@@ -32,14 +34,23 @@ import type {
 import type { LLMEvent } from "../llm/llm-event.js";
 import {
   SessionEventSchema,
-  RuntimeMessageInfoSchema,
-  RuntimeMessageSchema,
+  RuntimeMessageDraftSchema,
   RuntimeFailureSchema,
-  RuntimePartSchema,
+  RuntimePartDraftSchema,
   RuntimeBoundedTextSchema,
-  boundRuntimePartForStableWrite,
+  normalizeSessionEventWriterError,
+  normalizeRuntimeMessageStoreError,
   boundRuntimeText,
 } from "../contracts/runtime.js";
+import {
+  applyInternalToolRepairReceipt,
+  applyInterruptInputReceipt,
+  applyRuntimeOutputReceipt,
+  applyRuntimeRequestEndReceipt,
+  runtimeInternalToolRepairDraft,
+  runtimeOutputDraft,
+} from "./runtime-declaration.js";
+import { stableRuntimeID } from "./runtime-identity.js";
 
 /** Result of applying one provider event to the current request-turn projection. */
 export type SessionProcessorResult =
@@ -58,29 +69,34 @@ export type PublicToolEvent =
 
 export type { PublicMcpErrorEvent, RuntimeProcessorSource, RuntimeToolSettlement } from "../contracts/runtime.js";
 
+/** Loop-authored cancellation declaration joined to one open request closeout. */
+export interface RuntimeInterruptSettlementDraft {
+  readonly terminalAssistantSeal?: RuntimeMessageDraft;
+  readonly drafts: readonly RuntimeMessageDraft[];
+  readonly pendingToolCancellations: readonly {
+    readonly toolUseEventId: string;
+    readonly runtimeLocalId: string;
+  }[];
+}
+
 /** Hot projection, durable event, and internal-repair capabilities used by one processor. */
 export interface SessionProcessorWriter {
-  readonly writeMessage: (
-    message: RuntimeMessageInfo,
-    source: RuntimeProcessorSource,
-  ) => Promise<RuntimeMessageStoreWriteMessageResult>;
-  readonly writePart: (
-    part: RuntimePart,
-    source: RuntimeProcessorSource,
-  ) => Promise<RuntimeMessageStoreWritePartResult>;
   readonly appendEvent: (
     event: SessionEvent,
     source: RuntimeProcessorSource,
-    projectionJson?: string,
+    output?: {
+      readonly draftKind: RuntimeMessageDraft["draftKind"];
+      readonly message: RuntimeMessageDraft;
+    },
     stableReasoningParts?: readonly SessionEventWriterStableReasoningPart[],
     modelRequestId?: string,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
+    mcpMaterializationHandle?: string,
   ) => Promise<SessionEventWriterAppendResult>;
   readonly commitInternalToolRepair: (
     repair: RuntimeInternalToolRepairCommit,
     source: RuntimeProcessorSource,
-  ) => Promise<RuntimeMessageStoreWritePartResult>;
-  readonly commitPart?: (part: RuntimePart) => void;
+  ) => Promise<RuntimeInternalToolRepairCommitResult>;
 }
 
 interface LLMEventEnvelope extends RuntimeProcessorSource {
@@ -89,21 +105,18 @@ interface LLMEventEnvelope extends RuntimeProcessorSource {
 
 /** Identity, clock, shell, bounds, and writer dependencies for one request turn. */
 export interface SessionProcessorOptions {
-  readonly messageId: string;
   readonly modelRequestId: string;
+  readonly requestId: string;
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
-  /**
-   * AgentLoop owns assistant shell creation and its hot-store acknowledgement
-   * before the provider call. Durable transcript projection is gated separately
-   * by event and request-end writes; SessionProcessor owns stable part updates and
-   * terminal message finalization over the supplied shell.
-   */
-  readonly message: RuntimeMessageInfo;
+  readonly bindingId: string;
+  readonly bindingGeneration: number;
+  readonly targetPodUid: string;
+  /** Unstamped assistant draft owned by this provider request. */
+  readonly message: RuntimeMessageDraft;
   readonly maxNormalizedTextPreviewBytes?: number;
   readonly now: () => string;
-  readonly createId: (prefix: string) => string;
   readonly writer: SessionProcessorWriter;
 }
 
@@ -113,32 +126,30 @@ interface TextAppendResult {
   readonly acceptedDelta: string;
 }
 
-type TextRuntimePart = Extract<RuntimePart, { readonly type: "text" }>;
-type ReasoningRuntimePart = Extract<RuntimePart, { readonly type: "reasoning" }>;
-type ToolRuntimePart = Extract<RuntimePart, { readonly type: "tool" }>;
-type ReasoningProviderMetadata = NonNullable<ReasoningRuntimePart["providerMetadata"]>;
+type TextRuntimePartDraft = Extract<RuntimePartDraft, { readonly type: "text" }>;
+type ReasoningRuntimePartDraft = Extract<RuntimePartDraft, { readonly type: "reasoning" }>;
+type ToolRuntimePartDraft = Extract<RuntimePartDraft, { readonly type: "tool" }>;
+type DurableToolRuntimePart = Extract<RuntimePart, { readonly type: "tool" }>;
+type ReasoningProviderMetadata = NonNullable<ReasoningRuntimePartDraft["providerMetadata"]>;
 
-function stableReasoningPartForWrite(part: ReasoningRuntimePart): SessionEventWriterStableReasoningPart {
+function stableReasoningPartForWrite(part: ReasoningRuntimePartDraft): SessionEventWriterStableReasoningPart {
   return {
-    reasoningPartId: part.id,
+    reasoningPartId: part.runtimeLocalPartId,
     ...(part.providerPartId !== undefined ? { providerPartId: part.providerPartId } : {}),
-    partSequence: part.sequence,
+    partSequence: part.ordinal,
     text: part.text,
     ...(part.providerMetadata !== undefined ? { providerMetadata: part.providerMetadata } : {}),
     truncated: part.truncated,
   };
 }
 
-interface RuntimePartBase {
-  readonly id: string;
-  readonly sessionId: string;
-  readonly messageId: string;
-  readonly sequence: number;
-  readonly createdAt: string;
+interface RuntimePartDraftBase {
+  readonly runtimeLocalPartId: string;
+  readonly ordinal: number;
 }
 
 type EnsureToolPartResult =
-  | { readonly ok: true; readonly events: readonly SessionEvent[]; readonly part: ToolRuntimePart }
+  | { readonly ok: true; readonly events: readonly SessionEvent[]; readonly part: ToolRuntimePartDraft }
   | { readonly ok: false; readonly events: readonly SessionEvent[]; readonly error: RuntimeFailure; readonly messageId?: string };
 
 /**
@@ -148,25 +159,26 @@ type EnsureToolPartResult =
  */
 export class SessionProcessor {
   private readonly options: SessionProcessorOptions;
-  private readonly reasoningParts = new Map<string, ReasoningRuntimePart>();
-  private readonly toolParts = new Map<string, ToolRuntimePart>();
+  private readonly reasoningParts = new Map<string, ReasoningRuntimePartDraft>();
+  private readonly toolParts = new Map<string, ToolRuntimePartDraft>();
   private readonly toolUseEventIds = new Map<string, string>();
   private readonly toolEvents = new Map<string, PublicToolEvent>();
   private readonly durableReasoningPartIds = new Set<string>();
-  private projection: RuntimeMessage[];
-  private messageInfo: RuntimeMessageInfo;
-  private activeTextPart: TextRuntimePart | undefined;
+  private durableProjection: DurableRuntimeMessage[] = [];
+  private primaryDurableMessageId: string | undefined;
+  private failedCloseoutParts: RuntimePartDraft[] = [];
+  private workingMessage: RuntimeMessageDraft;
+  private activeTextPart: TextRuntimePartDraft | undefined;
   private activeStepIndex = 0;
   private terminal = false;
 
   constructor(options: SessionProcessorOptions) {
     this.options = options;
-    this.messageInfo = RuntimeMessageInfoSchema.parse(options.message);
-    this.projection = upsertMessageInfo([], this.messageInfo);
+    this.workingMessage = RuntimeMessageDraftSchema.parse(options.message);
   }
 
   messages(): readonly RuntimeMessage[] {
-    return [...this.projection];
+    return [...this.durableProjection];
   }
 
   stableReasoningParts(): readonly SessionEventWriterStableReasoningPart[] {
@@ -180,14 +192,127 @@ export class SessionProcessor {
   }
 
   isReasoningPartDurable(partId: string): boolean {
-    return this.durableReasoningPartIds.has(partId);
+    return this.durableReasoningPartIds.has(partId) ||
+      this.durableProjection.some((message) =>
+        message.parts.some((part) => part.type === "reasoning" && part.id === partId)
+      );
   }
 
-  hydratePendingToolUse(part: ToolRuntimePart): void {
-    const parsed = parseToolPart(part);
+  /** Builds the terminal assistant seal carried by an ordinary request-end declaration. */
+  requestEndSeal(includeSettlementReasoning: boolean): RuntimeMessageDraft | undefined {
+    if (this.workingMessage.status === "streaming") {
+      throw new Error("request end assistant seal requires a terminal processor");
+    }
+    const primaryMessage = this.primaryDurableMessageId === undefined
+      ? undefined
+      : this.durableProjection.find((message) => message.id === this.primaryDurableMessageId);
+    const durableAssociations = new Set(runtimePartAssociations(primaryMessage?.parts ?? []));
+    const currentAssociations = runtimePartAssociations(this.currentParts());
+    const parts = this.currentParts().filter((part, index) =>
+      durableAssociations.has(currentAssociations[index] ?? "") ||
+      (includeSettlementReasoning && part.type === "reasoning" && part.status === "completed")
+    );
+    if (parts.length === 0) {
+      return undefined;
+    }
+    return runtimeOutputDraft({
+      workspaceId: this.options.workspaceId,
+      sessionId: this.options.sessionId,
+      sessionThreadId: this.options.sessionThreadId,
+      runtimeWriteId: this.options.modelRequestId,
+      eventType: "model_request",
+      draftKind: "assistant_text",
+      message: RuntimeMessageDraftSchema.parse({
+        ...this.currentMessage(),
+        parts,
+      }),
+    });
+  }
+
+  /**
+   * Builds a failed request-end seal from content that already has durable
+   * stamps when processor settlement cannot reach its normal terminal state.
+   */
+  requestEndFailureSeal(failure: RuntimeFailure): RuntimeMessageDraft | undefined {
+    const primaryMessage = this.primaryDurableMessageId === undefined
+      ? undefined
+      : this.durableProjection.find((message) => message.id === this.primaryDurableMessageId);
+    const durableAssociations = new Set(runtimePartAssociations(primaryMessage?.parts ?? []));
+    const currentAssociations = runtimePartAssociations(this.currentParts());
+    const currentDurableParts = this.currentParts().filter((_part, index) =>
+      durableAssociations.has(currentAssociations[index] ?? "")
+    );
+    const parts = currentDurableParts.length > 0 ? currentDurableParts : this.failedCloseoutParts;
+    if (parts.length === 0) {
+      return undefined;
+    }
+    return runtimeOutputDraft({
+      workspaceId: this.options.workspaceId,
+      sessionId: this.options.sessionId,
+      sessionThreadId: this.options.sessionThreadId,
+      runtimeWriteId: this.options.modelRequestId,
+      eventType: "model_request",
+      draftKind: "assistant_text",
+      message: RuntimeMessageDraftSchema.parse({
+        ...this.currentMessage(),
+        status: "failed",
+        error: failure,
+        parts,
+      }),
+    });
+  }
+
+  /** Applies the database stamps returned for one ordinary request-end assistant seal. */
+  applyRequestEndSeal(
+    eventId: string,
+    draft: RuntimeMessageDraft | undefined,
+    declaration: NonNullable<Extract<SessionEventWriterAppendResult, { readonly ok: true }>["declaration"]>,
+  ): boolean {
+    if (declaration.applicationDisposition !== "current_custody") {
+      return false;
+    }
+    const expectedMessage = this.primaryDurableMessageId === undefined
+      ? undefined
+      : this.durableProjection.find((message) => message.id === this.primaryDurableMessageId);
+    this.durableProjection = [
+      ...applyRuntimeRequestEndReceipt({
+        sessionId: this.options.sessionId,
+        sessionThreadId: this.options.sessionThreadId,
+        modelRequestId: this.options.modelRequestId,
+        eventId,
+        drafts: draft === undefined ? [] : [draft],
+        existingMessages: this.durableProjection,
+        ...(expectedMessage === undefined ? {} : { expectedMessage }),
+      }, declaration.receipt),
+    ];
+    const sealStamp = draft === undefined
+      ? undefined
+      : declaration.receipt.messages.find((message) => message.runtimeLocalId === draft.runtimeLocalId);
+    if (sealStamp !== undefined) {
+      this.primaryDurableMessageId = sealStamp.messageId;
+    }
+    return true;
+  }
+
+  hydratePendingToolUse(message: DurableRuntimeMessage, part: DurableToolRuntimePart): void {
+    const parsed = this.currentParts().find(
+      (candidate): candidate is ToolRuntimePartDraft =>
+        candidate.type === "tool" && candidate.toolCallId === part.toolCallId,
+    );
+    if (parsed === undefined) {
+      throw new Error("pending tool use hydration is missing its working draft");
+    }
     if (parsed.state.status !== "running" || parsed.toolUseEventId === undefined) {
       throw new Error("pending tool use hydration requires a running tool part with toolUseEventId");
     }
+    if (
+      part.messageId !== message.id ||
+      !message.parts.some((candidate) => candidate.id === part.id)
+    ) {
+      throw new Error("pending tool use hydration requires its durable owning message");
+    }
+    this.durableProjection = [message];
+    this.primaryDurableMessageId = message.id;
     this.toolParts.set(parsed.toolCallId, parsed);
     this.toolUseEventIds.set(parsed.toolCallId, parsed.toolUseEventId);
     if (parsed.toolEvent !== undefined) {
@@ -210,8 +335,8 @@ export class SessionProcessor {
   //   forward. This provider-error arm calls terminalFailure and terminalizes the
   //   accumulator's active tool parts immediately. AgentLoop separately joins the
   //   request ToolFiberSet before choosing backoff or terminal closeout; a re-issue
-  //   rebases on the durably-committed view, while a denied stale_terminal loser
-  //   performs no additional local repair because the winning close owns it.
+  //   rebases on the durably-committed view. A divergent request close is rejected
+  //   by Bridge and the Runtime discards hot state before cold recovery.
   // UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts,
   //              services/agent-runtime/packages/core/src/runtime/message-projection.ts
   async process(envelope: LLMEventEnvelope): Promise<SessionProcessorResult> {
@@ -264,6 +389,107 @@ export class SessionProcessor {
     return await this.terminalizeActiveTools(source, "cancelled", failure);
   }
 
+  /**
+   * Freezes the terminal request seal and loop-authored tool cancellations
+   * without performing a separate event write.
+   */
+  prepareInterruptSettlement(
+    interrupt: {
+      readonly runtimeInputId: string;
+      readonly eventIds: readonly string[];
+    },
+    failure: RuntimeFailure,
+  ): RuntimeInterruptSettlementDraft {
+    if (this.terminal || interrupt.eventIds.length !== 1) {
+      throw new Error("interrupt settlement requires one open request and one admitted source event");
+    }
+    this.updateMessage({ status: "cancelled", error: failure });
+    this.terminal = true;
+    const terminalAssistantSeal = this.requestEndSeal(false);
+    const drafts: RuntimeMessageDraft[] = [];
+    const pendingToolCancellations: {
+      readonly toolUseEventId: string;
+      readonly runtimeLocalId: string;
+    }[] = [];
+    for (const [toolCallId, part] of this.toolParts) {
+      const toolUseEventId = this.toolUseEventIds.get(toolCallId) ?? part.toolUseEventId;
+      if (
+        toolUseEventId === undefined ||
+        part.state.status === "completed" ||
+        part.state.status === "error" ||
+        part.state.status === "cancelled"
+      ) {
+        continue;
+      }
+      const ordinal = drafts.length;
+      const runtimeLocalId = stableRuntimeID(
+        "runtime_message_draft",
+        this.options.workspaceId,
+        this.options.sessionId,
+        this.options.sessionThreadId,
+        "interrupt_control",
+        interrupt.runtimeInputId,
+        "cancellation",
+        String(ordinal),
+      );
+      const terminalError = runtimeToolErrorFromFailure(failure);
+      const cancelledPart = parseToolPart({
+        ...part,
+        runtimeLocalPartId: stableRuntimeID(
+          "runtime_message_part_draft",
+          runtimeLocalId,
+          "tool",
+          "0",
+        ),
+        ordinal: 0,
+        toolUseEventId,
+        state: part.state.status === "running"
+          ? { status: "cancelled", input: part.state.input, error: terminalError }
+          : { status: "cancelled", error: terminalError },
+        completedAt: this.options.now(),
+      });
+      drafts.push(RuntimeMessageDraftSchema.parse({
+        runtimeLocalId,
+        sourceKind: "interrupt_control",
+        sourceId: interrupt.runtimeInputId,
+        sourceEventId: interrupt.eventIds[0],
+        draftKind: "cancellation",
+        ordinal,
+        role: "assistant",
+        origin: "agent",
+        status: "completed",
+        parts: [cancelledPart],
+      }));
+      pendingToolCancellations.push({ toolUseEventId, runtimeLocalId });
+    }
+    return {
+      ...(terminalAssistantSeal === undefined ? {} : { terminalAssistantSeal }),
+      drafts,
+      pendingToolCancellations,
+    };
+  }
+
+  /** Applies the interrupt receipt after its joined request-end receipt. */
+  applyInterruptSettlement(
+    interrupt: {
+      readonly runtimeInputId: string;
+      readonly eventIds: readonly string[];
+    },
+    settlement: RuntimeInterruptSettlementDraft,
+    receipt: RuntimeDeclarationReceipt,
+  ): void {
+    this.durableProjection = [
+      ...applyInterruptInputReceipt({
+        sessionId: this.options.sessionId,
+        sessionThreadId: this.options.sessionThreadId,
+        runtimeInputId: interrupt.runtimeInputId,
+        eventIds: interrupt.eventIds,
+        drafts: settlement.drafts,
+        existingMessages: this.durableProjection,
+      }, receipt),
+    ];
+  }
+
   async commitPublicToolUse(
     source: RuntimeProcessorSource,
     toolCallId: string,
@@ -276,7 +502,6 @@ export class SessionProcessor {
         ok: false,
         events: [],
         error: protocolSequenceFailure(),
-        messageId: this.options.messageId,
       };
     }
     const existingToolUseEventId = this.toolUseEventIds.get(toolCallId);
@@ -285,19 +510,39 @@ export class SessionProcessor {
     }
     const event = toolUseSessionEvent(existing, evaluatedPermission, toolEvent);
     const anchoredReasoning = this.stableReasoningPrefixForTool(existing);
+    const draftPart = parseToolPart({
+      ...existing,
+      toolEvent,
+    });
+    this.toolParts.set(toolCallId, draftPart);
+    this.upsertPart(draftPart);
+    const declaredMessage = this.declarationMessage(anchoredReasoning);
+    // Transport and receipt application share this snapshot because another
+    // tool fiber may mutate the accumulator while the durable write is pending.
     const appendResult = await this.options.writer.appendEvent(
       event,
       source,
-      toolProjectionJson(existing, toolEvent),
+      { draftKind: "tool_use", message: declaredMessage },
       anchoredReasoning,
-      anchoredReasoning.length > 0 ? this.options.modelRequestId : undefined,
+      this.options.modelRequestId,
     );
     if (!appendResult.ok) {
       return {
         ok: false,
         events: [],
         error: eventWriterFailure(appendResult.error),
-        messageId: this.options.messageId,
+      };
+    }
+    const draft = this.outputDraftFromMessage(appendResult.writeId, event.type, "tool_use", declaredMessage);
+    if (!this.applyDeclaration(event, draft, appendResult)) {
+      return {
+        ok: false,
+        events: [],
+        error: eventWriterFailure(normalizeSessionEventWriterError({
+          code: "schema_mismatch",
+          sessionId: this.options.sessionId,
+          writeId: appendResult.writeId,
+        })),
       };
     }
     this.markStableReasoningDurable(anchoredReasoning);
@@ -307,20 +552,9 @@ export class SessionProcessor {
       ...existing,
       toolUseEventId: appendResult.eventId,
       toolEvent,
-      updatedAt: this.options.now(),
     });
-    const stampedWrite = await this.options.writer.writePart(toolUseStampedPart, source);
-    if (!stampedWrite.ok) {
-      return {
-        ok: false,
-        events: [event],
-        error: storeFailure(stampedWrite.error),
-        messageId: this.options.messageId,
-      };
-    }
     this.toolParts.set(toolCallId, toolUseStampedPart);
     this.upsertPart(toolUseStampedPart);
-    this.options.writer.commitPart?.(toolUseStampedPart);
     return {
       ok: true,
       events: [event],
@@ -345,11 +579,10 @@ export class SessionProcessor {
           input: existing.state.input,
           output: RuntimeBoundedTextSchema.parse(settlement.output),
         },
-        updatedAt: this.options.now(),
         completedAt: this.options.now(),
       });
       this.toolParts.set(toolCallId, completed);
-      return await this.writePart(completed, source, settlement.serverToolUse);
+      return await this.writePart(completed, source, settlement.serverToolUse, settlement.mcpMaterializationHandle);
     }
     if (settlement.type === "error") {
       const errored = parseToolPart({
@@ -359,11 +592,10 @@ export class SessionProcessor {
           input: existing.state.input,
           error: runtimeToolError(settlement.error),
         },
-        updatedAt: this.options.now(),
         completedAt: this.options.now(),
       });
       this.toolParts.set(toolCallId, errored);
-      const result = await this.writePart(errored, source, settlement.serverToolUse);
+      const result = await this.writePart(errored, source, settlement.serverToolUse, settlement.mcpMaterializationHandle);
       return await this.appendPublicMcpErrorEvent(result, settlement.publicErrorEvent, source);
     }
     const cancelled = parseToolPart({
@@ -373,7 +605,6 @@ export class SessionProcessor {
         input: existing.state.input,
         ...(settlement.error !== undefined ? { error: runtimeToolError(settlement.error) } : {}),
       },
-      updatedAt: this.options.now(),
       completedAt: this.options.now(),
     });
     this.toolParts.set(toolCallId, cancelled);
@@ -392,13 +623,9 @@ export class SessionProcessor {
       return await this.terminalFailure(source, "failed", semanticSequenceFailure());
     }
     const now = this.options.now();
-    const repairMessageId = internalToolRepairProjectionId("msg_repair", repairKey);
     const repaired = parseToolPart({
-      id: internalToolRepairProjectionId("part_repair", repairKey),
-      sessionId: this.options.sessionId,
-      messageId: repairMessageId,
-      sequence: 0,
-      createdAt: now,
+      runtimeLocalPartId: existing.runtimeLocalPartId,
+      ordinal: existing.ordinal,
       type: "tool",
       toolCallId: existing.toolCallId,
       toolName: existing.toolName,
@@ -408,38 +635,62 @@ export class SessionProcessor {
         error: runtimeToolError(failure),
       },
       startedAt: existing.startedAt,
-      updatedAt: now,
       completedAt: now,
     });
-    const repairMessage = RuntimeMessageSchema.parse({
-      id: repairMessageId,
-      sessionId: this.options.sessionId,
-      role: "assistant",
-      origin: "agent",
-      sequence: this.messageInfo.sequence + 1,
-      status: "completed",
-      createdAt: now,
-      updatedAt: now,
-      parts: [boundRuntimePartForStableWrite(repaired, this.maxBytes())],
-    });
-    const commit = await this.options.writer.commitInternalToolRepair({
+    const draft = runtimeInternalToolRepairDraft({
       workspaceId: this.options.workspaceId,
       sessionId: this.options.sessionId,
       sessionThreadId: this.options.sessionThreadId,
+      repairKey,
+      part: repaired,
+    });
+    const commit = await this.options.writer.commitInternalToolRepair({
+      requestId: this.options.requestId,
+      workspaceId: this.options.workspaceId,
+      sessionId: this.options.sessionId,
+      sessionThreadId: this.options.sessionThreadId,
+      bindingId: this.options.bindingId,
+      bindingGeneration: this.options.bindingGeneration,
+      targetPodUid: this.options.targetPodUid,
       modelRequestId,
       modelToolCallId: toolCallId,
       toolName: existing.toolName,
       repairKey,
-      message: repairMessage,
+      draft,
     }, source);
     if (!commit.ok) {
       const failureResult = storeFailure(commit.error);
       this.discardProjection();
       return this.failWithOptionalMessageId(failureResult);
     }
-    const repairPart = repairMessage.parts[0] as ToolRuntimePart;
-    this.toolParts.set(toolCallId, repairPart);
-    this.projection = upsertMessage(this.projection, repairMessage);
+    if (commit.declaration.applicationDisposition !== "current_custody") {
+      this.discardProjection();
+      return this.failWithOptionalMessageId(storeFailure(normalizeRuntimeMessageStoreError({
+        code: "unavailable",
+        operation: "commitInternalToolRepair",
+        reason: "runtime_contract_validation",
+        sessionId: this.options.sessionId,
+      })));
+    }
+    let repairMessage: DurableRuntimeMessage;
+    try {
+      repairMessage = applyInternalToolRepairReceipt({
+        sessionId: this.options.sessionId,
+        sessionThreadId: this.options.sessionThreadId,
+        repairKey,
+        eventId: commit.eventId,
+        draft,
+      }, commit.declaration.receipt);
+    } catch {
+      this.discardProjection();
+      return this.failWithOptionalMessageId(storeFailure(normalizeRuntimeMessageStoreError({
+        code: "schema_mismatch",
+        operation: "commitInternalToolRepair",
+        reason: "runtime_contract_validation",
+        sessionId: this.options.sessionId,
+      })));
+    }
+    this.durableProjection = upsertMessage(this.durableProjection, repairMessage);
     return { ok: true, events: [] };
   }
 
@@ -448,8 +699,8 @@ export class SessionProcessor {
   ): Promise<SessionProcessorResult> {
     this.activeStepIndex = envelope.event.stepIndex ?? this.activeStepIndex + 1;
     return await this.writePart(
-      RuntimePartSchema.parse({
-        ...this.partBase(),
+      RuntimePartDraftSchema.parse({
+        ...this.partBase("step-start"),
         type: "step-start",
         stepIndex: this.activeStepIndex,
       }),
@@ -461,8 +712,8 @@ export class SessionProcessor {
     envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { readonly type: "step-finish" }> },
   ): Promise<SessionProcessorResult> {
     const partWritten = await this.writePart(
-      RuntimePartSchema.parse({
-        ...this.partBase(),
+      RuntimePartDraftSchema.parse({
+        ...this.partBase("step-finish"),
         type: "step-finish",
         stepIndex: this.activeStepIndex === 0 ? undefined : this.activeStepIndex,
         finishReason: envelope.event.finishReason ?? "unknown",
@@ -473,16 +724,12 @@ export class SessionProcessor {
     if (!partWritten.ok) {
       return partWritten;
     }
-    return this.withPriorEvents(partWritten.events, await this.writeMessage(
-      RuntimeMessageInfoSchema.parse({
-        ...this.currentMessageInfoFields(),
-        status: "streaming",
-        finishReason: envelope.event.finishReason ?? "unknown",
-        ...(envelope.event.usage !== undefined ? { usage: envelope.event.usage } : {}),
-        updatedAt: this.options.now(),
-      }),
-      envelope,
-    ));
+    this.updateMessage({
+      status: "streaming",
+      finishReason: envelope.event.finishReason ?? "unknown",
+      ...(envelope.event.usage !== undefined ? { usage: envelope.event.usage } : {}),
+    });
+    return partWritten;
   }
 
   private async startText(
@@ -493,7 +740,7 @@ export class SessionProcessor {
     }
     const now = this.options.now();
     const part = parseTextPart({
-      ...this.partBase(now),
+      ...this.partBase("text"),
       type: "text",
       text: "",
       truncated: false,
@@ -515,7 +762,6 @@ export class SessionProcessor {
       ...this.activeTextPart,
       text: appended.text,
       truncated: appended.truncated,
-      updatedAt: this.options.now(),
     });
     this.activeTextPart = updatedText;
     this.upsertPart(this.activeTextPart);
@@ -531,7 +777,6 @@ export class SessionProcessor {
     const completed = parseTextPart({
       ...this.activeTextPart,
       status: "completed",
-      updatedAt: this.options.now(),
       completedAt: this.options.now(),
     });
     this.activeTextPart = undefined;
@@ -546,7 +791,7 @@ export class SessionProcessor {
     }
     const now = this.options.now();
     const part = parseReasoningPart({
-      ...this.partBase(now),
+      ...this.partBase("reasoning"),
       type: "reasoning",
       providerPartId: envelope.event.id,
       ...(envelope.event.providerMetadata !== undefined ? { providerMetadata: envelope.event.providerMetadata } : {}),
@@ -562,7 +807,6 @@ export class SessionProcessor {
         ok: false,
         events: [],
         error: eventWriterFailure(appendResult.error),
-        messageId: this.options.messageId,
       };
     }
     this.reasoningParts.set(envelope.event.id, part);
@@ -583,7 +827,6 @@ export class SessionProcessor {
       ...(providerMetadata !== undefined ? { providerMetadata } : {}),
       text: appended.text,
       truncated: appended.truncated,
-      updatedAt: this.options.now(),
     });
     this.reasoningParts.set(envelope.event.id, updated);
     this.upsertPart(updated);
@@ -602,7 +845,6 @@ export class SessionProcessor {
       ...part,
       ...(providerMetadata !== undefined ? { providerMetadata } : {}),
       status: "completed",
-      updatedAt: this.options.now(),
       completedAt: this.options.now(),
     });
     this.reasoningParts.delete(envelope.event.id);
@@ -617,7 +859,7 @@ export class SessionProcessor {
     }
     const now = this.options.now();
     const part = parseToolPart({
-      ...this.partBase(now),
+      ...this.partBase("tool"),
       type: "tool",
       toolCallId: envelope.event.id,
       toolName: envelope.event.toolName,
@@ -642,7 +884,6 @@ export class SessionProcessor {
         status: "running",
         input: runtimeJsonFromProvider(envelope.event.input, this.maxBytes()),
       },
-      updatedAt: this.options.now(),
     });
     this.toolParts.set(envelope.event.id, updated);
     return this.withPriorEvents(part.events, await this.writePart(updated, envelope));
@@ -651,25 +892,17 @@ export class SessionProcessor {
   private async finish(
     envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { readonly type: "finish" }> },
   ): Promise<SessionProcessorResult> {
-    const invalidFinish = this.messageInfo === undefined || (this.hasIncompleteParts() && envelope.event.finishReason !== "tool-calls") || this.currentParts().length === 0;
+    const invalidFinish = (this.hasIncompleteParts() && envelope.event.finishReason !== "tool-calls") || this.currentParts().length === 0;
     if (invalidFinish) {
       return await this.terminalFailure(envelope, "failed", semanticSequenceFailure());
     }
-    const completed = await this.writeMessage(
-      RuntimeMessageInfoSchema.parse({
-        ...this.currentMessageInfoFields(),
-        status: "completed",
-        finishReason: envelope.event.finishReason ?? "unknown",
-        ...(envelope.event.usage !== undefined ? { usage: envelope.event.usage } : {}),
-        updatedAt: this.options.now(),
-      }),
-      envelope,
-    );
-    if (!completed.ok) {
-      return completed;
-    }
+    this.updateMessage({
+      status: "completed",
+      finishReason: envelope.event.finishReason ?? "unknown",
+      ...(envelope.event.usage !== undefined ? { usage: envelope.event.usage } : {}),
+    });
     this.terminal = true;
-    return completed;
+    return { ok: true, events: [] };
   }
 
   private async terminalFailure(
@@ -681,24 +914,12 @@ export class SessionProcessor {
     if (!terminalized.ok) {
       return terminalized;
     }
-    const messageWritten = await this.writeMessage(
-      RuntimeMessageInfoSchema.parse({
-        ...this.currentMessageInfoFields(),
-        status,
-        error: failure,
-        updatedAt: this.options.now(),
-      }),
-      source,
-    );
-    if (!messageWritten.ok) {
-      return this.withPriorEvents(terminalized.events, messageWritten);
-    }
+    this.updateMessage({ status, error: failure });
     this.terminal = true;
     return {
       ok: true,
       events: [
         ...terminalized.events,
-        ...messageWritten.events,
         this.sessionEvent({
           type: "session.error",
           error: failure,
@@ -717,7 +938,6 @@ export class SessionProcessor {
       const terminalText = parseTextPart({
         ...this.activeTextPart,
         status,
-        updatedAt: this.options.now(),
         completedAt: this.options.now(),
       });
       this.activeTextPart = undefined;
@@ -731,7 +951,6 @@ export class SessionProcessor {
       const terminalReasoning = parseReasoningPart({
         ...part,
         status,
-        updatedAt: this.options.now(),
         completedAt: this.options.now(),
       });
       this.reasoningParts.delete(providerPartId);
@@ -765,7 +984,6 @@ export class SessionProcessor {
           : status === "cancelled"
             ? { status: "cancelled", error: terminalError }
             : { status: "error", error: terminalError },
-        updatedAt: this.options.now(),
         completedAt: this.options.now(),
       });
       this.toolParts.set(toolCallId, terminalTool);
@@ -789,7 +1007,7 @@ export class SessionProcessor {
     }
     const now = this.options.now();
     const part = parseToolPart({
-      ...this.partBase(now),
+      ...this.partBase("tool"),
       type: "tool",
       toolCallId,
       toolName,
@@ -800,84 +1018,63 @@ export class SessionProcessor {
     return { ok: true, events: [], part };
   }
 
-  private async writeMessage(
-    message: RuntimeMessageInfo,
-    source: RuntimeProcessorSource,
-  ): Promise<SessionProcessorResult> {
-    const result = await this.options.writer.writeMessage(message, source);
-    if (!result.ok) {
-      const failure = storeFailure(result.error);
-      if (this.messageInfo !== undefined && message.status !== "failed") {
-        await this.writeFailedMessageAfterStableWriteFailure(source, failure);
-      }
-      this.discardProjection();
-      return this.failWithOptionalMessageId(failure);
-    }
-    this.messageInfo = message;
-    this.projection = upsertMessageInfo(this.projection, message);
-    return {
-      ok: true,
-      events: [],
-    };
-  }
-
   private async writePart(
-    part: RuntimePart,
+    part: RuntimePartDraft,
     source: RuntimeProcessorSource,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
+    mcpMaterializationHandle?: string,
   ): Promise<SessionProcessorResult> {
-    const stablePart = boundRuntimePartForStableWrite(part, this.maxBytes());
-    const result = await this.options.writer.writePart(stablePart, source);
-    if (!result.ok) {
-      const failure = storeFailure(result.error);
-      await this.writeFailedPartAfterStableWriteFailure(stablePart, source, failure);
-      await this.writeFailedMessageAfterStableWriteFailure(source, failure);
-      this.discardProjection();
-      return this.failWithOptionalMessageId(failure);
-    }
-    this.upsertPart(stablePart);
-    const appended = await this.appendStablePartEvents(stablePart, source, serverToolUse);
-    if (!appended.ok) {
-      return appended;
-    }
-    if (stablePart.type !== "reasoning" && appended.events.length > 0) {
-      this.options.writer.commitPart?.(appended.committedPart ?? stablePart);
-    }
-    return appended;
+    this.upsertPart(part);
+    return await this.appendStablePartEvents(part, source, serverToolUse, mcpMaterializationHandle);
   }
 
   private async appendStablePartEvents(
-    part: RuntimePart,
+    part: RuntimePartDraft,
     source: RuntimeProcessorSource,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
-  ): Promise<SessionProcessorResult & { readonly committedPart?: RuntimePart }> {
+    mcpMaterializationHandle?: string,
+  ): Promise<SessionProcessorResult> {
     const events = sessionEventsForStablePart(part, this.toolUseEventIds, this.toolEvents);
     const appendedEvents: SessionEvent[] = [];
     for (const event of events) {
       const anchoredReasoning = part.type === "tool" && (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")
         ? this.stableReasoningPrefixForTool(part)
         : [];
-      const projectionJson = projectionJsonForStablePartEvent(part, event);
-      const modelRequestId = anchoredReasoning.length > 0
-        || event.type === "agent.message"
-        || event.type === "agent.tool_result"
-        || event.type === "agent.mcp_tool_result"
-        ? this.options.modelRequestId
-        : undefined;
+      const draftKind = event.type === "agent.message"
+        ? "assistant_text"
+        : event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use"
+          ? "tool_use"
+          : "tool_result";
+      const modelRequestId = this.options.modelRequestId;
+      const declaredMessage = this.declarationMessage(anchoredReasoning);
+      // Transport and receipt application share this snapshot because another
+      // tool fiber may mutate the accumulator while the durable write is pending.
       const appendResult = await this.options.writer.appendEvent(
         event,
         source,
-        projectionJson,
+        { draftKind, message: declaredMessage },
         anchoredReasoning,
         modelRequestId,
         event.type === "agent.tool_result" ? serverToolUse : undefined,
+        event.type === "agent.mcp_tool_result" ? mcpMaterializationHandle : undefined,
       );
       if (!appendResult.ok) {
         return {
           ok: false,
           events: appendedEvents,
           error: eventWriterFailure(appendResult.error),
-          messageId: this.options.messageId,
+        };
+      }
+      const draft = this.outputDraftFromMessage(appendResult.writeId, event.type, draftKind, declaredMessage);
+      if (!this.applyDeclaration(event, draft, appendResult)) {
+        return {
+          ok: false,
+          events: appendedEvents,
+          error: eventWriterFailure(normalizeSessionEventWriterError({
+            code: "schema_mismatch",
+            sessionId: this.options.sessionId,
+            writeId: appendResult.writeId,
+          })),
         };
       }
       this.markStableReasoningDurable(anchoredReasoning);
@@ -891,22 +1088,11 @@ export class SessionProcessor {
           ...part,
           toolUseEventId: appendResult.eventId,
           toolEvent,
-          updatedAt: this.options.now(),
         });
-        const stampedWrite = await this.options.writer.writePart(toolUseStampedPart, source);
-        if (!stampedWrite.ok) {
-          return {
-            ok: false,
-            events: appendedEvents,
-            error: storeFailure(stampedWrite.error),
-            messageId: this.options.messageId,
-          };
-        }
         this.upsertPart(toolUseStampedPart);
         return {
           ok: true,
           events: [...appendedEvents, event],
-          committedPart: toolUseStampedPart,
         };
       }
       appendedEvents.push(event);
@@ -915,57 +1101,6 @@ export class SessionProcessor {
       ok: true,
       events: appendedEvents,
     };
-  }
-
-  private async writeFailedMessageAfterStableWriteFailure(
-    source: RuntimeProcessorSource,
-    failure: RuntimeFailure,
-  ): Promise<void> {
-    const failedMessage = RuntimeMessageInfoSchema.parse({
-      ...this.currentMessageInfoFields(),
-      status: "failed",
-      error: failure,
-      updatedAt: this.options.now(),
-    });
-    const result = await this.options.writer.writeMessage(failedMessage, source);
-    if (result.ok) {
-      this.messageInfo = failedMessage;
-      this.projection = upsertMessageInfo(this.projection, failedMessage);
-      this.terminal = true;
-    }
-  }
-
-  private async writeFailedPartAfterStableWriteFailure(
-    failedWritePart: RuntimePart,
-    source: RuntimeProcessorSource,
-    failure: RuntimeFailure,
-  ): Promise<void> {
-    const currentPart = this.currentParts().find((part) => part.id === failedWritePart.id);
-    if (currentPart === undefined) {
-      return;
-    }
-    const terminalPart = terminalRuntimePartFromFailure(currentPart, failure, this.options.now());
-    if (terminalPart === undefined) {
-      return;
-    }
-    const stableTerminalPart = boundRuntimePartForStableWrite(terminalPart, this.maxBytes());
-    const result = await this.options.writer.writePart(stableTerminalPart, source);
-    if (result.ok) {
-      this.upsertPart(stableTerminalPart);
-      if (this.activeTextPart?.id === stableTerminalPart.id) {
-        this.activeTextPart = undefined;
-      }
-      for (const [providerPartId, part] of [...this.reasoningParts]) {
-        if (part.id === stableTerminalPart.id) {
-          this.reasoningParts.delete(providerPartId);
-        }
-      }
-      for (const [toolCallId, part] of [...this.toolParts]) {
-        if (part.id === stableTerminalPart.id && stableTerminalPart.type === "tool") {
-          this.toolParts.set(toolCallId, stableTerminalPart);
-        }
-      }
-    }
   }
 
   private async appendPublicMcpErrorEvent(
@@ -983,7 +1118,6 @@ export class SessionProcessor {
         ok: false,
         events: result.events,
         error: eventWriterFailure(appendResult.error),
-        messageId: this.options.messageId,
       };
     }
     return {
@@ -1002,7 +1136,6 @@ export class SessionProcessor {
       ok: false,
       events: [],
       error: failure,
-      messageId: this.options.messageId,
     };
   }
 
@@ -1013,33 +1146,135 @@ export class SessionProcessor {
     };
   }
 
-  private upsertPart(part: RuntimePart): void {
-    this.projection = upsertMessagePart(this.projection, part);
+  private upsertPart(part: RuntimePartDraft): void {
+    this.workingMessage = upsertDraftPart(this.workingMessage, part);
   }
 
-  private completedReasoningParts(): ReasoningRuntimePart[] {
-    return this.projection
-      .flatMap((message) => message.parts)
-      .filter((part): part is ReasoningRuntimePart => part.type === "reasoning" && part.status === "completed")
-      .sort((left, right) => left.sequence - right.sequence);
+  private completedReasoningParts(): ReasoningRuntimePartDraft[] {
+    return this.currentParts()
+      .filter((part): part is ReasoningRuntimePartDraft => part.type === "reasoning" && part.status === "completed")
+      .sort((left, right) => left.ordinal - right.ordinal);
   }
 
-  private stableReasoningPrefixForTool(tool: ToolRuntimePart): SessionEventWriterStableReasoningPart[] {
+  private stableReasoningPrefixForTool(tool: ToolRuntimePartDraft): SessionEventWriterStableReasoningPart[] {
     return this.completedReasoningParts()
-      .filter((part) => part.sequence < tool.sequence && !this.durableReasoningPartIds.has(part.id))
+      .filter((part) =>
+        part.ordinal < tool.ordinal &&
+        !this.durableReasoningPartIds.has(part.runtimeLocalPartId)
+      )
       .map(stableReasoningPartForWrite);
   }
 
   private discardProjection(): void {
-    this.projection = [];
+    const primaryMessage = this.primaryDurableMessageId === undefined
+      ? undefined
+      : this.durableProjection.find((message) => message.id === this.primaryDurableMessageId);
+    const durableAssociations = new Set(runtimePartAssociations(primaryMessage?.parts ?? []));
+    const currentAssociations = runtimePartAssociations(this.currentParts());
+    const durableParts = this.currentParts().filter((_part, index) =>
+      durableAssociations.has(currentAssociations[index] ?? "")
+    );
+    if (durableParts.length > 0) {
+      this.failedCloseoutParts = durableParts;
+    }
+    this.workingMessage = RuntimeMessageDraftSchema.parse({
+      ...this.workingMessage,
+      parts: [],
+    });
+    this.durableProjection = [];
+    this.primaryDurableMessageId = undefined;
   }
 
-  private currentMessageInfoFields(): RuntimeMessageInfo {
-    return this.messageInfo;
+  private updateMessage(
+    update: Pick<RuntimeMessageDraft, "status"> &
+      Partial<Pick<RuntimeMessageDraft, "error" | "finishReason" | "usage" | "responseId">>,
+  ): void {
+    this.workingMessage = RuntimeMessageDraftSchema.parse({
+      ...this.workingMessage,
+      ...update,
+    });
   }
 
-  private currentParts(): readonly RuntimePart[] {
-    return this.projection.find((message) => message.id === this.options.messageId)?.parts ?? [];
+  private currentParts(): readonly RuntimePartDraft[] {
+    return this.workingMessage.parts;
+  }
+
+  private outputDraftFromMessage(
+    runtimeWriteId: string,
+    eventType: string,
+    draftKind: RuntimeMessageDraft["draftKind"],
+    message: RuntimeMessageDraft,
+  ): RuntimeMessageDraft {
+    return runtimeOutputDraft({
+      workspaceId: this.options.workspaceId,
+      sessionId: this.options.sessionId,
+      sessionThreadId: this.options.sessionThreadId,
+      runtimeWriteId,
+      eventType,
+      draftKind,
+      message,
+    });
+  }
+
+  private currentMessage(): RuntimeMessageDraft {
+    return this.workingMessage;
+  }
+
+  private declarationMessage(
+    anchoredReasoning: readonly SessionEventWriterStableReasoningPart[],
+  ): RuntimeMessageDraft {
+    const admittedReasoning = new Set([
+      ...this.durableReasoningPartIds,
+      ...anchoredReasoning.map((part) => part.reasoningPartId),
+    ]);
+    return RuntimeMessageDraftSchema.parse({
+      ...this.workingMessage,
+      parts: this.workingMessage.parts.filter(
+        (part) => part.type !== "reasoning" || admittedReasoning.has(part.runtimeLocalPartId),
+      ),
+    });
+  }
+
+  private applyDeclaration(
+    event: SessionEvent,
+    draft: RuntimeMessageDraft,
+    result: Extract<SessionEventWriterAppendResult, { readonly ok: true }>,
+  ): boolean {
+    if (
+      result.declaration === undefined ||
+      result.declaration.applicationDisposition !== "current_custody"
+    ) {
+      return false;
+    }
+    this.durableProjection = [
+      ...applyRuntimeOutputReceipt({
+        sessionId: this.options.sessionId,
+        sessionThreadId: this.options.sessionThreadId,
+        runtimeWriteId: result.writeId,
+        eventType: event.type,
+        eventId: result.eventId,
+        drafts: [draft],
+        existingMessages: this.durableProjection,
+      }, result.declaration.receipt),
+    ];
+    const messageStamp = result.declaration.receipt.messages.find(
+      (message) => message.runtimeLocalId === draft.runtimeLocalId,
+    );
+    if (messageStamp !== undefined) {
+      this.primaryDurableMessageId = messageStamp.messageId;
+    }
+    const durableMessage = this.primaryDurableMessageId === undefined
+      ? undefined
+      : this.durableProjection.find((message) => message.id === this.primaryDurableMessageId);
+    const durableAssociations = new Set(runtimePartAssociations(durableMessage?.parts ?? []));
+    const currentAssociations = runtimePartAssociations(this.currentParts());
+    const durableParts = this.currentParts().filter((_part, index) =>
+      durableAssociations.has(currentAssociations[index] ?? "")
+    );
+    if (durableParts.length > 0) {
+      this.failedCloseoutParts = durableParts;
+    }
+    return true;
   }
 
   private hasIncompleteParts(): boolean {
@@ -1049,13 +1284,16 @@ export class SessionProcessor {
     return this.currentParts().some((part) => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"));
   }
 
-  private partBase(createdAt: string = this.options.now()): RuntimePartBase {
+  private partBase(partKind: RuntimePartDraft["type"]): RuntimePartDraftBase {
+    const ordinal = this.currentParts().length;
     return {
-      id: this.options.createId("part"),
-      sessionId: this.options.sessionId,
-      messageId: this.options.messageId,
-      sequence: this.currentParts().length,
-      createdAt,
+      runtimeLocalPartId: stableRuntimeID(
+        "runtime_message_part_draft",
+        this.workingMessage.runtimeLocalId,
+        partKind,
+        String(ordinal),
+      ),
+      ordinal,
     };
   }
 
@@ -1091,10 +1329,6 @@ export function internalToolRepairKey(modelRequestId: string, modelToolCallId: s
   return `internal_invalid_tool_${hash.digest("hex")}`;
 }
 
-function internalToolRepairProjectionId(prefix: "msg_repair" | "part_repair", repairKey: string): string {
-  return `${prefix}_${createHash("sha256").update(prefix, "utf8").update("\0", "utf8").update(repairKey, "utf8").digest("hex")}`;
-}
-
 function mergeProviderMetadata(
   existing: ReasoningProviderMetadata | undefined,
   incoming: ReasoningProviderMetadata | undefined,
@@ -1119,73 +1353,32 @@ function isMetadataObject(value: unknown): value is Readonly<Record<string, Reas
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseTextPart(input: unknown): TextRuntimePart {
-  const part = RuntimePartSchema.parse(input);
+function parseTextPart(input: unknown): TextRuntimePartDraft {
+  const part = RuntimePartDraftSchema.parse(input);
   if (part.type !== "text") {
     throw new Error("expected text runtime part");
   }
   return part;
 }
 
-function parseReasoningPart(input: unknown): ReasoningRuntimePart {
-  const part = RuntimePartSchema.parse(input);
+function parseReasoningPart(input: unknown): ReasoningRuntimePartDraft {
+  const part = RuntimePartDraftSchema.parse(input);
   if (part.type !== "reasoning") {
     throw new Error("expected reasoning runtime part");
   }
   return part;
 }
 
-function parseToolPart(input: unknown): ToolRuntimePart {
-  const part = RuntimePartSchema.parse(input);
+function parseToolPart(input: unknown): ToolRuntimePartDraft {
+  const part = RuntimePartDraftSchema.parse(input);
   if (part.type !== "tool") {
     throw new Error("expected tool runtime part");
   }
   return part;
 }
 
-function terminalRuntimePartFromFailure(part: RuntimePart, failure: RuntimeFailure, now: string): RuntimePart | undefined {
-  if (part.type === "text") {
-    if (part.status === "completed" || part.status === "failed" || part.status === "cancelled") {
-      return undefined;
-    }
-    return parseTextPart({
-      ...part,
-      status: "failed",
-      updatedAt: now,
-      completedAt: now,
-    });
-  }
-  if (part.type === "reasoning") {
-    if (part.status === "completed" || part.status === "failed" || part.status === "cancelled") {
-      return undefined;
-    }
-    return parseReasoningPart({
-      ...part,
-      status: "failed",
-      updatedAt: now,
-      completedAt: now,
-    });
-  }
-  if (part.type === "tool") {
-    if (part.state.status === "completed" || part.state.status === "error" || part.state.status === "cancelled") {
-      return undefined;
-    }
-    return parseToolPart({
-      ...part,
-      state: {
-        status: "error",
-        ...(part.state.status === "running" ? { input: part.state.input } : {}),
-        error: runtimeToolErrorFromFailure(failure),
-      },
-      updatedAt: now,
-      completedAt: now,
-    });
-  }
-  return undefined;
-}
-
 function appendBoundedText(
-  part: TextRuntimePart | ReasoningRuntimePart,
+  part: TextRuntimePartDraft | ReasoningRuntimePartDraft,
   text_delta: string,
   maxBytes: number,
 ): TextAppendResult {
@@ -1215,7 +1408,7 @@ function byteLength(value: string): number {
 }
 
 function toolUseSessionEvent(
-  part: ToolRuntimePart,
+  part: ToolRuntimePartDraft,
   evaluatedPermission: "allow" | "ask" | "deny",
   toolEvent: PublicToolEvent,
 ): SessionEvent {
@@ -1237,7 +1430,7 @@ function toolUseSessionEvent(
   });
 }
 
-function toolInputForEvent(part: ToolRuntimePart): RuntimeJsonValue {
+function toolInputForEvent(part: ToolRuntimePartDraft): RuntimeJsonValue {
   if ("input" in part.state) {
     const input = part.state.input;
     if (input !== undefined && input.value !== undefined && isRuntimeJsonObjectForEvent(input.value)) {
@@ -1276,62 +1469,6 @@ function toolResultSessionEvent(
   });
 }
 
-function projectionJsonForStablePartEvent(part: RuntimePart, event: SessionEvent): string | undefined {
-	if (part.type === "text" && event.type === "agent.message") {
-		return JSON.stringify({
-			type: "runtime_text_projection",
-			message_id: part.messageId,
-			part_id: part.id,
-			part_sequence: part.sequence,
-			truncated: part.truncated,
-		});
-	}
-	if (part.type !== "tool") {
-		return undefined;
-  }
-  switch (event.type) {
-    case "agent.tool_use":
-    case "agent.tool_result":
-    case "agent.mcp_tool_use":
-    case "agent.mcp_tool_result":
-      return toolProjectionJson(part);
-    default:
-      return undefined;
-  }
-}
-
-function toolProjectionJson(part: ToolRuntimePart, publicEvent: PublicToolEvent | undefined = part.toolEvent): string {
-  const input = toolInputForEvent(part);
-	const projection: Record<string, unknown> = {
-		type: "runtime_tool_projection",
-		message_id: part.messageId,
-		part_id: part.id,
-		part_sequence: part.sequence,
-		model_tool_call_id: part.toolCallId,
-    tool_name: part.toolName,
-    input,
-    state: part.state.status,
-  };
-  if (publicEvent?.kind === "mcp") {
-    projection.mcp_server_name = publicEvent.mcpServerName;
-  }
-  switch (part.state.status) {
-    case "completed":
-      projection.output = part.state.output;
-      break;
-    case "error":
-      projection.error = part.state.error;
-      break;
-    case "cancelled":
-      projection.error = part.state.error ?? { type: "cancelled", message: "tool call was cancelled" };
-      break;
-    case "pending":
-    case "running":
-      break;
-  }
-  return JSON.stringify(projection);
-}
-
 function mcpErrorSessionEvent(error: PublicMcpErrorEvent): SessionEvent {
   if (error.type === "unknown_error") {
     return SessionEventSchema.parse({
@@ -1354,7 +1491,7 @@ function mcpErrorSessionEvent(error: PublicMcpErrorEvent): SessionEvent {
   });
 }
 
-function toolEventForPart(part: ToolRuntimePart, toolEvents: ReadonlyMap<string, PublicToolEvent>): PublicToolEvent {
+function toolEventForPart(part: ToolRuntimePartDraft, toolEvents: ReadonlyMap<string, PublicToolEvent>): PublicToolEvent {
   if (part.toolEvent !== undefined) {
     return part.toolEvent;
   }
@@ -1362,7 +1499,7 @@ function toolEventForPart(part: ToolRuntimePart, toolEvents: ReadonlyMap<string,
 }
 
 function sessionEventsForStablePart(
-  part: RuntimePart,
+  part: RuntimePartDraft,
   toolUseEventIds: ReadonlyMap<string, string>,
   toolEvents: ReadonlyMap<string, PublicToolEvent>,
 ): readonly SessionEvent[] {
@@ -1402,6 +1539,30 @@ function runtimeToolError(error: RuntimeFailure): RuntimeToolError {
     message: error.message,
     retryable: error.retryable,
   };
+}
+
+function runtimePartAssociation(
+  part: RuntimePart | RuntimePartDraft,
+  fallbackOrdinal: number,
+): string {
+  if (part.type === "tool") {
+    return `tool:${part.toolCallId}`;
+  }
+  if (part.type === "reasoning" && part.providerPartId !== undefined) {
+    return `reasoning:${part.providerPartId}`;
+  }
+  return `${part.type}:${fallbackOrdinal}`;
+}
+
+function runtimePartAssociations(
+  parts: readonly (RuntimePart | RuntimePartDraft)[],
+): readonly string[] {
+  const kindOrdinals = new Map<RuntimePart["type"], number>();
+  return parts.map((part) => {
+    const ordinal = kindOrdinals.get(part.type) ?? 0;
+    kindOrdinals.set(part.type, ordinal + 1);
+    return runtimePartAssociation(part, ordinal);
+  });
 }
 
 function runtimeToolErrorFromFailure(error: RuntimeFailure): RuntimeToolError {
@@ -1463,28 +1624,15 @@ function semanticSequenceFailure(): RuntimeFailure {
   };
 }
 
-function upsertMessageInfo(messages: readonly RuntimeMessage[], messageInfo: RuntimeMessageInfo): RuntimeMessage[] {
-  const existing = messages.find((message) => message.id === messageInfo.id);
-  if (existing === undefined) {
-    return [...messages, RuntimeMessageSchema.parse({ ...messageInfo, parts: [] })];
-  }
-  return messages.map((message) =>
-    message.id === messageInfo.id ? RuntimeMessageSchema.parse({ ...messageInfo, parts: message.parts }) : message,
-  );
+function upsertDraftPart(message: RuntimeMessageDraft, part: RuntimePartDraft): RuntimeMessageDraft {
+  const parts = [
+    ...message.parts.filter((candidate) => candidate.runtimeLocalPartId !== part.runtimeLocalPartId),
+    part,
+  ].sort((left, right) => left.ordinal - right.ordinal);
+  return RuntimeMessageDraftSchema.parse({ ...message, parts });
 }
 
-function upsertMessagePart(messages: readonly RuntimeMessage[], part: RuntimePart): RuntimeMessage[] {
-  return messages.map((message) => {
-    if (message.id !== part.messageId) {
-      return message;
-    }
-    const parts = [...message.parts.filter((currentPart) => currentPart.id !== part.id), part]
-      .sort((left, right) => left.sequence - right.sequence);
-    return RuntimeMessageSchema.parse({ ...message, parts });
-  });
-}
-
-function upsertMessage(messages: readonly RuntimeMessage[], next: RuntimeMessage): RuntimeMessage[] {
+function upsertMessage<T extends RuntimeMessage>(messages: readonly T[], next: T): T[] {
   const exists = messages.some((message) => message.id === next.id);
   if (!exists) {
     return [...messages, next];

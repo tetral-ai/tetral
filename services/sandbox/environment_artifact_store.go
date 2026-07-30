@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strconv"
 	"time"
 
@@ -381,12 +382,24 @@ func (s *EnvironmentArtifactStore) FanoutReadyEnvironment(ctx context.Context, j
 		if err := rows.Close(); err != nil {
 			return err
 		}
+		sort.Slice(preparations, func(left, right int) bool {
+			if preparations[left].sessionID != preparations[right].sessionID {
+				return preparations[left].sessionID < preparations[right].sessionID
+			}
+			return preparations[left].preparationAttemptID < preparations[right].preparationAttemptID
+		})
+		requests := make([]queue.EnqueueRequest, 0, len(preparations))
 		for _, ref := range preparations {
-			if err := enqueueSessionPrepareForFanout(ctx, tx, job.WorkspaceID, ref.sessionID, ref.preparationAttemptID, now.UTC()); err != nil {
+			request, err := sessionPrepareFanoutEnqueueRequest(job.WorkspaceID, ref.sessionID, ref.preparationAttemptID, now.UTC())
+			if err != nil {
 				return err
 			}
-			advanced++
+			requests = append(requests, request)
 		}
+		if _, err := queue.EnqueueBatchTx(ctx, tx, requests); err != nil {
+			return err
+		}
+		advanced = len(requests)
 		return nil
 	})
 	return advanced, err
@@ -560,17 +573,17 @@ func enqueueEnvironmentFailedFanout(ctx context.Context, tx *dbconnect.Tx, job E
 	return err
 }
 
-func enqueueSessionPrepareForFanout(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, preparationAttemptID string, now time.Time) error {
+func sessionPrepareFanoutEnqueueRequest(workspaceID string, sessionID string, preparationAttemptID string, now time.Time) (queue.EnqueueRequest, error) {
 	payload, err := json.Marshal(map[string]string{
 		"workspace_id":           workspaceID,
 		"session_id":             sessionID,
 		"preparation_attempt_id": preparationAttemptID,
 	})
 	if err != nil {
-		return err
+		return queue.EnqueueRequest{}, err
 	}
 	ws := workspace.ID(workspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+	return queue.EnqueueRequest{
 		WorkspaceID:    ws,
 		Kind:           queue.KindSessionPrepare,
 		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
@@ -578,8 +591,7 @@ func enqueueSessionPrepareForFanout(ctx context.Context, tx *dbconnect.Tx, works
 		PayloadVersion: 1,
 		PayloadJSON:    payload,
 		Now:            now,
-	})
-	return err
+	}, nil
 }
 
 func decodePackageSetupJSON(raw string) (sandbox.PackageSetup, error) {

@@ -221,27 +221,29 @@ export class AutoApprovalReviewerManager {
     return Effect.forkIn(effect, this.#scope);
   }
 
-  dispose(): void {
-    this.#disposed = true;
-    this.#trunkBusy = false;
-    this.#feedCursor = undefined;
-    this.#lastCommittedTrunkSnapshot = undefined;
-    this.#decisionMemo.clear();
-    this.#ephemeralReviews.clear();
-    for (const execution of this.#executions.values()) {
-      if (execution.raceState === "pending") {
-        execution.raceState = "cancellation_won";
+  dispose(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (this.#disposed) {
+        return Effect.void;
       }
-      for (const listener of execution.cancellationListeners) {
-        listener();
+      this.#disposed = true;
+      this.#trunkBusy = false;
+      this.#feedCursor = undefined;
+      this.#lastCommittedTrunkSnapshot = undefined;
+      this.#decisionMemo.clear();
+      this.#ephemeralReviews.clear();
+      for (const execution of this.#executions.values()) {
+        if (execution.raceState === "pending") {
+          execution.raceState = "cancellation_won";
+        }
+        for (const listener of execution.cancellationListeners) {
+          listener();
+        }
+        execution.cancellationListeners.clear();
       }
-      execution.cancellationListeners.clear();
-    }
-    this.#executions.clear();
-    const close = Scope.closeUnsafe(this.#scope, Exit.void);
-    if (close !== undefined) {
-      Effect.runSync(close);
-    }
+      this.#executions.clear();
+      return Scope.close(this.#scope, Exit.void).pipe(Effect.asVoid);
+    });
   }
 
   private lease(

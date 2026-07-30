@@ -11,6 +11,7 @@
 import { SessionState } from "./session-state.js";
 import type { AutoApprovalReviewerManager } from "./approval-reviewer-manager.js";
 import { SessionToolCoordinator } from "../tools/tool-scheduler.js";
+import { SessionConfiguration } from "./session-configuration.js";
 
 /** Binding and thread identity required by Runtime-to-Bridge calls. */
 export interface RuntimeSessionIdentity {
@@ -18,6 +19,8 @@ export interface RuntimeSessionIdentity {
   readonly sessionId: string;
   readonly sessionThreadId: string;
   readonly parentThreadId?: string | undefined;
+  readonly parentTaskName?: string | undefined;
+  readonly taskName?: string | undefined;
   readonly threadRole?: "main" | "subagent" | "approval_reviewer" | undefined;
   readonly bindingId: string;
   readonly bindingGeneration: number;
@@ -30,6 +33,7 @@ export class Session {
   #identity: RuntimeSessionIdentity;
   readonly sessionId: string;
   readonly state: SessionState;
+  readonly configuration: SessionConfiguration;
   readonly approvalReviewerManager: AutoApprovalReviewerManager | undefined;
   readonly toolCoordinator: SessionToolCoordinator;
 
@@ -37,10 +41,12 @@ export class Session {
     identity: string | RuntimeSessionIdentity,
     approvalReviewerManager?: AutoApprovalReviewerManager,
     toolCoordinator: SessionToolCoordinator = new SessionToolCoordinator(),
+    configuration: SessionConfiguration = new SessionConfiguration(),
   ) {
     this.#identity = typeof identity === "string" ? defaultRuntimeSessionIdentity(identity) : identity;
     this.sessionId = this.#identity.sessionId;
     this.state = new SessionState(this.sessionId);
+    this.configuration = configuration;
     this.approvalReviewerManager = approvalReviewerManager;
     this.toolCoordinator = toolCoordinator;
   }

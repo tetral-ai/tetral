@@ -1,6 +1,6 @@
 import { describe, expect, jest, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect";
+import { Cause, Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect";
 import {
   ProviderRequestKind,
   RuntimeMessageRole,
@@ -8,23 +8,27 @@ import {
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
+  DurableRuntimeMessage,
   PendingInputResult,
   RuntimeDependencies,
   RuntimeInternalToolRepairCommit,
   RuntimeMessage,
+  RuntimeMessageDraft,
   RuntimeMessageInfo,
-  RuntimeMessageStoreOperationControls,
+  RuntimeDeclarationOperationControls,
   RuntimePart,
   SessionEvent,
   SessionEventEnvelope,
   SessionEventWriter,
   SessionEventWriterAppendResult,
+  SessionEventWriterFinishIdleEnvelope,
   SessionEventWriterRequestEndEnvelope,
   SessionEventWriterRuntimeTerminationEnvelope,
 } from "../../src/contracts/runtime.js";
 import {
+  DurableRuntimeMessageSchema,
   RuntimeMessageSchema,
-  RuntimeMessageStore,
+  RuntimeInternalToolRepairStore,
   SessionEventWriterRetryPolicy,
   normalizeContextLoaderError,
   normalizeRuntimeMessageStoreError,
@@ -67,6 +71,11 @@ interface PackageJson {
 }
 
 const createdAt = "2026-06-14T00:00:00.000Z";
+const emptyColdCoverage = {
+  pendingToolIds: [],
+  pendingAttachmentIdentities: [],
+  undeliveredMailDeliveryIds: [],
+} as const;
 const approvalReviewerOutputSchemaJson = JSON.stringify({
   type: "object",
   additionalProperties: false,
@@ -266,7 +275,7 @@ async function installLoaderStateForTest(loader: TestContextLoader, session: Ses
   }
 }
 
-class AgentLoopRuntimeStore extends RuntimeMessageStore {
+class AgentLoopRuntimeStore extends RuntimeInternalToolRepairStore {
   readonly messages = new Map<string, RuntimeMessage>();
   readonly repairs: RuntimeInternalToolRepairCommit[] = [];
 
@@ -276,11 +285,12 @@ class AgentLoopRuntimeStore extends RuntimeMessageStore {
     private readonly failMessageWrite = false,
     private readonly beforeWrite?: (operation: "writeMessage" | "writePart", payload: RuntimeMessageInfo | RuntimePart) => void,
     private readonly beforeInternalToolRepair?: (repair: RuntimeInternalToolRepairCommit) => void | Promise<void>,
+    private readonly durableSequence?: TestDurableSequence,
   ) {
     super();
   }
 
-  protected async writeMessageRecord(message: RuntimeMessageInfo, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
+  protected async writeMessageRecord(message: RuntimeMessageInfo, _controls: RuntimeDeclarationOperationControls): Promise<unknown> {
     this.beforeWrite?.("writeMessage", message);
     this.order.push(`store:message:${message.status}`);
     if (this.failMessageWrite) {
@@ -288,7 +298,7 @@ class AgentLoopRuntimeStore extends RuntimeMessageStore {
         ok: false,
         error: normalizeRuntimeMessageStoreError({
           code: "unavailable",
-          operation: "writeMessage",
+          operation: "commitInternalToolRepair",
           sessionId: message.sessionId,
           messageId: message.id,
         }),
@@ -296,10 +306,10 @@ class AgentLoopRuntimeStore extends RuntimeMessageStore {
     }
     const existing = this.messages.get(message.id);
     this.messages.set(message.id, RuntimeMessageSchema.parse({ ...message, parts: existing?.parts ?? [] }));
-    return { ok: true, messageId: message.id, operation: "writeMessage" };
+    return { ok: true, messageId: message.id, operation: "commitInternalToolRepair" };
   }
 
-  protected async writePartRecord(part: RuntimePart, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
+  protected async writePartRecord(part: RuntimePart, _controls: RuntimeDeclarationOperationControls): Promise<unknown> {
     this.beforeWrite?.("writePart", part);
     this.order.push(`store:part:${part.type}`);
     if (this.failPartWrite === true || (typeof this.failPartWrite === "function" && this.failPartWrite(part))) {
@@ -307,7 +317,7 @@ class AgentLoopRuntimeStore extends RuntimeMessageStore {
         ok: false,
         error: normalizeRuntimeMessageStoreError({
           code: "unavailable",
-          operation: "writePart",
+          operation: "commitInternalToolRepair",
           sessionId: part.sessionId,
           messageId: part.messageId,
           partId: part.id,
@@ -325,19 +335,69 @@ class AgentLoopRuntimeStore extends RuntimeMessageStore {
         parts: [...existing.parts.filter((current) => current.id !== part.id), part].sort((left, right) => left.sequence - right.sequence),
       }),
     );
-    return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
+    return { ok: true, messageId: part.messageId, partId: part.id, operation: "commitInternalToolRepair" };
   }
 
   protected async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit): Promise<unknown> {
     await this.beforeInternalToolRepair?.(repair);
-    const part = repair.message.parts[0];
+    const part = repair.draft.parts[0];
     if (part === undefined) {
       throw new Error("missing internal repair part");
     }
     this.repairs.push(repair);
     this.order.push("store:internal-tool-repair");
-    this.messages.set(repair.message.id, RuntimeMessageSchema.parse(repair.message));
-    return { ok: true, messageId: repair.message.id, partId: part.id, operation: "writePart" };
+    const eventId = `event-internal-repair-${this.repairs.length}`;
+    const messageId = `message-internal-repair-${this.repairs.length}`;
+    const partId = `part-internal-repair-${this.repairs.length}`;
+    const eventSequence = this.durableSequence === undefined
+      ? 20 + this.repairs.length
+      : ++this.durableSequence.eventSequence;
+    const messageSequence = this.durableSequence === undefined
+      ? 2
+      : ++this.durableSequence.messageSequence;
+    return {
+      ok: true,
+      eventId,
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: repair.bindingId,
+        observedBindingGeneration: repair.bindingGeneration,
+        receipt: {
+          sessionThreadId: repair.sessionThreadId,
+          operationKind: "commit_internal_tool_repair",
+          sourceKind: "internal_tool_repair",
+          sourceId: repair.repairKey,
+          declarationDigest: "test-repair-digest",
+          pendingAttachmentDelta: [],
+          events: [{
+            sessionThreadId: repair.sessionThreadId,
+            sourceEventId: repair.repairKey,
+            eventId,
+            eventSequence,
+            disposition: "created",
+          }],
+          messages: [{
+            runtimeLocalId: repair.draft.runtimeLocalId,
+            sessionThreadId: repair.sessionThreadId,
+            owningEventId: eventId,
+            messageId,
+            messageSequence,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created",
+            parts: [{
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId,
+              messageId,
+              partSequence: 0,
+              createdAt,
+              updatedAt: createdAt,
+              disposition: "created",
+            }],
+          }],
+        },
+      },
+    };
   }
 }
 
@@ -349,6 +409,21 @@ function agentLoopRuntime() {
     createId: (prefix: string) => `${prefix}-${++counter}`,
     sleep: async () => true,
   } satisfies RuntimeDependencies;
+}
+
+function testRunCustody(initialDurableTurnId?: string): AgentLoop.AgentLoopRunCustody {
+  let durableTurnId = initialDurableTurnId;
+  return {
+    durableTurnId: () => durableTurnId,
+    recordDurableTurnId: (value) => {
+      durableTurnId = value;
+    },
+    closeDurableTurn: (value) => {
+      if (durableTurnId === value) {
+        durableTurnId = undefined;
+      }
+    },
+  };
 }
 
 async function sleepUntilAborted(_milliseconds: number, signal: AbortSignal): Promise<boolean> {
@@ -382,39 +457,582 @@ function queuedLLMService(eventBatches: readonly (readonly LLMEvent[])[], reques
   };
 }
 
+interface TestDurableSequence {
+  eventSequence: number;
+  messageSequence: number;
+}
+
+class TestRuntimeDeclarationReceipts {
+  constructor(
+    private readonly durableSequence: TestDurableSequence = {
+      eventSequence: 100_000,
+      messageSequence: 100_000,
+    },
+  ) {}
+
+  private readonly activeMessages = new Map<string, {
+    readonly messageId: string;
+    readonly messageSequence: number;
+    readonly owningEventId: string;
+    readonly parts: Map<string, { readonly partId: string; readonly createdAt: string }>;
+  }>();
+
+  seedMessage(sessionThreadId: string, message: DurableRuntimeMessage): void {
+    this.durableSequence.eventSequence = Math.max(this.durableSequence.eventSequence, message.eventSequence);
+    this.durableSequence.messageSequence = Math.max(this.durableSequence.messageSequence, message.sequence);
+    this.activeMessages.set(sessionThreadId, {
+      messageId: message.id,
+      messageSequence: message.sequence,
+      owningEventId: message.owningEventId,
+      parts: new Map(message.parts.map((part) => [
+        part.type === "tool"
+          ? `tool:${part.toolCallId}`
+          : part.type === "reasoning"
+            ? `reasoning:${part.providerPartId ?? part.sequence}`
+            : `${part.type}:${part.sequence}`,
+        { partId: part.id, createdAt: part.createdAt },
+      ])),
+    });
+  }
+
+  apply(
+    envelope: SessionEventEnvelope,
+    result: SessionEventWriterAppendResult,
+  ): SessionEventWriterAppendResult {
+    if (envelope.event.type === "span.model_request_start") {
+      this.activeMessages.delete(envelope.sessionThreadId);
+    }
+    if (!result.ok || result.declaration !== undefined) {
+      return result;
+    }
+    this.durableSequence.eventSequence += 1;
+    const messages = envelope.drafts.length === 0
+      ? []
+      : (() => {
+          const current = this.activeMessages.get(envelope.sessionThreadId);
+          const message = current ?? {
+            messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence + 1}`,
+            messageSequence: this.durableSequence.messageSequence + 1,
+            owningEventId: result.eventId,
+            parts: new Map<string, { readonly partId: string; readonly createdAt: string }>(),
+          };
+          if (current === undefined) {
+            this.durableSequence.messageSequence += 1;
+            this.activeMessages.set(envelope.sessionThreadId, message);
+          }
+          const messageDisposition = current === undefined ? "created" as const : "updated" as const;
+          return envelope.drafts.map((draft) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: envelope.sessionThreadId,
+            owningEventId: message.owningEventId,
+            messageId: message.messageId,
+            messageSequence: message.messageSequence,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: messageDisposition,
+            parts: draft.parts.map((part, partIndex) => {
+              const association = testPartAssociation(part);
+              const existing = message.parts.get(association);
+              const durablePart = existing ?? {
+                partId: `part-${message.messageId}-${message.parts.size + 1}`,
+                createdAt,
+              };
+              message.parts.set(association, durablePart);
+              return {
+                runtimeLocalPartId: part.runtimeLocalPartId,
+                partId: durablePart.partId,
+                messageId: message.messageId,
+                partSequence: partIndex,
+                createdAt: durablePart.createdAt,
+                updatedAt: createdAt,
+                disposition: existing === undefined ? "created" as const : "updated" as const,
+              };
+            }),
+          }));
+        })();
+    const withReceipt: SessionEventWriterAppendResult = {
+      ...result,
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: envelope.bindingId,
+        observedBindingGeneration: envelope.bindingGeneration,
+        receipt: {
+          sessionThreadId: envelope.sessionThreadId,
+          operationKind: "write_event",
+          sourceKind: envelope.event.type,
+          sourceId: envelope.writeId,
+          declarationDigest: `digest-${envelope.writeId}`,
+          pendingAttachmentDelta: [],
+          pendingToolDelta: [],
+          prefixConsumptions: [],
+
+          childLifecycle: [],
+          events: [{
+            sessionThreadId: envelope.sessionThreadId,
+            sourceEventId: envelope.writeId,
+            eventId: result.eventId,
+            eventSequence: this.durableSequence.eventSequence,
+            disposition: "created",
+          }],
+          messages,
+        },
+      },
+    };
+    return withReceipt;
+  }
+
+  applyRequestEnd(
+    envelope: SessionEventWriterRequestEndEnvelope,
+    result: SessionEventWriterAppendResult,
+  ): SessionEventWriterAppendResult {
+    if (!result.ok || result.declaration !== undefined) {
+      return result;
+    }
+    this.durableSequence.eventSequence += 1;
+    const requestEndEventSequence = this.durableSequence.eventSequence;
+    const requestEndEventId = result.eventId;
+    const events = [{
+      sessionThreadId: envelope.sessionThreadId,
+      sourceEventId: envelope.modelRequestId,
+      eventId: requestEndEventId,
+      eventSequence: requestEndEventSequence,
+      disposition: "created" as const,
+    }];
+    const drafts = envelope.drafts ?? [];
+    const primaryDrafts = drafts.filter((draft) => draft.draftKind !== "cancellation");
+    const cancellationDrafts = drafts.filter((draft) => draft.draftKind === "cancellation");
+    const messages = primaryDrafts.length === 0
+      ? []
+      : envelope.requestKind === "compaction_summary"
+        ? (() => {
+          this.durableSequence.eventSequence += 1;
+          this.durableSequence.messageSequence = envelope.compactedThroughMessageSequence === undefined
+            ? this.durableSequence.messageSequence + 1
+            : envelope.compactedThroughMessageSequence + 1;
+          const compactionEventId = `bridge-compaction-${envelope.modelRequestId}`;
+          events.push({
+            sessionThreadId: envelope.sessionThreadId,
+            sourceEventId: envelope.modelRequestId,
+            eventId: compactionEventId,
+            eventSequence: this.durableSequence.eventSequence,
+            disposition: "created" as const,
+          });
+          return primaryDrafts.map((draft) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: envelope.sessionThreadId,
+            owningEventId: compactionEventId,
+            messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}`,
+            messageSequence: this.durableSequence.messageSequence,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created" as const,
+            parts: draft.parts.map((part, partIndex) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}-${partIndex}`,
+              messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}`,
+              partSequence: partIndex,
+              createdAt,
+              updatedAt: createdAt,
+              disposition: "created" as const,
+            })),
+          }));
+        })()
+        : (() => {
+            const current = this.activeMessages.get(envelope.sessionThreadId);
+            const message = current ?? {
+              messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence + 1}`,
+              messageSequence: this.durableSequence.messageSequence + 1,
+              owningEventId: requestEndEventId,
+              parts: new Map<string, { readonly partId: string; readonly createdAt: string }>(),
+            };
+            if (current === undefined) {
+              this.durableSequence.messageSequence += 1;
+              this.activeMessages.set(envelope.sessionThreadId, message);
+            }
+            return primaryDrafts.map((draft) => ({
+              runtimeLocalId: draft.runtimeLocalId,
+              sessionThreadId: envelope.sessionThreadId,
+              owningEventId: message.owningEventId,
+              messageId: message.messageId,
+              messageSequence: message.messageSequence,
+              createdAt,
+              updatedAt: createdAt,
+              disposition: current === undefined ? "created" as const : "updated" as const,
+              parts: draft.parts.map((part, partIndex) => {
+                const association = testPartAssociation(part);
+                const existing = message.parts.get(association);
+                const durablePart = existing ?? {
+                  partId: `part-${message.messageId}-${message.parts.size + 1}`,
+                  createdAt,
+                };
+                message.parts.set(association, durablePart);
+                return {
+                  runtimeLocalPartId: part.runtimeLocalPartId,
+                  partId: durablePart.partId,
+                  messageId: message.messageId,
+                  partSequence: partIndex,
+                  createdAt: durablePart.createdAt,
+                  updatedAt: createdAt,
+                  disposition: existing === undefined ? "created" as const : "updated" as const,
+                };
+              }),
+            }));
+          })();
+    const checkpointMessage = messages[0];
+    const interruptReceipt = envelope.interruptSettlement === undefined
+      ? undefined
+      : (() => {
+          const eventId = envelope.interruptSettlement.eventIds[0]!;
+          const interruptMessages = cancellationDrafts.map((draft) => {
+            this.durableSequence.messageSequence += 1;
+            const messageId = `message-interrupt-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}`;
+            return {
+              runtimeLocalId: draft.runtimeLocalId,
+              sessionThreadId: envelope.sessionThreadId,
+              owningEventId: eventId,
+              messageId,
+              messageSequence: this.durableSequence.messageSequence,
+              createdAt,
+              updatedAt: createdAt,
+              disposition: "created" as const,
+              parts: draft.parts.map((part, partIndex) => ({
+                runtimeLocalPartId: part.runtimeLocalPartId,
+                partId: `part-${messageId}-${partIndex}`,
+                messageId,
+                partSequence: partIndex,
+                createdAt,
+                updatedAt: createdAt,
+                disposition: "created" as const,
+              })),
+            };
+          });
+          return {
+            sessionThreadId: envelope.sessionThreadId,
+            operationKind: "commit_inputs",
+            sourceKind: "interrupt_control",
+            sourceId: envelope.interruptSettlement.runtimeInputId,
+            declarationDigest: `digest-interrupt-${envelope.interruptSettlement.runtimeInputId}`,
+            pendingAttachmentDelta: [],
+            pendingToolDelta: envelope.interruptSettlement.pendingToolCancellations.map((pending) =>
+              JSON.stringify({
+                result_event_id: eventId,
+                runtime_local_id: pending.runtimeLocalId,
+                status: "cancelled",
+                tool_use_event_id: pending.toolUseEventId,
+              })
+            ),
+            prefixConsumptions: [],
+
+            childLifecycle: [],
+            events: [{
+              sessionThreadId: envelope.sessionThreadId,
+              sourceEventId: eventId,
+              eventId,
+              eventSequence: envelope.interruptSettlement.sequenceFrom,
+              disposition: "existing" as const,
+            }],
+            messages: interruptMessages,
+          };
+        })();
+    return {
+      ...result,
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: envelope.bindingId,
+        observedBindingGeneration: envelope.bindingGeneration,
+        receipt: {
+          sessionThreadId: envelope.sessionThreadId,
+          operationKind: "write_request_end",
+          sourceKind: "model_request",
+          sourceId: envelope.modelRequestId,
+          declarationDigest: `digest-${envelope.modelRequestId}`,
+          pendingAttachmentDelta: [],
+          pendingToolDelta: [],
+          prefixConsumptions:
+            envelope.prefixConsumption === undefined || checkpointMessage === undefined
+              ? []
+              : [{
+                  childThreadId: envelope.prefixConsumption.childThreadId,
+                  parentBoundaryEventId: envelope.prefixConsumption.parentBoundaryEventId,
+                  checkpointMessageId: checkpointMessage.messageId,
+                  disposition: "consumed",
+                }],
+          childLifecycle: [],
+          events,
+          messages,
+          ...(envelope.reschedule === undefined
+            ? {}
+            : {
+                requestReschedule: {
+                  disposition: "accepted",
+                  requestKind: envelope.requestKind ?? "agent_provider_request",
+                  attempt: envelope.reschedule.attempt,
+                  effectiveDeadline: envelope.reschedule.deadline,
+                },
+              }),
+          ...(envelope.compactedThroughMessageSequence === undefined
+            ? {}
+            : { compactedThroughMessageSequence: envelope.compactedThroughMessageSequence }),
+        },
+        ...(interruptReceipt === undefined ? {} : { relatedReceipts: [interruptReceipt] }),
+      },
+      ...(envelope.reschedule === undefined
+        ? {}
+        : {
+            rescheduleDisposition: {
+              status: "accepted",
+              attempt: envelope.reschedule.attempt,
+              effectiveDeadline: envelope.reschedule.deadline,
+            },
+          }),
+    };
+  }
+
+  applyFinishIdle(
+    envelope: SessionEventWriterFinishIdleEnvelope,
+    result: SessionEventWriterAppendResult,
+  ): SessionEventWriterAppendResult {
+    if (!result.ok || result.declaration !== undefined) {
+      return result;
+    }
+    this.durableSequence.eventSequence += 1;
+    const idleEvent = {
+      sessionThreadId: envelope.sessionThreadId,
+      sourceEventId: envelope.durableTurnId,
+      eventId: result.eventId,
+      eventSequence: this.durableSequence.eventSequence,
+      disposition: "created" as const,
+    };
+    const events = [idleEvent];
+    const drafts = envelope.drafts ?? [];
+    const messages = drafts.map((draft) => {
+      this.durableSequence.eventSequence += 1;
+      const completionEventId = `bridge-completion-${envelope.durableTurnId}`;
+      events.push({
+        sessionThreadId: envelope.sessionThreadId,
+        sourceEventId: `delivery-${envelope.durableTurnId}`,
+        eventId: completionEventId,
+        eventSequence: this.durableSequence.eventSequence,
+        disposition: "created" as const,
+      });
+      const messageId = `message-completion-${envelope.durableTurnId}`;
+      return {
+        runtimeLocalId: draft.runtimeLocalId,
+        sessionThreadId: envelope.sessionThreadId,
+        owningEventId: completionEventId,
+        messageId,
+        messageSequence: 0,
+        createdAt,
+        updatedAt: createdAt,
+        disposition: "created" as const,
+        parts: draft.parts.map((part, partIndex) => ({
+          runtimeLocalPartId: part.runtimeLocalPartId,
+          partId: `part-completion-${envelope.durableTurnId}-${partIndex}`,
+          messageId,
+          partSequence: partIndex,
+          createdAt,
+          updatedAt: createdAt,
+          disposition: "created" as const,
+        })),
+      };
+    });
+    return {
+      ...result,
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: envelope.bindingId,
+        observedBindingGeneration: envelope.bindingGeneration,
+        receipt: {
+          sessionThreadId: envelope.sessionThreadId,
+          operationKind: "finish_idle",
+          sourceKind: "turn_closeout",
+          sourceId: envelope.durableTurnId,
+          declarationDigest: `digest-finish-${envelope.durableTurnId}`,
+          pendingAttachmentDelta: [],
+          pendingToolDelta: [],
+          prefixConsumptions: [],
+
+          childLifecycle: [],
+          events,
+          messages,
+          idleCloseout: {
+            durableTurnId: envelope.durableTurnId,
+            idleEventId: result.eventId,
+            idleEventSequence: idleEvent.eventSequence,
+            committedIdleAt: createdAt,
+          },
+        },
+      },
+    };
+  }
+
+  applyRuntimeTermination(
+    envelope: SessionEventWriterRuntimeTerminationEnvelope,
+    result: SessionEventWriterAppendResult,
+  ): SessionEventWriterAppendResult {
+    if (!result.ok || result.declaration !== undefined) {
+      return result;
+    }
+    const events = ["failure", "idle"].map((kind) => {
+      this.durableSequence.eventSequence += 1;
+      return {
+        sessionThreadId: envelope.sessionThreadId,
+        sourceEventId: envelope.writeId,
+        eventId: `bridge-termination-${kind}-${envelope.writeId}`,
+        eventSequence: this.durableSequence.eventSequence,
+        disposition: "created" as const,
+      };
+    });
+    const messageEvents = envelope.drafts.map((_draft, index) => {
+      this.durableSequence.eventSequence += 1;
+      return {
+        sessionThreadId: envelope.sessionThreadId,
+        sourceEventId: envelope.writeId,
+        eventId: `bridge-termination-${envelope.writeId}-${index}`,
+        eventSequence: this.durableSequence.eventSequence,
+        disposition: "created" as const,
+      };
+    });
+    events.push(...messageEvents);
+    const messages = envelope.drafts.map((draft, index) => {
+      this.durableSequence.messageSequence += 1;
+      const messageId = `message-termination-${envelope.writeId}-${index}`;
+      return {
+        runtimeLocalId: draft.runtimeLocalId,
+        sessionThreadId: envelope.sessionThreadId,
+        owningEventId: messageEvents[index]!.eventId,
+        messageId,
+        messageSequence: this.durableSequence.messageSequence,
+        createdAt,
+        updatedAt: createdAt,
+        disposition: "created" as const,
+        parts: draft.parts.map((part, partIndex) => ({
+          runtimeLocalPartId: part.runtimeLocalPartId,
+          partId: `part-termination-${envelope.writeId}-${index}-${partIndex}`,
+          messageId,
+          partSequence: partIndex,
+          createdAt,
+          updatedAt: createdAt,
+          disposition: "created" as const,
+        })),
+      };
+    });
+    return {
+      ...result,
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: envelope.bindingId,
+        observedBindingGeneration: envelope.bindingGeneration,
+        receipt: {
+          sessionThreadId: envelope.sessionThreadId,
+          operationKind: "commit_runtime_termination",
+          sourceKind: "runtime_termination",
+          sourceId: envelope.writeId,
+          declarationDigest: `digest-termination-${envelope.writeId}`,
+          pendingAttachmentDelta: [],
+          pendingToolDelta: envelope.pendingToolCancellations.map((pending) =>
+            JSON.stringify({
+              status: "cancelled",
+              tool_use_event_id: pending.toolUseEventId,
+            })
+          ),
+          prefixConsumptions: [],
+
+          childLifecycle: [],
+          events,
+          messages,
+        },
+      },
+    };
+  }
+}
+
+function withFinishIdleReceiptForTest(
+  envelope: SessionEventWriterFinishIdleEnvelope,
+  result: SessionEventWriterAppendResult,
+): SessionEventWriterAppendResult {
+  return new TestRuntimeDeclarationReceipts().applyFinishIdle(envelope, result);
+}
+
+function withRuntimeTerminationReceiptForTest(
+  envelope: SessionEventWriterRuntimeTerminationEnvelope,
+  result: SessionEventWriterAppendResult,
+): SessionEventWriterAppendResult {
+  return new TestRuntimeDeclarationReceipts().applyRuntimeTermination(envelope, result);
+}
+
+function testPartAssociation(part: RuntimeMessageDraft["parts"][number]): string {
+  if (part.type === "tool") {
+    return `tool:${part.toolCallId}`;
+  }
+  if (part.type === "reasoning") {
+    return `reasoning:${part.providerPartId ?? part.ordinal}`;
+  }
+  return `${part.type}:${part.ordinal}`;
+}
+
 function writerFrom(
   append: (envelope: SessionEventEnvelope) => SessionEventWriterAppendResult,
   writeRequestEnd?: SessionEventWriter["writeRequestEnd"],
+  existingMessages: readonly {
+    readonly sessionThreadId: string;
+    readonly message: DurableRuntimeMessage;
+  }[] = [],
+  durableSequence?: TestDurableSequence,
 ): SessionEventWriter {
+  const receipts = new TestRuntimeDeclarationReceipts(durableSequence);
+  for (const existing of existingMessages) {
+    receipts.seedMessage(existing.sessionThreadId, existing.message);
+  }
+  const appendWithReceipt = async (envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> =>
+    receipts.apply(envelope, append(envelope));
+  const writeRequestEndWithReceipt = async (
+    envelope: SessionEventWriterRequestEndEnvelope,
+  ): Promise<SessionEventWriterAppendResult> => {
+    const result = writeRequestEnd === undefined
+      ? append({
+          requestId: envelope.requestId,
+          workspaceId: envelope.workspaceId,
+          sessionId: envelope.sessionId,
+          sessionThreadId: envelope.sessionThreadId,
+          bindingId: envelope.bindingId,
+          bindingGeneration: envelope.bindingGeneration,
+          targetPodUid: envelope.targetPodUid,
+          writeId: envelope.writeId,
+          event: {
+            type: "span.model_request_end",
+            model_request_start_id: envelope.modelRequestStartEventId,
+            is_error: envelope.isError,
+            ...(envelope.errorKind !== undefined ? { error_kind: envelope.errorKind } : {}),
+            model_usage: {
+              input_tokens: envelope.usage?.inputTokens ?? 0,
+              output_tokens: envelope.usage?.outputTokens ?? 0,
+              cache_creation_input_tokens: envelope.usage?.cacheWriteTokens ?? 0,
+              cache_read_input_tokens: envelope.usage?.cacheReadTokens ?? 0,
+              speed: null,
+            },
+          },
+          drafts: [],
+        })
+      : await writeRequestEnd(envelope);
+    return receipts.applyRequestEnd(envelope, result);
+  };
   return {
-    append: async (envelope) => append(envelope),
-    writeRequestEnd: writeRequestEnd ?? (async (envelope) => append({
+    append: appendWithReceipt,
+    writeRequestEnd: writeRequestEndWithReceipt,
+    finishIdle: async (envelope) => receipts.applyFinishIdle(envelope, append({
+      requestId: envelope.durableTurnId,
       workspaceId: envelope.workspaceId,
       sessionId: envelope.sessionId,
       sessionThreadId: envelope.sessionThreadId,
-      writeId: envelope.writeId,
-      event: {
-        type: "span.model_request_end",
-        model_request_start_id: envelope.modelRequestStartEventId,
-        is_error: envelope.isError,
-        ...(envelope.errorKind !== undefined ? { error_kind: envelope.errorKind } : {}),
-        model_usage: {
-          input_tokens: envelope.usage?.inputTokens ?? 0,
-          output_tokens: envelope.usage?.outputTokens ?? 0,
-          cache_creation_input_tokens: envelope.usage?.cacheWriteTokens ?? 0,
-          cache_read_input_tokens: envelope.usage?.cacheReadTokens ?? 0,
-          speed: null,
-        },
-      },
-    })),
-    finishIdle: async (envelope) => append({
-      workspaceId: envelope.workspaceId,
-      sessionId: envelope.sessionId,
-      sessionThreadId: envelope.sessionThreadId,
-      writeId: envelope.writeId,
+      bindingId: envelope.bindingId,
+      bindingGeneration: envelope.bindingGeneration,
+      targetPodUid: envelope.targetPodUid,
+      writeId: envelope.durableTurnId,
       event: { type: "session.status_idle", stop_reason: envelope.stopReason },
-    }),
-    commitRuntimeTermination: async (envelope) => ({
+      drafts: envelope.drafts ?? [],
+    })),
+    commitRuntimeTermination: async (envelope) => receipts.applyRuntimeTermination(envelope, {
       ok: true,
       writeId: envelope.writeId,
       eventId: envelope.writeId,
@@ -499,6 +1117,28 @@ function utf8RoundTrip(value: string): string {
   return new TextDecoder("utf-8", { fatal: true }).decode(new TextEncoder().encode(value));
 }
 
+async function waitForReleaseOrAbort(release: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    throw new DOMException("aborted", "AbortError");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    release.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function activeCompactionRun(
   session: Session = new Session("sesn_1"),
   metrics?: RuntimeMetricsSink,
@@ -529,7 +1169,10 @@ async function activeCompactionRun(
       streamStarted.resolve();
       return Stream.fromAsyncIterable(
         (async function* () {
-          await providerRelease.promise;
+          if (options?.abortSignal === undefined) {
+            throw new Error("compaction stream requires an abort signal");
+          }
+          await waitForReleaseOrAbort(providerRelease.promise, options.abortSignal);
           yield { type: "finish" as const, finishReason: "stop" as const };
         })(),
         (error): LLMServiceError => ({
@@ -543,25 +1186,21 @@ async function activeCompactionRun(
       );
     },
   };
-  const baseWriter = writerFrom((envelope) => {
+  const writer = writerFrom((envelope) => {
     appended.push(envelope.event);
     const eventId = `bridge-${envelope.writeId}`;
     if (envelope.event.type === "span.model_request_start") {
       compactionStartEventId = eventId;
     }
     return { ok: true, writeId: envelope.writeId, eventId, processedAt: createdAt };
+  }, async (envelope) => {
+    requestEndEnvelopes.push(envelope);
+    return requestEndAck.promise;
   });
-  const writer: SessionEventWriter = {
-    ...baseWriter,
-    writeRequestEnd: async (envelope) => {
-      requestEndEnvelopes.push(envelope);
-      return requestEndAck.promise;
-    },
-  };
   const runFiber = Effect.runFork(
     Effect.gen(function* () {
       const agentLoop = yield* AgentLoop.Service;
-      return yield* agentLoop.run(session);
+      return yield* agentLoop.run(session, testRunCustody());
     }).pipe(
       Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: llm,
@@ -657,7 +1296,7 @@ function runtimeAgentLoopLayer(
     processedAt: createdAt,
   }));
   const productionLayer = AgentLoop.layer({
-    messageStore: store,
+    internalToolRepairStore: store,
     sessionEventWriter: writer,
     runtime: options.runtime ?? agentLoopRuntime(),
     llmService: options.llmService ?? llmService(options.events ?? [
@@ -695,9 +1334,9 @@ function runtimeAgentLoopLayer(
       const production = yield* AgentLoop.Service;
       return AgentLoop.Service.of({
         ...production,
-        run: (session) =>
+        run: (session, custody) =>
           Effect.promise(() => installLoaderStateForTest(loader, session)).pipe(
-            Effect.flatMap(() => production.run(session)),
+            Effect.flatMap(() => production.run(session, custody)),
           ),
       });
     }).pipe(Effect.provide(productionLayer)),
@@ -760,7 +1399,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(new Session("sesn_1"));
+        return yield* agentLoop.run(new Session("sesn_1"), testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { runtimeModel: () => undefined }))),
     );
 
@@ -777,7 +1416,11 @@ describe("AgentLoop", () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        const closeout = agentLoop.closeFailedRun(session, new Error(defectCanary));
+        const closeout = agentLoop.closeFailedRun(
+          session,
+          new Error(defectCanary),
+          testRunCustody("evt_failed_closeout_running"),
+        );
         expect(yield* closeout).toEqual({ type: "landed" });
         expect(yield* closeout).toEqual({ type: "landed" });
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
@@ -830,12 +1473,12 @@ describe("AgentLoop", () => {
       },
       finishIdle: async (envelope) => {
         idleCalls += 1;
-        return {
+        return withFinishIdleReceiptForTest(envelope, {
           ok: true,
-          writeId: envelope.writeId,
-          eventId: `bridge-${envelope.writeId}`,
+          writeId: envelope.durableTurnId,
+          eventId: `bridge-${envelope.durableTurnId}`,
           processedAt: createdAt,
-        };
+        });
       },
     };
     const loader = new RecordingContextLoader([], { type: "empty" });
@@ -843,7 +1486,11 @@ describe("AgentLoop", () => {
     let observationWindows = 0;
     const closeout = await Effect.runPromise(
       Effect.gen(function* () {
-        return (yield* AgentLoop.Service).closeFailedRun(session, new Error("defect"));
+        return (yield* AgentLoop.Service).closeFailedRun(
+          session,
+          new Error("defect"),
+          testRunCustody("evt_failed_closeout_single_flight_running"),
+        );
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         runtime: {
@@ -904,8 +1551,8 @@ describe("AgentLoop", () => {
       },
       finishIdle: async (envelope) => {
         idleCalls += 1;
-        idleWriteId = envelope.writeId;
-        return await idleResult.promise;
+        idleWriteId = envelope.durableTurnId;
+        return withFinishIdleReceiptForTest(envelope, await idleResult.promise);
       },
     };
     const closeout = await Effect.runPromise(
@@ -913,6 +1560,7 @@ describe("AgentLoop", () => {
         return (yield* AgentLoop.Service).closeFailedRun(
           new Session("sesn_failed_closeout_shared_window"),
           new Error("defect"),
+          testRunCustody("evt_failed_closeout_shared_window_running"),
         );
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader([], { type: "empty" }),
@@ -1000,6 +1648,7 @@ describe("AgentLoop", () => {
         return (yield* AgentLoop.Service).closeFailedRun(
           new Session("sesn_failed_closeout_reissue"),
           new Error("defect"),
+          testRunCustody("evt_failed_closeout_reissue_running"),
         );
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader([], { type: "empty" }),
@@ -1032,7 +1681,11 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.closeFailedRun(session, new Error("defect"));
+        return yield* agentLoop.closeFailedRun(
+          session,
+          new Error("defect"),
+          testRunCustody("evt_failed_closeout_ack_mismatch_running"),
+        );
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer: writerFrom((envelope) => ({
           ok: true,
@@ -1060,7 +1713,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(new Session("sesn_1"));
+        return yield* agentLoop.run(new Session("sesn_1"), testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { metrics }))),
     );
 
@@ -1281,7 +1934,7 @@ describe("AgentLoop", () => {
       const result = await Effect.runPromise(
         Effect.gen(function* () {
           const agentLoop = yield* AgentLoop.Service;
-          return yield* agentLoop.run(session);
+          return yield* agentLoop.run(session, testRunCustody());
         }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
           onStream: (request) => requests.push(request),
           runtimePolicy: () => runtimeToolPolicyFromPatchPayloads(scenario.patches),
@@ -1309,18 +1962,7 @@ describe("AgentLoop", () => {
         memoryStores: [],
       },
     });
-    expect(session.state.applyRuntimeConfigPatch({
-      requestId: "req_gpt_patch_prompt",
-      workspaceId: "workspace-test",
-      sessionId: session.sessionId,
-      sessionThreadId: "thread-test",
-      bindingId: "binding-test",
-      bindingGeneration: 1,
-      targetPodUid: "pod-test",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
-      runtimeInputId: "rin_gpt_patch_prompt",
+    expect(session.configuration.apply({
       generation: 1,
       payloadJson,
       coldLoad: true,
@@ -1335,7 +1977,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         onStream: (request) => requests.push(request),
         runtimePolicy: () => runtimeToolPolicyFromPatchPayloads([payloadJson]),
@@ -1359,7 +2001,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         events: [
           { type: "text-start", id: "text-1" },
@@ -1418,7 +2060,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -1477,7 +2119,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -1541,7 +2183,7 @@ describe("AgentLoop", () => {
     const pendingResult = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(new Session("sesn_1"));
+        return yield* agentLoop.run(new Session("sesn_1"), testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(pendingLoader))),
     );
 
@@ -1573,17 +2215,17 @@ describe("AgentLoop", () => {
         },
       }),
     };
-    session.state.applyRuntimeConfigPatch(runtimeConfigPatch);
+    session.configuration.apply(runtimeConfigPatch);
     const loader = new QueuedContextLoader([], []);
     const requests: LLMRequest[] = [];
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
-        return yield* (yield* AgentLoop.Service).run(session);
+        return yield* (yield* AgentLoop.Service).run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         runtimeModel: (activeSession) => runtimeModelForThread(
           activeSession.identity.threadRole,
-          activeSession.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
+          activeSession.configuration.patches().map((patch) => patch.payloadJson),
           { providerId: "anthropic", modelId: "claude-opus-4-8" },
         ),
         onStream: (request) => requests.push(request),
@@ -1620,7 +2262,7 @@ describe("AgentLoop", () => {
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
-        return yield* (yield* AgentLoop.Service).run(session);
+        return yield* (yield* AgentLoop.Service).run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader))),
     );
 
@@ -1647,7 +2289,7 @@ describe("AgentLoop", () => {
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
-        return yield* (yield* AgentLoop.Service).run(session);
+        return yield* (yield* AgentLoop.Service).run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer: writerFrom((envelope) => {
           if (envelope.event.type === "session.error" || envelope.event.type === "span.model_request_end") {
@@ -1667,6 +2309,54 @@ describe("AgentLoop", () => {
     expect(session.state.contextManager.messages()).toEqual([]);
     expect(session.state.acceptedInputCount()).toBe(0);
     expect(terminalEvents).toEqual([]);
+  });
+
+  test("a bounded live rejection is authored by the loop and committed before provider work", async () => {
+    const session = new Session("sesn_live_rejection");
+    const input = {
+      ...acceptedInput("rin_live_rejection", session.sessionId),
+      kind: "rejection" as const,
+      reasonCode: "runtime_command_payload_too_large" as const,
+    };
+    session.state.enqueueAcceptedInput(input);
+    const submittedDrafts: Array<readonly unknown[]> = [];
+    const loader: TestContextLoader = {
+      buildContext: async () => [],
+      loadPendingInput: async () => ({ type: "empty" }),
+      commitAcceptedInput: async (accepted, options) => {
+        submittedDrafts.push([...(options?.drafts ?? [])]);
+        return acceptedInputReceipt(accepted);
+      },
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* (yield* AgentLoop.Service).run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader))),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(submittedDrafts).toEqual([[
+      expect.objectContaining({
+        role: "assistant",
+        origin: "agent",
+        status: "completed",
+        parts: [expect.objectContaining({
+          type: "text",
+          text: "The session runtime could not accept this input.",
+        })],
+      }),
+    ]]);
+    expect(session.state.contextManager.messages()).toContainEqual(
+      expect.objectContaining({
+        owningEventId: "sevt_rin_live_rejection",
+        role: "assistant",
+        parts: [expect.objectContaining({
+          type: "text",
+          text: "The session runtime could not accept this input.",
+        })],
+      }),
+    );
   });
 
   test("first accepted turn rides the file attachments returned by CommitInputs", async () => {
@@ -1700,7 +2390,7 @@ describe("AgentLoop", () => {
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
-        return yield* (yield* AgentLoop.Service).run(session);
+        return yield* (yield* AgentLoop.Service).run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         onStream: (request) => requests.push(request),
       }))),
@@ -1719,7 +2409,7 @@ describe("AgentLoop", () => {
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
-        return yield* (yield* AgentLoop.Service).run(session);
+        return yield* (yield* AgentLoop.Service).run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         runtimeModel: () => undefined,
         writer: writerFrom((envelope) => {
@@ -1755,7 +2445,7 @@ describe("AgentLoop", () => {
     ]);
   });
 
-  test("no accepted pending input emits only terminal idle without running status", async () => {
+  test("no accepted pending input performs no durable turn transition", async () => {
     const loader = new RecordingContextLoader([], { type: "empty" });
     const session = new Session("sesn_1");
     const appendedTypes: string[] = [];
@@ -1763,7 +2453,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -1778,7 +2468,7 @@ describe("AgentLoop", () => {
     );
 
     expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
-    expect(appendedTypes).toEqual(["session.status_idle"]);
+    expect(appendedTypes).toEqual([]);
   });
 
   test("idle finalization fails closed when FinishIdle boundary is unavailable", async () => {
@@ -1797,7 +2487,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(new Session("sesn_1"));
+        return yield* agentLoop.run(new Session("sesn_1"), testRunCustody("evt_open_idle_failure"));
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { writer }))),
     );
 
@@ -1823,7 +2513,7 @@ describe("AgentLoop", () => {
         throw new Error("idle-only test must not close a provider request");
       },
       finishIdle: async (envelope) => {
-        finishIdleWriteIds.push(envelope.writeId);
+        finishIdleWriteIds.push(envelope.durableTurnId);
         if (finishIdleWriteIds.length === 1) {
           return {
             ok: false,
@@ -1834,23 +2524,28 @@ describe("AgentLoop", () => {
               retryable: true,
               fatal: false,
               sessionId: envelope.sessionId,
-              writeId: envelope.writeId,
+              writeId: envelope.durableTurnId,
             },
           };
         }
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return withFinishIdleReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.durableTurnId,
+          eventId: `bridge-${envelope.durableTurnId}`,
+          processedAt: createdAt,
+        });
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(new Session("sesn_1"));
+        return yield* agentLoop.run(new Session("sesn_1"), testRunCustody("evt_open_idle_retry"));
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { runtimeModel: () => undefined, writer }))),
     );
 
     expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
-    expect(finishIdleWriteIds).toEqual(["event_write-1", "event_write-1"]);
+    expect(finishIdleWriteIds).toEqual(["evt_open_idle_retry", "evt_open_idle_retry"]);
   });
 
   test("idle finalization drains the raw FinishIdle call after its local timeout", async () => {
@@ -1866,14 +2561,17 @@ describe("AgentLoop", () => {
       writeRequestEnd: async () => {
         throw new Error("idle-only test must not close a provider request");
       },
-      finishIdle: async () => {
+      finishIdle: async (envelope) => {
         finishCalls += 1;
-        return await rawFinish.promise;
+        return withFinishIdleReceiptForTest(envelope, await rawFinish.promise);
       },
     };
     const run = Effect.runPromise(
       Effect.gen(function* () {
-        return yield* (yield* AgentLoop.Service).run(new Session("sesn_finish_idle_drain"));
+        return yield* (yield* AgentLoop.Service).run(
+          new Session("sesn_finish_idle_drain"),
+          testRunCustody("evt_open_idle_drain"),
+        );
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader([], { type: "empty" }),
         { runtimeModel: () => undefined, writer, runtime: { ...agentLoopRuntime(), sleep: async () => true } },
@@ -1889,8 +2587,8 @@ describe("AgentLoop", () => {
 
     rawFinish.resolve({
       ok: true,
-      writeId: "event_write-1",
-      eventId: "bridge-event_write-1",
+      writeId: "evt_open_idle_drain",
+      eventId: "bridge-evt_open_idle_drain",
       processedAt: createdAt,
     });
     expect(await run).toEqual({ type: "completed", modelMessageCount: 0 });
@@ -1906,20 +2604,20 @@ describe("AgentLoop", () => {
     const first = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
     session.state.enqueueAcceptedInput(acceptedInput("rin_warm_second"));
     const second = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
     const third = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -1961,7 +2659,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -2002,11 +2700,11 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           AgentLoop.runtimeLayer({
-            messageStore: store,
+            internalToolRepairStore: store,
             sessionEventWriter: writer,
             runtime: agentLoopRuntime(),
             llmService: llmService([
@@ -2028,15 +2726,12 @@ describe("AgentLoop", () => {
     );
 
     expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
-    expect(providerSawShell).toBe(true);
+    expect(providerSawShell).toBe(false);
     expect(order).toEqual([
       "event:session.status_running:context_parts_0",
-      "store:message:streaming",
       "event:span.model_request_start:context_parts_0",
       "provider:stream",
-      "store:part:text",
       "event:agent.message:context_parts_0",
-      "store:message:completed",
       "event:span.model_request_end:context_parts_1",
       "event:session.status_idle:context_parts_1",
     ]);
@@ -2061,7 +2756,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -2148,7 +2843,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(runtimeAgentLoopLayer(loader, {
           writer: malformedWriter,
@@ -2199,7 +2894,7 @@ describe("AgentLoop", () => {
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEndEnvelopes.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
     const metrics = new RecordingRuntimeMetrics();
@@ -2218,7 +2913,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: llm,
         metrics,
@@ -2291,7 +2986,7 @@ describe("AgentLoop", () => {
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEndEnvelopes.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
     const llm = queuedLLMService([[
@@ -2304,7 +2999,7 @@ describe("AgentLoop", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { llmService: llm, writer }))),
     );
 
@@ -2373,10 +3068,18 @@ describe("AgentLoop", () => {
       ],
     ], requests);
     const appended: SessionEvent[] = [];
-    const writer = writerFrom((envelope) => {
+    const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => {
       appended.push(envelope.event);
       return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
     });
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        requestEndEnvelopes.push(envelope);
+        return await baseWriter.writeRequestEnd!(envelope);
+      },
+    };
     const layer = runtimeAgentLoopLayer(loader, {
       llmService: llm,
       writer,
@@ -2387,7 +3090,7 @@ describe("AgentLoop", () => {
     const first = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
     expect(first).toMatchObject({ type: "completed" });
@@ -2401,7 +3104,7 @@ describe("AgentLoop", () => {
     const second = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -2416,12 +3119,22 @@ describe("AgentLoop", () => {
       modelId: "claude-opus-4-8",
       variant: "",
     });
-    expect(appended).toContainEqual(expect.objectContaining({ type: "agent.thread_context_compacted" }));
+    expect(requestEndEnvelopes).toContainEqual(expect.objectContaining({
+      requestKind: "compaction_summary",
+      compactionEventPayloadJson: expect.stringContaining("agent.thread_context_compacted"),
+    }));
   });
 
   test("runtime layer compacts context before the next provider request", async () => {
     const session = new Session("sesn_1");
     session.state.updateCurrentModel({ providerId: "fake", modelId: "fake-chat" });
+    session.state.contextManager.installThreadContextPrefix({
+      childThreadId: "thrd_child",
+      parentThreadId: "thrd_parent",
+      parentBoundaryEventId: "sevt_parent_boundary",
+      entries: [userMessage("parent-prefix", 41, "PARENT_PREFIX_SENTINEL")],
+      createdAt,
+    });
     session.state.recordLastRequestCompletion({
       inputTokens: 96_000,
       outputTokens: 75,
@@ -2482,16 +3195,11 @@ describe("AgentLoop", () => {
       },
     };
     const appended: SessionEvent[] = [];
-    let compactionProjection: RuntimeMessage | undefined;
     const requestEndEnvelopes: SessionEventWriterRequestEndEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => {
       appended.push(envelope.event);
       if (envelope.event.type === "span.model_request_start" && !compactionBoundaryOrder.includes("compaction-start-ack")) {
         compactionBoundaryOrder.push("compaction-start-ack");
-      }
-      if (envelope.event.type === "agent.thread_context_compacted") {
-        compactionBoundaryOrder.push("compaction-event-ack");
-        compactionProjection = RuntimeMessageSchema.parse(JSON.parse(envelope.projectionJson ?? "{}"));
       }
       return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
     });
@@ -2500,16 +3208,16 @@ describe("AgentLoop", () => {
       writeRequestEnd: async (envelope) => {
         requestEndEnvelopes.push(envelope);
         if (envelope.requestKind === "compaction_summary" && !envelope.isError) {
-          compactionBoundaryOrder.push("compaction-request-end-ack");
+          compactionBoundaryOrder.push("compaction-request-end-and-event-ack");
         }
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd!(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -2544,6 +3252,7 @@ describe("AgentLoop", () => {
     expect(compactionPrompt).toContain("## Objective");
     expect(compactionPrompt).toContain("[User]:\n\n[User]: old context that should be summarized");
     expect(compactionPrompt).toContain("[User]: old context that should be summarized");
+    expect(compactionPrompt).toContain("PARENT_PREFIX_SENTINEL");
     expect(compactionPrompt).toContain("😀");
     expect(utf8RoundTrip(compactionPrompt)).toBe(compactionPrompt);
     expect(compactionPrompt).not.toContain("<previous-summary>");
@@ -2560,25 +3269,29 @@ describe("AgentLoop", () => {
     expect(appended.map((event) => event.type)).toEqual([
       "session.status_running",
       "span.model_request_start",
-      "agent.thread_context_compacted",
+      "span.model_request_end",
       "span.model_request_start",
       "agent.message",
+      "span.model_request_end",
       "session.status_idle",
     ]);
     expect(requestEndEnvelopes.map((envelope) => envelope.requestKind)).toEqual(["compaction_summary", undefined]);
+    expect(requestEndEnvelopes[0]?.prefixConsumption).toEqual({
+      childThreadId: "thrd_child",
+      parentBoundaryEventId: "sevt_parent_boundary",
+      checkpointRuntimeLocalId: expect.any(String),
+    });
     expect(compactionBoundaryOrder).toEqual([
       "compaction-start-ack",
-      "compaction-request-end-ack",
-      "compaction-event-ack",
+      "compaction-request-end-and-event-ack",
       "normal-provider-stream-start",
     ]);
     const hotCheckpoint = session.state.contextManager.messages().find((message) => message.origin === "runtime");
-    expect(compactionProjection).toBeDefined();
-    expect(hotCheckpoint).toEqual(compactionProjection);
-    expect(compactionProjection?.updatedAt).toBe(compactionProjection?.createdAt);
-    expect(compactionProjection?.parts[0]).toMatchObject({ type: "text", status: "completed" });
-    expect(compactionProjection?.parts[0]?.updatedAt).toBe(compactionProjection?.parts[0]?.createdAt);
-    const checkpointText = compactionProjection?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? "";
+    expect(hotCheckpoint).toBeDefined();
+    expect(hotCheckpoint?.updatedAt).toBe(hotCheckpoint?.createdAt);
+    expect(hotCheckpoint?.parts[0]).toMatchObject({ type: "text", status: "completed" });
+    expect(hotCheckpoint?.parts[0]?.updatedAt).toBe(hotCheckpoint?.parts[0]?.createdAt);
+    const checkpointText = hotCheckpoint?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? "";
     expect(new TextEncoder().encode(checkpointText).byteLength).toBeLessThanOrEqual(60 * 1_024);
     expect(checkpointText).toContain("<summary>\nSummary carried forward.");
     expect(checkpointText).toContain("RECENT_SENTINEL");
@@ -2596,6 +3309,7 @@ describe("AgentLoop", () => {
       contextWindowTokens: 320,
       outputTokenLimit: 120,
     });
+    expect(session.state.contextManager.threadContextPrefix()).toBeUndefined();
   });
 
   test("compaction updates the latest checkpoint and carries its legacy recent block as opaque context", async () => {
@@ -2635,7 +3349,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader(
           [previousCheckpoint],
@@ -2661,15 +3375,7 @@ Previous anchored summary.
             systemInstructions: "normal provider system",
             maxOutputTokens: 8_192,
           },
-          writer: {
-            ...writerBase,
-            writeRequestEnd: async (envelope) => ({
-              ok: true,
-              writeId: envelope.writeId,
-              eventId: `bridge-${envelope.writeId}`,
-              processedAt: createdAt,
-            }),
-          },
+          writer: writerBase,
         },
       ))),
     );
@@ -2709,11 +3415,16 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEnds.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
       commitRuntimeTermination: async (envelope) => {
         terminations.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return withRuntimeTerminationReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: `bridge-${envelope.writeId}`,
+          processedAt: createdAt,
+        });
       },
     };
     const overflow = {
@@ -2739,7 +3450,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: llm,
         writer,
@@ -2762,8 +3473,9 @@ Previous anchored summary.
     expect(requestEnds.map((end) => ({ kind: end.requestKind, isError: end.isError }))).toEqual([
       { kind: undefined, isError: true },
       { kind: "compaction_summary", isError: false },
+      { kind: undefined, isError: true },
     ]);
-    expect(appended.filter((event) => event.type === "agent.thread_context_compacted")).toHaveLength(1);
+    expect(appended.filter((event) => event.type === "agent.thread_context_compacted")).toHaveLength(0);
     expect(terminations).toHaveLength(1);
     expect(terminations[0]?.failure).toMatchObject({ code: "context_overflow" });
   });
@@ -2795,14 +3507,14 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEnds.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: queuedLLMService([[overflow], [overflow]], requests),
         writer,
@@ -2877,7 +3589,7 @@ Previous anchored summary.
       });
       await interrupt;
       const runExit = await Effect.runPromise(Fiber.await(active.runFiber));
-      expect(Exit.isFailure(runExit)).toBe(true);
+      expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
       expect(active.requestEndEnvelopes).toHaveLength(1);
     } finally {
       active.requestEndAck.resolve({ ok: true, writeId: "cleanup", eventId: "cleanup", processedAt: createdAt });
@@ -2957,7 +3669,7 @@ Previous anchored summary.
       expect(JSON.stringify(active.session.state.contextManager.messages())).not.toContain("<conversation-checkpoint>");
 
       const runExit = await Effect.runPromise(Fiber.await(active.runFiber));
-      expect(runExit).toEqual(Exit.succeed({ type: "interrupted" }));
+      expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
       expect(active.requestEndEnvelopes).toHaveLength(0);
     } finally {
       active.requestEndAck.resolve({ ok: true, writeId: "cleanup", eventId: "cleanup", processedAt: createdAt });
@@ -2968,22 +3680,17 @@ Previous anchored summary.
 
   test("compaction cancellation reports event_write_failed when request-end is not ACKed", async () => {
     const active = await activeCompactionRun();
-    let runFinished = false;
-    const run = Effect.runPromise(Fiber.join(active.runFiber)).then((result) => {
-      runFinished = true;
-      return result;
-    });
     active.session.state.beginUserInterrupt(acceptedInput("rin_compaction_unacked_interrupt"), async () => ({ ok: true }));
+    const interrupt = Effect.runPromise(Fiber.interrupt(active.runFiber));
 
     try {
       await waitForCondition(() => active.observedAbortSignal?.aborted === true, "compaction shutdown abort");
       expect(active.observedAbortSignal?.aborted).toBe(true);
       await waitForCondition(
-        () => active.requestEndEnvelopes.length === 1 || runFinished,
-        "compaction request-end write or run completion",
+        () => active.requestEndEnvelopes.length === 1,
+        "compaction request-end write",
       );
       expect(active.requestEndEnvelopes).toHaveLength(1);
-      expect(runFinished).toBe(false);
 
       const requestEnd = active.requestEndEnvelopes[0];
       if (requestEnd === undefined) {
@@ -3001,18 +3708,23 @@ Previous anchored summary.
           writeId: requestEnd.writeId,
         },
       });
-      expect(await run).toMatchObject({
-        type: "failed",
-        error: { type: "session-event-writer", code: "unavailable" },
-        releaseSession: { reason: "event_write_failed" },
-      });
+      await interrupt;
+      const runExit = await Effect.runPromise(Fiber.await(active.runFiber));
+      expect(Exit.isFailure(runExit)).toBe(true);
+      if (Exit.isFailure(runExit)) {
+        const rejectedWrite = runExit.cause.reasons.find(Cause.isDieReason)?.defect;
+        expect(rejectedWrite).toMatchObject({
+          type: "session-event-writer",
+          code: "unavailable",
+        });
+      }
       expect(active.requestEndEnvelopes).toHaveLength(1);
       expect(active.requests).toHaveLength(1);
       expect(active.appended).not.toContainEqual(expect.objectContaining({ type: "agent.thread_context_compacted" }));
     } finally {
       active.requestEndAck.resolve({ ok: true, writeId: "cleanup", eventId: "cleanup", processedAt: createdAt });
       active.providerRelease.resolve();
-      await Effect.runPromise(Fiber.interrupt(active.runFiber));
+      await interrupt;
     }
   });
 
@@ -3038,7 +3750,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(runtimeAgentLoopLayer(loader, {
           llmService: queuedLLMService([], requests),
@@ -3121,20 +3833,12 @@ Previous anchored summary.
       eventId: `bridge-${envelope.writeId}`,
       processedAt: createdAt,
     }));
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => ({
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-      }),
-    };
+    const writer = baseWriter;
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -3150,13 +3854,12 @@ Previous anchored summary.
       ),
     );
 
-    expect(result).toMatchObject({ type: "completed", modelMessageCount: 2 });
-    expect(requests[1]?.messages).toHaveLength(2);
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 3 });
+    expect(requests[1]?.messages).toHaveLength(3);
     expect(JSON.stringify(requests[1]?.messages[0])).toContain("<conversation-checkpoint>");
     expect(JSON.stringify(requests[1]?.messages[1])).toContain("later ACKed input");
     expect(JSON.stringify(requests[1]?.messages)).toContain("note added during compaction");
     expect(session.state.contextManager.messages().map((message) => message.id)).toContain("user-later");
-    expect(session.state.contextManager.messages().find((message) => message.origin === "agent")?.sequence).toBe(4);
     expect(session.state.lastRequestContextAnchorSequence()).toBe(2);
     expect(JSON.stringify(session.state.transientModelMessages())).not.toContain("note added during compaction");
   });
@@ -3214,7 +3917,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -3272,7 +3975,7 @@ Previous anchored summary.
     await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(runtimeAgentLoopLayer(loader, {
           llmService: queuedLLMService([[]]),
@@ -3289,59 +3992,6 @@ Previous anchored summary.
       errorKind: "gateway_stream_error",
       finishReason: "error",
     });
-  });
-
-  test("ordinary compaction stale-terminal loser requests hot-state discard", async () => {
-    const session = new Session("sesn_compaction_stale_terminal");
-    recordCompactionHint(session, {
-      inputTokens: 200,
-      outputTokens: 75,
-      reasoningTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-    });
-    const loader = new RecordingContextLoader([], {
-      type: "messages",
-      messages: [userMessage("user-compaction-stale", 0, compactionHistory("compact"))],
-    });
-    const baseWriter = writerFrom((envelope) => ({
-      ok: true,
-      writeId: envelope.writeId,
-      eventId: `bridge-${envelope.writeId}`,
-      processedAt: createdAt,
-    }));
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => ({
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-        rescheduleDisposition: {
-          status: "denied",
-          reason: "stale_terminal",
-          attempt: 0,
-        },
-      }),
-    };
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
-        writer,
-        compaction: {},
-        llmService: queuedLLMService([[
-          { type: "text-start", id: "summary-stale" },
-          { type: "text-delta", id: "summary-stale", text_delta: "summary" },
-          { type: "text-end", id: "summary-stale" },
-          { type: "finish", finishReason: "stop" },
-        ]]),
-      }))),
-    );
-
-    expect(result).toEqual({ type: "interrupted", discardHotState: true });
   });
 
   test("runtime layer retries failed compaction before normal provider request", async () => {
@@ -3399,28 +4049,14 @@ Previous anchored summary.
         if (envelope.reschedule !== undefined) {
           session.state.updateCurrentModel({ providerId: "second", modelId: "second-chat" });
         }
-        return {
-          ok: true,
-          writeId: envelope.writeId,
-          eventId: `bridge-${envelope.writeId}`,
-          processedAt: createdAt,
-          ...(envelope.reschedule !== undefined
-            ? {
-                rescheduleDisposition: {
-                  status: "accepted" as const,
-                  attempt: envelope.reschedule.attempt,
-                  effectiveDeadline: createdAt,
-                },
-              }
-            : {}),
-        };
+        return await baseWriter.writeRequestEnd!(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -3447,10 +4083,12 @@ Previous anchored summary.
     expect(appended.map((event) => event.type)).toEqual([
       "session.status_running",
       "span.model_request_start",
+      "span.model_request_end",
       "span.model_request_start",
-      "agent.thread_context_compacted",
+      "span.model_request_end",
       "span.model_request_start",
       "agent.message",
+      "span.model_request_end",
       "session.status_idle",
     ]);
     expect(requestEndEnvelopes.map((envelope) => ({
@@ -3512,7 +4150,7 @@ Previous anchored summary.
     const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: queuedLLMService([[{
           type: "provider-error",
@@ -3598,28 +4236,14 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEnds.push(envelope);
-        return {
-          ok: true,
-          writeId: envelope.writeId,
-          eventId: `bridge-${envelope.writeId}`,
-          processedAt: createdAt,
-          ...(envelope.reschedule !== undefined
-            ? {
-                rescheduleDisposition: {
-                  status: "accepted" as const,
-                  attempt: envelope.reschedule.attempt,
-                  effectiveDeadline: createdAt,
-                },
-              }
-            : {}),
-        };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: llm,
         writer,
@@ -3685,19 +4309,14 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEnds.push(envelope);
-        return {
-          ok: true,
-          writeId: envelope.writeId,
-          eventId: `bridge-${envelope.writeId}`,
-          processedAt: createdAt,
-        };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         llmService: queuedLLMService([[
@@ -3727,6 +4346,61 @@ Previous anchored summary.
       errorKind: "gateway_protocol_error",
     });
     expect(requestEnds[0]?.reschedule).toBeUndefined();
+  });
+
+  test("a stale no-content request-end receipt discards hot state before another provider request", async () => {
+    const session = new Session("sesn_stale_empty_request_end");
+    const loader = new RecordingContextLoader([], {
+      type: "messages",
+      messages: [userMessage("user-stale-empty-end", 0, "send this request")],
+    });
+    const requests: LLMRequest[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        const result = await baseWriter.writeRequestEnd(envelope);
+        if (!result.ok || result.declaration === undefined) {
+          return result;
+        }
+        return {
+          ...result,
+          declaration: {
+            ...result.declaration,
+            applicationDisposition: "stale_custody",
+          },
+        };
+      },
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        llmService: queuedLLMService([[
+          {
+            type: "provider-error",
+            error: runtimeFailureFromProviderError(normalizeProviderError({
+              code: "provider_unavailable",
+              message: "retryable provider failure",
+              retryable: true,
+              fatal: false,
+            })),
+          },
+        ]], requests),
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+      }))),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(requests).toHaveLength(1);
   });
 
   test("hot input reconciliation preserves a full retry ride and queues new media for the next request", async () => {
@@ -3796,27 +4470,13 @@ Previous anchored summary.
     }));
     const writer: SessionEventWriter = {
       ...baseWriter,
-      writeRequestEnd: async (envelope) => ({
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-        ...(envelope.reschedule !== undefined
-          ? {
-              rescheduleDisposition: {
-                status: "accepted" as const,
-                attempt: envelope.reschedule.attempt,
-                effectiveDeadline: createdAt,
-              },
-            }
-          : {}),
-      }),
+      writeRequestEnd: async (envelope) => await baseWriter.writeRequestEnd(envelope),
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         llmService: llm,
@@ -3909,21 +4569,7 @@ Previous anchored summary.
           expect(parkedHotContext).not.toContain(failedDraft);
           expect(parkedHotContext).not.toContain(failedReasoning);
         }
-        return {
-          ok: true,
-          writeId: envelope.writeId,
-          eventId: `bridge-${envelope.writeId}`,
-          processedAt: createdAt,
-          ...(envelope.reschedule !== undefined
-            ? {
-                rescheduleDisposition: {
-                  status: "accepted" as const,
-                  attempt: envelope.reschedule.attempt,
-                  effectiveDeadline: createdAt,
-                },
-              }
-            : {}),
-        };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
     let mutatingHelperExecutions = 0;
@@ -3943,13 +4589,13 @@ Previous anchored summary.
     const firstRun = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -4045,21 +4691,20 @@ Previous anchored summary.
     };
     const appended: SessionEventEnvelope[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
-    const baseWriter = writerFrom((envelope) => {
-      appended.push(envelope);
-      if (envelope.event.type === "agent.tool_result") {
-        toolResultCommitted.resolve();
-      }
-      return {
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: envelope.event.type === "agent.tool_use" ? "sevt_same_request_tool" : `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-      };
-    });
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => {
+    const writer = writerFrom(
+      (envelope) => {
+        appended.push(envelope);
+        if (envelope.event.type === "agent.tool_result") {
+          toolResultCommitted.resolve();
+        }
+        return {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: envelope.event.type === "agent.tool_use" ? "sevt_same_request_tool" : `bridge-${envelope.writeId}`,
+          processedAt: createdAt,
+        };
+      },
+      async (envelope) => {
         requestEnds.push(envelope);
         return {
           ok: true,
@@ -4071,12 +4716,12 @@ Previous anchored summary.
           }),
         };
       },
-    };
+    );
     let helperMutations = 0;
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: llm,
         writer,
@@ -4095,7 +4740,7 @@ Previous anchored summary.
     expect(helperMutations).toBe(1);
     expect(requests).toHaveLength(2);
     const retryContext = JSON.stringify(requests[1]?.messages);
-    for (const durableValue of ["reason before mutation", "mutate_record", "mutation committed"]) {
+    for (const durableValue of ["mutate_record", "mutation committed", "reason before mutation"]) {
       expect(retryContext.split(durableValue)).toHaveLength(2);
     }
     const toolAnchor = appended.find((envelope) => envelope.event.type === "agent.tool_use");
@@ -4153,7 +4798,7 @@ Previous anchored summary.
     const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         llmService: queuedLLMService([[{
           type: "provider-error",
@@ -4174,11 +4819,7 @@ Previous anchored summary.
     await Effect.runPromise(Fiber.interrupt(runFiber));
 
     expect(appended.at(-1)).toEqual({ type: "session.status_idle", stop_reason: { type: "end_turn" } });
-    expect(appended.filter((event) => event.type === "session.error")).toEqual([
-      expect.objectContaining({
-        error: expect.objectContaining({ retryStatus: { type: "retrying", attempt: 1 } }),
-      }),
-    ]);
+    expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
   });
 
   test("runtime shutdown abandons active provider state without Runtime-owned idle or error", async () => {
@@ -4202,7 +4843,10 @@ Previous anchored summary.
             yield { type: "text-start" as const, id: "text-1" };
             yield { type: "text-delta" as const, id: "text-1", text_delta: "partial answer" };
             streamStarted.resolve();
-            await releaseProvider.promise;
+            if (options?.abortSignal === undefined) {
+              throw new Error("provider stream requires an abort signal");
+            }
+            await waitForReleaseOrAbort(releaseProvider.promise, options.abortSignal);
             yield { type: "finish" as const, finishReason: "stop" as const };
           })(),
           (error): LLMServiceError => ({
@@ -4217,10 +4861,10 @@ Previous anchored summary.
       },
     };
 
-    const run = Effect.runPromise(
+    const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4237,16 +4881,17 @@ Previous anchored summary.
 
     await streamStarted.promise;
     session.state.beginRuntimeShutdown();
+    const shutdown = Effect.runPromise(Fiber.interrupt(runFiber));
     await waitForCondition(() => observedAbortSignal?.aborted === true, "provider abort signal");
 
-    const result = await run;
+    await shutdown;
+    const runExit = await Effect.runPromise(Fiber.await(runFiber));
     releaseProvider.resolve();
 
-    expect(result).toEqual({ type: "interrupted" });
+    expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
     expect(providerCalls).toBe(1);
     expect(loader.pendingCalls).toEqual(["sesn_1"]);
-    const assistantMessage = [...store.messages.values()].find((message) => message.role === "assistant");
-    expect(assistantMessage).toMatchObject({ status: "streaming" });
+    expect([...store.messages.values()].find((message) => message.role === "assistant")).toBeUndefined();
     expect(appended).toEqual([
       { type: "session.status_running" },
       { type: "span.model_request_start", model_request_id: expect.any(String) },
@@ -4266,7 +4911,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4303,7 +4948,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4323,6 +4968,59 @@ Previous anchored summary.
     expect(session.state.peekAcceptedInput()).toEqual(followUp);
   });
 
+  test("owner interruption waits for an in-flight running declaration", async () => {
+    const session = new Session("sesn_running_declaration_owner");
+    const loader = new RecordingContextLoader(
+      [],
+      { type: "messages", messages: [userMessage("user-running-owner", 0, "hello")] },
+    );
+    const appendStarted = deferred<void>();
+    const releaseAppend = deferred<void>();
+    const appended: SessionEvent[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      append: async (envelope) => {
+        if (envelope.event.type === "session.status_running") {
+          appendStarted.resolve();
+          await releaseAppend.promise;
+        }
+        appended.push(envelope.event);
+        return {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: `bridge-${envelope.writeId}`,
+          processedAt: createdAt,
+        };
+      },
+    };
+    const runFiber = Effect.runFork(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { writer }))),
+    );
+
+    await appendStarted.promise;
+    let interruptionFinished = false;
+    const interruption = Effect.runPromise(Fiber.interrupt(runFiber)).then(() => {
+      interruptionFinished = true;
+    });
+    await Bun.sleep(0);
+    expect(interruptionFinished).toBe(false);
+
+    releaseAppend.resolve();
+    await interruption;
+    expect(appended).toEqual([{ type: "session.status_running" }]);
+    const runExit = await Effect.runPromise(Fiber.await(runFiber));
+    expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
+  });
+
   test("provider-call assembly failure fails closed after running status but before assistant shell, span, and provider stream", async () => {
     const order: string[] = [];
     const session = new Session("sesn_1");
@@ -4335,7 +5033,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4395,7 +5093,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4415,8 +5113,8 @@ Previous anchored summary.
       releaseSession: { reason: "event_write_failed" },
     });
     expect(providerCalled).toBe(false);
-    expect(appendedTypes).toEqual(["session.status_running", "span.model_request_start"]);
-    expect(order).toEqual(["store:message:streaming"]);
+    expect(appendedTypes).toEqual(["session.status_running", "span.model_request_start", "session.status_idle"]);
+    expect(order).toEqual([]);
     expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user"]);
   });
 
@@ -4430,7 +5128,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4462,8 +5160,14 @@ Previous anchored summary.
       error: { type: "session-event-writer", code: "unavailable" },
       releaseSession: { reason: "event_write_failed" },
     });
-    expect(appendedTypes).toEqual(["session.status_running", "span.model_request_start", "agent.message", "span.model_request_end"]);
-    expect(order).toEqual(["store:message:streaming", "store:part:text", "store:message:completed"]);
+    expect(appendedTypes).toEqual([
+      "session.status_running",
+      "span.model_request_start",
+      "agent.message",
+      "span.model_request_end",
+      "session.status_idle",
+    ]);
+    expect(order).toEqual([]);
     expect(session.state.contextManager.messages().at(-1)?.parts).toEqual([
       expect.objectContaining({ type: "text", text: "ok", status: "completed" }),
     ]);
@@ -4488,7 +5192,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4531,71 +5235,7 @@ Previous anchored summary.
     ]);
   });
 
-  test("runtime layer shell write failure does not start provider and requests persistence removal", async () => {
-    const order: string[] = [];
-    const session = new Session("sesn_1");
-    const store = new AgentLoopRuntimeStore(order, false, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
-    let providerCalled = false;
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(
-        Effect.provide(
-          runtimeAgentLoopLayer(loader, {
-            store,
-            onStream: () => {
-              providerCalled = true;
-            },
-          }),
-        ),
-      ),
-    );
-
-    expect(providerCalled).toBe(false);
-    expect(order).toEqual(["store:message:streaming"]);
-    expect(result).toMatchObject({
-      type: "failed",
-      error: { type: "message-store", operation: "writeMessage" },
-      releaseSession: { reason: "persistence_failed" },
-    });
-    expect(session.state.contextManager.messages()).toEqual([]);
-  });
-
-  test("runtime layer attempts terminal events when shell write fails durably", async () => {
-    const order: string[] = [];
-    const session = new Session("sesn_1");
-    const store = new AgentLoopRuntimeStore(order, false, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
-    const appendedTypes: string[] = [];
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(
-        Effect.provide(
-          runtimeAgentLoopLayer(loader, {
-            store,
-            writer: failingEventWriter(appendedTypes, (event) => event.type === "session.error" || event.type === "session.status_idle"),
-          }),
-        ),
-      ),
-    );
-
-    expect(result).toMatchObject({
-      type: "failed",
-      error: { type: "message-store", operation: "writeMessage" },
-      releaseSession: { reason: "persistence_failed" },
-    });
-    expect(appendedTypes).toEqual(["session.status_running", "session.error", "session.status_idle"]);
-    expect(order).toEqual(["store:message:streaming"]);
-    expect(session.state.contextManager.messages()).toEqual([]);
-  });
-
-  test("runtime layer terminalizes processor creation failure after durable shell", async () => {
+  test("runtime layer terminalizes processor creation failure before publishing an assistant message", async () => {
     const order: string[] = [];
     const session = new Session("sesn_1");
     const store = new AgentLoopRuntimeStore(order);
@@ -4606,7 +5246,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4620,7 +5260,7 @@ Previous anchored summary.
             }),
             createProcessor: () => {
               const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
-              expect(assistant).toMatchObject({ status: "streaming", parts: [] });
+              expect(assistant).toBeUndefined();
               throw new Error("processor construction failed");
             },
           }),
@@ -4634,7 +5274,7 @@ Previous anchored summary.
       error: { type: "runtime", code: "runtime_invalid_sequence", reason: "runtime_contract_validation" },
       releaseSession: { reason: "crashed" },
     });
-    expect(order).toEqual(["store:message:streaming", "store:message:failed"]);
+    expect(order).toEqual([]);
     expect(appended).toEqual([
       { type: "session.status_running" },
       expect.objectContaining({
@@ -4665,7 +5305,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -4698,19 +5338,10 @@ Previous anchored summary.
     expect(result).toMatchObject({ type: "completed" });
     expect(order).toEqual([
       "event:session.status_running:tool_missing",
-      "store:message:streaming",
       "event:span.model_request_start:tool_missing",
-      "store:part:step-start",
-      "store:part:step-finish",
-      "store:message:streaming",
       "event:agent.thinking:tool_missing",
-      "store:part:reasoning",
-      "store:part:tool",
-      "store:message:completed",
       "event:span.model_request_end:tool_missing",
-      "event:agent.tool_use:tool_running",
-      "store:part:tool",
-      "store:part:tool",
+      "event:agent.tool_use:tool_missing",
       "event:agent.tool_result:tool_running",
       "event:session.status_idle:tool_completed",
     ]);
@@ -4724,6 +5355,50 @@ Previous anchored summary.
         expect.objectContaining({ type: "tool", state: expect.objectContaining({ status: "completed" }) }),
       ]),
     });
+  });
+
+  test("runtime layer discards hot state when a tool route observes stale custody", async () => {
+    const session = new Session("sesn_1");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const appended: SessionEvent[] = [];
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(
+        Effect.provide(
+          runtimeAgentLoopLayer(loader, {
+            writer: writerFrom((envelope) => {
+              appended.push(envelope.event);
+              return {
+                ok: true,
+                writeId: envelope.writeId,
+                eventId: envelope.event.type === "agent.tool_use" ? "bridge-tool" : `bridge-${envelope.writeId}`,
+                processedAt: createdAt,
+              };
+            }),
+            events: [
+              {
+                type: "tool-call",
+                id: "tool-1",
+                toolName: "search",
+                input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+              },
+              { type: "finish", finishReason: "tool-calls" },
+            ],
+            providerCallRuntime: {
+              systemInstructions: "stale custody tool test",
+              toolCatalog: catalogForTest({ name: "search", description: "Search test tool", inputSchema: { type: "object" } }),
+            },
+            runTool: () => ({ type: "stale_custody" }),
+          }),
+        ),
+      ),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(false);
   });
 
   test("commits completed reasoning with provider metadata only after durable request settlement", async () => {
@@ -4746,7 +5421,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(runtimeAgentLoopLayer(loader, {
           writer,
@@ -4804,7 +5479,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(runtimeAgentLoopLayer(loader, {
           writer,
@@ -4852,7 +5527,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         events: [
@@ -4911,7 +5586,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         events: [
@@ -4961,14 +5636,17 @@ Previous anchored summary.
     const releaseStream = deferred<void>();
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const service: LLMServiceInterface = {
-      stream() {
+      stream(_request, options) {
         return Stream.fromAsyncIterable(
           (async function* () {
             yield { type: "reasoning-start" as const, id: "interrupt-reasoning" };
             yield { type: "reasoning-delta" as const, id: "interrupt-reasoning", text_delta: "discard on interrupt" };
             yield { type: "reasoning-end" as const, id: "interrupt-reasoning" };
             reasoningProcessed.resolve();
-            await releaseStream.promise;
+            if (options?.abortSignal === undefined) {
+              throw new Error("provider stream requires an abort signal");
+            }
+            await waitForReleaseOrAbort(releaseStream.promise, options.abortSignal);
           })(),
           (error): LLMServiceError => ({
             type: "llm-service",
@@ -4992,7 +5670,7 @@ Previous anchored summary.
     const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { llmService: service, writer }))),
     );
 
@@ -5022,7 +5700,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -5075,7 +5753,7 @@ Previous anchored summary.
       sourceToolUseEventId: "bridge-tool",
       status: "completed",
       payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"bridge-tool\",\"status\":\"completed\"}",
-      bridgeProjection: projection,
+      committedMessage: projection,
     })).toBe("applied");
     expect(session.state.backgroundTool("task_1")).toMatchObject({
       taskId: "task_1",
@@ -5163,14 +5841,14 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEndEnvelopes.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -5232,7 +5910,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { llmService: llm }))),
     );
 
@@ -5305,7 +5983,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -5364,7 +6042,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         llmService: {
@@ -5487,28 +6165,14 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEndEnvelopes.push(envelope);
-        return {
-          ok: true,
-          writeId: envelope.writeId,
-          eventId: `bridge-${envelope.writeId}`,
-          processedAt: createdAt,
-          ...(envelope.reschedule !== undefined
-            ? {
-                rescheduleDisposition: {
-                  status: "accepted" as const,
-                  attempt: envelope.reschedule.attempt,
-                  effectiveDeadline: createdAt,
-                },
-              }
-            : {}),
-        };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -5566,127 +6230,6 @@ Previous anchored summary.
     expect(session.state.transientModelMessages()).toEqual([]);
   });
 
-  test("stale-terminal request-end loser retains the ride and requests hot-state discard", async () => {
-    const session = new Session("sesn_stale_terminal_attachment");
-    const attachment = {
-      transient: {
-        attachmentRef: "att_stale_terminal",
-        sourceToolUseEventId: "sevt_tool_stale_terminal",
-        sourcePath: "mcp:github/stale-terminal.png",
-        pageRange: "",
-        detail: "auto",
-      },
-      fileBacked: undefined,
-      mime: "image/png",
-      filename: "stale-terminal.png",
-    } as const;
-    session.state.addPendingAttachments([attachment]);
-    const loader = new RecordingContextLoader([], {
-      type: "messages",
-      messages: [userMessage("user-stale-terminal", 0, "retry")],
-    });
-    const baseWriter = writerFrom((envelope) => ({
-      ok: true,
-      writeId: envelope.writeId,
-      eventId: `bridge-${envelope.writeId}`,
-      processedAt: createdAt,
-    }));
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => ({
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-        rescheduleDisposition: {
-          status: "denied",
-          reason: "stale_terminal",
-          attempt: envelope.reschedule?.attempt ?? 0,
-        },
-      }),
-    };
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
-        writer,
-        llmService: queuedLLMService([[
-          {
-            type: "provider-error",
-            error: runtimeFailureFromProviderError(normalizeProviderError({
-              code: "provider_unavailable",
-              message: "repair close won",
-              retryable: true,
-              fatal: false,
-            })),
-          },
-        ]]),
-        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
-      }))),
-    );
-
-    expect(result).toEqual({ type: "interrupted", discardHotState: true });
-    expect(session.state.pendingAttachments()).toEqual([attachment]);
-  });
-
-  test("ordinary successful request stale-terminal loser does not settle its attachment ride", async () => {
-    const session = new Session("sesn_success_stale_terminal");
-    const attachment = {
-      transient: {
-        attachmentRef: "att_success_stale",
-        sourceToolUseEventId: "sevt_tool_success_stale",
-        sourcePath: "mcp:github/success-stale.png",
-        pageRange: "",
-        detail: "auto",
-      },
-      fileBacked: undefined,
-      mime: "image/png",
-      filename: "success-stale.png",
-    } as const;
-    session.state.addPendingAttachments([attachment]);
-    const loader = new RecordingContextLoader([], {
-      type: "messages",
-      messages: [userMessage("user-success-stale", 0, "finish")],
-    });
-    const baseWriter = writerFrom((envelope) => ({
-      ok: true,
-      writeId: envelope.writeId,
-      eventId: `bridge-${envelope.writeId}`,
-      processedAt: createdAt,
-    }));
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => ({
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-        rescheduleDisposition: {
-          status: "denied",
-          reason: "stale_terminal",
-          attempt: 0,
-        },
-      }),
-    };
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
-        writer,
-        llmService: queuedLLMService([[
-          { type: "finish", finishReason: "stop" },
-        ]]),
-      }))),
-    );
-
-    expect(result).toEqual({ type: "interrupted", discardHotState: true });
-    expect(session.state.pendingAttachments()).toEqual([attachment]);
-  });
-
   test("runtime layer commits valid tool errors to hot context after error result ACK", async () => {
     const order: string[] = [];
     const session = new Session("sesn_1");
@@ -5702,7 +6245,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -5741,14 +6284,9 @@ Previous anchored summary.
     expect(result).toMatchObject({ type: "completed" });
     expect(order).toEqual([
       "event:session.status_running:tool_missing:progress",
-      "store:message:streaming",
       "event:span.model_request_start:tool_missing:progress",
-      "store:part:tool",
-      "store:message:completed",
       "event:span.model_request_end:tool_missing:progress",
-      "event:agent.tool_use:tool_running:progress",
-      "store:part:tool",
-      "store:part:tool",
+      "event:agent.tool_use:tool_missing:progress",
       "event:agent.tool_result:tool_running:true",
       "event:session.status_idle:tool_error:progress",
     ]);
@@ -5777,7 +6315,7 @@ Previous anchored summary.
       const result = await Effect.runPromise(
         Effect.gen(function* () {
           const agentLoop = yield* AgentLoop.Service;
-          return yield* agentLoop.run(session);
+          return yield* agentLoop.run(session, testRunCustody());
         }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
           store,
           writer,
@@ -5821,7 +6359,7 @@ Previous anchored summary.
     const runPromise = Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -5914,7 +6452,7 @@ Previous anchored summary.
     const run = (session: Session, layer: Layer.Layer<AgentLoop.Service>) => Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -5951,7 +6489,7 @@ Previous anchored summary.
     const runPromise = Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         events: [
@@ -5998,7 +6536,6 @@ Previous anchored summary.
     expect(JSON.stringify(appended)).not.toContain("projection_refresh_failed");
     const pendingToolPart = session.state.contextManager.messages().at(-1)?.parts.find((part) => part.type === "tool");
     expect(pendingToolPart?.type === "tool" ? pendingToolPart.state.status : undefined).toBe("running");
-
     releaseProjectionSuccess.resolve(undefined);
     const result = await runPromise;
 
@@ -6029,7 +6566,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         store,
         writer: writerFrom((envelope) => {
@@ -6056,52 +6593,6 @@ Previous anchored summary.
     expect(appended.filter((event) => event.type === "span.model_request_start")).toEqual([]);
     expect(appended.filter((event) => event.type === "span.model_request_end")).toEqual([]);
     expect(appended.at(-1)).toEqual({ type: "session.status_idle", stop_reason: { type: "end_turn" } });
-  });
-
-  test("user interrupt after assistant shell ACK starts no span or provider", async () => {
-    const session = new Session("sesn_1");
-    const storeOrder: string[] = [];
-    let interrupted = false;
-    const store = new AgentLoopRuntimeStore(storeOrder);
-    const loader = new RecordingContextLoader([], {
-      type: "messages",
-      messages: [userMessage("user-1", 0, "stop after shell")],
-    });
-    const appended: SessionEvent[] = [];
-    let providerCalls = 0;
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
-        store,
-        createProcessor: (options) => {
-          if (!interrupted) {
-            interrupted = true;
-            beginTestUserInterrupt(session, "rin_after_shell");
-          }
-          return new SessionProcessor(options);
-        },
-        writer: writerFrom((envelope) => {
-          appended.push(envelope.event);
-          return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-        }),
-        llmService: {
-          stream() {
-            providerCalls++;
-            return Stream.empty;
-          },
-        },
-      }))),
-    );
-
-    expect(result).toEqual({ type: "interrupted" });
-    expect(providerCalls).toBe(0);
-    expect(storeOrder[0]).toBe("store:message:streaming");
-    expect(storeOrder).toContain("store:message:cancelled");
-    expect(appended.filter((event) => event.type === "span.model_request_start")).toEqual([]);
-    expect(appended.filter((event) => event.type === "span.model_request_end")).toEqual([]);
   });
 
   test("user interrupt after normal span ACK closes it before any provider call", async () => {
@@ -6140,14 +6631,14 @@ Previous anchored summary.
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEnds.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         store,
         writer,
@@ -6168,6 +6659,126 @@ Previous anchored summary.
     ]);
     expect(requestEnds[0]?.consumedAttachmentRefs ?? []).toEqual([]);
     expect(session.state.pendingAttachments()).toEqual([attachment]);
+  });
+
+  test("provider interruption exposes request-end rejection through the Effect Cause", async () => {
+    const session = new Session("sesn_provider_closeout_rejected");
+    const loader = new RecordingContextLoader([], {
+      type: "messages",
+      messages: [userMessage("user-provider-closeout", 0, "stop before provider")],
+    });
+    let interrupted = false;
+    const baseWriter = writerFrom((envelope) => {
+      if (!interrupted && envelope.event.type === "span.model_request_start") {
+        interrupted = true;
+        beginTestUserInterrupt(session, "rin_provider_closeout_rejected");
+      }
+      return {
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+      };
+    });
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => ({
+        ok: false,
+        error: {
+          type: "session-event-writer",
+          code: "unavailable",
+          message: "request end not ACKed",
+          retryable: false,
+          fatal: false,
+          sessionId: envelope.sessionId,
+          writeId: envelope.writeId,
+        },
+      }),
+    };
+
+    const runExit = await Effect.runPromiseExit(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        llmService: {
+          stream() {
+            throw new Error("provider must not start");
+          },
+        },
+      }))),
+    );
+
+    expect(Exit.isFailure(runExit)).toBe(true);
+    if (Exit.isFailure(runExit)) {
+      expect(runExit.cause.reasons.find(Cause.isDieReason)?.defect).toMatchObject({
+        type: "session-event-writer",
+        code: "unavailable",
+      });
+    }
+  });
+
+  test("a stale interrupt request-end receipt performs no fallback idle closeout", async () => {
+    const session = new Session("sesn_stale_interrupt_end");
+    const loader = new RecordingContextLoader([], {
+      type: "messages",
+      messages: [userMessage("user-stale-interrupt", 0, "stop before provider")],
+    });
+    let interrupted = false;
+    let requestEndCalls = 0;
+    let finishIdleCalls = 0;
+    const baseWriter = writerFrom((envelope) => {
+      if (!interrupted && envelope.event.type === "span.model_request_start") {
+        interrupted = true;
+        beginTestUserInterrupt(session, "rin_stale_interrupt_end");
+      }
+      return {
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+      };
+    });
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        requestEndCalls += 1;
+        const result = await baseWriter.writeRequestEnd(envelope);
+        if (!result.ok || result.declaration === undefined) {
+          return result;
+        }
+        return {
+          ...result,
+          declaration: {
+            ...result.declaration,
+            applicationDisposition: "stale_custody",
+          },
+        };
+      },
+      finishIdle: async (envelope) => {
+        finishIdleCalls += 1;
+        return await baseWriter.finishIdle!(envelope);
+      },
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        llmService: {
+          stream() {
+            throw new Error("provider must not start");
+          },
+        },
+      }))),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(requestEndCalls).toBe(1);
+    expect(finishIdleCalls).toBe(0);
   });
 
   test("cooperative child cancellation closes an ACKed request before run release", async () => {
@@ -6191,23 +6802,22 @@ Previous anchored summary.
     });
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     let providerCalls = 0;
-    const baseWriter = writerFrom((envelope) => {
-      if (envelope.event.type === "span.model_request_start") {
-        session.state.beginCooperativeCancel();
-      }
-      return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    });
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => {
+    const writer = writerFrom(
+      (envelope) => {
+        if (envelope.event.type === "span.model_request_start") {
+          session.state.beginCooperativeCancel();
+        }
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+      },
+      async (envelope) => {
         requestEnds.push(envelope);
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
       },
-    };
+    );
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         llmService: {
@@ -6240,7 +6850,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(
         new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "review")] }),
         {
@@ -6275,7 +6885,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         compaction: {},
         writer: writerFrom((envelope) => {
@@ -6320,26 +6930,22 @@ Previous anchored summary.
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     let providerCalls = 0;
     let interrupted = false;
-    const baseWriter = writerFrom((envelope) => {
+    const writer = writerFrom((envelope) => {
       appended.push(envelope.event);
       if (!interrupted && envelope.event.type === "span.model_request_start") {
         interrupted = true;
         beginTestUserInterrupt(session, "rin_after_compaction_span");
       }
       return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    }, async (envelope) => {
+      requestEnds.push(envelope);
+      return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
     });
-    const writer: SessionEventWriter = {
-      ...baseWriter,
-      writeRequestEnd: async (envelope) => {
-        requestEnds.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-      },
-    };
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         compaction: {},
         writer,
@@ -6372,6 +6978,7 @@ Previous anchored summary.
     const providerRelease = deferred<void>();
     const order: string[] = [];
     const appended: SessionEvent[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     let toolRunnerCalls = 0;
     let interruptCommitStarted = false;
     const recordWriter = writerFrom((envelope) => {
@@ -6395,11 +7002,15 @@ Previous anchored summary.
         }
         return await recordWriter.append(envelope);
       },
+      writeRequestEnd: async (envelope) => {
+        requestEnds.push(envelope);
+        return await recordWriter.writeRequestEnd(envelope);
+      },
     };
     const agentLayer = runtimeAgentLoopLayer(loader, {
       writer,
       llmService: {
-        stream() {
+        stream(_request, options) {
           return Stream.fromAsyncIterable((async function* () {
             yield {
               type: "tool-call" as const,
@@ -6407,7 +7018,10 @@ Previous anchored summary.
               toolName: "Write",
               input: { value: { file_path: "src/gated.ts", content: "one" }, preview: "{}", truncated: false },
             };
-            await providerRelease.promise;
+            if (options?.abortSignal === undefined) {
+              throw new Error("provider stream requires an abort signal");
+            }
+            await waitForReleaseOrAbort(providerRelease.promise, options.abortSignal);
             yield { type: "finish" as const, finishReason: "tool-calls" as const };
           })(), (error): LLMServiceError => ({
             type: "llm-service",
@@ -6440,18 +7054,20 @@ Previous anchored summary.
       await Effect.runPromise(manager.preloadThread({
         ...input,
         runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
         messages: [userMessage("user-1", 0, "run the gated tool")],
         thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
       }));
       await Effect.runPromise(manager.acceptInput(input));
       await toolUseAppendStarted.promise;
-      jest.useFakeTimers();
       const command = { ...acceptedInput("rin_gated_tool_use_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
       const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async () => {
         interruptCommitStarted = true;
         order.push("commit:interrupt");
         return { ok: true };
       }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      jest.useFakeTimers();
       await flushMicrotasks();
       jest.advanceTimersByTime(350);
       await flushMicrotasks();
@@ -6467,12 +7083,35 @@ Previous anchored summary.
 
       expect(toolRunnerCalls).toBe(0);
       expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
-      expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([
-        expect.objectContaining({ tool_use_id: "sevt_gated_tool_use", is_error: true }),
-      ]);
-      expect(order.indexOf("tool-use-append:ack")).toBeLessThan(order.indexOf("event:agent.tool_result"));
-      expect(order.indexOf("event:agent.tool_result")).toBeLessThan(order.indexOf("commit:interrupt"));
-      expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("event:session.status_idle"));
+      expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
+      expect(requestEnds).toHaveLength(1);
+      const cancellationDraft = requestEnds[0]?.drafts?.find((draft) => draft.draftKind === "cancellation");
+      expect(cancellationDraft).toMatchObject({
+        sourceKind: "interrupt_control",
+        sourceId: command.runtimeInputId,
+        sourceEventId: command.eventIds[0],
+        parts: [expect.objectContaining({
+          type: "tool",
+          toolUseEventId: "sevt_gated_tool_use",
+          state: expect.objectContaining({ status: "cancelled" }),
+        })],
+      });
+      if (cancellationDraft === undefined) {
+        throw new Error("missing joined interrupt cancellation draft");
+      }
+      expect(requestEnds[0]?.interruptSettlement).toEqual({
+        runtimeInputId: command.runtimeInputId,
+        eventIds: [...command.eventIds],
+        sequenceFrom: command.sequenceFrom,
+        sequenceTo: command.sequenceTo,
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_gated_tool_use",
+          runtimeLocalId: cancellationDraft.runtimeLocalId,
+        }],
+      });
+      expect(interruptCommitStarted).toBe(false);
+      expect(order.indexOf("tool-use-append:ack")).toBeLessThan(order.indexOf("event:span.model_request_end"));
+      expect(order.indexOf("event:span.model_request_end")).toBeLessThan(order.indexOf("event:session.status_idle"));
     } finally {
       jest.useRealTimers();
       releaseToolUseAppend.resolve();
@@ -6521,7 +7160,7 @@ Previous anchored summary.
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
       }),
       llmService: {
-        stream() {
+        stream(_request, options) {
           return Stream.fromAsyncIterable((async function* () {
             yield {
               type: "tool-call" as const,
@@ -6529,7 +7168,10 @@ Previous anchored summary.
               toolName: "MissingTool",
               input: { value: {}, preview: "{}", truncated: false },
             };
-            await providerRelease.promise;
+            if (options?.abortSignal === undefined) {
+              throw new Error("provider stream requires an abort signal");
+            }
+            await waitForReleaseOrAbort(providerRelease.promise, options.abortSignal);
             yield { type: "finish" as const, finishReason: "tool-calls" as const };
           })(), (error): LLMServiceError => ({
             type: "llm-service",
@@ -6558,6 +7200,7 @@ Previous anchored summary.
       await Effect.runPromise(manager.preloadThread({
         ...input,
         runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
         messages: [userMessage("user-1", 0, "trigger an internal repair")],
         thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
       }));
@@ -6584,8 +7227,9 @@ Previous anchored summary.
 
       expect(operationCountAtCloseout).toBe(1);
       expect(order.filter((entry) => entry === "store:internal-tool-repair")).toHaveLength(1);
-      expect(order.indexOf("repair:ack")).toBeLessThan(order.indexOf("commit:interrupt"));
-      expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("event:session.status_idle"));
+      expect(interruptCommitStarted).toBe(false);
+      expect(order.indexOf("repair:ack")).toBeLessThan(order.indexOf("event:span.model_request_end"));
+      expect(order.indexOf("event:span.model_request_end")).toBeLessThan(order.indexOf("event:session.status_idle"));
       expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
     } finally {
       releaseRepair.resolve();
@@ -6629,14 +7273,19 @@ Previous anchored summary.
       }),
       finishIdle: async (envelope) => {
         finishIdleCalls++;
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return withFinishIdleReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.durableTurnId,
+          eventId: `bridge-${envelope.durableTurnId}`,
+          processedAt: createdAt,
+        });
       },
     };
 
-    const result = await Effect.runPromise(
+    const runExit = await Effect.runPromiseExit(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         llmService: {
@@ -6647,30 +7296,35 @@ Previous anchored summary.
       }))),
     );
 
-    expect(result).toMatchObject({ type: "failed", releaseSession: { reason: "event_write_failed" } });
+    expect(Exit.isFailure(runExit)).toBe(true);
+    if (Exit.isFailure(runExit)) {
+      expect(runExit.cause.reasons.find(Cause.isDieReason)?.defect).toMatchObject({
+        type: "session-event-writer",
+        code: "unavailable",
+      });
+    }
     expect(interruptCommits).toBe(0);
     expect(finishIdleCalls).toBe(0);
     expect(appended.filter((event) => event.type === "session.status_idle")).toEqual([]);
   });
 
-  test("failed interrupt tool repair leaves the snapshot and FinishIdle unwritten for Bridge repair", async () => {
+  test("failed interrupt receipt application leaves FinishIdle unwritten and surfaces through the Effect Cause", async () => {
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], {
       type: "messages",
       messages: [userMessage("user-repair-failure", 0, "run then interrupt")],
     });
     const appended: SessionEvent[] = [];
-    let failRepairWrite = false;
+    const toolUseWritten = deferred<void>();
     let interruptCommits = 0;
     let finishIdleCalls = 0;
-    const store = new AgentLoopRuntimeStore([], (part) => failRepairWrite && part.type === "tool");
     const baseWriter = writerFrom((envelope) => {
       appended.push(envelope.event);
       if (envelope.event.type === "agent.tool_use") {
-        failRepairWrite = true;
         beginTestUserInterrupt(session, "rin_repair_failure", () => {
           interruptCommits++;
         });
+        toolUseWritten.resolve();
       }
       return {
         ok: true,
@@ -6681,17 +7335,38 @@ Previous anchored summary.
     });
     const writer: SessionEventWriter = {
       ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        const result = await baseWriter.writeRequestEnd(envelope);
+        if (!result.ok || result.declaration === undefined) {
+          return result;
+        }
+        return {
+          ...result,
+          declaration: {
+            ...result.declaration,
+            relatedReceipts: result.declaration.relatedReceipts?.map((receipt) =>
+              receipt.sourceKind === "interrupt_control"
+                ? { ...receipt, messages: [] }
+                : receipt
+            ),
+          },
+        };
+      },
       finishIdle: async (envelope) => {
         finishIdleCalls++;
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return withFinishIdleReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.durableTurnId,
+          eventId: `bridge-${envelope.durableTurnId}`,
+          processedAt: createdAt,
+        });
       },
     };
-    const run = Effect.runPromise(
+    const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
-        store,
         writer,
         providerCallRuntime: {
           systemInstructions: "interrupt repair failure test",
@@ -6706,13 +7381,10 @@ Previous anchored summary.
                 toolName: "Write",
                 input: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
               };
-              await new Promise<void>((resolve) => {
-                if (streamOptions?.abortSignal?.aborted === true) {
-                  resolve();
-                  return;
-                }
-                streamOptions?.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
-              });
+              if (streamOptions?.abortSignal === undefined) {
+                throw new Error("provider stream requires an abort signal");
+              }
+              await waitForReleaseOrAbort(new Promise<void>(() => undefined), streamOptions.abortSignal);
             })(), (error): LLMServiceError => ({
               type: "llm-service",
               error: runtimeFailureFromProviderError(normalizeProviderError({
@@ -6726,9 +7398,18 @@ Previous anchored summary.
       }))),
     );
 
-    const result = await run;
+    await toolUseWritten.promise;
+    await Effect.runPromise(Fiber.interrupt(runFiber));
+    const runExit = await Effect.runPromise(Fiber.await(runFiber));
 
-    expect(result).toMatchObject({ type: "failed", releaseSession: { reason: "persistence_failed" } });
+    expect(Exit.isFailure(runExit)).toBe(true);
+    if (Exit.isFailure(runExit)) {
+      expect(runExit.cause.reasons.find(Cause.isDieReason)?.defect).toMatchObject({
+        type: "runtime",
+        code: "runtime_invalid_sequence",
+        reason: "runtime_contract_validation",
+      });
+    }
     expect(interruptCommits).toBe(0);
     expect(finishIdleCalls).toBe(0);
     expect(appended.filter((event) => event.type === "session.status_idle")).toEqual([]);
@@ -6750,36 +7431,47 @@ Previous anchored summary.
     } as const;
     session.state.addPendingAttachments([attachment]);
     let failRepairWrite = false;
-    const store = new AgentLoopRuntimeStore([], (part) => failRepairWrite && part.type === "tool");
+    let repairAttempted = false;
     const loader = new RecordingContextLoader([], {
       type: "messages",
       messages: [userMessage("user-post-success-cooperative-failure", 0, "run the tool")],
     });
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
-    const baseWriter = writerFrom((envelope) => ({
-      ok: true,
-      writeId: envelope.writeId,
-      eventId: envelope.event.type === "agent.tool_use"
-        ? "sevt_post_success_cooperative_failure"
-        : `bridge-${envelope.writeId}`,
-      processedAt: createdAt,
-    }));
+    let interruptOwner: (() => void) | undefined;
+    const baseWriter = writerFrom((envelope) => {
+      if (failRepairWrite && envelope.event.type === "agent.tool_result") {
+        repairAttempted = true;
+        return {
+          ok: false,
+          error: normalizeSessionEventWriterError({
+            code: "unavailable",
+            sessionId: envelope.sessionId,
+            writeId: envelope.writeId,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: envelope.event.type === "agent.tool_use"
+          ? "sevt_post_success_cooperative_failure"
+          : `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+      };
+    });
     const writer: SessionEventWriter = {
       ...baseWriter,
       writeRequestEnd: async (envelope) => {
         requestEnds.push(envelope);
-        failRepairWrite = true;
-        session.state.beginCooperativeCancel();
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
-    const result = await Effect.runPromise(
+    const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
-        store,
         writer,
         providerCallRuntime: {
           systemInstructions: "post-success cooperative repair failure test",
@@ -6806,14 +7498,22 @@ Previous anchored summary.
         },
       }))),
     );
-
-    expect(result).toMatchObject({ type: "failed", releaseSession: { reason: "persistence_failed" } });
+    interruptOwner = () => {
+      void Effect.runPromise(Fiber.interrupt(runFiber));
+    };
+    await waitForCondition(() => requestEnds.length === 1, "successful request-end before cooperative cancellation");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    failRepairWrite = true;
+    session.state.beginCooperativeCancel();
+    interruptOwner();
+    const runExit = await Effect.runPromise(Fiber.await(runFiber));
+    expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
+    expect(repairAttempted).toBe(true);
     expect(requestEnds).toHaveLength(1);
     expect(requestEnds[0]).toMatchObject({
       isError: false,
       consumedAttachmentRefs: ["att_post_success_cooperative_failure"],
     });
-    expect(session.state.pendingAttachments()).toEqual([]);
   });
 
   test("post-success interrupt-fence failure settles the attachment ride already consumed by Bridge", async () => {
@@ -6858,14 +7558,14 @@ Previous anchored summary.
           retryable: false,
           errorCode: "interrupt_conflict",
         }));
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return await baseWriter.writeRequestEnd(envelope);
       },
     };
 
     const result = await Effect.runPromiseExit(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         providerCallRuntime: {
@@ -6919,12 +7619,17 @@ Previous anchored summary.
     const writer: SessionEventWriter = {
       ...baseWriter,
       finishIdle: async (envelope) => {
-        finishIdleWriteIds.push(envelope.writeId);
+        finishIdleWriteIds.push(envelope.durableTurnId);
         if (finishIdleWriteIds.length === 1) {
           finishIdleStarted.resolve();
           await releaseFinishIdle.promise;
         }
-        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        return withFinishIdleReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.durableTurnId,
+          eventId: `bridge-${envelope.durableTurnId}`,
+          processedAt: createdAt,
+        });
       },
     };
     let providerCalls = 0;
@@ -6974,6 +7679,7 @@ Previous anchored summary.
       await Effect.runPromise(manager.preloadThread({
         ...firstInput,
         runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
         messages: [userMessage("user-finish-idle-owner", 0, "hold the first run")],
         thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
       }));
@@ -7019,12 +7725,13 @@ Previous anchored summary.
     const releaseProvider = deferred<void>();
     const projectionFailureSeen = deferred<void>();
     const appended: SessionEvent[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const closeoutOrder: string[] = [];
     let observedToolSignal: AbortSignal | undefined;
     let toolRunnerCalls = 0;
     let bridgeAttempts = 0;
     const service: LLMServiceInterface = {
-      stream() {
+      stream(_request, options) {
         return Stream.fromAsyncIterable(
           (async function* () {
             yield {
@@ -7033,7 +7740,10 @@ Previous anchored summary.
               toolName: "memory",
               input: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
             };
-            await releaseProvider.promise;
+            if (options?.abortSignal === undefined) {
+              throw new Error("provider stream requires an abort signal");
+            }
+            await waitForReleaseOrAbort(releaseProvider.promise, options.abortSignal);
             yield { type: "finish" as const, finishReason: "tool-calls" as const };
           })(),
           (error): LLMServiceError => ({
@@ -7047,20 +7757,32 @@ Previous anchored summary.
         );
       },
     };
-    const writer = writerFrom((envelope) => {
-      appended.push(envelope.event);
-      closeoutOrder.push(`event:${envelope.event.type}`);
-      return {
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: envelope.event.type === "agent.tool_use" ? "sevt_memory_projection_cancel" : `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-      };
-    });
+    const writer = writerFrom(
+      (envelope) => {
+        appended.push(envelope.event);
+        closeoutOrder.push(`event:${envelope.event.type}`);
+        return {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: envelope.event.type === "agent.tool_use" ? "sevt_memory_projection_cancel" : `bridge-${envelope.writeId}`,
+          processedAt: createdAt,
+        };
+      },
+      async (envelope) => {
+        requestEnds.push(envelope);
+        closeoutOrder.push("event:span.model_request_end");
+        return {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: `bridge-${envelope.writeId}`,
+          processedAt: createdAt,
+        };
+      },
+    );
     const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         llmService: service,
@@ -7111,34 +7833,62 @@ Previous anchored summary.
       closeoutOrder.push("commit:interrupt");
       return { ok: true };
     });
-    const runPromise = Effect.runPromise(Fiber.join(runFiber));
+    const interrupt = Effect.runPromise(Fiber.interrupt(runFiber));
     await waitForCondition(() => observedToolSignal?.aborted === true, "Memory projection ToolFiber abort");
     releaseProvider.resolve(undefined);
-    const result = await runPromise;
+    await interrupt;
+    const runExit = await Effect.runPromise(Fiber.await(runFiber));
     await new Promise((resolve) => setTimeout(resolve, 25));
 
-    expect(result).toEqual({ type: "interrupted" });
+    expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
     expect(toolRunnerCalls).toBe(1);
     expect(bridgeAttempts).toBe(1);
-    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([
-      expect.objectContaining({ tool_use_id: "sevt_memory_projection_cancel", is_error: true }),
-    ]);
+    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
     expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
-    expect(closeoutOrder.filter((entry) => entry === "event:agent.tool_result")).toHaveLength(1);
-    expect(closeoutOrder.indexOf("event:span.model_request_end")).toBeLessThan(closeoutOrder.indexOf("event:agent.tool_result"));
-    expect(closeoutOrder.indexOf("event:agent.tool_result")).toBeLessThan(closeoutOrder.indexOf("commit:interrupt"));
-    expect(closeoutOrder.indexOf("commit:interrupt")).toBeLessThan(closeoutOrder.indexOf("event:session.status_idle"));
+    expect(requestEnds).toHaveLength(1);
+    const cancellationDraft = requestEnds[0]?.drafts?.find((draft) => draft.draftKind === "cancellation");
+    expect(cancellationDraft).toBeDefined();
+    expect(requestEnds[0]?.interruptSettlement).toEqual({
+      runtimeInputId: "rin_interrupt",
+      eventIds: ["sevt_interrupt"],
+      sequenceFrom: 9,
+      sequenceTo: 9,
+      pendingToolCancellations: [{
+        toolUseEventId: "sevt_memory_projection_cancel",
+        runtimeLocalId: cancellationDraft!.runtimeLocalId,
+      }],
+    });
+    expect(requestEnds[0]?.drafts?.filter((draft) => draft.draftKind === "cancellation")).toEqual([
+      expect.objectContaining({
+        sourceKind: "interrupt_control",
+        sourceId: "rin_interrupt",
+        sourceEventId: "sevt_interrupt",
+        parts: [expect.objectContaining({
+          type: "tool",
+          toolUseEventId: "sevt_memory_projection_cancel",
+          state: expect.objectContaining({ status: "cancelled" }),
+        })],
+      }),
+    ]);
+    expect(closeoutOrder).not.toContain("commit:interrupt");
+    expect(closeoutOrder.indexOf("event:span.model_request_end")).toBeLessThan(closeoutOrder.indexOf("event:session.status_idle"));
+    expect(
+      session.state.contextManager.messages().flatMap((message) => message.parts).find(
+        (part) => part.type === "tool" && part.toolUseEventId === "sevt_memory_projection_cancel" && part.state.status === "cancelled",
+      ),
+    ).toBeDefined();
   });
 
   test("SessionManager enforces the five-state interrupt fence across tools and CommitInputs", async () => {
-    const preCommitStarted = deferred<void>();
     const releasePreCommit = deferred<void>();
     const terminalResultAcked = deferred<void>();
+    const releaseNextProviderTool = deferred<void>();
     const pendingToolUseAppendStarted = deferred<void>();
     const releasePendingToolUseAppend = deferred<void>();
     const uncommittedRepairStarted = deferred<void>();
     const releaseUncommittedRepair = deferred<void>();
-    const requestEndAcked = deferred<void>();
+    let preCommitObserved = false;
+    let requestEndObserved = false;
     const commitCalls: string[] = [];
     const order: string[] = [];
     let nextMessageSequence = 1;
@@ -7158,7 +7908,7 @@ Previous anchored summary.
         }
         if (input.runtimeInputId === "rin_pre_fence_mixed") {
           order.push("commit:pre:start");
-          preCommitStarted.resolve();
+          preCommitObserved = true;
           await releasePreCommit.promise;
           order.push("commit:pre:end");
           return commitReceipt(input);
@@ -7169,12 +7919,16 @@ Previous anchored summary.
     };
     const appended: SessionEvent[] = [];
     const storeOrder: string[] = [];
+    const durableSequence: TestDurableSequence = {
+      eventSequence: 100_000,
+      messageSequence: 100_000,
+    };
     const store = new AgentLoopRuntimeStore(storeOrder, false, false, undefined, async (repair) => {
       if (repair.modelToolCallId === "tool-uncommitted") {
         uncommittedRepairStarted.resolve();
         await releaseUncommittedRepair.promise;
       }
-    });
+    }, durableSequence);
     let providerCalls = 0;
     let toolUseWrites = 0;
     let toolRunnerCalls = 0;
@@ -7185,20 +7939,10 @@ Previous anchored summary.
       inputSchema: { type: "object" },
       permissionPolicy: "always_ask",
     });
-    const uncommittedCatalog = catalogForTest({
-      name: "UncommittedWrite",
-      description: "Registered uncommitted write",
-      inputSchema: { type: "object" },
-    });
     const mixedCatalog: ToolCatalog = {
-      entries: [...terminalCatalog.entries, ...pendingCatalog.entries, ...uncommittedCatalog.entries],
-      configs: [...terminalCatalog.configs, ...pendingCatalog.configs, ...uncommittedCatalog.configs],
-    };
-    const catalogAfterUncommittedRegistration: ToolCatalog = {
       entries: [...terminalCatalog.entries, ...pendingCatalog.entries],
       configs: [...terminalCatalog.configs, ...pendingCatalog.configs],
     };
-    let includeUncommittedTool = true;
     const mixedWriterBase = writerFrom((envelope) => {
       appended.push(envelope.event);
       if (envelope.event.type === "agent.tool_result") {
@@ -7215,7 +7959,7 @@ Previous anchored summary.
         terminalResultAcked.resolve();
       }
       if (envelope.event.type === "span.model_request_end") {
-        requestEndAcked.resolve();
+        requestEndObserved = true;
       }
       return {
         ok: true,
@@ -7223,7 +7967,7 @@ Previous anchored summary.
         eventId: envelope.event.type === "agent.tool_use" ? `sevt_mixed_tool_${toolUseWrites}` : `bridge-${envelope.writeId}`,
         processedAt: createdAt,
       };
-    });
+    }, undefined, [], durableSequence);
     const mixedWriter: SessionEventWriter = {
       ...mixedWriterBase,
       append: async (envelope) => {
@@ -7256,7 +8000,7 @@ Previous anchored summary.
               toolName: "Read",
               input: { value: { file_path: "src/shared.ts", content: "terminal" }, preview: "{}", truncated: false },
             };
-            await terminalResultAcked.promise;
+            await releaseNextProviderTool.promise;
             yield {
               type: "tool-call" as const,
               id: "tool-running",
@@ -7286,9 +8030,6 @@ Previous anchored summary.
         toolCatalog: mixedCatalog,
       },
       approvalMode: "ask_for_approval",
-      runtimePolicy: () => ({
-        toolCatalog: includeUncommittedTool ? mixedCatalog : catalogAfterUncommittedRegistration,
-      }),
       runTool: (request) => {
         toolRunnerCalls++;
         expect(request.modelToolCallId).toBe("tool-terminal");
@@ -7304,10 +8045,29 @@ Previous anchored summary.
 
     try {
       const initialInput = acceptedInput("rin_initial_mixed");
+      await Effect.runPromise(manager.preloadThread({
+        ...initialInput,
+        runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
+        messages: [],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
       await Effect.runPromise(manager.acceptInput(initialInput));
-      await Promise.all([terminalResultAcked.promise, pendingToolUseAppendStarted.promise, requestEndAcked.promise]);
+      await terminalResultAcked.promise;
+      let terminalToolApplied = false;
+      for (let attempt = 0; attempt < 100 && !terminalToolApplied; attempt++) {
+        const snapshot = await Effect.runPromise(manager.inspectThread(initialInput));
+        terminalToolApplied =
+          JSON.stringify(snapshot).includes("sevt_mixed_tool_1") &&
+          JSON.stringify(snapshot).includes("terminal output");
+        if (!terminalToolApplied) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+      expect(terminalToolApplied).toBe(true);
+      releaseNextProviderTool.resolve();
+      await pendingToolUseAppendStarted.promise;
       expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
-      includeUncommittedTool = false;
       releasePendingToolUseAppend.resolve();
       await uncommittedRepairStarted.promise;
       expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_2")).toHaveLength(0);
@@ -7316,7 +8076,16 @@ Previous anchored summary.
       await Effect.runPromise(manager.acceptInput(preFenceInput));
       expect(commitCalls).toEqual(["rin_initial_mixed"]);
       releaseUncommittedRepair.resolve();
-      await preCommitStarted.promise;
+      try {
+        await waitForCondition(
+          () => requestEndObserved && preCommitObserved,
+          "request-end and pre-fence input commit",
+        );
+      } catch {
+        throw new Error(
+          `request-end/pre-fence gate failed: requestEnd=${requestEndObserved}, preCommit=${preCommitObserved}, order=${order.join(",")}, store=${storeOrder.join(",")}, events=${JSON.stringify(appended)}`,
+        );
+      }
       expect(providerCalls).toBe(1);
       expect(toolRunnerCalls).toBe(1);
       expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
@@ -7337,6 +8106,7 @@ Previous anchored summary.
         order.push("commit:interrupt");
         return { ok: true };
       }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await flushMicrotasks();
       const postFenceInput = { ...acceptedInput("rin_post_fence_mixed"), sequenceFrom: 10, sequenceTo: 10 };
       await Effect.runPromise(manager.acceptInput(postFenceInput));
@@ -7346,6 +8116,7 @@ Previous anchored summary.
       expect(order.filter((entry) => entry === "event:agent.tool_result:sevt_mixed_tool_2")).toHaveLength(0);
 
       releasePreCommit.resolve();
+      releaseNextProviderTool.resolve();
       const interruptResult = await interrupt;
       expect({ interruptResult, order }).toMatchObject({ interruptResult: { ok: true, interrupted: true } });
       await Effect.runPromise(manager.waitThread(postFenceInput, 1_000));
@@ -7481,6 +8252,13 @@ Previous anchored summary.
 
     try {
       const initialInput = acceptedInput("rin_non_cooperative_route");
+      await Effect.runPromise(manager.preloadThread({
+        ...initialInput,
+        runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
+        messages: [],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
       await Effect.runPromise(manager.acceptInput(initialInput));
       await Promise.all([routeStarted.promise, requestEndAcked.promise]);
       expect(toolRunnerCalls).toBe(1);
@@ -7488,7 +8266,6 @@ Previous anchored summary.
       expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
       expect(appended.filter((event) => event.type === "agent.tool_result")).toHaveLength(0);
 
-      jest.useFakeTimers();
       const interruptCommand = {
         ...acceptedInput("rin_non_cooperative_route_interrupt"),
         eventIds: ["sevt_non_cooperative_route_interrupt"],
@@ -7503,6 +8280,7 @@ Previous anchored summary.
         interruptSettled = true;
         return result;
       });
+      await new Promise<void>((resolve) => setImmediate(resolve));
       const postFenceInput = { ...acceptedInput("rin_after_non_cooperative_route"), sequenceFrom: 10, sequenceTo: 10 };
       await Effect.runPromise(manager.acceptInput(postFenceInput));
       await flushMicrotasks(50);
@@ -7515,8 +8293,7 @@ Previous anchored summary.
       expect(order).not.toContain("commit:interrupt");
       expect(await Effect.runPromise(manager.waitThread(interruptCommand, 0))).toMatchObject({ ok: true, timedOut: true });
 
-      jest.advanceTimersByTime(350);
-      await flushMicrotasks(50);
+      await new Promise((resolve) => setTimeout(resolve, 350));
       expect(interruptSettled).toBe(true);
       await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
       await Effect.runPromise(manager.waitThread(postFenceInput, 1_000));
@@ -7586,9 +8363,11 @@ Previous anchored summary.
   });
 
   test("SessionManager interrupts rehydrated approved tools, repairs every open sibling, and preserves a pre-fence settlement", async () => {
-    const loadedMessage = RuntimeMessageSchema.parse({
+    const loadedMessage = DurableRuntimeMessageSchema.parse({
       id: "assistant-rehydrated-approved",
       sessionId: "sesn_1",
+      owningEventId: "sevt_approved_settled",
+      eventSequence: 2,
       role: "assistant",
       origin: "agent",
       sequence: 1,
@@ -7663,8 +8442,11 @@ Previous anchored summary.
     const appended: SessionEvent[] = [];
     const order: string[] = [];
     const storeOrder: string[] = [];
-    const store = new AgentLoopRuntimeStore(storeOrder);
-    store.messages.set(loadedMessage.id, loadedMessage);
+    const durableSequence: TestDurableSequence = {
+      eventSequence: 100_000,
+      messageSequence: 100_000,
+    };
+    const store = new AgentLoopRuntimeStore(storeOrder, false, false, undefined, undefined, durableSequence);
     let observedLateSignal: AbortSignal | undefined;
     let providerCalls = 0;
     const agentLayer = runtimeAgentLoopLayer(loader, {
@@ -7678,7 +8460,10 @@ Previous anchored summary.
           settledResultAcked.resolve();
         }
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-      }),
+      }, undefined, [{
+        sessionThreadId: "thrd_1",
+        message: loadedMessage,
+      }], durableSequence),
       llmService: {
         stream() {
           providerCalls++;
@@ -7714,11 +8499,14 @@ Previous anchored summary.
         runtimeBindingToken: "runtime-binding-token",
         messages: [userMessage("user-rehydrated-approved", 0, "resume approved tools"), loadedMessage],
         pendingToolUses,
+        coldCoverage: {
+          ...emptyColdCoverage,
+          pendingToolIds: pendingToolUses.map((pending) => pending.toolUseEventId),
+        },
         thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
       }));
       await Effect.runPromise(manager.acceptInput(input));
       await Promise.all([lateRouteStarted.promise, settledResultAcked.promise]);
-      jest.useFakeTimers();
       const interruptCommand = {
         ...acceptedInput("rin_rehydrated_approved_interrupt"),
         eventIds: ["sevt_rehydrated_approved_interrupt"],
@@ -7733,12 +8521,12 @@ Previous anchored summary.
       void interrupt.then(() => {
         interruptSettled = true;
       });
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await flushMicrotasks();
 
       expect(observedLateSignal?.aborted).toBe(true);
       await abortObserved.promise;
-      jest.advanceTimersByTime(350);
-      await flushMicrotasks(50);
+      await new Promise((resolve) => setTimeout(resolve, 350));
       expect(interruptSettled).toBe(true);
       expect(await interrupt).toMatchObject({ ok: true, interrupted: true });
 
@@ -7851,13 +8639,22 @@ Previous anchored summary.
     }));
 
     try {
-      await Effect.runPromise(manager.acceptInput({ ...acceptedInput("rin_pre_fence"), sequenceFrom: 5, sequenceTo: 5 }));
+      const preFenceInput = { ...acceptedInput("rin_pre_fence"), sequenceFrom: 5, sequenceTo: 5 };
+      await Effect.runPromise(manager.preloadThread({
+        ...preFenceInput,
+        runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
+        messages: [],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
+      await Effect.runPromise(manager.acceptInput(preFenceInput));
       await preCommitStarted.promise;
       const interruptCommand = { ...acceptedInput("rin_commit_fence_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
       const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async () => {
         order.push("commit:interrupt");
         return { ok: true };
       }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await Effect.runPromise(manager.acceptInput({ ...acceptedInput("rin_post_fence"), sequenceFrom: 10, sequenceTo: 10 }));
       await new Promise((resolve) => setTimeout(resolve, 10));
       expect(order).toEqual(["event:session.status_running", "commit:pre:start"]);
@@ -7883,10 +8680,9 @@ Previous anchored summary.
     const releaseProvider = deferred<void>();
     const releaseTool = deferred<void>();
     let observedToolSignal: AbortSignal | undefined;
-    let runSettled = false;
     const order: string[] = [];
     const service: LLMServiceInterface = {
-      stream() {
+      stream(_request, options) {
         return Stream.fromAsyncIterable(
           (async function* () {
             yield {
@@ -7895,7 +8691,10 @@ Previous anchored summary.
               toolName: "Write",
               input: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             };
-            await releaseProvider.promise;
+            if (options?.abortSignal === undefined) {
+              throw new Error("provider stream requires an abort signal");
+            }
+            await waitForReleaseOrAbort(releaseProvider.promise, options.abortSignal);
             yield { type: "finish" as const, finishReason: "tool-calls" as const };
           })(),
           (error): LLMServiceError => ({
@@ -7910,10 +8709,10 @@ Previous anchored summary.
       },
     };
 
-    const runPromise = Effect.runPromise(
+    const runFiber = Effect.runFork(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -7941,21 +8740,19 @@ Previous anchored summary.
           }),
         ),
       ),
-    ).then((result) => {
-      runSettled = true;
-      return result;
-    });
+    );
 
     await waitForCondition(() => observedToolSignal !== undefined, "tool route signal");
     session.state.beginRuntimeShutdown();
+    const shutdown = Effect.runPromise(Fiber.interrupt(runFiber));
     await waitForCondition(() => observedToolSignal?.aborted === true, "tool route abort");
     releaseProvider.resolve(undefined);
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(runSettled).toBe(false);
     releaseTool.resolve(undefined);
-    const result = await runPromise;
+    await shutdown;
+    const runExit = await Effect.runPromise(Fiber.await(runFiber));
 
-    expect(result).toEqual({ type: "interrupted" });
+    expect(Exit.isFailure(runExit) && Cause.hasInterruptsOnly(runExit.cause)).toBe(true);
     expect(order.indexOf("tool-abort-signalled")).toBeGreaterThan(-1);
     expect(order).not.toContain("event:span.model_request_end");
     expect(order).not.toContain("event:agent.tool_result");
@@ -7975,7 +8772,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -8036,7 +8833,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -8077,6 +8874,48 @@ Previous anchored summary.
     });
   });
 
+  test("approval reviewer stale custody stops the turn and discards HotState", async () => {
+    const session = new Session("sesn_1", new AutoApprovalReviewerManager());
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const appended: SessionEvent[] = [];
+    const writer = writerFrom((envelope) => {
+      appended.push(envelope.event);
+      return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(
+        Effect.provide(
+          runtimeAgentLoopLayer(loader, {
+            writer,
+            approvalMode: "approve_for_me",
+            events: [
+              {
+                type: "tool-call",
+                id: "tool-1",
+                toolName: "Write",
+                input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+              },
+              { type: "finish", finishReason: "tool-calls" },
+            ],
+            providerCallRuntime: {
+              systemInstructions: "approval reviewer stale custody test system",
+              toolCatalog: catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }),
+            },
+            reviewApproval: () => Effect.succeed({ type: "stale_custody" as const }),
+            runTool: () => ({ type: "completed", output: { text: "must not run", truncated: false } }),
+          }),
+        ),
+      ),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(appended.some((event) => event.type === "agent.tool_use")).toBe(false);
+  });
+
   test("approve_for_me reviewer receives current request-turn draft state", async () => {
     const session = new Session("sesn_1", new AutoApprovalReviewerManager());
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
@@ -8091,7 +8930,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -8196,7 +9035,7 @@ Previous anchored summary.
     const first = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -8234,7 +9073,7 @@ Previous anchored summary.
     const second = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -8262,7 +9101,39 @@ Previous anchored summary.
     const session = new Session("sesn_1");
     session.state.enqueueAcceptedInput(acceptedInput("rin_cold_restore"));
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
-    const loadedMessages = [userMessage("user-cold", 0, "hello")];
+    const pendingMessage = DurableRuntimeMessageSchema.parse({
+      id: "assistant-cold-restore",
+      sessionId: "sesn_1",
+      owningEventId: "sevt_tool_1",
+      eventSequence: 2,
+      role: "assistant",
+      origin: "agent",
+      sequence: 1,
+      status: "completed",
+      createdAt,
+      parts: [{
+        id: "assistant-cold-restore-tool",
+        sessionId: "sesn_1",
+        messageId: "assistant-cold-restore",
+        sequence: 0,
+        type: "tool",
+        toolCallId: "tool-1",
+        toolName: "Write",
+        toolUseEventId: "sevt_tool_1",
+        toolEvent: { kind: "mcp", mcpServerName: "github" },
+        state: {
+          status: "running",
+          input: {
+            value: pendingInput,
+            preview: "{\"file_path\":\"src/a.ts\",\"content\":\"ok\"}",
+            truncated: false,
+          },
+        },
+        startedAt: createdAt,
+        createdAt,
+      }],
+    });
+    const loadedMessages = [userMessage("user-cold", 0, "hello"), pendingMessage];
     const pendingToolUses = [{
       toolUseEventId: "sevt_tool_1",
       modelRequestId: "mrq_cold_restore",
@@ -8275,16 +9146,17 @@ Previous anchored summary.
     }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
-    const writer = writerFrom((envelope) => {
-      appended.push(envelope.event);
-      return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    });
+    const writer = writerFrom(
+      (envelope) => {
+        appended.push(envelope.event);
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+      },
+      undefined,
+      [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }],
+    );
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
     const store = new AgentLoopRuntimeStore([]);
-    for (const message of loadedMessages) {
-      store.messages.set(message.id, message);
-    }
     const coldCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" });
     const layer = runtimeAgentLoopLayer(loader, {
       store,
@@ -8321,7 +9193,7 @@ Previous anchored summary.
         session.state.markPersistentContextLoaded();
         agentLoop.seedRuntimeModel(session);
         expect(yield* agentLoop.installLoadedPendingToolUses(session, pendingToolUses, loadedMessages)).toEqual({ ok: true });
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -8333,16 +9205,12 @@ Previous anchored summary.
       type: "session.status_idle",
       stop_reason: { type: "requires_action", event_ids: ["sevt_tool_1"] },
     });
-    const synthesizedPendingMessage = session.state.contextManager.messages().find((message) => message.id === "sevt_tool_1");
-    expect(synthesizedPendingMessage?.parts[0]).toMatchObject({
+    expect(session.state.contextManager.messages().find((message) => message.id === pendingMessage.id)?.parts[0]).toMatchObject({
       type: "tool",
       toolUseEventId: "sevt_tool_1",
       toolEvent: { kind: "mcp", mcpServerName: "github" },
       state: { status: "running" },
     });
-    if (synthesizedPendingMessage !== undefined) {
-      store.messages.set(synthesizedPendingMessage.id, synthesizedPendingMessage);
-    }
 
     expect(session.state.resolveToolConfirmation({
       requestId: "req_confirm_cold",
@@ -8364,7 +9232,7 @@ Previous anchored summary.
     const second = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -8389,9 +9257,11 @@ Previous anchored summary.
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
       userMessage("user-cold-deny", 0, "hello"),
-      RuntimeMessageSchema.parse({
+      DurableRuntimeMessageSchema.parse({
         id: "assistant-cold-deny",
         sessionId: "sesn_1",
+        owningEventId: "sevt_tool_1",
+        eventSequence: 2,
         role: "assistant",
         origin: "agent",
         sequence: 1,
@@ -8422,6 +9292,7 @@ Previous anchored summary.
         ],
       }),
     ];
+    const pendingMessage = DurableRuntimeMessageSchema.parse(loadedMessages[1]);
     const pendingToolUses = [{
       toolUseEventId: "sevt_tool_1",
       modelRequestId: "mrq_cold_deny_restore",
@@ -8436,15 +9307,16 @@ Previous anchored summary.
     }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
-    const writer = writerFrom((envelope) => {
-      appended.push(envelope.event);
-      return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    });
+    const writer = writerFrom(
+      (envelope) => {
+        appended.push(envelope.event);
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+      },
+      undefined,
+      [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }],
+    );
     const requests: LLMRequest[] = [];
     const store = new AgentLoopRuntimeStore([]);
-    for (const message of loadedMessages) {
-      store.messages.set(message.id, message);
-    }
     const layer = runtimeAgentLoopLayer(loader, {
       store,
       writer,
@@ -8472,7 +9344,7 @@ Previous anchored summary.
         session.state.markPersistentContextLoaded();
         agentLoop.seedRuntimeModel(session);
         expect(yield* agentLoop.installLoadedPendingToolUses(session, pendingToolUses, loadedMessages)).toEqual({ ok: true });
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(layer)),
     );
 
@@ -8544,12 +9416,13 @@ Previous anchored summary.
       await Effect.runPromise(
         Effect.gen(function* () {
           const agentLoop = yield* AgentLoop.Service;
-          return yield* agentLoop.run(session);
+          return yield* agentLoop.run(session, testRunCustody());
         }).pipe(Effect.provide(layer)),
       );
 
     expect(await run()).toMatchObject({ type: "completed" });
     expect(toolUseEventIds).toEqual(["sevt_tool_1", "sevt_tool_2"]);
+    const eventCountWhileBothApprovalsWait = appended.length;
 
     expect(session.state.resolveToolConfirmation({
       requestId: "req_confirm_1",
@@ -8571,10 +9444,7 @@ Previous anchored summary.
 
     expect(requests).toHaveLength(1);
     expect(runToolCalls).toEqual([]);
-    expect(appended.at(-1)).toEqual({
-      type: "session.status_idle",
-      stop_reason: { type: "requires_action", event_ids: ["sevt_tool_2"] },
-    });
+    expect(appended).toHaveLength(eventCountWhileBothApprovalsWait);
 
     expect(session.state.resolveToolConfirmation({
       requestId: "req_confirm_2",
@@ -8610,11 +9480,11 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           AgentLoop.runtimeLayer({
-            messageStore: store,
+            internalToolRepairStore: store,
             sessionEventWriter: writer,
             runtime: agentLoopRuntime(),
             llmService: llmService([
@@ -8643,170 +9513,7 @@ Previous anchored summary.
       "session.error",
       "session.status_idle",
     ]);
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({ role: "assistant", status: "streaming", parts: [] });
-  });
-
-  test("runtime layer clears hot context on durable write failure and requests hot-state discard", async () => {
-    const order: string[] = [];
-    const session = new Session("sesn_1");
-    const store = new AgentLoopRuntimeStore(order, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
-    await installLoaderStateForTest(loader, session);
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(
-        Effect.provide(
-          AgentLoop.runtimeLayer({
-            messageStore: store,
-            sessionEventWriter: writerFrom((envelope) => ({
-              ok: true,
-              writeId: envelope.writeId,
-              eventId: `bridge-${envelope.writeId}`,
-              processedAt: createdAt,
-            })),
-            runtime: agentLoopRuntime(),
-            llmService: llmService([
-              { type: "text-start", id: "text-1" },
-              { type: "text-delta", id: "text-1", text_delta: "hello" },
-              { type: "text-end", id: "text-1" },
-            ]),
-            storeOperationTimeoutMs: 1_000,
-            providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1_800_000 },
-            runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
-          }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader))),
-        ),
-      ),
-    );
-
-    expect(result).toMatchObject({
-      type: "failed",
-      error: { type: "message-store", code: "unavailable" },
-      releaseSession: { reason: "persistence_failed" },
-    });
-    expect(session.state.contextManager.messages()).toEqual([]);
-  });
-
-  test("runtime layer attempts terminal events when part persistence fails", async () => {
-    const order: string[] = [];
-    const session = new Session("sesn_1");
-    const store = new AgentLoopRuntimeStore(order, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
-    const appended: SessionEvent[] = [];
-    const writer = writerFrom((envelope) => {
-      appended.push(envelope.event);
-      if (envelope.event.type === "session.error" || envelope.event.type === "session.status_idle") {
-        return {
-          ok: false,
-          error: {
-            type: "session-event-writer",
-            code: "unavailable",
-            message: "append failed",
-            retryable: false,
-            fatal: false,
-            sessionId: envelope.sessionId,
-            writeId: envelope.writeId,
-          },
-        };
-      }
-      return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
-    });
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(
-        Effect.provide(
-          runtimeAgentLoopLayer(loader, {
-            store,
-            writer,
-          }),
-        ),
-      ),
-    );
-
-    expect(result).toMatchObject({
-      type: "failed",
-      error: { type: "message-store", operation: "writePart" },
-      releaseSession: { reason: "persistence_failed" },
-    });
-    expect(appended.map((event) => event.type)).toEqual([
-      "session.status_running",
-      "span.model_request_start",
-      "span.model_request_end",
-      "session.error",
-      "session.status_idle",
-    ]);
-    expect(appended).toContainEqual(expect.objectContaining({
-      type: "span.model_request_end",
-      is_error: true,
-      error_kind: "runtime_persistence_error",
-    }));
-    expect(order).toEqual(["store:message:streaming", "store:part:text", "store:part:text", "store:message:failed"]);
-    expect(session.state.contextManager.messages()).toEqual([]);
-  });
-
-  test("runtime layer stops consuming provider events after persistence failure", async () => {
-    const order: string[] = [];
-    const session = new Session("sesn_1");
-    const store = new AgentLoopRuntimeStore(order, true);
-    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
-    let eventsRead = 0;
-    await installLoaderStateForTest(loader, session);
-    const streamingService: LLMServiceInterface = {
-      stream() {
-        return Stream.fromAsyncIterable(
-          (async function* () {
-            eventsRead += 1;
-            yield { type: "text-start", id: "text-1" } satisfies LLMEvent;
-            eventsRead += 1;
-            yield { type: "text-end", id: "text-1" } satisfies LLMEvent;
-            eventsRead += 1;
-            yield { type: "text-start", id: "text-2" } satisfies LLMEvent;
-          })(),
-          () => ({
-            type: "llm-service" as const,
-            error: runtimeFailureFromProviderError(normalizeProviderError({
-              code: "provider_unknown",
-              retryable: false,
-              providerId: "fake",
-              modelId: "fake-chat",
-              message: "x",
-            })),
-          }),
-        );
-      },
-    };
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
-      }).pipe(
-        Effect.provide(
-          AgentLoop.layer({
-            messageStore: store,
-            sessionEventWriter: writerFrom((envelope) => ({
-              ok: true,
-              writeId: envelope.writeId,
-              eventId: `bridge-${envelope.writeId}`,
-              processedAt: createdAt,
-            })),
-            runtime: agentLoopRuntime(),
-            llmService: streamingService,
-            storeOperationTimeoutMs: 1_000,
-            providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1_800_000 },
-            runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
-          }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(loader))),
-        ),
-      ),
-    );
-
-    expect(result).toMatchObject({ type: "failed", releaseSession: { reason: "persistence_failed" } });
-    expect(eventsRead).toBe(2);
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("runtime layer treats progress append exhaustion as fatal and terminal append failures as non-recursive best effort", async () => {
@@ -8821,7 +9528,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -8850,7 +9557,7 @@ Previous anchored summary.
       "session.error",
       "session.status_idle",
     ]);
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({ role: "assistant", status: "streaming", parts: [] });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("provider-origin tool-result and tool-error events are rejected before AgentLoop", () => {
@@ -8899,7 +9606,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -8928,8 +9635,8 @@ Previous anchored summary.
       is_error: true,
       error_kind: "runtime_semantic_error",
     }));
-    expect(order).toEqual(["store:message:streaming", "store:message:failed"]);
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({ role: "assistant", status: "streaming", parts: [] });
+    expect(order).toEqual([]);
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("denied provider reschedule appends one exhausted error before idle", async () => {
@@ -8944,17 +9651,19 @@ Previous anchored summary.
     });
     const writer: SessionEventWriter = {
       ...baseWriter,
-      writeRequestEnd: async (envelope) => ({
-        ok: true,
-        writeId: envelope.writeId,
-        eventId: `bridge-${envelope.writeId}`,
-        processedAt: createdAt,
-        rescheduleDisposition: {
+      writeRequestEnd: async (envelope) => {
+        const result = await baseWriter.writeRequestEnd(envelope);
+        return result.ok
+          ? {
+              ...result,
+              rescheduleDisposition: {
           status: "denied",
           reason: "budget_exhausted",
           attempt: envelope.reschedule?.attempt ?? 0,
-        },
-      }),
+              },
+            }
+          : result;
+      },
     };
 
     const providerError = {
@@ -8970,7 +9679,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -8991,16 +9700,17 @@ Previous anchored summary.
     expect(appended.map((event) => event.type)).toEqual([
       "session.status_running",
       "span.model_request_start",
+      "span.model_request_end",
       "session.error",
       "session.status_idle",
     ]);
-    expect(appended.at(2)).toEqual({
+    expect(appended.at(3)).toEqual({
       type: "session.error",
       error: { ...providerError, retryStatus: { type: "exhausted" } },
     });
-    expect(appended.at(3)).toEqual({ type: "session.status_idle", stop_reason: { type: "retries_exhausted" } });
+    expect(appended.at(4)).toEqual({ type: "session.status_idle", stop_reason: { type: "retries_exhausted" } });
     expect(JSON.stringify(appended)).not.toContain('"type":"retrying"');
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({ role: "assistant", status: "failed" });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("runtime layer appends clean terminal events for provider diagnostics before durable progress", async () => {
@@ -9029,7 +9739,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -9066,11 +9776,7 @@ Previous anchored summary.
         retryAfterMs: 7,
       },
     });
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({
-      role: "assistant",
-      status: "failed",
-      parts: [],
-    });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
     expectNoProviderDiagnosticCanaries({ result, appended, storedMessages: [...store.messages.values()] });
   });
 
@@ -9098,7 +9804,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -9131,12 +9837,8 @@ Previous anchored summary.
     expect(appended).not.toContainEqual(expect.objectContaining({ type: "span.model_request_end", is_error: false }));
     expect(appended.at(3)).toMatchObject({ type: "session.error", error: { code: "provider_cancelled" } });
     expect(appended.at(4)).toEqual({ type: "session.status_idle", stop_reason: { type: "end_turn" } });
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({
-      role: "assistant",
-      status: "failed",
-      parts: [],
-    });
-    expect(order).toEqual(["store:message:streaming", "store:message:failed"]);
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
+    expect(order).toEqual([]);
   });
 
   test("runtime layer terminalizes injected no-terminal provider progress without publishing its draft", async () => {
@@ -9157,7 +9859,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -9190,11 +9892,7 @@ Previous anchored summary.
     expect(appended).not.toContainEqual(expect.objectContaining({ type: "span.model_request_end", is_error: false }));
     expect(JSON.stringify(appended)).not.toContain("visible");
     expect(appended.at(3)).toMatchObject({ type: "session.error", error: { code: "gateway_stream_error" } });
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({
-      role: "assistant",
-      status: "failed",
-      parts: [],
-    });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("runtime layer requests hot-state discard when provider-error terminal append fails before progress", async () => {
@@ -9218,7 +9916,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -9242,23 +9940,36 @@ Previous anchored summary.
       "session.error",
       "session.status_idle",
     ]);
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({ role: "assistant", status: "streaming", parts: [] });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("runtime layer routes a proven terminal provider failure through atomic termination", async () => {
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const appended: SessionEvent[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
     const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
+    const closeoutOrder: string[] = [];
     const baseWriter = writerFrom((envelope) => {
       appended.push(envelope.event);
       return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
     });
     const writer: SessionEventWriter = {
       ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        closeoutOrder.push("write_request_end");
+        requestEnds.push(envelope);
+        return await baseWriter.writeRequestEnd(envelope);
+      },
       commitRuntimeTermination: async (envelope) => {
+        closeoutOrder.push("commit_runtime_termination");
         terminations.push(envelope);
-        return { ok: true, writeId: envelope.writeId, eventId: envelope.writeId, processedAt: createdAt };
+        return withRuntimeTerminationReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: envelope.writeId,
+          processedAt: createdAt,
+        });
       },
     };
     const failure = {
@@ -9275,23 +9986,196 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
-        Effect.provide(runtimeAgentLoopLayer(loader, { writer, events: [{ type: "provider-error", error: failure }] })),
+        Effect.provide(runtimeAgentLoopLayer(loader, {
+          writer,
+          events: [
+            { type: "text-start", id: "terminal-text" },
+            { type: "text-delta", id: "terminal-text", text_delta: "partial answer" },
+            { type: "text-end", id: "terminal-text" },
+            { type: "provider-error", error: failure },
+          ],
+        })),
       ),
     );
 
     expect(result).toMatchObject({ type: "failed", error: failure });
     expect(terminations).toHaveLength(1);
+    expect(terminations[0]?.requestId).toBe(terminations[0]?.writeId);
+    expect(terminations[0]?.writeId).toMatch(/^bridge-stid_/);
     expect(terminations[0]).toMatchObject({
       sessionId: "sesn_1",
       sessionThreadId: "thread-test",
       failure,
+      drafts: [],
+      pendingToolCancellations: [],
     });
+    expect(closeoutOrder).toEqual(["write_request_end", "commit_runtime_termination"]);
+    expect(requestEnds).toEqual([
+      expect.objectContaining({
+        modelRequestId: expect.any(String),
+        isError: true,
+        errorKind: "provider_error",
+        finishReason: "error",
+        drafts: [expect.objectContaining({
+          sourceKind: "model_request",
+          draftKind: "assistant_text",
+          status: "failed",
+        })],
+      }),
+    ]);
     expect(appended.map((event) => event.type)).toEqual([
       "session.status_running",
       "span.model_request_start",
+      "agent.message",
+      "span.model_request_end",
     ]);
+  });
+
+  test("runtime layer seals a terminal stream failure before atomic termination", async () => {
+    const session = new Session("sesn_1");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const closeoutOrder: string[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const failure = {
+      type: "provider",
+      code: "provider_invalid_request",
+      message: "Terminal stream failure.",
+      retryable: false,
+      fatal: true,
+      retryStatus: { type: "terminal" },
+      providerId: "fake",
+      modelId: "fake-chat",
+    } as const;
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        closeoutOrder.push("write_request_end");
+        requestEnds.push(envelope);
+        return await baseWriter.writeRequestEnd(envelope);
+      },
+      commitRuntimeTermination: async (envelope) => {
+        closeoutOrder.push("commit_runtime_termination");
+        return withRuntimeTerminationReceiptForTest(envelope, {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: envelope.writeId,
+          processedAt: createdAt,
+        });
+      },
+    };
+    const service: LLMServiceInterface = {
+      stream() {
+        return Stream.concat(
+          Stream.fromIterable<LLMEvent>([
+            { type: "text-start", id: "stream-terminal-text" },
+            { type: "text-delta", id: "stream-terminal-text", text_delta: "partial stream answer" },
+            { type: "text-end", id: "stream-terminal-text" },
+          ]),
+          Stream.fail({
+            type: "llm-service",
+            error: failure,
+          } satisfies LLMServiceError),
+        );
+      },
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, { writer, llmService: service }))),
+    );
+
+    expect(result).toMatchObject({ type: "failed", error: failure });
+    expect(closeoutOrder).toEqual(["write_request_end", "commit_runtime_termination"]);
+    expect(requestEnds).toEqual([
+      expect.objectContaining({
+        isError: true,
+        finishReason: "error",
+        drafts: [expect.objectContaining({ status: "failed" })],
+      }),
+    ]);
+    expect(session.state.contextManager.messages()).toEqual([
+      expect.objectContaining({ role: "user", status: "completed" }),
+      expect.objectContaining({ role: "assistant", status: "failed" }),
+    ]);
+  });
+
+  test("processor settlement failure seals durable assistant content before terminal closeout", async () => {
+    const session = new Session("sesn_1");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        requestEnds.push(envelope);
+        return await baseWriter.writeRequestEnd(envelope);
+      },
+    };
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        events: [
+          { type: "text-start", id: "processor-failure-text" },
+          { type: "text-delta", id: "processor-failure-text", text_delta: "durable before repair" },
+          { type: "text-end", id: "processor-failure-text" },
+          { type: "step-start", stepIndex: 1 },
+        ],
+        createProcessor: (options) => {
+          const processor = new SessionProcessor(options);
+          const process = processor.process.bind(processor);
+          processor.process = async (source) => {
+            if (source.event.type === "step-start") {
+              return {
+                ok: false,
+                events: [],
+                error: {
+                  type: "runtime",
+                  code: "runtime_invalid_sequence",
+                  message: "Processor settlement failed.",
+                  retryable: false,
+                  fatal: true,
+                  reason: "runtime_contract_validation",
+                },
+              };
+            }
+            return await process(source);
+          };
+          return processor;
+        },
+      }))),
+    );
+
+    expect(result).toMatchObject({ type: "failed" });
+    expect(requestEnds).toEqual([
+      expect.objectContaining({
+        isError: true,
+        finishReason: "error",
+        drafts: [expect.objectContaining({
+          status: "failed",
+          parts: [expect.objectContaining({ type: "text", text: "durable before repair" })],
+        })],
+      }),
+    ]);
+    expect(session.state.contextManager.messages()).toEqual([]);
   });
 
   test("runtime layer discards active draft before terminal provider-error events", async () => {
@@ -9317,7 +10201,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -9348,16 +10232,8 @@ Previous anchored summary.
       error: { ...providerError, retryStatus: { type: "exhausted" } },
     });
     expect(appended.at(4)).toEqual({ type: "session.status_idle", stop_reason: { type: "retries_exhausted" } });
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({
-      role: "assistant",
-      status: "failed",
-      parts: [],
-    });
-    expect(order).toEqual([
-      "store:message:streaming",
-      "store:part:text",
-      "store:message:failed",
-    ]);
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
+    expect(order).toEqual([]);
   });
 
   test("terminal provider failure preserves completed text with a durable message ACK", async () => {
@@ -9377,7 +10253,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer: writerFrom((envelope) => {
           appended.push(envelope.event);
@@ -9421,7 +10297,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer: writerFrom((envelope) => {
           appended.push(envelope.event);
@@ -9455,11 +10331,7 @@ Previous anchored summary.
     expect(result).toMatchObject({ type: "failed", error: providerError });
     expect(runToolCalls).toBe(0);
     expect(appended.some((event) => event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")).toBe(false);
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({
-      role: "assistant",
-      status: "failed",
-      parts: [],
-    });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 
   test("terminal provider failure retains an atomically committed internal tool repair", async () => {
@@ -9480,7 +10352,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         store,
         writer: writerFrom((envelope) => {
@@ -9537,7 +10409,7 @@ Previous anchored summary.
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const agentLoop = yield* AgentLoop.Service;
-        return yield* agentLoop.run(session);
+        return yield* agentLoop.run(session, testRunCustody());
       }).pipe(
         Effect.provide(
           runtimeAgentLoopLayer(loader, {
@@ -9565,10 +10437,6 @@ Previous anchored summary.
       "session.error",
       "session.status_idle",
     ]);
-    expect(session.state.contextManager.messages().at(-1)).toMatchObject({
-      role: "assistant",
-      status: "streaming",
-      parts: [],
-    });
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
   });
 });

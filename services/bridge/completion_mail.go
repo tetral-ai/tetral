@@ -6,11 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"math"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/storage"
 
@@ -25,27 +22,10 @@ import (
 )
 
 const (
-	completionMailErrorReasonMaxBytes = 3600
-	completionMailApproxBytesPerToken = 4
-	completionMailErrorGuidance       = "This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."
-
 	MailFetchMaxEnvelopes          = 4
 	MailFetchMaxBodyBytes          = 4 * 1024 * 1024
 	CompletionMailReconcilerMinAge = 300 * time.Second
 )
-
-type completionMailKind string
-
-const (
-	completionMailNone      completionMailKind = ""
-	completionMailCompleted completionMailKind = "completed"
-	completionMailErrored   completionMailKind = "errored"
-)
-
-type completionMailDecision struct {
-	Kind   completionMailKind
-	Reason string
-}
 
 type pendingCompletionDelivery struct {
 	SessionID      string
@@ -53,33 +33,6 @@ type pendingCompletionDelivery struct {
 	DeliveryID     string
 	Sequence       int64
 	CreatedAt      time.Time
-}
-
-func completionMailEnvelope(taskName string, sender string, payload string) string {
-	return "Message Type: FINAL_ANSWER\nTask name: " + taskName + "\nSender: " + sender + "\nPayload:\n" + payload
-}
-
-func completionMailErrorPayload(reason string) string {
-	return "Agent errored: " + middleTruncateCompletionReason(reason) + "\n\n" + completionMailErrorGuidance
-}
-
-func middleTruncateCompletionReason(reason string) string {
-	if len(reason) <= completionMailErrorReasonMaxBytes {
-		return reason
-	}
-	headBudget := completionMailErrorReasonMaxBytes / 2
-	tailBudget := completionMailErrorReasonMaxBytes - headBudget
-	headEnd := headBudget
-	for headEnd > 0 && !utf8.RuneStart(reason[headEnd]) {
-		headEnd--
-	}
-	tailStart := len(reason) - tailBudget
-	for tailStart < len(reason) && !utf8.RuneStart(reason[tailStart]) {
-		tailStart++
-	}
-	removedBytes := len(reason) - completionMailErrorReasonMaxBytes
-	removedTokens := int(math.Ceil(float64(removedBytes) / completionMailApproxBytesPerToken))
-	return reason[:headEnd] + "…" + strconv.Itoa(removedTokens) + " tokens truncated…" + reason[tailStart:]
 }
 
 func completionDeliveryID(childThreadID string, runtimeWriteID string) string {
@@ -91,150 +44,98 @@ func completionRuntimeInputID(deliveryID string) string {
 	return "agent_mail:" + deliveryID
 }
 
-func classifyFinishIdleCompletionTx(
+func appendDeclaredCompletionMailTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	threadScope threadMutationScope,
-	stopReasonJSON string,
-) (completionMailDecision, error) {
-	if threadScope.role != "subagent" || threadScope.status == "closed_for_runtime" {
-		return completionMailDecision{}, nil
-	}
-	var stopReason struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(stopReasonJSON), &stopReason); err != nil {
-		return completionMailDecision{}, status.Error(codes.InvalidArgument, "idle stop reason must be JSON")
-	}
-	if stopReason.Type == "requires_action" {
-		return completionMailDecision{}, nil
-	}
-	var runningSequence int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0)
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND type = 'session.thread_status_running'`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&runningSequence); err != nil {
-		return completionMailDecision{}, err
-	}
-	var interrupted bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_events
-			 WHERE workspace_id = $1
-			   AND session_id = $2
-			   AND session_thread_id = $3
-			   AND sequence > $4
-			   AND type = 'user.interrupt'
-			   AND processed_at IS NOT NULL
-		)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		runningSequence,
-	).Scan(&interrupted); err != nil {
-		return completionMailDecision{}, err
-	}
-	if interrupted {
-		return completionMailDecision{}, nil
-	}
-	var terminalErrorPayload sql.NullString
-	if err := tx.QueryRow(ctx,
-		`SELECT payload_json
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND sequence > $4
-		    AND type = 'session.error'
-		    AND payload_json::jsonb #>> '{error,retry_status,type}' = 'terminal'
-		  ORDER BY sequence DESC
-		  LIMIT 1`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		runningSequence,
-	).Scan(&terminalErrorPayload.String); err == nil {
-		terminalErrorPayload.Valid = true
-	} else if !dbconnect.IsNoRows(err) {
-		return completionMailDecision{}, err
-	}
-	if terminalErrorPayload.Valid {
-		return completionMailDecision{Kind: completionMailErrored, Reason: completionErrorReason(terminalErrorPayload.String)}, nil
-	}
-	if stopReason.Type == "retries_exhausted" {
-		return completionMailDecision{Kind: completionMailErrored, Reason: "Runtime retries exhausted."}, nil
-	}
-	if stopReason.Type == "end_turn" {
-		return completionMailDecision{Kind: completionMailCompleted}, nil
-	}
-	return completionMailDecision{}, nil
-}
-
-func completionErrorReason(payloadJSON string) string {
-	var payload struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"error"`
-	}
-	if json.Unmarshal([]byte(payloadJSON), &payload) == nil {
-		if payload.Error.Message != "" {
-			return payload.Error.Message
-		}
-		if payload.Error.Type != "" {
-			return payload.Error.Type
-		}
-	}
-	return "Runtime failure."
-}
-
-func appendCompletionMailTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	threadScope threadMutationScope,
-	runtimeWriteID string,
-	decision completionMailDecision,
+	durableTurnID string,
+	draft *bridgev1.RuntimeMessageDraft,
 	now time.Time,
-) error {
-	if decision.Kind == completionMailNone {
-		return nil
+) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, error) {
+	return appendDeclaredCompletionMailForSourceTx(
+		ctx,
+		tx,
+		scope,
+		threadScope,
+		"finish_idle",
+		durableTurnID,
+		draft,
+		now,
+	)
+}
+
+func appendDeclaredCompletionMailForSourceTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	sourceKind string,
+	sourceID string,
+	draft *bridgev1.RuntimeMessageDraft,
+	now time.Time,
+) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, error) {
+	if draft == nil {
+		return nil, nil, nil
 	}
+	if threadScope.role != "subagent" || threadScope.status == "closed_for_runtime" {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail requires a live sub-agent thread")
+	}
+	if draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPLETION_MAIL ||
+		draft.GetSourceKind() != sourceKind ||
+		draft.GetSourceId() != sourceID ||
+		draft.GetSourceEventId() != "" ||
+		len(draft.GetParts()) != 1 {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft identity is invalid")
+	}
+	expectedMessageLocalID := stableRuntimeID(
+		"runtime_message_draft",
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		sourceKind,
+		sourceID,
+		runtimeDraftKindToken(draft.GetDraftKind()),
+		strconv.FormatInt(int64(draft.GetOrdinal()), 10),
+	)
+	if draft.GetRuntimeLocalId() != expectedMessageLocalID {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft id is invalid")
+	}
+	var messageInfo map[string]any
+	if err := json.Unmarshal([]byte(draft.GetMessageInfoJson()), &messageInfo); err != nil || messageInfo == nil {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft info is invalid")
+	}
+	for _, field := range []string{"id", "sessionId", "sequence", "createdAt", "updatedAt", "providerId", "modelId", "parts"} {
+		if _, present := messageInfo[field]; present {
+			return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft contains a durable or routing field")
+		}
+	}
+	if messageInfo["role"] != "user" || messageInfo["origin"] != "runtime" || messageInfo["status"] != "completed" {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft message is invalid")
+	}
+	part := draft.GetParts()[0]
+	if part == nil ||
+		part.GetPartKind() != "text" ||
+		part.GetOrdinal() != 0 ||
+		part.GetRuntimeLocalPartId() != stableRuntimeID("runtime_message_part_draft", expectedMessageLocalID, "text", "0") {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail part identity is invalid")
+	}
+	var partInfo struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(part.GetPartJson()), &partInfo); err != nil || partInfo.Type != "text" {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail part is invalid")
+	}
+
 	parentThreadID, sourceToolUseEventID, targetTaskName, err := completionLineageTx(ctx, tx, scope)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	sender := threadScope.taskName.String
-	if sender == "" {
-		return status.Error(codes.FailedPrecondition, "sub-agent completion sender has no task name")
-	}
-	task := targetTaskName.String
-	if task == "" {
-		task = "main"
-	}
-	payload := ""
-	if decision.Kind == completionMailCompleted {
-		payload, err = completionFinalAssistantTextTx(ctx, tx, scope)
-		if err != nil {
-			return err
-		}
-	} else {
-		payload = completionMailErrorPayload(decision.Reason)
-	}
-	envelope := completionMailEnvelope(task, sender, payload)
-	deliveryID := completionDeliveryID(scope.GetSessionThreadId(), runtimeWriteID)
-	messageJSON, err := completionRuntimeMessageJSON(scope.GetSessionId(), deliveryID, envelope, now)
+	deliveryID := completionDeliveryID(scope.GetSessionThreadId(), sourceID)
+	messageJSON, err := completionRuntimeMessageJSON(scope.GetSessionId(), deliveryID, partInfo.Text, now)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
 		"type":                     "agent.thread_message_sent",
@@ -246,12 +147,12 @@ func appendCompletionMailTx(
 		"message":                  json.RawMessage(messageJSON),
 	})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	eventID := id.New("evt_")
 	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	visibility, sessionVisible := threadScope.publicProjection("agent.thread_message_sent")
 	if _, err := tx.Exec(ctx,
@@ -267,15 +168,15 @@ func appendCompletionMailTx(
 		eventPayloadJSON,
 		visibility,
 		sessionVisible,
-		runtimeWriteID,
+		sourceID,
 		now,
 	); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return err
+		return nil, nil, err
 	}
-	return enqueueCompletionMailWakeTx(
+	if err := enqueueCompletionMailWakeTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
@@ -283,7 +184,37 @@ func appendCompletionMailTx(
 		parentThreadID,
 		deliveryID,
 		now,
-	)
+	); err != nil {
+		return nil, nil, err
+	}
+	timestamp := now.UTC().Format(time.RFC3339Nano)
+	messageID := "msg_" + deliveryID
+	partID := messageID + "_text"
+	return &bridgev1.DurableEventStamp{
+			SessionThreadId: scope.GetSessionThreadId(),
+			SourceEventId:   deliveryID,
+			EventId:         eventID,
+			EventSequence:   sequence,
+			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+		}, &bridgev1.DurableMessageStamp{
+			RuntimeLocalId:  draft.GetRuntimeLocalId(),
+			SessionThreadId: scope.GetSessionThreadId(),
+			OwningEventId:   eventID,
+			MessageId:       messageID,
+			MessageSequence: 0,
+			CreatedAt:       timestamp,
+			UpdatedAt:       timestamp,
+			Disposition:     bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
+			Parts: []*bridgev1.DurablePartStamp{{
+				RuntimeLocalPartId: part.GetRuntimeLocalPartId(),
+				PartId:             partID,
+				MessageId:          messageID,
+				PartSequence:       0,
+				CreatedAt:          timestamp,
+				UpdatedAt:          timestamp,
+				Disposition:        bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
+			}},
+		}, nil
 }
 
 // enqueueCompletionMailWakeTx is single-flight per delivery: the runtime-input dedupe key
@@ -702,56 +633,6 @@ func completionLineageTx(
 	}
 	targetTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, scope, parentThreadID)
 	return parentThreadID, sourceToolUseEventID, targetTaskName, err
-}
-
-func completionFinalAssistantTextTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-) (string, error) {
-	var raw string
-	err := tx.QueryRow(ctx,
-		`SELECT m.data_json
-		   FROM session_events e
-		   JOIN session_messages m
-		     ON m.workspace_id = e.workspace_id
-		    AND m.session_id = e.session_id
-		    AND m.session_thread_id = e.session_thread_id
-		    AND m.model_request_id = e.model_request_id
-		    AND m.kind = 'assistant'
-		  WHERE e.workspace_id = $1
-		    AND e.session_id = $2
-		    AND e.session_thread_id = $3
-		    AND e.type = 'span.model_request_end'
-		    AND e.payload_json::jsonb ->> 'request_kind' = 'agent_provider_request'
-		  ORDER BY e.sequence DESC
-		  LIMIT 1`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&raw)
-	if dbconnect.IsNoRows(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	var message struct {
-		Parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"parts"`
-	}
-	if json.Unmarshal([]byte(raw), &message) != nil {
-		return "", status.Error(codes.FailedPrecondition, "sub-agent final assistant message is malformed")
-	}
-	var text strings.Builder
-	for _, part := range message.Parts {
-		if part.Type == "text" {
-			text.WriteString(part.Text)
-		}
-	}
-	return text.String(), nil
 }
 
 func completionRuntimeMessageJSON(sessionID string, deliveryID string, text string, now time.Time) (string, error) {

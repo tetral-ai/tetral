@@ -651,11 +651,9 @@ export interface CommitInputsRequest {
   eventIds: string[];
   sequenceFrom: number;
   sequenceTo: number;
-  hotContextPatchJson: string;
   inputKind: string;
-  interAgentMessageJson: string;
-  approvalReviewJson: string;
   drafts: RuntimeMessageDraft[];
+  pendingToolCancellations: PendingToolCancellationDraft[];
 }
 
 export interface CommitInputsResponse {
@@ -663,16 +661,22 @@ export interface CommitInputsResponse {
   declaration: DeclarationResponse | undefined;
 }
 
+export interface PendingToolCancellationDraft {
+  toolUseEventId: string;
+  runtimeLocalId: string;
+}
+
 export interface CommitTaskNotificationResultRequest {
   scope: RuntimeScope | undefined;
   runtimeInputId: string;
   taskId: string;
   resultJson: string;
+  draft: RuntimeMessageDraft | undefined;
 }
 
 export interface CommitTaskNotificationResultResponse {
   ack: BridgeWriteAck | undefined;
-  runtimeMessageJson: string;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface McpManifestChangedRequest {
@@ -698,6 +702,8 @@ export interface ClaimMcpToolResultRequest {
 export interface ClaimMcpToolResultResponse {
   ack: BridgeWriteAck | undefined;
   resultJson: string;
+  materializationHandle?: string | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface CommitMcpToolResultRequest {
@@ -720,6 +726,8 @@ export interface McpInlineMedia {
 export interface CommitMcpToolResultResponse {
   ack: BridgeWriteAck | undefined;
   refsOnlyResultJson: string;
+  materializationHandle?: string | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface CommitInternalToolRepairRequest {
@@ -727,21 +735,25 @@ export interface CommitInternalToolRepairRequest {
   modelRequestId: string;
   modelToolCallId: string;
   toolName: string;
-  dataJson: string;
+  drafts: RuntimeMessageDraft[];
 }
 
 export interface CommitInternalToolRepairResponse {
   ack: BridgeWriteAck | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface CommitRuntimeTerminationRequest {
   scope: RuntimeScope | undefined;
   runtimeWriteId: string;
   failureJson: string;
+  drafts: RuntimeMessageDraft[];
+  pendingToolCancellations: PendingToolCancellationDraft[];
 }
 
 export interface CommitRuntimeTerminationResponse {
   ack: BridgeWriteAck | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface TransientAttachmentRef {
@@ -823,10 +835,11 @@ export interface WriteEventRequest {
   modelRequestId: string;
   eventType: string;
   payloadJson: string;
-  projectionJson: string;
   sessionVisible: boolean;
   stableReasoningParts: StableReasoningPart[];
   serverToolUse: ServerToolUseUsage | undefined;
+  drafts: RuntimeMessageDraft[];
+  mcpMaterializationHandle?: string | undefined;
 }
 
 export interface ServerToolUseUsage {
@@ -838,6 +851,7 @@ export interface WriteEventResponse {
   ack: BridgeWriteAck | undefined;
   eventId: string;
   sequence: number;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface WriteRequestEndRequest {
@@ -854,6 +868,19 @@ export interface WriteRequestEndRequest {
   reschedule: RequestEndReschedule | undefined;
   stableReasoningParts: StableReasoningPart[];
   consumedFileAttachments: FileAttachmentPair[];
+  drafts: RuntimeMessageDraft[];
+  prefixConsumption: PrefixConsumptionDraft | undefined;
+  compactedThroughMessageSequence?: number | undefined;
+  compactionEventPayloadJson: string;
+  interruptSettlement: RequestEndInterruptSettlement | undefined;
+}
+
+export interface RequestEndInterruptSettlement {
+  runtimeInputId: string;
+  eventIds: string[];
+  sequenceFrom: number;
+  sequenceTo: number;
+  pendingToolCancellations: PendingToolCancellationDraft[];
 }
 
 export interface StableReasoningPart {
@@ -867,7 +894,7 @@ export interface StableReasoningPart {
 
 export interface WriteRequestEndResponse {
   ack: BridgeWriteAck | undefined;
-  rescheduleDisposition: RequestEndRescheduleDisposition | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface RequestEndReschedule {
@@ -885,13 +912,14 @@ export interface RequestEndRescheduleDisposition {
 
 export interface FinishIdleRequest {
   scope: RuntimeScope | undefined;
-  runtimeWriteId: string;
-  idleSince: string;
   stopReasonJson: string;
+  durableTurnId: string;
+  drafts: RuntimeMessageDraft[];
 }
 
 export interface FinishIdleResponse {
   ack: BridgeWriteAck | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface CreateChildThreadRequest {
@@ -952,20 +980,29 @@ export interface MarkChildThreadClosedRequest {
   scope: RuntimeScope | undefined;
   childThreadId: string;
   closedAt: string;
+  source: ChildLifecycleSource | undefined;
 }
 
 export interface MarkChildThreadClosedResponse {
   ack: BridgeWriteAck | undefined;
+  declaration: DeclarationResponse | undefined;
 }
 
 export interface MarkChildThreadActiveRequest {
   scope: RuntimeScope | undefined;
   childThreadId: string;
   activeAt: string;
+  source: ChildLifecycleSource | undefined;
 }
 
 export interface MarkChildThreadActiveResponse {
   ack: BridgeWriteAck | undefined;
+  declaration: DeclarationResponse | undefined;
+}
+
+export interface ChildLifecycleSource {
+  sourceToolUseEventId?: string | undefined;
+  reviewerReviewId?: string | undefined;
 }
 
 export interface RunToolRequest {
@@ -3836,11 +3873,9 @@ function createBaseCommitInputsRequest(): CommitInputsRequest {
     eventIds: [],
     sequenceFrom: 0,
     sequenceTo: 0,
-    hotContextPatchJson: "",
     inputKind: "",
-    interAgentMessageJson: "",
-    approvalReviewJson: "",
     drafts: [],
+    pendingToolCancellations: [],
   };
 }
 
@@ -3861,20 +3896,14 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.sequenceTo !== 0) {
       writer.uint32(40).int64(message.sequenceTo);
     }
-    if (message.hotContextPatchJson !== "") {
-      writer.uint32(50).string(message.hotContextPatchJson);
-    }
     if (message.inputKind !== "") {
       writer.uint32(58).string(message.inputKind);
     }
-    if (message.interAgentMessageJson !== "") {
-      writer.uint32(66).string(message.interAgentMessageJson);
-    }
-    if (message.approvalReviewJson !== "") {
-      writer.uint32(74).string(message.approvalReviewJson);
-    }
     for (const v of message.drafts) {
       RuntimeMessageDraft.encode(v!, writer.uint32(82).fork()).join();
+    }
+    for (const v of message.pendingToolCancellations) {
+      PendingToolCancellationDraft.encode(v!, writer.uint32(90).fork()).join();
     }
     return writer;
   },
@@ -3926,14 +3955,6 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
           message.sequenceTo = longToNumber(reader.int64());
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.hotContextPatchJson = reader.string();
-          continue;
-        }
         case 7: {
           if (tag !== 58) {
             break;
@@ -3942,28 +3963,20 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
           message.inputKind = reader.string();
           continue;
         }
-        case 8: {
-          if (tag !== 66) {
-            break;
-          }
-
-          message.interAgentMessageJson = reader.string();
-          continue;
-        }
-        case 9: {
-          if (tag !== 74) {
-            break;
-          }
-
-          message.approvalReviewJson = reader.string();
-          continue;
-        }
         case 10: {
           if (tag !== 82) {
             break;
           }
 
           message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -3998,28 +4011,18 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         : isSet(object.sequence_to)
         ? globalThis.Number(object.sequence_to)
         : 0,
-      hotContextPatchJson: isSet(object.hotContextPatchJson)
-        ? globalThis.String(object.hotContextPatchJson)
-        : isSet(object.hot_context_patch_json)
-        ? globalThis.String(object.hot_context_patch_json)
-        : "",
       inputKind: isSet(object.inputKind)
         ? globalThis.String(object.inputKind)
         : isSet(object.input_kind)
         ? globalThis.String(object.input_kind)
         : "",
-      interAgentMessageJson: isSet(object.interAgentMessageJson)
-        ? globalThis.String(object.interAgentMessageJson)
-        : isSet(object.inter_agent_message_json)
-        ? globalThis.String(object.inter_agent_message_json)
-        : "",
-      approvalReviewJson: isSet(object.approvalReviewJson)
-        ? globalThis.String(object.approvalReviewJson)
-        : isSet(object.approval_review_json)
-        ? globalThis.String(object.approval_review_json)
-        : "",
       drafts: globalThis.Array.isArray(object?.drafts)
         ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
+      pendingToolCancellations: globalThis.Array.isArray(object?.pendingToolCancellations)
+        ? object.pendingToolCancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
+        : globalThis.Array.isArray(object?.pending_tool_cancellations)
+        ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
         : [],
     };
   },
@@ -4041,20 +4044,16 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.sequenceTo !== 0) {
       obj.sequenceTo = Math.round(message.sequenceTo);
     }
-    if (message.hotContextPatchJson !== "") {
-      obj.hotContextPatchJson = message.hotContextPatchJson;
-    }
     if (message.inputKind !== "") {
       obj.inputKind = message.inputKind;
     }
-    if (message.interAgentMessageJson !== "") {
-      obj.interAgentMessageJson = message.interAgentMessageJson;
-    }
-    if (message.approvalReviewJson !== "") {
-      obj.approvalReviewJson = message.approvalReviewJson;
-    }
     if (message.drafts?.length) {
       obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    }
+    if (message.pendingToolCancellations?.length) {
+      obj.pendingToolCancellations = message.pendingToolCancellations.map((e) =>
+        PendingToolCancellationDraft.toJSON(e)
+      );
     }
     return obj;
   },
@@ -4071,11 +4070,10 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     message.eventIds = object.eventIds?.map((e) => e) || [];
     message.sequenceFrom = object.sequenceFrom ?? 0;
     message.sequenceTo = object.sequenceTo ?? 0;
-    message.hotContextPatchJson = object.hotContextPatchJson ?? "";
     message.inputKind = object.inputKind ?? "";
-    message.interAgentMessageJson = object.interAgentMessageJson ?? "";
-    message.approvalReviewJson = object.approvalReviewJson ?? "";
     message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.pendingToolCancellations =
+      object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
     return message;
   },
 };
@@ -4160,8 +4158,92 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   },
 };
 
+function createBasePendingToolCancellationDraft(): PendingToolCancellationDraft {
+  return { toolUseEventId: "", runtimeLocalId: "" };
+}
+
+export const PendingToolCancellationDraft: MessageFns<PendingToolCancellationDraft> = {
+  encode(message: PendingToolCancellationDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.toolUseEventId !== "") {
+      writer.uint32(10).string(message.toolUseEventId);
+    }
+    if (message.runtimeLocalId !== "") {
+      writer.uint32(18).string(message.runtimeLocalId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PendingToolCancellationDraft {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePendingToolCancellationDraft();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.runtimeLocalId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PendingToolCancellationDraft {
+    return {
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      runtimeLocalId: isSet(object.runtimeLocalId)
+        ? globalThis.String(object.runtimeLocalId)
+        : isSet(object.runtime_local_id)
+        ? globalThis.String(object.runtime_local_id)
+        : "",
+    };
+  },
+
+  toJSON(message: PendingToolCancellationDraft): unknown {
+    const obj: any = {};
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.runtimeLocalId !== "") {
+      obj.runtimeLocalId = message.runtimeLocalId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PendingToolCancellationDraft>, I>>(base?: I): PendingToolCancellationDraft {
+    return PendingToolCancellationDraft.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PendingToolCancellationDraft>, I>>(object: I): PendingToolCancellationDraft {
+    const message = createBasePendingToolCancellationDraft();
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.runtimeLocalId = object.runtimeLocalId ?? "";
+    return message;
+  },
+};
+
 function createBaseCommitTaskNotificationResultRequest(): CommitTaskNotificationResultRequest {
-  return { scope: undefined, runtimeInputId: "", taskId: "", resultJson: "" };
+  return { scope: undefined, runtimeInputId: "", taskId: "", resultJson: "", draft: undefined };
 }
 
 export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificationResultRequest> = {
@@ -4177,6 +4259,9 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     }
     if (message.resultJson !== "") {
       writer.uint32(34).string(message.resultJson);
+    }
+    if (message.draft !== undefined) {
+      RuntimeMessageDraft.encode(message.draft, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -4220,6 +4305,14 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
           message.resultJson = reader.string();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.draft = RuntimeMessageDraft.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4247,6 +4340,7 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
         : isSet(object.result_json)
         ? globalThis.String(object.result_json)
         : "",
+      draft: isSet(object.draft) ? RuntimeMessageDraft.fromJSON(object.draft) : undefined,
     };
   },
 
@@ -4263,6 +4357,9 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
+    }
+    if (message.draft !== undefined) {
+      obj.draft = RuntimeMessageDraft.toJSON(message.draft);
     }
     return obj;
   },
@@ -4282,12 +4379,15 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     message.runtimeInputId = object.runtimeInputId ?? "";
     message.taskId = object.taskId ?? "";
     message.resultJson = object.resultJson ?? "";
+    message.draft = (object.draft !== undefined && object.draft !== null)
+      ? RuntimeMessageDraft.fromPartial(object.draft)
+      : undefined;
     return message;
   },
 };
 
 function createBaseCommitTaskNotificationResultResponse(): CommitTaskNotificationResultResponse {
-  return { ack: undefined, runtimeMessageJson: "" };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotificationResultResponse> = {
@@ -4295,8 +4395,8 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
     }
-    if (message.runtimeMessageJson !== "") {
-      writer.uint32(18).string(message.runtimeMessageJson);
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -4316,12 +4416,12 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
+        case 3: {
+          if (tag !== 26) {
             break;
           }
 
-          message.runtimeMessageJson = reader.string();
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -4336,11 +4436,7 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
   fromJSON(object: any): CommitTaskNotificationResultResponse {
     return {
       ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
-      runtimeMessageJson: isSet(object.runtimeMessageJson)
-        ? globalThis.String(object.runtimeMessageJson)
-        : isSet(object.runtime_message_json)
-        ? globalThis.String(object.runtime_message_json)
-        : "",
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
     };
   },
 
@@ -4349,8 +4445,8 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
     }
-    if (message.runtimeMessageJson !== "") {
-      obj.runtimeMessageJson = message.runtimeMessageJson;
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -4367,7 +4463,9 @@ export const CommitTaskNotificationResultResponse: MessageFns<CommitTaskNotifica
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
-    message.runtimeMessageJson = object.runtimeMessageJson ?? "";
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
@@ -4726,7 +4824,7 @@ export const ClaimMcpToolResultRequest: MessageFns<ClaimMcpToolResultRequest> = 
 };
 
 function createBaseClaimMcpToolResultResponse(): ClaimMcpToolResultResponse {
-  return { ack: undefined, resultJson: "" };
+  return { ack: undefined, resultJson: "", materializationHandle: undefined, declaration: undefined };
 }
 
 export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> = {
@@ -4736,6 +4834,12 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
     }
     if (message.resultJson !== "") {
       writer.uint32(18).string(message.resultJson);
+    }
+    if (message.materializationHandle !== undefined) {
+      writer.uint32(26).string(message.materializationHandle);
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -4763,6 +4867,22 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
           message.resultJson = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.materializationHandle = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4780,6 +4900,12 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
         : isSet(object.result_json)
         ? globalThis.String(object.result_json)
         : "",
+      materializationHandle: isSet(object.materializationHandle)
+        ? globalThis.String(object.materializationHandle)
+        : isSet(object.materialization_handle)
+        ? globalThis.String(object.materialization_handle)
+        : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
     };
   },
 
@@ -4790,6 +4916,12 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
     }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
+    }
+    if (message.materializationHandle !== undefined) {
+      obj.materializationHandle = message.materializationHandle;
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -4803,6 +4935,10 @@ export const ClaimMcpToolResultResponse: MessageFns<ClaimMcpToolResultResponse> 
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
     message.resultJson = object.resultJson ?? "";
+    message.materializationHandle = object.materializationHandle ?? undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
@@ -5115,7 +5251,7 @@ export const McpInlineMedia: MessageFns<McpInlineMedia> = {
 };
 
 function createBaseCommitMcpToolResultResponse(): CommitMcpToolResultResponse {
-  return { ack: undefined, refsOnlyResultJson: "" };
+  return { ack: undefined, refsOnlyResultJson: "", materializationHandle: undefined, declaration: undefined };
 }
 
 export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse> = {
@@ -5125,6 +5261,12 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
     }
     if (message.refsOnlyResultJson !== "") {
       writer.uint32(18).string(message.refsOnlyResultJson);
+    }
+    if (message.materializationHandle !== undefined) {
+      writer.uint32(26).string(message.materializationHandle);
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -5152,6 +5294,22 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
           message.refsOnlyResultJson = reader.string();
           continue;
         }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.materializationHandle = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5169,6 +5327,12 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
         : isSet(object.refs_only_result_json)
         ? globalThis.String(object.refs_only_result_json)
         : "",
+      materializationHandle: isSet(object.materializationHandle)
+        ? globalThis.String(object.materializationHandle)
+        : isSet(object.materialization_handle)
+        ? globalThis.String(object.materialization_handle)
+        : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
     };
   },
 
@@ -5179,6 +5343,12 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
     }
     if (message.refsOnlyResultJson !== "") {
       obj.refsOnlyResultJson = message.refsOnlyResultJson;
+    }
+    if (message.materializationHandle !== undefined) {
+      obj.materializationHandle = message.materializationHandle;
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -5192,12 +5362,16 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
     message.refsOnlyResultJson = object.refsOnlyResultJson ?? "";
+    message.materializationHandle = object.materializationHandle ?? undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
 
 function createBaseCommitInternalToolRepairRequest(): CommitInternalToolRepairRequest {
-  return { scope: undefined, modelRequestId: "", modelToolCallId: "", toolName: "", dataJson: "" };
+  return { scope: undefined, modelRequestId: "", modelToolCallId: "", toolName: "", drafts: [] };
 }
 
 export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepairRequest> = {
@@ -5214,8 +5388,8 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     if (message.toolName !== "") {
       writer.uint32(34).string(message.toolName);
     }
-    if (message.dataJson !== "") {
-      writer.uint32(42).string(message.dataJson);
+    for (const v of message.drafts) {
+      RuntimeMessageDraft.encode(v!, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -5264,7 +5438,7 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
             break;
           }
 
-          message.dataJson = reader.string();
+          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -5294,11 +5468,9 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
         : isSet(object.tool_name)
         ? globalThis.String(object.tool_name)
         : "",
-      dataJson: isSet(object.dataJson)
-        ? globalThis.String(object.dataJson)
-        : isSet(object.data_json)
-        ? globalThis.String(object.data_json)
-        : "",
+      drafts: globalThis.Array.isArray(object?.drafts)
+        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
     };
   },
 
@@ -5316,8 +5488,8 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     if (message.toolName !== "") {
       obj.toolName = message.toolName;
     }
-    if (message.dataJson !== "") {
-      obj.dataJson = message.dataJson;
+    if (message.drafts?.length) {
+      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
     }
     return obj;
   },
@@ -5335,19 +5507,22 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     message.modelRequestId = object.modelRequestId ?? "";
     message.modelToolCallId = object.modelToolCallId ?? "";
     message.toolName = object.toolName ?? "";
-    message.dataJson = object.dataJson ?? "";
+    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     return message;
   },
 };
 
 function createBaseCommitInternalToolRepairResponse(): CommitInternalToolRepairResponse {
-  return { ack: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const CommitInternalToolRepairResponse: MessageFns<CommitInternalToolRepairResponse> = {
   encode(message: CommitInternalToolRepairResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -5367,6 +5542,14 @@ export const CommitInternalToolRepairResponse: MessageFns<CommitInternalToolRepa
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5377,13 +5560,19 @@ export const CommitInternalToolRepairResponse: MessageFns<CommitInternalToolRepa
   },
 
   fromJSON(object: any): CommitInternalToolRepairResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+    };
   },
 
   toJSON(message: CommitInternalToolRepairResponse): unknown {
     const obj: any = {};
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -5400,12 +5589,15 @@ export const CommitInternalToolRepairResponse: MessageFns<CommitInternalToolRepa
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
 
 function createBaseCommitRuntimeTerminationRequest(): CommitRuntimeTerminationRequest {
-  return { scope: undefined, runtimeWriteId: "", failureJson: "" };
+  return { scope: undefined, runtimeWriteId: "", failureJson: "", drafts: [], pendingToolCancellations: [] };
 }
 
 export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminationRequest> = {
@@ -5418,6 +5610,12 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     }
     if (message.failureJson !== "") {
       writer.uint32(26).string(message.failureJson);
+    }
+    for (const v of message.drafts) {
+      RuntimeMessageDraft.encode(v!, writer.uint32(34).fork()).join();
+    }
+    for (const v of message.pendingToolCancellations) {
+      PendingToolCancellationDraft.encode(v!, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -5453,6 +5651,22 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
           message.failureJson = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5475,6 +5689,14 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
         : isSet(object.failure_json)
         ? globalThis.String(object.failure_json)
         : "",
+      drafts: globalThis.Array.isArray(object?.drafts)
+        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
+      pendingToolCancellations: globalThis.Array.isArray(object?.pendingToolCancellations)
+        ? object.pendingToolCancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
+        : globalThis.Array.isArray(object?.pending_tool_cancellations)
+        ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
+        : [],
     };
   },
 
@@ -5488,6 +5710,14 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     }
     if (message.failureJson !== "") {
       obj.failureJson = message.failureJson;
+    }
+    if (message.drafts?.length) {
+      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    }
+    if (message.pendingToolCancellations?.length) {
+      obj.pendingToolCancellations = message.pendingToolCancellations.map((e) =>
+        PendingToolCancellationDraft.toJSON(e)
+      );
     }
     return obj;
   },
@@ -5504,18 +5734,24 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
       : undefined;
     message.runtimeWriteId = object.runtimeWriteId ?? "";
     message.failureJson = object.failureJson ?? "";
+    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.pendingToolCancellations =
+      object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
     return message;
   },
 };
 
 function createBaseCommitRuntimeTerminationResponse(): CommitRuntimeTerminationResponse {
-  return { ack: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminationResponse> = {
   encode(message: CommitRuntimeTerminationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -5535,6 +5771,14 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5545,13 +5789,19 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
   },
 
   fromJSON(object: any): CommitRuntimeTerminationResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+    };
   },
 
   toJSON(message: CommitRuntimeTerminationResponse): unknown {
     const obj: any = {};
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -5567,6 +5817,9 @@ export const CommitRuntimeTerminationResponse: MessageFns<CommitRuntimeTerminati
     const message = createBaseCommitRuntimeTerminationResponse();
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
+      : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
       : undefined;
     return message;
   },
@@ -6790,10 +7043,11 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     modelRequestId: "",
     eventType: "",
     payloadJson: "",
-    projectionJson: "",
     sessionVisible: false,
     stableReasoningParts: [],
     serverToolUse: undefined,
+    drafts: [],
+    mcpMaterializationHandle: undefined,
   };
 }
 
@@ -6814,9 +7068,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.payloadJson !== "") {
       writer.uint32(42).string(message.payloadJson);
     }
-    if (message.projectionJson !== "") {
-      writer.uint32(50).string(message.projectionJson);
-    }
     if (message.sessionVisible !== false) {
       writer.uint32(56).bool(message.sessionVisible);
     }
@@ -6825,6 +7076,12 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.serverToolUse !== undefined) {
       ServerToolUseUsage.encode(message.serverToolUse, writer.uint32(74).fork()).join();
+    }
+    for (const v of message.drafts) {
+      RuntimeMessageDraft.encode(v!, writer.uint32(82).fork()).join();
+    }
+    if (message.mcpMaterializationHandle !== undefined) {
+      writer.uint32(90).string(message.mcpMaterializationHandle);
     }
     return writer;
   },
@@ -6876,14 +7133,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.payloadJson = reader.string();
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.projectionJson = reader.string();
-          continue;
-        }
         case 7: {
           if (tag !== 56) {
             break;
@@ -6906,6 +7155,22 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           }
 
           message.serverToolUse = ServerToolUseUsage.decode(reader, reader.uint32());
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.mcpMaterializationHandle = reader.string();
           continue;
         }
       }
@@ -6940,11 +7205,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.payload_json)
         ? globalThis.String(object.payload_json)
         : "",
-      projectionJson: isSet(object.projectionJson)
-        ? globalThis.String(object.projectionJson)
-        : isSet(object.projection_json)
-        ? globalThis.String(object.projection_json)
-        : "",
       sessionVisible: isSet(object.sessionVisible)
         ? globalThis.Boolean(object.sessionVisible)
         : isSet(object.session_visible)
@@ -6959,6 +7219,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         ? ServerToolUseUsage.fromJSON(object.serverToolUse)
         : isSet(object.server_tool_use)
         ? ServerToolUseUsage.fromJSON(object.server_tool_use)
+        : undefined,
+      drafts: globalThis.Array.isArray(object?.drafts)
+        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
+      mcpMaterializationHandle: isSet(object.mcpMaterializationHandle)
+        ? globalThis.String(object.mcpMaterializationHandle)
+        : isSet(object.mcp_materialization_handle)
+        ? globalThis.String(object.mcp_materialization_handle)
         : undefined,
     };
   },
@@ -6980,9 +7248,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.payloadJson !== "") {
       obj.payloadJson = message.payloadJson;
     }
-    if (message.projectionJson !== "") {
-      obj.projectionJson = message.projectionJson;
-    }
     if (message.sessionVisible !== false) {
       obj.sessionVisible = message.sessionVisible;
     }
@@ -6991,6 +7256,12 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.serverToolUse !== undefined) {
       obj.serverToolUse = ServerToolUseUsage.toJSON(message.serverToolUse);
+    }
+    if (message.drafts?.length) {
+      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    }
+    if (message.mcpMaterializationHandle !== undefined) {
+      obj.mcpMaterializationHandle = message.mcpMaterializationHandle;
     }
     return obj;
   },
@@ -7007,12 +7278,13 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.modelRequestId = object.modelRequestId ?? "";
     message.eventType = object.eventType ?? "";
     message.payloadJson = object.payloadJson ?? "";
-    message.projectionJson = object.projectionJson ?? "";
     message.sessionVisible = object.sessionVisible ?? false;
     message.stableReasoningParts = object.stableReasoningParts?.map((e) => StableReasoningPart.fromPartial(e)) || [];
     message.serverToolUse = (object.serverToolUse !== undefined && object.serverToolUse !== null)
       ? ServerToolUseUsage.fromPartial(object.serverToolUse)
       : undefined;
+    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.mcpMaterializationHandle = object.mcpMaterializationHandle ?? undefined;
     return message;
   },
 };
@@ -7102,7 +7374,7 @@ export const ServerToolUseUsage: MessageFns<ServerToolUseUsage> = {
 };
 
 function createBaseWriteEventResponse(): WriteEventResponse {
-  return { ack: undefined, eventId: "", sequence: 0 };
+  return { ack: undefined, eventId: "", sequence: 0, declaration: undefined };
 }
 
 export const WriteEventResponse: MessageFns<WriteEventResponse> = {
@@ -7115,6 +7387,9 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
     }
     if (message.sequence !== 0) {
       writer.uint32(24).int64(message.sequence);
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -7150,6 +7425,14 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
           message.sequence = longToNumber(reader.int64());
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7168,6 +7451,7 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
         ? globalThis.String(object.event_id)
         : "",
       sequence: isSet(object.sequence) ? globalThis.Number(object.sequence) : 0,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
     };
   },
 
@@ -7182,6 +7466,9 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
     if (message.sequence !== 0) {
       obj.sequence = Math.round(message.sequence);
     }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
+    }
     return obj;
   },
 
@@ -7195,6 +7482,9 @@ export const WriteEventResponse: MessageFns<WriteEventResponse> = {
       : undefined;
     message.eventId = object.eventId ?? "";
     message.sequence = object.sequence ?? 0;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
@@ -7214,6 +7504,11 @@ function createBaseWriteRequestEndRequest(): WriteRequestEndRequest {
     reschedule: undefined,
     stableReasoningParts: [],
     consumedFileAttachments: [],
+    drafts: [],
+    prefixConsumption: undefined,
+    compactedThroughMessageSequence: undefined,
+    compactionEventPayloadJson: "",
+    interruptSettlement: undefined,
   };
 }
 
@@ -7257,6 +7552,21 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     }
     for (const v of message.consumedFileAttachments) {
       FileAttachmentPair.encode(v!, writer.uint32(106).fork()).join();
+    }
+    for (const v of message.drafts) {
+      RuntimeMessageDraft.encode(v!, writer.uint32(114).fork()).join();
+    }
+    if (message.prefixConsumption !== undefined) {
+      PrefixConsumptionDraft.encode(message.prefixConsumption, writer.uint32(122).fork()).join();
+    }
+    if (message.compactedThroughMessageSequence !== undefined) {
+      writer.uint32(128).int64(message.compactedThroughMessageSequence);
+    }
+    if (message.compactionEventPayloadJson !== "") {
+      writer.uint32(138).string(message.compactionEventPayloadJson);
+    }
+    if (message.interruptSettlement !== undefined) {
+      RequestEndInterruptSettlement.encode(message.interruptSettlement, writer.uint32(146).fork()).join();
     }
     return writer;
   },
@@ -7372,6 +7682,46 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
           message.consumedFileAttachments.push(FileAttachmentPair.decode(reader, reader.uint32()));
           continue;
         }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.prefixConsumption = PrefixConsumptionDraft.decode(reader, reader.uint32());
+          continue;
+        }
+        case 16: {
+          if (tag !== 128) {
+            break;
+          }
+
+          message.compactedThroughMessageSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 17: {
+          if (tag !== 138) {
+            break;
+          }
+
+          message.compactionEventPayloadJson = reader.string();
+          continue;
+        }
+        case 18: {
+          if (tag !== 146) {
+            break;
+          }
+
+          message.interruptSettlement = RequestEndInterruptSettlement.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7440,6 +7790,29 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
         : globalThis.Array.isArray(object?.consumed_file_attachments)
         ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
         : [],
+      drafts: globalThis.Array.isArray(object?.drafts)
+        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
+      prefixConsumption: isSet(object.prefixConsumption)
+        ? PrefixConsumptionDraft.fromJSON(object.prefixConsumption)
+        : isSet(object.prefix_consumption)
+        ? PrefixConsumptionDraft.fromJSON(object.prefix_consumption)
+        : undefined,
+      compactedThroughMessageSequence: isSet(object.compactedThroughMessageSequence)
+        ? globalThis.Number(object.compactedThroughMessageSequence)
+        : isSet(object.compacted_through_message_sequence)
+        ? globalThis.Number(object.compacted_through_message_sequence)
+        : undefined,
+      compactionEventPayloadJson: isSet(object.compactionEventPayloadJson)
+        ? globalThis.String(object.compactionEventPayloadJson)
+        : isSet(object.compaction_event_payload_json)
+        ? globalThis.String(object.compaction_event_payload_json)
+        : "",
+      interruptSettlement: isSet(object.interruptSettlement)
+        ? RequestEndInterruptSettlement.fromJSON(object.interruptSettlement)
+        : isSet(object.interrupt_settlement)
+        ? RequestEndInterruptSettlement.fromJSON(object.interrupt_settlement)
+        : undefined,
     };
   },
 
@@ -7484,6 +7857,21 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     if (message.consumedFileAttachments?.length) {
       obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
     }
+    if (message.drafts?.length) {
+      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    }
+    if (message.prefixConsumption !== undefined) {
+      obj.prefixConsumption = PrefixConsumptionDraft.toJSON(message.prefixConsumption);
+    }
+    if (message.compactedThroughMessageSequence !== undefined) {
+      obj.compactedThroughMessageSequence = Math.round(message.compactedThroughMessageSequence);
+    }
+    if (message.compactionEventPayloadJson !== "") {
+      obj.compactionEventPayloadJson = message.compactionEventPayloadJson;
+    }
+    if (message.interruptSettlement !== undefined) {
+      obj.interruptSettlement = RequestEndInterruptSettlement.toJSON(message.interruptSettlement);
+    }
     return obj;
   },
 
@@ -7510,6 +7898,164 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     message.stableReasoningParts = object.stableReasoningParts?.map((e) => StableReasoningPart.fromPartial(e)) || [];
     message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
       [];
+    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.prefixConsumption = (object.prefixConsumption !== undefined && object.prefixConsumption !== null)
+      ? PrefixConsumptionDraft.fromPartial(object.prefixConsumption)
+      : undefined;
+    message.compactedThroughMessageSequence = object.compactedThroughMessageSequence ?? undefined;
+    message.compactionEventPayloadJson = object.compactionEventPayloadJson ?? "";
+    message.interruptSettlement = (object.interruptSettlement !== undefined && object.interruptSettlement !== null)
+      ? RequestEndInterruptSettlement.fromPartial(object.interruptSettlement)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRequestEndInterruptSettlement(): RequestEndInterruptSettlement {
+  return { runtimeInputId: "", eventIds: [], sequenceFrom: 0, sequenceTo: 0, pendingToolCancellations: [] };
+}
+
+export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettlement> = {
+  encode(message: RequestEndInterruptSettlement, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.runtimeInputId !== "") {
+      writer.uint32(10).string(message.runtimeInputId);
+    }
+    for (const v of message.eventIds) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.sequenceFrom !== 0) {
+      writer.uint32(24).int64(message.sequenceFrom);
+    }
+    if (message.sequenceTo !== 0) {
+      writer.uint32(32).int64(message.sequenceTo);
+    }
+    for (const v of message.pendingToolCancellations) {
+      PendingToolCancellationDraft.encode(v!, writer.uint32(42).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RequestEndInterruptSettlement {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRequestEndInterruptSettlement();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.eventIds.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.sequenceFrom = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.sequenceTo = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RequestEndInterruptSettlement {
+    return {
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : "",
+      eventIds: globalThis.Array.isArray(object?.eventIds)
+        ? object.eventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.event_ids)
+        ? object.event_ids.map((e: any) => globalThis.String(e))
+        : [],
+      sequenceFrom: isSet(object.sequenceFrom)
+        ? globalThis.Number(object.sequenceFrom)
+        : isSet(object.sequence_from)
+        ? globalThis.Number(object.sequence_from)
+        : 0,
+      sequenceTo: isSet(object.sequenceTo)
+        ? globalThis.Number(object.sequenceTo)
+        : isSet(object.sequence_to)
+        ? globalThis.Number(object.sequence_to)
+        : 0,
+      pendingToolCancellations: globalThis.Array.isArray(object?.pendingToolCancellations)
+        ? object.pendingToolCancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
+        : globalThis.Array.isArray(object?.pending_tool_cancellations)
+        ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: RequestEndInterruptSettlement): unknown {
+    const obj: any = {};
+    if (message.runtimeInputId !== "") {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.eventIds?.length) {
+      obj.eventIds = message.eventIds;
+    }
+    if (message.sequenceFrom !== 0) {
+      obj.sequenceFrom = Math.round(message.sequenceFrom);
+    }
+    if (message.sequenceTo !== 0) {
+      obj.sequenceTo = Math.round(message.sequenceTo);
+    }
+    if (message.pendingToolCancellations?.length) {
+      obj.pendingToolCancellations = message.pendingToolCancellations.map((e) =>
+        PendingToolCancellationDraft.toJSON(e)
+      );
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RequestEndInterruptSettlement>, I>>(base?: I): RequestEndInterruptSettlement {
+    return RequestEndInterruptSettlement.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RequestEndInterruptSettlement>, I>>(
+    object: I,
+  ): RequestEndInterruptSettlement {
+    const message = createBaseRequestEndInterruptSettlement();
+    message.runtimeInputId = object.runtimeInputId ?? "";
+    message.eventIds = object.eventIds?.map((e) => e) || [];
+    message.sequenceFrom = object.sequenceFrom ?? 0;
+    message.sequenceTo = object.sequenceTo ?? 0;
+    message.pendingToolCancellations =
+      object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
     return message;
   },
 };
@@ -7671,7 +8217,7 @@ export const StableReasoningPart: MessageFns<StableReasoningPart> = {
 };
 
 function createBaseWriteRequestEndResponse(): WriteRequestEndResponse {
-  return { ack: undefined, rescheduleDisposition: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const WriteRequestEndResponse: MessageFns<WriteRequestEndResponse> = {
@@ -7679,8 +8225,8 @@ export const WriteRequestEndResponse: MessageFns<WriteRequestEndResponse> = {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
     }
-    if (message.rescheduleDisposition !== undefined) {
-      RequestEndRescheduleDisposition.encode(message.rescheduleDisposition, writer.uint32(18).fork()).join();
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(26).fork()).join();
     }
     return writer;
   },
@@ -7700,12 +8246,12 @@ export const WriteRequestEndResponse: MessageFns<WriteRequestEndResponse> = {
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
+        case 3: {
+          if (tag !== 26) {
             break;
           }
 
-          message.rescheduleDisposition = RequestEndRescheduleDisposition.decode(reader, reader.uint32());
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -7720,11 +8266,7 @@ export const WriteRequestEndResponse: MessageFns<WriteRequestEndResponse> = {
   fromJSON(object: any): WriteRequestEndResponse {
     return {
       ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
-      rescheduleDisposition: isSet(object.rescheduleDisposition)
-        ? RequestEndRescheduleDisposition.fromJSON(object.rescheduleDisposition)
-        : isSet(object.reschedule_disposition)
-        ? RequestEndRescheduleDisposition.fromJSON(object.reschedule_disposition)
-        : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
     };
   },
 
@@ -7733,8 +8275,8 @@ export const WriteRequestEndResponse: MessageFns<WriteRequestEndResponse> = {
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
     }
-    if (message.rescheduleDisposition !== undefined) {
-      obj.rescheduleDisposition = RequestEndRescheduleDisposition.toJSON(message.rescheduleDisposition);
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -7747,10 +8289,9 @@ export const WriteRequestEndResponse: MessageFns<WriteRequestEndResponse> = {
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
-    message.rescheduleDisposition =
-      (object.rescheduleDisposition !== undefined && object.rescheduleDisposition !== null)
-        ? RequestEndRescheduleDisposition.fromPartial(object.rescheduleDisposition)
-        : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
@@ -7970,7 +8511,7 @@ export const RequestEndRescheduleDisposition: MessageFns<RequestEndRescheduleDis
 };
 
 function createBaseFinishIdleRequest(): FinishIdleRequest {
-  return { scope: undefined, runtimeWriteId: "", idleSince: "", stopReasonJson: "" };
+  return { scope: undefined, stopReasonJson: "", durableTurnId: "", drafts: [] };
 }
 
 export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
@@ -7978,14 +8519,14 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
     if (message.scope !== undefined) {
       RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
     }
-    if (message.runtimeWriteId !== "") {
-      writer.uint32(18).string(message.runtimeWriteId);
-    }
-    if (message.idleSince !== "") {
-      writer.uint32(26).string(message.idleSince);
-    }
     if (message.stopReasonJson !== "") {
       writer.uint32(34).string(message.stopReasonJson);
+    }
+    if (message.durableTurnId !== "") {
+      writer.uint32(42).string(message.durableTurnId);
+    }
+    for (const v of message.drafts) {
+      RuntimeMessageDraft.encode(v!, writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -8005,28 +8546,28 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
           message.scope = RuntimeScope.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.runtimeWriteId = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.idleSince = reader.string();
-          continue;
-        }
         case 4: {
           if (tag !== 34) {
             break;
           }
 
           message.stopReasonJson = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.durableTurnId = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -8041,21 +8582,19 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
   fromJSON(object: any): FinishIdleRequest {
     return {
       scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
-      runtimeWriteId: isSet(object.runtimeWriteId)
-        ? globalThis.String(object.runtimeWriteId)
-        : isSet(object.runtime_write_id)
-        ? globalThis.String(object.runtime_write_id)
-        : "",
-      idleSince: isSet(object.idleSince)
-        ? globalThis.String(object.idleSince)
-        : isSet(object.idle_since)
-        ? globalThis.String(object.idle_since)
-        : "",
       stopReasonJson: isSet(object.stopReasonJson)
         ? globalThis.String(object.stopReasonJson)
         : isSet(object.stop_reason_json)
         ? globalThis.String(object.stop_reason_json)
         : "",
+      durableTurnId: isSet(object.durableTurnId)
+        ? globalThis.String(object.durableTurnId)
+        : isSet(object.durable_turn_id)
+        ? globalThis.String(object.durable_turn_id)
+        : "",
+      drafts: globalThis.Array.isArray(object?.drafts)
+        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+        : [],
     };
   },
 
@@ -8064,14 +8603,14 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
     if (message.scope !== undefined) {
       obj.scope = RuntimeScope.toJSON(message.scope);
     }
-    if (message.runtimeWriteId !== "") {
-      obj.runtimeWriteId = message.runtimeWriteId;
-    }
-    if (message.idleSince !== "") {
-      obj.idleSince = message.idleSince;
-    }
     if (message.stopReasonJson !== "") {
       obj.stopReasonJson = message.stopReasonJson;
+    }
+    if (message.durableTurnId !== "") {
+      obj.durableTurnId = message.durableTurnId;
+    }
+    if (message.drafts?.length) {
+      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
     }
     return obj;
   },
@@ -8084,21 +8623,24 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
     message.scope = (object.scope !== undefined && object.scope !== null)
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
-    message.runtimeWriteId = object.runtimeWriteId ?? "";
-    message.idleSince = object.idleSince ?? "";
     message.stopReasonJson = object.stopReasonJson ?? "";
+    message.durableTurnId = object.durableTurnId ?? "";
+    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     return message;
   },
 };
 
 function createBaseFinishIdleResponse(): FinishIdleResponse {
-  return { ack: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const FinishIdleResponse: MessageFns<FinishIdleResponse> = {
   encode(message: FinishIdleResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -8118,6 +8660,14 @@ export const FinishIdleResponse: MessageFns<FinishIdleResponse> = {
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8128,13 +8678,19 @@ export const FinishIdleResponse: MessageFns<FinishIdleResponse> = {
   },
 
   fromJSON(object: any): FinishIdleResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+    };
   },
 
   toJSON(message: FinishIdleResponse): unknown {
     const obj: any = {};
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -8146,6 +8702,9 @@ export const FinishIdleResponse: MessageFns<FinishIdleResponse> = {
     const message = createBaseFinishIdleResponse();
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
+      : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
       : undefined;
     return message;
   },
@@ -9105,7 +9664,7 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
 };
 
 function createBaseMarkChildThreadClosedRequest(): MarkChildThreadClosedRequest {
-  return { scope: undefined, childThreadId: "", closedAt: "" };
+  return { scope: undefined, childThreadId: "", closedAt: "", source: undefined };
 }
 
 export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedRequest> = {
@@ -9118,6 +9677,9 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
     }
     if (message.closedAt !== "") {
       writer.uint32(26).string(message.closedAt);
+    }
+    if (message.source !== undefined) {
+      ChildLifecycleSource.encode(message.source, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -9153,6 +9715,14 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
           message.closedAt = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.source = ChildLifecycleSource.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9175,6 +9745,7 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
         : isSet(object.closed_at)
         ? globalThis.String(object.closed_at)
         : "",
+      source: isSet(object.source) ? ChildLifecycleSource.fromJSON(object.source) : undefined,
     };
   },
 
@@ -9189,6 +9760,9 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
     if (message.closedAt !== "") {
       obj.closedAt = message.closedAt;
     }
+    if (message.source !== undefined) {
+      obj.source = ChildLifecycleSource.toJSON(message.source);
+    }
     return obj;
   },
 
@@ -9202,18 +9776,24 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
       : undefined;
     message.childThreadId = object.childThreadId ?? "";
     message.closedAt = object.closedAt ?? "";
+    message.source = (object.source !== undefined && object.source !== null)
+      ? ChildLifecycleSource.fromPartial(object.source)
+      : undefined;
     return message;
   },
 };
 
 function createBaseMarkChildThreadClosedResponse(): MarkChildThreadClosedResponse {
-  return { ack: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const MarkChildThreadClosedResponse: MessageFns<MarkChildThreadClosedResponse> = {
   encode(message: MarkChildThreadClosedResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -9233,6 +9813,14 @@ export const MarkChildThreadClosedResponse: MessageFns<MarkChildThreadClosedResp
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9243,13 +9831,19 @@ export const MarkChildThreadClosedResponse: MessageFns<MarkChildThreadClosedResp
   },
 
   fromJSON(object: any): MarkChildThreadClosedResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+    };
   },
 
   toJSON(message: MarkChildThreadClosedResponse): unknown {
     const obj: any = {};
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -9264,12 +9858,15 @@ export const MarkChildThreadClosedResponse: MessageFns<MarkChildThreadClosedResp
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
     return message;
   },
 };
 
 function createBaseMarkChildThreadActiveRequest(): MarkChildThreadActiveRequest {
-  return { scope: undefined, childThreadId: "", activeAt: "" };
+  return { scope: undefined, childThreadId: "", activeAt: "", source: undefined };
 }
 
 export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveRequest> = {
@@ -9282,6 +9879,9 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.activeAt !== "") {
       writer.uint32(26).string(message.activeAt);
+    }
+    if (message.source !== undefined) {
+      ChildLifecycleSource.encode(message.source, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -9317,6 +9917,14 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
           message.activeAt = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.source = ChildLifecycleSource.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9339,6 +9947,7 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
         : isSet(object.active_at)
         ? globalThis.String(object.active_at)
         : "",
+      source: isSet(object.source) ? ChildLifecycleSource.fromJSON(object.source) : undefined,
     };
   },
 
@@ -9353,6 +9962,9 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     if (message.activeAt !== "") {
       obj.activeAt = message.activeAt;
     }
+    if (message.source !== undefined) {
+      obj.source = ChildLifecycleSource.toJSON(message.source);
+    }
     return obj;
   },
 
@@ -9366,18 +9978,24 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
       : undefined;
     message.childThreadId = object.childThreadId ?? "";
     message.activeAt = object.activeAt ?? "";
+    message.source = (object.source !== undefined && object.source !== null)
+      ? ChildLifecycleSource.fromPartial(object.source)
+      : undefined;
     return message;
   },
 };
 
 function createBaseMarkChildThreadActiveResponse(): MarkChildThreadActiveResponse {
-  return { ack: undefined };
+  return { ack: undefined, declaration: undefined };
 }
 
 export const MarkChildThreadActiveResponse: MessageFns<MarkChildThreadActiveResponse> = {
   encode(message: MarkChildThreadActiveResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    if (message.declaration !== undefined) {
+      DeclarationResponse.encode(message.declaration, writer.uint32(18).fork()).join();
     }
     return writer;
   },
@@ -9397,6 +10015,14 @@ export const MarkChildThreadActiveResponse: MessageFns<MarkChildThreadActiveResp
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.declaration = DeclarationResponse.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9407,13 +10033,19 @@ export const MarkChildThreadActiveResponse: MessageFns<MarkChildThreadActiveResp
   },
 
   fromJSON(object: any): MarkChildThreadActiveResponse {
-    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      declaration: isSet(object.declaration) ? DeclarationResponse.fromJSON(object.declaration) : undefined,
+    };
   },
 
   toJSON(message: MarkChildThreadActiveResponse): unknown {
     const obj: any = {};
     if (message.ack !== undefined) {
       obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.declaration !== undefined) {
+      obj.declaration = DeclarationResponse.toJSON(message.declaration);
     }
     return obj;
   },
@@ -9428,6 +10060,93 @@ export const MarkChildThreadActiveResponse: MessageFns<MarkChildThreadActiveResp
     message.ack = (object.ack !== undefined && object.ack !== null)
       ? BridgeWriteAck.fromPartial(object.ack)
       : undefined;
+    message.declaration = (object.declaration !== undefined && object.declaration !== null)
+      ? DeclarationResponse.fromPartial(object.declaration)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseChildLifecycleSource(): ChildLifecycleSource {
+  return { sourceToolUseEventId: undefined, reviewerReviewId: undefined };
+}
+
+export const ChildLifecycleSource: MessageFns<ChildLifecycleSource> = {
+  encode(message: ChildLifecycleSource, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sourceToolUseEventId !== undefined) {
+      writer.uint32(10).string(message.sourceToolUseEventId);
+    }
+    if (message.reviewerReviewId !== undefined) {
+      writer.uint32(18).string(message.reviewerReviewId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ChildLifecycleSource {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseChildLifecycleSource();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sourceToolUseEventId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.reviewerReviewId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ChildLifecycleSource {
+    return {
+      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
+        ? globalThis.String(object.sourceToolUseEventId)
+        : isSet(object.source_tool_use_event_id)
+        ? globalThis.String(object.source_tool_use_event_id)
+        : undefined,
+      reviewerReviewId: isSet(object.reviewerReviewId)
+        ? globalThis.String(object.reviewerReviewId)
+        : isSet(object.reviewer_review_id)
+        ? globalThis.String(object.reviewer_review_id)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ChildLifecycleSource): unknown {
+    const obj: any = {};
+    if (message.sourceToolUseEventId !== undefined) {
+      obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.reviewerReviewId !== undefined) {
+      obj.reviewerReviewId = message.reviewerReviewId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ChildLifecycleSource>, I>>(base?: I): ChildLifecycleSource {
+    return ChildLifecycleSource.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ChildLifecycleSource>, I>>(object: I): ChildLifecycleSource {
+    const message = createBaseChildLifecycleSource();
+    message.sourceToolUseEventId = object.sourceToolUseEventId ?? undefined;
+    message.reviewerReviewId = object.reviewerReviewId ?? undefined;
     return message;
   },
 };

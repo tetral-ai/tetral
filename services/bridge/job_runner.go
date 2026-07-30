@@ -19,6 +19,7 @@ type QueueClient interface {
 	Heartbeat(context.Context, *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error)
 	Ack(context.Context, *queuev1.AckRequest) (*queuev1.TransitionResponse, error)
 	Retry(context.Context, *queuev1.RetryRequest) (*queuev1.TransitionResponse, error)
+	Defer(context.Context, *queuev1.DeferRequest) (*queuev1.TransitionResponse, error)
 	DeadLetter(context.Context, *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error)
 	Cancel(context.Context, *queuev1.CancelRequest) (*queuev1.CancelResponse, error)
 }
@@ -49,6 +50,10 @@ func (a queueServiceClientAdapter) Ack(ctx context.Context, request *queuev1.Ack
 
 func (a queueServiceClientAdapter) Retry(ctx context.Context, request *queuev1.RetryRequest) (*queuev1.TransitionResponse, error) {
 	return a.client.Retry(ctx, request)
+}
+
+func (a queueServiceClientAdapter) Defer(ctx context.Context, request *queuev1.DeferRequest) (*queuev1.TransitionResponse, error) {
+	return a.client.Defer(ctx, request)
 }
 
 func (a queueServiceClientAdapter) DeadLetter(ctx context.Context, request *queuev1.DeadLetterRequest) (*queuev1.TransitionResponse, error) {
@@ -100,10 +105,7 @@ type RuntimeJob struct {
 	RuntimeInputID             string
 	ConfigGeneration           string
 	MCPServerName              string
-	MCPManifestETag            string
 	MCPManifestGeneration      string
-	MCPManifestReadiness       string
-	MCPManifestDiagnostic      string
 	CleanupJobID               string
 	DeleteCleanupID            string
 	PreparationAttemptID       string
@@ -112,6 +114,7 @@ type RuntimeJob struct {
 	SequenceFrom               int64
 	SequenceTo                 int64
 	InputKind                  string
+	RejectionReasonCode        string
 	CommandKind                agentruntimev1.RuntimeCommandKind
 	PayloadJSON                string
 	AttemptCount               int32
@@ -302,10 +305,16 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			ErrorKind:    "runtime_transport_error",
 			ErrorMessage: "runtime command delivery failed",
 		}
+		if job.Kind == queue.KindRuntimeConfigUpdate && !isMCPManifestRuntimeJob(job) {
+			return r.deferRuntimeConfig(ctx, job)
+		}
 		if runtimeJobFinalAttempt(job) {
 			finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 			if err != nil {
 				return err
+			}
+			if shouldDeferRuntimeConfigResult(job, finalized) {
+				return r.deferRuntimeConfig(ctx, job)
 			}
 			return r.applyRuntimeDeliveryResult(ctx, job, finalized)
 		}
@@ -317,6 +326,9 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 			ErrorMessage: result.ErrorMessage,
 		}))
 	}
+	if shouldDeferRuntimeConfigResult(job, result) {
+		return r.deferRuntimeConfig(ctx, job)
+	}
 	if runtimeDeliveryRequiresFinalization(job, result) {
 		finalized, err := r.finalizeRuntimeDelivery(ctx, job, result)
 		if err != nil {
@@ -324,7 +336,28 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}
 		result = finalized
 	}
+	if shouldDeferRuntimeConfigResult(job, result) {
+		return r.deferRuntimeConfig(ctx, job)
+	}
 	return r.applyRuntimeDeliveryResult(ctx, job, result)
+}
+
+func shouldDeferRuntimeConfigResult(job RuntimeJob, result RuntimeDeliveryResult) bool {
+	if job.Kind != queue.KindRuntimeConfigUpdate || result.Status != RuntimeDeliveryRejected {
+		return false
+	}
+	if !isMCPManifestRuntimeJob(job) {
+		return true
+	}
+	return result.ErrorKind == "control_busy" || !result.Retryable
+}
+
+func (r *JobRunner) deferRuntimeConfig(ctx context.Context, job RuntimeJob) error {
+	return transitionUpdated(r.Queue.Defer(ctx, &queuev1.DeferRequest{
+		WorkspaceId: job.WorkspaceID,
+		JobId:       job.JobID,
+		LeaseToken:  job.LeaseToken,
+	}))
 }
 
 func (r *JobRunner) finalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
@@ -516,13 +549,6 @@ func decodeRuntimeConfigUpdateJob(queueJob *queuev1.QueueJob) (RuntimeJob, error
 		ConfigGeneration   json.RawMessage `json:"config_generation"`
 		MCPServerName      string          `json:"mcp_server_name"`
 		ManifestGeneration int64           `json:"manifest_generation"`
-		MCPManifest        *struct {
-			MCPServerName      string `json:"mcp_server_name"`
-			ManifestETag       string `json:"manifest_etag"`
-			ManifestGeneration int64  `json:"manifest_generation"`
-			Readiness          string `json:"readiness"`
-			Diagnostic         string `json:"diagnostic"`
-		} `json:"mcp_manifest"`
 	}
 	if err := json.Unmarshal([]byte(queueJob.GetPayloadJson()), &payload); err != nil {
 		return RuntimeJob{}, err
@@ -534,34 +560,16 @@ func decodeRuntimeConfigUpdateJob(queueJob *queuev1.QueueJob) (RuntimeJob, error
 		return RuntimeJob{}, errors.New("runtime config update payload has missing identity fields")
 	}
 	var mcpServerName string
-	var manifestETag string
 	var manifestGeneration string
-	var manifestReadiness string
-	var manifestDiagnostic string
 	var configGeneration string
 	var runtimeInputID string
 	if payload.MCPServerName != "" || payload.ManifestGeneration != 0 {
-		if payload.MCPServerName == "" || payload.ManifestGeneration <= 0 || payload.MCPManifest != nil || len(payload.ConfigGeneration) > 0 {
+		if payload.MCPServerName == "" || payload.ManifestGeneration <= 0 || len(payload.ConfigGeneration) > 0 {
 			return RuntimeJob{}, errors.New("runtime config update payload has missing identity fields")
 		}
 		mcpServerName = payload.MCPServerName
 		manifestGeneration = strconv.FormatInt(payload.ManifestGeneration, 10)
 		runtimeInputID = runtimeMCPManifestInputID(payload.SessionID, mcpServerName, payload.ManifestGeneration)
-	} else if payload.MCPManifest != nil {
-		manifestReadiness = payload.MCPManifest.Readiness
-		if manifestReadiness == "" {
-			manifestReadiness = mcpManifestReadinessReady
-		}
-		validReady := manifestReadiness == mcpManifestReadinessReady && payload.MCPManifest.ManifestETag != "" && payload.MCPManifest.Diagnostic == ""
-		validUnready := manifestReadiness == mcpManifestReadinessUnready && payload.MCPManifest.ManifestETag == "" && payload.MCPManifest.Diagnostic != ""
-		if payload.MCPManifest.MCPServerName == "" || payload.MCPManifest.ManifestGeneration <= 0 || (!validReady && !validUnready) {
-			return RuntimeJob{}, errors.New("runtime config update payload has missing identity fields")
-		}
-		mcpServerName = payload.MCPManifest.MCPServerName
-		manifestETag = payload.MCPManifest.ManifestETag
-		manifestGeneration = strconv.FormatInt(payload.MCPManifest.ManifestGeneration, 10)
-		manifestDiagnostic = payload.MCPManifest.Diagnostic
-		runtimeInputID = runtimeMCPManifestInputID(payload.SessionID, mcpServerName, payload.MCPManifest.ManifestGeneration)
 	} else {
 		var hasConfigGeneration bool
 		var err error
@@ -583,10 +591,7 @@ func decodeRuntimeConfigUpdateJob(queueJob *queuev1.QueueJob) (RuntimeJob, error
 		RuntimeInputID:        runtimeInputID,
 		ConfigGeneration:      configGeneration,
 		MCPServerName:         mcpServerName,
-		MCPManifestETag:       manifestETag,
 		MCPManifestGeneration: manifestGeneration,
-		MCPManifestReadiness:  manifestReadiness,
-		MCPManifestDiagnostic: manifestDiagnostic,
 		CommandKind:           agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
 		PayloadJSON:           queueJob.GetPayloadJson(),
 		AttemptCount:          queueJob.GetAttemptCount(),
@@ -681,6 +686,8 @@ func RuntimeCommandKindForInputKind(inputKind string) (agentruntimev1.RuntimeCom
 		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_TASK_NOTIFICATION, nil
 	case "agent_mail":
 		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_AGENT_MAIL, nil
+	case "rejection":
+		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES, nil
 	default:
 		return agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_UNSPECIFIED, fmt.Errorf("unknown runtime input kind %q", inputKind)
 	}
@@ -759,6 +766,8 @@ func runtimeInputErrorKind(code agentruntimev1.RuntimeInputErrorCode) string {
 		return "runtime_context_load_failed"
 	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED:
 		return "runtime_control_not_accepted"
+	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY:
+		return "control_busy"
 	case agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT:
 		return "runtime_rejected_input"
 	default:

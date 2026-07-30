@@ -21,6 +21,10 @@ export function acceptedInputReceipt(
     sourceId: input.runtimeInputId,
     declarationDigest: `digest_${input.runtimeInputId}`,
     pendingAttachmentDelta: [],
+    pendingToolDelta: [],
+    prefixConsumptions: [],
+
+    childLifecycle: [],
     events: input.eventIds.map((eventId, index) => ({
       sessionThreadId: input.sessionThreadId,
       sourceEventId: eventId,

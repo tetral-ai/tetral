@@ -1,10 +1,12 @@
 package agentruntimebridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +33,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-commit-inputs-test-key-32")
+	var declarationLogs bytes.Buffer
+	store.Logger = slog.New(slog.NewJSONHandler(&declarationLogs, nil))
 	runtimeLocalID := stableRuntimeID(
 		"runtime_message_draft",
 		"default",
@@ -42,12 +46,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		"0",
 	)
 	request := &bridgev1.CommitInputsRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_commit", "thr_bridge_commit", "bind_bridge_commit", 1, "pod_uid_commit"),
-		RuntimeInputId:      "rin_bridge_commit",
-		EventIds:            []string{"evt_bridge_commit"},
-		SequenceFrom:        1,
-		SequenceTo:          1,
-		HotContextPatchJson: bridgeAcceptedMessageDeliveryPayload(t, runtime, "default", "sesn_bridge_commit", "thr_bridge_commit", "rin_bridge_commit", []string{"evt_bridge_commit"}, 1, 1),
+		Scope:          bridgeAPIScope("sesn_bridge_commit", "thr_bridge_commit", "bind_bridge_commit", 1, "pod_uid_commit"),
+		RuntimeInputId: "rin_bridge_commit",
+		EventIds:       []string{"evt_bridge_commit"},
+		SequenceFrom:   1,
+		SequenceTo:     1,
 		Drafts: []*bridgev1.RuntimeMessageDraft{{
 			RuntimeLocalId:  runtimeLocalID,
 			SourceKind:      "messages",
@@ -160,6 +163,23 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		response.GetDeclaration().GetObservedBindingId() != "bind_bridge_commit_replacement" ||
 		response.GetDeclaration().GetObservedBindingGeneration() != 2 {
 		t.Fatalf("replay declaration custody = %#v; want freshly observed replacement binding", response.GetDeclaration())
+	}
+	logText := declarationLogs.String()
+	for _, fragment := range []string{
+		`"event.kind":"runtime_declaration_committed"`,
+		`"event.kind":"runtime_declaration_replayed"`,
+		`"declaration.source.kind":"messages"`,
+		`"declaration.source.id":"rin_bridge_commit"`,
+		`"receipt.application_disposition":"current_custody"`,
+		`"receipt.application_disposition":"stale_custody"`,
+		`"binding.id":"bind_bridge_commit_replacement"`,
+	} {
+		if !strings.Contains(logText, fragment) {
+			t.Fatalf("declaration logs missing %s: %s", fragment, logText)
+		}
+	}
+	if strings.Contains(logText, `"text":"hello"`) {
+		t.Fatalf("declaration logs contain model-visible input: %s", logText)
 	}
 
 	var inboxStatus string
@@ -293,10 +313,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsFencesRuntimeInboxBinding(t *testin
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_commit_fence", "thr_bridge_commit_fence", "bind_bridge_commit_fence", 1, "pod_uid_commit_fence"),
-		RuntimeInputId:      "rin_bridge_commit_fence",
-		EventIds:            []string{"evt_bridge_commit_fence"},
-		HotContextPatchJson: bridgeAcceptedMessageSnapshotJSON(t, "sesn_bridge_commit_fence", "msg_bridge_commit_fence", "hello"),
+		Scope:          bridgeAPIScope("sesn_bridge_commit_fence", "thr_bridge_commit_fence", "bind_bridge_commit_fence", 1, "pod_uid_commit_fence"),
+		RuntimeInputId: "rin_bridge_commit_fence",
+		EventIds:       []string{"evt_bridge_commit_fence"},
 		Drafts: []*bridgev1.RuntimeMessageDraft{
 			bridgeUserInputDraftForTest("default", "sesn_bridge_commit_fence", "thr_bridge_commit_fence", "rin_bridge_commit_fence", "evt_bridge_commit_fence", "hello"),
 		},
@@ -329,13 +348,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsInboxIdentityConflictWithout
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	request := &bridgev1.CommitInputsRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_commit_payload_conflict", "thr_bridge_commit_payload_conflict", "bind_bridge_commit_payload_conflict", 1, "pod_uid_commit_payload_conflict"),
-		RuntimeInputId:      "rin_bridge_commit_payload_conflict",
-		InputKind:           "messages",
-		EventIds:            []string{"evt_bridge_commit_other"},
-		SequenceFrom:        2,
-		SequenceTo:          2,
-		HotContextPatchJson: bridgeAcceptedMessageSnapshotJSON(t, "sesn_bridge_commit_payload_conflict", "msg_bridge_commit_other", "other"),
+		Scope:          bridgeAPIScope("sesn_bridge_commit_payload_conflict", "thr_bridge_commit_payload_conflict", "bind_bridge_commit_payload_conflict", 1, "pod_uid_commit_payload_conflict"),
+		RuntimeInputId: "rin_bridge_commit_payload_conflict",
+		InputKind:      "messages",
+		EventIds:       []string{"evt_bridge_commit_other"},
+		SequenceFrom:   2,
+		SequenceTo:     2,
 		Drafts: []*bridgev1.RuntimeMessageDraft{
 			bridgeUserInputDraftForTest("default", "sesn_bridge_commit_payload_conflict", "thr_bridge_commit_payload_conflict", "rin_bridge_commit_payload_conflict", "evt_bridge_commit_other", "other"),
 		},
@@ -349,7 +367,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsInboxIdentityConflictWithout
 	request.SequenceFrom = 1
 	request.SequenceTo = 1
 	request.InputKind = "interrupt_control"
-	request.HotContextPatchJson = ""
 	request.Drafts = nil
 	if _, err := store.CommitInputs(context.Background(), request); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("CommitInputs conflicting inbox kind err = %v; want AlreadyExists", err)
@@ -368,13 +385,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsToolConfirmationAsMessage(t 
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_commit_confirmation_message", "thr_bridge_commit_confirmation_message", "bind_bridge_commit_confirmation_message", 1, "pod_uid_commit_confirmation_message"),
-		RuntimeInputId:      "rin_bridge_confirmation_as_message",
-		InputKind:           "messages",
-		EventIds:            []string{"evt_bridge_confirmation_as_message"},
-		SequenceFrom:        2,
-		SequenceTo:          2,
-		HotContextPatchJson: bridgeAcceptedMessageSnapshotJSON(t, "sesn_bridge_commit_confirmation_message", "msg_bridge_confirmation_as_message", "allow"),
+		Scope:          bridgeAPIScope("sesn_bridge_commit_confirmation_message", "thr_bridge_commit_confirmation_message", "bind_bridge_commit_confirmation_message", 1, "pod_uid_commit_confirmation_message"),
+		RuntimeInputId: "rin_bridge_confirmation_as_message",
+		InputKind:      "messages",
+		EventIds:       []string{"evt_bridge_confirmation_as_message"},
+		SequenceFrom:   2,
+		SequenceTo:     2,
 		Drafts: []*bridgev1.RuntimeMessageDraft{
 			bridgeUserInputDraftForTest("default", "sesn_bridge_commit_confirmation_message", "thr_bridge_commit_confirmation_message", "rin_bridge_confirmation_as_message", "evt_bridge_confirmation_as_message", "allow"),
 		},
@@ -419,6 +435,16 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "rin_bridge_commit_interrupt", "interrupt_control", `["evt_bridge_commit_interrupt"]`, "accepted", "bind_bridge_commit_interrupt", "pod_uid_commit_interrupt", 3, 3)
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		cancellationLocalID := stableRuntimeID(
+			"runtime_message_draft",
+			"default",
+			"sesn_bridge_commit_interrupt",
+			"thr_bridge_commit_interrupt",
+			"interrupt_control",
+			"rin_bridge_commit_interrupt",
+			"cancellation",
+			"0",
+		)
 		request := &bridgev1.CommitInputsRequest{
 			Scope:          bridgeAPIScope("sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "bind_bridge_commit_interrupt", 1, "pod_uid_commit_interrupt"),
 			RuntimeInputId: "rin_bridge_commit_interrupt",
@@ -426,6 +452,24 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			EventIds:       []string{"evt_bridge_commit_interrupt"},
 			SequenceFrom:   3,
 			SequenceTo:     3,
+			Drafts: []*bridgev1.RuntimeMessageDraft{{
+				RuntimeLocalId: cancellationLocalID,
+				SourceKind:     "interrupt_control",
+				SourceId:       "rin_bridge_commit_interrupt",
+				SourceEventId:  "evt_bridge_commit_interrupt",
+				DraftKind:      bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
+				MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed",
+					"toolUseEventId":"evt_bridge_interrupted_tool"}`,
+				Parts: []*bridgev1.RuntimePartDraft{{
+					RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "text", "0"),
+					PartKind:           "text",
+					PartJson:           `{"type":"text","text":"The pending tool call was cancelled.","status":"completed"}`,
+				}},
+			}},
+			PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
+				ToolUseEventId: "evt_bridge_interrupted_tool",
+				RuntimeLocalId: cancellationLocalID,
+			}},
 		}
 		response, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
@@ -464,10 +508,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 		}
 		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
 			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-			inboxStatus != "committed" || !processedAt.Valid || messageCount != 0 || pendingStatus != "cancelled" ||
-			!pendingResultEventID.Valid || terminalResultCount != 1 {
-			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d; want committed/duplicate/committed/processed/0/cancelled/result/1",
-				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, messageCount, pendingStatus, pendingResultEventID, terminalResultCount)
+			inboxStatus != "committed" || !processedAt.Valid || messageCount != 1 || pendingStatus != "cancelled" ||
+			!pendingResultEventID.Valid || pendingResultEventID.String != "evt_bridge_commit_interrupt" || terminalResultCount != 0 ||
+			len(response.GetDeclaration().GetReceipts()) != 1 ||
+			len(response.GetDeclaration().GetReceipts()[0].GetPendingToolDeltaJson()) != 1 {
+			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d receipt=%#v; want one declared cancellation and no extra result event",
+				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, messageCount, pendingStatus, pendingResultEventID, terminalResultCount, response.GetDeclaration())
 		}
 	})
 
@@ -488,6 +534,19 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			EventIds:       []string{"evt_bridge_commit_confirm"},
 			SequenceFrom:   2,
 			SequenceTo:     2,
+			Drafts: []*bridgev1.RuntimeMessageDraft{
+				bridgeInputDraftForTest(
+					"default",
+					"sesn_bridge_commit_confirm",
+					"thr_bridge_commit_confirm",
+					"tool_confirmation",
+					"rin_bridge_commit_confirm",
+					"evt_bridge_commit_confirm",
+					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_APPROVAL_INPUT,
+					"user",
+					"Approval denied: not now",
+				),
+			},
 		}
 		response, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
@@ -530,8 +589,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
 			inboxStatus != "committed" || !processedAt.Valid || pendingStatus != "resolving" ||
 			!decision.Valid || decision.String != "deny" || !denyMessage.Valid || denyMessage.String != "not now" ||
-			resolvedAt.Valid || messageCount != 0 {
-			t.Fatalf("confirmation commit ack=%s replay=%s inbox=%q processed=%v pending=%q decision=%v deny=%v resolved=%v messages=%d; want committed/duplicate/committed/processed/resolving/deny/unresolved/0",
+			resolvedAt.Valid || messageCount != 1 {
+			t.Fatalf("confirmation commit ack=%s replay=%s inbox=%q processed=%v pending=%q decision=%v deny=%v resolved=%v messages=%d; want committed/duplicate/committed/processed/resolving/deny/unresolved/1",
 				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, pendingStatus, decision, denyMessage, resolvedAt.Valid, messageCount)
 		}
 	})
@@ -553,6 +612,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			EventIds:       []string{"evt_bridge_commit_confirm_flip_deny"},
 			SequenceFrom:   2,
 			SequenceTo:     2,
+			Drafts: []*bridgev1.RuntimeMessageDraft{
+				bridgeApprovalInputDraftForTest("default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "rin_bridge_commit_confirm_flip_deny", "evt_bridge_commit_confirm_flip_deny", "Approval denied: first decision"),
+			},
 		})
 		if err != nil {
 			t.Fatalf("CommitInputs initial confirmation: %v", err)
@@ -567,6 +629,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			EventIds:       []string{"evt_bridge_commit_confirm_flip_allow"},
 			SequenceFrom:   3,
 			SequenceTo:     3,
+			Drafts: []*bridgev1.RuntimeMessageDraft{
+				bridgeApprovalInputDraftForTest("default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "rin_bridge_commit_confirm_flip_allow", "evt_bridge_commit_confirm_flip_allow", "Approval allowed"),
+			},
 		})
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("flipped CommitInputs err = %v; want FailedPrecondition", err)
@@ -629,6 +694,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			EventIds:       []string{"evt_bridge_commit_stale_confirm"},
 			SequenceFrom:   2,
 			SequenceTo:     2,
+			Drafts: []*bridgev1.RuntimeMessageDraft{
+				bridgeApprovalInputDraftForTest("default", "sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm", "rin_bridge_commit_stale_confirm", "evt_bridge_commit_stale_confirm", "Approval allowed"),
+			},
 		})
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("stale CommitInputs err = %v; want FailedPrecondition", err)
@@ -656,13 +724,25 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm")
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm"),
+		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_generated_tool_use",
+		ModelRequestId: "mreq_bridge_generated_tool_use",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"dangerous_tool","input":{"path":"README.md"},"evaluated_permission":"ask"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"tool-call-generated","tool_name":"dangerous_tool","input":{"path":"README.md"},"state":"running"}`,
 		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_generated_tool_use",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"tool-call-generated","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{"path":"README.md"},"preview":"{\"path\":\"README.md\"}","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent generated tool use: %v", err)
@@ -678,6 +758,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		EventIds:       []string{"evt_bridge_generated_confirm"},
 		SequenceFrom:   2,
 		SequenceTo:     2,
+		Drafts: []*bridgev1.RuntimeMessageDraft{
+			bridgeApprovalInputDraftForTest("default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "evt_bridge_generated_confirm", "Approval allowed"),
+		},
 	})
 	if err != nil {
 		t.Fatalf("CommitInputs generated confirmation: %v", err)
@@ -723,13 +806,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		t.Fatalf("CreateChildThread: %v", err)
 	}
 	messageJSON := bridgeRuntimeNotificationMessageJSON(t, "sesn_bridge_inter_agent", "msg_bridge_inter_agent_delivery", "hello child")
-	interAgentPayload := bridgeInterAgentMessageJSON(t, "delivery_bridge_inter_agent_0", "thr_bridge_inter_agent_parent", "evt_bridge_inter_agent_send", messageJSON)
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          parentScope,
 		RuntimeWriteId: "rwrite_bridge_inter_agent_sent",
 		EventType:      "agent.thread_message_sent",
 		PayloadJson:    bridgeInterAgentSentEventJSON(t, "delivery_bridge_inter_agent_0", "thr_bridge_inter_agent_parent", "thr_bridge_inter_agent_child", "child", "evt_bridge_inter_agent_send", messageJSON),
-		ProjectionJson: "{}",
 		SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent inter-agent sent: %v", err)
@@ -746,12 +827,16 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		strings.Contains(beforeReceived.GetChildThreadJson(), "hello child") {
 		t.Fatalf("delivery before receive = %+v; want sent only and no message payload leakage", beforeReceived)
 	}
-	request := &bridgev1.CommitInputsRequest{
-		Scope:                 bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_child", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent"),
-		RuntimeInputId:        "rin_bridge_inter_agent",
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: interAgentPayload,
-	}
+	request := bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_child", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent"),
+		"rin_bridge_inter_agent",
+		"delivery_bridge_inter_agent_0",
+		"thr_bridge_inter_agent_parent",
+		"evt_bridge_inter_agent_send",
+		messageJSON,
+	)
 
 	response, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
@@ -778,38 +863,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	if !afterReceived.GetSentExists() || !afterReceived.GetReceivedExists() || !afterReceived.GetChildReceivable() {
 		t.Fatalf("delivery after receive = %+v; want sent/received/receivable", afterReceived)
 	}
-	redelivery := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-	redelivery.RuntimeInputId = "rin_bridge_inter_agent_redelivery"
-	if _, err := store.CommitInputs(context.Background(), redelivery); err != nil {
-		t.Fatalf("CommitInputs inter-agent redelivery: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_threads
-		    SET status = 'closed_for_runtime',
-		        closed_at = '2026-01-01T00:02:00Z',
-		        updated_at = '2026-01-01T00:02:00Z'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_inter_agent'
-		    AND id = 'thr_bridge_inter_agent_child'`); err != nil {
-		t.Fatalf("close child thread after delivery: %v", err)
-	}
-	closedRedelivery := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-	closedRedelivery.RuntimeInputId = "rin_bridge_inter_agent_redelivery_closed"
-	if _, err := store.CommitInputs(context.Background(), closedRedelivery); err != nil {
-		t.Fatalf("CommitInputs inter-agent redelivery after close: %v", err)
-	}
-	closedResolved, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
-		Scope:         parentScope,
-		ChildThreadId: "thr_bridge_inter_agent_child",
-		DeliveryId:    "delivery_bridge_inter_agent_0",
-	})
-	if err != nil {
-		t.Fatalf("ResolveInterAgentDelivery after close: %v", err)
-	}
-	if !closedResolved.GetReceivedExists() || closedResolved.GetChildReceivable() {
-		t.Fatalf("delivery after close = %+v; want received but not receivable", closedResolved)
-	}
-
 	var receivedEventID string
 	var receivedVisibility string
 	var receivedSessionVisible bool
@@ -875,19 +928,13 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	).Scan(&streamChangeCount); err != nil {
 		t.Fatalf("read received stream change count: %v", err)
 	}
-	if streamChangeCount != 1 {
-		t.Fatalf("received stream changes = %d; want exactly one", streamChangeCount)
+	if streamChangeCount != 2 {
+		t.Fatalf("received stream changes = %d; want admission and processing revisions", streamChangeCount)
 	}
 
-	conflict := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-	conflict.RuntimeInputId = "rin_bridge_inter_agent_conflict"
-	conflict.InterAgentMessageJson = bridgeInterAgentMessageJSON(t, "delivery_bridge_inter_agent_0", "thr_bridge_inter_agent_parent", "evt_bridge_inter_agent_send", bridgeRuntimeNotificationMessageJSON(t, "sesn_bridge_inter_agent", "msg_bridge_inter_agent_conflict", "different"))
-	if _, err := store.CommitInputs(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("conflicting delivery err = %v; want AlreadyExists", err)
-	}
 }
 
-func TestPostgreSQLBridgeAPIStorePulledCompletionMailCommitsMarkerWithoutUserProjection(t *testing.T) {
+func TestPostgreSQLBridgeAPIStorePulledCompletionMailCommitsTypedProjection(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID = "sesn_bridge_completion_pull"
@@ -901,19 +948,16 @@ func TestPostgreSQLBridgeAPIStorePulledCompletionMailCommitsMarkerWithoutUserPro
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, mainID, "bind_bridge_completion_pull", 1, "pod_bridge_completion_pull")
 	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_completion_pull", completionMailEnvelope("main", "task_"+childID, "pulled body"))
-	request := &bridgev1.CommitInputsRequest{
-		Scope:          scope,
-		RuntimeInputId: completionRuntimeInputID(delivery),
-		InputKind:      "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessagePresentationJSON(
-			t,
-			delivery,
-			childID,
-			"sevt_bridge_completion_pull_spawn",
-			messageJSON,
-			"pull",
-		),
-	}
+	request := bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		scope,
+		completionRuntimeInputID(delivery),
+		delivery,
+		childID,
+		"sevt_bridge_completion_pull_spawn",
+		messageJSON,
+	)
 	response, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInputs pull receipt: %v", err)
@@ -922,16 +966,7 @@ func TestPostgreSQLBridgeAPIStorePulledCompletionMailCommitsMarkerWithoutUserPro
 		t.Fatalf("pull receipt status = %s; want committed", response.GetAck().GetStatus())
 	}
 
-	pushReplay := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-	pushReplay.InterAgentMessageJson = bridgeInterAgentMessagePresentationJSON(
-		t,
-		delivery,
-		childID,
-		"sevt_bridge_completion_pull_spawn",
-		messageJSON,
-		"push",
-	)
-	replay, err := store.CommitInputs(context.Background(), pushReplay)
+	replay, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInputs push replay after pull: %v", err)
 	}
@@ -954,8 +989,8 @@ func TestPostgreSQLBridgeAPIStorePulledCompletionMailCommitsMarkerWithoutUserPro
 	).Scan(&receivedCount, &projectionCount); err != nil {
 		t.Fatalf("read pull receipt projection evidence: %v", err)
 	}
-	if receivedCount != 1 || projectionCount != 0 {
-		t.Fatalf("pull receipt events/projections = %d/%d; want 1/0", receivedCount, projectionCount)
+	if receivedCount != 1 || projectionCount != 1 {
+		t.Fatalf("pull receipt events/projections = %d/%d; want 1/1", receivedCount, projectionCount)
 	}
 }
 
@@ -979,19 +1014,16 @@ func TestPostgreSQLBridgeAPIStorePushedCompletionMailProjectsOnceBeforePullDedup
 		"msg_bridge_completion_push_first",
 		completionMailEnvelope("main", "task_"+childID, "push-first body"),
 	)
-	request := &bridgev1.CommitInputsRequest{
-		Scope:          bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		RuntimeInputId: completionRuntimeInputID(delivery),
-		InputKind:      "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessagePresentationJSON(
-			t,
-			delivery,
-			childID,
-			"sevt_bridge_completion_push_first_spawn",
-			messageJSON,
-			"push",
-		),
-	}
+	request := bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		completionRuntimeInputID(delivery),
+		delivery,
+		childID,
+		"sevt_bridge_completion_push_first_spawn",
+		messageJSON,
+	)
 	pushed, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInputs push-first completion: %v", err)
@@ -1000,16 +1032,7 @@ func TestPostgreSQLBridgeAPIStorePushedCompletionMailProjectsOnceBeforePullDedup
 		t.Fatalf("push-first status = %s; want committed", pushed.GetAck().GetStatus())
 	}
 
-	pullReplay := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-	pullReplay.InterAgentMessageJson = bridgeInterAgentMessagePresentationJSON(
-		t,
-		delivery,
-		childID,
-		"sevt_bridge_completion_push_first_spawn",
-		messageJSON,
-		"pull",
-	)
-	pulled, err := store.CommitInputs(context.Background(), pullReplay)
+	pulled, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInputs pull after push: %v", err)
 	}
@@ -1058,22 +1081,16 @@ func TestPostgreSQLBridgeAPIStoreConcurrentCompletionPushAndPullCommitOneReceipt
 		"msg_bridge_completion_race",
 		completionMailEnvelope("main", "task_"+childID, "racing completion"),
 	)
-	request := &bridgev1.CommitInputsRequest{
-		Scope:          bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		RuntimeInputId: completionRuntimeInputID(delivery),
-		InputKind:      "inter_agent_message",
-	}
-	payloads := map[string]string{}
-	for _, presentation := range []string{"push", "pull"} {
-		payloads[presentation] = bridgeInterAgentMessagePresentationJSON(
-			t,
-			delivery,
-			childID,
-			"sevt_bridge_completion_race_spawn",
-			messageJSON,
-			presentation,
-		)
-	}
+	request := bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		completionRuntimeInputID(delivery),
+		delivery,
+		childID,
+		"sevt_bridge_completion_race_spawn",
+		messageJSON,
+	)
 
 	type result struct {
 		response *bridgev1.CommitInputsResponse
@@ -1081,12 +1098,10 @@ func TestPostgreSQLBridgeAPIStoreConcurrentCompletionPushAndPullCommitOneReceipt
 	}
 	start := make(chan struct{})
 	results := make(chan result, 2)
-	for _, presentation := range []string{"push", "pull"} {
-		presentation := presentation
+	for range 2 {
 		go func() {
 			<-start
 			candidate := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-			candidate.InterAgentMessageJson = payloads[presentation]
 			response, err := store.CommitInputs(context.Background(), candidate)
 			results <- result{response: response, err: err}
 		}()
@@ -1139,13 +1154,16 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_completion_main", 1, "pod_uid_completion_main")
 
 	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_completion_main", completionMailEnvelope("main", "task_"+childID, "done"))
-	payload := bridgeInterAgentMessageJSON(t, "delivery_bridge_completion_main", childID, "sevt_bridge_completion_spawn", messageJSON)
-	request := &bridgev1.CommitInputsRequest{
-		Scope:                 bridgeAPIScope(sessionID, mainThreadID, "bind_bridge_completion_main", 1, "pod_uid_completion_main"),
-		RuntimeInputId:        "agent_mail:delivery_bridge_completion_main",
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: payload,
-	}
+	request := bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, mainThreadID, "bind_bridge_completion_main", 1, "pod_uid_completion_main"),
+		"agent_mail:delivery_bridge_completion_main",
+		"delivery_bridge_completion_main",
+		childID,
+		"sevt_bridge_completion_spawn",
+		messageJSON,
+	)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	first, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
@@ -1234,7 +1252,6 @@ func TestPostgreSQLBridgeAPIStoreSentInterAgentMessageUsesDurableTargetCallableT
 			"sevt_bridge_inter_agent_target_tool",
 			messageJSON,
 		),
-		ProjectionJson: "{}",
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent child target: %v", err)
@@ -1267,7 +1284,6 @@ func TestPostgreSQLBridgeAPIStoreSentInterAgentMessageUsesDurableTargetCallableT
 			"sevt_bridge_inter_agent_target_primary_tool",
 			messageJSON,
 		),
-		ProjectionJson: "{}",
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent primary target: %v", err)
@@ -1315,80 +1331,11 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsMalformedPublicInterAgentMessa
 				RuntimeWriteId: runtimeWriteID,
 				EventType:      "agent.thread_message_sent",
 				PayloadJson:    payload,
-				ProjectionJson: "{}",
 			})
 			if status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("WriteEvent malformed message err = %v; want InvalidArgument", err)
 			}
 			assertRejectedSentInterAgentWriteHasNoDurableSideEffects(t, admin, sessionID, runtimeWriteID)
-		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsMalformedReceivedInterAgentMessageAtomically(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID      = "sesn_bridge_inter_agent_received_malformed"
-		mainThreadID   = "thr_bridge_inter_agent_received_malformed_main"
-		targetThreadID = "thr_bridge_inter_agent_received_malformed_child"
-		bindingID      = "bind_bridge_inter_agent_received_malformed"
-		podUID         = "pod_uid_inter_agent_received_malformed"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, targetThreadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	for index, test := range []struct {
-		name    string
-		message string
-	}{
-		{name: "message is not an object", message: `"invalid"`},
-		{name: "content is not an array", message: `{"content":{"type":"text","text":"invalid"}}`},
-		{name: "text content lacks text", message: `{"content":[{"type":"text"}]}`},
-		{name: "parts are absent", message: `{}`},
-		{name: "runtime part is not text", message: `{"parts":[{"type":"image","text":"invalid"}]}`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtimeInputID := fmt.Sprintf("rin_bridge_inter_agent_received_malformed_%d", index)
-			deliveryID := fmt.Sprintf("delivery_bridge_inter_agent_received_malformed_%d", index)
-			seedBridgeAPIRuntimeInbox(
-				t,
-				admin,
-				"default",
-				sessionID,
-				targetThreadID,
-				runtimeInputID,
-				"messages",
-				"[]",
-				"accepted",
-				bindingID,
-				podUID,
-				0,
-				0,
-			)
-			_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-				Scope:          bridgeAPIScope(sessionID, targetThreadID, bindingID, 1, podUID),
-				RuntimeInputId: runtimeInputID,
-				InputKind:      "inter_agent_message",
-				InterAgentMessageJson: bridgeInterAgentMessageJSON(
-					t,
-					deliveryID,
-					mainThreadID,
-					fmt.Sprintf("sevt_bridge_inter_agent_received_malformed_%d", index),
-					test.message,
-				),
-			})
-			if status.Code(err) != codes.InvalidArgument {
-				t.Fatalf("CommitInputs malformed received message err = %v; want InvalidArgument", err)
-			}
-			assertRejectedReceivedInterAgentCommitHasNoDurableSideEffects(
-				t,
-				admin,
-				sessionID,
-				targetThreadID,
-				runtimeInputID,
-				deliveryID,
-			)
 		})
 	}
 }
@@ -1407,12 +1354,16 @@ func TestPostgreSQLBridgeAPIStoreReceivedInterAgentMessageUsesSourceCallableTask
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_inter_agent_source_name", 1, "pod_uid_inter_agent_source_name")
 	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_inter_agent_source_name", "hello sibling")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:                 bridgeAPIScope(sessionID, targetThreadID, "bind_bridge_inter_agent_source_name", 1, "pod_uid_inter_agent_source_name"),
-		RuntimeInputId:        "rin_bridge_inter_agent_source_name",
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessageJSON(t, "delivery_bridge_inter_agent_source_name", sourceThreadID, "sevt_bridge_inter_agent_source_tool", messageJSON),
-	}); err != nil {
+	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, targetThreadID, "bind_bridge_inter_agent_source_name", 1, "pod_uid_inter_agent_source_name"),
+		"rin_bridge_inter_agent_source_name",
+		"delivery_bridge_inter_agent_source_name",
+		sourceThreadID,
+		"sevt_bridge_inter_agent_source_tool",
+		messageJSON,
+	)); err != nil {
 		t.Fatalf("CommitInputs sibling inter-agent message: %v", err)
 	}
 	var payloadJSON string
@@ -1435,6 +1386,120 @@ func TestPostgreSQLBridgeAPIStoreReceivedInterAgentMessageUsesSourceCallableTask
 	assertDurableInterAgentPublicContentPreservesRuntimeMessage(t, payloadJSON, "hello sibling")
 }
 
+func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(t *testing.T) {
+	t.Run("reviewer input", func(t *testing.T) {
+		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		const (
+			sessionID  = "sesn_bridge_reviewer_input"
+			mainID     = "thr_bridge_reviewer_input_main"
+			reviewerID = "thr_bridge_reviewer_input"
+			eventID    = "evt_bridge_reviewer_input"
+			inputID    = "rin_bridge_reviewer_input"
+			bindingID  = "bind_bridge_reviewer_input"
+			podUID     = "pod_bridge_reviewer_input"
+		)
+		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
+		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+		seedBridgeAPIEvent(t, admin, "default", sessionID, reviewerID, eventID, 1, "approval_review.decision", `{"decision":"approve"}`)
+		request := &bridgev1.CommitInputsRequest{
+			Scope:          bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
+			RuntimeInputId: inputID,
+			InputKind:      "approval_review",
+			EventIds:       []string{eventID},
+			SequenceFrom:   1,
+			SequenceTo:     1,
+			Drafts: []*bridgev1.RuntimeMessageDraft{
+				bridgeInputDraftForTest(
+					"default",
+					sessionID,
+					reviewerID,
+					"approval_review",
+					inputID,
+					eventID,
+					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_REVIEWER_INPUT,
+					"user",
+					"approve",
+				),
+			},
+		}
+		response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
+		if err != nil {
+			t.Fatalf("CommitInputs reviewer input: %v", err)
+		}
+		assertSingleCommitInputReceipt(t, response, "approval_review", inputID, eventID)
+	})
+
+	t.Run("rejection", func(t *testing.T) {
+		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		const (
+			sessionID = "sesn_bridge_rejection"
+			threadID  = "thr_bridge_rejection"
+			eventID1  = "evt_bridge_rejection_1"
+			eventID2  = "evt_bridge_rejection_2"
+			inputID   = "rin_bridge_rejection"
+			bindingID = "bind_bridge_rejection"
+			podUID    = "pod_bridge_rejection"
+		)
+		seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID1, 1, "user.message", `{"type":"user.message","content":[{"type":"text","text":"oversized one"}]}`)
+		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID2, 2, "user.message", `{"type":"user.message","content":[{"type":"text","text":"oversized two"}]}`)
+		seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, inputID, "rejection", `["`+eventID1+`","`+eventID2+`"]`, "accepted", bindingID, podUID, 1, 2)
+		request := &bridgev1.CommitInputsRequest{
+			Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+			RuntimeInputId: inputID,
+			InputKind:      "rejection",
+			EventIds:       []string{eventID1, eventID2},
+			SequenceFrom:   1,
+			SequenceTo:     2,
+			Drafts: []*bridgev1.RuntimeMessageDraft{
+				bridgeInputDraftForTest(
+					"default",
+					sessionID,
+					threadID,
+					"rejection",
+					inputID,
+					eventID1,
+					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_REJECTION,
+					"assistant",
+					"Input was not accepted.",
+				),
+				bridgeInputDraftForTestOrdinal(
+					"default",
+					sessionID,
+					threadID,
+					"rejection",
+					inputID,
+					eventID2,
+					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_REJECTION,
+					"assistant",
+					"Input was not accepted.",
+					1,
+				),
+			},
+		}
+		response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
+		if err != nil {
+			t.Fatalf("CommitInputs rejection: %v", err)
+		}
+		receipts := response.GetDeclaration().GetReceipts()
+		if len(receipts) != 1 || len(receipts[0].GetEvents()) != 2 || len(receipts[0].GetMessages()) != 2 {
+			t.Fatalf("CommitInputs batched rejection receipt = %+v; want two settled sources and projections", response.GetDeclaration())
+		}
+	})
+}
+
+func assertSingleCommitInputReceipt(t *testing.T, response *bridgev1.CommitInputsResponse, sourceKind string, sourceID string, eventID string) {
+	t.Helper()
+	receipts := response.GetDeclaration().GetReceipts()
+	if len(receipts) != 1 || receipts[0].GetSourceKind() != sourceKind || receipts[0].GetSourceId() != sourceID ||
+		len(receipts[0].GetEvents()) != 1 || receipts[0].GetEvents()[0].GetEventId() != eventID ||
+		len(receipts[0].GetMessages()) != 1 || receipts[0].GetMessages()[0].GetOwningEventId() != eventID {
+		t.Fatalf("CommitInputs receipt = %+v; want one %s receipt for %s", response.GetDeclaration(), sourceKind, sourceID)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreRejectsCompletionReceiptOnApprovalReviewer(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -1450,18 +1515,16 @@ func TestPostgreSQLBridgeAPIStoreRejectsCompletionReceiptOnApprovalReviewer(t *t
 	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:          bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
-		RuntimeInputId: "agent_mail:delivery_reviewer_rejected",
-		InputKind:      "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessageJSON(
-			t,
-			"delivery_reviewer_rejected",
-			sourceID,
-			"sevt_reviewer_rejected_spawn",
-			bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_reviewer_rejected", "completion"),
-		),
-	})
+	_, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
+		"agent_mail:delivery_reviewer_rejected",
+		"delivery_reviewer_rejected",
+		sourceID,
+		"sevt_reviewer_rejected_spawn",
+		bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_reviewer_rejected", "completion"),
+	))
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("CommitInputs completion receipt on reviewer err = %v; want FailedPrecondition", err)
 	}
@@ -1481,8 +1544,8 @@ func TestPostgreSQLBridgeAPIStoreRejectsCompletionReceiptOnApprovalReviewer(t *t
 	).Scan(&messageCount); err != nil {
 		t.Fatalf("count reviewer completion messages: %v", err)
 	}
-	if receivedCount != 0 || messageCount != 0 {
-		t.Fatalf("reviewer completion receipt side effects = event %d message %d; want zero", receivedCount, messageCount)
+	if receivedCount != 1 || messageCount != 0 {
+		t.Fatalf("reviewer completion receipt side effects = admitted event %d message %d; want 1/0", receivedCount, messageCount)
 	}
 }
 

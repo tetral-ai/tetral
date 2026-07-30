@@ -56,12 +56,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	seedBridgeAPIInternalToolCallMessage(t, admin, "default", "sesn_bridge_repair", "thr_bridge_repair", "msg_invalid_call", "part_invalid_call", "call_repair", "unknown_tool", 1)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	repairKey := internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool")
 	request := &bridgev1.CommitInternalToolRepairRequest{
 		Scope:           bridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair"),
 		ModelRequestId:  "mreq_repair",
 		ModelToolCallId: "call_repair",
 		ToolName:        "unknown_tool",
-		DataJson:        bridgeInternalToolRepairMessageJSON(t, "sesn_bridge_repair", "msg_repair", "part_repair", "call_repair", "unknown_tool", "invalid tool"),
+		Drafts: []*bridgev1.RuntimeMessageDraft{
+			bridgeInternalToolRepairDraftForTest("default", "sesn_bridge_repair", "thr_bridge_repair", repairKey, "call_repair", "unknown_tool", "invalid tool"),
+		},
 	}
 	response, err := store.CommitInternalToolRepair(context.Background(), request)
 	if err != nil {
@@ -70,6 +73,18 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
 	}
+	if len(response.GetDeclaration().GetReceipts()) != 1 {
+		t.Fatalf("declaration receipts = %d; want 1", len(response.GetDeclaration().GetReceipts()))
+	}
+	receipt := response.GetDeclaration().GetReceipts()[0]
+	if receipt.GetOperationKind() != bridgeOpCommitInternalToolRepair ||
+		receipt.GetSourceKind() != "internal_tool_repair" ||
+		receipt.GetSourceId() != repairKey ||
+		len(receipt.GetEvents()) != 1 ||
+		len(receipt.GetMessages()) != 1 ||
+		len(receipt.GetMessages()[0].GetParts()) != 1 {
+		t.Fatalf("repair receipt = %+v; want one complete repair declaration", receipt)
+	}
 	replay, err := store.CommitInternalToolRepair(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInternalToolRepair replay: %v", err)
@@ -77,11 +92,14 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("replay ack = %s; want duplicate", replay.GetAck().GetStatus())
 	}
+	if !proto.Equal(replay.GetDeclaration(), response.GetDeclaration()) {
+		t.Fatal("replayed repair declaration differs from the committed receipt")
+	}
 
 	var messageID string
 	var kind string
 	var sourceEventID sql.NullString
-	var repairKey string
+	var storedRepairKey string
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT message_id, kind, source_event_id, repair_key, data_json
@@ -89,11 +107,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_repair'
 		    AND session_thread_id = 'thr_bridge_repair'
-		    AND repair_key IS NOT NULL`).Scan(&messageID, &kind, &sourceEventID, &repairKey, &dataJSON); err != nil {
+		    AND repair_key IS NOT NULL`).Scan(&messageID, &kind, &sourceEventID, &storedRepairKey, &dataJSON); err != nil {
 		t.Fatalf("read repair row: %v", err)
 	}
-	if messageID != "msg_repair" || kind != "assistant" || sourceEventID.Valid || repairKey != internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool") {
-		t.Fatalf("repair row message=%q kind=%q source=%v key=%q; want event-less assistant repair", messageID, kind, sourceEventID.Valid, repairKey)
+	if messageID != receipt.GetMessages()[0].GetMessageId() || kind != "assistant" || !sourceEventID.Valid || storedRepairKey != repairKey {
+		t.Fatalf("repair row message=%q kind=%q source=%v key=%q; want event-owned assistant repair", messageID, kind, sourceEventID.Valid, storedRepairKey)
 	}
 	var durable map[string]any
 	if err := json.Unmarshal([]byte(dataJSON), &durable); err != nil {
@@ -118,13 +136,17 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	}
 	if len(payload.Messages) != 2 ||
 		!strings.Contains(string(payload.Messages[0]), `"id":"msg_invalid_call"`) ||
-		!strings.Contains(string(payload.Messages[1]), `"id":"msg_repair"`) ||
+		!strings.Contains(string(payload.Messages[1]), `"id":"`+messageID+`"`) ||
 		!strings.Contains(string(payload.Messages[1]), `"toolCallId":"call_repair"`) {
 		t.Fatalf("LoadContext repair messages = %s; want invalid call followed by durable repair row", contextResponse.GetContextJson())
 	}
 
 	conflict := proto.Clone(request).(*bridgev1.CommitInternalToolRepairRequest)
-	conflict.DataJson = bridgeInternalToolRepairMessageJSON(t, "sesn_bridge_repair", "msg_repair_conflict", "part_repair_conflict", "call_repair", "unknown_tool", "different invalid tool")
+	conflict.Drafts[0].Parts[0].PartJson = strings.ReplaceAll(
+		conflict.Drafts[0].Parts[0].GetPartJson(),
+		"invalid tool",
+		"different invalid tool",
+	)
 	if _, err := store.CommitInternalToolRepair(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInternalToolRepair err = %v; want AlreadyExists", err)
 	}
@@ -141,7 +163,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 		ModelRequestId:  "mreq_repair_stale",
 		ModelToolCallId: "call_repair_stale",
 		ToolName:        "unknown_tool",
-		DataJson:        bridgeInternalToolRepairMessageJSON(t, "sesn_bridge_repair_stale", "msg_repair_stale", "part_repair_stale", "call_repair_stale", "unknown_tool", "invalid tool"),
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInternalToolRepairDraftForTest(
+			"default",
+			"sesn_bridge_repair_stale",
+			"thr_bridge_repair_stale",
+			internalToolRepairKey("mreq_repair_stale", "call_repair_stale", "unknown_tool"),
+			"call_repair_stale",
+			"unknown_tool",
+			"invalid tool",
+		)},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("stale CommitInternalToolRepair err = %v; want FailedPrecondition", err)
@@ -2395,18 +2425,27 @@ func TestPostgreSQLBridgeAPIStoreRequeueResetsPreparationBehindActiveLeasedSessi
 	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "prep_bridge_tool_stale_active_lease", "2026-01-01T01:00:00Z")
 
 	ws := workspace.ID("default")
+	partitionKey := queue.FormatSessionPartitionKey(ws, "sesn_bridge_tool_stale_active_lease")
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO queue_partition_counters (
+			workspace_id, partition_key, last_sequence, created_at, updated_at
+		 ) VALUES ('default', $1, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		partitionKey,
+	); err != nil {
+		t.Fatalf("seed active session_prepare partition sequence: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, status,
+			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, status,
 			payload_json, lease_token, leased_by, leased_at, leased_until,
 			available_at, created_at, updated_at
 			) VALUES (
-				'qjob_bridge_tool_stale_active_lease_existing', 'default', 'session_prepare', $1, $2, 'leased',
+				'qjob_bridge_tool_stale_active_lease_existing', 'default', 'session_prepare', $1, 1, $2, 'leased',
 				'{"workspace_id":"default","session_id":"sesn_bridge_tool_stale_active_lease","preparation_attempt_id":"prep_bridge_tool_stale_active_lease"}', 'lease_active_prepare', 'sandbox-service',
 					'2026-01-01T00:39:30Z', '2026-01-01T01:10:00Z',
 					'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:39:30Z'
 			)`,
-		queue.FormatSessionPartitionKey(ws, "sesn_bridge_tool_stale_active_lease"),
+		partitionKey,
 		queue.FormatSessionPrepareDedupeKey(ws, "sesn_bridge_tool_stale_active_lease", "prep_bridge_tool_stale_active_lease"),
 	); err != nil {
 		t.Fatalf("seed active leased session_prepare job: %v", err)

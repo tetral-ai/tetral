@@ -17,6 +17,7 @@ import type { RuntimeDeclarationReceipt } from "../runtime/runtime-declaration.j
 import type {
   RuntimeAcceptedInputState,
   RuntimeAcceptedThreadMetadataState,
+  RuntimeColdCoverage,
   RuntimeConfigPatchState,
   RuntimePreloadedBackgroundToolState,
   RuntimeThreadControlState,
@@ -36,6 +37,7 @@ export interface ContextLoader {
   ) => Promise<{
     readonly messages: readonly RuntimeMessage[];
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
+    readonly durableTurnId?: string | undefined;
     readonly runtimeBindingToken: string;
     readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
     readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
@@ -44,6 +46,7 @@ export interface ContextLoader {
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
     readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
+    readonly coldCoverage: RuntimeColdCoverage;
   }>;
   /** Refreshes the binding credential without changing durable declaration state. */
   readonly refreshRuntimeBindingToken?: (

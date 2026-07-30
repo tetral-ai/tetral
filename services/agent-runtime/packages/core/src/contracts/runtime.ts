@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod/v4";
+import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderErrorCodes, ProviderMetadataSchema as RawProviderMetadataSchema } from "./provider.js";
 import type { ProviderId } from "./provider.js";
 export {
@@ -55,8 +56,8 @@ export interface SessionEventWriterServerToolUse {
 
 /** Final disposition returned by a Runtime tool route to its request turn. */
 export type RuntimeToolSettlement =
-  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly serverToolUse?: SessionEventWriterServerToolUse }
+  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string }
   | { readonly type: "cancelled"; readonly error?: RuntimeFailure };
 
 const IdentifierSchema = z.string().min(1);
@@ -77,7 +78,7 @@ const RuntimeProviderMetadataMaxBytes = 16 * 1024;
 //              services/bridge/bridge_api_settlement.go
 export const MaxStableReasoningPartsPerRequest = 16;
 export const MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024;
-const SafeOperationNameSchema = z.enum(["writeMessage", "writePart"]);
+const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
   "bounded",
@@ -471,6 +472,88 @@ export const RuntimeMessageDraftSchema = z.strictObject({
 });
 export type RuntimeMessageDraft = z.infer<typeof RuntimeMessageDraftSchema>;
 
+export interface RuntimeDurableEventStamp {
+  readonly sessionThreadId: string;
+  readonly sourceEventId: string;
+  readonly eventId: string;
+  readonly eventSequence: number;
+  readonly disposition: "existing" | "created";
+}
+
+export interface RuntimeDurablePartStamp {
+  readonly runtimeLocalPartId: string;
+  readonly partId: string;
+  readonly messageId: string;
+  readonly partSequence: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly disposition: "created" | "updated";
+}
+
+export interface RuntimeDurableMessageStamp {
+  readonly runtimeLocalId: string;
+  readonly sessionThreadId: string;
+  readonly owningEventId: string;
+  readonly messageId: string;
+  readonly messageSequence: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly disposition: "created" | "updated";
+  readonly parts: readonly RuntimeDurablePartStamp[];
+}
+
+export interface RuntimePrefixConsumptionStamp {
+  readonly childThreadId: string;
+  readonly parentBoundaryEventId: string;
+  readonly checkpointMessageId: string;
+  readonly disposition: "consumed";
+}
+
+export interface RuntimeRequestRescheduleStamp {
+  readonly disposition: "accepted" | "denied_attempt_mismatch" | "denied_budget_exhausted";
+  readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
+  readonly attempt: number;
+  readonly effectiveDeadline: string;
+}
+
+export interface RuntimeIdleCloseoutStamp {
+  readonly durableTurnId: string;
+  readonly idleEventId: string;
+  readonly idleEventSequence: number;
+  readonly committedIdleAt: string;
+}
+
+export interface RuntimeChildLifecycleStamp {
+  readonly childThreadId: string;
+  readonly disposition: "closed" | "already_closed" | "resumed" | "already_active";
+  readonly effectiveAt: string;
+}
+
+export interface RuntimeSealedAgentMailStamp {
+  readonly runtimeInputId: string;
+  readonly birthPreparationAttemptId: string;
+  readonly failedPreparationAttemptId: string;
+  readonly disposition: "sealed_for_failed_birth";
+}
+
+export interface RuntimeDeclarationReceipt {
+  readonly sessionThreadId: string;
+  readonly operationKind: string;
+  readonly sourceKind: string;
+  readonly sourceId: string;
+  readonly declarationDigest: string;
+  readonly events: readonly RuntimeDurableEventStamp[];
+  readonly messages: readonly RuntimeDurableMessageStamp[];
+  readonly pendingAttachmentDelta: readonly ProviderRequestAttachment[];
+  readonly pendingToolDelta: readonly string[];
+  readonly prefixConsumptions: readonly RuntimePrefixConsumptionStamp[];
+  readonly requestReschedule?: RuntimeRequestRescheduleStamp | undefined;
+  readonly idleCloseout?: RuntimeIdleCloseoutStamp | undefined;
+  readonly compactedThroughMessageSequence?: number | undefined;
+  readonly childLifecycle: readonly RuntimeChildLifecycleStamp[];
+  readonly sealedAgentMail?: RuntimeSealedAgentMailStamp | undefined;
+}
+
 // Boundary contract for persisted runtime parts, not a backend table definition.
 // It also enforces that every part remains attached to the owning message and session.
 export const RuntimeMessageSchema = RuntimeMessageInfoSchema.extend({
@@ -509,28 +592,40 @@ export type DurableRuntimeMessage = z.infer<typeof DurableRuntimeMessageSchema>;
 
 /** One self-contained invalid-tool repair committed before it enters hot history. */
 export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
+  requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
+  bindingId: SanitizedIdentifierSchema,
+  bindingGeneration: NonNegativeIntegerSchema,
+  targetPodUid: SanitizedIdentifierSchema,
   modelRequestId: SanitizedIdentifierSchema,
   modelToolCallId: SanitizedIdentifierSchema,
   toolName: SanitizedIdentifierSchema,
   repairKey: SanitizedIdentifierSchema,
-  message: RuntimeMessageSchema,
+  draft: RuntimeMessageDraftSchema,
 })
-  .refine((repair) => repair.message.sessionId === repair.sessionId, "repair message sessionId must match the request")
-  .refine((repair) => repair.message.role === "assistant" && repair.message.origin === "agent" && repair.message.status === "completed", "repair message must be a completed assistant agent message")
-  .refine((repair) => repair.message.parts.length === 1, "repair message must carry exactly one part")
+  .refine((repair) =>
+    repair.draft.sourceKind === "internal_tool_repair" &&
+    repair.draft.sourceId === repair.repairKey &&
+    repair.draft.sourceEventId === undefined &&
+    repair.draft.draftKind === "internal_tool_repair" &&
+    repair.draft.ordinal === 0,
+  "repair draft identity must match the repair operation")
+  .refine((repair) =>
+    repair.draft.role === "assistant" &&
+    repair.draft.origin === "agent" &&
+    repair.draft.status === "completed",
+  "repair draft must be a completed assistant agent message")
+  .refine((repair) => repair.draft.parts.length === 1, "repair draft must carry exactly one part")
   .refine((repair) => {
-    const [part] = repair.message.parts;
+    const [part] = repair.draft.parts;
     return part?.type === "tool" &&
-      part.sessionId === repair.sessionId &&
-      part.messageId === repair.message.id &&
       part.toolCallId === repair.modelToolCallId &&
       part.toolName === repair.toolName &&
       part.toolUseEventId === undefined &&
       part.state.status === "error";
-  }, "repair part must be an internal terminal tool error without a public tool use id");
+  }, "repair draft part must be an internal terminal tool error without a public tool use id");
 export type RuntimeInternalToolRepairCommit = z.infer<typeof RuntimeInternalToolRepairCommitSchema>;
 
 const UserRuntimeMessageSchema = RuntimeMessageSchema.refine((message) => message.role === "user", "pending input messages must be user messages");
@@ -862,15 +957,20 @@ function validateStableReasoningSet(
 
 /** WriteEvent payload with identity, projection, reasoning, and server-tool bounds. */
 export const SessionEventEnvelopeSchema = z.strictObject({
+  requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
+  bindingId: SanitizedIdentifierSchema,
+  bindingGeneration: NonNegativeIntegerSchema,
+  targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
   event: SessionEventSchema,
-  projectionJson: z.string().optional(),
+  drafts: z.array(RuntimeMessageDraftSchema),
   modelRequestId: SanitizedIdentifierSchema.optional(),
   stableReasoningParts: z.array(SessionEventWriterStableReasoningPartSchema).max(MaxStableReasoningPartsPerRequest).optional(),
   serverToolUse: SessionEventWriterServerToolUseSchema.optional(),
+  mcpMaterializationHandle: SanitizedIdentifierSchema.optional(),
 }).superRefine((envelope, context) => {
   const parts = envelope.stableReasoningParts ?? [];
   if (parts.length > 0 && envelope.event.type !== "agent.tool_use" && envelope.event.type !== "agent.mcp_tool_use") {
@@ -879,15 +979,8 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   if (parts.length > 0 && envelope.modelRequestId === undefined) {
     context.addIssue({ code: "custom", message: "stable reasoning requires a model request id" });
   }
-  if ((envelope.event.type === "agent.tool_result" || envelope.event.type === "agent.mcp_tool_result") && envelope.modelRequestId === undefined) {
-    context.addIssue({ code: "custom", message: "tool result projection requires a model request id" });
-  }
-  const projectionJson = envelope.projectionJson?.trim();
-  if (envelope.event.type === "agent.message" && projectionJson !== undefined && projectionJson !== "" && projectionJson !== "{}" && envelope.modelRequestId === undefined) {
-    context.addIssue({ code: "custom", message: "assistant text projection requires a model request id" });
-  }
-  if ((envelope.event.type === "agent.tool_use" || envelope.event.type === "agent.mcp_tool_use") && parts.length === 0 && envelope.modelRequestId !== undefined) {
-    context.addIssue({ code: "custom", message: "unanchored tool use forbids a model request id" });
+  if (envelope.drafts.length > 0 && envelope.modelRequestId === undefined) {
+    context.addIssue({ code: "custom", message: "runtime output projection requires a model request id" });
   }
   if ((envelope.event.type.startsWith("session.") || envelope.event.type.startsWith("span.")) && envelope.modelRequestId !== undefined) {
     context.addIssue({ code: "custom", message: "non-assistant event forbids a model request id" });
@@ -895,15 +988,25 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   if (envelope.serverToolUse !== undefined && envelope.event.type !== "agent.tool_result") {
     context.addIssue({ code: "custom", message: "server tool usage requires a tool-result event" });
   }
+  if (envelope.mcpMaterializationHandle !== undefined && envelope.event.type !== "agent.mcp_tool_result") {
+    context.addIssue({ code: "custom", message: "MCP materialization requires an MCP tool-result event" });
+  }
+  if (envelope.event.type === "agent.mcp_tool_result" && envelope.mcpMaterializationHandle === undefined) {
+    context.addIssue({ code: "custom", message: "MCP tool-result event requires materialization" });
+  }
   validateStableReasoningSet(parts, context);
 });
 export type SessionEventEnvelope = z.infer<typeof SessionEventEnvelopeSchema>;
 
 /** Request-end settlement payload, including retry and attachment consumption facts. */
 export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
+  requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
+  bindingId: SanitizedIdentifierSchema,
+  bindingGeneration: NonNegativeIntegerSchema,
+  targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
   modelRequestId: SanitizedIdentifierSchema,
   modelRequestStartEventId: SanitizedIdentifierSchema,
@@ -923,6 +1026,33 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
     backoffMs: NonNegativeIntegerSchema,
   }).optional(),
   stableReasoningParts: z.array(SessionEventWriterStableReasoningPartSchema).max(MaxStableReasoningPartsPerRequest).optional(),
+  drafts: z.array(RuntimeMessageDraftSchema).optional(),
+  prefixConsumption: z.strictObject({
+    childThreadId: SanitizedIdentifierSchema,
+    parentBoundaryEventId: SanitizedIdentifierSchema,
+    checkpointRuntimeLocalId: SanitizedIdentifierSchema,
+  }).optional(),
+  compactedThroughMessageSequence: NonNegativeIntegerSchema.optional(),
+  compactionEventPayloadJson: z.string().superRefine((value, context) => {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        context.addIssue({ code: "custom", message: "compaction event payload must be a JSON object" });
+      }
+    } catch {
+      context.addIssue({ code: "custom", message: "compaction event payload must be valid JSON" });
+    }
+  }).optional(),
+  interruptSettlement: z.strictObject({
+    runtimeInputId: SanitizedIdentifierSchema,
+    eventIds: z.array(SanitizedIdentifierSchema).length(1),
+    sequenceFrom: NonNegativeIntegerSchema,
+    sequenceTo: NonNegativeIntegerSchema,
+    pendingToolCancellations: z.array(z.strictObject({
+      toolUseEventId: SanitizedIdentifierSchema,
+      runtimeLocalId: SanitizedIdentifierSchema,
+    })),
+  }).optional(),
 }).superRefine((envelope, context) => {
   const parts = envelope.stableReasoningParts ?? [];
   if (parts.length > 0 && (envelope.isError || envelope.reschedule !== undefined)) {
@@ -937,6 +1067,91 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
   if (envelope.reschedule !== undefined && consumedAttachmentCount > 0) {
     context.addIssue({ code: "custom", message: "rescheduled request ends cannot consume attachments" });
   }
+  const isCompaction = envelope.requestKind === "compaction_summary";
+  const drafts = envelope.drafts ?? [];
+  const cancellationDrafts = drafts.filter((draft) => draft.draftKind === "cancellation");
+  const primaryDrafts = drafts.filter((draft) => draft.draftKind !== "cancellation");
+  if (envelope.interruptSettlement === undefined) {
+    if (cancellationDrafts.length > 0) {
+      context.addIssue({ code: "custom", message: "request-end cancellation drafts require interrupt settlement" });
+    }
+  } else {
+    if (
+      !envelope.isError ||
+      envelope.errorKind !== "runtime_interrupted" ||
+      envelope.reschedule !== undefined ||
+      envelope.interruptSettlement.sequenceTo < envelope.interruptSettlement.sequenceFrom
+    ) {
+      context.addIssue({ code: "custom", message: "request-end interrupt settlement requires an interrupted terminal end" });
+    }
+    if (
+      cancellationDrafts.length !== envelope.interruptSettlement.pendingToolCancellations.length ||
+      cancellationDrafts.some((draft) =>
+        draft.sourceKind !== "interrupt_control" ||
+        draft.sourceId !== envelope.interruptSettlement?.runtimeInputId ||
+        draft.sourceEventId !== envelope.interruptSettlement?.eventIds[0]
+      )
+    ) {
+      context.addIssue({ code: "custom", message: "request-end interrupt cancellation drafts are incomplete" });
+    }
+    const cancellationIDs = new Set(cancellationDrafts.map((draft) => draft.runtimeLocalId));
+    if (
+      cancellationIDs.size !== cancellationDrafts.length ||
+      envelope.interruptSettlement.pendingToolCancellations.some(
+        (pending) => !cancellationIDs.has(pending.runtimeLocalId),
+      )
+    ) {
+      context.addIssue({ code: "custom", message: "request-end interrupt cancellation mapping is invalid" });
+    }
+  }
+  if (isCompaction) {
+    if (!envelope.isError && envelope.reschedule === undefined) {
+      if (
+        primaryDrafts.length !== 1 ||
+        primaryDrafts[0]?.draftKind !== "compaction_checkpoint" ||
+        envelope.compactedThroughMessageSequence === undefined ||
+        envelope.compactionEventPayloadJson === undefined
+      ) {
+        context.addIssue({ code: "custom", message: "successful compaction requires its event, checkpoint, and sequence boundary" });
+      }
+      if (
+        envelope.prefixConsumption !== undefined &&
+        envelope.prefixConsumption.checkpointRuntimeLocalId !== primaryDrafts[0]?.runtimeLocalId
+      ) {
+        context.addIssue({ code: "custom", message: "prefix consumption must name the compaction checkpoint draft" });
+      }
+    } else {
+      if (primaryDrafts.length !== 0) {
+        context.addIssue({ code: "custom", message: "failed compaction request ends permit cancellation drafts only" });
+      }
+      if (
+        envelope.prefixConsumption !== undefined ||
+        envelope.compactedThroughMessageSequence !== undefined ||
+        envelope.compactionEventPayloadJson !== undefined
+      ) {
+        context.addIssue({ code: "custom", message: "failed compaction request ends forbid checkpoint declaration fields" });
+      }
+    }
+  } else {
+    if (
+      envelope.prefixConsumption !== undefined ||
+      envelope.compactedThroughMessageSequence !== undefined ||
+      envelope.compactionEventPayloadJson !== undefined
+    ) {
+      context.addIssue({ code: "custom", message: "non-compaction request ends forbid checkpoint declaration fields" });
+    }
+    if (
+      primaryDrafts.length > 1 ||
+      primaryDrafts.some((draft) =>
+        draft.draftKind !== "assistant_text" ||
+        draft.sourceKind !== "model_request" ||
+        draft.sourceId !== envelope.modelRequestId ||
+        draft.status === "streaming"
+      )
+    ) {
+      context.addIssue({ code: "custom", message: "ordinary request ends permit one terminal assistant seal only" });
+    }
+  }
   validateStableReasoningSet(parts, context);
 });
 export type SessionEventWriterRequestEndEnvelope = z.infer<typeof SessionEventWriterRequestEndEnvelopeSchema>;
@@ -945,18 +1160,76 @@ export const SessionEventWriterFinishIdleEnvelopeSchema = z.strictObject({
   workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
-  writeId: SanitizedIdentifierSchema,
-  idleSince: TimestampSchema,
+  bindingId: SanitizedIdentifierSchema,
+  bindingGeneration: NonNegativeIntegerSchema,
+  targetPodUid: SanitizedIdentifierSchema,
+  durableTurnId: SanitizedIdentifierSchema,
   stopReason: SessionIdleStopReasonSchema,
+  drafts: z.array(RuntimeMessageDraftSchema).max(1).optional(),
+}).superRefine((envelope, context) => {
+  if ((envelope.drafts ?? []).some((draft) => draft.draftKind !== "completion_mail")) {
+    context.addIssue({ code: "custom", message: "idle closeout permits a completion-mail draft only" });
+  }
 });
 export type SessionEventWriterFinishIdleEnvelope = z.infer<typeof SessionEventWriterFinishIdleEnvelopeSchema>;
 
 export const SessionEventWriterRuntimeTerminationEnvelopeSchema = z.strictObject({
+  requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
   sessionId: SanitizedIdentifierSchema,
   sessionThreadId: SanitizedIdentifierSchema,
+  bindingId: SanitizedIdentifierSchema,
+  bindingGeneration: NonNegativeIntegerSchema,
+  targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
   failure: RuntimeFailureSchema,
+  drafts: z.array(RuntimeMessageDraftSchema),
+  pendingToolCancellations: z.array(z.strictObject({
+    toolUseEventId: SanitizedIdentifierSchema,
+    runtimeLocalId: SanitizedIdentifierSchema,
+  })),
+}).superRefine((envelope, context) => {
+  const cancellationDrafts = envelope.drafts.filter((draft) => draft.draftKind === "termination");
+  const completionDrafts = envelope.drafts.filter((draft) => draft.draftKind === "completion_mail");
+  if (
+    cancellationDrafts.length + completionDrafts.length !== envelope.drafts.length ||
+    completionDrafts.length > 1 ||
+    envelope.drafts.some((draft, ordinal) =>
+      draft.sourceKind !== "runtime_termination" ||
+      draft.sourceId !== envelope.writeId ||
+      draft.sourceEventId !== undefined ||
+      draft.ordinal !== ordinal
+    )
+  ) {
+    context.addIssue({ code: "custom", message: "runtime termination draft set is invalid" });
+  }
+  const cancellationIDs = new Set(cancellationDrafts.map((draft) => draft.runtimeLocalId));
+  const toolUseIDs = new Set(envelope.pendingToolCancellations.map((pending) => pending.toolUseEventId));
+  if (
+    cancellationIDs.size !== cancellationDrafts.length ||
+    toolUseIDs.size !== envelope.pendingToolCancellations.length ||
+    cancellationDrafts.length !== envelope.pendingToolCancellations.length ||
+    envelope.pendingToolCancellations.some((pending) => !cancellationIDs.has(pending.runtimeLocalId)) ||
+    cancellationDrafts.some((draft) =>
+      draft.role !== "assistant" ||
+      draft.origin !== "agent" ||
+      draft.status !== "completed" ||
+      draft.parts.length !== 1 ||
+      draft.parts[0]?.type !== "tool" ||
+      draft.parts[0].state.status !== "cancelled"
+    )
+  ) {
+    context.addIssue({ code: "custom", message: "runtime termination pending-tool declaration is incomplete" });
+  }
+  if (completionDrafts.some((draft) =>
+    draft.role !== "user" ||
+    draft.origin !== "runtime" ||
+    draft.status !== "completed" ||
+    draft.parts.length !== 1 ||
+    draft.parts[0]?.type !== "text"
+  )) {
+    context.addIssue({ code: "custom", message: "runtime termination completion mail is invalid" });
+  }
 });
 export type SessionEventWriterRuntimeTerminationEnvelope = z.infer<typeof SessionEventWriterRuntimeTerminationEnvelopeSchema>;
 
@@ -982,10 +1255,17 @@ export type SessionEventWriterError = z.infer<typeof SessionEventWriterErrorSche
 export const SessionEventWriterAppendResultSchema = z.discriminatedUnion("ok", [
   z.strictObject({
     ok: z.literal(true),
-    writeId: SanitizedIdentifierSchema,
-    eventId: SanitizedIdentifierSchema,
-    processedAt: TimestampSchema,
-    rescheduleDisposition: z.discriminatedUnion("status", [
+      writeId: SanitizedIdentifierSchema,
+      eventId: SanitizedIdentifierSchema,
+      processedAt: TimestampSchema,
+      declaration: z.strictObject({
+        receipt: z.custom<RuntimeDeclarationReceipt>(),
+        relatedReceipts: z.array(z.custom<RuntimeDeclarationReceipt>()).optional(),
+        applicationDisposition: z.enum(["current_custody", "stale_custody"]),
+        observedBindingId: SanitizedIdentifierSchema,
+        observedBindingGeneration: NonNegativeIntegerSchema,
+      }).optional(),
+      rescheduleDisposition: z.discriminatedUnion("status", [
       z.strictObject({
         status: z.literal("accepted"),
         attempt: z.number().int().positive(),
@@ -993,7 +1273,7 @@ export const SessionEventWriterAppendResultSchema = z.discriminatedUnion("ok", [
       }),
       z.strictObject({
         status: z.literal("denied"),
-        reason: z.enum(["stale_terminal", "attempt_mismatch", "budget_exhausted"]),
+        reason: z.enum(["attempt_mismatch", "budget_exhausted"]),
         attempt: z.number().int().nonnegative(),
       }),
     ]).optional(),
@@ -1034,15 +1314,14 @@ const OperationSleepSchema = z.custom<(durationMs: number, signal: AbortSignal) 
   "operation sleep",
 );
 
-/** Cancellation and deadline controls required for every validating message-store operation. */
-export const RuntimeMessageStoreOperationControlsSchema = z
+/** Cancellation and deadline controls for the Bridge-backed internal repair declaration. */
+export const RuntimeDeclarationOperationControlsSchema = z
   .strictObject({
     signal: AbortSignalLikeSchema,
     timeoutMs: PositiveIntegerSchema.optional(),
     deadlineEpochMs: PositiveIntegerSchema.optional(),
     nowEpochMs: OperationClockSchema.optional(),
     sleep: OperationSleepSchema,
-    maxNormalizedTextPreviewBytes: PositiveIntegerSchema.optional(),
   })
   .refine(
     (controls) => controls.timeoutMs !== undefined || controls.deadlineEpochMs !== undefined,
@@ -1052,76 +1331,46 @@ export const RuntimeMessageStoreOperationControlsSchema = z
     (controls) => controls.deadlineEpochMs === undefined || controls.nowEpochMs !== undefined,
     "runtime message store deadline controls require nowEpochMs",
   );
-export type RuntimeMessageStoreOperationControls = z.infer<typeof RuntimeMessageStoreOperationControlsSchema>;
+export type RuntimeDeclarationOperationControls = z.infer<typeof RuntimeDeclarationOperationControlsSchema>;
 
-type RuntimeMessageStoreRawOperationStart = () => () => void;
-const RuntimeMessageStoreRawOperationOwners = new WeakMap<AbortSignal, RuntimeMessageStoreRawOperationStart>();
+type RuntimeDeclarationRawOperationStart = () => () => void;
+const RuntimeDeclarationRawOperationOwners = new WeakMap<AbortSignal, RuntimeDeclarationRawOperationStart>();
 
 /** Internal hot-execution lifecycle hook. It is keyed by the local operation
  * signal and never crosses the Runtime/Bridge contract boundary. */
-export function ownRuntimeMessageStoreRawOperations(
+export function ownRuntimeDeclarationRawOperations(
   signal: AbortSignal,
-  start: RuntimeMessageStoreRawOperationStart,
+  start: RuntimeDeclarationRawOperationStart,
 ): () => void {
-  RuntimeMessageStoreRawOperationOwners.set(signal, start);
+  RuntimeDeclarationRawOperationOwners.set(signal, start);
   return () => {
-    if (RuntimeMessageStoreRawOperationOwners.get(signal) === start) {
-      RuntimeMessageStoreRawOperationOwners.delete(signal);
+    if (RuntimeDeclarationRawOperationOwners.get(signal) === start) {
+      RuntimeDeclarationRawOperationOwners.delete(signal);
     }
   };
 }
 
-export const RuntimeMessageStoreWriteMessageResultSchema = z.discriminatedUnion("ok", [
-  z.strictObject({
-    ok: z.literal(true),
-    messageId: RuntimeIdentifierSchema,
-    operation: z.literal("writeMessage"),
-  }),
-  z.strictObject({
-    ok: z.literal(false),
-    error: RuntimeMessageStoreErrorSchema,
-  }),
-]);
-export type RuntimeMessageStoreWriteMessageResult = z.infer<typeof RuntimeMessageStoreWriteMessageResultSchema>;
+const RuntimeDeclarationApplicationSchema = z.strictObject({
+  receipt: z.custom<RuntimeDeclarationReceipt>(),
+  applicationDisposition: z.enum(["current_custody", "stale_custody"]),
+  observedBindingId: SanitizedIdentifierSchema,
+  observedBindingGeneration: NonNegativeIntegerSchema,
+});
 
-const RawRuntimeMessageStoreWriteMessageResultSchema = z.discriminatedUnion("ok", [
+export const RuntimeInternalToolRepairCommitResultSchema = z.discriminatedUnion("ok", [
   z.strictObject({
     ok: z.literal(true),
-    messageId: IdentifierSchema,
-    operation: z.literal("writeMessage"),
+    eventId: RuntimeIdentifierSchema,
+    declaration: RuntimeDeclarationApplicationSchema,
   }),
   z.strictObject({
     ok: z.literal(false),
     error: RuntimeMessageStoreErrorSchema,
   }),
 ]);
+export type RuntimeInternalToolRepairCommitResult = z.infer<typeof RuntimeInternalToolRepairCommitResultSchema>;
 
-export const RuntimeMessageStoreWritePartResultSchema = z.discriminatedUnion("ok", [
-  z.strictObject({
-    ok: z.literal(true),
-    messageId: RuntimeIdentifierSchema,
-    partId: RuntimeIdentifierSchema,
-    operation: z.literal("writePart"),
-  }),
-  z.strictObject({
-    ok: z.literal(false),
-    error: RuntimeMessageStoreErrorSchema,
-  }),
-]);
-export type RuntimeMessageStoreWritePartResult = z.infer<typeof RuntimeMessageStoreWritePartResultSchema>;
-
-const RawRuntimeMessageStoreWritePartResultSchema = z.discriminatedUnion("ok", [
-  z.strictObject({
-    ok: z.literal(true),
-    messageId: IdentifierSchema,
-    partId: IdentifierSchema,
-    operation: z.literal("writePart"),
-  }),
-  z.strictObject({
-    ok: z.literal(false),
-    error: RuntimeMessageStoreErrorSchema,
-  }),
-]);
+const RawRuntimeInternalToolRepairCommitResultSchema = RuntimeInternalToolRepairCommitResultSchema;
 
 /** Injectable clock, identity, and cancellation-aware sleep dependencies for Runtime Core. */
 export interface RuntimeDependencies {
@@ -1139,7 +1388,7 @@ const StoreErrorRetryableCodes = new Set<(typeof RuntimeMessageStoreErrorCodes)[
 
 export interface RuntimeMessageStoreErrorInput {
   readonly code?: RuntimeMessageStoreError["code"];
-  readonly operation: "writeMessage" | "writePart";
+  readonly operation: "commitInternalToolRepair";
   readonly rawError?: unknown;
   readonly reason?: z.infer<typeof SafeReasonCodeSchema> | undefined;
   readonly constraint?: string | undefined;
@@ -1259,36 +1508,19 @@ function sanitizeRuntimeFailure(failure: RuntimeFailure): RuntimeFailure {
   });
 }
 
-function prepareRuntimeMessageInfoForStableWrite(message: RuntimeMessageInfo): RuntimeMessageInfo {
-  return RuntimeMessageInfoSchema.parse({
-    ...message,
-    ...(message.error !== undefined ? { error: sanitizeRuntimeFailure(message.error) } : {}),
-  });
-}
-
-type RuntimeMessageStoreOperationName = "writeMessage" | "writePart";
-
-function schemaMismatch(operation: RuntimeMessageStoreOperationName): RuntimeMessageStoreError {
+function declarationSchemaMismatch(): RuntimeMessageStoreError {
   return normalizeRuntimeMessageStoreError({
     code: "schema_mismatch",
-    operation,
+    operation: "commitInternalToolRepair",
     reason: "runtime_contract_validation",
   });
 }
 
-function writeAcknowledgementMismatch(operation: "writeMessage" | "writePart"): RuntimeMessageStoreError {
-  return normalizeRuntimeMessageStoreError({
-    code: "schema_mismatch",
-    operation,
-    reason: "write_acknowledgement_mismatch",
-  });
-}
-
-function caughtStoreError(operation: "writeMessage" | "writePart", error: unknown): RuntimeMessageStoreError {
-  if (error instanceof RuntimeMessageStoreOperationError) {
+function caughtDeclarationStoreError(error: unknown): RuntimeMessageStoreError {
+  if (error instanceof RuntimeDeclarationOperationError) {
     return normalizeRuntimeMessageStoreError({
       code: error.storeError.code,
-      operation,
+      operation: "commitInternalToolRepair",
       reason: error.storeError.reason,
       constraint: error.storeError.constraint,
       status: error.storeError.status,
@@ -1302,152 +1534,52 @@ function caughtStoreError(operation: "writeMessage" | "writePart", error: unknow
   const code = RuntimeMessageStoreErrorSchema.shape.code.safeParse(errorRecord.code);
   return normalizeRuntimeMessageStoreError({
     code: code.success ? code.data : "unknown",
-    operation,
+    operation: "commitInternalToolRepair",
     rawError: error,
   });
 }
 
-/** Error wrapper that preserves a normalized store failure across an async implementation. */
-export class RuntimeMessageStoreOperationError extends Error {
+/** Error wrapper that preserves a normalized declaration failure across an async implementation. */
+export class RuntimeDeclarationOperationError extends Error {
   readonly storeError: RuntimeMessageStoreError;
 
   constructor(storeError: RuntimeMessageStoreError) {
     super(storeError.message);
-    this.name = "RuntimeMessageStoreOperationError";
+    this.name = "RuntimeDeclarationOperationError";
     this.storeError = storeError;
   }
 }
 
 /**
- * Validating message port implemented by the Runtime hot store, with internal
- * repairs delegated by that implementation to its Bridge-backed dependency.
- * Public methods own bounds, deadlines, acknowledgement identity, and error
- * normalization before delegating to protected record operations. The
- * production hot-store implementation acknowledges ordinary message and part
- * identities locally; their durable projection is gated later by Bridge event
- * writes, while internal repair commits cross Bridge through this port.
+ * Validating Bridge-backed port for the one internal repair declaration that
+ * is not authored as a public WriteEvent.
  */
-export abstract class RuntimeMessageStore {
-  async writeMessage(message: unknown, controls: unknown): Promise<RuntimeMessageStoreWriteMessageResult> {
-    const parsedMessage = RuntimeMessageInfoSchema.safeParse(message);
-    const parsedControls = RuntimeMessageStoreOperationControlsSchema.safeParse(controls);
-    if (!parsedMessage.success || !parsedControls.success) {
-      return { ok: false, error: schemaMismatch("writeMessage") };
-    }
-    const preflightFailure = operationPreflightFailure(parsedControls.data, "writeMessage");
-    if (preflightFailure !== undefined) {
-      return { ok: false, error: preflightFailure };
-    }
-    try {
-      const stableMessage = prepareRuntimeMessageInfoForStableWrite(parsedMessage.data);
-      const result = await withBoundedStoreOperation(
-        (operationControls) => this.writeMessageRecord(stableMessage, operationControls),
-        parsedControls.data,
-        "writeMessage",
-      );
-      const parsedResult = RawRuntimeMessageStoreWriteMessageResultSchema.safeParse(result);
-      if (!parsedResult.success) {
-        return { ok: false, error: schemaMismatch("writeMessage") };
-      }
-      if (parsedResult.data.ok === false) {
-        return {
-          ok: false,
-          error: normalizeRuntimeMessageStoreError({
-            code: parsedResult.data.error.code,
-            operation: "writeMessage",
-            reason: parsedResult.data.error.reason,
-            constraint: parsedResult.data.error.constraint,
-            status: parsedResult.data.error.status,
-            attemptedStatus: parsedResult.data.error.attemptedStatus,
-            messageId: parsedResult.data.error.messageId,
-            partId: parsedResult.data.error.partId,
-            sessionId: parsedResult.data.error.sessionId,
-          }),
-        };
-      }
-      if (parsedResult.data.messageId !== stableMessage.id) {
-        return { ok: false, error: writeAcknowledgementMismatch("writeMessage") };
-      }
-      return RuntimeMessageStoreWriteMessageResultSchema.parse(parsedResult.data);
-    } catch (error) {
-      return { ok: false, error: caughtStoreError("writeMessage", error) };
-    }
-  }
-
-  async writePart(part: unknown, controls: unknown): Promise<RuntimeMessageStoreWritePartResult> {
-    const parsedPart = RuntimePartSchema.safeParse(part);
-    const parsedControls = RuntimeMessageStoreOperationControlsSchema.safeParse(controls);
-    if (!parsedPart.success || !parsedControls.success) {
-      return { ok: false, error: schemaMismatch("writePart") };
-    }
-    const preflightFailure = operationPreflightFailure(parsedControls.data, "writePart");
-    if (preflightFailure !== undefined) {
-      return { ok: false, error: preflightFailure };
-    }
-    const boundedPart = boundRuntimePartForStableWrite(parsedPart.data, effectiveRuntimeMessageStoreTextBudget(parsedControls.data));
-    try {
-      const result = await withBoundedStoreOperation(
-        (operationControls) => this.writePartRecord(boundedPart, operationControls),
-        parsedControls.data,
-        "writePart",
-      );
-      const parsedResult = RawRuntimeMessageStoreWritePartResultSchema.safeParse(result);
-      if (!parsedResult.success) {
-        return { ok: false, error: schemaMismatch("writePart") };
-      }
-      if (parsedResult.data.ok === false) {
-        return {
-          ok: false,
-          error: normalizeRuntimeMessageStoreError({
-            code: parsedResult.data.error.code,
-            operation: "writePart",
-            reason: parsedResult.data.error.reason,
-            constraint: parsedResult.data.error.constraint,
-            status: parsedResult.data.error.status,
-            attemptedStatus: parsedResult.data.error.attemptedStatus,
-            messageId: parsedResult.data.error.messageId,
-            partId: parsedResult.data.error.partId,
-            sessionId: parsedResult.data.error.sessionId,
-          }),
-        };
-      }
-      if (parsedResult.data.messageId !== boundedPart.messageId || parsedResult.data.partId !== boundedPart.id) {
-        return { ok: false, error: writeAcknowledgementMismatch("writePart") };
-      }
-      return RuntimeMessageStoreWritePartResultSchema.parse(parsedResult.data);
-    } catch (error) {
-      return { ok: false, error: caughtStoreError("writePart", error) };
-    }
-  }
-
-  async commitInternalToolRepair(repair: unknown, controls: unknown): Promise<RuntimeMessageStoreWritePartResult> {
+export abstract class RuntimeInternalToolRepairStore {
+  async commitInternalToolRepair(repair: unknown, controls: unknown): Promise<RuntimeInternalToolRepairCommitResult> {
     const parsedRepair = RuntimeInternalToolRepairCommitSchema.safeParse(repair);
-    const parsedControls = RuntimeMessageStoreOperationControlsSchema.safeParse(controls);
+    const parsedControls = RuntimeDeclarationOperationControlsSchema.safeParse(controls);
     if (!parsedRepair.success || !parsedControls.success) {
-      return { ok: false, error: schemaMismatch("writePart") };
+      return { ok: false, error: declarationSchemaMismatch() };
     }
-    const preflightFailure = operationPreflightFailure(parsedControls.data, "writePart");
+    const preflightFailure = operationPreflightFailure(parsedControls.data);
     if (preflightFailure !== undefined) {
       return { ok: false, error: preflightFailure };
     }
-    const stableRepair = boundInternalToolRepairForStableWrite(parsedRepair.data, effectiveRuntimeMessageStoreTextBudget(parsedControls.data));
-    const [part] = stableRepair.message.parts;
     try {
       const result = await withBoundedStoreOperation(
-        (operationControls) => this.commitInternalToolRepairRecord(stableRepair, operationControls),
+        (operationControls) => this.commitInternalToolRepairRecord(parsedRepair.data, operationControls),
         parsedControls.data,
-        "writePart",
       );
-      const parsedResult = RawRuntimeMessageStoreWritePartResultSchema.safeParse(result);
+      const parsedResult = RawRuntimeInternalToolRepairCommitResultSchema.safeParse(result);
       if (!parsedResult.success) {
-        return { ok: false, error: schemaMismatch("writePart") };
+        return { ok: false, error: declarationSchemaMismatch() };
       }
       if (parsedResult.data.ok === false) {
         return {
           ok: false,
           error: normalizeRuntimeMessageStoreError({
             code: parsedResult.data.error.code,
-            operation: "writePart",
+            operation: "commitInternalToolRepair",
             reason: parsedResult.data.error.reason,
             constraint: parsedResult.data.error.constraint,
             status: parsedResult.data.error.status,
@@ -1458,78 +1590,39 @@ export abstract class RuntimeMessageStore {
           }),
         };
       }
-      if (parsedResult.data.messageId !== stableRepair.message.id || parsedResult.data.partId !== part?.id) {
-        return { ok: false, error: writeAcknowledgementMismatch("writePart") };
-      }
-      return RuntimeMessageStoreWritePartResultSchema.parse(parsedResult.data);
+      return parsedResult.data;
     } catch (error) {
-      return { ok: false, error: caughtStoreError("writePart", error) };
+      return { ok: false, error: caughtDeclarationStoreError(error) };
     }
   }
 
-  /**
-   * AgentLoop/SessionProcessor call writeMessage after a stable assistant shell
-   * exists; success means the implementation acknowledged the same message
-   * identity, this port never reads context, ack mismatches fail closed, and raw
-   * dependency payloads are not allowed through this boundary.
-   */
-  protected abstract writeMessageRecord(
-    message: RuntimeMessageInfo,
-    controls: RuntimeMessageStoreOperationControls,
-  ): Promise<unknown>;
-
-  /**
-   * AgentLoop/SessionProcessor call writePart only for stable parts; success means
-   * the implementation acknowledged the same message and part identities, this
-   * port never reads context, ack mismatches fail closed, and raw dependency
-   * payloads are sanitized.
-   */
-  protected abstract writePartRecord(
-    part: RuntimePart,
-    controls: RuntimeMessageStoreOperationControls,
-  ): Promise<unknown>;
-
-  protected async commitInternalToolRepairRecord(
+  protected abstract commitInternalToolRepairRecord(
     repair: RuntimeInternalToolRepairCommit,
-    _controls: RuntimeMessageStoreOperationControls,
-  ): Promise<unknown> {
-    const [part] = repair.message.parts;
-    return {
-      ok: false,
-      error: normalizeRuntimeMessageStoreError({
-        code: "unavailable",
-        operation: "writePart",
-        reason: "runtime_contract_validation",
-        messageId: repair.message.id,
-        partId: part?.id,
-        sessionId: repair.sessionId,
-      }),
-    };
-  }
+    controls: RuntimeDeclarationOperationControls,
+  ): Promise<unknown>;
 }
 
 function operationPreflightFailure(
-  controls: RuntimeMessageStoreOperationControls,
-  operation: "writeMessage" | "writePart",
+  controls: RuntimeDeclarationOperationControls,
 ): RuntimeMessageStoreError | undefined {
   if (controls.signal.aborted) {
     return normalizeRuntimeMessageStoreError({
       code: "timeout",
-      operation,
+      operation: "commitInternalToolRepair",
       reason: "aborted",
     });
   }
   if (remainingOperationBudgetMs(controls) <= 0) {
     return normalizeRuntimeMessageStoreError({
       code: "timeout",
-      operation,
+      operation: "commitInternalToolRepair",
       reason: "timeout",
     });
   }
   return undefined;
 }
 
-function remainingOperationBudgetMs(controls: RuntimeMessageStoreOperationControls): number {
+function remainingOperationBudgetMs(controls: RuntimeDeclarationOperationControls): number {
   const budgets: number[] = [];
   if (controls.timeoutMs !== undefined) {
     budgets.push(controls.timeoutMs);
@@ -1544,10 +1637,9 @@ async function pendingForever(): Promise<never> {
   return await new Promise<never>(() => undefined);
 }
 
-async function withBoundedStoreOperation<T, TControls extends RuntimeMessageStoreOperationControls>(
+async function withBoundedStoreOperation<T, TControls extends RuntimeDeclarationOperationControls>(
   operation: (controls: TControls) => Promise<T>,
   controls: TControls,
-  operationName: "writeMessage" | "writePart",
 ): Promise<T> {
   const operationController = new AbortController();
   const abortOperation = (): void => operationController.abort();
@@ -1564,7 +1656,7 @@ async function withBoundedStoreOperation<T, TControls extends RuntimeMessageStor
   });
   const timeoutPromise = controls.sleep(remainingOperationBudgetMs(controls), operationController.signal)
     .then(async (elapsed) => (elapsed ? { kind: "timeout" as const } : await pendingForever()));
-  const finishOwnedRawOperation = RuntimeMessageStoreRawOperationOwners.get(controls.signal)?.();
+  const finishOwnedRawOperation = RuntimeDeclarationRawOperationOwners.get(controls.signal)?.();
   let rawOperation: Promise<T>;
   try {
     rawOperation = operation(operationControls);
@@ -1593,10 +1685,10 @@ async function withBoundedStoreOperation<T, TControls extends RuntimeMessageStor
       }
       throw ownedResult.error;
     }
-    throw new RuntimeMessageStoreOperationError(
+    throw new RuntimeDeclarationOperationError(
       normalizeRuntimeMessageStoreError({
         code: "timeout",
-        operation: operationName,
+        operation: "commitInternalToolRepair",
         reason: result.kind,
       }),
     );
@@ -1673,10 +1765,6 @@ export function boundRuntimeToolError(input: RuntimeToolError, maxBytes: number)
     message: boundedMessage.text,
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
   });
-}
-
-function effectiveRuntimeMessageStoreTextBudget(controls: RuntimeMessageStoreOperationControls): number {
-  return controls.maxNormalizedTextPreviewBytes ?? DefaultMaxNormalizedTextPreviewBytes;
 }
 
 function boundExistingRuntimeBoundedText(input: RuntimeBoundedText, maxBytes: number): RuntimeBoundedText {
@@ -1763,24 +1851,6 @@ export function boundRuntimePartForStableWrite(part: RuntimePart, maxBytes: numb
     case "step-finish":
       return part;
   }
-}
-
-function boundInternalToolRepairForStableWrite(
-  repair: RuntimeInternalToolRepairCommit,
-  maxBytes: number = DefaultMaxNormalizedTextPreviewBytes,
-): RuntimeInternalToolRepairCommit {
-  const [part] = repair.message.parts;
-  if (part === undefined) {
-    return repair;
-  }
-  const boundedPart = boundRuntimePartForStableWrite(part, maxBytes);
-  return RuntimeInternalToolRepairCommitSchema.parse({
-    ...repair,
-    message: RuntimeMessageSchema.parse({
-      ...repair.message,
-      parts: [boundedPart],
-    }),
-  });
 }
 
 export function createRuntimeId(deps: RuntimeDependencies, prefix: string): string {

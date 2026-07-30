@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,8 +74,8 @@ func runtimeTerminationErrorKind(failure runtimeTerminationFailure) string {
 	return "runtime_semantic_error"
 }
 
-func closeRuntimeTerminationSpansTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sessionWide bool, failure runtimeTerminationFailure, now time.Time) error {
-	starts, err := runtimeTerminationOpenRequestStartsTx(ctx, tx, scope, sessionWide)
+func closeRuntimeTerminationSpansTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, failure runtimeTerminationFailure, now time.Time) error {
+	starts, err := runtimeTerminationOpenRequestStartsTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
@@ -90,17 +91,13 @@ func closeRuntimeTerminationSpansTx(ctx context.Context, tx *dbconnect.Tx, scope
 	return nil
 }
 
-func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sessionWide bool) ([]runtimeOpenRequestStart, error) {
-	threadID := scope.GetSessionThreadId()
-	if sessionWide {
-		threadID = ""
-	}
+func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]runtimeOpenRequestStart, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.payload_json
 		   FROM session_events e
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
-		    AND ($3 = '' OR e.session_thread_id = $3)
+		    AND e.session_thread_id = $3
 		    AND e.type = 'span.model_request_start'
 		    AND COALESCE(e.model_request_id, '') <> ''
 		    AND NOT EXISTS (
@@ -112,7 +109,7 @@ func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx
 		    )
 		  ORDER BY e.sequence ASC, e.event_id ASC
 		  FOR UPDATE OF e`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), threadID)
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
 	if err != nil {
 		return nil, err
 	}
@@ -130,33 +127,13 @@ func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx
 	return starts, rows.Err()
 }
 
-func settleRuntimeTerminationToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sessionWide bool, now time.Time) error {
-	toolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, scope, sessionWide)
-	if err != nil {
-		return err
-	}
-	binding := runtimeTerminationBinding(scope)
-	for _, toolUse := range toolUses {
-		if _, err := insertRuntimeTerminalToolResultTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), binding, toolUse, runtimeTerminalToolResult{
-			WriteIDPrefix: "rwrite_runtime_termination_tool_",
-			Reason:        "runtime_terminated",
-			ErrorType:     "runtime_terminated",
-			Message:       "Tool execution terminated with the runtime session.",
-			Retryable:     false,
-		}, now); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sessionWide bool) ([]runtimeOrphanToolUse, error) {
 	threadID := scope.GetSessionThreadId()
 	if sessionWide {
 		threadID = ""
 	}
 	rows, err := tx.Query(ctx,
-		`SELECT e.session_thread_id, e.event_id, COALESCE(e.model_request_id, ''), e.payload_json, COALESCE(e.projection_json, '{}')
+		`SELECT e.session_thread_id, e.event_id, COALESCE(e.model_request_id, ''), e.payload_json
 		   FROM session_events e
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
@@ -181,7 +158,7 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 	toolUses := make([]runtimeOrphanToolUse, 0)
 	for rows.Next() {
 		var toolUse runtimeOrphanToolUse
-		if err := rows.Scan(&toolUse.SessionThreadID, &toolUse.EventID, &toolUse.ModelRequestID, &toolUse.PayloadJSON, &toolUse.ProjectionJSON); err != nil {
+		if err := rows.Scan(&toolUse.SessionThreadID, &toolUse.EventID, &toolUse.ModelRequestID, &toolUse.PayloadJSON); err != nil {
 			return nil, err
 		}
 		toolUses = append(toolUses, toolUse)
@@ -189,85 +166,336 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 	return toolUses, rows.Err()
 }
 
-func settleRuntimeTerminationPendingWaitsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, sessionWide bool, now time.Time) error {
-	threadID := scope.GetSessionThreadId()
-	if sessionWide {
-		threadID = ""
+func commitRuntimeTerminationDeclarationsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	runtimeWriteID string,
+	drafts []*bridgev1.RuntimeMessageDraft,
+	cancellations []*bridgev1.PendingToolCancellationDraft,
+	now time.Time,
+) (*bridgev1.DeclarationReceipt, error) {
+	cancellationByLocalID := make(map[string]*bridgev1.PendingToolCancellationDraft, len(cancellations))
+	cancellationByToolUseID := make(map[string]struct{}, len(cancellations))
+	for _, cancellation := range cancellations {
+		if cancellation == nil || cancellation.GetRuntimeLocalId() == "" || cancellation.GetToolUseEventId() == "" {
+			return nil, status.Error(codes.InvalidArgument, "runtime termination pending tool cancellation is invalid")
+		}
+		if _, duplicate := cancellationByLocalID[cancellation.GetRuntimeLocalId()]; duplicate {
+			return nil, status.Error(codes.InvalidArgument, "runtime termination pending tool cancellation is duplicated")
+		}
+		if _, duplicate := cancellationByToolUseID[cancellation.GetToolUseEventId()]; duplicate {
+			return nil, status.Error(codes.InvalidArgument, "runtime termination pending tool use is duplicated")
+		}
+		cancellationByLocalID[cancellation.GetRuntimeLocalId()] = cancellation
+		cancellationByToolUseID[cancellation.GetToolUseEventId()] = struct{}{}
 	}
-	rows, err := tx.Query(ctx,
-		`SELECT p.session_thread_id, p.tool_use_event_id, p.model_tool_call_id, p.tool_name, p.input_json,
-		        e.type, COALESCE(e.payload_json::jsonb ->> 'mcp_server_name', '')
-		   FROM session_pending_tool_uses p
-		   JOIN session_events e
-		     ON e.workspace_id = p.workspace_id AND e.session_id = p.session_id
-		    AND e.session_thread_id = p.session_thread_id AND e.event_id = p.tool_use_event_id
-		  WHERE p.workspace_id = $1 AND p.session_id = $2
-		    AND ($3 = '' OR p.session_thread_id = $3)
-		    AND p.status IN ('pending', 'resolving')
-		  ORDER BY e.sequence ASC, p.tool_use_event_id ASC
-		  FOR UPDATE OF p`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), threadID)
+	pendingToolUseIDs, err := runtimeTerminationPendingToolUseIDsTx(ctx, tx, scope)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	waits := make([]cleanupPendingWait, 0)
-	for rows.Next() {
-		var wait cleanupPendingWait
-		if err := rows.Scan(&wait.ThreadID, &wait.ToolUseEventID, &wait.ModelToolCallID, &wait.ToolName, &wait.InputJSON, &wait.EventType, &wait.MCPServerName); err != nil {
-			_ = rows.Close()
-			return err
+	if len(pendingToolUseIDs) != len(cancellationByToolUseID) {
+		return nil, status.Error(codes.FailedPrecondition, "runtime termination pending tool declaration is incomplete")
+	}
+	for _, toolUseID := range pendingToolUseIDs {
+		if _, ok := cancellationByToolUseID[toolUseID]; !ok {
+			return nil, status.Error(codes.FailedPrecondition, "runtime termination pending tool declaration is incomplete")
 		}
-		waits = append(waits, wait)
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
+
+	receipt := &bridgev1.DeclarationReceipt{
+		SessionThreadId: scope.GetSessionThreadId(),
+		OperationKind:   bridgeOpCommitRuntimeTermination,
+		SourceKind:      "runtime_termination",
+		SourceId:        runtimeWriteID,
 	}
-	_ = rows.Close()
-	for _, wait := range waits {
-		waitScope := bridgeSessionScope(scope.GetWorkspaceId(), scope.GetSessionId(), wait.ThreadID)
-		waitScope.Binding = scope.GetBinding()
-		eventID, exists, err := toolResultForToolUseExistsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), wait.ToolUseEventID)
-		if err != nil {
-			return err
+	seenCompletionMail := false
+	seenCancellations := make(map[string]struct{}, len(cancellations))
+	for index, draft := range drafts {
+		if draft == nil || draft.GetOrdinal() != int32(index) ||
+			draft.GetSourceKind() != "runtime_termination" ||
+			draft.GetSourceId() != runtimeWriteID ||
+			draft.GetSourceEventId() != "" {
+			return nil, status.Error(codes.InvalidArgument, "runtime termination draft identity is invalid")
 		}
-		if !exists {
-			eventID, err = insertPendingToolTerminalResultTx(ctx, tx, waitScope, wait, pendingToolTerminal{
-				PartStatus: "error",
-				ErrorType:  "runtime_terminated",
-				Message:    "Tool execution terminated with the runtime session.",
-			}, now)
-			if err != nil {
-				return err
+		expectedLocalID := stableRuntimeID(
+			"runtime_message_draft",
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			"runtime_termination",
+			runtimeWriteID,
+			runtimeDraftKindToken(draft.GetDraftKind()),
+			strconv.FormatInt(int64(index), 10),
+		)
+		if draft.GetRuntimeLocalId() != expectedLocalID {
+			return nil, status.Error(codes.InvalidArgument, "runtime termination draft id is invalid")
+		}
+		switch draft.GetDraftKind() {
+		case bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TERMINATION:
+			cancellation, ok := cancellationByLocalID[draft.GetRuntimeLocalId()]
+			if !ok {
+				return nil, status.Error(codes.InvalidArgument, "runtime termination tool draft has no pending cancellation")
 			}
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_pending_tool_uses
-			    SET status = 'cancelled', result_event_id = COALESCE(result_event_id, $5),
-			        resolved_at = COALESCE(resolved_at, $6), updated_at = $6
-			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-			    AND tool_use_event_id = $4 AND status IN ('pending', 'resolving')`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), wait.ThreadID, wait.ToolUseEventID,
-			eventID, now); err != nil {
-			return err
+			eventStamp, messageStamp, delta, err := appendDeclaredRuntimeTerminationToolResultTx(
+				ctx,
+				tx,
+				scope,
+				threadScope,
+				runtimeWriteID,
+				cancellation.GetToolUseEventId(),
+				draft,
+				now,
+			)
+			if err != nil {
+				return nil, err
+			}
+			receipt.Events = append(receipt.Events, eventStamp)
+			receipt.Messages = append(receipt.Messages, messageStamp)
+			receipt.PendingToolDeltaJson = append(receipt.PendingToolDeltaJson, delta)
+			seenCancellations[draft.GetRuntimeLocalId()] = struct{}{}
+		case bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPLETION_MAIL:
+			if seenCompletionMail {
+				return nil, status.Error(codes.InvalidArgument, "runtime termination completion mail is duplicated")
+			}
+			eventStamp, messageStamp, err := appendDeclaredCompletionMailForSourceTx(
+				ctx,
+				tx,
+				scope,
+				threadScope,
+				"runtime_termination",
+				runtimeWriteID,
+				draft,
+				now,
+			)
+			if err != nil {
+				return nil, err
+			}
+			receipt.Events = append(receipt.Events, eventStamp)
+			receipt.Messages = append(receipt.Messages, messageStamp)
+			seenCompletionMail = true
+		default:
+			return nil, status.Error(codes.InvalidArgument, "runtime termination draft class is invalid")
 		}
 	}
-	return nil
+	if len(seenCancellations) != len(cancellationByLocalID) {
+		return nil, status.Error(codes.InvalidArgument, "runtime termination pending cancellation draft is missing")
+	}
+	if threadScope.role == "subagent" && threadScope.status != "closed_for_runtime" && !seenCompletionMail {
+		return nil, status.Error(codes.InvalidArgument, "runtime termination sub-agent completion mail is required")
+	}
+	if threadScope.role != "subagent" && seenCompletionMail {
+		return nil, status.Error(codes.InvalidArgument, "runtime termination completion mail requires a sub-agent")
+	}
+	return receipt, nil
 }
 
-func appendRuntimeTerminationErrorTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, failureJSON string, now time.Time) error {
+func runtimeTerminationPendingToolUseIDsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT tool_use_event_id
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND status IN ('pending', 'resolving')
+		  ORDER BY tool_use_event_id
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var toolUseID string
+		if err := rows.Scan(&toolUseID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, toolUseID)
+	}
+	return ids, rows.Err()
+}
+
+func appendDeclaredRuntimeTerminationToolResultTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	runtimeWriteID string,
+	toolUseEventID string,
+	draft *bridgev1.RuntimeMessageDraft,
+	now time.Time,
+) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, string, error) {
+	if len(draft.GetParts()) != 1 || draft.GetParts()[0].GetPartKind() != "tool" {
+		return nil, nil, "", status.Error(codes.InvalidArgument, "runtime termination tool draft is invalid")
+	}
+	var partInfo struct {
+		Type           string `json:"type"`
+		ToolUseEventID string `json:"toolUseEventId"`
+		State          struct {
+			Status string `json:"status"`
+			Error  struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(draft.GetParts()[0].GetPartJson()), &partInfo); err != nil ||
+		partInfo.Type != "tool" ||
+		partInfo.ToolUseEventID != toolUseEventID ||
+		(partInfo.State.Status != "cancelled" && partInfo.State.Status != "error") ||
+		strings.TrimSpace(partInfo.State.Error.Message) == "" {
+		return nil, nil, "", status.Error(codes.InvalidArgument, "runtime termination tool part is invalid")
+	}
+	var sourceEventType string
+	if err := tx.QueryRow(ctx,
+		`SELECT type
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND event_id = $4
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventID,
+	).Scan(&sourceEventType); err != nil {
+		return nil, nil, "", err
+	}
+	eventType := "agent.tool_result"
+	toolUseField := "tool_use_id"
+	if sourceEventType == "agent.mcp_tool_use" {
+		eventType = "agent.mcp_tool_result"
+		toolUseField = "mcp_tool_use_id"
+	} else if sourceEventType != "agent.tool_use" {
+		return nil, nil, "", status.Error(codes.FailedPrecondition, "runtime termination pending tool source is invalid")
+	}
+	payloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":       eventType,
+		toolUseField: toolUseEventID,
+		"is_error":   true,
+		"content": []map[string]any{{
+			"type": "text",
+			"text": partInfo.State.Error.Message,
+		}},
+	})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	eventID := id.New("evt_")
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	visibility, sessionVisible := threadScope.publicProjection(eventType)
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $7, $11, $11, $11)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		eventID,
+		sequence,
+		eventType,
+		payloadJSON,
+		visibility,
+		sessionVisible,
+		runtimeWriteID,
+		now,
+	); err != nil {
+		return nil, nil, "", err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return nil, nil, "", err
+	}
+	messageStamp, err := insertGeneratedRuntimeMessageDraftTx(
+		ctx,
+		tx,
+		scope,
+		eventID,
+		"assistant",
+		"agent",
+		draft,
+		now,
+	)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE session_pending_tool_uses
+		    SET status = 'cancelled',
+		        result_event_id = $5,
+		        resolved_at = $6,
+		        updated_at = $6
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND tool_use_event_id = $4
+		    AND status IN ('pending', 'resolving')`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventID,
+		eventID,
+		now,
+	)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if !rowsAffected(result) {
+		return nil, nil, "", status.Error(codes.FailedPrecondition, "runtime termination pending tool use is stale")
+	}
+	delta, err := marshalBridgeJSON(map[string]any{
+		"result_event_id":   eventID,
+		"runtime_local_id":  draft.GetRuntimeLocalId(),
+		"status":            "cancelled",
+		"tool_use_event_id": toolUseEventID,
+	})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return &bridgev1.DurableEventStamp{
+		SessionThreadId: scope.GetSessionThreadId(),
+		SourceEventId:   toolUseEventID,
+		EventId:         eventID,
+		EventSequence:   sequence,
+		Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+	}, messageStamp, delta, nil
+}
+
+func appendRuntimeTerminationErrorTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, failureJSON string, now time.Time) (*bridgev1.DurableEventStamp, error) {
 	var failure runtimeTerminationFailure
 	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
-		return err
+		return nil, err
 	}
 	payloadJSON, err := marshalBridgeJSON(map[string]any{
 		"type":  "session.error",
 		"error": publicRuntimeTerminationError(failure),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID+":error", "session.error", payloadJSON, now)
+	return insertRuntimeTerminationEventTx(
+		ctx,
+		tx,
+		scope,
+		threadScope,
+		runtimeWriteID+":error",
+		runtimeWriteID,
+		"session.error",
+		payloadJSON,
+		now,
+	)
 }
 
 func publicRuntimeTerminationError(failure runtimeTerminationFailure) map[string]any {
@@ -286,26 +514,26 @@ func publicRuntimeTerminationError(failure runtimeTerminationFailure) map[string
 	}
 }
 
-func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, now time.Time) error {
+func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, now time.Time) (*bridgev1.DurableEventStamp, error) {
 	eventType := "session.thread_status_terminated"
 	payloadJSON, err := threadStatusPayloadJSON(eventType, scope, threadScope, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if threadScope.role == "main" {
 		eventType = "session.status_terminated"
 		payloadJSON, err = marshalBridgeJSON(map[string]any{"type": eventType})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE sessions SET status = 'terminated', updated_at = $3 WHERE workspace_id = $1 AND id = $2`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), now)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !rowsAffected(result) {
-			return status.Error(codes.FailedPrecondition, "runtime session is stale")
+			return nil, status.Error(codes.FailedPrecondition, "runtime session is stale")
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE session_runtime_status
@@ -317,16 +545,20 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			        updated_at = $3
 			  WHERE workspace_id = $1 AND session_id = $2`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), now); err != nil {
-			return err
+			return nil, err
 		}
-		if _, err := tx.Exec(ctx,
+		result, err = tx.Exec(ctx,
 			`UPDATE session_threads
-			    SET status = CASE WHEN id = $3 THEN 'failed' ELSE 'terminated' END,
+			    SET status = 'failed',
 			        closed_at = COALESCE(closed_at, $4), last_active_at = $4, updated_at = $4
-			  WHERE workspace_id = $1 AND session_id = $2
+			  WHERE workspace_id = $1 AND session_id = $2 AND id = $3
 			    AND status NOT IN ('terminated', 'failed')`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now); err != nil {
-			return err
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
+		if err != nil {
+			return nil, err
+		}
+		if !rowsAffected(result) {
+			return nil, status.Error(codes.FailedPrecondition, "runtime main thread status update failed")
 		}
 	} else {
 		result, err := tx.Exec(ctx,
@@ -335,21 +567,31 @@ func appendRuntimeTerminatedStatusTx(ctx context.Context, tx *dbconnect.Tx, scop
 			  WHERE workspace_id = $1 AND session_id = $2 AND id = $3 AND role <> 'main'`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !rowsAffected(result) {
-			return status.Error(codes.FailedPrecondition, "child thread status update failed")
+			return nil, status.Error(codes.FailedPrecondition, "child thread status update failed")
 		}
 	}
-	return insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, eventType, payloadJSON, now)
+	return insertRuntimeTerminationEventTx(ctx, tx, scope, threadScope, runtimeWriteID, runtimeWriteID, eventType, payloadJSON, now)
 }
 
-func insertRuntimeTerminationEventTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, threadScope threadMutationScope, runtimeWriteID string, eventType string, payloadJSON string, now time.Time) error {
+func insertRuntimeTerminationEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	threadScope threadMutationScope,
+	runtimeWriteID string,
+	sourceEventID string,
+	eventType string,
+	payloadJSON string,
+	now time.Time,
+) (*bridgev1.DurableEventStamp, error) {
 	visibility, sessionVisible := threadScope.publicProjection(eventType)
 	eventID := id.New("evt_")
 	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO session_events (
@@ -358,10 +600,18 @@ func insertRuntimeTerminationEventTx(ctx context.Context, tx *dbconnect.Tx, scop
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $7, $11, $11, $11)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), eventID, sequence,
 		eventType, payloadJSON, visibility, sessionVisible, runtimeWriteID, now); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now)
-	return err
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return nil, err
+	}
+	return &bridgev1.DurableEventStamp{
+		SessionThreadId: scope.GetSessionThreadId(),
+		SourceEventId:   sourceEventID,
+		EventId:         eventID,
+		EventSequence:   sequence,
+		Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+	}, nil
 }
 
 func runtimeTerminationBinding(scope *bridgev1.RuntimeScope) runtimeBindingForDelivery {

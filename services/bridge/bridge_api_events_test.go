@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,20 +21,83 @@ import (
 
 // This file owns the Bridge events protocol-family boundary.
 
+func TestRuntimeToolProjectionSelectsTheToolNamedByTheCurrentEvent(t *testing.T) {
+	drafts := []*bridgev1.RuntimeMessageDraft{{
+		Parts: []*bridgev1.RuntimePartDraft{
+			{
+				RuntimeLocalPartId: "local_tool_1",
+				PartKind:           "tool",
+				Ordinal:            0,
+				PartJson:           `{"type":"tool","toolCallId":"call_1","toolName":"Read","toolUseEventId":"sevt_tool_1","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{"path":"one"}}}}`,
+			},
+			{
+				RuntimeLocalPartId: "local_tool_2",
+				PartKind:           "tool",
+				Ordinal:            1,
+				PartJson:           `{"type":"tool","toolCallId":"call_2","toolName":"Write","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{"path":"two"}}}}`,
+			},
+		},
+	}}
+	stamps := []*bridgev1.DurableMessageStamp{{
+		MessageId: "msg_1",
+		Parts: []*bridgev1.DurablePartStamp{
+			{
+				RuntimeLocalPartId: "local_tool_1",
+				PartId:             "part_1",
+				MessageId:          "msg_1",
+				PartSequence:       0,
+				Disposition:        bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_UPDATED,
+			},
+			{
+				RuntimeLocalPartId: "local_tool_2",
+				PartId:             "part_2",
+				MessageId:          "msg_1",
+				PartSequence:       1,
+				Disposition:        bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
+			},
+		},
+	}}
+
+	projection, err := runtimeToolProjectionFromDeclaration(
+		"sevt_tool_2",
+		"agent.tool_use",
+		`{"type":"agent.tool_use","name":"Write","input":{"path":"two"},"evaluated_permission":"allow"}`,
+		drafts,
+		stamps,
+	)
+	if err != nil {
+		t.Fatalf("select current tool projection: %v", err)
+	}
+	if projection.ModelToolCallID != "call_2" || projection.ToolName != "Write" || projection.PartID != "part_2" {
+		t.Fatalf("current tool projection = %#v; want call_2/Write/part_2", projection)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotency(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_event", "thr_bridge_event")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_event", "bind_bridge_event", 1, "pod_uid_event")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_event", "thr_bridge_event", "bind_bridge_event", 1, "pod_uid_event")
 	request := &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_event", "thr_bridge_event", "bind_bridge_event", 1, "pod_uid_event"),
+		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_event",
 		ModelRequestId: "mreq_bridge_event",
 		EventType:      "agent.message",
 		PayloadJson:    `{"type":"agent.message","provider_session_id":"sess_provider","content":[{"type":"text","text":"hello","provider_metadata":{"raw":"secret"}}]}`,
-		ProjectionJson: `{"type":"runtime_text_projection","message_id":"msg_bridge_event","part_id":"part_bridge_event","part_sequence":0,"truncated":false,"provider_command_id":"cmd_provider"}`,
 		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_event",
+			"agent.message",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "text",
+				json: `{"type":"text","text":"hello","truncated":false,"status":"completed"}`,
+			},
+		)},
 	}
 	response, err := store.WriteEvent(context.Background(), request)
 	if err != nil {
@@ -104,9 +166,8 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 			t.Fatalf("%s lost safe semantic content: %s", name, data)
 		}
 	}
-	if !strings.Contains(eventProjectionJSON, `"type":"runtime_text_projection"`) ||
-		!strings.Contains(eventProjectionJSON, `"message_id":"msg_bridge_event"`) {
-		t.Fatalf("event projection lost projection identity: %s", eventProjectionJSON)
+	if eventProjectionJSON != "{}" {
+		t.Fatalf("event projection = %s; want no clerk-authored projection metadata", eventProjectionJSON)
 	}
 	var assistantMessage struct {
 		Role   string `json:"role"`
@@ -144,12 +205,24 @@ func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_web_usage", "thr_bridge_web_usage", "bind_bridge_web_usage", 1, "pod_uid_web_usage")
+	const modelRequestID = "mreq_bridge_web_usage"
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_web_tool_use",
+		ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"web","input":{"search_query":[{"q":"tetral"}]},"evaluated_permission":"allow"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_bridge_web","part_id":"part_bridge_web","part_sequence":0,"model_tool_call_id":"call_bridge_web","tool_name":"web","input":{"search_query":[{"q":"tetral"}]},"state":"running"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_web_tool_use",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_web","toolName":"web","state":{"status":"running","input":{"value":{"search_query":[{"q":"tetral"}]},"preview":"{\"search_query\":[{\"q\":\"tetral\"}]}","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent web tool use: %v", err)
@@ -157,9 +230,20 @@ func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing
 	request := &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_web_tool_result",
+		ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"web result"}]}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_bridge_web","part_id":"part_bridge_web","part_sequence":0,"model_tool_call_id":"call_bridge_web","tool_name":"web","input":{"search_query":[{"q":"tetral"}]},"state":"completed","output":{"text":"web result","truncated":false}}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_web_tool_result",
+			"agent.tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_web","toolName":"web","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"search_query":[{"q":"tetral"}]},"preview":"{\"search_query\":[{\"q\":\"tetral\"}]}","truncated":false},"output":{"text":"web result","truncated":false}}}`,
+			},
+		)},
 		ServerToolUse: &bridgev1.ServerToolUseUsage{
 			WebSearchRequests: 32,
 			WebFetchRequests:  8,
@@ -218,12 +302,24 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_web_usage_concurrent", "thr_bridge_web_usage_concurrent", "bind_bridge_web_usage_concurrent", 1, "pod_uid_web_usage_concurrent")
+	const modelRequestID = "mreq_bridge_web_usage_concurrent"
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_web_tool_use_concurrent",
+		ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"web","input":{"search_query":[{"q":"tetral"}]},"evaluated_permission":"allow"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_bridge_web_concurrent","part_id":"part_bridge_web_concurrent","part_sequence":0,"model_tool_call_id":"call_bridge_web_concurrent","tool_name":"web","input":{"search_query":[{"q":"tetral"}]},"state":"running"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_web_tool_use_concurrent",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_web_concurrent","toolName":"web","state":{"status":"running","input":{"value":{"search_query":[{"q":"tetral"}]},"preview":"{\"search_query\":[{\"q\":\"tetral\"}]}","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent web tool use: %v", err)
@@ -231,10 +327,21 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 	request := &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_web_tool_result_concurrent",
+		ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"web result"}]}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_bridge_web_concurrent","part_id":"part_bridge_web_concurrent","part_sequence":0,"model_tool_call_id":"call_bridge_web_concurrent","tool_name":"web","input":{"search_query":[{"q":"tetral"}]},"state":"completed","output":{"text":"web result","truncated":false}}`,
-		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebSearchRequests: 1, WebFetchRequests: 1},
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_web_tool_result_concurrent",
+			"agent.tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_web_concurrent","toolName":"web","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"search_query":[{"q":"tetral"}]},"preview":"{\"search_query\":[{\"q\":\"tetral\"}]}","truncated":false},"output":{"text":"web result","truncated":false}}}`,
+			},
+		)},
+		ServerToolUse: &bridgev1.ServerToolUseUsage{WebSearchRequests: 1, WebFetchRequests: 1},
 	}
 
 	const writers = 6
@@ -306,7 +413,6 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 		RuntimeWriteId: "rwrite_bridge_web_usage_negative",
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_missing"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_negative","part_id":"part_negative","part_sequence":0,"model_tool_call_id":"call_negative","tool_name":"web","input":{},"state":"error","error":{"type":"tool_error","message":"failed","retryable":false}}`,
 		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebFetchRequests: -1},
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -321,7 +427,6 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 			RuntimeWriteId: fmt.Sprintf("rwrite_bridge_web_usage_over_%d_%d", usage.GetWebSearchRequests(), usage.GetWebFetchRequests()),
 			EventType:      "agent.tool_result",
 			PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_missing"}`,
-			ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_over","part_id":"part_over","part_sequence":0,"model_tool_call_id":"call_over","tool_name":"web","input":{},"state":"error","error":{"type":"tool_error","message":"failed","retryable":false}}`,
 			ServerToolUse:  usage,
 		})
 		if status.Code(err) != codes.InvalidArgument {
@@ -331,9 +436,20 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 	readUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_read_tool_use",
+		ModelRequestId: "mreq_bridge_read_tool",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_read","part_id":"part_read","part_sequence":0,"model_tool_call_id":"call_read","tool_name":"Read","input":{"file_path":"README.md"},"state":"running"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_read_tool_use",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_read","toolName":"Read","state":{"status":"running","input":{"value":{"file_path":"README.md"},"preview":"{\"file_path\":\"README.md\"}","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent Read tool use: %v", err)
@@ -341,10 +457,21 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_read_tool_result_with_web_usage",
+		ModelRequestId: "mreq_bridge_read_tool",
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"` + readUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","message_id":"msg_read","part_id":"part_read","part_sequence":0,"model_tool_call_id":"call_read","tool_name":"Read","input":{"file_path":"README.md"},"state":"completed","output":{"text":"done","truncated":false}}`,
-		ServerToolUse:  &bridgev1.ServerToolUseUsage{WebSearchRequests: 1},
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_read_tool_result_with_web_usage",
+			"agent.tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_read","toolName":"Read","toolUseEventId":"` + readUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"file_path":"README.md"},"preview":"{\"file_path\":\"README.md\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
+			},
+		)},
+		ServerToolUse: &bridgev1.ServerToolUseUsage{WebSearchRequests: 1},
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("WriteEvent usage on non-Web result err = %v; want InvalidArgument", err)
@@ -415,302 +542,6 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPublishesThinkingWithoutMessageProjec
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreWriteEventProjectsThreadContextCompactionBoundary(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_compaction", "thr_bridge_compaction")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_compaction", "bind_bridge_compaction", 1, "pod_uid_compaction")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_compaction", "thr_bridge_compaction", "evt_bridge_compaction_previous", 40, "user.message", `{"content":[{"type":"text","text":"old"}]}`)
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
-	store.Clock = func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }
-	scope := bridgeAPIScope("sesn_bridge_compaction", "thr_bridge_compaction", "bind_bridge_compaction", 1, "pod_uid_compaction")
-	oldMessageJSON := `{"id":"msg_old","sessionId":"sesn_bridge_compaction","role":"user","origin":"user","sequence":0,"status":"completed","createdAt":"2026-01-01T00:00:00Z","parts":[]}`
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, created_at, updated_at
-		) VALUES ('default', 'sesn_bridge_compaction', 'thr_bridge_compaction', 'msg_old', 7, 'user', $1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		oldMessageJSON,
-	); err != nil {
-		t.Fatalf("seed old message: %v", err)
-	}
-
-	canonicalProjection := `{
-  "id": "msg_runtime_compaction",
-  "sessionId": "sesn_bridge_compaction",
-  "role": "user",
-  "origin": "runtime",
-  "sequence": 77,
-  "status": "completed",
-  "createdAt": "2026-01-01T10:11:12.123Z",
-  "updatedAt": "2026-01-01T10:11:13.456Z",
-  "parts": [{
-    "id": "part_runtime_compaction",
-    "sessionId": "sesn_bridge_compaction",
-    "messageId": "msg_runtime_compaction",
-    "sequence": 0,
-    "createdAt": "2026-01-01T10:11:12.123Z",
-    "updatedAt": "2026-01-01T10:11:13.456Z",
-    "type": "text",
-    "text": "<conversation-checkpoint>\n<summary>Older turns discussed deploys.</summary>\n<recent-context>Keep testing.</recent-context>\n</conversation-checkpoint>",
-    "truncated": false,
-    "status": "completed",
-    "completedAt": "2026-01-01T10:11:13.456Z",
-    "runtimeOwned": {"preserved": true}
-  }]
-}`
-	request := &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_compaction",
-		ModelRequestId: "mreq_bridge_compaction",
-		EventType:      "agent.thread_context_compacted",
-		PayloadJson:    `{"type":"agent.thread_context_compacted","summary":"Older turns discussed deploys.","recent_context":[{"role":"user","text":"Keep testing."}]}`,
-		ProjectionJson: canonicalProjection,
-		SessionVisible: true,
-	}
-	response, err := store.WriteEvent(context.Background(), request)
-	if err != nil {
-		t.Fatalf("WriteEvent compaction: %v", err)
-	}
-	if response.GetSequence() != 41 {
-		t.Fatalf("compaction event sequence = %d; want event-local 41", response.GetSequence())
-	}
-	if replay, err := store.WriteEvent(context.Background(), request); err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("WriteEvent compaction replay = %+v err=%v; want duplicate", replay, err)
-	}
-
-	var compactionMessageID string
-	var compactionSequence int64
-	var compactionDataJSON, eventProjectionJSON string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT message_id, sequence, data_json
-		   FROM session_messages
-		  WHERE workspace_id = 'default'
-		    AND source_event_id = $1
-		    AND kind = 'compaction'`,
-		response.GetEventId(),
-	).Scan(&compactionMessageID, &compactionSequence, &compactionDataJSON); err != nil {
-		t.Fatalf("read compaction projection: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT projection_json FROM session_events WHERE workspace_id = 'default' AND event_id = $1`, response.GetEventId()).Scan(&eventProjectionJSON); err != nil {
-		t.Fatalf("read compaction event projection: %v", err)
-	}
-	if compactionMessageID != "msg_runtime_compaction" || compactionSequence != 8 || compactionDataJSON != canonicalProjection || eventProjectionJSON != canonicalProjection {
-		t.Fatalf("compaction persistence id=%q message_sequence=%d data_equal=%v event_equal=%v; want runtime identity/verbatim body and next message sequence 8",
-			compactionMessageID, compactionSequence, compactionDataJSON == canonicalProjection, eventProjectionJSON == canonicalProjection)
-	}
-	var compactionCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_messages
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_compaction' AND kind = 'compaction'`).Scan(&compactionCount); err != nil {
-		t.Fatalf("count replayed compaction rows: %v", err)
-	}
-	if compactionCount != 1 {
-		t.Fatalf("compaction rows after replay = %d; want one", compactionCount)
-	}
-
-	assistantResponse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_compaction_after",
-		ModelRequestId: "mreq_bridge_compaction_after",
-		EventType:      "agent.message",
-		PayloadJson:    `{"id":"msg_runtime_attempted_assistant","type":"agent.message","content":[{"type":"text","text":"after compaction"}]}`,
-		ProjectionJson: `{}`,
-		SessionVisible: true,
-	})
-	if err != nil {
-		t.Fatalf("WriteEvent assistant after compaction: %v", err)
-	}
-	var assistantMessageID string
-	var assistantSequence int64
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT message_id, sequence FROM session_messages
-		  WHERE workspace_id = 'default' AND source_event_id = $1 AND kind = 'assistant'`, assistantResponse.GetEventId()).Scan(&assistantMessageID, &assistantSequence); err != nil {
-		t.Fatalf("read assistant after compaction: %v", err)
-	}
-	if assistantSequence != 9 || !strings.HasPrefix(assistantMessageID, "msg_") || assistantMessageID == "msg_runtime_attempted_assistant" || assistantMessageID == compactionMessageID {
-		t.Fatalf("assistant identity/sequence = %q/%d; want Bridge-minted identity and next message sequence 9", assistantMessageID, assistantSequence)
-	}
-
-	contextResponse, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:          scope,
-		RuntimeInputId: "rin_bridge_compaction_load",
-	})
-	if err != nil {
-		t.Fatalf("LoadContext after compaction: %v", err)
-	}
-	var contextPayload struct {
-		Messages []json.RawMessage `json:"messages"`
-	}
-	if err := json.Unmarshal([]byte(contextResponse.GetContextJson()), &contextPayload); err != nil {
-		t.Fatalf("parse compaction context: %v", err)
-	}
-	if len(contextPayload.Messages) != 2 {
-		t.Fatalf("LoadContext messages = %d in %s; want compaction boundary plus later message", len(contextPayload.Messages), contextResponse.GetContextJson())
-	}
-	if strings.Contains(contextResponse.GetContextJson(), "msg_old") {
-		t.Fatalf("LoadContext crossed latest compaction boundary: %s", contextResponse.GetContextJson())
-	}
-	if !strings.Contains(string(contextPayload.Messages[0]), `"id":"msg_runtime_compaction"`) ||
-		!strings.Contains(string(contextPayload.Messages[0]), `"id":"part_runtime_compaction"`) ||
-		!strings.Contains(string(contextPayload.Messages[0]), `"createdAt":"2026-01-01T10:11:12.123Z"`) ||
-		!strings.Contains(string(contextPayload.Messages[0]), `"runtimeOwned":{"preserved":true}`) ||
-		!strings.Contains(string(contextPayload.Messages[1]), `"id":"`+assistantMessageID+`"`) {
-		t.Fatalf("LoadContext order = %s; want compaction then later row", contextResponse.GetContextJson())
-	}
-	var loadedCompaction struct {
-		Sequence int64 `json:"sequence"`
-	}
-	if err := json.Unmarshal(contextPayload.Messages[0], &loadedCompaction); err != nil {
-		t.Fatalf("parse loaded compaction: %v", err)
-	}
-	if loadedCompaction.Sequence != compactionSequence {
-		t.Fatalf("loaded compaction sequence = %d; want Bridge-assigned %d", loadedCompaction.Sequence, compactionSequence)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreKeepsReviewerCompactionCheckpointInternal(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_reviewer_compaction", "thr_bridge_reviewer_parent")
-	seedBridgeAPIInternalReviewerThread(t, admin, "default", "sesn_bridge_reviewer_compaction", "thr_bridge_reviewer_parent", "thr_bridge_reviewer_compaction")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_reviewer_compaction", "bind_bridge_reviewer_compaction", 1, "pod_uid_reviewer_compaction")
-
-	projection := `{
-  "id": "msg_runtime_reviewer_compaction",
-  "sessionId": "sesn_bridge_reviewer_compaction",
-  "role": "user",
-  "origin": "runtime",
-  "sequence": 0,
-  "status": "completed",
-  "createdAt": "2026-01-01T10:11:12.123Z",
-  "updatedAt": "2026-01-01T10:11:13.456Z",
-  "parts": [{
-    "id": "part_runtime_reviewer_compaction",
-    "sessionId": "sesn_bridge_reviewer_compaction",
-    "messageId": "msg_runtime_reviewer_compaction",
-    "sequence": 0,
-    "createdAt": "2026-01-01T10:11:12.123Z",
-    "updatedAt": "2026-01-01T10:11:13.456Z",
-    "type": "text",
-    "text": "<conversation-checkpoint><summary>Internal review history.</summary><recent-context></recent-context></conversation-checkpoint>",
-    "status": "completed",
-    "completedAt": "2026-01-01T10:11:13.456Z"
-  }]
-}`
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_reviewer_compaction", "thr_bridge_reviewer_compaction", "bind_bridge_reviewer_compaction", 1, "pod_uid_reviewer_compaction"),
-		RuntimeWriteId: "rwrite_bridge_reviewer_compaction",
-		ModelRequestId: "mreq_bridge_reviewer_compaction",
-		EventType:      "agent.thread_context_compacted",
-		PayloadJson:    `{"type":"agent.thread_context_compacted","summary":"Internal review history.","recent_context":[]}`,
-		ProjectionJson: projection,
-		SessionVisible: true,
-	})
-	if err != nil {
-		t.Fatalf("WriteEvent reviewer compaction: %v", err)
-	}
-
-	var visibility string
-	var sessionVisible bool
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT visibility, session_visible FROM session_events WHERE workspace_id = 'default' AND event_id = $1`,
-		response.GetEventId(),
-	).Scan(&visibility, &sessionVisible); err != nil {
-		t.Fatalf("read reviewer compaction event: %v", err)
-	}
-	if visibility != "internal" || sessionVisible {
-		t.Fatalf("reviewer compaction projection = %s/%v; want internal/false", visibility, sessionVisible)
-	}
-
-	var kind, threadID, dataJSON string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT kind, session_thread_id, data_json
-		   FROM session_messages
-		  WHERE workspace_id = 'default'
-		    AND source_event_id = $1`,
-		response.GetEventId(),
-	).Scan(&kind, &threadID, &dataJSON); err != nil {
-		t.Fatalf("read reviewer compaction checkpoint: %v", err)
-	}
-	if kind != "compaction" || threadID != "thr_bridge_reviewer_compaction" || dataJSON != projection {
-		t.Fatalf("reviewer checkpoint = kind %q thread %q verbatim %v; want internal reviewer compaction row", kind, threadID, dataJSON == projection)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreWriteEventRejectsInvalidCompactionProjectionAtomically(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_compaction_invalid", "thr_bridge_compaction_invalid")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_compaction_invalid", "bind_bridge_compaction_invalid", 1, "pod_uid_compaction_invalid")
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_compaction_invalid", "thr_bridge_compaction_invalid", "bind_bridge_compaction_invalid", 1, "pod_uid_compaction_invalid")
-	valid := `{"id":"msg_runtime_compaction_invalid","sessionId":"sesn_bridge_compaction_invalid","role":"user","origin":"runtime","sequence":0,"status":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","parts":[{"id":"part_runtime_compaction_invalid","sessionId":"sesn_bridge_compaction_invalid","messageId":"msg_runtime_compaction_invalid","sequence":0,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","type":"text","text":"<conversation-checkpoint></conversation-checkpoint>","status":"completed","completedAt":"2026-01-01T00:00:01Z"}]}`
-	oversizedText := "<conversation-checkpoint><summary>" +
-		strings.Repeat("x", 64*1024) +
-		"</summary><recent-context></recent-context></conversation-checkpoint>"
-	tests := []struct {
-		name       string
-		projection string
-	}{
-		{name: "not object", projection: `[]`},
-		{name: "missing identity", projection: `{}`},
-		{name: "wrong role", projection: strings.Replace(valid, `"role":"user"`, `"role":"assistant"`, 1)},
-		{name: "wrong session", projection: strings.Replace(valid, `"sessionId":"sesn_bridge_compaction_invalid"`, `"sessionId":"sesn_other"`, 1)},
-		{name: "part identity mismatch", projection: strings.Replace(valid, `"messageId":"msg_runtime_compaction_invalid"`, `"messageId":"msg_other"`, 1)},
-		{
-			name:       "text part exceeds ingress bound",
-			projection: strings.Replace(valid, "<conversation-checkpoint></conversation-checkpoint>", oversizedText, 1),
-		},
-	}
-	for index, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope:          scope,
-				RuntimeWriteId: "rwrite_bridge_compaction_invalid_" + strconv.Itoa(index),
-				ModelRequestId: "mreq_bridge_compaction_invalid_" + strconv.Itoa(index),
-				EventType:      "agent.thread_context_compacted",
-				PayloadJson:    `{"type":"agent.thread_context_compacted"}`,
-				ProjectionJson: test.projection,
-				SessionVisible: true,
-			})
-			if status.Code(err) != codes.FailedPrecondition {
-				t.Fatalf("WriteEvent invalid compaction err = %v; want FailedPrecondition", err)
-			}
-		})
-	}
-	for name, query := range map[string]string{
-		"events":         `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_compaction_invalid'`,
-		"stream changes": `SELECT count(*) FROM session_event_stream_changes WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_compaction_invalid'`,
-		"messages":       `SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_compaction_invalid'`,
-		"operations":     `SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_compaction_invalid'`,
-	} {
-		var count int
-		if err := admin.QueryRowContext(context.Background(), query).Scan(&count); err != nil {
-			t.Fatalf("count %s: %v", name, err)
-		}
-		if count != 0 {
-			t.Fatalf("invalid compaction %s = %d; want zero", name, count)
-		}
-	}
-}
-
-func TestValidateRuntimeCompactionProjectionAcceptsExactTextIngressBound(t *testing.T) {
-	scope := bridgeAPIScope("sesn_bridge_compaction_boundary", "thr_bridge_compaction_boundary", "bind_bridge_compaction_boundary", 1, "pod_uid_compaction_boundary")
-	prefix := "<conversation-checkpoint><summary>"
-	suffix := "</summary><recent-context></recent-context></conversation-checkpoint>"
-	text := prefix + strings.Repeat("x", 64*1024-len(prefix)-len(suffix)) + suffix
-	projection := fmt.Sprintf(
-		`{"id":"msg_runtime_compaction_boundary","sessionId":"sesn_bridge_compaction_boundary","role":"user","origin":"runtime","sequence":0,"status":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","parts":[{"id":"part_runtime_compaction_boundary","sessionId":"sesn_bridge_compaction_boundary","messageId":"msg_runtime_compaction_boundary","sequence":0,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:01Z","type":"text","text":%q,"status":"completed","completedAt":"2026-01-01T00:00:01Z"}]}`,
-		text,
-	)
-	if _, err := validateRuntimeCompactionProjection(scope, projection); err != nil {
-		t.Fatalf("validate exact 64 KiB compaction projection: %v", err)
-	}
-}
-
 func TestPostgreSQLBridgeAPIStoreWriteEventRejectsCustomToolUseWithoutSideEffects(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_custom_tool", "thr_bridge_custom_tool")
@@ -722,7 +553,6 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsCustomToolUseWithoutSideEffect
 		RuntimeWriteId: "rwrite_bridge_custom_tool",
 		EventType:      "agent.custom_tool_use",
 		PayloadJson:    `{"type":"agent.custom_tool_use","name":"legacy_custom","input":{}}`,
-		ProjectionJson: `{}`,
 		SessionVisible: true,
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -776,13 +606,25 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return now }
+	scope := bridgeAPIScope("sesn_bridge_tool_ask", "thr_bridge_tool_ask", "bind_bridge_tool_ask", 1, "pod_uid_tool_ask")
 	request := &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_tool_ask", "thr_bridge_tool_ask", "bind_bridge_tool_ask", 1, "pod_uid_tool_ask"),
+		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_tool_ask",
+		ModelRequestId: "mreq_bridge_tool_ask",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"dangerous_tool","input":{"path":"README.md"},"evaluated_permission":"ask"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"tool-call-ask","tool_name":"dangerous_tool","input":{"path":"README.md"},"state":"running"}`,
 		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_tool_ask",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"tool-call-ask","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{"path":"README.md"},"preview":"{\"path\":\"README.md\"}","truncated":false}}}`,
+			},
+		)},
 	}
 	response, err := store.WriteEvent(context.Background(), request)
 	if err != nil {
@@ -823,8 +665,8 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 		replay.GetEventId() != response.GetEventId() ||
 		modelToolCallID != "tool-call-ask" || toolName != "dangerous_tool" ||
 		inputJSON != `{"path":"README.md"}` || pendingStatus != "pending" ||
-		expiresAt != "2026-01-01T00:30:00Z" || pendingCount != 1 || messageCount != 0 {
-		t.Fatalf("pending projection ack=%s replay=%s event=%s/%s model=%q tool=%q input=%s status=%q expires=%q pending=%d messages=%d; want ask pending idempotent without context row",
+		expiresAt != "2026-01-01T00:30:00Z" || pendingCount != 1 || messageCount != 1 {
+		t.Fatalf("pending declaration ack=%s replay=%s event=%s/%s model=%q tool=%q input=%s status=%q expires=%q pending=%d messages=%d; want ask pending idempotent with one loop-authored context row",
 			response.GetAck().GetStatus(), replay.GetAck().GetStatus(), response.GetEventId(), replay.GetEventId(),
 			modelToolCallID, toolName, inputJSON, pendingStatus, expiresAt, pendingCount, messageCount)
 	}
@@ -840,13 +682,26 @@ func TestPostgreSQLBridgeAPIStoreWriteEventToolUseAllowDenyDoNotOpenPendingAppro
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_tool_"+permission, 1, "pod_uid_tool_"+permission)
 
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_tool_"+permission, 1, "pod_uid_tool_"+permission)
+			runtimeWriteID := "rwrite_bridge_tool_" + permission
 			if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, "bind_bridge_tool_"+permission, 1, "pod_uid_tool_"+permission),
-				RuntimeWriteId: "rwrite_bridge_tool_" + permission,
+				Scope:          scope,
+				RuntimeWriteId: runtimeWriteID,
+				ModelRequestId: "mreq_bridge_tool_" + permission,
 				EventType:      "agent.tool_use",
 				PayloadJson:    `{"type":"agent.tool_use","name":"safe_tool","input":{"ok":true},"evaluated_permission":"` + permission + `"}`,
-				ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"tool-call-` + permission + `","tool_name":"safe_tool","input":{"ok":true},"state":"running"}`,
 				SessionVisible: true,
+				Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+					t,
+					scope,
+					runtimeWriteID,
+					"agent.tool_use",
+					"streaming",
+					bridgeRuntimePartDraftForTest{
+						kind: "tool",
+						json: `{"type":"tool","toolCallId":"tool-call-` + permission + `","toolName":"safe_tool","state":{"status":"running","input":{"value":{"ok":true},"preview":"{\"ok\":true}","truncated":false}}}`,
+					},
+				)},
 			}); err != nil {
 				t.Fatalf("WriteEvent tool_use %s: %v", permission, err)
 			}

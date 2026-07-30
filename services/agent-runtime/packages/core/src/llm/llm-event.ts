@@ -21,7 +21,7 @@ export const LLMEventProviderMetadataMaxBytes = 4_096;
 
 const IdentifierSchema = z.string().min(1);
 const NonNegativeIntegerSchema = z.number().int().nonnegative();
-const SafeOperationNameSchema = z.enum(["writeMessage", "writePart"]);
+const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
   "bounded",

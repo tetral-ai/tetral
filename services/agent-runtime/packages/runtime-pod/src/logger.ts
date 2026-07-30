@@ -8,6 +8,8 @@
 import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
 import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
+import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
+import type { RuntimeReceiptEvidenceOutcome } from "./metrics.js";
 
 /** Structured JSON logger accepted by Runtime Pod composition and runtime services. */
 export type RuntimePodLogger = TetralJsonLogger<RuntimePodLogRecord>;
@@ -23,7 +25,65 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "closeout.active_count"?: number;
   readonly "closeout.error_code"?: RuntimeCloseoutEvent["errorCode"];
   readonly "startup.cause_class"?: string;
+  readonly "declaration.source.kind"?: string;
+  readonly "declaration.source.id"?: string;
+  readonly "declaration.digest"?: string;
+  readonly "receipt.application_disposition"?: "current_custody" | "stale_custody";
+  readonly "receipt.discard_reason"?: Exclude<RuntimeReceiptEvidenceOutcome, "applied">;
 };
+
+/** Safe identity-only evidence emitted after one Bridge declaration response is validated. */
+export interface RuntimeReceiptEvidence {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly operation: string;
+  readonly sourceKind: string;
+  readonly sourceId: string;
+  readonly declarationDigest: string;
+  readonly bindingId: string;
+  readonly bindingGeneration: number;
+  readonly applicationDisposition?: "current_custody" | "stale_custody" | undefined;
+  readonly outcome: RuntimeReceiptEvidenceOutcome;
+}
+
+/** Minimal metric extension consumed by the receipt evidence recorder. */
+export interface RuntimeReceiptEvidenceMetrics extends RuntimeMetricsSink {
+  readonly recordReceiptEvidence?: ((outcome: RuntimeReceiptEvidenceOutcome) => void) | undefined;
+}
+
+/** Records receipt evidence without allowing metrics or log sinks to affect declaration handling. */
+export function recordRuntimeReceiptEvidence(
+  logger: RuntimePodLogger | undefined,
+  metrics: RuntimeReceiptEvidenceMetrics | undefined,
+  evidence: RuntimeReceiptEvidence,
+): void {
+  try {
+    metrics?.recordReceiptEvidence?.(evidence.outcome);
+    const applied = evidence.outcome === "applied";
+    logger?.info({
+      event: applied ? "runtime_receipt_applied" : "runtime_receipt_discarded",
+      "event.kind": applied ? "runtime_receipt_applied" : "runtime_receipt_discarded",
+      operation: evidence.operation,
+      component: "agent-runtime",
+      message: applied ? "runtime receipt applied" : "runtime receipt discarded",
+      "workspace.id": evidence.workspaceId,
+      "session.id": evidence.sessionId,
+      "thread.id": evidence.sessionThreadId,
+      "binding.id": evidence.bindingId,
+      "binding.generation": evidence.bindingGeneration,
+      "declaration.source.kind": evidence.sourceKind,
+      "declaration.source.id": evidence.sourceId,
+      "declaration.digest": evidence.declarationDigest,
+      ...(evidence.applicationDisposition === undefined
+        ? {}
+        : { "receipt.application_disposition": evidence.applicationDisposition }),
+      ...(applied ? {} : { "receipt.discard_reason": evidence.outcome }),
+    });
+  } catch {
+    // Receipt application is authoritative; observability is not part of its custody boundary.
+  }
+}
 
 /** Configures the JSON sink and optional service resource attributes for Runtime Pod logs. */
 export interface JsonLoggerOptions {

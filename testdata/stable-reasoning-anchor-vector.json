@@ -8,7 +8,6 @@
     },
     "evaluated_permission": "allow"
   },
-  "projection_json": "{\"type\":\"runtime_tool_projection\",\"message_id\":\"ignored_by_bridge\",\"part_id\":\"part_shared_tool\",\"part_sequence\":2,\"model_tool_call_id\":\"call_shared_anchor\",\"tool_name\":\"Read\",\"input\":{\"path\":\"a.txt\"},\"state\":\"running\"}",
   "stable_reasoning_parts": [
     {
       "reasoning_part_id": "part_shared_reasoning",
@@ -26,9 +25,5 @@
       "metadata_json": "{\"openai\":{\"encrypted_content\":\"cipher_shared\"}}",
       "truncated": true
     }
-  ],
-  "expected_assistant_part_ids": [
-    "part_shared_reasoning",
-    "part_shared_reasoning_2"
   ]
 }

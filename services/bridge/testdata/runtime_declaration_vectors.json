@@ -21,6 +21,33 @@
         "part_json": "{\"status\":\"completed\",\"truncated\":false,\"text\":\"hello\",\"type\":\"text\"}"
       }
     },
-    "digest": "845aa5714fcc268c810ac3303f17db88b2511266112cc754d7273003358a8631"
+    "digest": "8a2a168fc6680fd532b3fca0350b442c69798883216a04e3e7967dcddd0c4642"
+  },
+  "internal_tool_repair": {
+    "session_thread_id": "thr_vector",
+    "model_request_id": "mreq_vector",
+    "model_tool_call_id": "call_vector",
+    "tool_name": "unknown_tool",
+    "repair_key": "internal_invalid_tool_vector",
+    "draft": {
+      "runtime_local_id": "stid_d8a17bf2f01ab5d4afe8ecf57566e1a8703bdcfb13a70383827b26653c83c983",
+      "source_kind": "internal_tool_repair",
+      "source_id": "internal_invalid_tool_vector",
+      "ordinal": 0,
+      "message_info_json": "{\"role\":\"assistant\",\"origin\":\"agent\",\"status\":\"completed\"}",
+      "part": {
+        "runtime_local_part_id": "stid_07810482bd5d50baa5fe4c1d8c1745adcde3a7dcec3ef0db8a6bbca4f86517ec",
+        "part_kind": "tool",
+        "ordinal": 0,
+        "part_json": "{\"type\":\"tool\",\"toolCallId\":\"call_vector\",\"toolName\":\"unknown_tool\",\"completedAt\":\"2026-01-01T00:00:00Z\",\"state\":{\"status\":\"error\",\"input\":{\"value\":{\"q\":\"x\"},\"preview\":\"{\\\"q\\\":\\\"x\\\"}\",\"truncated\":false},\"error\":{\"type\":\"provider_tool_protocol_error\",\"message\":\"invalid tool\",\"retryable\":false}}}"
+      }
+    },
+    "digest": "67f95449cfd034d9572bb337b641ab5cc2a0d60e43bb6b5a38a07b2bda02402d"
+  },
+  "runtime_termination": {
+    "session_thread_id": "thr_vector",
+    "runtime_write_id": "evt_turn_vector",
+    "failure_json": "{\"type\":\"provider\",\"code\":\"provider_invalid_request\",\"message\":\"Provider request is terminal.\",\"retryable\":false,\"fatal\":true,\"retryStatus\":{\"type\":\"terminal\"}}",
+    "digest": "23604fe78946161874ea01a20c05ade816ce203ab740489b0d8491cf9485f581"
   }
 }

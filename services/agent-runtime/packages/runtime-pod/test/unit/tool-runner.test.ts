@@ -5,6 +5,8 @@ import { resolve } from "node:path";
 import { Metadata, status as GrpcStatus } from "@grpc/grpc-js";
 import {
   BridgeWriteStatus,
+  ChildLifecycleDisposition,
+  ReceiptApplicationDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceClient,
@@ -39,8 +41,10 @@ import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/s
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
-import { canonicalRunToolJSON } from "../../src/run-tool-canonical-json.js";
+import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import { childLifecycleDeclarationDigest } from "../../src/runtime-declaration-wire.js";
 import type { RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
 import {
   buildToolRunnerCompletedToolMessage as completedToolMessage,
@@ -1228,15 +1232,20 @@ describe("RuntimePodToolRunner", () => {
       resultText: "mcp result",
       attachments: [],
       errorKind: undefined,
+      materializationHandle: "evt_mcp_materialized",
     };
     const runner = makeRunner({ mcp });
 
     const result = await runner.runTool(mcpToolRequest({ query: "issues" }));
 
-    expect(result).toEqual({ type: "completed", output: { text: "mcp result", truncated: false } });
+    expect(result).toEqual({
+      type: "completed",
+      output: { text: "mcp result", truncated: false },
+      mcpMaterializationHandle: "evt_mcp_materialized",
+    });
     expect(mcp.runMcpToolRequests).toEqual([
       {
-        requestId: "req_1",
+        requestId: `req_${sha256("tool:mreq_1:tool_call_1").slice(0, 32)}`,
         workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thrd_1",
@@ -1400,6 +1409,22 @@ describe("RuntimePodToolRunner", () => {
       },
     });
     expect(result).not.toHaveProperty("publicErrorEvent");
+  });
+
+  test("returns stale custody without projecting a model-visible MCP failure", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool execution lost runtime custody.",
+      attachments: [],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST,
+      retryStatus: undefined,
+    };
+    const runner = makeRunner({ mcp });
+
+    await expect(runner.runTool(mcpToolRequest({ repo: "tetral" }))).resolves.toEqual({
+      type: "stale_custody",
+    });
   });
 
   test("returns MCP attachment refs without a Runtime-side byte handoff", async () => {
@@ -1604,6 +1629,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("close_agent commits durable closed projection before releasing hot child state", async () => {
     const bridge = new RecordingBridgeClient();
+    bridge.closeReceiptTargetIds = ["thr_child_1", "thr_grandchild_1"];
     const subAgentHost = new RecordingSubAgentHost();
     subAgentHost.onClose = () => {
       expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
@@ -1618,8 +1644,29 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: closed_for_runtime"),
       }),
     });
-    expect(subAgentHost.actions).toEqual(["close"]);
+    expect(subAgentHost.actions).toEqual(["close", "close"]);
+    expect(subAgentHost.closedThreadIds).toEqual(["thr_child_1", "thr_grandchild_1"]);
     expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+  });
+
+  test("close_agent rejects a lifecycle receipt from another Runtime binding", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childLifecycleObservedBindingId = "bind_other";
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    const replay = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({ type: "stale_custody" });
+    expect(replay).toEqual({ type: "stale_custody" });
+    const firstClosedAt = bridge.markChildThreadClosedRequests[0]?.closedAt;
+    expect(firstClosedAt).toBeDefined();
+    expect(bridge.markChildThreadClosedRequests.map((request) => request.closedAt)).toEqual([
+      firstClosedAt!,
+      firstClosedAt!,
+    ]);
+    expect(subAgentHost.actions).toEqual([]);
   });
 
   test("close_agent does not release hot child state when durable close is rejected", async () => {
@@ -1645,25 +1692,31 @@ describe("RuntimePodToolRunner", () => {
   test("close_agent reports retryable failure when hot close fails after durable close", async () => {
     const bridge = new RecordingBridgeClient();
     const subAgentHost = new RecordingSubAgentHost();
-    subAgentHost.closeResult = {
+    subAgentHost.closeResults.push({
       ok: false,
       sessionId: "sesn_1",
       sessionThreadId: "thr_child_1",
       reason: "thread_busy",
-    };
+    });
     const runner = makeRunner({ bridge, subAgentHost });
 
-    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    const first = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    await Bun.sleep(5);
+    const second = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
 
-    expect(result).toEqual({
+    expect(first).toEqual({
       type: "error",
       error: expect.objectContaining({
         message: expect.stringContaining("thread_busy"),
         retryable: true,
       }),
     });
-    expect(subAgentHost.actions).toEqual(["close"]);
-    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+    expect(second).toMatchObject({ type: "completed" });
+    expect(subAgentHost.actions).toEqual(["close", "close"]);
+    expect(bridge.markChildThreadClosedRequests).toHaveLength(2);
+    expect(bridge.markChildThreadClosedRequests[1]?.closedAt).toBe(
+      bridge.markChildThreadClosedRequests[0]?.closedAt,
+    );
   });
 
   test("send_message keeps same-child inputs in model order when the first child lookup is slow", async () => {
@@ -2007,7 +2060,7 @@ describe("RuntimePodToolRunner", () => {
     expect(subAgentHost.enqueued).toEqual([]);
   });
 
-  test("resume_agent is a benign no-op for a child that is not closed", async () => {
+  test("resume_agent records an already-active declaration without reloading the observed child", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.childStatus = "running";
     const subAgentHost = new RecordingSubAgentHost();
@@ -2022,7 +2075,9 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: running"),
       }),
     });
-    expect(bridge.markChildThreadActiveRequests).toEqual([]);
+    expect(bridge.markChildThreadActiveRequests).toEqual([
+      expect.objectContaining({ childThreadId: "thr_child_1" }),
+    ]);
     expect(subAgentHost.actions).toEqual(["inspect"]);
     expect(subAgentHost.preloaded).toEqual([]);
     expect(subAgentHost.enqueued).toEqual([]);
@@ -2040,11 +2095,15 @@ describe("RuntimePodToolRunner", () => {
 
     const first = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
     bridge.childStatus = "idle";
+    await Bun.sleep(5);
     const second = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
 
     expect(first).toMatchObject({ type: "error" });
     expect(second).toMatchObject({ type: "completed" });
-    expect(bridge.markChildThreadActiveRequests).toHaveLength(1);
+    expect(bridge.markChildThreadActiveRequests).toHaveLength(2);
+    expect(bridge.markChildThreadActiveRequests[1]?.activeAt).toBe(
+      bridge.markChildThreadActiveRequests[0]?.activeAt,
+    );
     expect(subAgentHost.preloaded).toHaveLength(2);
     expect(subAgentHost.actions.filter((action) => action === "resume")).toHaveLength(0);
   });
@@ -2068,24 +2127,6 @@ function makeRunner(options: {
     mcpConnectorClient: (options.mcp ?? new RecordingMcpConnectorClient()).client(),
     metadataFactory: options.metadataFactory ?? (async () => new Metadata()),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
-    scopeForThread: (workspaceId: string, sessionId: string, sessionThreadId: string) =>
-      workspaceId === "wksp_1" && sessionId === "sesn_1" && sessionThreadId === "thrd_1"
-      ? {
-        requestId: "req_1",
-        workspaceId: "wksp_1",
-        sessionId: "sesn_1",
-        sessionThreadId: "thrd_1",
-        bindingId: "bind_1",
-        bindingGeneration: 42,
-        targetPodUid: "pod_1",
-        runtimeInputId: "rin_1",
-        eventIds: ["sevt_user_1"],
-        sequenceFrom: 1,
-        sequenceTo: 1,
-        kind: "messages",
-        payloadJson: "{}",
-      }
-      : undefined,
     subAgentRunHost: () => options.subAgentHost,
   });
 }
@@ -2250,6 +2291,8 @@ class RecordingBridgeClient {
   afterRunMemoryResponse: ((callNumber: number) => void) | undefined;
   markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   markChildThreadClosedErrorCode = "";
+  closeReceiptTargetIds: string[] = [];
+  childLifecycleObservedBindingId: string | undefined;
 
   client(): Pick<AgentRuntimeBridgeServiceClient,
     | "runTool"
@@ -2452,16 +2495,89 @@ class RecordingBridgeClient {
 
   private markChildThreadClosed(request: MarkChildThreadClosedRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.markChildThreadClosedRequests.push(request);
+    const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
+    const operationId = stableRuntimeID("child_tree_close", sourceCommandId, request.childThreadId);
+    const targetIds = this.closeReceiptTargetIds.length > 0
+      ? this.closeReceiptTargetIds
+      : [request.childThreadId];
     callback(null, {
-      ack: { status: this.markChildThreadClosedStatus, runtimeInputId: "", runtimeWriteId: "", errorCode: this.markChildThreadClosedErrorCode },
+      ack: { status: this.markChildThreadClosedStatus, runtimeInputId: "", runtimeWriteId: operationId, errorCode: this.markChildThreadClosedErrorCode },
+      ...(this.markChildThreadClosedStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED
+        ? {}
+        : {
+            declaration: {
+              receipts: targetIds.map((targetId) => ({
+                sessionThreadId: targetId,
+                operationKind: "mark_child_thread_closed",
+                sourceKind: "child_close_command",
+                sourceId: operationId,
+                events: [],
+                messages: [],
+                pendingAttachmentDeltaJson: [],
+                pendingToolDeltaJson: [],
+                prefixConsumptions: [],
+                declarationDigest: childLifecycleDeclarationDigest({
+                  operationKind: "mark_child_thread_closed",
+                  action: "close",
+                  sessionThreadId: request.scope?.sessionThreadId ?? "",
+                  childThreadId: request.childThreadId,
+                  sourceKind: "tool_use",
+                  sourceCommandId,
+                  requestedAt: request.closedAt,
+                }),
+                childLifecycle: [{
+                  childThreadId: targetId,
+                  disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+                  effectiveAt: request.closedAt,
+                }],
+              })),
+              applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+              observedBindingId: this.childLifecycleObservedBindingId ?? request.scope?.binding?.bindingId ?? "",
+              observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+            },
+          }),
     });
     return grpcCall();
   }
 
   private markChildThreadActive(request: MarkChildThreadActiveRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.markChildThreadActiveRequests.push(request);
+    const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
+    const operationId = stableRuntimeID("child_resume", sourceCommandId, request.childThreadId);
     callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: operationId, errorCode: "" },
+      declaration: {
+        receipts: [{
+          sessionThreadId: request.childThreadId,
+          operationKind: "mark_child_thread_active",
+          sourceKind: "child_resume_command",
+          sourceId: operationId,
+          events: [],
+          messages: [],
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          declarationDigest: childLifecycleDeclarationDigest({
+            operationKind: "mark_child_thread_active",
+            action: "resume",
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            childThreadId: request.childThreadId,
+            sourceKind: "tool_use",
+            sourceCommandId,
+            requestedAt: request.activeAt,
+          }),
+          childLifecycle: [{
+            childThreadId: request.childThreadId,
+            disposition: this.childStatus === "closed_for_runtime"
+              ? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED
+              : ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE,
+            effectiveAt: request.activeAt,
+          }],
+        }],
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+      },
     });
     return grpcCall();
   }
@@ -2479,12 +2595,13 @@ class RecordingBridgeClient {
 
 class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
   readonly actions: string[] = [];
+  readonly closedThreadIds: string[] = [];
   readonly enqueued: Parameters<RuntimeSubAgentRunHost["enqueueThreadInput"]>[0][] = [];
   readonly preloaded: Parameters<RuntimeSubAgentRunHost["preloadThread"]>[0][] = [];
   waitResult: Awaited<ReturnType<RuntimeSubAgentRunHost["waitThread"]>> | undefined;
   pulledAgentMail: Awaited<ReturnType<NonNullable<RuntimeSubAgentRunHost["pullAgentMail"]>>> | undefined;
   readonly pullAgentMailCalls: Array<{ readonly sessionThreadId: string; readonly sourceThreadId: string }> = [];
-  closeResult: Awaited<ReturnType<RuntimeSubAgentRunHost["markThreadClosed"]>> | undefined;
+  readonly closeResults: Array<Awaited<ReturnType<RuntimeSubAgentRunHost["markThreadClosed"]>>> = [];
   interruptApplied = true;
   interruptRunExitOutcome: "completed_clean" | "interrupt_applied" | "failed_closeout" | undefined;
   onClose: (() => void) | undefined;
@@ -2533,8 +2650,9 @@ class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
 
   async markThreadClosed(command: Parameters<RuntimeSubAgentRunHost["markThreadClosed"]>[0]) {
     this.actions.push("close");
+    this.closedThreadIds.push(command.sessionThreadId);
     this.onClose?.();
-    return this.closeResult ?? { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
+    return this.closeResults.shift() ?? { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
   }
 
   async markThreadActive(command: Parameters<RuntimeSubAgentRunHost["markThreadActive"]>[0]) {

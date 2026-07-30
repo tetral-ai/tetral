@@ -660,11 +660,17 @@ export function buildCoreHostsAssistantRunningToolMessage(
   toolName: string,
   toolUseEventId: string,
   input: unknown,
+  toolEvent: { readonly kind: "tool" } | {
+    readonly kind: "mcp";
+    readonly mcpServerName: string;
+  } = { kind: "tool" },
 ): RuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id,
     sessionId,
+    owningEventId: toolUseEventId,
+    eventSequence: sequence,
     role: "assistant",
     origin: "agent",
     sequence,
@@ -680,7 +686,7 @@ export function buildCoreHostsAssistantRunningToolMessage(
         toolCallId,
         toolName,
         toolUseEventId,
-        toolEvent: { kind: "tool" },
+        toolEvent,
         state: {
           status: "running",
           input: {

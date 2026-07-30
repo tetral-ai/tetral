@@ -1006,6 +1006,53 @@ func TestPostgreSQLSessionUpdateApprovalModeRejectsActiveRuntimeQueueWork(t *tes
 	}
 }
 
+func TestPostgreSQLSessionUpdateApprovalModeRejectsUnsettledRuntimeInbox(t *testing.T) {
+	for _, inboxStatus := range []string{"accepted", "delivering", "parked"} {
+		t.Run(inboxStatus, func(t *testing.T) {
+			env := newSessionPostgreSQLProofEnv(t)
+			seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, "ready")
+			createTime := time.Date(2026, 5, 11, 12, 30, 0, 0, time.UTC)
+			service := env.newService(createTime)
+			sessionID := "sesn_approval_inbox_" + inboxStatus
+			threadID := "thread_approval_inbox_" + inboxStatus
+			service.sessionIDStrategy = fixedSessionIDs(sessionID)
+			service.threadIDStrategy = fixedSessionIDs(threadID)
+			if _, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
+				Agent:         AgentReference{ID: "agent_test"},
+				EnvironmentID: "env_test",
+			}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			now := createTime.Add(time.Minute)
+			if _, err := env.admin.ExecContext(context.Background(),
+				`INSERT INTO session_runtime_inbox (
+					workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+					event_ids_json, sequence_from, sequence_to, status, binding_id,
+					binding_generation, target_pod_uid, created_at, updated_at
+				) VALUES ($1, $2, $3, $4, 'messages', '[]', 1, 1, $5, $7, 1, $8, $6, $6)`,
+				string(workspace.DefaultID),
+				sessionID,
+				threadID,
+				"rin_approval_inbox_"+inboxStatus,
+				inboxStatus,
+				now,
+				"bind_approval_inbox_"+inboxStatus,
+				"pod_approval_inbox_"+inboxStatus,
+			); err != nil {
+				t.Fatalf("seed %s runtime inbox: %v", inboxStatus, err)
+			}
+
+			_, err := service.Update(context.Background(), workspace.DefaultID, sessionID, UpdateRequest{
+				ApprovalMode: approvalModePtr(ApprovalModeFullAccess),
+			})
+			var conflict *ConflictError
+			if !errors.As(err, &conflict) {
+				t.Fatalf("Update with %s inbox err = %T %v; want ConflictError", inboxStatus, err, err)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLSessionUpdateApprovalModeRejectsMissingRuntimeStatus(t *testing.T) {
 	env := newSessionPostgreSQLProofEnv(t)
 	seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, "ready")
@@ -1252,6 +1299,7 @@ func seedActiveRuntimeQueueJob(t *testing.T, db *sql.DB, workspaceID workspace.I
 		payload["sequence_from"] = 1
 		payload["sequence_to"] = 1
 		payload["input_kind"] = "messages"
+		payload["preparation_attempt_id"] = "prep_" + suffix
 		dedupeKey = queue.FormatRuntimeInputDedupeKey(workspaceID, sessionID, "rin_"+suffix)
 	case queue.KindRuntimeConfigUpdate:
 		payload["config_generation"] = 7
@@ -1264,19 +1312,22 @@ func seedActiveRuntimeQueueJob(t *testing.T, db *sql.DB, workspaceID workspace.I
 	if err != nil {
 		t.Fatalf("marshal active queue payload: %v", err)
 	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, payload_version, status, payload_json,
-			priority, attempt_count, max_attempts, available_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 1, 'pending', $6, 0, 0, 10, $7, $7, $7)`,
-		"qjob_active_"+suffix,
-		string(workspaceID),
-		kind,
-		queue.FormatSessionPartitionKey(workspaceID, sessionID),
-		dedupeKey,
-		string(payloadJSON),
-		now,
-	); err != nil {
+	availableAt, err := time.Parse(time.RFC3339, now)
+	if err != nil {
+		t.Fatalf("parse active queue time: %v", err)
+	}
+	store := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(db))
+	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID:             "qjob_active",
+		WorkspaceID:    workspaceID,
+		Kind:           kind,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspaceID, sessionID),
+		DedupeKey:      dedupeKey,
+		PayloadVersion: 1,
+		PayloadJSON:    payloadJSON,
+		MaxAttempts:    10,
+		Now:            availableAt,
+	}); err != nil {
 		t.Fatalf("seed active queue job: %v", err)
 	}
 }

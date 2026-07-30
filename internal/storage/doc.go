@@ -78,7 +78,7 @@
 //	session_mcp_manifests                                  Bridge only                                                      Bridge LoadContext, manifest patch delivery
 //	session_background_tasks                               Bridge only                                                      Runtime task read/send/cancel, Bridge cleanup
 //	request_usage_details                                  Bridge only (WriteRequestEnd)                                    session usage projection, audit/billing
-//	session_runtime_tool_results                           Bridge only                                                      Bridge replay/idempotency, MCP claim replays
+//	session_runtime_tool_results                           Bridge only                                                      Bridge replay/idempotency, MCP claim/materialization lifecycle
 //	session_transient_attachments                          Bridge only                                                      Gateway ResolveTransientAttachment,
 //	                                                                                                                         Bridge GC and LoadContext
 //	session_provider_auth                                  api upserts (rotate + soft-delete siblings,               Gateway provider credential resolution

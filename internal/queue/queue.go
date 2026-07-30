@@ -201,24 +201,25 @@ type ValidationError struct {
 func (e *ValidationError) Error() string { return e.Message }
 
 type Job struct {
-	ID             string
-	WorkspaceID    workspace.ID
-	Kind           string
-	PartitionKey   string
-	DedupeKey      string
-	PayloadVersion int
-	PayloadJSON    json.RawMessage
-	Status         string
-	Priority       int
-	AvailableAt    time.Time
-	LeasedBy       string
-	LeaseToken     string
-	LeasedAt       *time.Time
-	LeasedUntil    *time.Time
-	AttemptCount   int
-	MaxAttempts    int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                     string
+	WorkspaceID            workspace.ID
+	Kind                   string
+	PartitionKey           string
+	QueuePartitionSequence int64
+	DedupeKey              string
+	PayloadVersion         int
+	PayloadJSON            json.RawMessage
+	Status                 string
+	Priority               int
+	AvailableAt            time.Time
+	LeasedBy               string
+	LeaseToken             string
+	LeasedAt               *time.Time
+	LeasedUntil            *time.Time
+	AttemptCount           int
+	MaxAttempts            int
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type MetricsSnapshot struct {
@@ -612,20 +613,18 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeInputDedupeKey(request.WorkspaceID, sessionID, runtimeInputID))
 	case KindRuntimeConfigUpdate:
 		if _, ok := rawPayload["config_generation"]; ok {
-			if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "config_generation", "approval_mode", "tool_policy"); err != nil {
+			if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "config_generation"); err != nil {
 				return err
 			}
-			sessionID, configGeneration, err := requiredPayloadTokens(payload, "session_id", "config_generation")
+			sessionID, err := requiredPayloadToken(payload, "session_id")
 			if err != nil {
 				return err
 			}
-			if rawApprovalMode, ok := rawPayload["approval_mode"]; ok {
-				approvalMode, ok := payloadToken(rawApprovalMode)
-				if !ok || !isApprovalMode(approvalMode) {
-					return &ValidationError{Message: "runtime_config_update approval_mode is invalid"}
-				}
+			configGeneration, err := requiredPayloadInt64(payload, "config_generation")
+			if err != nil || configGeneration <= 0 {
+				return &ValidationError{Message: "payload_json missing config_generation"}
 			}
-			return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeConfigUpdateDedupeKey(request.WorkspaceID, sessionID, configGeneration))
+			return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeConfigUpdateDedupeKey(request.WorkspaceID, sessionID, strconv.FormatInt(configGeneration, 10)))
 		}
 		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "mcp_server_name", "manifest_generation"); err != nil {
 			return err
@@ -842,16 +841,7 @@ func isKnownKind(kind string) bool {
 
 func isRuntimeInputKind(inputKind string) bool {
 	switch inputKind {
-	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail":
-		return true
-	default:
-		return false
-	}
-}
-
-func isApprovalMode(mode string) bool {
-	switch mode {
-	case "full_access", "ask_for_approval", "approve_for_me":
+	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "approval_review", "rejection":
 		return true
 	default:
 		return false

@@ -148,6 +148,7 @@ export enum RuntimeInputErrorCode {
   RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED = 9,
   RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED = 10,
   RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT = 11,
+  RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY = 12,
   UNRECOGNIZED = -1,
 }
 
@@ -189,6 +190,9 @@ export function runtimeInputErrorCodeFromJSON(object: any): RuntimeInputErrorCod
     case 11:
     case "RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT":
       return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT;
+    case 12:
+    case "RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY":
+      return RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -222,6 +226,8 @@ export function runtimeInputErrorCodeToJSON(object: RuntimeInputErrorCode): stri
       return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED";
     case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT:
       return "RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT";
+    case RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY:
+      return "RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY";
     case RuntimeInputErrorCode.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";

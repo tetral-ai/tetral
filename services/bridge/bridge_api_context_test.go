@@ -97,12 +97,16 @@ func TestPostgreSQLBridgeAPIStoreLoadContextRescansOnlyUnreceiptedCompletionMail
 		t.Fatalf("pending completion mail before receipt = %#v; want delivery", beforePayload.PendingAgentMail)
 	}
 
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:                 bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-		RuntimeInputId:        "agent_mail:" + delivery,
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessageJSON(t, delivery, childID, "sevt_bridge_completion_rescan_spawn", messageJSON),
-	}); err != nil {
+	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		"agent_mail:"+delivery,
+		delivery,
+		childID,
+		"sevt_bridge_completion_rescan_spawn",
+		messageJSON,
+	)); err != nil {
 		t.Fatalf("CommitInputs completion receipt: %v", err)
 	}
 	after, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
@@ -148,12 +152,16 @@ func TestPostgreSQLBridgeAPIStoreFilteredCompletionMailRefusesSupersededCourtesy
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-completion-currency-key")
 	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:                 scope,
-		RuntimeInputId:        "agent_mail:" + delivery,
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessageJSON(t, delivery, childID, "sevt_bridge_completion_currency_spawn", messageJSON),
-	}); err != nil {
+	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		scope,
+		"agent_mail:"+delivery,
+		delivery,
+		childID,
+		"sevt_bridge_completion_currency_spawn",
+		messageJSON,
+	)); err != nil {
 		t.Fatalf("commit completion receipt: %v", err)
 	}
 
@@ -278,18 +286,16 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsUnfilteredCompletionMailAndLet
 		t.Fatalf("unfiltered pending mail = %d; want %d", len(unfilteredPayload.PendingAgentMail), MailFetchMaxEnvelopes)
 	}
 	for _, mail := range unfilteredPayload.PendingAgentMail {
-		if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope:          scope,
-			RuntimeInputId: "agent_mail:" + mail.DeliveryID,
-			InputKind:      "inter_agent_message",
-			InterAgentMessageJson: bridgeInterAgentMessageJSON(
-				t,
-				mail.DeliveryID,
-				mail.SourceThreadID,
-				mail.SourceToolUseEventID,
-				string(mail.Message),
-			),
-		}); err != nil {
+		if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+			t,
+			admin,
+			scope,
+			"agent_mail:"+mail.DeliveryID,
+			mail.DeliveryID,
+			mail.SourceThreadID,
+			mail.SourceToolUseEventID,
+			string(mail.Message),
+		)); err != nil {
 			t.Fatalf("commit bounded completion receipt %s: %v", mail.DeliveryID, err)
 		}
 	}
@@ -812,10 +818,21 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result"),
 		RuntimeWriteId: "rwrite_bridge_tool_result",
+		ModelRequestId: "mreq_bridge_tool_result",
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"done"}]}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"tool-call-result","tool_name":"search","input":{"q":"x"},"state":"completed","output":{"text":"done","truncated":false}}`,
 		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result"),
+			"rwrite_bridge_tool_result",
+			"agent.tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"tool-call-result","toolName":"search","toolUseEventId":"evt_public_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent tool_result: %v", err)
@@ -876,22 +893,66 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 		ModelRequestId: "mreq_bridge_mcp",
 		EventType:      "agent.mcp_tool_use",
 		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"search_code","input":{"q":"x"},"mcp_server_name":"github","evaluated_permission":"ask"}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"call_bridge_mcp","tool_name":"search_code","mcp_server_name":"github","input":{"q":"x"},"state":"running"}`,
 		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_mcp_use",
+			"agent.mcp_tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent MCP tool use: %v", err)
 	}
 	setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_mcp_projection", "thr_bridge_mcp_projection", toolUse.GetEventId(), "resolving")
+	claim := &bridgev1.ClaimMcpToolResultRequest{
+		Scope:               scope,
+		ToolUseEventId:      toolUse.GetEventId(),
+		NormalizedInputHash: "hash_bridge_mcp_projection",
+		McpServerName:       "github",
+		ToolName:            "search_code",
+		InputJson:           `{"q":"x"}`,
+	}
+	if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
+		t.Fatalf("ClaimMcpToolResult: %v", err)
+	}
+	materialized, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+		Scope:               scope,
+		ToolUseEventId:      claim.GetToolUseEventId(),
+		NormalizedInputHash: claim.GetNormalizedInputHash(),
+		McpServerName:       claim.GetMcpServerName(),
+		ToolName:            claim.GetToolName(),
+		InputJson:           claim.GetInputJson(),
+		ResultJson:          `{"response":{"status":1,"result_text":"done","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+	})
+	if err != nil {
+		t.Fatalf("CommitMcpToolResult: %v", err)
+	}
 
 	result, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_bridge_mcp_result",
-		ModelRequestId: "mreq_bridge_mcp",
-		EventType:      "agent.mcp_tool_result",
-		PayloadJson:    `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
-		ProjectionJson: `{"type":"runtime_tool_projection","model_tool_call_id":"call_bridge_mcp","tool_name":"search_code","mcp_server_name":"github","input":{"q":"x"},"state":"completed","output":{"text":"done","truncated":false}}`,
-		SessionVisible: true,
+		Scope:                    scope,
+		RuntimeWriteId:           "rwrite_bridge_mcp_result",
+		ModelRequestId:           "mreq_bridge_mcp",
+		EventType:                "agent.mcp_tool_result",
+		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
+		SessionVisible:           true,
+		McpMaterializationHandle: materialized.MaterializationHandle,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_mcp_result",
+			"agent.mcp_tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_mcp","toolName":"search_code","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
+			},
+		)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent MCP tool result: %v", err)
@@ -908,7 +969,7 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 	}
 	var messageDataJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND source_event_id = $1`,
+		`SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND last_event_id = $1`,
 		result.GetEventId()).Scan(&messageDataJSON); err != nil {
 		t.Fatalf("read MCP result projection: %v", err)
 	}

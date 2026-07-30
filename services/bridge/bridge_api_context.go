@@ -82,6 +82,7 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 type bridgeLoadContextPayload struct {
 	Messages            []json.RawMessage                    `json:"messages"`
 	ThreadContextPrefix *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
+	DurableTurnID       *string                              `json:"durableTurnId"`
 	Thread              bridgeLoadContextThread              `json:"thread"`
 	RuntimeConfig       bridgeLoadContextRuntimeConfig       `json:"runtimeConfig"`
 	MCPManifests        []bridgeLoadContextMCPManifest       `json:"mcpManifests"`
@@ -89,6 +90,13 @@ type bridgeLoadContextPayload struct {
 	BackgroundTools     []bridgeLoadContextBackgroundTool    `json:"backgroundTools"`
 	PendingAttachments  []bridgeLoadContextPendingAttachment `json:"pendingAttachments"`
 	PendingAgentMail    []bridgeLoadContextAgentMail         `json:"pendingAgentMail"`
+	ColdCoverage        bridgeLoadContextColdCoverage        `json:"coldCoverage"`
+}
+
+type bridgeLoadContextColdCoverage struct {
+	PendingToolIDs              []string `json:"pendingToolIds"`
+	PendingAttachmentIdentities []string `json:"pendingAttachmentIdentities"`
+	UndeliveredMailDeliveryIDs  []string `json:"undeliveredMailDeliveryIds"`
 }
 
 type bridgeLoadContextThreadPrefix struct {
@@ -102,6 +110,7 @@ type bridgeLoadContextThreadPrefix struct {
 
 type bridgeLoadContextThread struct {
 	ParentThreadID *string `json:"parentThreadId"`
+	ParentTaskName *string `json:"parentTaskName"`
 	Role           string  `json:"role"`
 	Visibility     string  `json:"visibility"`
 	TaskName       *string `json:"taskName"`
@@ -239,6 +248,10 @@ func loadThreadContextJSONTx(
 	if err != nil {
 		return "", err
 	}
+	durableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, scope)
+	if err != nil {
+		return "", err
+	}
 	threadContextPrefix, err := loadThreadContextPrefixTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
@@ -336,6 +349,7 @@ func loadThreadContextJSONTx(
 	return marshalBridgeJSON(bridgeLoadContextPayload{
 		Messages:            messages,
 		ThreadContextPrefix: threadContextPrefix,
+		DurableTurnID:       durableTurnID,
 		Thread:              thread,
 		RuntimeConfig:       runtimeConfig,
 		MCPManifests:        mcpManifests,
@@ -343,7 +357,41 @@ func loadThreadContextJSONTx(
 		BackgroundTools:     backgroundTools,
 		PendingAttachments:  pendingAttachments,
 		PendingAgentMail:    pendingAgentMail,
+		ColdCoverage:        coldCoverageForLoad(pendingToolUses, pendingAttachments, pendingAgentMail),
 	})
+}
+
+func coldCoverageForLoad(
+	pendingToolUses []bridgeLoadContextPendingTool,
+	pendingAttachments []bridgeLoadContextPendingAttachment,
+	pendingAgentMail []bridgeLoadContextAgentMail,
+) bridgeLoadContextColdCoverage {
+	coverage := bridgeLoadContextColdCoverage{
+		PendingToolIDs:              make([]string, 0, len(pendingToolUses)),
+		PendingAttachmentIdentities: make([]string, 0, len(pendingAttachments)),
+		UndeliveredMailDeliveryIDs:  make([]string, 0, len(pendingAgentMail)),
+	}
+	for _, pending := range pendingToolUses {
+		coverage.PendingToolIDs = append(coverage.PendingToolIDs, pending.ToolUseEventID)
+	}
+	for _, attachment := range pendingAttachments {
+		switch {
+		case attachment.Origin.Transient != nil:
+			coverage.PendingAttachmentIdentities = append(
+				coverage.PendingAttachmentIdentities,
+				"transient:"+attachment.Origin.Transient.SourceToolUseEventID+":"+attachment.Origin.Transient.AttachmentRef,
+			)
+		case attachment.Origin.FileBacked != nil:
+			coverage.PendingAttachmentIdentities = append(
+				coverage.PendingAttachmentIdentities,
+				"file:"+attachment.Origin.FileBacked.SourceEventID+":"+attachment.Origin.FileBacked.FileID,
+			)
+		}
+	}
+	for _, mail := range pendingAgentMail {
+		coverage.UndeliveredMailDeliveryIDs = append(coverage.UndeliveredMailDeliveryIDs, mail.DeliveryID)
+	}
+	return coverage
 }
 
 func loadThreadContextPrefixTx(
@@ -467,24 +515,80 @@ func loadThreadMetadataForContextTx(
 ) (bridgeLoadContextThread, error) {
 	var thread bridgeLoadContextThread
 	var parentThreadID sql.NullString
+	var parentTaskName sql.NullString
 	var taskName sql.NullString
 	if err := tx.QueryRow(ctx,
-		`SELECT parent_thread_id, role, visibility, task_name, agent_type, status
-		   FROM session_threads
-		  WHERE workspace_id=$1 AND session_id=$2 AND id=$3`,
+		`SELECT child.parent_thread_id,
+		        parent.task_name,
+		        child.role,
+		        child.visibility,
+		        child.task_name,
+		        child.agent_type,
+		        child.status
+		   FROM session_threads child
+		   LEFT JOIN session_threads parent
+		     ON parent.workspace_id=child.workspace_id
+		    AND parent.session_id=child.session_id
+		    AND parent.id=child.parent_thread_id
+		  WHERE child.workspace_id=$1 AND child.session_id=$2 AND child.id=$3`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-	).Scan(&parentThreadID, &thread.Role, &thread.Visibility, &taskName, &thread.AgentType, &thread.Status); err != nil {
+	).Scan(&parentThreadID, &parentTaskName, &thread.Role, &thread.Visibility, &taskName, &thread.AgentType, &thread.Status); err != nil {
 		return bridgeLoadContextThread{}, err
 	}
 	if parentThreadID.Valid {
 		thread.ParentThreadID = &parentThreadID.String
 	}
+	if parentTaskName.Valid {
+		thread.ParentTaskName = &parentTaskName.String
+	}
 	if taskName.Valid {
 		thread.TaskName = &taskName.String
 	}
 	return thread, nil
+}
+
+func loadOpenDurableTurnIDTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) (*string, error) {
+	var durableTurnID string
+	err := tx.QueryRow(ctx,
+		`WITH latest_close AS (
+			SELECT COALESCE(MAX(sequence), 0) AS sequence
+			  FROM session_events
+			 WHERE workspace_id=$1
+			   AND session_id=$2
+			   AND session_thread_id=$3
+			   AND type IN (
+			     'session.status_idle',
+			     'session.thread_status_idle',
+			     'session.status_terminated',
+			     'session.thread_status_terminated'
+			   )
+		)
+		SELECT event_id
+		  FROM session_events, latest_close
+		 WHERE workspace_id=$1
+		   AND session_id=$2
+		   AND session_thread_id=$3
+		   AND type IN ('session.status_running', 'session.thread_status_running')
+		   AND session_events.sequence > latest_close.sequence
+		 ORDER BY session_events.sequence ASC
+		 LIMIT 1`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	).Scan(&durableTurnID)
+	if dbconnect.IsNoRows(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &durableTurnID, nil
 }
 
 func loadThreadPendingAgentMailTx(

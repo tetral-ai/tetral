@@ -15,8 +15,16 @@ import * as SessionManager from "../session/session-manager.js";
 export interface Interface {
   readonly handleAcceptInput: (command: Parameters<SessionManager.Interface["acceptInput"]>[0]) => Effect.Effect<SessionManager.AcceptInputResult>;
   readonly handleInterruptControl: (sessionId: string, command: SessionManager.RuntimeInterruptControlCommand, commitInput?: Parameters<SessionManager.Interface["interruptControl"]>[2]) => Effect.Effect<SessionManager.InterruptControlResult>;
-  readonly handleToolConfirmation: (sessionId: string, command: Parameters<SessionManager.Interface["resolveToolConfirmation"]>[1]) => Effect.Effect<SessionManager.RuntimeControlResult>;
-  readonly handleTaskNotification: (sessionId: string, command: Parameters<SessionManager.Interface["commitTaskNotification"]>[1]) => Effect.Effect<SessionManager.RuntimeControlResult>;
+  readonly handleToolConfirmation: (
+    sessionId: string,
+    command: Parameters<SessionManager.Interface["resolveToolConfirmation"]>[1],
+    commit: Parameters<SessionManager.Interface["resolveToolConfirmation"]>[2],
+  ) => Effect.Effect<SessionManager.RuntimeControlResult>;
+  readonly handleTaskNotification: (
+    sessionId: string,
+    command: Parameters<SessionManager.Interface["commitTaskNotification"]>[1],
+    commit: Parameters<SessionManager.Interface["commitTaskNotification"]>[2],
+  ) => Effect.Effect<SessionManager.RuntimeTaskNotificationResult>;
   readonly handleRuntimeConfigPatch: (sessionId: string, command: Parameters<SessionManager.Interface["applyRuntimeConfigPatch"]>[1]) => Effect.Effect<SessionManager.RuntimeControlResult>;
   readonly handleCleanupSession: (sessionId: string, command: SessionManager.RuntimeCleanupSessionCommand) => Effect.Effect<SessionManager.CleanupSessionResult>;
   readonly handlePreloadThread: (command: Parameters<SessionManager.Interface["preloadThread"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
@@ -54,8 +62,8 @@ export const layer = Layer.effect(
         command,
         commitInput ?? (async () => ({ ok: false, retryable: true, errorCode: "interrupt_commit_unavailable" })),
       ),
-      handleToolConfirmation: (sessionId, command) => manager.resolveToolConfirmation(sessionId, command),
-      handleTaskNotification: (sessionId, command) => manager.commitTaskNotification(sessionId, command),
+      handleToolConfirmation: (sessionId, command, commit) => manager.resolveToolConfirmation(sessionId, command, commit),
+      handleTaskNotification: (sessionId, command, commit) => manager.commitTaskNotification(sessionId, command, commit),
       handleRuntimeConfigPatch: (sessionId, command) => manager.applyRuntimeConfigPatch(sessionId, command),
       // External cleanup ingress; never loads pending input or context.
       handleCleanupSession: (sessionId, command) => manager.cleanupSession(sessionId, command),

@@ -135,11 +135,14 @@ describe("session run static boundaries", () => {
     const expectedLifecycleFiles = [
       "src/agent-loop/agent-loop.ts",
       "src/agent-loop/provider-call-assembly.ts",
+      "src/agent-loop/request-turn-state.ts",
       "src/session/approval-reviewer-manager.ts",
       "src/session/context-manager.ts",
+      "src/session/session-configuration.ts",
       "src/session/session-manager.ts",
       "src/session/session-state.ts",
       "src/session/session.ts",
+      "src/session/thread-command-channel.ts",
       "src/session-run-host/session-run-host.ts",
     ].sort((left, right) => left.localeCompare(right));
 
@@ -211,17 +214,18 @@ describe("session run static boundaries", () => {
     expect(normalizedManager).toContain("pendingWakeAfterStop:boolean;");
     expect(normalizedManager).toContain("interfaceThreadEntry{");
     expect(normalizedManager).toContain("runSlot:ThreadRunSlot|undefined;");
-    expect(normalizedSessionEntry).toBe("workspaceId:string;readonlysessionId:string;bindingId:string;bindingGeneration:number;readonlythreads:Map<string,ThreadEntry>;readonlytoolCoordinator:SessionToolCoordinator;readonlyruntimeShutdown:RuntimeShutdownObservation;sharedStateStatus:\"initializing\"|\"ready\"|\"failed\";readonlysharedStateInitializerThreadId:string;readonlysharedStateReady:Promise<boolean>;readonlycompleteSharedStateReady:(ready:boolean)=>void;sharedRuntimeConfigPatches:readonlyRuntimeConfigPatchState[]|undefined;");
+    expect(normalizedSessionEntry).toBe("workspaceId:string;readonlysessionId:string;bindingId:string;bindingGeneration:number;readonlythreads:Map<string,ThreadEntry>;readonlytoolCoordinator:SessionToolCoordinator;readonlyruntimeShutdown:RuntimeShutdownObservation;readonlycontrolGate:Semaphore.Semaphore;readonlyconfiguration:SessionConfiguration;sharedStateStatus:\"initializing\"|\"ready\"|\"failed\";readonlysharedStateInitializerThreadId:string;readonlysharedStateReady:Promise<boolean>;readonlycompleteSharedStateReady:(ready:boolean)=>void;");
     expect(normalizedManager).toContain("toolCoordinator:newSessionToolCoordinator({maxConcurrentTools:options.maxConcurrentTools??8})");
-    expect(normalizedManager).toContain("newSession.Session(identity,approvalReviewer,toolCoordinator)");
+    expect(normalizedManager).toContain("newSession.Session(identity,approvalReviewer,toolCoordinator,sessionConfiguration)");
     expect(normalizedManager).toContain("constsessions=newMap<string,SessionEntry>();");
     expect(normalizedManager).toContain("constsessionKey=(workspaceId:string,sessionId:string):string=>`${workspaceId}\\u0000${sessionId}`;");
     expect(normalizedManager).toContain("constcommandSessionKey=(command:{readonlyworkspaceId:string;readonlysessionId:string}):string=>sessionKey(command.workspaceId,command.sessionId);");
     expect(normalizedManager).toContain("constawaitRunSlot=(runSlot:ThreadRunSlot,):Effect.Effect<Exit.Exit<AgentLoop.AgentLoopRunResult,unknown>>=>Deferred.await(runSlot.doneDeferred).pipe(Effect.exit)");
-    expect(normalizedManager).toContain("construnScope=yield*Scope.fork(scope);");
+    expect(normalizedManager).toContain("construnScope=yield*Scope.make();");
+    expect(normalizedManager).toContain("constfiber=yield*Effect.forkIn(run,runScope);");
     expect(normalizedManager).toContain("constcontrolIdentity=(command:RuntimeThreadControlState):Session.RuntimeSessionIdentity=>({workspaceId:command.workspaceId,sessionId:command.sessionId,sessionThreadId:command.sessionThreadId,bindingId:command.bindingId,bindingGeneration:command.bindingGeneration");
-    expect(normalizedManager).toContain("constsessionEntry=sessions.get(commandSessionKey(command));if(sessionEntry===undefined||!sessionEntry.threads.has(command.sessionThreadId)){return{ok:true,sessionId,created:false,applied:false};}");
-    expect(normalizedManager).toContain("if([...sessionEntry.threads.values()].some((threadEntry)=>threadEntry.runSlot!==undefined)){return{ok:false,sessionId,reason:\"control_busy\"};}");
+    expect(normalizedManager).toContain("constsessionEntry=sessions.get(commandSessionKey(command));if(sessionEntry===undefined){return{ok:true,sessionId,created:false,applied:false,noResidency:true};}");
+    expect(normalizedManager).toContain("sessionEntry.sharedStateStatus!==\"ready\"||[...sessionEntry.threads.values()].some((threadEntry)=>threadEntry.installationState!==\"ready\"||threadEntry.runSlot!==undefined,)");
     expect(normalizedManager).toContain("for(constthreadEntryofsessionEntry.threads.values()){");
     expect(normalizedState).toContain("interfaceRuntimeThreadControlStateextendsRuntimeCommandScopeState{readonlyruntimeInputId:string;readonlyeventIds:readonlystring[];readonlysequenceFrom:number;readonlysequenceTo:number;}");
     expect(normalizedManager).not.toContain("runInFlight");
@@ -268,7 +272,7 @@ describe("session run static boundaries", () => {
     expect(cleanupSection).not.toContain("sessionBinding.unbind");
     expect(cleanupSection).not.toContain("buildContext");
     expect(cleanupSection).not.toContain("loadPendingInput");
-    expect(cleanupSection).not.toContain("RuntimeMessageStore");
+    expect(cleanupSection).not.toContain("RuntimeInternalToolRepairStore");
     expect(cleanupSection).not.toContain("SessionEventWriter");
     expect(cleanupSection).not.toContain("writeMessage");
     expect(cleanupSection).not.toContain("writePart");
@@ -339,7 +343,7 @@ describe("session run static boundaries", () => {
 
     expect(stateStart).toBeGreaterThanOrEqual(0);
     expect(stateEnd).toBeGreaterThan(stateStart);
-    expect(pendingState).toContain("assistantMessage: RuntimeMessageInfo");
+    expect(pendingState).toContain("assistantMessage: DurableRuntimeMessage");
     expect(pendingState).toContain('toolPart: Extract<RuntimePart, { readonly type: "tool" }>');
     expect(pendingState).not.toContain("SessionProcessor");
     expect(pendingState).not.toMatch(/\bprocessor\s*:/);

@@ -433,16 +433,43 @@ func TestPostgreSQLAgentMailSealIsSilentAndLeavesMailForRecovery(t *testing.T) {
 					(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),
 					(SELECT count(*) FROM session_bridge_operations
 					  WHERE workspace_id='default' AND session_id=$1
-					    AND operation='settle_sealed_agent_mail'
-					    AND runtime_input_id=$2),
+					    AND operation='settle_sealed_agent_mail'),
 					(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1)`,
 				sessionID,
-				runtimeInputID,
 			).Scan(&eventCount, &operationCount, &inboxCount); err != nil {
 				t.Fatalf("read silent settlement evidence: %v", err)
 			}
 			if eventCount != 1 || operationCount != 1 || inboxCount != 0 {
 				t.Fatalf("silent settlement events/operations/inbox = %d/%d/%d; want 1/1/0", eventCount, operationCount, inboxCount)
+			}
+			var sourceKind, sourceID, declarationDigest, receiptJSON string
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT source_kind, idempotency_key, declaration_digest, receipt_json
+				   FROM session_bridge_operations
+				  WHERE workspace_id='default' AND session_id=$1
+				    AND operation='settle_sealed_agent_mail'`,
+				sessionID,
+			).Scan(&sourceKind, &sourceID, &declarationDigest, &receiptJSON); err != nil {
+				t.Fatalf("read sealed mail declaration receipt: %v", err)
+			}
+			expectedSourceID := stableRuntimeID("sealed_agent_mail", runtimeInputID, preparationID, preparationID)
+			receipt, err := unmarshalDeclarationReceipt(receiptJSON)
+			if err != nil {
+				t.Fatalf("decode sealed mail declaration receipt: %v", err)
+			}
+			if sourceKind != "sealed_agent_mail" ||
+				sourceID != expectedSourceID ||
+				declarationDigest == "" ||
+				receipt.GetSourceId() != expectedSourceID ||
+				receipt.GetDeclarationDigest() != declarationDigest ||
+				receipt.GetSessionThreadId() != mainID ||
+				receipt.GetOperationKind() != bridgeOpSettleSealedAgentMail ||
+				receipt.GetSourceKind() != "sealed_agent_mail" ||
+				receipt.GetSealedAgentMail().GetRuntimeInputId() != runtimeInputID ||
+				receipt.GetSealedAgentMail().GetBirthPreparationAttemptId() != preparationID ||
+				receipt.GetSealedAgentMail().GetFailedPreparationAttemptId() != preparationID ||
+				receipt.GetSealedAgentMail().GetDisposition() != bridgev1.SealedAgentMailDisposition_SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH {
+				t.Fatalf("sealed mail declaration operation = source %q/%q digest=%q receipt=%+v", sourceKind, sourceID, declarationDigest, receipt)
 			}
 			replayed, found, err := deliveryStore.ReplayRuntimeDeliveryFinalization(context.Background(), job)
 			if err != nil || !found || replayed.Status != RuntimeDeliveryAccepted {
@@ -533,18 +560,16 @@ func TestPostgreSQLAgentMailSealIsSilentAndLeavesMailForRecovery(t *testing.T) {
 			if len(payload.PendingAgentMail) != 1 || payload.PendingAgentMail[0].DeliveryID != deliveryID {
 				t.Fatalf("recovery pending mail = %#v; want sealed mail retained", payload.PendingAgentMail)
 			}
-			if _, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-				Scope:          bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
-				RuntimeInputId: runtimeInputID,
-				InputKind:      "inter_agent_message",
-				InterAgentMessageJson: bridgeInterAgentMessageJSON(
-					t,
-					deliveryID,
-					childID,
-					"sevt_agent_mail_seal_spawn_"+suffix,
-					string(payload.PendingAgentMail[0].Message),
-				),
-			}); err != nil {
+			if _, err := apiStore.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+				t,
+				admin,
+				bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+				runtimeInputID,
+				deliveryID,
+				childID,
+				"sevt_agent_mail_seal_spawn_"+suffix,
+				string(payload.PendingAgentMail[0].Message),
+			)); err != nil {
 				t.Fatalf("commit recovered sealed mail receipt: %v", err)
 			}
 			afterReceipt, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{

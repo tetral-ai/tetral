@@ -125,8 +125,9 @@ state are awaited Effects, never detached background work.
 | --- | --- |
 | `CommitInputs` | append accepted messages to `ContextManager` |
 | `WriteEvent` | update hot assistant/tool state; open or resolve pending waits |
-| `WriteRequestEnd` | update `lastRequestUsage`; close the request turn |
+| `WriteRequestEnd` | validate current custody even when no assistant seal exists; otherwise apply the terminal message/part stamps. An interrupt during an open provider request also applies the identity-matched `CommitInputs` receipt returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
+| `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; validate every returned stamp before removing pending tools or releasing the turn |
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider
@@ -202,7 +203,10 @@ Invariants a replacement must preserve:
 - The stable `tool-call` is the execution boundary; `tool-input` fragments start
   nothing.
 - The next request cannot start until the stream is terminal, the request end is
-  ACKed, and the per-turn tool-fiber set has settled.
+  ACKed, its terminal assistant projection is installed in hot context, and the
+  per-turn tool-fiber set has settled. A rescheduled request carries only parts
+  already proven durable; successful closeout adds the request's complete stable
+  reasoning set in the same settlement.
 - The pod is the only retry driver: a retryable failure parks in-run until the
   Bridge-effective deadline and re-issues the request rebuilt from committed
   context, or settles as retries-exhausted.

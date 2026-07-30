@@ -74,6 +74,7 @@ const (
 	bridgeOpCancelCommand                  = "cancel_command"
 	bridgeOpRunMemory                      = "run_memory"
 	bridgeOpMcpManifestChanged             = "mcp_manifest_changed"
+	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
 	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
 	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
 	bridgeOpSettleSealedAgentMail          = "settle_sealed_agent_mail"
@@ -92,6 +93,7 @@ const (
 	// Claim, and a replay after Commit is served from the stored result.
 	mcpClaimStatusStored   = "stored"
 	mcpClaimStatusInFlight = "in_flight"
+	mcpClaimStatusConsumed = "consumed"
 	mcpClaimLeaseTTL       = 180 * time.Second
 	mcpClaimInFlightCode   = "mcp_claim_in_flight"
 	mcpClaimNotOwnedCode   = "mcp_claim_not_owned"
@@ -126,7 +128,6 @@ const (
 	memoryProjectionStateSkippedCold = "skipped_cold"
 	memoryToolContentMaxBytes        = 102400
 	transientAttachmentMaxBytes      = 10 * 1024 * 1024
-	internalToolRepairDataMaxBytes   = 64 * 1024
 	providerCommandMetadataMaxBytes  = 4 * 1024
 	internalToolRepairIDMaxBytes     = 128
 	maxResourceHelperRecoveries      = 1
@@ -584,7 +585,8 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND tool_use_event_id = $3`
+		    AND session_thread_id = $3
+		    AND tool_use_event_id = $4`
 	if forUpdate {
 		query += `
 		  FOR UPDATE`
@@ -593,6 +595,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		query,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 		toolUseEventID,
 	)
 	var existing runtimeToolResult
@@ -675,6 +678,13 @@ func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
 	}
 	return nil
+}
+
+func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.RuntimeScope) error {
+	if err := validateRuntimeScope(scope); err != nil {
+		return err
+	}
+	return verifyRuntimeCallerPodUID(ctx, scope)
 }
 
 func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {

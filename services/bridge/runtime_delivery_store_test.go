@@ -547,12 +547,13 @@ func TestPostgreSQLRuntimeDeliveryStoreBuildsTaskNotificationFromBackgroundTask(
 	assertNoTaskOutputPaths(t, plan.Request.GetPayloadJson())
 	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	apiStore.Clock = store.Clock
-	committed, err := apiStore.CommitTaskNotificationResult(context.Background(), &bridgev1.CommitTaskNotificationResultRequest{
-		Scope:          runtimeScopeFromCommandRequest(plan.Request),
-		RuntimeInputId: job.RuntimeInputID,
-		TaskId:         plan.TaskNotification.TaskID,
-		ResultJson:     plan.TaskNotification.ResultJSON,
-	})
+	committed, err := apiStore.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
+		t,
+		runtimeScopeFromCommandRequest(plan.Request),
+		job.RuntimeInputID,
+		plan.TaskNotification.TaskID,
+		plan.TaskNotification.ResultJSON,
+	))
 	if err != nil {
 		t.Fatalf("CommitTaskNotificationResult delivery: %v", err)
 	}
@@ -2376,7 +2377,7 @@ func TestTerminalPreparationFailureMessageHidesInternalFailureDetails(t *testing
 	}
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreRecordsNonRetryableRuntimeRejection(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreConvertsOversizedInputToBoundedLoopRejection(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected")
 	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_runtime_rejected", "prep_bridge_runtime_rejected")
@@ -2385,13 +2386,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRecordsNonRetryableRuntimeRejection(t *te
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_runtime_rejected", "thr_bridge_runtime_rejected", "evt_bridge_runtime_rejected", 1, "user.message", `{"type":"user.message","content":[{"type":"text","text":"hello"}]}`)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
-		Status:         agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
-		Retryable:      false,
-		ErrorCode:      agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_INPUT_IDENTITY_CONFLICT,
-		SessionId:      "sesn_bridge_runtime_rejected",
-		RuntimeInputId: "rin_bridge_runtime_rejected",
-	}}
 	job := RuntimeJob{
 		JobID:                "qjob_bridge_runtime_rejected",
 		LeaseToken:           "lease_bridge_runtime_rejected",
@@ -2416,25 +2410,36 @@ func TestPostgreSQLRuntimeDeliveryStoreRecordsNonRetryableRuntimeRejection(t *te
 	if got := plan.Request.GetRuntimeInputId(); got != "rin_bridge_runtime_rejected" {
 		t.Fatalf("prepared runtime input id = %q; want rin_bridge_runtime_rejected", got)
 	}
-	result := RuntimeDeliveryResultFromResponse(sender.response)
-	if result.Status != RuntimeDeliveryRejected || result.Retryable || result.ErrorKind != "runtime_input_identity_conflict" {
-		t.Fatalf("runtime rejection response result = %#v; want nonretryable runtime_input_identity_conflict", result)
+	result := RuntimeDeliveryResult{
+		Status:       RuntimeDeliveryRejected,
+		Retryable:    false,
+		ErrorKind:    "runtime_command_payload_too_large",
+		ErrorMessage: "runtime command exceeds the transport fuse",
 	}
-	if err := store.RecordRuntimeInputRejected(context.Background(), job, result); err != nil {
-		t.Fatalf("RecordRuntimeInputRejected: %T %v", err, err)
+	converted, err := store.PrepareRuntimeInputRejection(context.Background(), job, result)
+	if err != nil {
+		t.Fatalf("PrepareRuntimeInputRejection: %T %v", err, err)
+	}
+	if !converted {
+		t.Fatal("PrepareRuntimeInputRejection converted = false; want true")
 	}
 
 	var inboxStatus string
+	var inboxKind string
+	var rejectionReason string
 	var inboxUpdatedAt string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status, updated_at
+		`SELECT status, input_kind, rejection_reason_code, updated_at
 		   FROM session_runtime_inbox
 		  WHERE workspace_id = 'default'
-		    AND runtime_input_id = 'rin_bridge_runtime_rejected'`).Scan(&inboxStatus, &inboxUpdatedAt); err != nil {
+		    AND runtime_input_id = 'rin_bridge_runtime_rejected'`).Scan(&inboxStatus, &inboxKind, &rejectionReason, &inboxUpdatedAt); err != nil {
 		t.Fatalf("read rejected runtime inbox: %v", err)
 	}
-	if inboxStatus != "dead_lettered" || inboxUpdatedAt != "2026-01-01T00:02:00Z" {
-		t.Fatalf("rejected inbox status=%q updatedAt=%q; want dead_lettered at rejection time", inboxStatus, inboxUpdatedAt)
+	if inboxStatus != "delivering" || inboxKind != "rejection" ||
+		rejectionReason != "runtime_command_payload_too_large" ||
+		inboxUpdatedAt != "2026-01-01T00:02:00Z" {
+		t.Fatalf("rejected inbox status/kind/reason/updatedAt = %q/%q/%q/%q; want delivering bounded rejection",
+			inboxStatus, inboxKind, rejectionReason, inboxUpdatedAt)
 	}
 	var inputProcessedAt sql.NullString
 	var inputRevision int64
@@ -2445,68 +2450,44 @@ func TestPostgreSQLRuntimeDeliveryStoreRecordsNonRetryableRuntimeRejection(t *te
 		    AND event_id = 'evt_bridge_runtime_rejected'`).Scan(&inputProcessedAt, &inputRevision); err != nil {
 		t.Fatalf("read rejected input event: %v", err)
 	}
-	if !inputProcessedAt.Valid || inputRevision != 2 {
-		t.Fatalf("rejected input event processed=%v revision=%d; want terminal processing revision", inputProcessedAt.Valid, inputRevision)
+	if inputProcessedAt.Valid || inputRevision != 1 {
+		t.Fatalf("rejected input event processed=%v revision=%d; want untouched source until loop commit", inputProcessedAt.Valid, inputRevision)
 	}
 
-	var eventID string
-	var payloadJSON string
-	var visibility string
-	var sessionVisible bool
-	var processedAt sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT event_id, payload_json, visibility, session_visible, processed_at
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_runtime_rejected'
-		    AND type = 'session.error'`).Scan(&eventID, &payloadJSON, &visibility, &sessionVisible, &processedAt); err != nil {
-		t.Fatalf("read runtime rejection session.error: %v", err)
-	}
-	if visibility != "public" || !sessionVisible || !processedAt.Valid ||
-		testJSONPathString(t, payloadJSON, "error.type") != "runtime" ||
-		testJSONPathString(t, payloadJSON, "error.code") != "runtime_invalid_sequence" ||
-		testJSONPathString(t, payloadJSON, "error.retry_status.type") != "terminal" ||
-		testJSONPathString(t, payloadJSON, "error.reason") != "runtime_contract_validation" {
-		t.Fatalf("runtime rejection session.error payload = visibility %s visible %v processed %v payload %s; want public terminal runtime error",
-			visibility, sessionVisible, processedAt.Valid, payloadJSON)
-	}
 	var errorEventCount int
+	var messageProjectionCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*)
 		   FROM session_events
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_runtime_rejected'
 		    AND type = 'session.error'`).Scan(&errorEventCount); err != nil {
-		t.Fatalf("read runtime rejection session.error count: %v", err)
+		t.Fatalf("count runtime rejection session.error rows: %v", err)
 	}
-	if errorEventCount != 1 {
-		t.Fatalf("runtime rejection session.error count = %d; want exactly one", errorEventCount)
-	}
-	var streamChanges int
-	var messageProjectionCount int
-	var messageProjection string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*)
-		   FROM session_event_stream_changes
-		  WHERE workspace_id = 'default'
-		    AND event_id = $1`,
-		eventID,
-	).Scan(&streamChanges); err != nil {
-		t.Fatalf("read runtime rejection stream changes: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), COALESCE(MAX(data_json), '')
 		   FROM session_messages
 		  WHERE workspace_id = 'default'
-		    AND source_event_id = $1
-		    AND kind = 'assistant'`,
-		eventID,
-	).Scan(&messageProjectionCount, &messageProjection); err != nil {
-		t.Fatalf("read runtime rejection message projection: %v", err)
+		    AND session_id = 'sesn_bridge_runtime_rejected'`).Scan(&messageProjectionCount); err != nil {
+		t.Fatalf("count runtime rejection message projections: %v", err)
 	}
-	if streamChanges != 1 || messageProjectionCount != 1 || !strings.Contains(messageProjection, "could not accept this input") {
-		t.Fatalf("runtime rejection stream/projection = changes %d messages %d projection %s; want model-visible terminal error",
-			streamChanges, messageProjectionCount, messageProjection)
+	if errorEventCount != 0 || messageProjectionCount != 0 {
+		t.Fatalf("Bridge-authored rejection content = events %d messages %d; want none", errorEventCount, messageProjectionCount)
+	}
+
+	retryPlan, err := store.PrepareRuntimeCommand(context.Background(), job)
+	if err != nil {
+		t.Fatalf("PrepareRuntimeCommand bounded rejection: %v", err)
+	}
+	var bounded struct {
+		InputKind  string `json:"input_kind"`
+		ReasonCode string `json:"reason_code"`
+	}
+	if err := json.Unmarshal([]byte(retryPlan.Request.GetPayloadJson()), &bounded); err != nil {
+		t.Fatalf("decode bounded rejection payload: %v", err)
+	}
+	if bounded.InputKind != "rejection" || bounded.ReasonCode != "runtime_command_payload_too_large" {
+		t.Fatalf("bounded rejection payload = %+v; want closed source-free fact", bounded)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 func TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedCleanupSession(t, admin, "sesn_due")
+	seedCleanupSession(t, admin, "sesn_due_second")
 	seedCleanupSession(t, admin, "sesn_unbound")
 	seedCleanupSession(t, admin, "sesn_future")
 	seedCleanupSession(t, admin, "sesn_existing")
@@ -31,6 +32,7 @@ func TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs(t *testing.T)
 			workspace_id, session_id, status, cleanup_after, cleanup_job_id, binding_id, binding_generation, created_at, updated_at
 		) VALUES
 			('default', 'sesn_due', 'idle', '2026-01-01T00:00:00Z', NULL, 'bind_due', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+			('default', 'sesn_due_second', 'idle', '2026-01-01T00:00:00Z', NULL, 'bind_due_second', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 			('default', 'sesn_unbound', 'idle', '2026-01-01T00:00:00Z', NULL, NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 			('default', 'sesn_future', 'idle', '2026-01-01T01:00:00Z', NULL, 'bind_future', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 			('default', 'sesn_existing', 'idle', '2026-01-01T00:00:00Z', 'cleanup_existing', 'bind_existing', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
@@ -48,8 +50,10 @@ func TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs(t *testing.T)
 	if err != nil {
 		t.Fatalf("ClaimDue: %v", err)
 	}
-	if len(claimed) != 1 || claimed[0].SessionID != "sesn_due" || claimed[0].CleanupJobID != "cleanup_1" || claimed[0].QueueJobID != "qjob_2" {
-		t.Fatalf("claimed = %#v; want one due cleanup job", claimed)
+	if len(claimed) != 2 ||
+		claimed[0].SessionID != "sesn_due" || claimed[0].CleanupJobID != "cleanup_1" || claimed[0].QueueJobID != "qjob_2" ||
+		claimed[1].SessionID != "sesn_due_second" || claimed[1].CleanupJobID != "cleanup_3" || claimed[1].QueueJobID != "qjob_4" {
+		t.Fatalf("claimed = %#v; want two due cleanup jobs in semantic order", claimed)
 	}
 
 	var cleanupJobID string
@@ -85,6 +89,19 @@ func TestSchedulerClaimsOnlyDueBoundIdleRowsAndEnqueuesCleanupJobs(t *testing.T)
 	}
 	if payload["workspace_id"] != "default" || payload["session_id"] != "sesn_due" || payload["cleanup_job_id"] != "cleanup_1" {
 		t.Fatalf("payload = %#v", payload)
+	}
+	var firstPartitionJobs int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT COUNT(*)
+		   FROM queue_jobs
+		  WHERE workspace_id = 'default'
+		    AND id IN ('qjob_2', 'qjob_4')
+		    AND queue_partition_sequence = 1`,
+	).Scan(&firstPartitionJobs); err != nil {
+		t.Fatalf("read cleanup partition sequences: %v", err)
+	}
+	if firstPartitionJobs != 2 {
+		t.Fatalf("cleanup jobs with first partition sequence = %d; want 2", firstPartitionJobs)
 	}
 
 	replay, err := scheduler.ClaimDue(context.Background(), ClaimDueRequest{WorkspaceID: workspace.DefaultID, Limit: 10})
