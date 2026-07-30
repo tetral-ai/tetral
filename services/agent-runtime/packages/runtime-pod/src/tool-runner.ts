@@ -856,6 +856,9 @@ export class RuntimePodToolRunner {
           this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return toolFailure(request, declaration.errorCode, true);
         }
+        const rootDisposition = declaration.dispositions.find(
+          (stamp) => stamp.childThreadId === child.sessionThreadId,
+        )?.disposition;
         let rootRunExitOutcome: string | undefined;
         for (const stamp of declaration.dispositions) {
           const lifecycle = await host.markThreadClosed(
@@ -869,17 +872,22 @@ export class RuntimePodToolRunner {
           }
         }
         this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+        const rootStatus = rootDisposition === "preserved_failed"
+          ? "failed"
+          : rootDisposition === "preserved_terminated"
+            ? "terminated"
+            : "closed_for_runtime";
         return completedText([
           `task_name: ${child.taskName}`,
           `session_thread_id: ${child.sessionThreadId}`,
-          "status: closed_for_runtime",
+          `status: ${rootStatus}`,
           ...(rootRunExitOutcome === undefined ? [] : [`run_outcome: ${rootRunExitOutcome}`]),
         ].join("\n"));
       });
     });
   }
 
-  // Resume is complete only when durable reactivation and hot residency both hold.
+  // A durable terminal receipt completes without installing hot state; reopened children require hot residency.
   private async resumeAgent(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     return await this.withResolvedChild(request, "resume_agent", async (parentScope, child, metadata) => {
       const host = this.options.subAgentRunHost?.();
@@ -888,10 +896,6 @@ export class RuntimePodToolRunner {
       }
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
         const control = threadControlFromRequest(request, parentScope, child.sessionThreadId);
-        const inspected = await host.inspectThread(control);
-        if (!inspected.ok) {
-          return toolFailure(request, `Sub-agent resume inspection failed: ${inspected.reason}.`, true);
-        }
         const lifecycleKey = childLifecycleRequestKey("resume", request, child.sessionThreadId);
         const activeAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
         this.pendingChildLifecycleTimestamps.set(lifecycleKey, activeAt);
@@ -918,33 +922,53 @@ export class RuntimePodToolRunner {
           this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return toolFailure(request, declaration.errorCode, true);
         }
-        if (child.status !== "closed_for_runtime" && inspected.observed) {
+        const disposition = declaration.dispositions[0]?.disposition;
+        const preservedStatus = disposition === "preserved_failed"
+          ? "failed"
+          : disposition === "preserved_terminated"
+            ? "terminated"
+            : undefined;
+        if (preservedStatus !== undefined) {
           this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return completedText([
             `task_name: ${child.taskName}`,
             `session_thread_id: ${child.sessionThreadId}`,
-            `status: ${child.status}`,
+            `status: ${preservedStatus}`,
           ].join("\n"));
         }
-        if (child.status === "closed_for_runtime" && inspected.observed) {
+        // Observe residency after the durable receipt so a concurrent run exit cannot make the result stale.
+        const inspected = await host.inspectThread(control);
+        if (!inspected.ok) {
+          return toolFailure(request, `Sub-agent resume inspection failed: ${inspected.reason}.`, true);
+        }
+        if (disposition === "already_active" && inspected.observed) {
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+          return completedText([
+            `task_name: ${child.taskName}`,
+            `session_thread_id: ${child.sessionThreadId}`,
+            `status: ${inspected.status ?? child.status}`,
+          ].join("\n"));
+        }
+        if (disposition === "resumed" && inspected.observed) {
           const lifecycle = await host.markThreadActive(control);
           if (!lifecycle.ok) {
             return toolFailure(request, `Sub-agent resume was not accepted: ${lifecycle.reason}.`, true);
           }
         }
+        const activeStatus = disposition === "resumed" ? "idle" : child.status;
         const preloaded = await preloadChildThread(host, request, parentScope, child.sessionThreadId, {
           parentThreadId: request.sessionThreadId,
           role: "subagent",
           visibility: "public",
           taskName: child.taskName,
           agentType: child.agentType,
-          status: "idle",
+          status: activeStatus,
         });
         if (!preloaded.ok) {
           return toolFailure(request, `Sub-agent resume context preload failed: ${preloaded.reason}.`, true);
         }
         this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
-        return completedText(`task_name: ${child.taskName}\nsession_thread_id: ${child.sessionThreadId}\nstatus: idle`);
+        return completedText(`task_name: ${child.taskName}\nsession_thread_id: ${child.sessionThreadId}\nstatus: ${activeStatus}`);
       });
     });
   }

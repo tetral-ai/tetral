@@ -291,9 +291,15 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 			childScope := scopeForThread(request.GetScope(), threadID)
 			threadScope := lockedThreads[threadID]
 			disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
-			if threadScope.status == "closed_for_runtime" {
+			switch threadScope.status {
+			case "closed_for_runtime":
 				// The per-target receipt still records this target in the frozen subtree.
-			} else {
+			case "failed":
+				// Closing a subtree records terminal members without rewriting their durable outcome.
+				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED
+			case "terminated":
+				disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
+			default:
 				if _, err := tx.Exec(ctx,
 					`UPDATE session_threads
 					    SET status='closed_for_runtime',
@@ -402,7 +408,13 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
 		}
 		disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
-		if threadScope.status == "closed_for_runtime" {
+		switch threadScope.status {
+		case "failed":
+			// Resume never revives a terminal child or changes its durable outcome.
+			disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED
+		case "terminated":
+			disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
+		case "closed_for_runtime":
 			result, err := tx.Exec(ctx,
 				`UPDATE session_threads
 				    SET status = 'idle',
@@ -720,10 +732,14 @@ func validStoredChildLifecycleReceipt(
 	}
 	if command.action == "close" {
 		return stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED ||
-			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED
+			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED ||
+			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED ||
+			stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
 	}
 	return stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED ||
-		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
+		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE ||
+		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED ||
+		stamp.GetDisposition() == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
 }
 
 func childLifecycleReceipt(
@@ -1000,7 +1016,7 @@ func verifyChildParentThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 	} else if err != nil {
 		return err
 	}
-	if parentStatus == "closed_for_runtime" || parentStatus == "terminated" {
+	if parentStatus == "closed_for_runtime" || parentStatus == "terminated" || parentStatus == "failed" {
 		return status.Error(codes.FailedPrecondition, "parent thread is not open")
 	}
 	return nil

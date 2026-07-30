@@ -525,7 +525,13 @@ export interface RuntimeIdleCloseoutStamp {
 
 export interface RuntimeChildLifecycleStamp {
   readonly childThreadId: string;
-  readonly disposition: "closed" | "already_closed" | "resumed" | "already_active";
+  readonly disposition:
+    | "closed"
+    | "already_closed"
+    | "resumed"
+    | "already_active"
+    | "preserved_failed"
+    | "preserved_terminated";
   readonly effectiveAt: string;
 }
 

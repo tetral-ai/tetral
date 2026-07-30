@@ -1649,6 +1649,36 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
   });
 
+  test("close_agent preserves the root terminal status while releasing every stamped hot subtree target", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "failed";
+    bridge.closeReceiptTargetIds = ["thr_child_1", "thr_terminated_1", "thr_running_1"];
+    bridge.closeReceiptDispositions.set(
+      "thr_child_1",
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED,
+    );
+    bridge.closeReceiptDispositions.set(
+      "thr_terminated_1",
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED,
+    );
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: failed"),
+      }),
+    });
+    expect(subAgentHost.closedThreadIds).toEqual([
+      "thr_child_1",
+      "thr_terminated_1",
+      "thr_running_1",
+    ]);
+  });
+
   test("close_agent rejects a lifecycle receipt from another Runtime binding", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.childLifecycleObservedBindingId = "bind_other";
@@ -2072,7 +2102,7 @@ describe("RuntimePodToolRunner", () => {
     expect(result).toEqual({
       type: "completed",
       output: expect.objectContaining({
-        text: expect.stringContaining("status: running"),
+        text: expect.stringContaining("status: idle"),
       }),
     });
     expect(bridge.markChildThreadActiveRequests).toEqual([
@@ -2081,6 +2111,32 @@ describe("RuntimePodToolRunner", () => {
     expect(subAgentHost.actions).toEqual(["inspect"]);
     expect(subAgentHost.preloaded).toEqual([]);
     expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("resume_agent rechecks hot residency after an already-active receipt before reporting success", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    bridge.deferMarkChildThreadActive = true;
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.inspectObserved = true;
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const resuming = runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+    await waitForCondition(
+      () => bridge.markChildThreadActiveRequests.length === 1,
+      "durable already-active declaration",
+    );
+    subAgentHost.inspectObserved = false;
+    bridge.completeDeferredMarkChildThreadActive();
+
+    expect(await resuming).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: running"),
+      }),
+    });
+    expect(subAgentHost.actions).toEqual(["inspect", "preload"]);
+    expect(subAgentHost.preloaded).toHaveLength(1);
   });
 
   test("resume_agent retries preload for a non-closed cold child after the durable reopen already committed", async () => {
@@ -2106,7 +2162,42 @@ describe("RuntimePodToolRunner", () => {
     );
     expect(subAgentHost.preloaded).toHaveLength(2);
     expect(subAgentHost.actions.filter((action) => action === "resume")).toHaveLength(0);
+    expect(bridge.activeReceiptDispositions).toEqual([
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED,
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED,
+    ]);
   });
+
+  for (const testCase of [
+    {
+      status: "failed",
+      disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED,
+    },
+    {
+      status: "terminated",
+      disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED,
+    },
+  ]) {
+    test(`resume_agent preserves a cold ${testCase.status} child without loading context`, async () => {
+      const bridge = new RecordingBridgeClient();
+      bridge.childStatus = testCase.status;
+      bridge.activeReceiptDisposition = testCase.disposition;
+      const subAgentHost = new RecordingSubAgentHost();
+      const runner = makeRunner({ bridge, subAgentHost });
+
+      const result = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+
+      expect(result).toEqual({
+        type: "completed",
+        output: expect.objectContaining({
+          text: expect.stringContaining(`status: ${testCase.status}`),
+        }),
+      });
+      expect(bridge.markChildThreadActiveRequests).toHaveLength(1);
+      expect(subAgentHost.actions).toEqual([]);
+      expect(subAgentHost.preloaded).toEqual([]);
+    });
+  }
 });
 
 function makeRunner(options: {
@@ -2274,6 +2365,7 @@ class RecordingBridgeClient {
   private deferredListChildThreads: ((response: unknown) => void) | undefined;
   private deferredResolveInterAgentDelivery: ((response: unknown) => void) | undefined;
   private deferredRunMemory: (() => void) | undefined;
+  private deferredMarkChildThreadActive: (() => void) | undefined;
   deferReadCommandResult = false;
   deferFirstListChildThreads = false;
   deferResolveInterAgentDelivery = false;
@@ -2292,6 +2384,11 @@ class RecordingBridgeClient {
   markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   markChildThreadClosedErrorCode = "";
   closeReceiptTargetIds: string[] = [];
+  readonly closeReceiptDispositions = new Map<string, ChildLifecycleDisposition>();
+  activeReceiptDisposition: ChildLifecycleDisposition | undefined;
+  readonly activeReceiptDispositions: ChildLifecycleDisposition[] = [];
+  deferMarkChildThreadActive = false;
+  private readonly activeReceiptDispositionByOperationId = new Map<string, ChildLifecycleDisposition>();
   childLifecycleObservedBindingId: string | undefined;
 
   client(): Pick<AgentRuntimeBridgeServiceClient,
@@ -2527,7 +2624,8 @@ class RecordingBridgeClient {
                 }),
                 childLifecycle: [{
                   childThreadId: targetId,
-                  disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+                  disposition: this.closeReceiptDispositions.get(targetId)
+                    ?? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
                   effectiveAt: request.closedAt,
                 }],
               })),
@@ -2544,7 +2642,14 @@ class RecordingBridgeClient {
     this.markChildThreadActiveRequests.push(request);
     const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
     const operationId = stableRuntimeID("child_resume", sourceCommandId, request.childThreadId);
-    callback(null, {
+    const disposition = this.activeReceiptDispositionByOperationId.get(operationId)
+      ?? this.activeReceiptDisposition
+      ?? (this.childStatus === "closed_for_runtime"
+        ? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED
+        : ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE);
+    this.activeReceiptDispositionByOperationId.set(operationId, disposition);
+    this.activeReceiptDispositions.push(disposition);
+    const respond = (): void => callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: operationId, errorCode: "" },
       declaration: {
         receipts: [{
@@ -2568,9 +2673,7 @@ class RecordingBridgeClient {
           }),
           childLifecycle: [{
             childThreadId: request.childThreadId,
-            disposition: this.childStatus === "closed_for_runtime"
-              ? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED
-              : ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE,
+            disposition,
             effectiveAt: request.activeAt,
           }],
         }],
@@ -2579,7 +2682,22 @@ class RecordingBridgeClient {
         observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
       },
     });
+    if (this.deferMarkChildThreadActive) {
+      this.deferredMarkChildThreadActive = respond;
+      return grpcCall();
+    }
+    respond();
     return grpcCall();
+  }
+
+  completeDeferredMarkChildThreadActive(): void {
+    const complete = this.deferredMarkChildThreadActive;
+    if (complete === undefined) {
+      throw new Error("no deferred markChildThreadActive call");
+    }
+    this.deferMarkChildThreadActive = false;
+    this.deferredMarkChildThreadActive = undefined;
+    complete();
   }
 
   private writeEvent(request: WriteEventRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {

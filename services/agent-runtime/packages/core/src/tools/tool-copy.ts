@@ -146,13 +146,13 @@ export const BuiltinToolCopy = {
     }
   },
   "close_agent": {
-    "description": "Releases a running child agent from active runtime while preserving it\nso it can be reopened later. The child's durable record and all of its\ndescendant records are marked closed first; only then is their live\nstate torn down. Any turns still running in that subtree are cancelled\nas part of the close. After this succeeds the child reports\n`closed_for_runtime` and stops consuming active capacity; reopen it\nlater with resume_agent. Fails when no child with the given name\nexists, when the closed state cannot be persisted (child left running,\nsafe to retry), or when live-state teardown is refused (retryable).\nMay pause for user approval before it runs.",
+    "description": "Releases a child agent and its complete descendant subtree from active\nruntime. Non-terminal durable records are marked `closed_for_runtime`;\nfailed and terminated records keep their terminal outcome. Only after\nthose outcomes are durably recorded is live state torn down, cancelling\nany turns still running in the subtree. The result reports the named\nchild's actual resulting status. A child closed for runtime can be\nreopened later with resume_agent; a terminal child cannot. Fails when\nno child with the given name exists, when the durable close cannot be\nrecorded, or when live-state teardown is refused (retryable). May pause\nfor user approval before it runs.",
     "parameters": {
       "task_name (required)": "The name you gave the child when you spawned\nit."
     }
   },
   "resume_agent": {
-    "description": "Reopens a previously closed child agent into active runtime and reloads\nits full context, without sending it any new work. The child is marked\nactive, its prior conversation is loaded back in, and it settles at\n`idle`, ready for the next message. Use this before send_message when\nthe child you want was closed. Fails when no child with the given name\nexists, when the child is already running, or when its context cannot\nbe reloaded because runtime capacity is exhausted. May pause for user\napproval before it runs.",
+    "description": "Reopens a child that is `closed_for_runtime` and reloads its full\ncontext without sending new work. The reopened child settles at `idle`,\nready for the next message. Calling this for an already active child\nensures its hot context is resident and reports its current status.\nFailed and terminated children remain terminal and are not reloaded.\nFails when no child with the given name exists or when a non-terminal\nchild's context cannot be restored. May pause for user approval before\nit runs.",
     "parameters": {
       "task_name (required)": "The name of the closed child to reopen."
     }

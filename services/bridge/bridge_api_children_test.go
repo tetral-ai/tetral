@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1258,6 +1259,172 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedPreservesTerminalTargetsInFrozenSubtree(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID         = "sesn_bridge_close_terminal_tree"
+		mainID            = "thr_bridge_close_terminal_tree_main"
+		failedRootID      = "thr_bridge_close_terminal_tree_failed"
+		terminatedChildID = "thr_bridge_close_terminal_tree_terminated"
+		runningGrandID    = "thr_bridge_close_terminal_tree_running"
+		closedSiblingID   = "thr_bridge_close_terminal_tree_closed"
+		bindingID         = "bind_bridge_close_terminal_tree"
+		podUID            = "pod_bridge_close_terminal_tree"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, failedRootID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, failedRootID, terminatedChildID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, terminatedChildID, runningGrandID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, failedRootID, closedSiblingID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status = CASE id
+		      WHEN $2 THEN 'failed'
+		      WHEN $3 THEN 'terminated'
+		      WHEN $4 THEN 'running'
+		      WHEN $5 THEN 'closed_for_runtime'
+		    END,
+		        closed_at = CASE WHEN id = $5 THEN '2026-01-01T00:00:01Z'::timestamptz ELSE NULL END
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND id IN ($2, $3, $4, $5)`,
+		sessionID,
+		failedRootID,
+		terminatedChildID,
+		runningGrandID,
+		closedSiblingID,
+	); err != nil {
+		t.Fatalf("seed mixed child subtree statuses: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 6, 0, time.UTC) }
+	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_close_terminal_tree")
+	request := &bridgev1.MarkChildThreadClosedRequest{
+		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ChildThreadId: failedRootID,
+		ClosedAt:      "2026-01-01T00:00:05.000Z",
+		Source:        closeSource,
+	}
+	response, err := store.MarkChildThreadClosed(context.Background(), request)
+	if err != nil {
+		t.Fatalf("MarkChildThreadClosed mixed terminal tree: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("close mixed terminal tree ack = %s; want committed", response.GetAck().GetStatus())
+	}
+	wantDispositions := map[string]bridgev1.ChildLifecycleDisposition{
+		failedRootID:      bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED,
+		terminatedChildID: bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED,
+		runningGrandID:    bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+		closedSiblingID:   bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED,
+	}
+	gotDispositions := make(map[string]bridgev1.ChildLifecycleDisposition, len(wantDispositions))
+	for _, receipt := range response.GetDeclaration().GetReceipts() {
+		if len(receipt.GetChildLifecycle()) != 1 {
+			t.Fatalf("close mixed terminal tree receipt %q lifecycle stamps = %d; want 1", receipt.GetSessionThreadId(), len(receipt.GetChildLifecycle()))
+		}
+		gotDispositions[receipt.GetSessionThreadId()] = receipt.GetChildLifecycle()[0].GetDisposition()
+	}
+	if !reflect.DeepEqual(gotDispositions, wantDispositions) {
+		t.Fatalf("close mixed terminal tree dispositions = %#v; want %#v", gotDispositions, wantDispositions)
+	}
+	rows, err := admin.QueryContext(context.Background(),
+		`SELECT id, status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND id IN ($2, $3, $4, $5)`,
+		sessionID,
+		failedRootID,
+		terminatedChildID,
+		runningGrandID,
+		closedSiblingID,
+	)
+	if err != nil {
+		t.Fatalf("read mixed terminal tree statuses: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	gotStatuses := map[string]string{}
+	for rows.Next() {
+		var threadID, threadStatus string
+		if err := rows.Scan(&threadID, &threadStatus); err != nil {
+			t.Fatalf("scan mixed terminal tree status: %v", err)
+		}
+		gotStatuses[threadID] = threadStatus
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate mixed terminal tree statuses: %v", err)
+	}
+	wantStatuses := map[string]string{
+		failedRootID:      "failed",
+		terminatedChildID: "terminated",
+		runningGrandID:    "closed_for_runtime",
+		closedSiblingID:   "closed_for_runtime",
+	}
+	if !reflect.DeepEqual(gotStatuses, wantStatuses) {
+		t.Fatalf("close mixed terminal tree statuses = %#v; want %#v", gotStatuses, wantStatuses)
+	}
+	var closedEvents int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_events
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND type = 'session.thread_status_idle'
+		    AND payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'`,
+		sessionID,
+	).Scan(&closedEvents); err != nil {
+		t.Fatalf("count mixed terminal tree close events: %v", err)
+	}
+	if closedEvents != 1 {
+		t.Fatalf("mixed terminal tree close events = %d; want only the running descendant transition", closedEvents)
+	}
+	replay, err := store.MarkChildThreadClosed(context.Background(), request)
+	if err != nil {
+		t.Fatalf("MarkChildThreadClosed mixed terminal tree replay: %v", err)
+	}
+	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		!proto.Equal(response.GetDeclaration(), replay.GetDeclaration()) {
+		t.Fatalf("close mixed terminal tree replay = %+v; want exact duplicate declaration", replay)
+	}
+	const escapedChildID = "thr_bridge_close_terminal_tree_escaped"
+	seedBridgeAPIEvent(t, admin, "default", sessionID, failedRootID, "sevt_bridge_close_terminal_tree_late_spawn", 2, "agent.tool_use", `{}`)
+	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
+		Scope:                bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ParentThreadId:       failedRootID,
+		ChildThreadId:        escapedChildID,
+		Role:                 "subagent",
+		TaskName:             "escaped-child",
+		AgentType:            "worker",
+		SourceToolUseEventId: "sevt_bridge_close_terminal_tree_late_spawn",
+		ForkTurns:            "none",
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(
+			t,
+			sessionID,
+			"msg_bridge_close_terminal_tree_late_seed",
+			"late seed",
+			failedRootID,
+			"sevt_bridge_close_terminal_tree_late_spawn",
+			"none",
+		),
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("create below preserved failed root err = %v; want FailedPrecondition", err)
+	}
+	var escapedChildCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_threads
+		  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+		sessionID,
+		escapedChildID,
+	).Scan(&escapedChildCount); err != nil {
+		t.Fatalf("count child below preserved failed root: %v", err)
+	}
+	if escapedChildCount != 0 {
+		t.Fatalf("children created below preserved failed root = %d; want 0", escapedChildCount)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCloseAndConcurrentChildCreateSerializeAtTheParent(t *testing.T) {
 	type operationResult struct {
 		operation string
@@ -1468,6 +1635,79 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadActiveOnlyReopensClosedThread(t 
 	}
 	if childStatus != "idle" {
 		t.Fatalf("closed child status after resume = %q; want idle", childStatus)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMarkChildThreadActivePreservesTerminalThread(t *testing.T) {
+	for _, testCase := range []struct {
+		status      string
+		disposition bridgev1.ChildLifecycleDisposition
+	}{
+		{status: "failed", disposition: bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED},
+		{status: "terminated", disposition: bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED},
+	} {
+		t.Run(testCase.status, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_bridge_resume_" + testCase.status
+			mainID := "thr_bridge_resume_" + testCase.status + "_main"
+			childID := "thr_bridge_resume_" + testCase.status + "_child"
+			bindingID := "bind_bridge_resume_" + testCase.status
+			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_bridge_resume_terminal")
+			if _, err := admin.ExecContext(context.Background(),
+				`UPDATE session_threads
+				    SET status = $3
+				  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+				sessionID,
+				childID,
+				testCase.status,
+			); err != nil {
+				t.Fatalf("mark child %s: %v", testCase.status, err)
+			}
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_resume_"+testCase.status)
+			response, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
+				Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, "pod_bridge_resume_terminal"),
+				ChildThreadId: childID,
+				ActiveAt:      "2026-01-01T00:01:00Z",
+				Source:        source,
+			})
+			if err != nil {
+				t.Fatalf("MarkChildThreadActive %s child: %v", testCase.status, err)
+			}
+			stamps := response.GetDeclaration().GetReceipts()[0].GetChildLifecycle()
+			if len(stamps) != 1 || stamps[0].GetDisposition() != testCase.disposition {
+				t.Fatalf("resume %s disposition = %+v; want %s", testCase.status, stamps, testCase.disposition)
+			}
+			var childStatus string
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT status FROM session_threads
+				  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+				sessionID,
+				childID,
+			).Scan(&childStatus); err != nil {
+				t.Fatalf("read %s child status: %v", testCase.status, err)
+			}
+			if childStatus != testCase.status {
+				t.Fatalf("resume %s child status = %q; want unchanged", testCase.status, childStatus)
+			}
+			var statusEvents int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_events
+				  WHERE workspace_id = 'default'
+				    AND session_id = $1
+				    AND session_thread_id = $2
+				    AND type = 'session.thread_status_idle'`,
+				sessionID,
+				childID,
+			).Scan(&statusEvents); err != nil {
+				t.Fatalf("count resume %s status events: %v", testCase.status, err)
+			}
+			if statusEvents != 0 {
+				t.Fatalf("resume %s status events = %d; want 0", testCase.status, statusEvents)
+			}
+		})
 	}
 }
 

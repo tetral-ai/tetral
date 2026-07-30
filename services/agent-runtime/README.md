@@ -334,9 +334,11 @@ Invariants a replacement must preserve:
   writes `agent.thread_message_received` (replay-deduped by `delivery_id`); a
   `wait_agent` pull carries a settled child's outcome and writes the receipt in
   the same step so the push copy dedups away.
-- `close_agent` cascades to the closed child's descendant subtree; a closed row
-  wins against any concurrent status flip; `resume_agent` reactivates only
-  `closed_for_runtime` rows.
+- `close_agent` freezes the complete descendant subtree, closes its
+  non-terminal rows, preserves `failed` and `terminated` outcomes, and only
+  then releases resident hot state. `resume_agent` reactivates only
+  `closed_for_runtime` rows; terminal rows remain terminal and are never
+  installed into hot state.
 
 Conformance tests: `core/test/unit/session-manager.test.ts`,
 `core/test/unit/conversation-turns.test.ts`,

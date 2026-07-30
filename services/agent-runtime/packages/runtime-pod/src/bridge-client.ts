@@ -1931,7 +1931,11 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
             ? "resumed" as const
             : stamp.disposition === ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
               ? "already_active" as const
-              : undefined;
+              : stamp.disposition === ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED
+                ? "preserved_failed" as const
+                : stamp.disposition === ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED
+                  ? "preserved_terminated" as const
+                  : undefined;
       if (disposition === undefined || stamp.childThreadId.length === 0 || stamp.effectiveAt.length === 0) {
         throw new Error("declaration receipt has an invalid child-lifecycle stamp");
       }
@@ -2057,8 +2061,16 @@ export function validateChildLifecycleDeclarationResponse(
   const stamps = receipts.flatMap((receipt) => receipt.childLifecycle);
   const receiptTargets = new Set(receipts.map((receipt) => receipt.sessionThreadId));
   const validDisposition = input.action === "close"
-    ? (value: string): boolean => value === "closed" || value === "already_closed"
-    : (value: string): boolean => value === "resumed" || value === "already_active";
+    ? (value: string): boolean =>
+        value === "closed" ||
+        value === "already_closed" ||
+        value === "preserved_failed" ||
+        value === "preserved_terminated"
+    : (value: string): boolean =>
+        value === "resumed" ||
+        value === "already_active" ||
+        value === "preserved_failed" ||
+        value === "preserved_terminated";
   if (
     receiptTargets.size !== receipts.length ||
     !receiptTargets.has(input.childThreadId) ||
