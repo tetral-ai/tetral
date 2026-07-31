@@ -232,6 +232,54 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	}
 }
 
+func TestValidatePendingToolCancellationDraftsEnforcesBijection(t *testing.T) {
+	const interruptEventID = "evt_interrupt"
+	cancellationDraft := func(localID string, toolUseEventIDs ...string) *bridgev1.RuntimeMessageDraft {
+		parts := make([]*bridgev1.RuntimePartDraft, 0, len(toolUseEventIDs))
+		for _, toolUseEventID := range toolUseEventIDs {
+			parts = append(parts, &bridgev1.RuntimePartDraft{
+				PartKind: "tool",
+				PartJson: `{"type":"tool","toolUseEventId":"` + toolUseEventID + `","state":{"status":"cancelled"}}`,
+			})
+		}
+		return &bridgev1.RuntimeMessageDraft{
+			RuntimeLocalId: localID,
+			SourceEventId:  interruptEventID,
+			DraftKind:      bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
+			Parts:          parts,
+		}
+	}
+
+	err := validatePendingToolCancellationDrafts(
+		interruptEventID,
+		[]*bridgev1.PendingToolCancellationDraft{{
+			ToolUseEventId: "evt_pending_tool",
+			RuntimeLocalId: "draft_expected",
+		}},
+		[]*bridgev1.RuntimeMessageDraft{
+			cancellationDraft("draft_expected", "evt_pending_tool"),
+			cancellationDraft("draft_unmatched", "evt_other_tool"),
+		},
+	)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unmatched cancellation draft error = %v; want InvalidArgument", err)
+	}
+
+	err = validatePendingToolCancellationDrafts(
+		interruptEventID,
+		[]*bridgev1.PendingToolCancellationDraft{
+			{ToolUseEventId: "evt_pending_tool_a", RuntimeLocalId: "draft_shared"},
+			{ToolUseEventId: "evt_pending_tool_b", RuntimeLocalId: "draft_shared"},
+		},
+		[]*bridgev1.RuntimeMessageDraft{
+			cancellationDraft("draft_shared", "evt_pending_tool_a", "evt_pending_tool_b"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("shared cancellation draft error = %v; want nil", err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCommitInputsReturnsFirstTurnFileAttachmentDelta(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

@@ -5278,13 +5278,13 @@ func (x *ResolveInterAgentDeliveryRequest) GetDeliveryId() string {
 type ResolveInterAgentDeliveryResponse struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	Ack                  *BridgeWriteAck        `protobuf:"bytes,1,opt,name=ack,proto3" json:"ack,omitempty"`
-	DeliveryId           string                 `protobuf:"bytes,2,opt,name=delivery_id,json=deliveryId,proto3" json:"delivery_id,omitempty"`
-	SourceThreadId       string                 `protobuf:"bytes,3,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
-	TargetThreadId       string                 `protobuf:"bytes,4,opt,name=target_thread_id,json=targetThreadId,proto3" json:"target_thread_id,omitempty"`
-	SourceToolUseEventId string                 `protobuf:"bytes,5,opt,name=source_tool_use_event_id,json=sourceToolUseEventId,proto3" json:"source_tool_use_event_id,omitempty"`
-	ReceivedEventId      string                 `protobuf:"bytes,6,opt,name=received_event_id,json=receivedEventId,proto3" json:"received_event_id,omitempty"`
-	ReceivedSequence     int64                  `protobuf:"varint,7,opt,name=received_sequence,json=receivedSequence,proto3" json:"received_sequence,omitempty"`
-	MessageJson          string                 `protobuf:"bytes,8,opt,name=message_json,json=messageJson,proto3" json:"message_json,omitempty"`
+	DeliveryId           string                 `protobuf:"bytes,6,opt,name=delivery_id,json=deliveryId,proto3" json:"delivery_id,omitempty"`
+	SourceThreadId       string                 `protobuf:"bytes,7,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
+	TargetThreadId       string                 `protobuf:"bytes,8,opt,name=target_thread_id,json=targetThreadId,proto3" json:"target_thread_id,omitempty"`
+	SourceToolUseEventId string                 `protobuf:"bytes,9,opt,name=source_tool_use_event_id,json=sourceToolUseEventId,proto3" json:"source_tool_use_event_id,omitempty"`
+	ReceivedEventId      string                 `protobuf:"bytes,10,opt,name=received_event_id,json=receivedEventId,proto3" json:"received_event_id,omitempty"`
+	ReceivedSequence     int64                  `protobuf:"varint,11,opt,name=received_sequence,json=receivedSequence,proto3" json:"received_sequence,omitempty"`
+	MessageJson          string                 `protobuf:"bytes,12,opt,name=message_json,json=messageJson,proto3" json:"message_json,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -6769,17 +6769,18 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12&\n" +
 	"\x0fchild_thread_id\x18\x02 \x01(\tR\rchildThreadId\x12\x1f\n" +
 	"\vdelivery_id\x18\x03 \x01(\tR\n" +
-	"deliveryId\"\x80\x03\n" +
+	"deliveryId\"\xc9\x03\n" +
 	"!ResolveInterAgentDeliveryResponse\x122\n" +
 	"\x03ack\x18\x01 \x01(\v2 .tetral.bridge.v1.BridgeWriteAckR\x03ack\x12\x1f\n" +
-	"\vdelivery_id\x18\x02 \x01(\tR\n" +
+	"\vdelivery_id\x18\x06 \x01(\tR\n" +
 	"deliveryId\x12(\n" +
-	"\x10source_thread_id\x18\x03 \x01(\tR\x0esourceThreadId\x12(\n" +
-	"\x10target_thread_id\x18\x04 \x01(\tR\x0etargetThreadId\x126\n" +
-	"\x18source_tool_use_event_id\x18\x05 \x01(\tR\x14sourceToolUseEventId\x12*\n" +
-	"\x11received_event_id\x18\x06 \x01(\tR\x0freceivedEventId\x12+\n" +
-	"\x11received_sequence\x18\a \x01(\x03R\x10receivedSequence\x12!\n" +
-	"\fmessage_json\x18\b \x01(\tR\vmessageJson\"\xd9\x01\n" +
+	"\x10source_thread_id\x18\a \x01(\tR\x0esourceThreadId\x12(\n" +
+	"\x10target_thread_id\x18\b \x01(\tR\x0etargetThreadId\x126\n" +
+	"\x18source_tool_use_event_id\x18\t \x01(\tR\x14sourceToolUseEventId\x12*\n" +
+	"\x11received_event_id\x18\n" +
+	" \x01(\tR\x0freceivedEventId\x12+\n" +
+	"\x11received_sequence\x18\v \x01(\x03R\x10receivedSequence\x12!\n" +
+	"\fmessage_json\x18\f \x01(\tR\vmessageJsonJ\x04\b\x02\x10\x06R\vsent_existsR\x0freceived_existsR\x10child_receivableR\x11child_thread_json\"\xd9\x01\n" +
 	"\x1cMarkChildThreadClosedRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12&\n" +
 	"\x0fchild_thread_id\x18\x02 \x01(\tR\rchildThreadId\x12\x1b\n" +

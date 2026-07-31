@@ -654,6 +654,7 @@ func validatePendingToolCancellationDrafts(
 		draftsByLocalID[draft.GetRuntimeLocalId()] = draft
 	}
 	seenTools := make(map[string]struct{}, len(cancellations))
+	referencedDrafts := make(map[string]struct{}, len(drafts))
 	for _, cancellation := range cancellations {
 		if cancellation == nil || cancellation.GetToolUseEventId() == "" || cancellation.GetRuntimeLocalId() == "" {
 			return status.Error(codes.InvalidArgument, "pending tool cancellation is invalid")
@@ -669,6 +670,10 @@ func validatePendingToolCancellationDrafts(
 			!cancellationDraftNamesPendingTool(draft, cancellation.GetToolUseEventId()) {
 			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
 		}
+		referencedDrafts[cancellation.GetRuntimeLocalId()] = struct{}{}
+	}
+	if len(referencedDrafts) != len(draftsByLocalID) {
+		return status.Error(codes.InvalidArgument, "pending tool cancellation draft is unmatched")
 	}
 	return nil
 }

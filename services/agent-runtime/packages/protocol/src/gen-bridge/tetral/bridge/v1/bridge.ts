@@ -9530,25 +9530,25 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
     }
     if (message.deliveryId !== "") {
-      writer.uint32(18).string(message.deliveryId);
+      writer.uint32(50).string(message.deliveryId);
     }
     if (message.sourceThreadId !== "") {
-      writer.uint32(26).string(message.sourceThreadId);
+      writer.uint32(58).string(message.sourceThreadId);
     }
     if (message.targetThreadId !== "") {
-      writer.uint32(34).string(message.targetThreadId);
+      writer.uint32(66).string(message.targetThreadId);
     }
     if (message.sourceToolUseEventId !== "") {
-      writer.uint32(42).string(message.sourceToolUseEventId);
+      writer.uint32(74).string(message.sourceToolUseEventId);
     }
     if (message.receivedEventId !== "") {
-      writer.uint32(50).string(message.receivedEventId);
+      writer.uint32(82).string(message.receivedEventId);
     }
     if (message.receivedSequence !== 0) {
-      writer.uint32(56).int64(message.receivedSequence);
+      writer.uint32(88).int64(message.receivedSequence);
     }
     if (message.messageJson !== "") {
-      writer.uint32(66).string(message.messageJson);
+      writer.uint32(98).string(message.messageJson);
     }
     return writer;
   },
@@ -9568,56 +9568,56 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
+        case 6: {
+          if (tag !== 50) {
             break;
           }
 
           message.deliveryId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
+        case 7: {
+          if (tag !== 58) {
             break;
           }
 
           message.sourceThreadId = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
+        case 8: {
+          if (tag !== 66) {
             break;
           }
 
           message.targetThreadId = reader.string();
           continue;
         }
-        case 5: {
-          if (tag !== 42) {
+        case 9: {
+          if (tag !== 74) {
             break;
           }
 
           message.sourceToolUseEventId = reader.string();
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
+        case 10: {
+          if (tag !== 82) {
             break;
           }
 
           message.receivedEventId = reader.string();
           continue;
         }
-        case 7: {
-          if (tag !== 56) {
+        case 11: {
+          if (tag !== 88) {
             break;
           }
 
           message.receivedSequence = longToNumber(reader.int64());
           continue;
         }
-        case 8: {
-          if (tag !== 66) {
+        case 12: {
+          if (tag !== 98) {
             break;
           }
 

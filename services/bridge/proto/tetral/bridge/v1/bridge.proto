@@ -600,13 +600,15 @@ message ResolveInterAgentDeliveryRequest {
 
 message ResolveInterAgentDeliveryResponse {
   BridgeWriteAck ack = 1;
-  string delivery_id = 2;
-  string source_thread_id = 3;
-  string target_thread_id = 4;
-  string source_tool_use_event_id = 5;
-  string received_event_id = 6;
-  int64 received_sequence = 7;
-  string message_json = 8;
+  reserved 2 to 5;
+  reserved "sent_exists", "received_exists", "child_receivable", "child_thread_json";
+  string delivery_id = 6;
+  string source_thread_id = 7;
+  string target_thread_id = 8;
+  string source_tool_use_event_id = 9;
+  string received_event_id = 10;
+  int64 received_sequence = 11;
+  string message_json = 12;
 }
 
 message MarkChildThreadClosedRequest {
