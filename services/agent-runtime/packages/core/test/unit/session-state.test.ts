@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
-import type { RuntimeAcceptedInputState } from "../../src/session/session-state.js";
+import type {
+  RuntimeAcceptedInputState,
+  RuntimeTaskNotificationState,
+} from "../../src/session/session-state.js";
 import { MaxProviderRequestAttachments, SessionState } from "../../src/session/session-state.js";
 
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -218,6 +221,82 @@ describe("SessionState", () => {
 
     expect(state.peekAcceptedInput()).toEqual(mail);
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+  });
+
+  test("task-notification identity deduplicates while the accepted fact remains queued", () => {
+    const state = new SessionState("sesn_task_notification_queued");
+    const notification = {
+      requestId: "req_task_notification_queued",
+      workspaceId: "wksp_task_notification_queued",
+      sessionId: "sesn_task_notification_queued",
+      sessionThreadId: "thrd_task_notification_queued",
+      bindingId: "bind_task_notification_queued",
+      bindingGeneration: 1,
+      targetPodUid: "pod_task_notification_queued",
+      runtimeInputId: "rin_task_notification_queued",
+      eventIds: ["sevt_task_notification_queued"],
+      sequenceFrom: 3,
+      sequenceTo: 3,
+      kind: "task_notification",
+      taskId: "task_notification_queued",
+      sourceToolUseEventId: "sevt_task_notification_source",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      commit: async () => ({ ok: true, stale: true }),
+    } satisfies RuntimeAcceptedInputState;
+
+    expect(state.enqueueAcceptedInput(notification)).toBe("applied");
+    expect(state.enqueueAcceptedInput(notification)).toBe("duplicate");
+    expect(state.peekAcceptedInput()).toBe(notification);
+  });
+
+  test("task-notification identity deduplicates after its durable message is committed", () => {
+    const state = new SessionState("sesn_task_notification_committed");
+    const committedMessage = RuntimeMessageSchema.parse({
+      id: "msg_task_notification_committed",
+      sessionId: "sesn_task_notification_committed",
+      role: "user",
+      origin: "runtime",
+      sequence: 4,
+      status: "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      parts: [{
+        id: "part_task_notification_committed",
+        sessionId: "sesn_task_notification_committed",
+        messageId: "msg_task_notification_committed",
+        sequence: 0,
+        type: "text",
+        text: "Task completed.",
+        truncated: false,
+        status: "completed",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: timestamp,
+      }],
+    });
+    const notification = {
+      requestId: "req_task_notification_committed",
+      workspaceId: "wksp_task_notification_committed",
+      sessionId: "sesn_task_notification_committed",
+      sessionThreadId: "thrd_task_notification_committed",
+      bindingId: "bind_task_notification_committed",
+      bindingGeneration: 1,
+      targetPodUid: "pod_task_notification_committed",
+      runtimeInputId: "rin_task_notification_committed",
+      eventIds: ["sevt_task_notification_committed"],
+      sequenceFrom: 4,
+      sequenceTo: 4,
+      taskId: "task_notification_committed",
+      sourceToolUseEventId: "sevt_task_notification_source",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      committedMessage,
+    } satisfies RuntimeTaskNotificationState;
+
+    expect(state.commitTaskNotification(notification)).toBe("applied");
+    expect(state.commitTaskNotification(notification)).toBe("duplicate");
+    expect(state.contextManager.messages()).toEqual([committedMessage]);
   });
 
   test("clear removes transient attachments and model-only messages", () => {

@@ -18,6 +18,35 @@ import (
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
+func TestRuntimeDeliveryExhaustionEventIDMatchesDatabaseDerivation(t *testing.T) {
+	_, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	job := RuntimeJob{
+		WorkspaceID:    "default",
+		SessionID:      "sesn_exhaustion_id_parity",
+		RuntimeInputID: "agent_mail:delivery_exhaustion_id_parity",
+	}
+	var databaseID string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT 'evt_runtime_exhausted_' || substr(encode(sha256(
+			convert_to($1, 'UTF8') ||
+			decode('00', 'hex') ||
+			convert_to($2, 'UTF8') ||
+			decode('00', 'hex') ||
+			convert_to($3, 'UTF8') ||
+			decode('00', 'hex') ||
+			convert_to('runtime_delivery_exhausted', 'UTF8')
+		), 'hex'), 1, 24)`,
+		job.WorkspaceID,
+		job.SessionID,
+		job.RuntimeInputID,
+	).Scan(&databaseID); err != nil {
+		t.Fatalf("derive runtime delivery exhaustion event id in PostgreSQL: %v", err)
+	}
+	if got := runtimeDeliveryExhaustionEventID(job); got != databaseID {
+		t.Fatalf("runtime delivery exhaustion event id = %q; database derivation = %q", got, databaseID)
+	}
+}
+
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFenceSurvivesRepair(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox")

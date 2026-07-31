@@ -555,6 +555,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 		var pendingStatus string
 		var pendingResultEventID sql.NullString
 		var terminalResultCount int
+		var cancellationMessageJSON string
 		if err := admin.QueryRowContext(context.Background(),
 			`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = 'rin_bridge_commit_interrupt'`).Scan(&inboxStatus); err != nil {
 			t.Fatalf("read interrupt inbox: %v", err)
@@ -574,6 +575,40 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 		if err := admin.QueryRowContext(context.Background(),
 			`SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_commit_interrupt' AND type = 'agent.tool_result' AND payload_json::jsonb ->> 'tool_use_id' = 'evt_bridge_interrupted_tool'`).Scan(&terminalResultCount); err != nil {
 			t.Fatalf("read interrupted terminal result count: %v", err)
+		}
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT data_json
+			   FROM session_messages
+			  WHERE workspace_id = 'default'
+			    AND session_id = 'sesn_bridge_commit_interrupt'
+			    AND session_thread_id = 'thr_bridge_commit_interrupt'
+			    AND source_event_id = 'evt_bridge_commit_interrupt'`,
+		).Scan(&cancellationMessageJSON); err != nil {
+			t.Fatalf("read durable interrupt cancellation message: %v", err)
+		}
+		var cancellationMessage struct {
+			Parts []struct {
+				Type           string `json:"type"`
+				ToolUseEventID string `json:"toolUseEventId"`
+				State          struct {
+					Status string `json:"status"`
+				} `json:"state"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal([]byte(cancellationMessageJSON), &cancellationMessage); err != nil {
+			t.Fatalf("decode durable interrupt cancellation message: %v", err)
+		}
+		cancelledTools := make(map[string]bool, len(cancellationMessage.Parts))
+		for _, part := range cancellationMessage.Parts {
+			if part.Type != "tool" || part.State.Status != "cancelled" {
+				t.Fatalf("durable interrupt cancellation part = %+v; want cancelled tool part", part)
+			}
+			cancelledTools[part.ToolUseEventID] = true
+		}
+		if len(cancellationMessage.Parts) != 2 ||
+			!cancelledTools["evt_bridge_interrupted_tool"] ||
+			!cancelledTools["evt_bridge_active_tool"] {
+			t.Fatalf("durable interrupt cancellation tools = %#v; want exact pending and in-flight tool ids", cancelledTools)
 		}
 		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
 			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
@@ -1541,28 +1576,47 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsMalformedPublicInterAgentMessa
 func TestPostgreSQLBridgeAPIStoreReceivedInterAgentMessageUsesSourceCallableTaskName(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID      = "sesn_bridge_inter_agent_source_name"
-		mainThreadID   = "thr_bridge_inter_agent_source_main"
-		sourceThreadID = "thr_bridge_inter_agent_source_child"
-		targetThreadID = "thr_bridge_inter_agent_target_child"
+		sessionID     = "sesn_bridge_inter_agent_source_name"
+		mainThreadID  = "thr_bridge_inter_agent_source_main"
+		childThreadID = "thr_bridge_inter_agent_source_child"
+		bindingID     = "bind_bridge_inter_agent_source_name"
+		podUID        = "pod_uid_inter_agent_source_name"
+		deliveryID    = "delivery_bridge_inter_agent_source_name"
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, sourceThreadID)
-	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, targetThreadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_inter_agent_source_name", 1, "pod_uid_inter_agent_source_name")
-	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_inter_agent_source_name", "hello sibling")
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_inter_agent_source_name")
+	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_inter_agent_source_name", "child complete")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
-		t,
-		admin,
-		bridgeAPIScope(sessionID, targetThreadID, "bind_bridge_inter_agent_source_name", 1, "pod_uid_inter_agent_source_name"),
-		"rin_bridge_inter_agent_source_name",
-		"delivery_bridge_inter_agent_source_name",
-		sourceThreadID,
-		"sevt_bridge_inter_agent_source_tool",
-		messageJSON,
-	)); err != nil {
-		t.Fatalf("CommitInputs sibling inter-agent message: %v", err)
+	childScope := bridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          childScope,
+		RuntimeWriteId: "rwrite_bridge_inter_agent_source_name",
+		EventType:      "agent.thread_message_sent",
+		PayloadJson: bridgeInterAgentSentEventJSON(
+			t,
+			deliveryID,
+			childThreadID,
+			mainThreadID,
+			"",
+			"sevt_bridge_inter_agent_source_tool",
+			messageJSON,
+		),
+		SessionVisible: true,
+	}); err != nil {
+		t.Fatalf("WriteEvent child completion: %v", err)
+	}
+	resolved, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
+		Scope:         bridgeAPIScope(sessionID, mainThreadID, bindingID, 1, podUID),
+		ChildThreadId: childThreadID,
+		DeliveryId:    deliveryID,
+	})
+	if err != nil {
+		t.Fatalf("ResolveInterAgentDelivery child completion: %v", err)
+	}
+	if resolved.GetSourceThreadId() != childThreadID || resolved.GetTargetThreadId() != mainThreadID {
+		t.Fatalf("resolved child completion = %+v; want child-to-parent envelope", resolved)
 	}
 	var payloadJSON string
 	if err := admin.QueryRowContext(context.Background(),
@@ -1572,16 +1626,17 @@ func TestPostgreSQLBridgeAPIStoreReceivedInterAgentMessageUsesSourceCallableTask
 		    AND session_id = $1
 		    AND session_thread_id = $2
 		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = 'delivery_bridge_inter_agent_source_name'`,
+		    AND payload_json::jsonb ->> 'delivery_id' = $3`,
 		sessionID,
-		targetThreadID,
+		mainThreadID,
+		deliveryID,
 	).Scan(&payloadJSON); err != nil {
-		t.Fatalf("read sibling received event: %v", err)
+		t.Fatalf("read child completion received event: %v", err)
 	}
-	if got, want := testJSONPathString(t, payloadJSON, "source_task_name"), "task_"+sourceThreadID; got != want {
+	if got, want := testJSONPathString(t, payloadJSON, "source_task_name"), "task_"+childThreadID; got != want {
 		t.Fatalf("source_task_name = %q; want source thread callable name %q", got, want)
 	}
-	assertDurableInterAgentPublicContentPreservesRuntimeMessage(t, payloadJSON, "hello sibling")
+	assertDurableInterAgentPublicContentPreservesRuntimeMessage(t, payloadJSON, "child complete")
 }
 
 func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(t *testing.T) {
@@ -1698,7 +1753,7 @@ func assertSingleCommitInputReceipt(t *testing.T, response *bridgev1.CommitInput
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreRejectsCompletionReceiptOnApprovalReviewer(t *testing.T) {
+func TestAdmitAgentMailDeliveryRejectsApprovalReviewerTarget(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID  = "sesn_bridge_completion_reviewer_receipt"
@@ -1712,37 +1767,30 @@ func TestPostgreSQLBridgeAPIStoreRejectsCompletionReceiptOnApprovalReviewer(t *t
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, sourceID)
 	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	_, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
-		t,
-		admin,
-		bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
-		"agent_mail:delivery_reviewer_rejected",
-		"delivery_reviewer_rejected",
-		sourceID,
-		"sevt_reviewer_rejected_spawn",
-		bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_reviewer_rejected", "completion"),
-	))
+	client := dbconnect.NewClientForTesting(runtime)
+	err := client.WithWorkspaceTx(context.Background(), "default", "test.reject_reviewer_agent_mail", func(tx *dbconnect.Tx) error {
+		binding, err := readRuntimeBindingForDeliveryTx(context.Background(), tx, "default", sessionID)
+		if err != nil {
+			return err
+		}
+		_, err = admitAgentMailDeliveryTx(
+			context.Background(),
+			tx,
+			bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
+			storedAgentMailEnvelope{
+				DeliveryID:           "delivery_reviewer_rejected",
+				SourceThreadID:       sourceID,
+				TargetThreadID:       reviewerID,
+				SourceToolUseEventID: "sevt_reviewer_rejected_spawn",
+				MessageJSON:          json.RawMessage(bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_reviewer_rejected", "completion")),
+			},
+			"prep_reviewer_rejected",
+			binding,
+			time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC),
+		)
+		return err
+	})
 	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("CommitInputs completion receipt on reviewer err = %v; want FailedPrecondition", err)
-	}
-	var receivedCount, messageCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events
-		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
-		    AND type='agent.thread_message_received'`,
-		sessionID, reviewerID,
-	).Scan(&receivedCount); err != nil {
-		t.Fatalf("count reviewer received events: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_messages
-		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2`,
-		sessionID, reviewerID,
-	).Scan(&messageCount); err != nil {
-		t.Fatalf("count reviewer completion messages: %v", err)
-	}
-	if receivedCount != 1 || messageCount != 0 {
-		t.Fatalf("reviewer completion receipt side effects = admitted event %d message %d; want 1/0", receivedCount, messageCount)
+		t.Fatalf("admit completion mail on reviewer err = %v; want FailedPrecondition", err)
 	}
 }
