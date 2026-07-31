@@ -129,24 +129,6 @@ func normalizeStableReasoningParts(request stableReasoningCarrier) (normalizedSt
 	return normalized, nil
 }
 
-func stableReasoningContentIdentity(part map[string]any) []byte {
-	identity := make(map[string]any, len(part))
-	for key, value := range part {
-		switch key {
-		case "messageId", "createdAt", "updatedAt", "startedAt", "completedAt":
-			continue
-		default:
-			identity[key] = value
-		}
-	}
-	encoded, _ := json.Marshal(identity)
-	return encoded
-}
-
-func sameStableReasoningContent(left, right map[string]any) bool {
-	return bytes.Equal(stableReasoningContentIdentity(left), stableReasoningContentIdentity(right))
-}
-
 func validateStableReasoningBudget(parts []any) error {
 	count := 0
 	aggregateBytes := 0

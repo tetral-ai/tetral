@@ -560,7 +560,7 @@ export class BridgeAPIApprovalReviewerThreadCreator implements RuntimeApprovalRe
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }
 
-  /** Creates a seedless trunk or a sidecar whose fork-seed snapshot may be empty, ACK-gated. */
+  /** Creates a prefixless trunk or a sidecar whose thread-context-prefix snapshot may be empty, ACK-gated. */
   async createApprovalReviewerThread(input: ApprovalReviewerThreadCreation) {
     let metadata: Metadata;
     try {

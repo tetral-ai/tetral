@@ -3225,42 +3225,6 @@ func terminalPreparationFailurePayloadJSON(message string) (string, error) {
 	})
 }
 
-func runtimeInputRejectedUserMessage() string {
-	return "The session runtime could not accept this input."
-}
-
-func runtimeInputRejectedPayloadJSON(job RuntimeJob, message string) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"type": "session.error",
-		"error": map[string]any{
-			"type":      "runtime",
-			"code":      "runtime_invalid_sequence",
-			"message":   message,
-			"retryable": false,
-			"fatal":     false,
-			"retry_status": map[string]any{
-				"type": "terminal",
-			},
-			"reason":    "runtime_contract_validation",
-			"sessionId": job.SessionID,
-		},
-	})
-}
-
-func runtimeInputRejectedMessageJSON(scope *bridgev1.RuntimeScope, message string) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"role": "assistant",
-		"content": []map[string]any{
-			{
-				"type": "text",
-				"text": message,
-			},
-		},
-		"session_id":        scope.GetSessionId(),
-		"session_thread_id": scope.GetSessionThreadId(),
-	})
-}
-
 func terminalPreparationFailureMessageJSON(scope *bridgev1.RuntimeScope, message string) (string, error) {
 	return marshalBridgeJSON(map[string]any{
 		"role": "assistant",

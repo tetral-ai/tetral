@@ -344,7 +344,7 @@ export class RuntimeControlService {
     );
   }
 
-  /** Accepts one database-stamped agent-mail command and wakes its target thread. */
+  /** Accepts one delivered durable agent-mail envelope directly and wakes its target thread. */
   async acceptAgentMail(request: RuntimeInputCommandRequest, metadata: Metadata): Promise<RuntimeInputCommandResponse> {
     return await this.runRuntimeCommand(
       request,

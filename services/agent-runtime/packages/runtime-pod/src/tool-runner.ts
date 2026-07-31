@@ -236,9 +236,6 @@ export class RuntimePodToolRunner {
 
   private async runSandboxTool(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this tool call.", true);
-    }
     const inputJson = stableJsonStringify(request.input);
     try {
       const response = await runTool(this.bridgeClient, {
@@ -319,9 +316,6 @@ export class RuntimePodToolRunner {
 
   private async runCommandInput(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this command input.", true);
-    }
     const taskId = taskIdFromInput(request.input);
     if (taskId === undefined) {
       return toolFailure(request, "write_stdin requires a session_id task handle.", false);
@@ -379,9 +373,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, `Bridge tool route ${request.entry.route.operation} is not installed.`, false);
     }
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this memory tool call.", true);
-    }
     const inputJson = stableJsonStringify(request.input);
     const runMemoryRequest: RunMemoryRequest = {
       scope,
@@ -469,9 +460,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "MCP tool route is missing mcp_server_name.", false);
     }
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime scope is unavailable for MCP tool execution.", true);
-    }
     const inputJson = stableJsonStringify(request.input);
     try {
       const response = await runMcpTool(this.mcpConnectorClient, {
@@ -566,9 +554,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "spawn_agent requires an inherited current model.", true);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent spawn.", true);
-    }
     const host = this.options.subAgentRunHost?.();
     if (host === undefined) {
       return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
@@ -662,9 +647,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "send_message requires an inherited current model.", true);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent send.", true);
-    }
     const host = this.options.subAgentRunHost?.();
     if (host === undefined) {
       return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
@@ -737,9 +719,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "wait_agent requires task_name.", false);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent wait.", true);
-    }
     try {
       const child = await this.resolveChildByTaskName(request, parentScope, taskName, await this.metadata());
       if (child === undefined) {
@@ -956,9 +935,6 @@ export class RuntimePodToolRunner {
 
   private async listAgents(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent list.", true);
-    }
     try {
       const response = await listChildThreads(this.bridgeClient, {
         scope: parentScope,
@@ -991,9 +967,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, `${toolName} requires task_name.`, false);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, `Runtime Bridge scope is unavailable for ${toolName}.`, true);
-    }
     try {
       return await this.withChildTaskOperationQueue(request, taskName, async () => {
         const metadata = await this.metadata();

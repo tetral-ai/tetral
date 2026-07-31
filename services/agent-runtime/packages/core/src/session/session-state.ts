@@ -4,7 +4,7 @@
  * ThreadRun mutates. Not the source of truth; recoverable from durable state.
  * SessionManager, AgentLoop, and tool execution call it; it delegates hot message
  * list changes to ContextManager, performs ordinary in-memory transitions, and owns
- * the injected interrupt-input commit and memoized FinishIdle closeout operations.
+ * the injected interrupt-input commit state and hot agent-mail delivery dedupe.
  *
  * OWNS (hot, per-thread):
  *   - accepted-input queue and the in-flight commit marker;

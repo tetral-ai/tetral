@@ -1515,7 +1515,6 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningLaterMergeFailureRollsBackWholeS
 	for label, query := range map[string]string{
 		"request end":  `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND model_request_id = 'mreq_reasoning_rollback' AND type = 'span.model_request_end'`,
 		"usage detail": `SELECT count(*) FROM request_usage_details WHERE workspace_id = 'default' AND model_request_id = 'mreq_reasoning_rollback'`,
-		"operation":    `SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND operation = 'write_request_end' AND idempotency_key = 'mreq_reasoning_rollback:rwrite_reasoning_rollback_end'`,
 		"message":      `SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND model_request_id = 'mreq_reasoning_rollback'`,
 	} {
 		var count int
@@ -1600,15 +1599,10 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningInvalidSetsWriteNothing(t *testi
 			for label, query := range map[string]string{
 				"request end": `SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND model_request_id = $1 AND type = 'span.model_request_end'`,
 				"usage":       `SELECT count(*) FROM request_usage_details WHERE workspace_id = 'default' AND model_request_id = $1`,
-				"operation":   `SELECT count(*) FROM session_bridge_operations WHERE workspace_id = 'default' AND operation = 'write_request_end' AND idempotency_key = $1`,
 				"message":     `SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND model_request_id = $1`,
 			} {
 				var count int
-				argument := modelRequestID
-				if label == "operation" {
-					argument = modelRequestID + ":" + request.GetRuntimeWriteId()
-				}
-				if err := admin.QueryRowContext(context.Background(), query, argument).Scan(&count); err != nil {
+				if err := admin.QueryRowContext(context.Background(), query, modelRequestID).Scan(&count); err != nil {
 					t.Fatalf("count %s rows: %v", label, err)
 				}
 				if count != 0 {

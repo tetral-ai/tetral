@@ -4615,10 +4615,6 @@ function toolCatalogForSession(session: Session, options: AgentLoopRuntimeOption
   return runtimePolicyForSession(session, options).toolCatalog;
 }
 
-function approvalModeForSession(session: Session, options: AgentLoopRuntimeOptions): ToolApprovalMode {
-  return runtimePolicyForSession(session, options).approvalMode ?? options.approvalMode ?? "ask_for_approval";
-}
-
 function effectiveToolPermissionPolicy(toolCatalog: ToolCatalog, toolName: string): RuntimeJsonValue {
   const entry = lookupToolEntry(toolCatalog, toolName);
   return entry === undefined ? "disabled" : effectivePermissionPolicy(entry, toolCatalog.configs);

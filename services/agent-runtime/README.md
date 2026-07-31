@@ -312,9 +312,9 @@ specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
-  threads are created through Bridge `CreateChildThread` with a fork seed;
+  threads are created through Bridge `CreateChildThread` with a thread context prefix;
   `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
-- Lifecycle: `spawn_agent` prepares a durable child row and fork seed before the
+- Lifecycle: `spawn_agent` prepares a durable child row and context prefix before the
   first message; `send_message` resolves the child by `task_name`, delivering
   every instruction through the stored envelope and durable Runtime input rail;
   `wait_agent`, `interrupt_agent`, `close_agent`, `resume_agent`, and
@@ -322,8 +322,8 @@ thread sees tool use/result; child work stays child-thread-local.
 
 Invariants a replacement must preserve:
 
-- Child durable thread and fork seed exist before the initial message; a crash
-  after `CreateChildThread` ACK reuses the same child and seed.
+- Child durable thread and context prefix exist before the initial message; a crash
+  after `CreateChildThread` ACK reuses the same child and prefix.
 - Inter-agent delivery is exactly-once by `delivery_id`, ordered
   sent envelope → received source/inbox → Runtime command → stamped input
   receipt. Inbox repair recreates only the queue wake and reuses that identity.

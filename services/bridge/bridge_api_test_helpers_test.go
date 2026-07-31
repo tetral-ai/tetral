@@ -1194,7 +1194,7 @@ func bridgeThreadContextPrefixJSON(t *testing.T, sessionID string, messageID str
 		"runtime_messages_snapshot": []json.RawMessage{json.RawMessage(bridgeRuntimeUserMessageJSON(t, sessionID, messageID, text))},
 	})
 	if err != nil {
-		t.Fatalf("marshal fork seed: %v", err)
+		t.Fatalf("marshal thread context prefix: %v", err)
 	}
 	return string(raw)
 }
@@ -1212,7 +1212,7 @@ func bridgeReviewerThreadContextPrefixJSON(t *testing.T, parentThreadID string, 
 		"runtime_messages_snapshot": messages,
 	})
 	if err != nil {
-		t.Fatalf("marshal reviewer fork seed: %v", err)
+		t.Fatalf("marshal reviewer thread context prefix: %v", err)
 	}
 	return string(raw)
 }

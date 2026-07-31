@@ -74,7 +74,7 @@ export interface RuntimeApprovalReviewerThreadCreator {
 /**
  * Describes one durable reviewer thread operation with the parent request scope
  * and reviewer identity needed by the Bridge adapter. A trunk uses the manager's
- * fresh hot-lifetime id and starts without a fork seed; a sidecar uses its
+ * fresh hot-lifetime id and starts without a context prefix; a sidecar uses its
  * deterministic review id and carries a serialized parent transcript snapshot.
  */
 export interface ApprovalReviewerThreadCreation {

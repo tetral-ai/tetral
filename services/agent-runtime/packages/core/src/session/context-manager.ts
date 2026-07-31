@@ -39,7 +39,7 @@ export interface ThreadContextPrefix {
 //
 // A tool-confirmation commit appends its database-stamped user decision before
 // waking the approved tool. A task notification uses the background-task settlement
-// path and projects a bounded runtime note. A fork seed is loaded from the CHILD
+// path and projects a bounded runtime note. A thread context prefix is loaded from the CHILD
 // thread's durable context and is never rebuilt from the current parent. The
 // generation counter advances on any non-append-only rewrite (compaction or in-place
 // update) so the approval-reviewer feed cursor can detect invalidation within one hot

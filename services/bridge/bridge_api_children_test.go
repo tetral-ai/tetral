@@ -522,7 +522,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndContextP
 		SequenceTo:     1,
 	})
 	if err != nil {
-		t.Fatalf("LoadContext child fork seed: %v", err)
+		t.Fatalf("LoadContext child context prefix: %v", err)
 	}
 	var childContextPayload struct {
 		Messages            []map[string]any `json:"messages"`
@@ -553,7 +553,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndContextP
 	emptySeedRequest.ForkTurns = "none"
 	emptySeedRequest.ThreadContextPrefixJson = emptyPrefixJSON
 	if _, err := store.CreateChildThread(context.Background(), emptySeedRequest); err != nil {
-		t.Fatalf("CreateChildThread empty fork seed: %v", err)
+		t.Fatalf("CreateChildThread empty context prefix: %v", err)
 	}
 	emptyChildContext, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_child_seed", "thr_bridge_child_seed_empty", "bind_bridge_child_seed", 1, "pod_uid_child_seed"),
@@ -562,7 +562,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndContextP
 		SequenceTo:     1,
 	})
 	if err != nil {
-		t.Fatalf("LoadContext empty child fork seed: %v", err)
+		t.Fatalf("LoadContext empty child context prefix: %v", err)
 	}
 	var emptyChildContextPayload struct {
 		Messages            []map[string]any `json:"messages"`

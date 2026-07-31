@@ -954,12 +954,12 @@ type threadContextPrefixEnvelope struct {
 //	approval_reviewer sidecar    review_id (must equal the       source_tool_use_event_id
 //	                               corresponding approval_review
 //	                               input's review_id)
-//	approval_reviewer trunk      none — seedless; fresh id per    any source or fork seed
+//	approval_reviewer trunk      none — prefixless; fresh id per  any source or context prefix
 //	                               parent hot lifetime;
 //	                               at-most-one live trunk uses
 //	                               demote-at-create succession
 //
-// Both seed arms are strict: no empty-string stand-ins in either field. The
+// Both context-prefix arms are strict: no empty-string stand-ins in either field. The
 // source rides the CreateChildThread wire, so validation is shape/lineage/identity
 // WITHIN-REQUEST only — it never joins a durable review-event row, which does not
 // exist at creation time. A sidecar's source_parent_thread_id is the PUBLIC
@@ -982,7 +982,7 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 			return status.Error(codes.InvalidArgument, "invalid sub-agent agent_type")
 		}
 		if prefixJSON == "" {
-			return status.Error(codes.InvalidArgument, "sub-agent fork seed is required")
+			return status.Error(codes.InvalidArgument, "sub-agent thread context prefix is required")
 		}
 		if reviewID != "" {
 			return status.Error(codes.InvalidArgument, "sub-agent reviewer_review_id must be absent")
@@ -993,13 +993,13 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 	}
 	if role == "approval_reviewer" && request.GetIsTrunk() {
 		if sourceToolUseEventID != "" || reviewID != "" || prefixJSON != "" {
-			return status.Error(codes.InvalidArgument, "approval reviewer trunk must not carry a fork seed source")
+			return status.Error(codes.InvalidArgument, "approval reviewer trunk must not carry a thread context prefix source")
 		}
 		return nil
 	}
 	if role == "approval_reviewer" {
 		if sourceToolUseEventID != "" || reviewID == "" || prefixJSON == "" {
-			return status.Error(codes.InvalidArgument, "approval reviewer sidecar requires only reviewer_review_id and a fork seed")
+			return status.Error(codes.InvalidArgument, "approval reviewer sidecar requires only reviewer_review_id and a thread context prefix")
 		}
 		if !validForkTurns(forkTurns) {
 			return status.Error(codes.InvalidArgument, "invalid approval reviewer fork_turns")
@@ -1008,43 +1008,43 @@ func validateChildThreadRequest(request *bridgev1.CreateChildThreadRequest, role
 			return status.Error(codes.InvalidArgument, "approval reviewer sidecar identity is invalid")
 		}
 	}
-	var seed threadContextPrefixEnvelope
+	var prefix threadContextPrefixEnvelope
 	decoder := json.NewDecoder(strings.NewReader(prefixJSON))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&seed); err != nil {
-		return status.Error(codes.InvalidArgument, "fork seed must match the strict schema")
+	if err := decoder.Decode(&prefix); err != nil {
+		return status.Error(codes.InvalidArgument, "thread context prefix must match the strict schema")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return status.Error(codes.InvalidArgument, "fork seed must contain exactly one object")
+		return status.Error(codes.InvalidArgument, "thread context prefix must contain exactly one object")
 	}
-	if seed.SourceParentThreadID != parentThreadID || seed.ForkTurns != forkTurns || seed.RuntimeMessages == nil {
-		return status.Error(codes.InvalidArgument, "fork seed lineage or snapshot is invalid")
+	if prefix.SourceParentThreadID != parentThreadID || prefix.ForkTurns != forkTurns || prefix.RuntimeMessages == nil {
+		return status.Error(codes.InvalidArgument, "thread context prefix lineage or snapshot is invalid")
 	}
-	if seed.ParentBoundaryEventID == "" {
-		return status.Error(codes.InvalidArgument, "fork seed parent boundary is required")
+	if prefix.ParentBoundaryEventID == "" {
+		return status.Error(codes.InvalidArgument, "thread context prefix parent boundary is required")
 	}
-	if role == "subagent" && (seed.SourceToolUseEventID != sourceToolUseEventID || seed.ReviewID != "") {
-		return status.Error(codes.InvalidArgument, "sub-agent fork seed source is invalid")
+	if role == "subagent" && (prefix.SourceToolUseEventID != sourceToolUseEventID || prefix.ReviewID != "") {
+		return status.Error(codes.InvalidArgument, "sub-agent thread context prefix source is invalid")
 	}
-	if role == "subagent" && seed.ParentBoundaryEventID != sourceToolUseEventID {
-		return status.Error(codes.InvalidArgument, "sub-agent fork seed boundary is invalid")
+	if role == "subagent" && prefix.ParentBoundaryEventID != sourceToolUseEventID {
+		return status.Error(codes.InvalidArgument, "sub-agent thread context prefix boundary is invalid")
 	}
-	if role == "approval_reviewer" && (seed.ReviewID != reviewID || seed.SourceToolUseEventID != "") {
-		return status.Error(codes.InvalidArgument, "approval reviewer fork seed source is invalid")
+	if role == "approval_reviewer" && (prefix.ReviewID != reviewID || prefix.SourceToolUseEventID != "") {
+		return status.Error(codes.InvalidArgument, "approval reviewer thread context prefix source is invalid")
 	}
-	for _, message := range seed.RuntimeMessages {
+	for _, message := range prefix.RuntimeMessages {
 		if !json.Valid(message) {
-			return status.Error(codes.InvalidArgument, "fork seed contains malformed message")
+			return status.Error(codes.InvalidArgument, "thread context prefix contains malformed message")
 		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(message, &fields); err != nil {
-			return status.Error(codes.InvalidArgument, "fork seed message must be an object")
+			return status.Error(codes.InvalidArgument, "thread context prefix message must be an object")
 		}
 		if _, ok := fields["providerId"]; ok {
-			return status.Error(codes.InvalidArgument, "fork seed message contains routing metadata")
+			return status.Error(codes.InvalidArgument, "thread context prefix message contains routing metadata")
 		}
 		if _, ok := fields["modelId"]; ok {
-			return status.Error(codes.InvalidArgument, "fork seed message contains routing metadata")
+			return status.Error(codes.InvalidArgument, "thread context prefix message contains routing metadata")
 		}
 	}
 	return nil
@@ -1227,9 +1227,9 @@ func insertChildThreadCreatedEventTx(
 }
 
 func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, prefixJSON string, now time.Time) error {
-	var seed threadContextPrefixEnvelope
-	if err := json.Unmarshal([]byte(prefixJSON), &seed); err != nil {
-		return status.Error(codes.InvalidArgument, "fork seed is invalid")
+	var prefix threadContextPrefixEnvelope
+	if err := json.Unmarshal([]byte(prefixJSON), &prefix); err != nil {
+		return status.Error(codes.InvalidArgument, "thread context prefix is invalid")
 	}
 	var boundaryThreadID string
 	if err := tx.QueryRow(ctx,
@@ -1241,14 +1241,14 @@ func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		  FOR SHARE`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
-		seed.ParentBoundaryEventID,
+		prefix.ParentBoundaryEventID,
 	).Scan(&boundaryThreadID); err != nil {
 		return err
 	}
-	if boundaryThreadID != seed.SourceParentThreadID {
-		return status.Error(codes.FailedPrecondition, "fork seed parent boundary does not belong to the parent thread")
+	if boundaryThreadID != prefix.SourceParentThreadID {
+		return status.Error(codes.FailedPrecondition, "thread context prefix parent boundary does not belong to the parent thread")
 	}
-	entriesJSON, err := json.Marshal(seed.RuntimeMessages)
+	entriesJSON, err := json.Marshal(prefix.RuntimeMessages)
 	if err != nil {
 		return err
 	}
@@ -1260,8 +1260,8 @@ func insertThreadContextPrefixTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-		seed.SourceParentThreadID,
-		seed.ParentBoundaryEventID,
+		prefix.SourceParentThreadID,
+		prefix.ParentBoundaryEventID,
 		string(entriesJSON),
 		now,
 	); err != nil {
