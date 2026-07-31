@@ -15,25 +15,25 @@ documented here because this service is their primary owner:
 - `internal/sandbox/helper` — source of the static `sandbox` binary installed
   at `/usr/local/bin/sandbox` in the base template. It is the only executor of
   sandbox-backed tool semantics. It runs inside sandboxes, never inside a
-  service pod: Bridge invokes it for tool routes, and this service invokes its
-  `health` subcommand during preparation.
+  service pod. The Sandbox Service invokes it through the selected provider
+  adapter for queued tool execution and resource materialization.
 
 ## Responsibilities
 
-Consume four queue kinds — `environment_build`, `environment_ready_fanout`,
-`environment_failed_fanout`, `session_prepare` — plus a resource-prefix GC
-poll loop, and hold the sole authority over provider lifecycle: build
-deterministic Environment artifacts, create/wake/replace/release each session's
-sandbox from a pinned artifact, project the session's resources into it, and
-drive `sandboxes` through its lifecycle. Business truth lives in
-`environment_artifacts`, `session_preparations`, and `sandboxes` — never in the
-queue row. No other workload may start, stop, archive, delete, refresh, or
-replace a machine: the Bridge API container receives provider configuration
-solely to reach the in-sandbox helper for tool and output transport; Runtime
-Pod, api, auth, Queue, and Gateway receive no provider
-credentials at all. The provider API key is a deployment-owned control-plane
-credential and never enters public rows, queue payloads, runtime payloads,
-events, model-visible context, or logs.
+Consume Environment, Sandbox lifecycle, resource-materialization, and Sandbox
+tool-execution queue jobs, plus the resource-prefix GC poll loop. The service
+holds the sole authority over provider lifecycle: it builds deterministic
+Environment artifacts, creates/wakes/replaces/releases each Session's Sandbox
+from a pinned artifact, projects the Session's resources, and submits approved
+Sandbox tool commands. Business truth lives in `environment_artifacts`,
+`session_sandbox_bindings`, `sandbox_lifecycle_operations`,
+`session_runtime_tool_results`, and the resource stores — never in the Queue
+row. Queue jobs carry only stable references to that truth.
+
+The provider API key is a deployment-owned control-plane credential and never
+enters public rows, Queue payloads, Runtime payloads, events, model-visible
+context, or logs. Runtime Pod, API, Auth, Queue, and Gateway receive no Sandbox
+provider credentials.
 
 ## States & lifecycle
 
@@ -45,12 +45,50 @@ events, model-visible context, or logs.
 | `environment_ready_fanout` | build success | advance `waiting_environment` preparations to `pending`, enqueue their `session_prepare` |
 | `environment_failed_fanout` | terminal build failure | settle per-session inputs gated on the build so none is left silently blocked |
 | `session_prepare` | session admitted / cold return | run the two preparation stages below |
+| `sandbox_tool_execute` | an approved Sandbox Tool Use has a durable execution row | converge the Session binding and materialization receipt, then submit the helper command once and store its normalized result |
+| `sandbox_activate` | an execution or materialization observes a missing, stopped, or archived provider resource | resolve/adopt by stable name and labels, create/start/replace as required, then wake durable waiters |
+| `sandbox_materialize` | the binding's Environment generation, resource revision, credential, or helper receipt is not current | project resources against the current provider handle and persist one complete materialization receipt |
 | resource-prefix GC poll | timer | reclaim orphaned resource prefixes |
 
 An Environment's `networking` is runtime policy and never triggers a build.
 Snapshot creation is never called while holding a database transaction.
 Artifact reuse is bounded to the same environment lineage with an earlier
 `ready` generation and the same input hash.
+
+### Durable Sandbox tool execution
+
+An approved Tool Use owns one full-scope execution row keyed by workspace,
+Session, thread, and Tool Use event. The row, not its Queue notification, is
+the authority for execution state and result custody.
+
+```text
+pending
+  -> waiting_activation -> pending
+  -> waiting_materialization -> pending
+  -> preparing -> running -> terminal_unconsumed -> consumed
+```
+
+`preparing` covers provider-neutral payload staging under a persisted deadline;
+the user command has not started. The `preparing -> running` transaction
+rechecks the current binding, release/cancellation fences, exact materialized
+resource revision, credential lifetime, helper verification, and the database
+clock. Only after that transaction commits may the adapter make the one
+user-facing helper call. A lost worker that finds `running` never submits the
+command again; without a durable provider result it records
+`unknown_outcome`.
+
+Activation and materialization never hold an execution Queue lease while they
+wait. They attach the execution to a durable lifecycle operation and ACK the
+execution job. Lifecycle completion issues a new refs-only execution job for
+the same Tool Use and increments the business attempt generation. Queue
+transport attempts and business execution generations are separate counters.
+
+Every Sandbox job has an explicit positive attempt budget. The last permitted
+attempt still runs. A worker receiving a lease beyond that budget finalizes the
+business row before dead-lettering the Queue row. A separate bounded
+maintenance pass closes jobs whose final worker died: it writes the same
+state-specific business outcome and conditionally dead-letters the still-pending
+Queue row in one transaction, without calling a provider.
 
 ### `session_prepare` — two ordered stages
 
@@ -159,19 +197,18 @@ finds the socket dead re-checks `exit.json` before concluding `task_lost`.
 ### Seam: sandbox driver (`internal/sandbox/driver`)
 
 The provider-specific boundary. Confining Daytona to one package is what keeps
-every layer above the driver free of provider names, and it is where the
-credential-isolation invariants are enforced. Confinement is not a single
-drop-in point, though: only the `LifecycleProvider` is selected through a driver
-switch. Every other provider-backed role is constructed as Daytona directly at a
-process entrypoint — there is no factory or registry — so swapping providers
-means editing each of these construction sites, not one.
+every layer above the driver free of Daytona SDK types, and it is where the
+credential-isolation invariants are enforced. Sandbox execution and lifecycle
+resolve a provider-neutral `ProviderAdapter` from the service registry. The
+alpha registry is deliberately closed to one installed provider, Daytona;
+adding another provider means implementing the complete adapter contract and
+registering it at startup.
 
 | Provider-backed role | Constructed at | How it is selected |
 | --- | --- | --- |
-| `sandbox.LifecycleProvider` | `services/sandbox/wiring.go` (`NewSandboxLifecycleProvider`) | driver switch on `cfg.SandboxDriver`; today only `daytona` is accepted |
+| `ProviderAdapter` | `services/sandbox/wiring.go` (`NewDaytonaAdapter`) | registered under the configured provider; today only `daytona` is accepted |
 | `sandbox.ArtifactBuilder` | `services/sandbox/cmd/tetral-sandbox/main.go` (`NewDaytonaArtifactBuilder`) | constructed as Daytona directly |
 | memory materializer / memory-projection refresher / preparation-command runner / preparation file stager (one `DaytonaHelperExecutor`) | `services/sandbox/cmd/tetral-sandbox/main.go` (`NewDaytonaHelperExecutor`) | constructed as Daytona directly |
-| Bridge tool executor / output capturer (`DaytonaHelperExecutor`) | `services/bridge/cmd/bridge-api/main.go` (`NewDaytonaHelperExecutor`) | constructed as Daytona directly |
 
 A replacement provider must cover all of these construction sites, not only
 the `cfg.SandboxDriver` switch.
@@ -181,13 +218,14 @@ driver implements; nothing above the driver names Daytona.
 
 | Interface | Location | Implemented by | Purpose |
 | --- | --- | --- | --- |
+| `ProviderAdapter` | `services/sandbox/provider_adapter.go` | `DaytonaAdapter` | inspect/resolve/activate/materialize/prepare/execute/release with normalized effect boundaries and dispositions |
 | `sandbox.LifecycleProvider` | `internal/sandbox/sandbox.go` | `driver.DaytonaLifecycleProvider` | `CreateSandbox`, `StartSandbox`, `CheckBaseTemplateHealth`, `ApplyNetworkPolicy`, `PrepareBaseDirectories`, `GetStatus`, `ReleaseSandbox` |
 | `sandbox.ArtifactBuilder` | `internal/sandbox/sandbox.go` | driver artifact builder (`artifact_builder.go`) | `BuildArtifact(normalized packages) -> provider_artifact_ref` |
 | `driver.ToolExecutor` | `internal/sandbox/driver/types.go` | `driver.DaytonaHelperExecutor` | `CheckHealth`, `RunTool`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand` |
 | `driver.OutputCapturer` | `driver/types.go` | `DaytonaHelperExecutor` | `CaptureOutputs` (Bridge-driven idle output capture) |
 | `driver.MemoryProjectionRefresher`, `PreparationCommandRunner`, `PreparationFileStager` | `driver/types.go` | `DaytonaHelperExecutor` | preparation-time transport |
 
-Callers pass and receive only Tetral identifiers and normalized results
+Callers above the adapter pass and receive only Tetral identifiers and normalized results
 (`ToolTarget`, `ToolInvocation`, `ToolExecution`, `CommandReference`,
 `CommandResult`, `ProviderHandle`, `sandbox.Status`). Provider command IDs,
 process-session IDs, and sandbox IDs stay behind this boundary.
@@ -613,6 +651,9 @@ directory-remove is a no-op).
 | `internal/sandbox/memory_projection_test.go` | memory projection builds a verified snapshot per store, removes deleted stores under the mutation lock, retries removal failure before detach, and rejects a prefix-conflicting snapshot |
 | `internal/sandbox/helper/contract_static_test.go`, `supervisor_privilege_integration_test.go` | the helper contract and privilege model: package layout, static build artifact, no service/provider imports, detached-task authorization surviving privilege drop, hidden entrypoints rejecting forged capabilities, non-root identity constants |
 | `services/sandbox/environment_artifact_store_test.go`, `environment_runner_test.go` | environment build and fan-out: ready enqueues fan-out and advances same-input followers, terminal failure fails waiting preparations, lease loss cancels the build without a durable outcome |
+| `services/sandbox/provider_adapter_test.go`, `tool_execution_runner_test.go` | provider outcome normalization, stable activation adoption, pre-submission preparation, one authorized helper submission, and no replay after an unknown outcome |
+| `services/sandbox/execution_store_test.go`, `lifecycle_store_test.go`, `lifecycle_runner_test.go` | binding convergence, exact materialization receipts, database-clock authorization fences, activation/materialization waiter handoff, and lifecycle exhaustion fan-out |
+| `services/sandbox/queue_over_limit_reconciler_test.go` | bounded over-budget discovery and atomic business-result plus Queue dead-letter settlement after worker loss |
 | `services/sandbox/session_prepare_runner_test.go` | the prepare runner's durable transitions, retry without ack, failure before retry-exhaustion dead-letter, and dead-lettering invalid payloads before the handler |
 | `services/sandbox/release_handler_test.go`, `server_test.go` | release idempotency on key and fence, runtime-pod-lost using the binding fence without a cleanup claim, unclaimed cleanup jobs rejected, and the gRPC surface's reason/identity/status mapping |
 | `services/sandbox/resource_prefix_gc_runner_test.go` | the prefix GC runner: due unbound prefixes deleted and marked, bound/active markers skipped, retryable failure keeping the marker due later, workspace ID required |
@@ -622,22 +663,26 @@ directory-remove is a no-op).
 
 Run every suite that opens PostgreSQL with the race detector on. The live
 resource-projection suite needs a real sandbox provider and is opt-in. If a PR
-changes the preparation stages, the release/terminal-status mapping, the
-reconcilers, the driver surface, the helper contract, or either projection
-layout, it updates the matching row here.
+changes Sandbox execution states, binding or materialization receipts, the
+release/terminal-status mapping, the reconcilers, the provider-adapter surface,
+the helper contract, or either projection layout, it updates the matching row
+here.
 
 ## Boundaries
 
-This service never delivers runtime input, never talks to Runtime Pod, and
-never writes events or messages; Bridge gates runtime delivery on preparation
-readiness and reads the `sandboxes` row without mutating machine lifecycle.
+This service never delivers Runtime input, never talks to Runtime Pod, and
+never writes conversation events or messages. It stores a normalized terminal
+Sandbox result for a durable Tool Use; Runtime authors the corresponding Tool
+Result and Bridge commits that conversation write before marking the stored
+result consumed.
 Lifecycle timing (stop timeouts, auto-stop/auto-archive/auto-delete intervals)
 and the lease/command safety inequality are typed configuration of this service
 alone, validated at startup as whole seconds; the auto intervals are
 required-positive because they are the sole re-sleep mechanism for a machine
-woken without a runtime binding. If a PR changes the job kinds, the two
-preparation stages, the wake-vs-replace decision, the release/terminal-status
-mapping, the reconcilers, the driver interface surface, the helper
+woken without a runtime binding. If a PR changes the job kinds, Sandbox
+execution states, binding or materialization receipts, the wake-vs-replace
+decision, the release/terminal-status mapping, the reconcilers, the
+provider-adapter surface, the helper
 payload/envelope contract, the file-resource projection object layout /
 credential scope / five checks, or the memory projection layout / transport, it
 updates the matching section here.

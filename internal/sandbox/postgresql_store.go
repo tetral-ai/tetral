@@ -408,13 +408,42 @@ func (s *PostgreSQLSandboxStore) SettleDeletedSessionPreparationAfterCreate(
 }
 
 func (s *PostgreSQLSandboxStore) ListSessionPreparationResources(ctx context.Context, ws workspace.ID, sessionID string) (ResourceSetup, error) {
+	return s.listSessionResources(ctx, ws, sessionID, true)
+}
+
+// ListSessionResources returns the current durable resource declarations
+// without mutating any preparation-era receipt. Lifecycle materialization uses
+// this read after it has claimed an immutable target resource revision.
+func (s *PostgreSQLSandboxStore) ListSessionResources(ctx context.Context, ws workspace.ID, sessionID string) (ResourceSetup, error) {
+	return s.listSessionResources(ctx, ws, sessionID, false)
+}
+
+func (s *PostgreSQLSandboxStore) listSessionResources(ctx context.Context, ws workspace.ID, sessionID string, persistPreparationIndex bool) (ResourceSetup, error) {
 	if s == nil || s.client == nil {
 		return ResourceSetup{}, &ValidationError{Message: "session preparation store is required"}
 	}
 	var setup ResourceSetup
 	err := s.client.WithWorkspaceTx(ctx, string(ws), "sandbox.list_session_preparation_resources", func(tx *dbconnect.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT sr.resource_id, sr.type, sr.detached_at, sr.delete_requested_at,
+		var err error
+		setup, err = listSessionResourcesTx(ctx, tx, ws, sessionID, persistPreparationIndex)
+		return err
+	})
+	return setup, err
+}
+
+// ListSessionResourcesTx resolves the exact resource declarations while its
+// caller holds the Session and target-revision transaction fences.
+func (s *PostgreSQLSandboxStore) ListSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string) (ResourceSetup, error) {
+	if s == nil || s.client == nil || tx == nil {
+		return ResourceSetup{}, &ValidationError{Message: "session resource transaction is required"}
+	}
+	return listSessionResourcesTx(ctx, tx, ws, sessionID, false)
+}
+
+func listSessionResourcesTx(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, persistPreparationIndex bool) (ResourceSetup, error) {
+	var setup ResourceSetup
+	rows, err := tx.Query(ctx,
+		`SELECT sr.resource_id, sr.type, sr.detached_at, sr.delete_requested_at,
 			        sfr.source_file_id, source_file.object_id, sfr.file_id, sfr.mount_path,
 			        smr.memory_store_id, smr.access, smr.instructions, smr.name, smr.description, smr.mount_path,
 			        sgr.url, sgr.mount_path, sgr.checkout_type, sgr.checkout_ref
@@ -437,108 +466,108 @@ func (s *PostgreSQLSandboxStore) ListSessionPreparationResources(ctx context.Con
 			  WHERE sr.workspace_id = $1
 			    AND sr.session_id = $2
 			  ORDER BY sr.storage_sequence ASC`,
-			string(ws), sessionID,
+		string(ws), sessionID,
+	)
+	if err != nil {
+		return ResourceSetup{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			resourceID         string
+			resourceType       string
+			detachedAt         sql.NullTime
+			deleteRequestedAt  sql.NullTime
+			sourceFileID       sql.NullString
+			objectID           sql.NullString
+			sessionFileID      sql.NullString
+			fileMountPath      sql.NullString
+			memoryStoreID      sql.NullString
+			memoryAccess       sql.NullString
+			memoryInstructions sql.NullString
+			memoryName         sql.NullString
+			memoryDescription  sql.NullString
+			memoryMountPath    sql.NullString
+			githubURL          sql.NullString
+			githubMountPath    sql.NullString
+			checkoutType       sql.NullString
+			checkoutRef        sql.NullString
 		)
-		if err != nil {
-			return err
+		if err := rows.Scan(
+			&resourceID, &resourceType, &detachedAt, &deleteRequestedAt,
+			&sourceFileID, &objectID, &sessionFileID, &fileMountPath,
+			&memoryStoreID, &memoryAccess, &memoryInstructions, &memoryName, &memoryDescription, &memoryMountPath,
+			&githubURL, &githubMountPath, &checkoutType, &checkoutRef,
+		); err != nil {
+			return ResourceSetup{}, err
 		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var (
-				resourceID         string
-				resourceType       string
-				detachedAt         sql.NullTime
-				deleteRequestedAt  sql.NullTime
-				sourceFileID       sql.NullString
-				objectID           sql.NullString
-				sessionFileID      sql.NullString
-				fileMountPath      sql.NullString
-				memoryStoreID      sql.NullString
-				memoryAccess       sql.NullString
-				memoryInstructions sql.NullString
-				memoryName         sql.NullString
-				memoryDescription  sql.NullString
-				memoryMountPath    sql.NullString
-				githubURL          sql.NullString
-				githubMountPath    sql.NullString
-				checkoutType       sql.NullString
-				checkoutRef        sql.NullString
-			)
-			if err := rows.Scan(
-				&resourceID, &resourceType, &detachedAt, &deleteRequestedAt,
-				&sourceFileID, &objectID, &sessionFileID, &fileMountPath,
-				&memoryStoreID, &memoryAccess, &memoryInstructions, &memoryName, &memoryDescription, &memoryMountPath,
-				&githubURL, &githubMountPath, &checkoutType, &checkoutRef,
-			); err != nil {
-				return err
+		switch resourceType {
+		case "file":
+			mount := FileMount{
+				ResourceID:    resourceID,
+				SourceFileID:  nullableStringValue(sourceFileID),
+				SessionFileID: nullableStringValue(sessionFileID),
+				ObjectID:      nullableStringValue(objectID),
+				MountPath:     nullableStringValue(fileMountPath),
+				ReadOnly:      true,
 			}
-			switch resourceType {
-			case "file":
-				mount := FileMount{
-					ResourceID:    resourceID,
-					SourceFileID:  nullableStringValue(sourceFileID),
-					SessionFileID: nullableStringValue(sessionFileID),
-					ObjectID:      nullableStringValue(objectID),
-					MountPath:     nullableStringValue(fileMountPath),
-					ReadOnly:      true,
-				}
-				if deleteRequestedAt.Valid && !detachedAt.Valid {
-					setup.DeletedFiles = append(setup.DeletedFiles, mount)
-				} else if detachedAt.Valid {
-					continue
-				} else {
-					setup.Files = append(setup.Files, mount)
-				}
-			case "memory_store":
-				mount := MemoryStoreMount{
-					ResourceID:    resourceID,
-					MemoryStoreID: nullableStringValue(memoryStoreID),
-					MountPath:     nullableStringValue(memoryMountPath),
-					Access:        nullableStringValue(memoryAccess),
-					Instructions:  nullableStringValue(memoryInstructions),
-					Name:          nullableStringValue(memoryName),
-					Description:   nullableStringValue(memoryDescription),
-				}
-				if deleteRequestedAt.Valid && !detachedAt.Valid {
-					setup.DeletedMemoryStores = append(setup.DeletedMemoryStores, mount)
-				} else if detachedAt.Valid {
-					continue
-				} else {
-					setup.MemoryStores = append(setup.MemoryStores, mount)
-				}
-			case "github_repository":
-				mount := GitHubRepositoryMount{
-					ResourceID:   resourceID,
-					URL:          nullableStringValue(githubURL),
-					MountPath:    nullableStringValue(githubMountPath),
-					CheckoutType: nullableStringValue(checkoutType),
-					CheckoutRef:  nullableStringValue(checkoutRef),
-				}
-				if deleteRequestedAt.Valid && !detachedAt.Valid {
-					setup.DeletedGitHubRepositories = append(setup.DeletedGitHubRepositories, mount)
-				} else if detachedAt.Valid {
-					continue
-				} else {
-					setup.GitHubRepositories = append(setup.GitHubRepositories, mount)
-				}
-			default:
-				return &ValidationError{Message: "session resource type is invalid"}
+			if deleteRequestedAt.Valid && !detachedAt.Valid {
+				setup.DeletedFiles = append(setup.DeletedFiles, mount)
+			} else if detachedAt.Valid {
+				continue
+			} else {
+				setup.Files = append(setup.Files, mount)
 			}
+		case "memory_store":
+			mount := MemoryStoreMount{
+				ResourceID:    resourceID,
+				MemoryStoreID: nullableStringValue(memoryStoreID),
+				MountPath:     nullableStringValue(memoryMountPath),
+				Access:        nullableStringValue(memoryAccess),
+				Instructions:  nullableStringValue(memoryInstructions),
+				Name:          nullableStringValue(memoryName),
+				Description:   nullableStringValue(memoryDescription),
+			}
+			if deleteRequestedAt.Valid && !detachedAt.Valid {
+				setup.DeletedMemoryStores = append(setup.DeletedMemoryStores, mount)
+			} else if detachedAt.Valid {
+				continue
+			} else {
+				setup.MemoryStores = append(setup.MemoryStores, mount)
+			}
+		case "github_repository":
+			mount := GitHubRepositoryMount{
+				ResourceID:   resourceID,
+				URL:          nullableStringValue(githubURL),
+				MountPath:    nullableStringValue(githubMountPath),
+				CheckoutType: nullableStringValue(checkoutType),
+				CheckoutRef:  nullableStringValue(checkoutRef),
+			}
+			if deleteRequestedAt.Valid && !detachedAt.Valid {
+				setup.DeletedGitHubRepositories = append(setup.DeletedGitHubRepositories, mount)
+			} else if detachedAt.Valid {
+				continue
+			} else {
+				setup.GitHubRepositories = append(setup.GitHubRepositories, mount)
+			}
+		default:
+			return ResourceSetup{}, &ValidationError{Message: "session resource type is invalid"}
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		skills, err := listSessionPreparationSkills(ctx, tx, ws, sessionID)
-		if err != nil {
-			return err
-		}
+	}
+	if err := rows.Err(); err != nil {
+		return ResourceSetup{}, err
+	}
+	skills, err := listSessionPreparationSkills(ctx, tx, ws, sessionID)
+	if err != nil {
+		return ResourceSetup{}, err
+	}
+	if persistPreparationIndex {
 		if err := persistSessionPreparationSkillsIndex(ctx, tx, ws, sessionID, skills); err != nil {
-			return err
+			return ResourceSetup{}, err
 		}
-		setup.Skills = skills
-		return nil
-	})
-	return setup, err
+	}
+	setup.Skills = skills
+	return setup, nil
 }
 
 type sessionPreparationSkillRef struct {

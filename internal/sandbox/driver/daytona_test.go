@@ -121,6 +121,75 @@ func TestDaytonaHelperDoesNotReplayThePayloadConsumingCommand(t *testing.T) {
 	}
 }
 
+func TestDaytonaHelperPreparationDoesNotInvokeUserTool(t *testing.T) {
+	client := newRecordingMemoryProjectionClient()
+	client.process.results = []string{
+		"",
+		`{"schema_version":1,"tool":"read","status":"success","truncated":false,"error":null,"result":{"content":"ok"}}`,
+	}
+	executor := NewDaytonaHelperExecutorForClient(client)
+	prepared, err := executor.PrepareTool(context.Background(), ToolInvocation{
+		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
+		ToolUseEventID: "evt_prepare_boundary",
+		ToolName:       "Read",
+		InputJSON:      `{"file_path":"/workspace/file.txt"}`,
+	})
+	if err != nil {
+		t.Fatalf("PrepareTool: %v", err)
+	}
+	if len(client.process.commands) != 1 || strings.Contains(client.process.commands[0], "--payload") {
+		t.Fatalf("preparation commands = %v; want only permission freeze", client.process.commands)
+	}
+	if _, err := executor.ExecutePreparedTool(context.Background(), prepared); err != nil {
+		t.Fatalf("ExecutePreparedTool: %v", err)
+	}
+	if len(client.process.commands) != 2 || !strings.Contains(client.process.commands[1], "--payload") {
+		t.Fatalf("commands after execution = %v; want one user-facing helper invocation", client.process.commands)
+	}
+}
+
+func TestDaytonaPreparedToolDoesNotReinspectProviderBeforeSubmission(t *testing.T) {
+	client := newRecordingMemoryProjectionClient()
+	client.process.results = []string{
+		"",
+		`{"schema_version":1,"tool":"read","status":"success","truncated":false,"error":null,"result":{"content":"ok"}}`,
+	}
+	executor := NewDaytonaHelperExecutorForClient(client)
+	prepared, err := executor.PrepareTool(context.Background(), ToolInvocation{
+		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
+		ToolUseEventID: "evt_submission_boundary",
+		ToolName:       "Read",
+		InputJSON:      `{"file_path":"/workspace/file.txt"}`,
+	})
+	if err != nil {
+		t.Fatalf("PrepareTool: %v", err)
+	}
+	client.err = errors.New("provider inspection unavailable after authorization")
+	if _, err := executor.ExecutePreparedTool(context.Background(), prepared); err != nil {
+		t.Fatalf("ExecutePreparedTool performed a second provider inspection: %v", err)
+	}
+	if len(client.process.commands) != 2 || !strings.Contains(client.process.commands[1], "--payload") {
+		t.Fatalf("commands after execution = %v; want exactly one prepared user command", client.process.commands)
+	}
+}
+
+func TestDaytonaToolPreparationPreservesTransientPreSubmissionFailure(t *testing.T) {
+	client := newRecordingMemoryProjectionClient()
+	client.err = daytonaerrors.NewDaytonaRateLimitError("busy", nil)
+	executor := NewDaytonaHelperExecutorForClient(client)
+	_, err := executor.PrepareTool(context.Background(), ToolInvocation{
+		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
+		ToolUseEventID: "evt_transient_pre_submission",
+		ToolName:       "Read",
+		InputJSON:      `{"file_path":"/workspace/file.txt"}`,
+	})
+	var providerErr *sandbox.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Stage != sandbox.StageExecuteTool ||
+		providerErr.Kind != sandbox.ProviderErrorUnavailable || !providerErr.Retryable {
+		t.Fatalf("PrepareTool error = %T %v; want retryable pre-submission provider failure", err, err)
+	}
+}
+
 func TestStripProviderMetadataFromResultRemovesGenericProviderMetadata(t *testing.T) {
 	result := stripProviderMetadataFromResult(`{"status":"completed","provider_metadata":{"raw":"secret"},"nested":{"provider_metadata_json":"{\"raw\":\"secret\"}","items":[{"provider_command_id":"cmd_1","text":"ok"}]}}`)
 	for _, forbidden := range []string{"provider_metadata", "provider_metadata_json", "provider_command_id", "secret", "cmd_1"} {
@@ -995,8 +1064,14 @@ func TestDaytonaHelperExecutorFailsBeforeHelperWhenPayloadPermissionCommandFails
 		ToolName:       "Read",
 		InputJSON:      `{"file_path":"/workspace/file.txt"}`,
 	})
-	if err == nil || !strings.Contains(err.Error(), "payload permission command exited with code 7") {
-		t.Fatalf("RunTool err = %v; want payload permission failure", err)
+	var providerErr *sandbox.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("RunTool err = %T %v; want ProviderError", err, err)
+	}
+	if providerErr.Provider != DaytonaProviderName || providerErr.Stage != sandbox.StageExecuteTool ||
+		providerErr.Kind != sandbox.ProviderErrorUnknown || !providerErr.Retryable ||
+		providerErr.SafeMessage != "sandbox helper payload permission command failed" {
+		t.Fatalf("RunTool provider error = %+v; want safe retryable execute-tool failure", providerErr)
 	}
 	if len(client.process.commands) != 1 {
 		t.Fatalf("sandbox commands = %v; want permission command only", client.process.commands)
@@ -1203,6 +1278,64 @@ func TestDaytonaCreateSandboxLowersBoundedLifecycleIntervals(t *testing.T) {
 	}
 }
 
+func TestDaytonaResolveSandboxRequiresExactStableIdentity(t *testing.T) {
+	labels := map[string]string{
+		"tetral.workspace_id":           "ws_resolve",
+		"tetral.session_id":             "sesn_resolve",
+		"tetral.sandbox_id":             "sbox_resolve",
+		"tetral.lifecycle_operation_id": "sop_resolve",
+		"tetral.lifecycle_owner":        "sandbox",
+	}
+	tests := []struct {
+		name      string
+		got       *daytona.Sandbox
+		wantFound bool
+		wantError bool
+	}{
+		{
+			name: "exact ownership",
+			got: &daytona.Sandbox{
+				ID: "provider_resolve", Name: "sbox_resolve", Labels: labels,
+			},
+			wantFound: true,
+		},
+		{
+			name: "wrong stable name",
+			got: &daytona.Sandbox{
+				ID: "provider_resolve", Name: "different", Labels: labels,
+			},
+			wantError: true,
+		},
+		{
+			name: "extra ownership label",
+			got: &daytona.Sandbox{
+				ID: "provider_resolve", Name: "sbox_resolve",
+				Labels: map[string]string{
+					"tetral.workspace_id":           "ws_resolve",
+					"tetral.session_id":             "sesn_resolve",
+					"tetral.sandbox_id":             "sbox_resolve",
+					"tetral.lifecycle_operation_id": "sop_resolve",
+					"tetral.lifecycle_owner":        "sandbox",
+					"unexpected":                    "label",
+				},
+			},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := NewDaytonaLifecycleProviderForClient(&recordingDaytonaLifecycleClient{getResult: test.got}, 45*time.Second)
+			handle, found, err := provider.ResolveSandbox(context.Background(), "sbox_resolve", labels)
+			if (err != nil) != test.wantError || found != test.wantFound {
+				t.Fatalf("ResolveSandbox = (%+v, %t, %v); want found=%t error=%t", handle, found, err, test.wantFound, test.wantError)
+			}
+			if found && handle.SandboxID != "provider_resolve" {
+				t.Fatalf("resolved handle = %+v", handle)
+			}
+		})
+	}
+}
+
 func TestDaytonaLifecycleIntervalBoundsMaximumDuration(t *testing.T) {
 	got, err := daytonaIntervalMinutes(time.Duration(1<<63-1), "auto-delete")
 	if err != nil {
@@ -1210,6 +1343,19 @@ func TestDaytonaLifecycleIntervalBoundsMaximumDuration(t *testing.T) {
 	}
 	if got == nil || *got <= 0 || int64(*got) > 2147483647 {
 		t.Fatalf("daytonaIntervalMinutes = %v; want positive int32-bounded minutes", got)
+	}
+}
+
+func TestDaytonaGetStatusRejectsMissingProviderResponse(t *testing.T) {
+	client := &recordingDaytonaLifecycleClient{returnNilGet: true}
+	provider := NewDaytonaLifecycleProviderForClient(client, 45*time.Second)
+	_, err := provider.GetStatus(context.Background(), sandbox.ProviderHandle{
+		Provider:  DaytonaProviderName,
+		SandboxID: "provider_missing_response",
+	})
+	var providerErr *sandbox.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Kind != sandbox.ProviderErrorMalformedResponse || providerErr.Retryable {
+		t.Fatalf("GetStatus error = %T %v; want non-retryable malformed response", err, err)
 	}
 }
 
@@ -1308,6 +1454,8 @@ func TestDaytonaCreateSandboxRejectsMalformedNetworkPolicy(t *testing.T) {
 
 type recordingDaytonaLifecycleClient struct {
 	createParams any
+	getResult    *daytona.Sandbox
+	returnNilGet bool
 }
 
 func (c *recordingDaytonaLifecycleClient) Create(_ context.Context, params any, _ ...func(*options.CreateSandbox)) (*daytona.Sandbox, error) {
@@ -1316,6 +1464,12 @@ func (c *recordingDaytonaLifecycleClient) Create(_ context.Context, params any, 
 }
 
 func (c *recordingDaytonaLifecycleClient) Get(context.Context, string) (*daytona.Sandbox, error) {
+	if c.returnNilGet {
+		return nil, nil
+	}
+	if c.getResult != nil {
+		return c.getResult, nil
+	}
 	return &daytona.Sandbox{ID: "provider_sandbox_test"}, nil
 }
 

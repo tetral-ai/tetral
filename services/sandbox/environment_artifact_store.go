@@ -271,6 +271,9 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildTerminalFailure(ctx conte
 		if len(generations) == 0 {
 			return nil
 		}
+		if err := failWaitingArtifactActivationsTx(ctx, tx, job.WorkspaceID, job.EnvironmentID, generations, failure, timestamp); err != nil {
+			return err
+		}
 		rows, err = tx.Query(ctx,
 			`UPDATE session_preparations
 			    SET status = 'failed',
@@ -399,10 +402,147 @@ func (s *EnvironmentArtifactStore) FanoutReadyEnvironment(ctx context.Context, j
 		if _, err := queue.EnqueueBatchTx(ctx, tx, requests); err != nil {
 			return err
 		}
-		advanced = len(requests)
+		activationCount, err := requeueWaitingArtifactActivationsTx(ctx, tx, job, now.UTC())
+		if err != nil {
+			return err
+		}
+		advanced = len(requests) + activationCount
 		return nil
 	})
 	return advanced, err
+}
+
+func requeueWaitingArtifactActivationsTx(ctx context.Context, tx *dbconnect.Tx, job EnvironmentReadyFanoutJob, now time.Time) (int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT o.operation_id, o.session_id, o.logical_sandbox_id
+		   FROM sandbox_lifecycle_operations o
+		   JOIN sessions s
+		     ON s.workspace_id = o.workspace_id AND s.id = o.session_id
+		  WHERE o.workspace_id = $1
+		    AND s.environment_id = $2
+		    AND o.target_environment_generation = $3
+		    AND o.kind IN ('create', 'replace')
+		    AND o.state = 'waiting_artifact'
+		  ORDER BY o.operation_id
+		  FOR UPDATE OF o`,
+		job.WorkspaceID, job.EnvironmentID, job.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	type activationRef struct {
+		operationID      string
+		sessionID        string
+		logicalSandboxID string
+	}
+	var activations []activationRef
+	for rows.Next() {
+		var ref activationRef
+		if err := rows.Scan(&ref.operationID, &ref.sessionID, &ref.logicalSandboxID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		activations = append(activations, ref)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, ref := range activations {
+		queueJobID := queue.NewJobID()
+		partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(job.WorkspaceID), ref.logicalSandboxID)
+		dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxActivate, workspace.ID(job.WorkspaceID), ref.logicalSandboxID, ref.operationID)
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state = 'pending', queue_job_id = $3, queue_kind = $4,
+			        queue_partition_key = $5, queue_dedupe_key = $6, updated_at = $7
+			  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'waiting_artifact'`,
+			job.WorkspaceID, ref.operationID, queueJobID, queue.KindSandboxActivate,
+			partitionKey, dedupeKey, now,
+		); err != nil {
+			return 0, err
+		}
+		payload, err := sandboxLifecycleQueuePayload(SandboxExecutionRef{
+			WorkspaceID: job.WorkspaceID, SessionID: ref.sessionID,
+		}, ref.logicalSandboxID, ref.operationID)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+			ID: queueJobID, WorkspaceID: workspace.ID(job.WorkspaceID), Kind: queue.KindSandboxActivate,
+			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+			PayloadJSON: payload, MaxAttempts: sandboxActivationMaxAttempts, Now: now,
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return len(activations), nil
+}
+
+func failWaitingArtifactActivationsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, environmentID string, generations []int64, failure EnvironmentArtifactFailure, now time.Time) error {
+	rows, err := tx.Query(ctx,
+		`SELECT o.operation_id
+		   FROM sandbox_lifecycle_operations o
+		   JOIN sessions s
+		     ON s.workspace_id = o.workspace_id AND s.id = o.session_id
+		  WHERE o.workspace_id = $1
+		    AND s.environment_id = $2
+		    AND o.target_environment_generation = ANY($3)
+		    AND o.kind IN ('create', 'replace')
+		    AND o.state = 'waiting_artifact'
+		  ORDER BY o.operation_id
+		  FOR UPDATE OF o`,
+		workspaceID, environmentID, generations,
+	)
+	if err != nil {
+		return err
+	}
+	var operationIDs []string
+	for rows.Next() {
+		var operationID string
+		if err := rows.Scan(&operationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		operationIDs = append(operationIDs, operationID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	kind := failure.LastErrorKind
+	if kind == "" {
+		kind = "environment_artifact_failed"
+	}
+	const message = "sandbox environment artifact is unavailable"
+	for _, operationID := range operationIDs {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state = 'failed', error_kind = $3, safe_message = $4,
+			        completed_at = $5, updated_at = $5
+			  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'waiting_artifact'`,
+			workspaceID, operationID, kind, message, now,
+		); err != nil {
+			return err
+		}
+		waiters, err := lockExecutionWaiters(ctx, tx, workspaceID, operationID, "waiting_activation_operation_id")
+		if err != nil {
+			return err
+		}
+		if err := settleExecutionWaitersTx(ctx, tx, waiters, kind, message, now); err != nil {
+			return err
+		}
+		if err := failActivationMaterializationDependentsTx(ctx, tx, workspaceID, operationID, kind, message, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // FanoutFailedEnvironment settles the gated inputs of every session whose

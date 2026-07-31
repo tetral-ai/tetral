@@ -33,7 +33,7 @@ type Transaction interface {
 	LockSessionForDelete(ctx context.Context, sessionID string) (*Session, error)
 	ListSessions(ctx context.Context, options ListOptions) ([]*Session, bool, error)
 	RequireSessionUsableForMutation(ctx context.Context, sessionID string) error
-	PrepareSessionResourceMutation(ctx context.Context, sessionID string, now time.Time) error
+	RecordSessionResourceMutation(ctx context.Context, sessionID string, now time.Time) error
 	UpdateSession(ctx context.Context, sessionID string, update UpdateSession) (*Session, error)
 	GetProviderCredentialForAdmission(ctx context.Context, credentialID string, boundVaultIDs []string) (*ProviderCredentialForAdmission, error)
 	UpsertSessionProviderAuth(ctx context.Context, selector SessionProviderAuthAdmission) error

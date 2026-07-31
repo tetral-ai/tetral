@@ -29,6 +29,41 @@ func NewSandboxLifecycleProvider(cfg Config) (sandbox.LifecycleProvider, error) 
 	}
 }
 
+func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client) (*DaytonaAdapter, error) {
+	if client == nil {
+		return nil, &ConfigError{Message: "sandbox database client is required"}
+	}
+	lifecycle, err := driver.NewDaytonaLifecycleProvider(cfg.Daytona)
+	if err != nil {
+		return nil, err
+	}
+	helper, err := driver.NewDaytonaHelperExecutor(cfg.Daytona)
+	if err != nil {
+		return nil, err
+	}
+	projection, err := NewResourceProjectionPreparerFromConfig(ctx, cfg, helper)
+	if err != nil {
+		return nil, err
+	}
+	store := sandbox.NewPostgreSQLStore(client)
+	resources := &DaytonaResourceMaterializer{
+		Projection: projection,
+		Memory: &DaytonaMemoryMaterializer{
+			Reader: store, Locker: store, Materializer: helper,
+		},
+		GitHub: &sandbox.GitHubRepositoryConverger{
+			Rotator: gitticket.NewPostgreSQLStore(client), Materializer: helper,
+			GitProxyHost: cfg.GitProxyHost,
+		},
+	}
+	return &DaytonaAdapter{
+		Lifecycle: lifecycle,
+		Resolver:  lifecycle,
+		Tools:     helper,
+		Resources: resources,
+	}, nil
+}
+
 func SandboxServiceOptions(cfg Config) []sandbox.Option {
 	return []sandbox.Option{
 		sandbox.WithProviderName(internalSandboxProviderName),

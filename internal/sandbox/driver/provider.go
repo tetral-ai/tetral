@@ -126,6 +126,42 @@ func (p *DaytonaLifecycleProvider) CreateSandbox(ctx context.Context, request sa
 	}, nil
 }
 
+// ResolveSandbox returns the exact provider resource for a stable Tetral name
+// only when every ownership label matches. It is the crash-recovery probe that
+// prevents an uncertain Create response from authorizing another Create.
+func (p *DaytonaLifecycleProvider) ResolveSandbox(ctx context.Context, name string, labels map[string]string) (sandbox.ProviderHandle, bool, error) {
+	if p == nil || p.client == nil {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
+	}
+	if name == "" || len(labels) == 0 {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox resolution identity is required", nil)
+	}
+	got, err := p.client.Get(ctx, name)
+	if err != nil {
+		mapped := mapDaytonaError(sandbox.StageStatus, err)
+		var providerErr *sandbox.ProviderError
+		if stderrors.As(mapped, &providerErr) && providerErr.Kind == sandbox.ProviderErrorNotFound {
+			return sandbox.ProviderHandle{}, false, nil
+		}
+		return sandbox.ProviderHandle{}, false, mapped
+	}
+	if got == nil || got.ID == "" || got.Name != name {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona returned an invalid sandbox identity", nil)
+	}
+	if len(got.Labels) != len(labels) {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona sandbox ownership labels do not match", nil)
+	}
+	for key, value := range labels {
+		if got.Labels[key] != value {
+			return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona sandbox ownership labels do not match", nil)
+		}
+	}
+	return sandbox.ProviderHandle{
+		Provider: DaytonaProviderName, SandboxID: got.ID,
+		Metadata: map[string]string{"daytona_state": string(got.State)},
+	}, true, nil
+}
+
 func (p *DaytonaLifecycleProvider) StartSandbox(ctx context.Context, handle sandbox.ProviderHandle) error {
 	if p == nil || p.client == nil {
 		return daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
@@ -301,6 +337,9 @@ func (p *DaytonaLifecycleProvider) GetStatus(ctx context.Context, handle sandbox
 	if err != nil {
 		return sandbox.ProviderStatus{}, mapDaytonaError(sandbox.StageStatus, err)
 	}
+	if got == nil || got.ID == "" || got.ID != handle.SandboxID {
+		return sandbox.ProviderStatus{}, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona status response identity is invalid", nil)
+	}
 	return sandbox.ProviderStatus{
 		Availability:  daytonaAvailability(got),
 		SandboxStatus: daytonaSandboxStatus(got),
@@ -384,13 +423,17 @@ func daytonaIntervalMinutes(interval time.Duration, name string) (*int, error) {
 }
 
 func daytonaLabels(request sandbox.CreateSandboxRequest) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"tetral.workspace_id":    string(request.Setup.WorkspaceID),
 		"tetral.session_id":      request.Setup.SessionID,
 		"tetral.sandbox_id":      request.Setup.SandboxID,
 		"tetral.environment_id":  request.Setup.EnvironmentID,
 		"tetral.lifecycle_owner": "sandbox",
 	}
+	if request.Setup.LifecycleOperationID != "" {
+		labels["tetral.lifecycle_operation_id"] = request.Setup.LifecycleOperationID
+	}
+	return labels
 }
 
 func daytonaNetworkPolicy(network sandbox.NetworkSetup) (bool, *string, error) {
@@ -513,11 +556,11 @@ func daytonaStatusRetryable(got *daytona.Sandbox) bool {
 	case apiclient.SANDBOXSTATE_CREATING, apiclient.SANDBOXSTATE_RESTORING, apiclient.SANDBOXSTATE_STARTING,
 		apiclient.SANDBOXSTATE_STOPPING, apiclient.SANDBOXSTATE_PENDING_BUILD, apiclient.SANDBOXSTATE_BUILDING_SNAPSHOT,
 		apiclient.SANDBOXSTATE_PULLING_SNAPSHOT, apiclient.SANDBOXSTATE_ARCHIVING, apiclient.SANDBOXSTATE_RESIZING,
-		apiclient.SANDBOXSTATE_SNAPSHOTTING, apiclient.SANDBOXSTATE_FORKING:
+		apiclient.SANDBOXSTATE_SNAPSHOTTING, apiclient.SANDBOXSTATE_FORKING, apiclient.SANDBOXSTATE_DESTROYING:
 		return true
 	default:
-		switch string(got.State) {
-		case "pausing", "resuming":
+		switch strings.ToLower(string(got.State)) {
+		case "pausing", "resuming", "deleting", "destroying":
 			return true
 		default:
 			return false
@@ -535,6 +578,10 @@ func daytonaSafeStatusMessage(got *daytona.Sandbox) string {
 func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 	if err == nil {
 		return nil
+	}
+	var providerErr *sandbox.ProviderError
+	if stderrors.As(err, &providerErr) {
+		return err
 	}
 	var notFound *daytonaerrors.DaytonaNotFoundError
 	if stderrors.As(err, &notFound) {

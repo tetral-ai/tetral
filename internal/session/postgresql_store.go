@@ -760,7 +760,7 @@ func (t *postgresqlTransaction) RequireSessionUsableForMutation(ctx context.Cont
 	return t.rejectRuntimeConfigUpdateRaces(ctx, sessionID)
 }
 
-func (t *postgresqlTransaction) PrepareSessionResourceMutation(ctx context.Context, sessionID string, now time.Time) error {
+func (t *postgresqlTransaction) RecordSessionResourceMutation(ctx context.Context, sessionID string, now time.Time) error {
 	if sessionID == "" {
 		return &ValidationError{Message: "session_id is required"}
 	}
@@ -771,25 +771,102 @@ func (t *postgresqlTransaction) PrepareSessionResourceMutation(ctx context.Conte
 	if err := t.requireIdleRuntimeStatusForResourceMutation(ctx, sessionID); err != nil {
 		return err
 	}
-	state, err := t.lockLatestSessionPreparation(ctx, sessionID)
+	var resourceRevision int64
+	if err := t.tx.QueryRowScanner(ctx,
+		`UPDATE sessions
+		    SET sandbox_resource_revision = sandbox_resource_revision + 1,
+		        updated_at = $3
+		  WHERE workspace_id = $1 AND id = $2
+		  RETURNING sandbox_resource_revision`,
+		string(t.workspaceID), sessionID, now,
+	).Scan(&resourceRevision); err != nil {
+		return err
+	}
+	var logicalSandboxID, providerResourceID string
+	var bindingRevision, environmentGeneration int64
+	err := t.tx.QueryRowScanner(ctx,
+		`SELECT logical_sandbox_id, provider_resource_id, binding_revision, environment_generation
+		   FROM session_sandbox_bindings
+		  WHERE workspace_id = $1 AND session_id = $2
+		    AND provider_resource_id IS NOT NULL
+		    AND release_requested_at IS NULL
+		  FOR UPDATE`,
+		string(t.workspaceID), sessionID,
+	).Scan(&logicalSandboxID, &providerResourceID, &bindingRevision, &environmentGeneration)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if !state.found {
+	var existingOperationID string
+	err = t.tx.QueryRowScanner(ctx,
+		`SELECT operation_id
+		   FROM sandbox_lifecycle_operations
+		  WHERE workspace_id = $1 AND logical_sandbox_id = $2
+		    AND kind = 'materialize'
+		    AND state IN ('pending', 'waiting_activation', 'running')
+		  FOR UPDATE`,
+		string(t.workspaceID), logicalSandboxID,
+	).Scan(&existingOperationID)
+	if err == nil {
 		return nil
 	}
-	switch state.status {
-	case "ready":
-		return t.resetSessionPreparationForResourceMutation(ctx, state, now)
-	case "failed":
-		return t.createFreshPreparationAttemptForResourceMutation(ctx, sessionID, state, now)
-	case "pending", "waiting_environment":
-		return nil
-	case "preparing":
-		return &ConflictError{Message: "session preparation is in progress", InvalidRequest: true}
-	default:
-		return &ValidationError{Message: "session preparation status is invalid"}
+	if !dbconnect.IsNoRows(err) {
+		return err
 	}
+	rawTx, err := t.rawDBTx()
+	if err != nil {
+		return err
+	}
+	resources, err := t.loadResourceMaterializationSnapshot(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	resourcesJSON, err := json.Marshal(resources)
+	if err != nil {
+		return err
+	}
+	operationID := id.New("sop_")
+	queueJobID := queue.NewJobID()
+	partitionKey := queue.FormatSandboxLifecyclePartitionKey(t.workspaceID, logicalSandboxID)
+	dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxMaterialize, t.workspaceID, logicalSandboxID, operationID)
+	payloadJSON, err := json.Marshal(map[string]string{
+		"workspace_id": string(t.workspaceID), "session_id": sessionID,
+		"logical_sandbox_id": logicalSandboxID, "operation_id": operationID,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := t.tx.Exec(ctx,
+		`INSERT INTO sandbox_lifecycle_operations (
+			workspace_id, operation_id, session_id, logical_sandbox_id,
+			kind, state, observed_binding_revision, target_environment_generation,
+			target_resource_revision, target_provider_resource_id,
+			materialization_resources_json, queue_job_id, queue_kind,
+			queue_partition_key, queue_dedupe_key, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, 'materialize', 'pending', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)`,
+		string(t.workspaceID), operationID, sessionID, logicalSandboxID,
+		bindingRevision, environmentGeneration, resourceRevision, providerResourceID,
+		string(resourcesJSON), queueJobID, queue.KindSandboxMaterialize,
+		partitionKey, dedupeKey, now,
+	); err != nil {
+		return err
+	}
+	_, err = queue.EnqueueTx(ctx, rawTx, queue.EnqueueRequest{
+		ID: queueJobID, WorkspaceID: t.workspaceID, Kind: queue.KindSandboxMaterialize,
+		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+		PayloadJSON: payloadJSON, MaxAttempts: 5, Now: now,
+	})
+	return err
+}
+
+func (t *postgresqlTransaction) rawDBTx() (*dbconnect.Tx, error) {
+	adapter, ok := t.tx.(postgresqlTxAdapter)
+	if !ok || adapter.tx == nil {
+		return nil, errors.New("session: PostgreSQL transaction is unavailable")
+	}
+	return adapter.tx, nil
 }
 
 func (t *postgresqlTransaction) requireIdleRuntimeStatusForResourceMutation(ctx context.Context, sessionID string) error {
@@ -817,231 +894,6 @@ func (t *postgresqlTransaction) requireIdleRuntimeStatusForResourceMutation(ctx 
 	default:
 		return &ValidationError{Message: "session runtime status is invalid"}
 	}
-}
-
-type sessionPreparationResourceMutationState struct {
-	found                 bool
-	materialized          bool
-	sessionID             string
-	preparationAttemptID  string
-	environmentID         string
-	environmentGeneration int64
-	sandboxID             string
-	status                string
-	resourceCredExpiresAt sql.NullTime
-}
-
-func (t *postgresqlTransaction) lockLatestSessionPreparation(ctx context.Context, sessionID string) (sessionPreparationResourceMutationState, error) {
-	var state sessionPreparationResourceMutationState
-	err := t.tx.QueryRowScanner(ctx,
-		`SELECT preparation_attempt_id, environment_id, environment_generation, sandbox_id, status, resource_cred_expires_at
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND superseded_at IS NULL
-		  ORDER BY created_at DESC, preparation_attempt_id DESC
-		  LIMIT 1
-		  FOR UPDATE`,
-		string(t.workspaceID),
-		sessionID,
-	).Scan(&state.preparationAttemptID, &state.environmentID, &state.environmentGeneration, &state.sandboxID, &state.status, &state.resourceCredExpiresAt)
-	if dbconnect.IsNoRows(err) {
-		return sessionPreparationResourceMutationState{}, nil
-	}
-	if err != nil {
-		return sessionPreparationResourceMutationState{}, err
-	}
-	state.found = true
-	state.sessionID = sessionID
-	state.materialized, err = t.lockLatestReadySessionPreparationForSandbox(ctx, sessionID, state.sandboxID)
-	if err != nil {
-		return sessionPreparationResourceMutationState{}, err
-	}
-	return state, nil
-}
-
-func (t *postgresqlTransaction) lockLatestReadySessionPreparationForSandbox(ctx context.Context, sessionID string, sandboxID string) (bool, error) {
-	var preparationAttemptID string
-	err := t.tx.QueryRowScanner(ctx,
-		`SELECT preparation_attempt_id
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND sandbox_id = $3
-		    AND status = 'ready'
-		  ORDER BY created_at DESC, preparation_attempt_id DESC
-		  LIMIT 1
-		  FOR UPDATE`,
-		string(t.workspaceID),
-		sessionID,
-		sandboxID,
-	).Scan(&preparationAttemptID)
-	if dbconnect.IsNoRows(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (t *postgresqlTransaction) resetSessionPreparationForResourceMutation(ctx context.Context, state sessionPreparationResourceMutationState, now time.Time) error {
-	if state.preparationAttemptID == "" {
-		return errors.New("session: preparation_attempt_id invariant missing")
-	}
-	if state.environmentID == "" || state.environmentGeneration <= 0 || state.sandboxID == "" {
-		return errors.New("session: ready preparation invariant missing")
-	}
-	carryResourceCredential := state.resourceCredExpiresAt
-	if hasFiles, err := t.sessionHasActiveFileResources(ctx, state.sessionID); err != nil {
-		return err
-	} else if !hasFiles {
-		carryResourceCredential = sql.NullTime{}
-	}
-	preparationAttemptID := id.New("prep_")
-	freshAttemptTime, err := t.nextSessionPreparationCreatedAt(ctx, state.sessionID, now)
-	if err != nil {
-		return err
-	}
-	result, err := t.tx.Exec(ctx,
-		`UPDATE session_preparations
-		    SET superseded_at = $4, updated_at = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3
-		    AND status = 'ready'
-		    AND superseded_at IS NULL`,
-		string(t.workspaceID),
-		state.sessionID,
-		state.preparationAttemptID,
-		now,
-	)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return &ConflictError{Message: "session preparation changed during resource mutation", InvalidRequest: true}
-	}
-	result, err = t.tx.Exec(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, resource_cred_expires_at,
-			created_at, updated_at
-		)
-		SELECT workspace_id, session_id, $4, environment_id,
-		       environment_generation, sandbox_id, 'pending', $5,
-		       $6, $6
-		  FROM session_preparations
-		 WHERE workspace_id = $1
-		   AND session_id = $2
-		   AND preparation_attempt_id = $3
-		   AND status = 'ready'`,
-		string(t.workspaceID),
-		state.sessionID,
-		state.preparationAttemptID,
-		preparationAttemptID,
-		nullableNullTime(carryResourceCredential),
-		freshAttemptTime,
-	)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return &ConflictError{Message: "session preparation changed during resource mutation", InvalidRequest: true}
-	}
-	return t.enqueueSessionPrepareForResourceMutation(ctx, state.sessionID, preparationAttemptID, now)
-}
-
-func (t *postgresqlTransaction) createFreshPreparationAttemptForResourceMutation(ctx context.Context, sessionID string, failed sessionPreparationResourceMutationState, now time.Time) error {
-	if failed.environmentID == "" || failed.environmentGeneration <= 0 || failed.sandboxID == "" {
-		return errors.New("session: failed preparation invariant missing")
-	}
-	preparationAttemptID := id.New("prep_")
-	freshAttemptTime, err := t.nextSessionPreparationCreatedAt(ctx, sessionID, now)
-	if err != nil {
-		return err
-	}
-	if _, err := t.tx.Exec(ctx,
-		`UPDATE session_preparations
-		    SET superseded_at = $4, updated_at = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3
-		    AND status = 'failed'
-		    AND superseded_at IS NULL`,
-		string(t.workspaceID),
-		sessionID,
-		failed.preparationAttemptID,
-		now,
-	); err != nil {
-		return err
-	}
-	if _, err := t.tx.Exec(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $7)`,
-		string(t.workspaceID),
-		sessionID,
-		preparationAttemptID,
-		failed.environmentID,
-		failed.environmentGeneration,
-		failed.sandboxID,
-		freshAttemptTime,
-	); err != nil {
-		return err
-	}
-	return t.enqueueSessionPrepareForResourceMutation(ctx, sessionID, preparationAttemptID, now)
-}
-
-func (t *postgresqlTransaction) nextSessionPreparationCreatedAt(ctx context.Context, sessionID string, requested time.Time) (time.Time, error) {
-	var latest sql.NullTime
-	if err := t.tx.QueryRowScanner(ctx,
-		`SELECT MAX(created_at)
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		string(t.workspaceID),
-		sessionID,
-	).Scan(&latest); err != nil {
-		return time.Time{}, err
-	}
-	next := requested.UTC()
-	if latest.Valid && !next.After(latest.Time.UTC()) {
-		next = latest.Time.UTC().Add(time.Microsecond)
-	}
-	return next, nil
-}
-
-func (t *postgresqlTransaction) enqueueSessionPrepareForResourceMutation(ctx context.Context, sessionID string, preparationAttemptID string, now time.Time) error {
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":           string(t.workspaceID),
-		"session_id":             sessionID,
-		"preparation_attempt_id": preparationAttemptID,
-	})
-	if err != nil {
-		return err
-	}
-	return t.enqueueCanonicalSessionPrepare(ctx, sessionID, preparationAttemptID, payload, now)
-}
-
-func (t *postgresqlTransaction) sessionHasActiveFileResources(ctx context.Context, sessionID string) (bool, error) {
-	var exists bool
-	err := t.tx.QueryRowScanner(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM session_resources
-			 WHERE workspace_id = $1
-			   AND session_id = $2
-			   AND type = $3
-			   AND detached_at IS NULL
-			   AND delete_requested_at IS NULL
-		)`,
-		string(t.workspaceID),
-		sessionID,
-		string(ResourceTypeFile),
-	).Scan(&exists)
-	return exists, err
 }
 
 func (t *postgresqlTransaction) UpdateSession(ctx context.Context, sessionID string, update UpdateSession) (*Session, error) {
@@ -2202,14 +2054,19 @@ func (t *postgresqlTransaction) RequestResourceDelete(ctx context.Context, sessi
 	if requestedAt.IsZero() {
 		requestedAt = storage.Now()
 	}
-	state, err := t.lockLatestSessionPreparation(ctx, sessionID)
-	if err != nil {
+	var materialized bool
+	err = t.tx.QueryRowScanner(ctx,
+		`SELECT provider_resource_id IS NOT NULL AND materialized_resource_revision > 0
+		   FROM session_sandbox_bindings
+		  WHERE workspace_id = $1 AND session_id = $2
+		  FOR UPDATE`,
+		string(t.workspaceID), sessionID,
+	).Scan(&materialized)
+	if dbconnect.IsNoRows(err) {
+		materialized = false
+	} else if err != nil {
 		return nil, err
 	}
-	if state.found && state.status == "preparing" {
-		return nil, &ConflictError{Message: "session resource mutation is not allowed while preparation is in progress", InvalidRequest: true}
-	}
-	materialized := state.found && state.materialized
 	var result interface {
 		RowsAffected() (int64, error)
 	}

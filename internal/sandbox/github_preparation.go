@@ -72,6 +72,25 @@ type GitHubRepositoryPreparation struct {
 	Repositories      []GitHubRepositoryMount
 }
 
+// GitHubRepositoryConverger owns the disposable sandbox checkout and its
+// bounded Git proxy credential. PostgreSQL tickets remain durable authority;
+// provider files and configuration are rebuilt from the requested snapshot.
+type GitHubRepositoryConverger struct {
+	Rotator      GitTicketRotator
+	Materializer GitHubRepositoryMaterializer
+	GitProxyHost string
+	Random       io.Reader
+	Clock        func() time.Time
+}
+
+func (c *GitHubRepositoryConverger) MaterializeGitHubRepositories(ctx context.Context, setup SandboxSetup, handle ProviderHandle) error {
+	return c.materialize(ctx, setup.WorkspaceID, setup.SessionID, handle, setup.Resources.GitHubRepositories, time.Time{})
+}
+
+func (c *GitHubRepositoryConverger) RemoveDeletedGitHubRepositories(ctx context.Context, setup SandboxSetup, handle ProviderHandle) error {
+	return c.removeDeleted(ctx, handle, setup.Resources.DeletedGitHubRepositories, setup.ResourceCleanup)
+}
+
 type GitHubPreparationFailure struct {
 	Reason      string
 	ResourceID  string
@@ -115,32 +134,40 @@ func gitHubPreparationFailureIdentity(err error) (string, string) {
 }
 
 func (s *Service) prepareGitHubRepositories(ctx context.Context, ws workspace.ID, sessionID string, handle ProviderHandle, resources ResourceSetup) error {
-	if len(resources.GitHubRepositories) == 0 {
+	converger := GitHubRepositoryConverger{
+		Rotator: s.gitTicketRotator, Materializer: s.gitHubMaterializer,
+		GitProxyHost: s.gitProxyHost, Random: s.gitTicketRandom, Clock: s.clock,
+	}
+	return converger.materialize(ctx, ws, sessionID, handle, resources.GitHubRepositories, resources.PreparationAttemptCreatedAt)
+}
+
+func (c *GitHubRepositoryConverger) materialize(ctx context.Context, ws workspace.ID, sessionID string, handle ProviderHandle, requested []GitHubRepositoryMount, notBefore time.Time) error {
+	if len(requested) == 0 {
 		return nil
 	}
-	if s.gitHubMaterializer == nil {
+	if c == nil || c.Materializer == nil {
 		return &ValidationError{Message: "github_repository materializer is required"}
 	}
 	if handle.SandboxID == "" {
 		return &ValidationError{Message: "provider sandbox id is required"}
 	}
-	if s.gitTicketRotator == nil {
+	if c.Rotator == nil {
 		return &ValidationError{Message: "git ticket rotator is required"}
 	}
-	gitProxyHost := strings.TrimSpace(s.gitProxyHost)
+	gitProxyHost := strings.TrimSpace(c.GitProxyHost)
 	if gitProxyHost == "" {
 		return &ValidationError{Message: "git proxy host is required"}
 	}
-	repositories, err := normalizeGitHubRepositoryMounts(resources.GitHubRepositories)
+	repositories, err := normalizeGitHubRepositoryMounts(requested)
 	if err != nil {
 		return err
 	}
-	if recovered, err := s.recoverInstalledGitTicket(ctx, ws, sessionID, handle.SandboxID, gitProxyHost, resources.PreparationAttemptCreatedAt, repositories); err != nil {
+	if recovered, err := c.recoverInstalledGitTicket(ctx, ws, sessionID, handle.SandboxID, gitProxyHost, notBefore, repositories); err != nil {
 		return err
 	} else if recovered {
 		return nil
 	}
-	random := s.gitTicketRandom
+	random := c.Random
 	if random == nil {
 		random = rand.Reader
 	}
@@ -153,10 +180,14 @@ func (s *Service) prepareGitHubRepositories(ctx context.Context, ws workspace.ID
 		return err
 	}
 	ticketID := id.New("gitt_")
-	if _, err := s.gitTicketRotator.CreatePending(ctx, ws, sessionID, ticketID, hash, s.clock().UTC()); err != nil {
+	clock := c.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	if _, err := c.Rotator.CreatePending(ctx, ws, sessionID, ticketID, hash, clock().UTC()); err != nil {
 		return err
 	}
-	if err := s.gitHubMaterializer.InstallGitHubRepositoryConfiguration(ctx, GitHubRepositoryConfiguration{
+	if err := c.Materializer.InstallGitHubRepositoryConfiguration(ctx, GitHubRepositoryConfiguration{
 		WorkspaceID:       ws,
 		SessionID:         sessionID,
 		ProviderSandboxID: handle.SandboxID,
@@ -165,23 +196,20 @@ func (s *Service) prepareGitHubRepositories(ctx context.Context, ws workspace.ID
 	}); err != nil {
 		return err
 	}
-	if _, err := s.gitTicketRotator.ActivatePending(ctx, ws, sessionID, ticketID, s.clock().UTC()); err != nil {
+	if _, err := c.Rotator.ActivatePending(ctx, ws, sessionID, ticketID, clock().UTC()); err != nil {
 		return err
 	}
-	return s.gitHubMaterializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
+	return c.Materializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
 		WorkspaceID: ws, SessionID: sessionID, ProviderSandboxID: handle.SandboxID, Repositories: repositories,
 	})
 }
 
-func (s *Service) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID, sessionID, providerSandboxID, gitProxyHost string, attemptCreatedAt time.Time, repositories []GitHubRepositoryMount) (bool, error) {
-	if attemptCreatedAt.IsZero() {
-		return false, nil
-	}
-	hash, installed, err := s.gitHubMaterializer.InstalledGitTicketHash(ctx, providerSandboxID, gitProxyHost)
+func (c *GitHubRepositoryConverger) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID, sessionID, providerSandboxID, gitProxyHost string, notBefore time.Time, repositories []GitHubRepositoryMount) (bool, error) {
+	hash, installed, err := c.Materializer.InstalledGitTicketHash(ctx, providerSandboxID, gitProxyHost)
 	if err != nil || !installed {
 		return false, err
 	}
-	ticket, err := s.gitTicketRotator.FindBySessionTokenHash(ctx, ws, sessionID, hash)
+	ticket, err := c.Rotator.FindBySessionTokenHash(ctx, ws, sessionID, hash)
 	if err != nil {
 		var notFound *gitticket.NotFoundError
 		if errors.As(err, &notFound) {
@@ -189,19 +217,23 @@ func (s *Service) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID
 		}
 		return false, err
 	}
-	if ticket.CreatedAt.Before(attemptCreatedAt) {
+	if !notBefore.IsZero() && ticket.CreatedAt.Before(notBefore) {
 		return false, nil
 	}
 	switch ticket.Status {
 	case gitticket.StatusPending:
-		if _, err := s.gitTicketRotator.ActivatePending(ctx, ws, sessionID, ticket.TicketID, s.clock().UTC()); err != nil {
+		clock := c.Clock
+		if clock == nil {
+			clock = time.Now
+		}
+		if _, err := c.Rotator.ActivatePending(ctx, ws, sessionID, ticket.TicketID, clock().UTC()); err != nil {
 			return false, err
 		}
 	case gitticket.StatusLive:
 	default:
 		return false, nil
 	}
-	if err := s.gitHubMaterializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
+	if err := c.Materializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
 		WorkspaceID: ws, SessionID: sessionID, ProviderSandboxID: providerSandboxID, Repositories: repositories,
 	}); err != nil {
 		return false, err
@@ -210,10 +242,15 @@ func (s *Service) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID
 }
 
 func (s *Service) removeDeletedGitHubRepositories(ctx context.Context, handle ProviderHandle, repositories []GitHubRepositoryMount, cleanup SessionResourceCleanupCoordinator) error {
+	converger := GitHubRepositoryConverger{Materializer: s.gitHubMaterializer}
+	return converger.removeDeleted(ctx, handle, repositories, cleanup)
+}
+
+func (c *GitHubRepositoryConverger) removeDeleted(ctx context.Context, handle ProviderHandle, repositories []GitHubRepositoryMount, cleanup SessionResourceCleanupCoordinator) error {
 	if len(repositories) == 0 {
 		return nil
 	}
-	if s.gitHubMaterializer == nil {
+	if c == nil || c.Materializer == nil {
 		return &ValidationError{Message: "github_repository materializer is required"}
 	}
 	if handle.SandboxID == "" {
@@ -233,7 +270,7 @@ func (s *Service) removeDeletedGitHubRepositories(ctx context.Context, handle Pr
 	}
 	for _, repository := range normalized {
 		remove := func(ctx context.Context) error {
-			return s.gitHubMaterializer.RemoveGitHubRepository(ctx, handle.SandboxID, repository)
+			return c.Materializer.RemoveGitHubRepository(ctx, handle.SandboxID, repository)
 		}
 		if cleanup == nil {
 			if err := remove(ctx); err != nil {

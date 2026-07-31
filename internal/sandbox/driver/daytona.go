@@ -163,36 +163,70 @@ func NewDaytonaHelperExecutorForClientWithPreparationTimeout(client daytonaSandb
 }
 
 func (e *DaytonaHelperExecutor) RunTool(ctx context.Context, invocation ToolInvocation) (ToolExecution, error) {
+	prepared, err := e.PrepareTool(ctx, invocation)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	return e.ExecutePreparedTool(ctx, prepared)
+}
+
+// PrepareTool validates and stages one deterministic helper payload. It may
+// be repeated for the same Tool Use after worker loss and does not invoke the
+// user-facing helper subcommand.
+func (e *DaytonaHelperExecutor) PrepareTool(ctx context.Context, invocation ToolInvocation) (PreparedToolExecution, error) {
 	if invocation.ToolUseEventID == "" || invocation.ToolName == "" {
-		return ToolExecution{}, errors.New("tool invocation is incomplete")
+		return PreparedToolExecution{}, errors.New("tool invocation is incomplete")
 	}
 	helperCommand, err := helperSubcommandForToolName(invocation.ToolName)
 	if err != nil {
-		return ToolExecution{}, err
+		return PreparedToolExecution{}, err
 	}
 	input, composition, err := helperRunToolInputForInvocation(helperCommand, invocation.ToolName, invocation.InputJSON, invocation.ToolUseEventID)
 	if err != nil {
 		var preHelperResult *preHelperToolResult
 		if errors.As(err, &preHelperResult) {
-			return ToolExecution{ResultJSON: preHelperResult.resultJSON}, nil
+			result := ToolExecution{ResultJSON: preHelperResult.resultJSON}
+			return PreparedToolExecution{immediateResult: &result}, nil
 		}
-		return ToolExecution{}, err
+		return PreparedToolExecution{}, err
 	}
 	payload, err := newHelperPayload(invocation.Target, helperCommand, invocation.ToolUseEventID, input)
 	if err != nil {
-		return ToolExecution{}, err
+		return PreparedToolExecution{}, err
 	}
 	limits := helperLimits(helperCommand, input)
-	result, err := e.executeHelper(ctx, invocation.Target, invocation.ToolUseEventID, helperCommand, payload)
+	payloadPath, process, err := e.stageHelperPayload(ctx, invocation.Target, invocation.ToolUseEventID, helperCommand, payload)
+	if err != nil {
+		return PreparedToolExecution{}, mapDaytonaError(sandbox.StageExecuteTool, err)
+	}
+	return PreparedToolExecution{
+		target: invocation.Target, process: process, toolUseEventID: invocation.ToolUseEventID,
+		helperCommand: helperCommand, payloadPath: payloadPath,
+		pollUntilTerminal: composition.pollUntilTerminal,
+		visibleBytes:      limits.VisibleBytes, visibleLines: limits.VisibleLines,
+	}, nil
+}
+
+// ExecutePreparedTool invokes the user-facing helper command exactly once for
+// a previously staged payload. Any returned error is post-authorization and
+// cannot justify replaying the command.
+func (e *DaytonaHelperExecutor) ExecutePreparedTool(ctx context.Context, prepared PreparedToolExecution) (ToolExecution, error) {
+	if prepared.immediateResult != nil {
+		return *prepared.immediateResult, nil
+	}
+	result, err := e.executePreparedHelper(ctx, prepared.process, prepared.helperCommand, prepared.payloadPath)
 	if err != nil {
 		return ToolExecution{}, err
 	}
-	if composition.pollUntilTerminal {
-		return e.pollForegroundTaskUntilTerminal(ctx, invocation.Target, invocation.ToolUseEventID, limits, result)
+	if prepared.pollUntilTerminal {
+		return e.pollForegroundTaskUntilTerminal(ctx, prepared.target, prepared.toolUseEventID, protocol.Limits{
+			VisibleBytes: prepared.visibleBytes,
+			VisibleLines: prepared.visibleLines,
+		}, result)
 	}
 	var backgroundTask *BackgroundTask
-	if helperCommand == helperSubcommandExec {
-		backgroundTask = synthesizeHelperBackgroundTask(invocation.Target, result)
+	if prepared.helperCommand == helperSubcommandExec {
+		backgroundTask = synthesizeHelperBackgroundTask(prepared.target, result)
 	}
 	return ToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: backgroundTask}, nil
 }
@@ -640,26 +674,34 @@ func (e *DaytonaHelperExecutor) executeCommandHelper(ctx context.Context, refere
 }
 
 func (e *DaytonaHelperExecutor) executeHelper(ctx context.Context, target ToolTarget, payloadID string, helperCommand string, payload map[string]any) (helperResult, error) {
-	if e == nil || e.client == nil {
-		return helperResult{}, errors.New("daytona sandbox client is unavailable")
-	}
-	if target.ProviderSandboxID == "" {
-		return helperResult{}, errors.New("provider sandbox id is required")
-	}
-	if !helperCommandNamePattern.MatchString(helperCommand) {
-		return helperResult{}, fmt.Errorf("helper command %q has invalid shape", helperCommand)
-	}
-	if !helperPayloadIDPattern.MatchString(payloadID) {
-		return helperResult{}, fmt.Errorf("helper payload id %q has invalid shape", payloadID)
-	}
-	sandbox, err := retryDaytonaTransient(ctx, func() (daytonaSandboxHandle, error) {
-		return e.client.Get(ctx, target.ProviderSandboxID)
-	}, nil)
+	payloadPath, process, err := e.stageHelperPayload(ctx, target, payloadID, helperCommand, payload)
 	if err != nil {
 		return helperResult{}, err
 	}
-	if sandbox.Process == nil || sandbox.FileSystem == nil {
-		return helperResult{}, errors.New("daytona sandbox is missing process or filesystem service")
+	return e.executePreparedHelper(ctx, process, helperCommand, payloadPath)
+}
+
+func (e *DaytonaHelperExecutor) stageHelperPayload(ctx context.Context, target ToolTarget, payloadID string, helperCommand string, payload map[string]any) (string, daytonaProcess, error) {
+	if e == nil || e.client == nil {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona sandbox client is unavailable", nil)
+	}
+	if target.ProviderSandboxID == "" {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "provider sandbox id is required", nil)
+	}
+	if !helperCommandNamePattern.MatchString(helperCommand) {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "helper command has invalid shape", nil)
+	}
+	if !helperPayloadIDPattern.MatchString(payloadID) {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "helper payload id has invalid shape", nil)
+	}
+	providerSandbox, err := retryDaytonaTransient(ctx, func() (daytonaSandboxHandle, error) {
+		return e.client.Get(ctx, target.ProviderSandboxID)
+	}, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	if providerSandbox.Process == nil || providerSandbox.FileSystem == nil {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona sandbox is missing process or filesystem service", nil)
 	}
 	stageDir := path.Join(payloadStageRootPath, payloadID)
 	stagePath := path.Join(stageDir, payloadFileName)
@@ -667,18 +709,18 @@ func (e *DaytonaHelperExecutor) executeHelper(ctx context.Context, target ToolTa
 	payloadPath := path.Join(payloadDir, payloadFileName)
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return helperResult{}, err
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox helper payload is invalid", err)
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
-		return sandbox.FileSystem.CreateFolder(ctx, stageDir, options.WithMode("0700"))
+		return providerSandbox.FileSystem.CreateFolder(ctx, stageDir, options.WithMode("0700"))
 	}); err != nil {
-		return helperResult{}, err
+		return "", nil, err
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
-		return sandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), stagePath)
+		return providerSandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), stagePath)
 	}); err != nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
-		return helperResult{}, err
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, err
 	}
 	// The freeze runs the privileged chain under one sudo sh -c so no
 	// intermediate state is observable: the final root is root-owned before
@@ -697,22 +739,28 @@ func (e *DaytonaHelperExecutor) executeHelper(ctx context.Context, target ToolTa
 		" && chmod 0700 -- " + shellQuote(payloadDir) +
 		" && chmod 0600 -- " + shellQuote(payloadPath)
 	permissionResponse, err := retryDaytonaTransient(ctx, func() (*types.ExecuteResponse, error) {
-		return sandbox.Process.ExecuteCommand(ctx, "sudo -n sh -c "+shellQuote(freezeScript))
+		return providerSandbox.Process.ExecuteCommand(ctx, "sudo -n sh -c "+shellQuote(freezeScript))
 	}, nil)
 	if err != nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
-		return helperResult{}, err
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, err
 	}
 	if permissionResponse == nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
-		return helperResult{}, errors.New("sandbox helper payload permission command returned no response")
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorMalformedResponse, false, 0, "sandbox helper payload permission command returned no response", nil)
 	}
 	if permissionResponse.ExitCode != 0 {
-		_ = sandbox.FileSystem.DeleteFile(ctx, stageDir, true)
-		return helperResult{}, fmt.Errorf("sandbox helper payload permission command exited with code %d", permissionResponse.ExitCode)
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorUnknown, true, 0, "sandbox helper payload permission command failed", nil)
 	}
+	return payloadPath, providerSandbox.Process, nil
+}
 
-	response, err := sandbox.Process.ExecuteCommand(ctx, "sudo -n -u "+shellQuote(helperUser)+" "+shellQuote(helperPath)+" "+shellQuote(helperCommand)+" --payload "+shellQuote(payloadPath))
+func (e *DaytonaHelperExecutor) executePreparedHelper(ctx context.Context, process daytonaProcess, helperCommand string, payloadPath string) (helperResult, error) {
+	if e == nil || process == nil {
+		return helperResult{}, errors.New("daytona sandbox is missing process service")
+	}
+	response, err := process.ExecuteCommand(ctx, "sudo -n -u "+shellQuote(helperUser)+" "+shellQuote(helperPath)+" "+shellQuote(helperCommand)+" --payload "+shellQuote(payloadPath))
 	if err != nil {
 		return helperResult{}, err
 	}

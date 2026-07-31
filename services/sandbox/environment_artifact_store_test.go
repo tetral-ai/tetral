@@ -37,6 +37,68 @@ func TestEnvironmentArtifactStoreBuildReadyEnqueuesFanout(t *testing.T) {
 	assertQueueJobCount(t, admin, "ws_env_store", "environment_ready_fanout", 1)
 }
 
+func TestEnvironmentArtifactReadyFanoutWakesWaitingSandboxActivation(t *testing.T) {
+	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
+	seedSandboxExecutionStoreFixture(t, admin)
+	ctx := context.Background()
+	if _, err := admin.Exec(`UPDATE environment_artifacts
+		SET status = 'building', provider_artifact_ref = NULL
+		WHERE workspace_id = 'ws_execution_store' AND environment_id = 'env_execution_store' AND generation = 1`); err != nil {
+		t.Fatalf("mark artifact building: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	var operationID string
+	if err := admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
+		WHERE workspace_id = 'ws_execution_store' AND tool_use_event_id = 'evt_execution_a'`).Scan(&operationID); err != nil {
+		t.Fatalf("read waiting activation: %v", err)
+	}
+	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
+	job := EnvironmentBuildJob{WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	if err := store.MarkEnvironmentBuildReady(ctx, job, "artifact_execution_store", fixedEnvironmentStoreTime); err != nil {
+		t.Fatalf("MarkEnvironmentBuildReady: %v", err)
+	}
+	if _, err := store.FanoutReadyEnvironment(ctx, EnvironmentReadyFanoutJob(job), fixedEnvironmentStoreTime); err != nil {
+		t.Fatalf("FanoutReadyEnvironment: %v", err)
+	}
+	var state string
+	var queueJobID sql.NullString
+	if err := admin.QueryRow(`SELECT state, queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id = $1 AND operation_id = $2`, job.WorkspaceID, operationID).Scan(&state, &queueJobID); err != nil {
+		t.Fatalf("read activation after fanout: %v", err)
+	}
+	if state != "pending" || !queueJobID.Valid {
+		t.Fatalf("activation after artifact ready = state %q queue %v; want pending with notification", state, queueJobID)
+	}
+}
+
+func TestEnvironmentArtifactFailureSettlesWaitingSandboxActivation(t *testing.T) {
+	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
+	seedSandboxExecutionStoreFixture(t, admin)
+	ctx := context.Background()
+	if _, err := admin.Exec(`UPDATE environment_artifacts
+		SET status = 'building', provider_artifact_ref = NULL
+		WHERE workspace_id = 'ws_execution_store' AND environment_id = 'env_execution_store' AND generation = 1`); err != nil {
+		t.Fatalf("mark artifact building: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
+	job := EnvironmentBuildJob{WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	if err := store.MarkEnvironmentBuildTerminalFailure(ctx, job, EnvironmentArtifactFailure{
+		Stage: "build_artifact", LastErrorKind: "environment_artifact_failed", Reason: "artifact build failed",
+	}, fixedEnvironmentStoreTime); err != nil {
+		t.Fatalf("MarkEnvironmentBuildTerminalFailure: %v", err)
+	}
+	assertSandboxExecutionState(t, admin, "evt_execution_a", "terminal_unconsumed", 1)
+}
+
 func TestEnvironmentArtifactStoreBuildReadyAdvancesSameInputFollowers(t *testing.T) {
 	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
 	ctx := context.Background()
@@ -325,7 +387,7 @@ func seedEnvironmentArtifact(t *testing.T, db *sql.DB, workspaceID string, envir
 			workspace_id, environment_id, generation, status, provider,
 			provider_artifact_ref, normalized_config_hash, artifact_input_hash,
 			runtime_network_policy_json, packages_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'tetral', NULLIF($5, ''), 'hash_config', 'hash_packages',
+		) VALUES ($1, $2, $3, $4, 'daytona', NULLIF($5, ''), 'hash_config', 'hash_packages',
 			'{"type":"unrestricted"}', $6, $7::timestamptz, $7::timestamptz)`,
 		workspaceID, environmentID, generation, status, providerRef, packagesJSON, now,
 	)

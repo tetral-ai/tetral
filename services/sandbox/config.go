@@ -266,7 +266,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	if cfg.PreparationCommandTimeout/time.Second > time.Duration(math.MaxInt32) {
 		return Config{}, workload.NewConfigError(EnvSandboxPreparationCommandTimeout + " exceeds the Daytona integer-seconds wire range")
 	}
-	// Session-prepare lease/command fence. A preparation command may dispatch
+	// Sandbox provider-command lease fence. A provider command may dispatch
 	// up to one full LeaseHeartbeatInterval after the last successful lease
 	// renewal, so the usable window is SessionPrepareLeaseDuration minus one
 	// heartbeat, and it must still cover PreparationCommandTimeout plus
@@ -275,10 +275,8 @@ func ConfigFromEnv(env Env) (Config, error) {
 	// queue clock while the kill fires on the sandbox daemon clock). Defaults
 	// 120/15/45/30s satisfy 120-15 = 105 >= 45+30 = 75.
 	//
-	// Only the session-prepare runner dispatches sandbox-mutating preparation
-	// commands under its lease, so only it takes the explicit
-	// SessionPrepareLeaseDuration; the environment build, ready-fanout, and
-	// failed-fanout runners issue no such commands and use the derived
+	// Provider-mutating Sandbox runners take the explicit
+	// SessionPrepareLeaseDuration; environment build and fanout runners use the derived
 	// heartbeat*4 lease. UPDATE-WITH: wiring.go (SessionPrepareQueueLeaseDuration,
 	// EnvironmentQueueLeaseDuration).
 	if cfg.SessionPrepareLeaseDuration-cfg.LeaseHeartbeatInterval < cfg.PreparationCommandTimeout+cfg.LateCommandMargin {

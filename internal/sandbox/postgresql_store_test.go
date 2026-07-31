@@ -2160,7 +2160,7 @@ func TestPostgreSQLPrepareSessionClaimRefreshesCurrentEnvironmentGenerationBefor
 			workspace_id, environment_id, generation, status, provider,
 			provider_artifact_ref, normalized_config_hash, artifact_input_hash,
 			runtime_network_policy_json, packages_json, created_at, updated_at
-		) VALUES ($1, 'env_sandbox', 2, 'ready', 'tetral', 'artifact_sandbox_generation_2',
+		) VALUES ($1, 'env_sandbox', 2, 'ready', 'daytona', 'artifact_sandbox_generation_2',
 			'hash_config_sandbox_2', 'hash_packages_sandbox_2', '{"type":"unrestricted"}', '{}', $2, $2)`,
 		string(workspace.DefaultID), "2026-07-14T12:00:00Z",
 	); err != nil {
@@ -2246,7 +2246,7 @@ func TestPostgreSQLPreparationClaimMovesToCurrentBuildingGenerationWaitingForFan
 			workspace_id, environment_id, generation, status, provider,
 			provider_artifact_ref, normalized_config_hash, artifact_input_hash,
 			runtime_network_policy_json, packages_json, created_at, updated_at
-		) VALUES ($1, 'env_sandbox', 2, 'building', 'tetral', NULL,
+		) VALUES ($1, 'env_sandbox', 2, 'building', 'daytona', NULL,
 			'hash_config_sandbox_waiting_2', 'hash_packages_sandbox_waiting_2',
 			'{"type":"unrestricted"}', '{}', $2, $2)`,
 		string(workspace.DefaultID), "2026-07-14T12:00:00Z",
@@ -3675,7 +3675,7 @@ func seedSandboxSession(t *testing.T, admin *sql.DB, ws workspace.ID, sessionID 
 			workspace_id, environment_id, generation, status, provider,
 			provider_artifact_ref, normalized_config_hash, artifact_input_hash,
 			runtime_network_policy_json, packages_json, created_at, updated_at
-		) VALUES ($1, 'env_sandbox', 1, 'ready', 'tetral', 'artifact_sandbox',
+		) VALUES ($1, 'env_sandbox', 1, 'ready', 'daytona', 'artifact_sandbox',
 			'hash_config_sandbox', 'hash_packages_sandbox', '{"type":"unrestricted"}', '{}', $2, $2)
 		ON CONFLICT (workspace_id, environment_id, generation) DO NOTHING`,
 		string(ws), createdAt,

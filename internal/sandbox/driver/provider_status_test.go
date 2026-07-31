@@ -32,3 +32,18 @@ func TestDaytonaSandboxStatusMapsProviderStatesToTetralStates(t *testing.T) {
 		})
 	}
 }
+
+func TestDaytonaDeletingStatesRemainRetryableObservations(t *testing.T) {
+	for _, state := range []apiclient.SandboxState{
+		apiclient.SANDBOXSTATE_DESTROYING,
+		apiclient.SandboxState("deleting"),
+		apiclient.SandboxState("destroying"),
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			got := &daytona.Sandbox{State: state}
+			if daytonaSandboxStatus(got) != sandbox.StatusReleased || !daytonaStatusRetryable(got) {
+				t.Fatalf("state %q mapped to status=%q retryable=%t; want released transitional observation", state, daytonaSandboxStatus(got), daytonaStatusRetryable(got))
+			}
+		})
+	}
+}

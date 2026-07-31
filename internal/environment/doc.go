@@ -6,7 +6,7 @@
 //     (PostgreSQLEnvironmentStore), each write inside a per-workspace tx.
 //   - Table `environment_artifacts`: one row per
 //     (workspace_id, environment_id, generation) carrying status, provider
-//     'tetral', normalized_config_hash, artifact_input_hash,
+//     'daytona', normalized_config_hash, artifact_input_hash,
 //     runtime_network_policy_json, packages_json, provider_artifact_ref, and
 //     the summarized failure fields. This package writes the admission rows;
 //     the sandbox build and fanout runners flip them.

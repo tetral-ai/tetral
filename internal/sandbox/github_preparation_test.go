@@ -160,6 +160,42 @@ func TestPrepareGitHubRepositoriesMaterializesDefaultMountPath(t *testing.T) {
 	}
 }
 
+func TestGitHubRepositoryConvergerRecoversInstalledTicketWithoutPreparationGeneration(t *testing.T) {
+	events := []string{}
+	hash := []byte("installed-ticket-hash")
+	rotator := &recordingGitTicketRotator{
+		eventsRef: &events,
+		findTicket: &gitticket.Ticket{
+			WorkspaceID: workspace.DefaultID,
+			SessionID:   "sesn_git_converge",
+			TicketID:    "gitt_existing",
+			TokenHash:   hash,
+			Status:      gitticket.StatusPending,
+		},
+	}
+	materializer := &recordingGitHubRepositoryMaterializer{eventsRef: &events, installedHash: hash}
+	converger := &GitHubRepositoryConverger{
+		Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test",
+		Clock: func() time.Time { return time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC) },
+	}
+	err := converger.MaterializeGitHubRepositories(context.Background(), SandboxSetup{
+		WorkspaceID: workspace.DefaultID,
+		SessionID:   "sesn_git_converge",
+		Resources: ResourceSetup{GitHubRepositories: []GitHubRepositoryMount{{
+			ResourceID: "sesrsc_repo", URL: "https://github.com/tetral-ai/tetral",
+		}}},
+	}, ProviderHandle{SandboxID: "provider_sandbox"})
+	if err != nil {
+		t.Fatalf("MaterializeGitHubRepositories: %v", err)
+	}
+	if got := strings.Join(events, " -> "); got != "activate -> clone" {
+		t.Fatalf("phase order = %s; want activate -> clone", got)
+	}
+	if len(rotator.pendingCalls) != 0 || len(materializer.installs) != 0 {
+		t.Fatalf("recovery minted a replacement credential: pending=%d installs=%d", len(rotator.pendingCalls), len(materializer.installs))
+	}
+}
+
 func TestPrepareGitHubRepositoriesRemovesDeletedCheckoutWithoutRotatingTicket(t *testing.T) {
 	rotator := &recordingGitTicketRotator{}
 	materializer := &recordingGitHubRepositoryMaterializer{}

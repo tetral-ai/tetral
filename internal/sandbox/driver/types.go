@@ -60,6 +60,29 @@ type ToolExecution struct {
 	BackgroundTask *BackgroundTask
 }
 
+// PreparedToolExecution is the opaque, repeatable Daytona payload-staging
+// result. Creating it never invokes the user-authored tool command; callers
+// must cross their durable submission fence before ExecutePreparedTool.
+type PreparedToolExecution struct {
+	target            ToolTarget
+	process           daytonaProcess
+	toolUseEventID    string
+	helperCommand     string
+	payloadPath       string
+	pollUntilTerminal bool
+	visibleBytes      int
+	visibleLines      int
+	immediateResult   *ToolExecution
+}
+
+func (p PreparedToolExecution) ImmediateResult() *ToolExecution {
+	if p.immediateResult == nil {
+		return nil
+	}
+	result := *p.immediateResult
+	return &result
+}
+
 type BackgroundTask struct {
 	TaskID                      string
 	SourceToolUseEventID        string

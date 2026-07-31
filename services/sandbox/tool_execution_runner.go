@@ -1,0 +1,413 @@
+package tetralsandbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sandbox"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage"
+	"github.com/tetral-ai/tetral/internal/workspace"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
+)
+
+const SandboxToolExecuteMaxAttempts = 5
+
+type SandboxExecutionRef struct {
+	WorkspaceID     string
+	SessionID       string
+	SessionThreadID string
+	ToolUseEventID  string
+}
+
+type SandboxBinding struct {
+	LogicalSandboxID             string
+	EnvironmentID                string
+	EnvironmentGeneration        int64
+	Provider                     string
+	ProviderResourceID           string
+	BindingRevision              int64
+	MaterializedResourceRevision int64
+	ResourceCredentialExpiresAt  *time.Time
+	HelperVerifiedAt             *time.Time
+	ReleaseRequestedAt           *time.Time
+	ReleaseReason                string
+	ResourceRootsJSON            string
+	ProviderMetadataJSON         string
+}
+
+func (b SandboxBinding) ReleaseRequested() bool {
+	return b.ReleaseRequestedAt != nil
+}
+
+type SandboxExecutionWork struct {
+	Ref                          SandboxExecutionRef
+	AttemptGeneration            int64
+	State                        string
+	Binding                      *SandboxBinding
+	MaterializationReady         bool
+	AuthorizedBindingRevision    int64
+	AuthorizedProviderResourceID string
+	PreparationDeadline          *time.Time
+	ProviderCommandReference     string
+	Invocation                   sandboxdriver.ToolInvocation
+}
+
+type SandboxExecutionJob struct {
+	JobID             string
+	LeaseToken        string
+	Ref               SandboxExecutionRef
+	AttemptGeneration int64
+}
+
+type SandboxExecutionSettlementKind string
+
+const (
+	SandboxExecutionCompleted      SandboxExecutionSettlementKind = "completed"
+	SandboxExecutionFailed         SandboxExecutionSettlementKind = "failed"
+	SandboxExecutionUnknownOutcome SandboxExecutionSettlementKind = "unknown_outcome"
+)
+
+type SandboxExecutionSettlement struct {
+	Kind                     SandboxExecutionSettlementKind
+	ResultJSON               string
+	ResultDigest             string
+	ProviderCommandReference string
+	ErrorKind                string
+	SafeMessage              string
+}
+
+type SandboxExecutionCoordinator interface {
+	LoadExecution(context.Context, SandboxExecutionJob) (SandboxExecutionWork, bool, error)
+	WaitForActivation(context.Context, SandboxExecutionWork, ExecutionReadiness) error
+	WaitForMaterialization(context.Context, SandboxExecutionWork) error
+	BeginPreparing(context.Context, SandboxExecutionWork, time.Time) (bool, error)
+	AuthorizeRunning(context.Context, SandboxExecutionWork) (bool, error)
+	SettleExecution(context.Context, SandboxExecutionWork, SandboxExecutionSettlement) error
+	FinalizeInvalidExecution(context.Context, *queuev1.QueueJob) error
+	FinalizeExhaustedExecution(context.Context, *queuev1.QueueJob) error
+}
+
+type SandboxToolExecutionJobRunner struct {
+	Queue       SessionPrepareQueueClient
+	Coordinator SandboxExecutionCoordinator
+	Providers   *ProviderRegistry
+	Config      SandboxToolExecutionRunnerConfig
+	Clock       func() time.Time
+}
+
+type SandboxToolExecutionRunnerConfig struct {
+	WorkspaceID        string
+	LeaseOwner         string
+	MaxJobs            int
+	LeaseDuration      time.Duration
+	HeartbeatInterval  time.Duration
+	PreparationTimeout time.Duration
+	LateCommandMargin  time.Duration
+}
+
+func (r *SandboxToolExecutionJobRunner) RunOnce(ctx context.Context) error {
+	_, err := r.RunOnceWithActivity(ctx)
+	return err
+}
+
+func (r *SandboxToolExecutionJobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
+	if r == nil || r.Queue == nil {
+		return false, errors.New("sandbox tool execution queue client is required")
+	}
+	if r.Coordinator == nil {
+		return false, errors.New("sandbox execution coordinator is required")
+	}
+	if r.Providers == nil {
+		return false, errors.New("sandbox provider registry is required")
+	}
+	cfg, err := normalizeSandboxToolExecutionRunnerConfig(r.Config)
+	if err != nil {
+		return false, err
+	}
+	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
+		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxToolExecute},
+		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
+	})
+	if err != nil {
+		return false, err
+	}
+	hadWork := len(lease.GetJobs()) > 0
+	for _, job := range lease.GetJobs() {
+		if err := r.processJob(ctx, job, cfg); err != nil {
+			return hadWork, err
+		}
+	}
+	return hadWork, nil
+}
+
+func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxToolExecutionRunnerConfig) error {
+	if queueJob.GetMaxAttempts() <= 0 {
+		if err := r.Coordinator.FinalizeInvalidExecution(ctx, queueJob); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: "sandbox_queue_integrity_error", ErrorMessage: "sandbox execution job has no attempt budget",
+		}))
+	}
+	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
+		if err := r.Coordinator.FinalizeExhaustedExecution(ctx, queueJob); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: "sandbox_execution_attempts_exhausted", ErrorMessage: "sandbox execution attempt budget exhausted",
+		}))
+	}
+	job, err := DecodeSandboxExecutionJob(queueJob)
+	if err != nil {
+		if err := r.Coordinator.FinalizeInvalidExecution(ctx, queueJob); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: "invalid_sandbox_tool_execute_payload", ErrorMessage: "sandbox tool execution queue payload is invalid",
+		}))
+	}
+	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.Ref.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	err = r.handleExecution(workCtx, job, cfg)
+	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+		return heartbeatErr
+	}
+	if err != nil {
+		var retry *sandboxExecutionRetry
+		if errors.As(err, &retry) {
+			if queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
+				if err := r.Coordinator.FinalizeExhaustedExecution(ctx, queueJob); err != nil {
+					return err
+				}
+				return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+					WorkspaceId: job.Ref.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+					ErrorKind: "sandbox_execution_attempts_exhausted", ErrorMessage: "sandbox execution attempt budget exhausted",
+				}))
+			}
+			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+				WorkspaceId: job.Ref.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+				ErrorKind: retry.kind, ErrorMessage: retry.message,
+			}))
+		}
+		return err
+	}
+	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
+		WorkspaceId: job.Ref.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+	}))
+}
+
+func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job SandboxExecutionJob, cfg SandboxToolExecutionRunnerConfig) error {
+	work, current, err := r.Coordinator.LoadExecution(ctx, job)
+	if err != nil {
+		return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox execution state could not be loaded")
+	}
+	if !current {
+		return nil
+	}
+	if work.State == "running" {
+		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+			Kind: SandboxExecutionUnknownOutcome, ProviderCommandReference: work.ProviderCommandReference,
+			ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
+		})
+	}
+	if work.Binding == nil || work.Binding.ProviderResourceID == "" {
+		return sandboxExecutionDependencyResult(r.Coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation))
+	}
+	adapter, ok := r.Providers.Resolve(work.Binding.Provider)
+	if !ok {
+		return r.settleProviderFailure(ctx, work, ProviderOutcome[ExecutionReadiness]{
+			EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderTerminal,
+			ErrorKind: "provider_not_registered", SafeMessage: "sandbox provider is not registered",
+		})
+	}
+	inspection := adapter.InspectForExecution(ctx, work.Binding.ProviderResourceID)
+	if inspection.Failed() {
+		if inspection.EffectBoundary == ProviderProvedNotStarted && inspection.Disposition == ProviderRetryable {
+			return newSandboxExecutionRetry(valueOrDefault(inspection.ErrorKind, "provider_inspection_retryable"), "sandbox provider inspection will be retried")
+		}
+		return r.settleProviderFailure(ctx, work, inspection)
+	}
+	switch inspection.Value {
+	case ExecutionNeedsActivation, ExecutionNeedsCreation:
+		return sandboxExecutionDependencyResult(r.Coordinator.WaitForActivation(ctx, work, inspection.Value))
+	case ExecutionReady:
+	default:
+		return r.settleProviderFailure(ctx, work, ProviderOutcome[ExecutionReadiness]{
+			EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderTerminal,
+			ErrorKind: "provider_response_malformed", SafeMessage: "sandbox provider returned an invalid readiness result",
+		})
+	}
+	if !work.MaterializationReady {
+		return sandboxExecutionDependencyResult(r.Coordinator.WaitForMaterialization(ctx, work))
+	}
+	deadline := r.now().Add(cfg.PreparationTimeout)
+	if work.State == "preparing" && work.PreparationDeadline != nil {
+		deadline = work.PreparationDeadline.UTC()
+	}
+	prepared, err := r.Coordinator.BeginPreparing(ctx, work, deadline)
+	if err != nil {
+		if errors.Is(err, errSandboxExecutionReinspection) {
+			return newSandboxExecutionRetry("sandbox_execution_reinspection", "sandbox execution state changed before preparation")
+		}
+		return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox execution preparation could not be recorded")
+	}
+	if !prepared {
+		return nil
+	}
+	work.Invocation.Target = sandboxdriver.ToolTarget{
+		WorkspaceID: work.Ref.WorkspaceID, SessionID: work.Ref.SessionID,
+		SessionThreadID: work.Ref.SessionThreadID, SandboxID: work.Binding.LogicalSandboxID,
+		ProviderSandboxID: work.Binding.ProviderResourceID, ResourceRootsJSON: work.Binding.ResourceRootsJSON,
+	}
+	preparationCtx, cancelPreparation := context.WithDeadline(ctx, deadline)
+	preparation := adapter.PrepareTool(preparationCtx, ToolExecutionRequest{
+		Handle:     sandbox.ProviderHandle{Provider: work.Binding.Provider, SandboxID: work.Binding.ProviderResourceID},
+		Invocation: work.Invocation,
+	})
+	cancelPreparation()
+	if preparation.Failed() {
+		if preparation.EffectBoundary == ProviderProvedNotStarted && preparation.Disposition == ProviderRetryable {
+			return newSandboxExecutionRetry(valueOrDefault(preparation.ErrorKind, "sandbox_tool_preparation_retryable"), "sandbox tool preparation will be retried")
+		}
+		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+			Kind: SandboxExecutionFailed, ErrorKind: valueOrDefault(preparation.ErrorKind, "sandbox_tool_preparation_failed"), SafeMessage: preparation.SafeMessage,
+		})
+	}
+	if preparation.Value.ImmediateResult != nil {
+		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+			Kind: SandboxExecutionCompleted, ResultJSON: preparation.Value.ImmediateResult.ResultJSON,
+		})
+	}
+	authorized, err := r.Coordinator.AuthorizeRunning(ctx, work)
+	if err != nil {
+		if errors.Is(err, errSandboxExecutionReinspection) {
+			return newSandboxExecutionRetry("sandbox_execution_reinspection", "sandbox execution state changed before submission")
+		}
+		return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox execution authorization could not be recorded")
+	}
+	if !authorized {
+		return nil
+	}
+	outcome := adapter.ExecuteTool(ctx, ToolExecutionRequest{
+		Handle:     sandbox.ProviderHandle{Provider: work.Binding.Provider, SandboxID: work.Binding.ProviderResourceID},
+		Invocation: work.Invocation,
+		Prepared:   preparation.Value.Prepared,
+	})
+	if outcome.Failed() {
+		kind := SandboxExecutionFailed
+		if outcome.EffectBoundary == ProviderOutcomeUnknown || outcome.EffectBoundary == ProviderSubmitted {
+			kind = SandboxExecutionUnknownOutcome
+		}
+		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+			Kind: kind, ErrorKind: valueOrDefault(outcome.ErrorKind, "sandbox_execution_failed"), SafeMessage: outcome.SafeMessage,
+		})
+	}
+	return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+		Kind: SandboxExecutionCompleted, ResultJSON: outcome.Value.ResultJSON,
+	})
+}
+
+func sandboxExecutionDependencyResult(err error) error {
+	if errors.Is(err, errSandboxExecutionReinspection) {
+		return newSandboxExecutionRetry("sandbox_execution_reinspection", "sandbox execution state changed before its dependency was recorded")
+	}
+	return err
+}
+
+func (r *SandboxToolExecutionJobRunner) settleProviderFailure(ctx context.Context, work SandboxExecutionWork, outcome ProviderOutcome[ExecutionReadiness]) error {
+	return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+		Kind: SandboxExecutionFailed, ErrorKind: valueOrDefault(outcome.ErrorKind, "sandbox_provider_unavailable"), SafeMessage: outcome.SafeMessage,
+	})
+}
+
+func (r *SandboxToolExecutionJobRunner) now() time.Time {
+	if r != nil && r.Clock != nil {
+		return r.Clock().UTC()
+	}
+	return storage.Now()
+}
+
+func DecodeSandboxExecutionJob(queueJob *queuev1.QueueJob) (SandboxExecutionJob, error) {
+	if queueJob == nil || queueJob.GetKind() != queue.KindSandboxToolExecute {
+		return SandboxExecutionJob{}, errors.New("queue job kind is not sandbox_tool_execute")
+	}
+	job, err := decodeSandboxExecutionQueueIdentity(
+		queueJob.GetId(), queueJob.GetWorkspaceId(), queueJob.GetPartitionKey(),
+		queueJob.GetDedupeKey(), queueJob.GetPayloadJson(),
+	)
+	if err != nil {
+		return SandboxExecutionJob{}, err
+	}
+	if queueJob.GetLeaseToken() == "" {
+		return SandboxExecutionJob{}, errors.New("sandbox execution lease token is missing")
+	}
+	job.LeaseToken = queueJob.GetLeaseToken()
+	return job, nil
+}
+
+func decodeSandboxExecutionQueueIdentity(jobID string, workspaceID string, partitionKey string, dedupeKey string, payloadJSON string) (SandboxExecutionJob, error) {
+	var payload struct {
+		WorkspaceID     string `json:"workspace_id"`
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		ToolUseEventID  string `json:"tool_use_event_id"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(payloadJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		return SandboxExecutionJob{}, err
+	}
+	separator := strings.LastIndexByte(dedupeKey, ':')
+	if separator < 0 {
+		return SandboxExecutionJob{}, errors.New("sandbox execution dedupe generation is missing")
+	}
+	generation, err := strconv.ParseInt(dedupeKey[separator+1:], 10, 64)
+	if err != nil || generation <= 0 {
+		return SandboxExecutionJob{}, errors.New("sandbox execution dedupe generation is invalid")
+	}
+	ref := SandboxExecutionRef{WorkspaceID: payload.WorkspaceID, SessionID: payload.SessionID, SessionThreadID: payload.SessionThreadID, ToolUseEventID: payload.ToolUseEventID}
+	if jobID == "" || ref.WorkspaceID == "" || ref.WorkspaceID != workspaceID ||
+		ref.SessionID == "" || ref.SessionThreadID == "" || ref.ToolUseEventID == "" ||
+		partitionKey != queue.FormatSandboxExecutionPartitionKey(queueWorkspaceID(ref.WorkspaceID), ref.SessionID, ref.SessionThreadID, ref.ToolUseEventID) ||
+		dedupeKey != queue.FormatSandboxToolExecuteDedupeKey(queueWorkspaceID(ref.WorkspaceID), ref.SessionID, ref.SessionThreadID, ref.ToolUseEventID, generation) {
+		return SandboxExecutionJob{}, errors.New("sandbox execution queue identity is invalid")
+	}
+	return SandboxExecutionJob{JobID: jobID, Ref: ref, AttemptGeneration: generation}, nil
+}
+
+func queueWorkspaceID(value string) workspace.ID { return workspace.ID(value) }
+
+func normalizeSandboxToolExecutionRunnerConfig(cfg SandboxToolExecutionRunnerConfig) (SandboxToolExecutionRunnerConfig, error) {
+	if cfg.LeaseOwner == "" {
+		cfg.LeaseOwner = ServiceName
+	}
+	if cfg.MaxJobs <= 0 {
+		cfg.MaxJobs = 1
+	}
+	if cfg.LeaseDuration <= 0 || cfg.HeartbeatInterval <= 0 || cfg.PreparationTimeout <= 0 || cfg.LateCommandMargin < 0 {
+		return SandboxToolExecutionRunnerConfig{}, errors.New("sandbox tool execution timing configuration is invalid")
+	}
+	if cfg.LeaseDuration-cfg.HeartbeatInterval < cfg.PreparationTimeout+cfg.LateCommandMargin {
+		return SandboxToolExecutionRunnerConfig{}, errors.New("sandbox tool execution lease does not cover preparation deadline and late-command margin")
+	}
+	return cfg, nil
+}
+
+type sandboxExecutionRetry struct {
+	kind    string
+	message string
+}
+
+func (e *sandboxExecutionRetry) Error() string { return e.message }
+
+func newSandboxExecutionRetry(kind string, message string) error {
+	return &sandboxExecutionRetry{kind: kind, message: message}
+}

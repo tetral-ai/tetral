@@ -272,7 +272,8 @@ func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
 	if err := blobStore.Put(ctx, skillBlobKey, bytes.NewReader(skillZip), int64(len(skillZip))); err != nil {
 		t.Fatalf("put skill package: %v", err)
 	}
-	minter := &recordingResourceCredentialMinter{}
+	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
+	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
 	runner := &recordingPreparationCommandRunner{}
 	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
 	setup := sandbox.SandboxSetup{
@@ -293,11 +294,11 @@ func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareSessionResources: %v", err)
 	}
-	if prepared.ResourceRootsJSON != "[]" || prepared.ResourceCredExpiresAt != nil {
-		t.Fatalf("prepared roots=%q expires=%v; want no file-resource credential", prepared.ResourceRootsJSON, prepared.ResourceCredExpiresAt)
+	if prepared.ResourceRootsJSON != "[]" || prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
+		t.Fatalf("prepared roots=%q expires=%v; want bounded materialization receipt", prepared.ResourceRootsJSON, prepared.ResourceCredExpiresAt)
 	}
-	if len(minter.requests) != 0 {
-		t.Fatalf("credential mint requests = %d; want none for skill-only materialization", len(minter.requests))
+	if len(minter.requests) != 1 {
+		t.Fatalf("credential mint requests = %d; want one for skill-only materialization", len(minter.requests))
 	}
 	if len(runner.uploads) != 1 {
 		t.Fatalf("uploads = %+v; want one staged skill archive", runner.uploads)
@@ -316,6 +317,33 @@ func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
 		if !strings.Contains(command, want) {
 			t.Fatalf("skill materialization command missing %q:\n%s", want, command)
 		}
+	}
+}
+
+func TestResourceProjectionPreparerMintsBoundedReceiptWithoutFileResources(t *testing.T) {
+	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
+	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
+		ExpiresAt: expiresAt,
+	}}
+	preparer := newTestResourceProjectionPreparer(
+		t,
+		blob.NewFakeBlobStore(),
+		minter,
+		&recordingPreparationCommandRunner{},
+	)
+
+	prepared, err := preparer.PrepareSessionResources(context.Background(), sandbox.SandboxSetup{
+		WorkspaceID: workspace.ID("ws_test"),
+		SessionID:   "sesn_no_resources",
+	}, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	if err != nil {
+		t.Fatalf("PrepareSessionResources: %v", err)
+	}
+	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
+		t.Fatalf("resource credential expiry = %v; want %s", prepared.ResourceCredExpiresAt, expiresAt)
+	}
+	if len(minter.requests) != 1 {
+		t.Fatalf("credential mint requests = %d; want one bounded materialization credential", len(minter.requests))
 	}
 }
 
@@ -855,8 +883,10 @@ func TestResourceProjectionPreparerLocalCopyFallbackStagesBytesWithoutMintOrMoun
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
+	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
+	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
 	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparerWithLevel(t, blobStore, nil, runner, ResourceProjectionLevelLocalCopy)
+	preparer := newTestResourceProjectionPreparerWithLevel(t, blobStore, minter, runner, ResourceProjectionLevelLocalCopy)
 
 	prepared, err := preparer.PrepareSessionResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
@@ -865,8 +895,11 @@ func TestResourceProjectionPreparerLocalCopyFallbackStagesBytesWithoutMintOrMoun
 	if len(prepared.Files) != 0 || len(prepared.DeletedFiles) != 0 {
 		t.Fatalf("prepared files=%+v deleted=%+v; want raw file mounts consumed", prepared.Files, prepared.DeletedFiles)
 	}
-	if prepared.ResourceCredExpiresAt != nil {
-		t.Fatalf("ResourceCredExpiresAt = %v; want nil because local_copy uses no sandbox R2 credential", prepared.ResourceCredExpiresAt)
+	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
+		t.Fatalf("ResourceCredExpiresAt = %v; want bounded materialization receipt", prepared.ResourceCredExpiresAt)
+	}
+	if len(minter.requests) != 1 {
+		t.Fatalf("credential mint requests = %d; want one receipt credential not injected into local_copy", len(minter.requests))
 	}
 	if got, want := prepared.ResourceRootsJSON, `[{"path":"/mnt/session/uploads/file_session","mode":"read"}]`; got != want {
 		t.Fatalf("ResourceRootsJSON = %s; want %s", got, want)
@@ -1197,7 +1230,8 @@ func TestResourceProjectionPreparerCleansDeletedLastFileAndUnmountsStaging(t *te
 		events = append(events, "blob-delete")
 		return nil
 	})
-	minter := &recordingResourceCredentialMinter{}
+	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
+	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
 	runner := &recordingPreparationCommandRunner{eventsRef: &events}
 	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
 	oldExpiresAt := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
@@ -1217,11 +1251,11 @@ func TestResourceProjectionPreparerCleansDeletedLastFileAndUnmountsStaging(t *te
 	if err != nil {
 		t.Fatalf("PrepareSessionResources: %v", err)
 	}
-	if prepared.ResourceRootsJSON != "[]" || prepared.ResourceCredExpiresAt != nil {
-		t.Fatalf("prepared metadata roots=%q expires=%v; want empty roots without minted credential", prepared.ResourceRootsJSON, prepared.ResourceCredExpiresAt)
+	if prepared.ResourceRootsJSON != "[]" || prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
+		t.Fatalf("prepared metadata roots=%q expires=%v; want empty roots with bounded materialization receipt", prepared.ResourceRootsJSON, prepared.ResourceCredExpiresAt)
 	}
-	if len(minter.requests) != 0 {
-		t.Fatalf("mint requests = %d; want none for cleanup-only prepare", len(minter.requests))
+	if len(minter.requests) != 1 {
+		t.Fatalf("mint requests = %d; want one for cleanup-only materialization", len(minter.requests))
 	}
 	if blobStore.Has(sessionKey) {
 		t.Fatal("deleted resource session copy survived cleanup")
@@ -1280,8 +1314,8 @@ func TestResourceProjectionPreparerRetriesStagingUnmountAfterDetachWithoutDelete
 	if err != nil {
 		t.Fatalf("retry without deleted row: %v", err)
 	}
-	if prepared.ResourceCredExpiresAt != nil {
-		t.Fatalf("retry resource credential expiry = %v; want nil only after successful staging cleanup", prepared.ResourceCredExpiresAt)
+	if prepared.ResourceCredExpiresAt == nil {
+		t.Fatal("retry materialization did not produce a bounded credential receipt")
 	}
 	if want := []string{"file-remove", "blob-delete", "resource-detach", "staging-unmount", "staging-unmount"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("retry events = %v; want %v", events, want)
@@ -1711,6 +1745,9 @@ type recordingResourceCredentialMinter struct {
 
 func (m *recordingResourceCredentialMinter) Mint(_ context.Context, request resourceprojection.CredentialMintRequest) (resourceprojection.CredentialMintResult, error) {
 	m.requests = append(m.requests, request)
+	if m.err == nil && m.result.ExpiresAt.IsZero() {
+		m.result.ExpiresAt = request.Now.Add(request.TTL)
+	}
 	return m.result, m.err
 }
 

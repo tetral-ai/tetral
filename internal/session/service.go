@@ -638,7 +638,7 @@ func (s *Service) addResourceLocked(ctx context.Context, ws workspace.ID, sessio
 		if err := tx.CreateResource(ctx, resource); err != nil {
 			return err
 		}
-		return tx.PrepareSessionResourceMutation(ctx, sessionID, now)
+		return tx.RecordSessionResourceMutation(ctx, sessionID, now)
 	}); err != nil {
 		return nil, err
 	}
@@ -698,9 +698,8 @@ func (s *Service) deleteResourceLocked(ctx context.Context, ws workspace.ID, ses
 					return err
 				}
 			}
-			return nil
 		}
-		return tx.PrepareSessionResourceMutation(ctx, sessionID, now)
+		return tx.RecordSessionResourceMutation(ctx, sessionID, now)
 	}); err != nil {
 		return nil, err
 	}
@@ -906,36 +905,44 @@ func (s *Service) UpdateResource(ctx context.Context, ws workspace.ID, sessionID
 		return nil, &ValidationError{Message: "authorization_token is required"}
 	}
 	var resource *Resource
-	if err := s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
-		storedSession, err := tx.LockSession(ctx, sessionID)
-		if err != nil {
-			return err
-		}
-		if storedSession.LifecycleState == LifecycleStateDeleted {
-			return &NotFoundError{Message: "session not found"}
-		}
-		if storedSession.ArchivedAt != nil ||
-			storedSession.LifecycleState == LifecycleStateArchiving ||
-			storedSession.LifecycleState == LifecycleStateArchived {
-			return &ConflictError{Message: "session is archived", InvalidRequest: true}
-		}
-		current, err := tx.GetResource(ctx, sessionID, resourceID)
-		if err != nil {
-			return err
-		}
-		if current.Type != ResourceTypeGitHubRepository {
-			return &ValidationError{Message: "only github_repository authorization_token can be updated"}
-		}
-		if s.encryptor == nil {
-			return fmt.Errorf("session resource encryptor is required")
-		}
-		encrypted, err := s.encryptor.Encrypt([]byte(token))
-		if err != nil {
-			return err
-		}
-		resource, err = tx.UpdateGitHubRepositoryToken(ctx, sessionID, resourceID, encrypted, s.clock().UTC())
-		return err
-	}); err != nil {
+	err := s.store.WithRuntimeMutationLock(ctx, ws, sessionID, func() error {
+		return s.store.WithWorkspaceTx(ctx, ws, func(tx Transaction) error {
+			storedSession, err := tx.LockSession(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			if storedSession.LifecycleState == LifecycleStateDeleted {
+				return &NotFoundError{Message: "session not found"}
+			}
+			if storedSession.ArchivedAt != nil || storedSession.LifecycleState == LifecycleStateArchiving || storedSession.LifecycleState == LifecycleStateArchived {
+				return &ConflictError{Message: "session is archived", InvalidRequest: true}
+			}
+			if err := tx.RequireSessionUsableForMutation(ctx, sessionID); err != nil {
+				return err
+			}
+			current, err := tx.GetResource(ctx, sessionID, resourceID)
+			if err != nil {
+				return err
+			}
+			if current.Type != ResourceTypeGitHubRepository {
+				return &ValidationError{Message: "only github_repository authorization_token can be updated"}
+			}
+			if s.encryptor == nil {
+				return fmt.Errorf("session resource encryptor is required")
+			}
+			encrypted, err := s.encryptor.Encrypt([]byte(token))
+			if err != nil {
+				return err
+			}
+			now := s.clock().UTC()
+			resource, err = tx.UpdateGitHubRepositoryToken(ctx, sessionID, resourceID, encrypted, now)
+			if err != nil {
+				return err
+			}
+			return tx.RecordSessionResourceMutation(ctx, sessionID, now)
+		})
+	})
+	if err != nil {
 		return nil, err
 	}
 	return resourceResponse(resource), nil

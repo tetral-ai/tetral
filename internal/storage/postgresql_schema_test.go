@@ -623,7 +623,13 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		"session_runtime_tool_results": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
 			"tool_kind", "normalized_input_hash", "tool_name", "input_json",
-			"ack_status", "result_json", "background_task_started", "task_id",
+			"ack_status", "result_json", "model_tool_call_id", "execution_state",
+			"execution_attempt_generation", "waiting_activation_operation_id",
+			"waiting_materialization_operation_id", "authorized_binding_revision",
+			"authorized_provider_resource_id", "preparation_deadline", "result_digest",
+			"provider_command_reference_json", "cancel_requested_at", "cancel_state",
+			"cancel_submitted_at", "consumed_by_terminal_event_id", "consumption_reason",
+			"helper_recovery_count", "background_task_started", "task_id",
 			"memory_projection_state", "mcp_claim_status", "mcp_claim_owner_request_id",
 			"mcp_claim_lease_expires_at", "created_at", "updated_at",
 		},
@@ -1052,7 +1058,7 @@ func TestSessionRuntimeToolResultsMemoryProjectionStateShape(t *testing.T) {
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed session thread: %v", err)
 	}
-	for _, state := range []any{nil, "pending", "refreshed", "skipped_cold"} {
+	for _, state := range []any{nil, "pending", "refreshed", "skipped_cold", "failed"} {
 		toolUseEventID := fmt.Sprintf("tool_%v", state)
 		if state == nil {
 			toolUseEventID = "tool_null"
@@ -1084,6 +1090,39 @@ func TestSessionRuntimeToolResultsMemoryProjectionStateShape(t *testing.T) {
 			'invalid', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err == nil {
 		t.Fatal("invalid memory_projection_state inserted successfully; want check constraint failure")
+	}
+}
+
+func TestSessionRuntimeToolResultsKeepsSandboxExecutionFieldsKindScoped(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_tool_kind_scope", "sesn_tool_kind_scope")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_threads (
+		workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at
+	) VALUES ('workspace_tool_kind_scope', 'thr_tool_kind_scope', 'sesn_tool_kind_scope', 'main', 'public', 'idle',
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed session thread: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		created_at, updated_at
+	) VALUES (
+		'workspace_tool_kind_scope', 'sesn_tool_kind_scope', 'thr_tool_kind_scope', 'evt_mcp_null_result', 'mcp',
+		'hash_mcp_null_result', 'mcp:server/tool', '{}', 'committed', NULL,
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	)`); err == nil {
+		t.Fatal("MCP row accepted a Sandbox-only nullable result body")
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		execution_state, execution_attempt_generation, created_at, updated_at
+	) VALUES (
+		'workspace_tool_kind_scope', 'sesn_tool_kind_scope', 'thr_tool_kind_scope', 'evt_memory_execution', 'memory',
+		'hash_memory_execution', 'memory', '{}', 'committed', '{}', 'pending', 1,
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	)`); err == nil {
+		t.Fatal("memory row accepted Sandbox execution state")
 	}
 }
 
@@ -1345,6 +1384,165 @@ func TestSessionRuntimeBindingsSchemaShapeAndRLS(t *testing.T) {
 				t.Fatalf("session_runtime_bindings column %q contains forbidden binding concept %q", column, forbidden)
 			}
 		}
+	}
+}
+
+func TestSandboxBindingAndLifecycleOperationSchemaShape(t *testing.T) {
+	_, db, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	for _, table := range []string{"session_sandbox_bindings", "sandbox_lifecycle_operations"} {
+		assertTableRLSForced(t, db, schema, table)
+	}
+	assertPrimaryKeyColumns(t, db, schema, "session_sandbox_bindings", []string{"workspace_id", "session_id"})
+	assertUniqueConstraintColumns(t, db, schema, "session_sandbox_bindings", []string{"workspace_id", "logical_sandbox_id"})
+	if columns := readIndexColumns(t, db, schema, "idx_session_sandbox_bindings_provider_resource_unique"); !equalStringSlices(columns, []string{"provider", "provider_resource_id"}) {
+		t.Fatalf("provider-resource index columns = %v", columns)
+	}
+	if !readIndexIsUnique(t, db, schema, "idx_session_sandbox_bindings_provider_resource_unique") {
+		t.Fatal("provider-resource index is not unique")
+	}
+	if predicate := readIndexPredicate(t, db, schema, "idx_session_sandbox_bindings_provider_resource_unique"); !strings.Contains(predicate, "provider_resource_id IS NOT NULL") {
+		t.Fatalf("provider-resource index predicate = %q", predicate)
+	}
+	assertPrimaryKeyColumns(t, db, schema, "sandbox_lifecycle_operations", []string{"workspace_id", "operation_id"})
+	if !slices.Contains(readColumnNames(t, db, schema, "sandbox_lifecycle_operations"), "materialization_resources_json") {
+		t.Fatal("sandbox lifecycle operations is missing immutable materialization resources")
+	}
+	if !slices.Contains(readColumnNames(t, db, schema, "sessions"), "sandbox_resource_revision") {
+		t.Fatal("sessions is missing sandbox_resource_revision")
+	}
+
+	seedStorageSchemaSession(t, db, "workspace_sandbox_binding", "sesn_sandbox_binding")
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, binding_revision,
+		materialized_resource_revision, resource_roots_json,
+		provider_metadata_json, created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sesn_sandbox_binding', 'sbox_binding',
+		'env_sesn_sandbox_binding', 1, 'daytona', 1, 0, '[]', '{}',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert daytona binding: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_sandbox_bindings SET provider = 'tetral' WHERE workspace_id = 'workspace_sandbox_binding' AND session_id = 'sesn_sandbox_binding'`); err == nil {
+		t.Fatal("retired tetral provider label was accepted")
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_sandbox_bindings SET provider_resource_id = 'sandbox_shared_provider_id' WHERE workspace_id = 'workspace_sandbox_binding' AND session_id = 'sesn_sandbox_binding'`); err != nil {
+		t.Fatalf("set first provider resource id: %v", err)
+	}
+	seedStorageSchemaSession(t, db, "workspace_sandbox_binding_other", "sesn_sandbox_binding_other")
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		materialized_resource_revision, resource_roots_json,
+		provider_metadata_json, created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding_other', 'sesn_sandbox_binding_other', 'sbox_binding_other',
+		'env_sesn_sandbox_binding_other', 1, 'daytona', 'sandbox_shared_provider_id', 1,
+		0, '[]', '{}', '2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err == nil {
+		t.Fatal("one provider resource was accepted by two workspaces")
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		observed_binding_revision, target_environment_generation,
+		provider_create_name, provider_request_labels_json,
+		queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sop_create', 'sesn_sandbox_binding', 'sbox_binding',
+		'create', 'pending', 1, 1, 'tetral-sbox-binding', '{"workspace_id":"workspace_sandbox_binding"}',
+		'qjob_create', 'sandbox_activate', 'sandbox-lifecycle:workspace_sandbox_binding:sbox_binding',
+		'sandbox_activate:workspace_sandbox_binding:sbox_binding:sop_create',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert lifecycle operation: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations SET state = 'mystery' WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err == nil {
+		t.Fatal("unknown lifecycle state was accepted")
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
+		SET state = 'completed', completed_at = '2026-07-31T00:01:00Z'
+		WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err != nil {
+		t.Fatalf("complete first lifecycle operation: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		observed_binding_revision, target_environment_generation,
+		provider_create_name, provider_request_labels_json,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sop_waiting_artifact', 'sesn_sandbox_binding', 'sbox_binding',
+		'create', 'waiting_artifact', 1, 1, 'sbox_binding', '{"workspace_id":"workspace_sandbox_binding"}',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert lifecycle operation before queue notification: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
+		SET queue_job_id = 'qjob_partial'
+		WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_waiting_artifact'`); err == nil {
+		t.Fatal("partial lifecycle queue identity was accepted")
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		target_provider_resource_id, release_reason,
+		queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sop_release', 'sesn_sandbox_binding', 'sbox_binding',
+		'release', 'pending', 'provider_old', 'replaced_handle',
+		'qjob_release', 'sandbox_release', 'sandbox-lifecycle:workspace_sandbox_binding:sbox_binding',
+		'sandbox_release:workspace_sandbox_binding:sbox_binding:sop_release',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert replaced-handle release: %v", err)
+	}
+}
+
+func TestSandboxExecutionHandoffSchemaShape(t *testing.T) {
+	_, db, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, db, "workspace_sandbox_execution", "sesn_sandbox_execution")
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_threads (
+		workspace_id, session_id, id, role, status, visibility, created_at, last_active_at, updated_at
+	) VALUES (
+		'workspace_sandbox_execution', 'sesn_sandbox_execution', 'thr_sandbox_execution',
+		'main', 'idle', 'internal', '2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert execution thread: %v", err)
+	}
+	columns := readColumnNames(t, db, schema, "session_runtime_tool_results")
+	for _, column := range []string{
+		"model_tool_call_id", "execution_state", "execution_attempt_generation",
+		"waiting_activation_operation_id", "waiting_materialization_operation_id",
+		"authorized_binding_revision", "authorized_provider_resource_id",
+		"preparation_deadline", "result_digest", "provider_command_reference_json",
+		"cancel_requested_at", "cancel_state", "cancel_submitted_at",
+		"consumed_by_terminal_event_id", "consumption_reason", "helper_recovery_count",
+	} {
+		if !slices.Contains(columns, column) {
+			t.Fatalf("session_runtime_tool_results is missing %s", column)
+		}
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		model_tool_call_id, execution_state, execution_attempt_generation,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_execution', 'sesn_sandbox_execution', 'thr_sandbox_execution',
+		'evt_sandbox_execution', 'sandbox_tool', 'input_hash', 'bash', '{}', 'committed', NULL,
+		'call_sandbox_execution', 'pending', 1,
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert pending Sandbox execution handoff: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_tool_results
+		SET cancel_state = 'submitted'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`); err == nil {
+		t.Fatal("submitted cancellation without request/submission timestamps was accepted")
 	}
 }
 
@@ -1995,6 +2193,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"queue_jobs",
 		"queue_partition_counters",
 		"request_usage_details",
+		"sandbox_lifecycle_operations",
 		"sandbox_release_idempotency_keys",
 		"sandboxes",
 		"session_background_tasks",
@@ -2019,6 +2218,7 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_runtime_inbox",
 		"session_runtime_status",
 		"session_runtime_tool_results",
+		"session_sandbox_bindings",
 		"session_thread_context_prefixes",
 		"session_threads",
 		"session_transient_attachments",

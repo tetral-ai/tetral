@@ -41,9 +41,10 @@ const (
 //
 // local_copy (L2) has the driver stream the session-copy bytes into a 0444
 // local file (stageLocalCopyResources reads them through this process into the
-// sandbox — the one exception to bytes never transiting our process). It needs
-// no credential, and its read-only-ness is soft afterward (a 0444 file the
-// runtime user can chmod back).
+// sandbox — the one exception to bytes never transiting our process). It does
+// not inject the bounded materialization credential into the sandbox, and its
+// read-only-ness is soft afterward (a 0444 file the runtime user can chmod
+// back).
 //
 // UPDATE-WITH: mount.go (fuse_bind command), verify.go (local_copy command),
 // credential.go (the minter fuse_bind requires).
@@ -104,7 +105,7 @@ func NewResourceProjectionPreparer(config ResourceProjectionPreparerConfig) (*Re
 	default:
 		return nil, &ConfigError{Message: "resource projection level must be fuse_bind or local_copy"}
 	}
-	if config.ProjectionLevel == ResourceProjectionLevelFUSEBind && config.CredentialMinter == nil {
+	if config.CredentialMinter == nil {
 		return nil, &ConfigError{Message: "resource projection credential minter is required"}
 	}
 	if strings.TrimSpace(config.Bucket) == "" {
@@ -222,7 +223,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		}
 		prepared.ResourceRootsJSON = "[]"
 		prepared.ResourceCredExpiresAt = nil
-		return prepared, nil
+		return p.ensureMaterializationCredential(ctx, setup, prepared)
 	}
 	if len(setup.Resources.Files) == 0 {
 		if len(deletedTargets) > 0 || setup.Resources.ResourceCredExpiresAt != nil {
@@ -236,7 +237,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		}
 		prepared.ResourceRootsJSON = plan.ResourceRootsJSON
 		prepared.ResourceCredExpiresAt = nil
-		return prepared, nil
+		return p.ensureMaterializationCredential(ctx, setup, prepared)
 	}
 	if handle.SandboxID == "" {
 		return sandbox.ResourceSetup{}, missingProviderSandboxIDError()
@@ -278,7 +279,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		prepared.DeletedFiles = nil
 		prepared.ResourceRootsJSON = plan.ResourceRootsJSON
 		prepared.ResourceCredExpiresAt = nil
-		return prepared, nil
+		return p.ensureMaterializationCredential(ctx, setup, prepared)
 	}
 	env := map[string]string{}
 	expiresAt := time.Time{}
@@ -311,6 +312,28 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 	prepared.Files = nil
 	prepared.DeletedFiles = nil
 	prepared.ResourceRootsJSON = plan.ResourceRootsJSON
+	prepared.ResourceCredExpiresAt = &expiresAt
+	return prepared, nil
+}
+
+func (p *ResourceProjectionPreparer) ensureMaterializationCredential(ctx context.Context, setup sandbox.SandboxSetup, prepared sandbox.ResourceSetup) (sandbox.ResourceSetup, error) {
+	if prepared.ResourceCredExpiresAt != nil {
+		return prepared, nil
+	}
+	now := p.clock().UTC()
+	mintResult, err := p.credentialMinter.Mint(ctx, resourceprojection.CredentialMintRequest{
+		WorkspaceID: string(setup.WorkspaceID),
+		SessionID:   setup.SessionID,
+		TTL:         p.credentialTTL,
+		Now:         now,
+	})
+	if err != nil {
+		return sandbox.ResourceSetup{}, err
+	}
+	if !mintResult.ExpiresAt.After(now) {
+		return sandbox.ResourceSetup{}, &ConfigError{Message: "resource projection credential expiry must be in the future"}
+	}
+	expiresAt := mintResult.ExpiresAt.UTC()
 	prepared.ResourceCredExpiresAt = &expiresAt
 	return prepared, nil
 }
