@@ -3334,6 +3334,13 @@ describe("AgentLoop", () => {
     expect(session.state.contextManager.threadContextPrefix()).toBeUndefined();
   });
 
+  test("compaction boundary uses zero only for an empty own-message list", () => {
+    expect(AgentLoop.compactionBoundaryMessageSequence([])).toBe(0);
+    expect(AgentLoop.compactionBoundaryMessageSequence([
+      userMessage("own-message", 12, "own context"),
+    ])).toBe(12);
+  });
+
   test("compaction updates the latest checkpoint and carries its legacy recent block as opaque context", async () => {
     const session = new Session("sesn_1");
     recordCompactionHint(session, {

@@ -1848,7 +1848,7 @@ function runOwnedCompactionSummaryAttemptEffect(
           modelRequestId: request.modelRequestId,
           text: mintCompactionCheckpoint(summary, recentContext),
         });
-        const compactionBoundarySequence = highestMessageSequence(messages);
+        const compactionBoundarySequence = compactionBoundaryMessageSequence(messages);
         const prefixConsumption = prefix === undefined
           ? undefined
           : {
@@ -2246,6 +2246,10 @@ function usableModelInputTokens(limits: RuntimeModelLimits, reservedInputTokens?
 
 function highestMessageSequence(messages: readonly RuntimeMessage[]): number {
   return messages.reduce((highest, message) => Math.max(highest, message.sequence), -1);
+}
+
+export function compactionBoundaryMessageSequence(messages: readonly RuntimeMessage[]): number {
+  return Math.max(0, highestMessageSequence(messages));
 }
 
 function isContextOverflowFailure(failure: RuntimeFailure): boolean {

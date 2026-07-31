@@ -3339,33 +3339,57 @@ func seedSandboxSessionEvent(t *testing.T, admin *sql.DB, ws workspace.ID, sessi
 
 func seedSandboxRuntimeInputJob(t *testing.T, admin *sql.DB, ws workspace.ID, sessionID string, threadID string, runtimeInputID string, eventIDs []string, sequenceFrom int64, sequenceTo int64, inputKind string) {
 	t.Helper()
+	var preparationAttemptID string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT preparation_attempt_id
+		   FROM session_preparations
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		  ORDER BY created_at DESC, preparation_attempt_id DESC
+		  LIMIT 1`,
+		string(ws),
+		sessionID,
+	).Scan(&preparationAttemptID); err != nil {
+		t.Fatalf("read runtime input birth preparation attempt: %v", err)
+	}
 	payload, err := json.Marshal(map[string]any{
-		"workspace_id":      string(ws),
-		"session_id":        sessionID,
-		"session_thread_id": threadID,
-		"runtime_input_id":  runtimeInputID,
-		"event_ids":         eventIDs,
-		"sequence_from":     sequenceFrom,
-		"sequence_to":       sequenceTo,
-		"input_kind":        inputKind,
+		"workspace_id":           string(ws),
+		"session_id":             sessionID,
+		"session_thread_id":      threadID,
+		"runtime_input_id":       runtimeInputID,
+		"event_ids":              eventIDs,
+		"sequence_from":          sequenceFrom,
+		"sequence_to":            sequenceTo,
+		"input_kind":             inputKind,
+		"preparation_attempt_id": preparationAttemptID,
 	})
 	if err != nil {
 		t.Fatalf("marshal runtime input job: %v", err)
 	}
-	now := "2026-05-22T10:00:00Z"
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, payload_version, status, payload_json,
-			priority, attempt_count, max_attempts, available_at, created_at, updated_at
-		) VALUES ($1, $2, 'runtime_input', $3, $4, 1, 'pending', $5, 0, 0, 0, $6, $6, $6)`,
-		"qjob_"+runtimeInputID,
-		string(ws),
-		queue.FormatSessionPartitionKey(ws, sessionID),
-		queue.FormatRuntimeInputDedupeKey(ws, sessionID, runtimeInputID),
-		string(payload),
-		now,
-	); err != nil {
+	ctx := context.Background()
+	sqlTx, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin runtime input job seed: %v", err)
+	}
+	defer func() { _ = sqlTx.Rollback() }()
+	queueTx := dbconnect.NewTxForTesting(
+		sqlTx,
+		dbconnect.NewClientForTesting(admin),
+		"sandbox.seed_runtime_input_job",
+	)
+	now := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
+	if _, err := queue.EnqueueTx(ctx, queueTx, queue.EnqueueRequest{
+		WorkspaceID:  ws,
+		Kind:         queue.KindRuntimeInput,
+		PartitionKey: queue.FormatSessionPartitionKey(ws, sessionID),
+		DedupeKey:    queue.FormatRuntimeInputDedupeKey(ws, sessionID, runtimeInputID),
+		PayloadJSON:  payload,
+		Now:          now,
+	}); err != nil {
 		t.Fatalf("seed runtime input job: %v", err)
+	}
+	if err := sqlTx.Commit(); err != nil {
+		t.Fatalf("commit runtime input job seed: %v", err)
 	}
 }
 
