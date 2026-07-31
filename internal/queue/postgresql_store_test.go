@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1312,10 +1313,375 @@ func TestPostgreSQLStoreReclaimsExpiredLeasesAcrossWorkspacesWithQueueMaintenanc
 	}
 }
 
+func TestTargetedCancelTxRequiresExactPendingIdentity(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_targeted_cancel")
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	pending := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_targeted_cancel", "thrd_targeted_cancel", "sevt_pending_cancel", "qjob_pending_cancel", 2, now))
+
+	cancelled := false
+	if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_targeted_cancel", func(tx *dbconnect.Tx) error {
+		var err error
+		cancelled, err = CancelTx(ctx, tx, TargetedCancelRequest{
+			WorkspaceID:  ws,
+			JobID:        pending.ID,
+			Kind:         pending.Kind,
+			PartitionKey: pending.PartitionKey,
+			DedupeKey:    pending.DedupeKey,
+			Now:          now.Add(time.Second),
+		})
+		return err
+	}); err != nil || !cancelled {
+		t.Fatalf("CancelTx pending = (%v,%v); want true,nil", cancelled, err)
+	}
+	if got := queueJobStatus(t, admin, ws, pending.ID); got != StatusCancelled {
+		t.Fatalf("pending status after CancelTx = %s; want cancelled", got)
+	}
+
+	leasedJob := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_targeted_cancel", "thrd_targeted_cancel", "sevt_leased_cancel", "qjob_leased_cancel", 2, now.Add(2*time.Second)))
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindSandboxToolExecute}, LeaseOwner: "sandbox",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(3 * time.Second),
+	})
+	if leased.ID != leasedJob.ID {
+		t.Fatalf("leased id = %s; want %s", leased.ID, leasedJob.ID)
+	}
+	cancelled = true
+	if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_targeted_cancel_leased", func(tx *dbconnect.Tx) error {
+		var err error
+		cancelled, err = CancelTx(ctx, tx, TargetedCancelRequest{
+			WorkspaceID:  ws,
+			JobID:        leasedJob.ID,
+			Kind:         leasedJob.Kind,
+			PartitionKey: leasedJob.PartitionKey,
+			DedupeKey:    leasedJob.DedupeKey,
+			Now:          now.Add(4 * time.Second),
+		})
+		return err
+	}); err != nil || cancelled {
+		t.Fatalf("CancelTx leased = (%v,%v); want false,nil", cancelled, err)
+	}
+
+	if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_targeted_cancel_mismatch", func(tx *dbconnect.Tx) error {
+		_, err := CancelTx(ctx, tx, TargetedCancelRequest{
+			WorkspaceID:  ws,
+			JobID:        leasedJob.ID,
+			Kind:         KindSandboxActivate,
+			PartitionKey: leasedJob.PartitionKey,
+			DedupeKey:    leasedJob.DedupeKey,
+			Now:          now.Add(5 * time.Second),
+		})
+		return err
+	}); !IsIntegrityError(err) {
+		t.Fatalf("CancelTx mismatched identity = %v; want integrity error", err)
+	}
+}
+
+func TestPostgreSQLStoreListsAndConditionallyDeadLettersPendingOverBudgetSandboxJobs(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_over_budget")
+	now := time.Date(2026, 7, 31, 13, 0, 0, 0, time.UTC)
+	job := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_over_budget", "thrd_over_budget", "sevt_over_budget", "qjob_over_budget", 1, now))
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindSandboxToolExecute}, LeaseOwner: "sandbox",
+		MaxJobs: 1, LeaseDuration: time.Second, Now: now,
+	})
+	if leased.AttemptCount != 1 || leased.MaxAttempts != 1 {
+		t.Fatalf("leased budget = %d/%d; want 1/1", leased.AttemptCount, leased.MaxAttempts)
+	}
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Limit: 1, Now: now.Add(2 * time.Second)}); err != nil || reclaimed != 1 {
+		t.Fatalf("ReclaimExpiredLeases = (%d,%v); want 1,nil", reclaimed, err)
+	}
+
+	candidates, err := store.ListPendingAtOrOverBudget(ctx, ListPendingAtOrOverBudgetRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListPendingAtOrOverBudget: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].JobID != job.ID || candidates[0].AttemptCount != 1 || candidates[0].MaxAttempts != 1 {
+		t.Fatalf("over-budget candidates = %#v; want %s at 1/1", candidates, job.ID)
+	}
+
+	updated := true
+	if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_stale_dead_letter", func(tx *dbconnect.Tx) error {
+		var err error
+		updated, err = DeadLetterExhaustedTx(ctx, tx, DeadLetterExhaustedRequest{
+			WorkspaceID: ws, JobID: job.ID, ObservedAttemptCount: 2,
+			ErrorKind: "sandbox_execution_unavailable", ErrorMessage: "sandbox execution unavailable", Now: now.Add(3 * time.Second),
+		})
+		return err
+	}); err != nil || updated {
+		t.Fatalf("DeadLetterExhaustedTx stale observation = (%v,%v); want false,nil", updated, err)
+	}
+	if got := queueJobStatus(t, admin, ws, job.ID); got != StatusPending {
+		t.Fatalf("status after stale dead-letter = %s; want pending", got)
+	}
+
+	if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_dead_letter", func(tx *dbconnect.Tx) error {
+		var err error
+		updated, err = DeadLetterExhaustedTx(ctx, tx, DeadLetterExhaustedRequest{
+			WorkspaceID: ws, JobID: job.ID, ObservedAttemptCount: 1,
+			ErrorKind: "sandbox_execution_unavailable", ErrorMessage: "sandbox execution unavailable", Now: now.Add(4 * time.Second),
+		})
+		return err
+	}); err != nil || !updated {
+		t.Fatalf("DeadLetterExhaustedTx = (%v,%v); want true,nil", updated, err)
+	}
+	if got := queueJobStatus(t, admin, ws, job.ID); got != StatusDeadLettered {
+		t.Fatalf("status after dead-letter = %s; want dead_lettered", got)
+	}
+
+	invalidBudget := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_over_budget", "thrd_over_budget", "sevt_zero_budget", "qjob_zero_budget", 1, now.Add(5*time.Second)))
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE queue_jobs SET max_attempts = 0 WHERE workspace_id = $1 AND id = $2`,
+		string(ws), invalidBudget.ID,
+	); err != nil {
+		t.Fatalf("set invalid Sandbox budget: %v", err)
+	}
+	if _, err := store.ListPendingAtOrOverBudget(ctx, ListPendingAtOrOverBudgetRequest{Limit: 10}); !IsIntegrityError(err) {
+		t.Fatalf("ListPendingAtOrOverBudget zero budget = %v; want integrity error", err)
+	}
+}
+
+func TestPostgreSQLStoreSweepsOnlyExpiredSandboxTerminalJobsThenEmptyCounters(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 31, 14, 0, 0, 0, time.UTC)
+	ws := workspace.ID("ws_sandbox_retention")
+	oldSandbox := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_retention", "thrd_retention", "sevt_old_sandbox", "qjob_old_sandbox", 2, now.Add(-SandboxTerminalRetentionAge)))
+	newSandbox := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_retention", "thrd_retention", "sevt_new_sandbox", "qjob_new_sandbox", 2, now.Add(-time.Hour)))
+	nonSandbox := mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_old_runtime", WorkspaceID: ws, Kind: KindCleanupSession,
+		PartitionKey: FormatSessionPartitionKey(ws, "sesn_retention"),
+		DedupeKey:    FormatCleanupSessionDedupeKey(ws, "sesn_retention", "cleanup_retention"),
+		PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": "sesn_retention", "cleanup_job_id": "cleanup_retention"}),
+		Now:          now.Add(-26 * time.Hour),
+	})
+	for _, job := range []*Job{oldSandbox, newSandbox, nonSandbox} {
+		completedAt := job.CreatedAt
+		if _, err := admin.ExecContext(ctx,
+			`UPDATE queue_jobs SET status = 'acknowledged', acknowledged_at = $3, updated_at = $3 WHERE workspace_id = $1 AND id = $2`,
+			string(ws), job.ID, completedAt,
+		); err != nil {
+			t.Fatalf("mark %s acknowledged: %v", job.ID, err)
+		}
+	}
+
+	deleted, err := store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: 100})
+	if err != nil || deleted != 1 {
+		t.Fatalf("SweepSandboxTerminalJobs = (%d,%v); want 1,nil", deleted, err)
+	}
+	if queueJobExists(t, admin, ws, oldSandbox.ID) {
+		t.Fatalf("old sandbox job %s still exists", oldSandbox.ID)
+	}
+	if !queueJobExists(t, admin, ws, newSandbox.ID) || !queueJobExists(t, admin, ws, nonSandbox.ID) {
+		t.Fatalf("retention deleted an ineligible or non-sandbox job")
+	}
+
+	deletedCounters, err := store.SweepEmptyPartitionCounters(ctx, EmptyPartitionCounterSweepRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("SweepEmptyPartitionCounters: %v", err)
+	}
+	if deletedCounters != 1 {
+		t.Fatalf("deleted counters = %d; want only the old sandbox partition", deletedCounters)
+	}
+	if queuePartitionCounterExists(t, admin, ws, oldSandbox.PartitionKey) {
+		t.Fatalf("empty old sandbox counter still exists")
+	}
+	if !queuePartitionCounterExists(t, admin, ws, newSandbox.PartitionKey) || !queuePartitionCounterExists(t, admin, ws, nonSandbox.PartitionKey) {
+		t.Fatalf("counter sweep deleted a nonempty partition")
+	}
+
+	corrupt := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_retention", "thrd_retention", "sevt_corrupt_sandbox", "qjob_corrupt_sandbox", 2, now.Add(-26*time.Hour)))
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE queue_jobs SET status = 'acknowledged', updated_at = $3 WHERE workspace_id = $1 AND id = $2`,
+		string(ws), corrupt.ID, corrupt.CreatedAt,
+	); err != nil {
+		t.Fatalf("mark %s terminal without timestamp: %v", corrupt.ID, err)
+	}
+	if _, err := store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: 100}); !IsIntegrityError(err) {
+		t.Fatalf("SweepSandboxTerminalJobs missing terminal timestamp = %v; want integrity error", err)
+	}
+}
+
+func TestPostgreSQLStoreSandboxTerminalSweepCoversEveryTerminalStatusAcrossWorkspacesAndCapsAt100(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 31, 14, 30, 0, 0, time.UTC)
+	workspaces := []workspace.ID{"ws_sandbox_retention_a", "ws_sandbox_retention_b"}
+	statuses := []string{"acknowledged", "cancelled", "dead_lettered"}
+	for index := 0; index < SandboxMaintenanceBatchLimit+1; index++ {
+		ws := workspaces[index%len(workspaces)]
+		jobID := "qjob_terminal_" + strconv.Itoa(index)
+		job := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_retention_cap", "thrd_retention_cap", "sevt_"+strconv.Itoa(index), jobID, 2, now.Add(-SandboxTerminalRetentionAge)))
+		statusValue := statuses[index%len(statuses)]
+		if _, err := admin.ExecContext(ctx,
+			`UPDATE queue_jobs
+			    SET status = $3,
+			        acknowledged_at = CASE WHEN $3::text = 'acknowledged' THEN $4::timestamptz ELSE NULL END,
+			        cancelled_at = CASE WHEN $3::text = 'cancelled' THEN $4::timestamptz ELSE NULL END,
+			        dead_lettered_at = CASE WHEN $3::text = 'dead_lettered' THEN $4::timestamptz ELSE NULL END,
+			        updated_at = $4
+			  WHERE workspace_id = $1 AND id = $2`,
+			string(ws), job.ID, statusValue, now.Add(-SandboxTerminalRetentionAge),
+		); err != nil {
+			t.Fatalf("mark %s %s: %v", job.ID, statusValue, err)
+		}
+	}
+
+	deleted, err := store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: SandboxMaintenanceBatchLimit + 50})
+	if err != nil || deleted != SandboxMaintenanceBatchLimit {
+		t.Fatalf("first SweepSandboxTerminalJobs = (%d,%v); want %d,nil", deleted, err, SandboxMaintenanceBatchLimit)
+	}
+	deleted, err = store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: SandboxMaintenanceBatchLimit})
+	if err != nil || deleted != 1 {
+		t.Fatalf("second SweepSandboxTerminalJobs = (%d,%v); want 1,nil", deleted, err)
+	}
+}
+
+func TestEmptyCounterCleanupSerializesWithConcurrentEnqueue(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_counter_enqueue_race")
+	now := time.Date(2026, 7, 31, 15, 0, 0, 0, time.UTC)
+	oldJob := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_counter_race", "thrd_counter_race", "sevt_counter_race", "qjob_counter_old", 2, now.Add(-26*time.Hour)))
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE queue_jobs SET status = 'acknowledged', acknowledged_at = $3, updated_at = $3 WHERE workspace_id = $1 AND id = $2`,
+		string(ws), oldJob.ID, oldJob.CreatedAt,
+	); err != nil {
+		t.Fatalf("mark old counter job acknowledged: %v", err)
+	}
+	if deleted, err := store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: 1}); err != nil || deleted != 1 {
+		t.Fatalf("delete old counter job = (%d,%v); want 1,nil", deleted, err)
+	}
+
+	const advisoryKey int64 = 731731
+	lockConn, err := admin.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open advisory-lock connection: %v", err)
+	}
+	defer func() { _ = lockConn.Close() }()
+	if _, err := lockConn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, advisoryKey); err != nil {
+		t.Fatalf("hold counter-delete barrier: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `
+		CREATE FUNCTION queue_counter_delete_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF OLD.workspace_id = 'ws_counter_enqueue_race' THEN
+				PERFORM pg_advisory_xact_lock(731731);
+			END IF;
+			RETURN OLD;
+		END $$;
+		CREATE TRIGGER queue_counter_delete_barrier
+		BEFORE DELETE ON queue_partition_counters
+		FOR EACH ROW EXECUTE FUNCTION queue_counter_delete_barrier()`); err != nil {
+		t.Fatalf("install counter-delete barrier: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = lockConn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, advisoryKey)
+		_, _ = admin.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS queue_counter_delete_barrier ON queue_partition_counters`)
+		_, _ = admin.ExecContext(context.Background(), `DROP FUNCTION IF EXISTS queue_counter_delete_barrier()`)
+	})
+
+	cleanupDone := make(chan error, 1)
+	go func() {
+		_, err := store.SweepEmptyPartitionCounters(ctx, EmptyPartitionCounterSweepRequest{Limit: 1})
+		cleanupDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := admin.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = $1)`,
+			advisoryKey,
+		).Scan(&waiting); err != nil {
+			t.Fatalf("observe counter-delete barrier: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("production counter cleanup did not reach the delete barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	request := sandboxToolExecuteRequest(t, ws, "sesn_counter_race", "thrd_counter_race", "sevt_counter_race", "qjob_counter_new", 2, now)
+	enqueueDone := make(chan error, 1)
+	go func() {
+		_, err := store.Enqueue(ctx, request)
+		enqueueDone <- err
+	}()
+	select {
+	case err := <-enqueueDone:
+		t.Fatalf("concurrent enqueue completed before counter lock released: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := lockConn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, advisoryKey); err != nil {
+		t.Fatalf("release counter-delete barrier: %v", err)
+	}
+	select {
+	case err := <-cleanupDone:
+		if err != nil {
+			t.Fatalf("counter cleanup transaction: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("counter cleanup transaction timed out")
+	}
+	select {
+	case err := <-enqueueDone:
+		if err != nil {
+			t.Fatalf("concurrent enqueue after counter cleanup: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent enqueue timed out")
+	}
+	if got := queueJobPartitionSequence(t, admin, ws, "qjob_counter_new"); got != 1 {
+		t.Fatalf("new surviving partition sequence = %d; want 1", got)
+	}
+	if !queuePartitionCounterExists(t, admin, ws, oldJob.PartitionKey) {
+		t.Fatal("concurrent enqueue did not recreate the partition counter")
+	}
+}
+
 func newPostgreSQLQueueStore(t testing.TB) (*PostgreSQLQueueStore, *sql.DB) {
 	t.Helper()
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	return NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)), admin
+}
+
+func sandboxToolExecuteRequest(t testing.TB, ws workspace.ID, sessionID string, threadID string, toolUseEventID string, jobID string, maxAttempts int, now time.Time) EnqueueRequest {
+	t.Helper()
+	return EnqueueRequest{
+		ID: jobID, WorkspaceID: ws, Kind: KindSandboxToolExecute,
+		PartitionKey: FormatSandboxExecutionPartitionKey(ws, sessionID, threadID, toolUseEventID),
+		DedupeKey:    FormatSandboxToolExecuteDedupeKey(ws, sessionID, threadID, toolUseEventID, 1),
+		PayloadJSON: queuePayload(t, map[string]any{
+			"workspace_id": ws, "session_id": sessionID, "session_thread_id": threadID,
+			"tool_use_event_id": toolUseEventID,
+		}),
+		MaxAttempts: maxAttempts,
+		Now:         now,
+	}
+}
+
+func queueJobExists(t testing.TB, admin *sql.DB, ws workspace.ID, jobID string) bool {
+	t.Helper()
+	var exists bool
+	if err := admin.QueryRow(`SELECT EXISTS (SELECT 1 FROM queue_jobs WHERE workspace_id = $1 AND id = $2)`, string(ws), jobID).Scan(&exists); err != nil {
+		t.Fatalf("read queue job existence: %v", err)
+	}
+	return exists
+}
+
+func queuePartitionCounterExists(t testing.TB, admin *sql.DB, ws workspace.ID, partitionKey string) bool {
+	t.Helper()
+	var exists bool
+	if err := admin.QueryRow(`SELECT EXISTS (SELECT 1 FROM queue_partition_counters WHERE workspace_id = $1 AND partition_key = $2)`, string(ws), partitionKey).Scan(&exists); err != nil {
+		t.Fatalf("read queue counter existence: %v", err)
+	}
+	return exists
 }
 
 func mustEnqueue(t testing.TB, store *PostgreSQLQueueStore, request EnqueueRequest) *Job {

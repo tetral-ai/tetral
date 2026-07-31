@@ -35,9 +35,10 @@
 //   - Every DDL statement is idempotent (IF NOT EXISTS, or DROP + CREATE for
 //     policies), so InitializePostgreSQLSchema is a no-op against an
 //     already-initialized database.
-//   - Baseline statement bytes are frozen: a checksum pins each schema
-//     version, so a DDL change is a new appended migration, never an edit of
-//     an applied statement.
+//   - Before the first public release, the version-one baseline is the clean
+//     bootstrap schema and its checksum is regenerated when pre-release
+//     shapes are folded into their final definitions. After release, schema
+//     changes append migrations without rewriting an applied version.
 //   - The DDL uses only ordinary table/index DDL plus row-level security, so
 //     it stays portable across self-managed PostgreSQL and managed providers.
 //
@@ -85,6 +86,7 @@
 //	                                                       not insert-only); Vault hard-deletes on credential delete
 //	queue_jobs                                             owning services admit atomically; Queue Service transitions      Sandbox Service, Bridge Job Runner,
 //	                                                                                                                         cleanup scheduler
+//	queue_partition_counters                               Queue admission and bounded Queue maintenance                    Queue admission and maintenance
 //	platform_provider_keys                                 operator ops CLI (platform credential domain)                    Gateway platform key pool (read-only, cached)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go; the writer/reader

@@ -2,12 +2,43 @@ package tetralqueue
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/tetral-ai/tetral/internal/queue"
 )
+
+func TestMaintenanceTickReclaimsThenSweepsSandboxJobsAndCounters(t *testing.T) {
+	store := &recordingMaintenanceStore{}
+	now := time.Date(2026, 7, 31, 15, 0, 0, 0, time.UTC)
+	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 37}, now)
+
+	wantCalls := []string{"reclaim:37", "sandbox-terminal:100", "empty-counters:100"}
+	if len(store.calls) != len(wantCalls) {
+		t.Fatalf("maintenance calls = %v; want %v", store.calls, wantCalls)
+	}
+	for index := range wantCalls {
+		if store.calls[index] != wantCalls[index] {
+			t.Fatalf("maintenance calls = %v; want %v", store.calls, wantCalls)
+		}
+	}
+	if !store.reclaimNow.Equal(now) || !store.sandboxSweepNow.Equal(now) {
+		t.Fatalf("maintenance times = reclaim %v sweep %v; want %v", store.reclaimNow, store.sandboxSweepNow, now)
+	}
+}
+
+func TestMaintenanceTickStopsAfterReclaimFailure(t *testing.T) {
+	store := &recordingMaintenanceStore{reclaimErr: errors.New("reclaim failed")}
+	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10}, time.Now())
+	if len(store.calls) != 1 || store.calls[0] != "reclaim:10" {
+		t.Fatalf("maintenance calls after reclaim failure = %v; want reclaim only", store.calls)
+	}
+}
 
 func TestLeaseReclaimMaintenanceLogsSharedOperationAndErrorFields(t *testing.T) {
 	var buffer bytes.Buffer
@@ -67,4 +98,28 @@ func decodeJSONLogRecords(t *testing.T, body []byte) []map[string]any {
 		records = append(records, record)
 	}
 	return records
+}
+
+type recordingMaintenanceStore struct {
+	calls           []string
+	reclaimNow      time.Time
+	sandboxSweepNow time.Time
+	reclaimErr      error
+}
+
+func (s *recordingMaintenanceStore) ReclaimExpiredLeases(_ context.Context, request queue.ReclaimExpiredLeasesRequest) (int, error) {
+	s.calls = append(s.calls, "reclaim:"+strconv.Itoa(request.Limit))
+	s.reclaimNow = request.Now
+	return 0, s.reclaimErr
+}
+
+func (s *recordingMaintenanceStore) SweepSandboxTerminalJobs(_ context.Context, request queue.SandboxTerminalSweepRequest) (int, error) {
+	s.calls = append(s.calls, "sandbox-terminal:"+strconv.Itoa(request.Limit))
+	s.sandboxSweepNow = request.Now
+	return 0, nil
+}
+
+func (s *recordingMaintenanceStore) SweepEmptyPartitionCounters(_ context.Context, request queue.EmptyPartitionCounterSweepRequest) (int, error) {
+	s.calls = append(s.calls, "empty-counters:"+strconv.Itoa(request.Limit))
+	return 0, nil
 }

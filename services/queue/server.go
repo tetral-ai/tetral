@@ -134,7 +134,9 @@ func (s *Server) Retry(ctx context.Context, request *queuev1.RetryRequest) (*que
 // consumer already finished. This is the recovery path for runtime_input,
 // session_prepare, and cleanup_session jobs stranded by a lost pod. A job reaches
 // dead_lettered only through Retry, once attempt_count reaches the effective
-// max_attempts, or through an explicit DeadLetter.
+// max_attempts, through an explicit DeadLetter, or after a Sandbox consumer
+// settles the business outcome and conditionally closes a reclaimed,
+// over-budget notification with DeadLetterExhaustedTx.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (Defer, ReclaimExpiredLeases,
 // leaseCandidate); services/queue/maintenance.go (RunStalledLeaseMaintenance).

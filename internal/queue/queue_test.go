@@ -121,6 +121,146 @@ func TestNormalizeEnqueueRequestAcceptsOnlyRefsOnlyRuntimeConfigPayloads(t *test
 	}
 }
 
+func TestNormalizeEnqueueRequestAcceptsCanonicalSandboxJobsAndRequiresExplicitBudget(t *testing.T) {
+	ws := workspace.ID("ws_sandbox_queue_shapes")
+	sessionID := "sesn_sandbox_queue_shapes"
+	threadID := "thrd_sandbox_queue_shapes"
+	toolUseEventID := "sevt_sandbox_queue_shapes"
+	logicalSandboxID := "sbox_sandbox_queue_shapes"
+	finishIdleWriteID := "write_sandbox_queue_shapes"
+	taskID := "task_sandbox_queue_shapes"
+	tests := []struct {
+		name    string
+		request EnqueueRequest
+	}{
+		{name: KindSandboxToolExecute, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxToolExecute,
+			PartitionKey: FormatSandboxExecutionPartitionKey(ws, sessionID, threadID, toolUseEventID),
+			DedupeKey:    FormatSandboxToolExecuteDedupeKey(ws, sessionID, threadID, toolUseEventID, 1),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "session_thread_id": threadID, "tool_use_event_id": toolUseEventID}),
+		}},
+		{name: KindSandboxActivate, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxActivate,
+			PartitionKey: FormatSandboxLifecyclePartitionKey(ws, logicalSandboxID),
+			DedupeKey:    FormatSandboxLifecycleDedupeKey(KindSandboxActivate, ws, logicalSandboxID, "op_activate"),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "logical_sandbox_id": logicalSandboxID, "operation_id": "op_activate"}),
+		}},
+		{name: KindSandboxMaterialize, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxMaterialize,
+			PartitionKey: FormatSandboxLifecyclePartitionKey(ws, logicalSandboxID),
+			DedupeKey:    FormatSandboxLifecycleDedupeKey(KindSandboxMaterialize, ws, logicalSandboxID, "op_materialize"),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "logical_sandbox_id": logicalSandboxID, "operation_id": "op_materialize"}),
+		}},
+		{name: KindSandboxRelease, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxRelease,
+			PartitionKey: FormatSandboxLifecyclePartitionKey(ws, logicalSandboxID),
+			DedupeKey:    FormatSandboxLifecycleDedupeKey(KindSandboxRelease, ws, logicalSandboxID, "op_release"),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "logical_sandbox_id": logicalSandboxID, "operation_id": "op_release"}),
+		}},
+		{name: KindSandboxToolCancel, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxToolCancel,
+			PartitionKey: FormatSandboxCancelPartitionKey(ws, sessionID, threadID, toolUseEventID),
+			DedupeKey:    FormatSandboxToolCancelDedupeKey(ws, sessionID, threadID, toolUseEventID),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "session_thread_id": threadID, "tool_use_event_id": toolUseEventID}),
+		}},
+		{name: KindSandboxOutputCapture, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxOutputCapture,
+			PartitionKey: FormatSandboxCapturePartitionKey(ws, sessionID, finishIdleWriteID),
+			DedupeKey:    FormatSandboxOutputCaptureDedupeKey(ws, sessionID, finishIdleWriteID, 1),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "finish_idle_write_id": finishIdleWriteID, "capture_generation": 1}),
+		}},
+		{name: KindSandboxOutputCaptureCleanup, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxOutputCaptureCleanup,
+			PartitionKey: FormatSandboxCapturePartitionKey(ws, sessionID, finishIdleWriteID),
+			DedupeKey:    FormatSandboxOutputCaptureCleanupDedupeKey(ws, sessionID, finishIdleWriteID, 1, 2),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "finish_idle_write_id": finishIdleWriteID, "capture_generation": 1, "cleanup_generation": 2}),
+		}},
+		{name: KindSandboxMemoryProjection, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxMemoryProjection,
+			PartitionKey: FormatSandboxMemoryPartitionKey(ws, "mem_sandbox_queue_shapes"),
+			DedupeKey:    FormatSandboxMemoryProjectionDedupeKey(ws, "mem_sandbox_queue_shapes", "mwrite_sandbox_queue_shapes"),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "memory_store_id": "mem_sandbox_queue_shapes", "memory_write_id": "mwrite_sandbox_queue_shapes"}),
+		}},
+		{name: KindSandboxBackgroundCommand, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxBackgroundCommand,
+			PartitionKey: FormatSandboxBackgroundPartitionKey(ws, sessionID, taskID),
+			DedupeKey:    FormatSandboxBackgroundCommandDedupeKey(ws, sessionID, taskID, "request_sandbox_queue_shapes"),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "task_id": taskID, "request_id": "request_sandbox_queue_shapes"}),
+		}},
+		{name: KindSandboxBackgroundReconcile, request: EnqueueRequest{
+			WorkspaceID: ws, Kind: KindSandboxBackgroundReconcile,
+			PartitionKey: FormatSandboxBackgroundPartitionKey(ws, sessionID, taskID),
+			DedupeKey:    FormatSandboxBackgroundReconcileDedupeKey(ws, sessionID, taskID, 3),
+			PayloadJSON:  queuePayload(t, map[string]any{"workspace_id": ws, "session_id": sessionID, "task_id": taskID, "reconcile_generation": 3}),
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.request.MaxAttempts = 3
+			if _, err := NormalizeEnqueueRequest(test.request); err != nil {
+				t.Fatalf("NormalizeEnqueueRequest: %v", err)
+			}
+			withoutBudget := test.request
+			withoutBudget.MaxAttempts = 0
+			if _, err := NormalizeEnqueueRequest(withoutBudget); !IsValidationError(err) || !strings.Contains(err.Error(), "max_attempts") {
+				t.Fatalf("NormalizeEnqueueRequest without explicit budget = %v; want max_attempts validation", err)
+			}
+			wrongPartition := test.request
+			wrongPartition.PartitionKey += ":wrong"
+			if _, err := NormalizeEnqueueRequest(wrongPartition); !IsValidationError(err) || !strings.Contains(err.Error(), "partition_key") {
+				t.Fatalf("NormalizeEnqueueRequest wrong partition = %v; want partition validation", err)
+			}
+			wrongDedupe := test.request
+			wrongDedupe.DedupeKey += ":wrong"
+			if _, err := NormalizeEnqueueRequest(wrongDedupe); !IsValidationError(err) || !strings.Contains(err.Error(), "dedupe_key") {
+				t.Fatalf("NormalizeEnqueueRequest wrong dedupe = %v; want dedupe validation", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(test.request.PayloadJSON, &payload); err != nil {
+				t.Fatalf("decode canonical payload: %v", err)
+			}
+			payload["content"] = "must stay in the durable business row"
+			withContent := test.request
+			withContent.PayloadJSON = queuePayload(t, payload)
+			if _, err := NormalizeEnqueueRequest(withContent); !IsValidationError(err) || !strings.Contains(err.Error(), "unsupported field") {
+				t.Fatalf("NormalizeEnqueueRequest content payload = %v; want refs-only validation", err)
+			}
+			for _, key := range sandboxStringReferenceFields(test.name) {
+				var malformed map[string]any
+				if err := json.Unmarshal(test.request.PayloadJSON, &malformed); err != nil {
+					t.Fatalf("decode canonical payload: %v", err)
+				}
+				malformed[key] = float64(7)
+				withNumericReference := test.request
+				withNumericReference.PayloadJSON = queuePayload(t, malformed)
+				if _, err := NormalizeEnqueueRequest(withNumericReference); !IsValidationError(err) {
+					t.Fatalf("NormalizeEnqueueRequest numeric %s = %v; want validation error", key, err)
+				}
+			}
+		})
+	}
+}
+
+func sandboxStringReferenceFields(kind string) []string {
+	switch kind {
+	case KindSandboxToolExecute, KindSandboxToolCancel:
+		return []string{"workspace_id", "session_id", "session_thread_id", "tool_use_event_id"}
+	case KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease:
+		return []string{"workspace_id", "session_id", "logical_sandbox_id", "operation_id"}
+	case KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup:
+		return []string{"workspace_id", "session_id", "finish_idle_write_id"}
+	case KindSandboxMemoryProjection:
+		return []string{"workspace_id", "session_id", "memory_store_id", "memory_write_id"}
+	case KindSandboxBackgroundCommand:
+		return []string{"workspace_id", "session_id", "task_id", "request_id"}
+	case KindSandboxBackgroundReconcile:
+		return []string{"workspace_id", "session_id", "task_id"}
+	default:
+		return nil
+	}
+}
+
 func TestNormalizeEnqueueRequestRejectsOversizedPayloadForEveryJobKind(t *testing.T) {
 	kinds := []string{
 		KindRuntimeInput,
@@ -131,6 +271,16 @@ func TestNormalizeEnqueueRequestRejectsOversizedPayloadForEveryJobKind(t *testin
 		KindEnvironmentBuild,
 		KindEnvironmentReadyFanout,
 		KindEnvironmentFailedFanout,
+		KindSandboxToolExecute,
+		KindSandboxActivate,
+		KindSandboxMaterialize,
+		KindSandboxRelease,
+		KindSandboxToolCancel,
+		KindSandboxOutputCapture,
+		KindSandboxOutputCaptureCleanup,
+		KindSandboxMemoryProjection,
+		KindSandboxBackgroundCommand,
+		KindSandboxBackgroundReconcile,
 	}
 	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {

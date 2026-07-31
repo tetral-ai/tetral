@@ -798,7 +798,7 @@ const (
 		last_error_message TEXT,
 		PRIMARY KEY (id),
 		UNIQUE (workspace_id, id),
-		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_prepare', 'environment_build', 'environment_ready_fanout')),
+		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'session_prepare', 'environment_build', 'environment_ready_fanout', 'environment_failed_fanout', 'sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')),
 		CONSTRAINT queue_jobs_status_shape CHECK (status IN ('pending', 'leased', 'acknowledged', 'cancelled', 'dead_lettered')),
 		CONSTRAINT queue_jobs_payload_version_shape CHECK (payload_version > 0),
 		CONSTRAINT queue_jobs_partition_sequence_shape CHECK (queue_partition_sequence > 0),
@@ -1025,14 +1025,6 @@ BEGIN
 		EXECUTE FUNCTION tetral_sessions_fill_agent_version_id();
 	END IF;
 END $$`
-	alterPostgreSQLQueueJobsKindConstraint = `ALTER TABLE queue_jobs
-		DROP CONSTRAINT IF EXISTS queue_jobs_kind_shape,
-		ADD CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'session_prepare', 'environment_build', 'environment_ready_fanout'))`
-
-	alterPostgreSQLQueueJobsEnvironmentFailedFanout = `ALTER TABLE queue_jobs
-		DROP CONSTRAINT IF EXISTS queue_jobs_kind_shape,
-		ADD CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'session_prepare', 'environment_build', 'environment_ready_fanout', 'environment_failed_fanout'))`
-
 	alterPostgreSQLSandboxesMachineWasUsable     = `ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS machine_was_usable BOOLEAN`
 	alterPostgreSQLSandboxesActiveUsabilityCheck = `UPDATE sandboxes
 		SET machine_was_usable = TRUE
@@ -1349,6 +1341,8 @@ END $$`
 	createPostgreSQLQueueJobsLeasedPartitionIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_partition ON queue_jobs(workspace_id, partition_key) WHERE status = 'leased'`
 	createPostgreSQLQueueJobsPartitionSequenceIndex         = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_partition_sequence ON queue_jobs(workspace_id, partition_key, queue_partition_sequence)`
 	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, partition_key, priority DESC, available_at, queue_partition_sequence) WHERE status = 'pending'`
+	createPostgreSQLQueueJobsSandboxTerminalRetentionIndex  = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_sandbox_terminal_retention ON queue_jobs(COALESCE(acknowledged_at, cancelled_at, dead_lettered_at), id) WHERE kind IN ('sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile') AND status IN ('acknowledged', 'cancelled', 'dead_lettered')`
+	createPostgreSQLQueueJobsSandboxSessionCleanupIndex     = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_sandbox_session_cleanup ON queue_jobs(workspace_id, (payload_json::jsonb ->> 'session_id'), status) WHERE kind IN ('sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')`
 	createPostgreSQLSessionResourcesSessionSeqIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resources_session_seq ON session_resources(workspace_id, session_id, storage_sequence)`
 	createPostgreSQLSessionResourcesTypeIndex               = `CREATE INDEX IF NOT EXISTS idx_session_resources_type ON session_resources(workspace_id, session_id, type, detached_at)`
 	createPostgreSQLSessionGitTicketsLiveIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_git_tickets_live ON session_git_tickets(workspace_id, session_id) WHERE status = 'live'`
@@ -1653,6 +1647,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_queue_jobs_leased_partition", createPostgreSQLQueueJobsLeasedPartitionIndex},
 		{"index_queue_jobs_partition_sequence", createPostgreSQLQueueJobsPartitionSequenceIndex},
 		{"index_queue_jobs_available", createPostgreSQLQueueJobsAvailableIndex},
+		{"index_queue_jobs_sandbox_terminal_retention", createPostgreSQLQueueJobsSandboxTerminalRetentionIndex},
+		{"index_queue_jobs_sandbox_session_cleanup", createPostgreSQLQueueJobsSandboxSessionCleanupIndex},
 		{"index_session_resources_session_seq", createPostgreSQLSessionResourcesSessionSeqIndex},
 		{"index_session_resources_type", createPostgreSQLSessionResourcesTypeIndex},
 		{"index_session_resource_prefix_gc_due", createPostgreSQLSessionResourcePrefixGCDueIndex},
@@ -1756,6 +1752,16 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 			USING (current_setting('tetral.queue_maintenance', true) = 'true')
 			WITH CHECK (current_setting('tetral.queue_maintenance', true) = 'true')`,
 		},
+		postgresqlSchemaStep{
+			name: "rls_policy_queue_counter_maintenance_drop",
+			ddl:  "DROP POLICY IF EXISTS queue_maintenance ON queue_partition_counters",
+		},
+		postgresqlSchemaStep{
+			name: "rls_policy_queue_counter_maintenance",
+			ddl: `CREATE POLICY queue_maintenance ON queue_partition_counters
+			USING (current_setting('tetral.queue_maintenance', true) = 'true')
+			WITH CHECK (current_setting('tetral.queue_maintenance', true) = 'true')`,
+		},
 		// Narrow transient-attachment sweep policy: the blob garbage
 		// collector reclaims expired and consumed attachments across every
 		// workspace, so it cannot carry a workspace predicate. The policy is
@@ -1814,7 +1820,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	// Formerly version 3: hard-delete lifecycle for sessions and sandboxes.
 	steps = append(steps,
 		postgresqlSchemaStep{name: "sessions_delete_cleanup_id", ddl: alterPostgreSQLSessionsDeleteCleanupID},
-		postgresqlSchemaStep{name: "queue_jobs_kind_session_delete_cleanup", ddl: alterPostgreSQLQueueJobsKindConstraint},
 		postgresqlSchemaStep{name: "sandboxes_environment_identity", ddl: `ALTER TABLE sandboxes
 			ADD COLUMN IF NOT EXISTS environment_id TEXT,
 			ADD COLUMN IF NOT EXISTS environment_generation BIGINT`},
@@ -1970,7 +1975,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		postgresqlSchemaStep{name: "sandboxes_machine_was_usable", ddl: alterPostgreSQLSandboxesMachineWasUsable},
 		postgresqlSchemaStep{name: "session_preparations_failure_resource_id", ddl: alterPostgreSQLSessionPreparationsFailureResourceID},
 		postgresqlSchemaStep{name: "session_preparations_failure_resource_url", ddl: alterPostgreSQLSessionPreparationsFailureResourceURL},
-		postgresqlSchemaStep{name: "queue_jobs_environment_failed_fanout", ddl: alterPostgreSQLQueueJobsEnvironmentFailedFanout},
 	)
 
 	// Formerly version 11: active-sandbox usability enforcement.

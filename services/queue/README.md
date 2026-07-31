@@ -14,7 +14,7 @@ never exist without its queue entry or the reverse. What the workload exposes
 is everything *after*
 admission — a gRPC transition API (`services/queue/proto/tetral/queue/v1`,
 `QueueService`) that consumers drive, plus one background goroutine that rescues
-leases their owners abandoned. The store reads and writes only `queue_jobs` and
+leases their owners abandoned and bounds Sandbox notification retention. The store reads and writes only `queue_jobs` and
 `queue_partition_counters`; it never touches the business tables (`session_events`,
 `sandboxes`, `session_preparations`, and the rest), never calls Runtime Pod,
 Bridge, Sandbox Service, or any provider, and never infers that referenced work
@@ -50,11 +50,11 @@ order. Caller timestamps and random job ids never establish causal order.
 
 | Status | Meaning | Writers (`internal/queue/postgresql_store.go`) | Transitions to |
 |---|---|---|---|
-| `pending` | admitted, awaiting a lease; `Retry`/`Defer` re-admit with a backoff-delayed `available_at`; reclaim re-admits at `available_at = now` | `Enqueue` (insert), `Retry` (budget left), `Defer`, `ReclaimExpiredLeases` | `leased`, `cancelled` |
+| `pending` | admitted, awaiting a lease; `Retry`/`Defer` re-admit with a backoff-delayed `available_at`; reclaim re-admits at `available_at = now` | `Enqueue` (insert), `Retry` (budget left), `Defer`, `ReclaimExpiredLeases` | `leased`, `cancelled`, `dead_lettered` |
 | `leased` | one consumer holds the row under a `lease_token` for the lease window | `Lease` | `pending`, `acknowledged`, `dead_lettered` |
 | `acknowledged` | terminal; the leased work committed | `Ack` | (none) |
-| `cancelled` | terminal; a superseded `pending` `runtime_input` row was fenced out — reached only straight from `pending`, never from `leased` | `Cancel` (`runtime_input` rows only) | (none) |
-| `dead_lettered` | terminal; attempts exhausted or an explicit dead-letter | `Retry` (exhausted), `DeadLetter` | (none) |
+| `cancelled` | terminal; pending work was fenced out — reached only straight from `pending`, never from `leased` | `Cancel` (`runtime_input` rows), `CancelTx` (one exact Sandbox notification identity) | (none) |
+| `dead_lettered` | terminal; attempts exhausted or an explicit dead-letter | `Retry` (exhausted), `DeadLetter`, `DeadLetterExhaustedTx` after Sandbox business settlement | (none) |
 
 ### Transitions
 
@@ -74,14 +74,24 @@ changes nothing.
 | `Cancel` | partition-scoped, **not** lease-fenced | `runtime_input` `input_kind = messages` only | requires `workspace_id`, `session_id`, `session_thread_id`, and a positive `interrupt_fence_sequence`; marks `cancelled` every `pending` matching row in that thread whose `sequence_to` is below the fence; touches no `leased`/terminal row and deletes no `session_events` |
 | `ReclaimExpiredLeases` | exempt (matches `workspace_id`/`id`/`status = 'leased'` without the stale token) | any | background loop only; clears lease bookkeeping on rows `leased` with `leased_until <= now` and returns them to `pending` at `available_at = now` with a `lease_expired` error stamp |
 
+Three in-process Queue boundaries support Sandbox business transactions without
+moving business state into Queue. `CancelTx` cancels only the exact pending row
+named by job id plus expected kind, partition, and dedupe key; a mismatch is an
+integrity error and a leased row is unchanged. `ListPendingAtOrOverBudget`
+performs a nonlocking, cross-workspace census of reclaimed Sandbox jobs whose
+explicit attempt budget is spent. The Sandbox owner then settles its business
+row before calling `DeadLetterExhaustedTx`, which rechecks pending status and the
+observed attempt count in that same transaction. None of these are Queue RPCs.
+
 Backoff is `delay = rand(0, min(cap, base * 2^(count-1)))`, where `count` is
 `attempt_count` for Retry and `session_prepare` Defer, and `defer_count` for
 config Defer. The full-jitter distribution is fixed, not a knob. Lease expiry alone never
 dead-letters: the prior owner may have committed business success and only lost
 the acknowledgement, so the next lease holder revalidates the durable row under
 its own token and stale-acks when the work is already done. Attempt exhaustion
-through `Retry`, and an explicit `DeadLetter`, are the only routes to
-`dead_lettered`.
+through `Retry` and an explicit `DeadLetter` are the leased-job routes to
+`dead_lettered`; a Sandbox business transaction may also use
+`DeadLetterExhaustedTx` after reclaim exposes an exhausted pending row.
 
 ### Invariants
 
@@ -94,12 +104,19 @@ writers uphold them under concurrency.
 | At most one `leased` job per `(workspace_id, partition_key)` — the same-session serial-execution barrier | `leased` only | `leaseCandidate`'s NOT-EXISTS leased-in-partition guard + partial-unique index; many `pending` jobs may still sit in one partition awaiting their turn |
 | One causal position per partition | all jobs | the locked `(workspace_id, partition_key)` counter assigns `queue_partition_sequence`; Retry, Defer, and reclaim update availability/lease state without changing it |
 
-### The reclaim loop
+### The maintenance loop
 
 One background goroutine (`RunStalledLeaseMaintenance`) runs
 `ReclaimExpiredLeases` across all workspaces on a fixed interval, taking a bounded
 batch per scan. This is what unsticks a `runtime_input`, `session_prepare`,
-`cleanup_session`, or `session_delete_cleanup` job stranded by a crashed consumer.
+`cleanup_session`, `session_delete_cleanup`, or Sandbox job stranded by a crashed
+consumer. After a successful reclaim pass, the same tick deletes at most 100
+Sandbox-owned terminal notifications whose matching terminal timestamp is at
+least 24 hours old, then in a separate transaction deletes at most 100 partition
+counters that have no job of any status. Other job families have no retention
+change. Both cross-workspace sweeps use the transaction-local
+`tetral.queue_maintenance` RLS policy; a terminal row missing its required status
+timestamp is reported as an integrity error and retained.
 
 ### Startup configuration
 
@@ -132,9 +149,9 @@ and DNS, and ingress on both ports to `api`, `bridge`, and
 
 ### Seam 1 — Job kind registry
 
-Eight kinds share the table under two partition families. The queue stores `kind`
-as an opaque label and never dispatches on it, but three behaviors are
-kind-specific.
+Eighteen kinds share the table. The queue stores `kind` as an opaque label and
+never performs Sandbox business behavior; admission shape, partition identity,
+and a few transport transitions are kind-specific.
 
 | Kind | Partition family | Leased by |
 |---|---|---|
@@ -146,6 +163,16 @@ kind-specific.
 | `environment_build` | `environment:<workspace_id>:<environment_id>` | Sandbox Service |
 | `environment_ready_fanout` | `environment:…` | Sandbox Service |
 | `environment_failed_fanout` | `environment:…` | Sandbox Service |
+| `sandbox_tool_execute` | `sandbox-execution:<workspace>:<session>:<thread>:<tool-use-event>` | dedicated Sandbox execution runner |
+| `sandbox_activate` | `sandbox-lifecycle:<workspace>:<logical-sandbox>` | Sandbox Service |
+| `sandbox_materialize` | `sandbox-lifecycle:…` | Sandbox Service |
+| `sandbox_release` | `sandbox-lifecycle:…` | Sandbox Service |
+| `sandbox_tool_cancel` | `sandbox-cancel:<workspace>:<session>:<thread>:<tool-use-event>` | Sandbox Service |
+| `sandbox_output_capture` | `sandbox-capture:<workspace>:<session>:<finish-idle-write>` | Sandbox Service |
+| `sandbox_output_capture_cleanup` | `sandbox-capture:…` | Sandbox Service |
+| `sandbox_memory_projection` | `sandbox-memory:<workspace>:<memory-store>` | Sandbox Service |
+| `sandbox_background_command` | `sandbox-background:<workspace>:<session>:<task>` | Sandbox Service |
+| `sandbox_background_reconcile` | `sandbox-background:…` | Sandbox Service |
 
 **Interface contract.** Kinds and their canonical shapes live in
 `internal/queue/queue.go`: `isKnownKind` is the closed registry;
@@ -157,7 +184,7 @@ non-whitelisted field, or whose partition/dedupe keys differ from the computed
 forms. A single kind may carry more than one canonical payload sub-shape: the
 `runtime_mcp_manifest_update` shape (with its own `Format…DedupeKey` helper and
 `validateCanonicalQueueShape` branch) is a variant of `runtime_config_update`,
-not a ninth kind — `isKnownKind` still admits only the eight above.
+not an additional kind — `isKnownKind` still admits only the eighteen above.
 
 The `runtime_input` kind carries an `input_kind` discriminator, checked by
 `isRuntimeInputKind`, over a closed set: `messages`, `interrupt_control`,
@@ -191,10 +218,16 @@ functions of the payload's identity fields; adding a kind means extending
 `isKnownKind`, `validateCanonicalQueueShape`, and the key formatters together —
 plus the durable `queue_jobs_kind_shape` CHECK constraint, which lives in
 `internal/storage/postgresql_schema.go` (the `queue_jobs` DDL and its
-`alterPostgreSQLQueueJobsKindConstraint` migrations, exactly how
-`session_delete_cleanup` and `environment_failed_fanout` were added). A kind is
+clean version-one `queue_jobs` definition). A kind is
 incomplete until all four agree; a kind admitted in code but absent from the
 CHECK is rejected by the database on insert.
+
+Every Sandbox payload carries durable references only and must set an explicit
+positive `max_attempts`; Sandbox consumers never inherit the Queue Service's
+deployment default. Lifecycle mutation kinds share one logical-Sandbox
+partition, while independently runnable Tool Uses each receive their own
+execution partition. Transport retry preserves the same dedupe identity and is
+distinct from a new business execution-attempt generation.
 
 **Conformance tests.** `TestPostgreSQLStoreRejectsNonCanonicalQueueShape`,
 `TestPostgreSQLStoreAcceptsRuntimeMCPManifestUpdateCanonicalShape`,
@@ -252,13 +285,13 @@ the next holder re-leases under a new token.
 | Suite (file) | Proves |
 |---|---|
 | `internal/queue/queue_test.go` | admission validation: per-kind canonical shape, references-only payload bounds, event-reference limits, lease batch-capacity arithmetic |
-| `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: lease ordering + priority overtaking + partition barrier, ack/retry/defer/dead-letter fencing, cancel-by-interrupt-fence, backoff full-jitter, unset-`max_attempts` projection, cross-workspace reclaim, metrics summary |
+| `internal/queue/postgresql_store_test.go` | the store's durable behavior against PostgreSQL: lease ordering + priority overtaking + partition barrier, ack/retry/defer/dead-letter fencing, both cancellation boundaries, over-budget conditional dead-lettering, Sandbox terminal retention and empty-counter cleanup, backoff full-jitter, unset-`max_attempts` projection, cross-workspace maintenance, metrics summary |
 | `services/queue/server_test.go` | the gRPC surface over the generated client: lease + fenced transitions, maximum legal batch within the message fuse, the field census matching lease arithmetic, validation → `InvalidArgument` mapping |
 | `services/queue/config_test.go` | `ConfigFromEnv` pins the retry policy and rejects invalid values |
-| `services/queue/maintenance_test.go` | the reclaim loop logs shared operation/error fields |
+| `services/queue/maintenance_test.go` | each maintenance tick runs reclaim, bounded Sandbox terminal retention, then bounded empty-counter cleanup, and logs shared operation/error fields |
 | `services/queue/cmd/tetral-queue/main_test.go` | schema-behind startup stops before the store and listener; startup-failure logs use shared fields |
 
 Run the store suite (and any test that opens PostgreSQL) with the race detector
 on. If a PR changes the `queue_jobs` invariants, admission validation, lease
-selection or barrier, any transition, the backoff formula, or the reclaim loop in
+selection or barrier, any transition, the backoff formula, or the maintenance loop in
 this folder, it updates the matching section here.

@@ -676,6 +676,105 @@ func TestQueuePartitionSequenceSchema(t *testing.T) {
 	assertQueuePartitionSequenceSchema(t, admin, schema)
 }
 
+func TestSandboxQueueSchemaCarriesClosedKindsMaintenanceAndCleanupIndexes(t *testing.T) {
+	_, admin, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	ctx := context.Background()
+
+	sandboxKinds := []string{
+		"sandbox_tool_execute",
+		"sandbox_activate",
+		"sandbox_materialize",
+		"sandbox_release",
+		"sandbox_tool_cancel",
+		"sandbox_output_capture",
+		"sandbox_output_capture_cleanup",
+		"sandbox_memory_projection",
+		"sandbox_background_command",
+		"sandbox_background_reconcile",
+	}
+	kindConstraint := readCheckConstraintDefinition(t, admin, schema, "queue_jobs", "queue_jobs_kind_shape")
+	for _, kind := range sandboxKinds {
+		if !strings.Contains(kindConstraint, "'"+kind+"'") {
+			t.Fatalf("queue_jobs kind constraint = %q; missing %s", kindConstraint, kind)
+		}
+	}
+
+	for _, index := range []struct {
+		name      string
+		fragments []string
+	}{
+		{
+			name: "idx_queue_jobs_sandbox_terminal_retention",
+			fragments: []string{
+				"COALESCE(acknowledged_at, cancelled_at, dead_lettered_at)",
+				"status = ANY",
+				"sandbox_tool_execute",
+				"sandbox_background_reconcile",
+			},
+		},
+		{
+			name: "idx_queue_jobs_sandbox_session_cleanup",
+			fragments: []string{
+				"workspace_id",
+				"payload_json",
+				"session_id",
+				"status",
+				"sandbox_tool_execute",
+				"sandbox_background_reconcile",
+			},
+		},
+	} {
+		var definition string
+		if err := admin.QueryRowContext(ctx,
+			`SELECT indexdef
+			   FROM pg_indexes
+			  WHERE schemaname = $1 AND tablename = 'queue_jobs' AND indexname = $2`,
+			schema,
+			index.name,
+		).Scan(&definition); err != nil {
+			t.Fatalf("read %s: %v", index.name, err)
+		}
+		for _, fragment := range index.fragments {
+			if !strings.Contains(definition, fragment) {
+				t.Fatalf("%s definition = %q; missing %q", index.name, definition, fragment)
+			}
+		}
+		predicate := readIndexPredicate(t, admin, schema, index.name)
+		if got := strings.Count(predicate, "sandbox_"); got != len(sandboxKinds) {
+			t.Fatalf("%s Sandbox kind count = %d; want exact set of %d: %q", index.name, got, len(sandboxKinds), predicate)
+		}
+		if index.name == "idx_queue_jobs_sandbox_terminal_retention" {
+			for _, status := range []string{"acknowledged", "cancelled", "dead_lettered"} {
+				if !strings.Contains(definition, status) {
+					t.Fatalf("%s definition = %q; missing terminal status %s", index.name, definition, status)
+				}
+			}
+			for _, status := range []string{"pending", "leased"} {
+				if strings.Contains(definition, "'"+status+"'") {
+					t.Fatalf("%s definition = %q; unexpectedly indexes %s", index.name, definition, status)
+				}
+			}
+		}
+	}
+
+	var counterMaintenancePolicyCount int
+	if err := admin.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		   FROM pg_policies
+		  WHERE schemaname = $1
+		    AND tablename = 'queue_partition_counters'
+		    AND policyname = 'queue_maintenance'
+		    AND qual LIKE '%tetral.queue_maintenance%'
+		    AND with_check LIKE '%tetral.queue_maintenance%'`,
+		schema,
+	).Scan(&counterMaintenancePolicyCount); err != nil {
+		t.Fatalf("read queue counter maintenance policy: %v", err)
+	}
+	if counterMaintenancePolicyCount != 1 {
+		t.Fatalf("queue counter maintenance policy count = %d; want 1", counterMaintenancePolicyCount)
+	}
+}
+
 func assertQueuePartitionSequenceSchema(t *testing.T, db *sql.DB, schema string) {
 	t.Helper()
 	assertTableRLSForced(t, db, schema, "queue_partition_counters")
