@@ -219,6 +219,7 @@ export interface RuntimeControlInputCommitter {
       readonly toolUseEventId: string;
       readonly runtimeLocalId: string;
     }[];
+    readonly sandboxExecutionToolUseEventIds: readonly string[];
   }) => Promise<
     | { readonly ok: true; readonly stale: true }
     | { readonly ok: true; readonly receipt: RuntimeDeclarationReceipt }
@@ -754,6 +755,7 @@ export class RuntimeControlService {
       inputKind,
       drafts: declaration.drafts,
       pendingToolCancellations: declaration.pendingToolCancellations,
+      sandboxExecutionToolUseEventIds: declaration.sandboxExecutionToolUseEventIds,
     });
     if (!ack.ok) {
       return {

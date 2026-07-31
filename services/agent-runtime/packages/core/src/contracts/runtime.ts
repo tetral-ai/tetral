@@ -1058,6 +1058,7 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
       toolUseEventId: SanitizedIdentifierSchema,
       runtimeLocalId: SanitizedIdentifierSchema,
     })),
+    sandboxExecutionToolUseEventIds: z.array(SanitizedIdentifierSchema),
   }).optional(),
 }).superRefine((envelope, context) => {
   const parts = envelope.stableReasoningParts ?? [];
@@ -1103,9 +1104,12 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
     const pendingToolIDs = new Set(
       envelope.interruptSettlement.pendingToolCancellations.map((pending) => pending.toolUseEventId),
     );
+    const sandboxExecutionIDs = new Set(envelope.interruptSettlement.sandboxExecutionToolUseEventIds);
     if (
       cancellationIDs.size !== cancellationDrafts.length ||
       pendingToolIDs.size !== envelope.interruptSettlement.pendingToolCancellations.length ||
+      sandboxExecutionIDs.size !== envelope.interruptSettlement.sandboxExecutionToolUseEventIds.length ||
+      envelope.interruptSettlement.pendingToolCancellations.some((pending) => sandboxExecutionIDs.has(pending.toolUseEventId)) ||
       envelope.interruptSettlement.pendingToolCancellations.some(
         (pending) => !cancellationIDs.has(pending.runtimeLocalId),
       )
@@ -1197,6 +1201,7 @@ export const SessionEventWriterRuntimeTerminationEnvelopeSchema = z.strictObject
     toolUseEventId: SanitizedIdentifierSchema,
     runtimeLocalId: SanitizedIdentifierSchema,
   })),
+  sandboxExecutionToolUseEventIds: z.array(SanitizedIdentifierSchema),
 }).superRefine((envelope, context) => {
   const cancellationDrafts = envelope.drafts.filter((draft) => draft.draftKind === "termination");
   const completionDrafts = envelope.drafts.filter((draft) => draft.draftKind === "completion_mail");
@@ -1214,9 +1219,12 @@ export const SessionEventWriterRuntimeTerminationEnvelopeSchema = z.strictObject
   }
   const cancellationIDs = new Set(cancellationDrafts.map((draft) => draft.runtimeLocalId));
   const toolUseIDs = new Set(envelope.pendingToolCancellations.map((pending) => pending.toolUseEventId));
+  const sandboxExecutionIDs = new Set(envelope.sandboxExecutionToolUseEventIds);
   if (
     cancellationIDs.size !== cancellationDrafts.length ||
     toolUseIDs.size !== envelope.pendingToolCancellations.length ||
+    sandboxExecutionIDs.size !== envelope.sandboxExecutionToolUseEventIds.length ||
+    envelope.pendingToolCancellations.some((pending) => sandboxExecutionIDs.has(pending.toolUseEventId)) ||
     cancellationDrafts.length !== envelope.pendingToolCancellations.length ||
     envelope.pendingToolCancellations.some((pending) => !cancellationIDs.has(pending.runtimeLocalId)) ||
     cancellationDrafts.some((draft) =>

@@ -56,6 +56,7 @@ import type {
   RuntimeAcceptedThreadMetadataState,
   RuntimeConfigPatchState,
   RuntimePreloadedBackgroundToolState,
+  RuntimePreloadedSandboxExecutionState,
   RuntimeThreadControlState,
   RuntimeColdCoverage,
 } from "@tetral/agent-runtime-core/src/session/session-state.js";
@@ -175,6 +176,7 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
       inputKind: input.inputKind,
       drafts: input.drafts.map(runtimeMessageDraftForBridge),
       pendingToolCancellations: input.pendingToolCancellations.map((cancellation) => ({ ...cancellation })),
+      sandboxExecutionToolUseEventIds: [...input.sandboxExecutionToolUseEventIds],
     };
     const declarationDigest = commitInputsDeclarationDigest(request);
     let response: CommitInputsResponse | undefined;
@@ -746,6 +748,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
     readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
+    readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
     readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
@@ -843,6 +846,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
       inputKind: sourceKind,
       drafts: drafts.map(runtimeMessageDraftForBridge),
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     };
     const declarationDigest = commitInputsDeclarationDigest(request);
     let response: CommitInputsResponse;
@@ -999,6 +1003,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
     readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
+    readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
     readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
@@ -1253,6 +1258,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
                 toolUseEventId: pending.toolUseEventId,
                 runtimeLocalId: pending.runtimeLocalId,
               })),
+              sandboxExecutionToolUseEventIds: [...envelope.interruptSettlement.sandboxExecutionToolUseEventIds],
             },
       };
       const declarationDigest = writeRequestEndDeclarationDigest(request);
@@ -1269,6 +1275,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
               (draft) => draft.draftKind === RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION,
             ),
             pendingToolCancellations: request.interruptSettlement.pendingToolCancellations,
+            sandboxExecutionToolUseEventIds: request.interruptSettlement.sandboxExecutionToolUseEventIds,
           };
       const interruptDigest = interruptRequest === undefined
         ? undefined
@@ -1554,6 +1561,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           toolUseEventId: pending.toolUseEventId,
           runtimeLocalId: pending.runtimeLocalId,
         })),
+        sandboxExecutionToolUseEventIds: [...envelope.sandboxExecutionToolUseEventIds],
       };
       const declarationDigest = runtimeTerminationDeclarationDigest(request);
       const response = await commitRuntimeTermination(this.client, request, metadata);
@@ -2520,6 +2528,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
   readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
   readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
   readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
+  readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
   readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
   readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
   readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
@@ -2537,6 +2546,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
     const runtimeConfigPatch = runtimeConfigPatchFromContextPayload(parsed, input);
     const mcpManifests = mcpManifestPatchesFromContextPayload(parsed.mcpManifests, input);
     const pendingToolUses = parsePendingToolUses(parsed.pendingToolUses);
+    const pendingSandboxExecutions = parsePendingSandboxExecutions(parsed.pendingSandboxExecutions);
     const backgroundTools = parseBackgroundTools(parsed.backgroundTools);
     const pendingAttachments = parsePendingAttachments(parsed.pendingAttachments);
     const pendingAgentMail = parsePendingAgentMail(parsed.pendingAgentMail);
@@ -2549,6 +2559,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
       ...(runtimeConfigPatch !== undefined ? { runtimeConfigPatch } : {}),
       ...(mcpManifests !== undefined ? { mcpManifests } : {}),
       ...(pendingToolUses !== undefined ? { pendingToolUses } : {}),
+      ...(pendingSandboxExecutions !== undefined ? { pendingSandboxExecutions } : {}),
       ...(backgroundTools !== undefined ? { backgroundTools } : {}),
       ...(pendingAttachments !== undefined ? { pendingAttachments } : {}),
       ...(pendingAgentMail !== undefined ? { pendingAgentMail } : {}),
@@ -2581,9 +2592,44 @@ function parseColdCoverage(value: unknown): RuntimeColdCoverage {
   };
   return {
     pendingToolIds: stringList("pendingToolIds"),
+    pendingSandboxExecutionIds: stringList("pendingSandboxExecutionIds"),
     pendingAttachmentIdentities: stringList("pendingAttachmentIdentities"),
     undeliveredMailDeliveryIds: stringList("undeliveredMailDeliveryIds"),
   };
+}
+
+function parsePendingSandboxExecutions(value: unknown): readonly RuntimePreloadedSandboxExecutionState[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("load context pendingSandboxExecutions is malformed");
+  }
+  const allowedStates = new Set<RuntimePreloadedSandboxExecutionState["executionState"]>([
+    "pending",
+    "preparing",
+    "running",
+    "waiting_activation",
+    "waiting_materialization",
+    "terminal_unconsumed",
+  ]);
+  return value.map((item): RuntimePreloadedSandboxExecutionState => {
+    if (!isRecord(item)) {
+      throw new Error("load context pendingSandboxExecutions is malformed");
+    }
+    const executionState = requiredStringField(item, "executionState") as RuntimePreloadedSandboxExecutionState["executionState"];
+    if (!allowedStates.has(executionState)) {
+      throw new Error("load context pendingSandboxExecutions is malformed");
+    }
+    return {
+      toolUseEventId: requiredStringField(item, "toolUseEventId"),
+      modelRequestId: requiredStringField(item, "modelRequestId"),
+      modelToolCallId: requiredStringField(item, "modelToolCallId"),
+      toolName: requiredStringField(item, "toolName"),
+      input: RuntimeJsonValueSchema.parse(item.input ?? {}),
+      executionState,
+    };
+  });
 }
 
 function parseThreadContextPrefix(value: unknown): ThreadContextPrefix | undefined {

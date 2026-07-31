@@ -481,6 +481,20 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 		seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_commit_interrupt", "bind_bridge_commit_interrupt", 1, "pod_uid_commit_interrupt")
 		seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_interrupted_tool", 1)
+		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_active_tool", 2, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}`)
+		if _, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_runtime_tool_results (
+				workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+				normalized_input_hash, tool_name, input_json, ack_status, result_json,
+				model_tool_call_id, execution_state, execution_attempt_generation,
+				provider_command_reference_json, created_at, updated_at
+			) VALUES ('default', 'sesn_bridge_commit_interrupt', 'thr_bridge_commit_interrupt',
+				'evt_bridge_active_tool', 'sandbox_tool', $1, 'Read', $2, 'committed', NULL,
+				'tool-2', 'running', 1, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			sha256Hex(`{"file_path":"README.md"}`), `{"file_path":"README.md"}`, `{"command_id":"cmd_bridge_interrupt"}`,
+		); err != nil {
+			t.Fatalf("seed running sandbox execution: %v", err)
+		}
 		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_commit_interrupt", 3, "user.interrupt", `{"type":"user.interrupt"}`)
 		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "rin_bridge_commit_interrupt", "interrupt_control", `["evt_bridge_commit_interrupt"]`, "accepted", "bind_bridge_commit_interrupt", "pod_uid_commit_interrupt", 3, 3)
 
@@ -517,18 +531,13 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 						Ordinal:            0,
 						PartJson:           `{"type":"tool","toolCallId":"tool-1","toolName":"Write","toolUseEventId":"evt_bridge_interrupted_tool","state":{"status":"cancelled","error":{"type":"runtime","message":"aborted","retryable":false}},"completedAt":"2026-07-30T00:00:00Z"}`,
 					},
-					{
-						RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "tool", "1"),
-						PartKind:           "tool",
-						Ordinal:            1,
-						PartJson:           `{"type":"tool","toolCallId":"tool-2","toolName":"Read","toolUseEventId":"evt_bridge_active_tool","state":{"status":"cancelled","error":{"type":"runtime","message":"aborted","retryable":false}},"completedAt":"2026-07-30T00:00:00Z"}`,
-					},
 				},
 			}},
 			PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
 				ToolUseEventId: "evt_bridge_interrupted_tool",
 				RuntimeLocalId: cancellationLocalID,
 			}},
+			SandboxExecutionToolUseEventIds: []string{"evt_bridge_active_tool"},
 		}
 		mismatched := proto.Clone(request).(*bridgev1.CommitInputsRequest)
 		mismatched.Drafts[0].Parts[0].PartJson = strings.Replace(
@@ -605,19 +614,42 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 			}
 			cancelledTools[part.ToolUseEventID] = true
 		}
-		if len(cancellationMessage.Parts) != 2 ||
+		if len(cancellationMessage.Parts) != 1 ||
 			!cancelledTools["evt_bridge_interrupted_tool"] ||
-			!cancelledTools["evt_bridge_active_tool"] {
-			t.Fatalf("durable interrupt cancellation tools = %#v; want exact pending and in-flight tool ids", cancelledTools)
+			cancelledTools["evt_bridge_active_tool"] {
+			t.Fatalf("durable interrupt cancellation tools = %#v; want only approval-owned tool id", cancelledTools)
+		}
+		var executionState, cancelState string
+		var cancelRequestedAt sql.NullString
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT execution_state, cancel_state, cancel_requested_at
+			   FROM session_runtime_tool_results
+			  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_commit_interrupt'
+			    AND session_thread_id = 'thr_bridge_commit_interrupt'
+			    AND tool_use_event_id = 'evt_bridge_active_tool'`,
+		).Scan(&executionState, &cancelState, &cancelRequestedAt); err != nil {
+			t.Fatalf("read interrupted sandbox execution: %v", err)
+		}
+		var cancelJobCount int
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT count(*) FROM queue_jobs
+			  WHERE workspace_id = 'default' AND kind = 'sandbox_tool_cancel'
+			    AND payload_json::jsonb ->> 'session_id' = 'sesn_bridge_commit_interrupt'
+			    AND payload_json::jsonb ->> 'session_thread_id' = 'thr_bridge_commit_interrupt'
+			    AND payload_json::jsonb ->> 'tool_use_event_id' = 'evt_bridge_active_tool'`,
+		).Scan(&cancelJobCount); err != nil {
+			t.Fatalf("count sandbox cancellation jobs: %v", err)
 		}
 		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
 			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
 			inboxStatus != "committed" || !processedAt.Valid || messageCount != 1 || pendingStatus != "cancelled" ||
 			!pendingResultEventID.Valid || pendingResultEventID.String != "evt_bridge_commit_interrupt" || terminalResultCount != 0 ||
+			executionState != "running" || cancelState != "pending" || !cancelRequestedAt.Valid || cancelJobCount != 1 ||
 			len(response.GetDeclaration().GetReceipts()) != 1 ||
 			len(response.GetDeclaration().GetReceipts()[0].GetPendingToolDeltaJson()) != 1 {
-			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d receipt=%#v; want one message with two cancellation parts, one pending transition, and no extra result event",
-				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, messageCount, pendingStatus, pendingResultEventID, terminalResultCount, response.GetDeclaration())
+			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d execution=%q cancel=%q requested=%v jobs=%d receipt=%#v; want disjoint approval settlement and one durable execution cancellation",
+				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, messageCount, pendingStatus, pendingResultEventID, terminalResultCount,
+				executionState, cancelState, cancelRequestedAt, cancelJobCount, response.GetDeclaration())
 		}
 	})
 

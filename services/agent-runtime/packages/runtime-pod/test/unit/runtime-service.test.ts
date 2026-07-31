@@ -1297,7 +1297,7 @@ function testControlDeclaration(
   inputKind: "interrupt_control" | "tool_confirmation",
 ): RuntimeControlInputDeclaration {
   if (inputKind === "interrupt_control") {
-    return { drafts: [], pendingToolCancellations: [] };
+    return { drafts: [], pendingToolCancellations: [], sandboxExecutionToolUseEventIds: [] };
   }
   const runtimeLocalId = `draft_${command.runtimeInputId}`;
   return {
@@ -1321,6 +1321,7 @@ function testControlDeclaration(
       }],
     })],
     pendingToolCancellations: [],
+    sandboxExecutionToolUseEventIds: [],
   };
 }
 

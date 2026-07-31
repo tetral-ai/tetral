@@ -78,6 +78,7 @@ export interface RuntimeInterruptSettlementDraft {
     readonly toolUseEventId: string;
     readonly runtimeLocalId: string;
   }[];
+  readonly sandboxExecutionToolUseEventIds: readonly string[];
 }
 
 /** Hot projection, durable event, and internal-repair capabilities used by one processor. */
@@ -401,6 +402,7 @@ export class SessionProcessor {
     },
     failure: RuntimeFailure,
     pendingToolUseEventIds: ReadonlySet<string>,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string>,
   ): RuntimeInterruptSettlementDraft {
     if (this.terminal || interrupt.eventIds.length !== 1) {
       throw new Error("interrupt settlement requires one open request and one admitted source event");
@@ -408,7 +410,12 @@ export class SessionProcessor {
     this.updateMessage({ status: "cancelled", error: failure });
     this.terminal = true;
     const terminalAssistantSeal = this.requestEndSeal(false);
-    const declaration = this.prepareInterruptToolDeclarations(interrupt, failure, pendingToolUseEventIds);
+    const declaration = this.prepareInterruptToolDeclarations(
+      interrupt,
+      failure,
+      pendingToolUseEventIds,
+      sandboxExecutionToolUseEventIds,
+    );
     return {
       ...(terminalAssistantSeal === undefined ? {} : { terminalAssistantSeal }),
       ...declaration,
@@ -423,6 +430,7 @@ export class SessionProcessor {
     },
     failure: RuntimeFailure,
     pendingToolUseEventIds: ReadonlySet<string>,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string>,
   ): Omit<RuntimeInterruptSettlementDraft, "terminalAssistantSeal"> {
     if (interrupt.eventIds.length !== 1) {
       throw new Error("interrupt tool declaration requires one admitted source event");
@@ -442,6 +450,7 @@ export class SessionProcessor {
       readonly toolUseEventId: string;
       readonly runtimeLocalId: string;
     }[] = [];
+    const sandboxExecutions: string[] = [];
     for (const [toolCallId, part] of this.toolParts) {
       const toolUseEventId = this.toolUseEventIds.get(toolCallId) ?? part.toolUseEventId;
       if (
@@ -450,6 +459,10 @@ export class SessionProcessor {
         part.state.status === "error" ||
         part.state.status === "cancelled"
       ) {
+        continue;
+      }
+      if (sandboxExecutionToolUseEventIds.has(toolUseEventId)) {
+        sandboxExecutions.push(toolUseEventId);
         continue;
       }
       const ordinal = parts.length;
@@ -488,7 +501,11 @@ export class SessionProcessor {
           status: "completed",
           parts,
         })];
-    return { drafts, pendingToolCancellations };
+    return {
+      drafts,
+      pendingToolCancellations,
+      sandboxExecutionToolUseEventIds: sandboxExecutions,
+    };
   }
 
   /** Applies the interrupt receipt after its joined request-end receipt. */
@@ -508,6 +525,7 @@ export class SessionProcessor {
         eventIds: interrupt.eventIds,
         drafts: settlement.drafts,
         pendingToolCancellations: settlement.pendingToolCancellations,
+        sandboxExecutionToolUseEventIds: settlement.sandboxExecutionToolUseEventIds,
         existingMessages: this.durableProjection,
       }, receipt).map((message) => DurableRuntimeMessageSchema.parse(message)),
     ];

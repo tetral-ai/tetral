@@ -830,6 +830,11 @@ func expireCleanupPendingWaitsTx(ctx context.Context, tx *dbconnect.Tx, claim cl
 		if err != nil {
 			return err
 		}
+		if wait.EventType == "agent.tool_use" {
+			if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, wait.ToolUseEventID, eventID, "cleanup_wait_expired", now); err != nil {
+				return err
+			}
+		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_pending_tool_uses
 			    SET status = 'expired',
@@ -853,6 +858,82 @@ func expireCleanupPendingWaitsTx(ctx context.Context, tx *dbconnect.Tx, claim cl
 		}
 		if !rowsAffected(result) {
 			return runtimeDeliveryPrepareError{kind: "cleanup_pending_wait_expire_stale", message: "cleanup pending wait expiry fence is stale", retryable: false}
+		}
+	}
+	return expireCleanupSandboxExecutionsTx(ctx, tx, claim, now)
+}
+
+func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, claim cleanupSessionClaim, now time.Time) error {
+	rows, err := tx.Query(ctx,
+		`SELECT r.session_thread_id, r.tool_use_event_id, r.model_tool_call_id, r.tool_name, r.input_json
+		   FROM session_runtime_tool_results r
+		   JOIN session_events e
+		     ON e.workspace_id = r.workspace_id
+		    AND e.session_id = r.session_id
+		    AND e.session_thread_id = r.session_thread_id
+		    AND e.event_id = r.tool_use_event_id
+		  WHERE r.workspace_id = $1
+		    AND r.session_id = $2
+		    AND r.tool_kind = 'sandbox_tool'
+		    AND r.execution_state <> 'consumed'
+		    AND e.latest_stream_position <= $3
+		  ORDER BY e.latest_stream_position ASC, r.tool_use_event_id ASC`,
+		claim.WorkspaceID,
+		claim.SessionID,
+		claim.IdleStreamPosition,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var executions []cleanupPendingWait
+	for rows.Next() {
+		var execution cleanupPendingWait
+		if err := rows.Scan(
+			&execution.ThreadID,
+			&execution.ToolUseEventID,
+			&execution.ModelToolCallID,
+			&execution.ToolName,
+			&execution.InputJSON,
+		); err != nil {
+			return err
+		}
+		execution.EventType = "agent.tool_use"
+		executions = append(executions, execution)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, execution := range executions {
+		scope := &bridgev1.RuntimeScope{
+			WorkspaceId:     claim.WorkspaceID,
+			SessionId:       claim.SessionID,
+			SessionThreadId: execution.ThreadID,
+			Binding: &bridgev1.RuntimeBindingRef{
+				BindingId:         claim.BindingID,
+				BindingGeneration: claim.BindingGeneration,
+				TargetPodUid:      claim.PodUID,
+			},
+		}
+		eventID, settled, err := toolResultForToolUseExistsTx(ctx, tx, claim.WorkspaceID, claim.SessionID, execution.ToolUseEventID)
+		if err != nil {
+			return err
+		}
+		if !settled {
+			eventID, err = insertPendingToolTerminalResultTx(ctx, tx, scope, execution, pendingToolTerminal{
+				PartStatus: "error",
+				ErrorType:  "cleanup_expired",
+				Message:    "Sandbox tool execution expired during session cleanup.",
+			}, now)
+			if err != nil {
+				return err
+			}
+		}
+		if err := markPendingToolResultResolvedTx(ctx, tx, scope, execution.ToolUseEventID, eventID, now); err != nil {
+			return err
+		}
+		if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, execution.ToolUseEventID, eventID, "cleanup_wait_expired", now); err != nil {
+			return err
 		}
 	}
 	return nil

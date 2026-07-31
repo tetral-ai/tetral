@@ -371,7 +371,7 @@ func seedLifecycleEnvironmentArtifact(t *testing.T, db *sql.DB, ws workspace.ID,
 			workspace_id, environment_id, generation, status, provider,
 			provider_artifact_ref, normalized_config_hash, artifact_input_hash,
 			runtime_network_policy_json, packages_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'tetral', $5, 'hash-config', 'hash-artifact', '{"type":"unrestricted"}', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ($1, $2, $3, $4, 'daytona', $5, 'hash-config', 'hash-artifact', '{"type":"unrestricted"}', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		string(ws), environmentID, generation, status, "artifact_"+environmentID); err != nil {
 		t.Fatalf("seed lifecycle artifact: %v", err)
 	}

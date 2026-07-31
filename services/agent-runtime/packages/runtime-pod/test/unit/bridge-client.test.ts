@@ -88,6 +88,7 @@ describe("BridgeAPIContextLoader", () => {
       messages: [],
       coldCoverage: {
         pendingToolIds: [],
+        pendingSandboxExecutionIds: [],
         pendingAttachmentIdentities: [],
         undeliveredMailDeliveryIds: [],
       },
@@ -410,6 +411,14 @@ describe("BridgeAPIContextLoader", () => {
       status: "resolving",
       expiresAt: "2026-01-01T00:30:00Z",
     }]);
+    expect(loadedContext.pendingSandboxExecutions).toEqual([{
+      toolUseEventId: "evt_pending_sandbox",
+      modelRequestId: "mrq_pending_sandbox",
+      modelToolCallId: "toolu_pending_sandbox",
+      toolName: "Bash",
+      input: { command: "pwd" },
+      executionState: "running",
+    }]);
     expect(loadedContext.backgroundTools).toEqual([{
       taskId: "task_loaded",
       sourceToolUseEventId: "evt_background_tool",
@@ -556,12 +565,14 @@ describe("BridgeAPIControlInputCommitter", () => {
         toolUseEventId: "sevt_tool",
         runtimeLocalId: cancellationDraft.runtimeLocalId,
       }],
+      sandboxExecutionToolUseEventIds: [],
     });
     const confirmation = await committer.commitControlInput({
       scope: { ...scope, runtimeInputId: "rin_confirm", eventIds: ["sevt_confirm"] },
       inputKind: "tool_confirmation",
       drafts: [approvalDraft],
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(interrupt).toEqual({ ok: true, receipt: expect.objectContaining({ messages: [expect.any(Object)] }) });
@@ -606,6 +617,7 @@ describe("BridgeAPIControlInputCommitter", () => {
       inputKind: "tool_confirmation",
       drafts: [],
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(result).toMatchObject({
@@ -632,6 +644,7 @@ describe("BridgeAPIControlInputCommitter", () => {
       inputKind: "interrupt_control",
       drafts: [],
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     })).resolves.toEqual({ ok: true, receipt: expect.any(Object) });
 
     expect(bridge.commitInputsRequests).toHaveLength(2);
@@ -663,6 +676,7 @@ describe("BridgeAPIControlInputCommitter", () => {
       inputKind: "interrupt_control",
       drafts: [],
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     })).resolves.toMatchObject({
       ok: false,
       retryable: true,
@@ -706,6 +720,7 @@ describe("BridgeAPIControlInputCommitter", () => {
       inputKind: "tool_confirmation",
       drafts: [],
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     })).resolves.toEqual({ ok: true, stale: true });
   });
 });
@@ -1344,6 +1359,7 @@ describe("BridgeAPIEventWriter", () => {
           reason: "runtime_contract_validation" as const,
         },
         pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       }),
     ];
 
@@ -1392,6 +1408,7 @@ describe("BridgeAPIEventWriter", () => {
         reason: "runtime_contract_validation",
       },
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(result).toMatchObject({
@@ -1455,6 +1472,7 @@ describe("BridgeAPIEventWriter", () => {
           reason: "runtime_contract_validation" as const,
         },
         pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       }),
     ];
 
@@ -1693,6 +1711,7 @@ describe("BridgeAPIEventWriter", () => {
           toolUseEventId: "sevt_tool_use_1",
           runtimeLocalId: cancellationDraft.runtimeLocalId,
         }],
+        sandboxExecutionToolUseEventIds: [],
       },
     });
 
@@ -1750,6 +1769,7 @@ describe("BridgeAPIEventWriter", () => {
       writeId: "rwrite_terminate",
       failure,
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(result).toMatchObject({ ok: true, writeId: "rwrite_terminate" });
@@ -2458,6 +2478,14 @@ class RecordingBridgeClient {
           status: "resolving",
           expiresAt: "2026-01-01T00:30:00Z",
         }],
+        pendingSandboxExecutions: [{
+          toolUseEventId: "evt_pending_sandbox",
+          modelRequestId: "mrq_pending_sandbox",
+          modelToolCallId: "toolu_pending_sandbox",
+          toolName: "Bash",
+          input: { command: "pwd" },
+          executionState: "running",
+        }],
         backgroundTools: [{
           taskId: "task_loaded",
           sourceToolUseEventId: "evt_background_tool",
@@ -2486,6 +2514,7 @@ class RecordingBridgeClient {
         }],
         coldCoverage: {
           pendingToolIds: ["evt_pending_tool"],
+          pendingSandboxExecutionIds: ["evt_pending_sandbox"],
           pendingAttachmentIdentities: [
             "transient:evt_loaded_tool:att_loaded",
             "file:evt_loaded_user:file_loaded_pdf",
@@ -2640,6 +2669,7 @@ class RecordingBridgeClient {
             (draft) => draft.draftKind === RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION,
           ),
           pendingToolCancellations: request.interruptSettlement.pendingToolCancellations,
+          sandboxExecutionToolUseEventIds: request.interruptSettlement.sandboxExecutionToolUseEventIds,
         };
     const interruptReceipt = interruptRequest === undefined
       ? undefined

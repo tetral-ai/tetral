@@ -20,6 +20,7 @@ import type {
   RuntimeColdCoverage,
   RuntimeConfigPatchState,
   RuntimePreloadedBackgroundToolState,
+  RuntimePreloadedSandboxExecutionState,
   RuntimeThreadControlState,
 } from "../session/session-state.js";
 import type { RuntimeSessionIdentity } from "../session/session.js";
@@ -42,6 +43,7 @@ export interface ContextLoader {
     readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
     readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
     readonly pendingToolUses?: readonly RuntimeLoadedPendingToolUse[] | undefined;
+    readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
     readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
     readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;

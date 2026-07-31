@@ -20,8 +20,8 @@
         "part_json": "{\"type\":\"text\",\"text\":\"A &<> B\",\"truncated\":false,\"status\":\"completed\"}"
       }
     },
-    "canonical_json": "{\"drafts\":[{\"draft_kind\":\"RUNTIME_DRAFT_KIND_USER_INPUT\",\"message_info\":{\"origin\":\"user\",\"role\":\"user\",\"status\":\"completed\"},\"ordinal\":0,\"parts\":[{\"ordinal\":0,\"part_json\":{\"status\":\"completed\",\"text\":\"A &<> B\",\"truncated\":false,\"type\":\"text\"},\"part_kind\":\"text\",\"runtime_local_part_id\":\"part_user\"}],\"runtime_local_id\":\"msg_user\",\"source_event_id\":\"evt_input\",\"source_id\":\"rin_vector\",\"source_kind\":\"messages\"}],\"event_ids\":[\"evt_input\"],\"input_kind\":\"messages\",\"operation_kind\":\"commit_inputs\",\"pending_tool_cancellations\":[],\"runtime_input_id\":\"rin_vector\",\"sequence_from\":7,\"sequence_to\":7,\"session_thread_id\":\"thr_vector\"}",
-    "digest": "65e181663ba7995815a14f0ed13918b460923122114b019232da67a7631cf9d6"
+    "canonical_json": "{\"drafts\":[{\"draft_kind\":\"RUNTIME_DRAFT_KIND_USER_INPUT\",\"message_info\":{\"origin\":\"user\",\"role\":\"user\",\"status\":\"completed\"},\"ordinal\":0,\"parts\":[{\"ordinal\":0,\"part_json\":{\"status\":\"completed\",\"text\":\"A &<> B\",\"truncated\":false,\"type\":\"text\"},\"part_kind\":\"text\",\"runtime_local_part_id\":\"part_user\"}],\"runtime_local_id\":\"msg_user\",\"source_event_id\":\"evt_input\",\"source_id\":\"rin_vector\",\"source_kind\":\"messages\"}],\"event_ids\":[\"evt_input\"],\"input_kind\":\"messages\",\"operation_kind\":\"commit_inputs\",\"pending_tool_cancellations\":[],\"runtime_input_id\":\"rin_vector\",\"sandbox_execution_tool_use_event_ids\":[],\"sequence_from\":7,\"sequence_to\":7,\"session_thread_id\":\"thr_vector\"}",
+    "digest": "a855e8cdfc2c8106656495e50194067fb19303d520e4df30954d09270ec18ebc"
   },
   "write_event": {
     "session_thread_id": "thr_vector",
@@ -54,8 +54,8 @@
     "session_thread_id": "thr_vector",
     "runtime_write_id": "term_vector",
     "failure_json": "{\"retryable\":false,\"message\":\"terminal\",\"type\":\"provider\"}",
-    "canonical_json": "{\"drafts\":[],\"failure\":{\"message\":\"terminal\",\"retryable\":false,\"type\":\"provider\"},\"operation_kind\":\"commit_runtime_termination\",\"pending_tool_cancellations\":[],\"runtime_write_id\":\"term_vector\",\"session_thread_id\":\"thr_vector\"}",
-    "digest": "4b8f14e65147aed0e2e4db77ce4d7a282680c328d38c79b43404e437fdbd2ec5"
+    "canonical_json": "{\"drafts\":[],\"failure\":{\"message\":\"terminal\",\"retryable\":false,\"type\":\"provider\"},\"operation_kind\":\"commit_runtime_termination\",\"pending_tool_cancellations\":[],\"runtime_write_id\":\"term_vector\",\"sandbox_execution_tool_use_event_ids\":[],\"session_thread_id\":\"thr_vector\"}",
+    "digest": "5198f5b26d0d18819c3e3286a0c89e47d43b6a1401ee5b2f7a607007c61f8a48"
   },
   "child_lifecycle": {
     "session_thread_id": "thr_parent",

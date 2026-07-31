@@ -60,7 +60,13 @@ import type {
   SessionEventWriterRuntimeTerminationEnvelope,
 } from "../contracts/runtime.js";
 import type { Session } from "../session/session.js";
-import type { RuntimePendingApprovalToolJobState, RuntimePreloadedPendingToolUseState, SessionCurrentModel } from "../session/session-state.js";
+import type {
+  RuntimePendingApprovalToolJobState,
+  RuntimePendingSandboxExecutionJobState,
+  RuntimePreloadedPendingToolUseState,
+  RuntimePreloadedSandboxExecutionState,
+  SessionCurrentModel,
+} from "../session/session-state.js";
 import type { ThreadContextPrefix } from "../session/context-manager.js";
 import type { AutoApprovalReviewerManager, ParentTranscriptView } from "../session/approval-reviewer-manager.js";
 import * as ContextLoader from "../context/context-loader.js";
@@ -181,6 +187,11 @@ export interface Interface {
   readonly installLoadedPendingToolUses: (
     session: Session,
     pendingToolUses: readonly RuntimePreloadedPendingToolUseState[] | undefined,
+    messages: readonly RuntimeMessage[],
+  ) => Effect.Effect<PendingToolUseInstallResult>;
+  readonly installLoadedSandboxExecutions: (
+    session: Session,
+    executions: readonly RuntimePreloadedSandboxExecutionState[] | undefined,
     messages: readonly RuntimeMessage[],
   ) => Effect.Effect<PendingToolUseInstallResult>;
 }
@@ -318,6 +329,8 @@ export interface AgentLoopRuntimeOptions {
   readonly runtimeModel?: (session: Session) => SessionCurrentModel | undefined;
   readonly runtimePolicy?: (session: Session) => AgentLoopRuntimePolicy;
   readonly runTool?: RuntimeToolRunner;
+  readonly acceptSandboxExecution?: RuntimeSandboxExecutionAccepter;
+  readonly awaitSandboxExecution?: RuntimeToolRunner;
   readonly reviewApproval?: RuntimeApprovalReviewer;
   readonly metrics?: RuntimeMetricsSink | undefined;
   readonly refreshRuntimeBindingToken?: (
@@ -482,7 +495,20 @@ export type RuntimeToolRunner = (
   request: RuntimeToolExecutionRequest,
 ) => RuntimeToolExecutionResult | Promise<RuntimeToolExecutionResult>;
 
-type RuntimeToolExecutionRequestBase = Omit<RuntimeToolExecutionRequest, "abortSignal">;
+/** Carries one Sandbox declaration before its independently cancellable result wait. */
+export type RuntimeSandboxExecutionRequest = Omit<RuntimeToolExecutionRequest, "abortSignal">;
+
+/** Reports whether Bridge durably accepted ownership of one Sandbox execution. */
+export type RuntimeSandboxExecutionAcceptanceResult =
+  | { readonly type: "accepted" }
+  | Extract<RuntimeToolExecutionResult, { readonly type: "error" | "stale_custody" }>;
+
+/** Transfers a Sandbox Tool Use to durable execution custody. */
+export type RuntimeSandboxExecutionAccepter = (
+  request: RuntimeSandboxExecutionRequest,
+) => RuntimeSandboxExecutionAcceptanceResult | Promise<RuntimeSandboxExecutionAcceptanceResult>;
+
+type RuntimeToolExecutionRequestBase = RuntimeSandboxExecutionRequest;
 
 /** Carries target-specific approval evidence and the reviewer-thread owner to the reviewer adapter. */
 export interface RuntimeApprovalReviewRequest {
@@ -602,6 +628,8 @@ function agentLoopLayer(options: AgentLoopRuntimeOptions): Layer.Layer<Service, 
       seedRuntimeModel: (session) => seedRuntimeModel(session, options),
       installLoadedPendingToolUses: (session, pendingToolUses, messages) =>
         Effect.sync(() => installLoadedPendingToolUses(session, options, pendingToolUses, messages)),
+      installLoadedSandboxExecutions: (session, executions, messages) =>
+        Effect.sync(() => installLoadedSandboxExecutions(session, options, executions, messages)),
     });
   }),
   );
@@ -965,7 +993,7 @@ function runAgentLoopEffect(
           acceptedContextCommitted = true;
         }
       }
-      const pendingApprovalResume = yield* resumePendingApprovalToolJobsEffect(session, options, custody);
+      const pendingApprovalResume = yield* resumeRecoveredToolJobsEffect(session, options, custody);
       if (pendingApprovalResume.type === "failed") {
         return pendingApprovalResume;
       }
@@ -1291,7 +1319,7 @@ function settleUserInterruptAtRunExitEffect(
   custody: AgentLoopRunCustody,
 ): Effect.Effect<void, unknown> {
   return Effect.gen(function* () {
-    const pendingApprovalSettlement = yield* resumePendingApprovalToolJobsEffect(session, options, custody);
+    const pendingApprovalSettlement = yield* resumeRecoveredToolJobsEffect(session, options, custody);
     if (pendingApprovalSettlement.type === "failed") {
       return yield* failRequestCloseout(pendingApprovalSettlement.error);
     }
@@ -1791,6 +1819,7 @@ function runOwnedCompactionSummaryAttemptEffect(
                 command: interruptCommand,
                 drafts: [],
                 pendingToolCancellations: [],
+                sandboxExecutionToolUseEventIds: [],
               },
             )
           );
@@ -2013,6 +2042,7 @@ function closeStartedCompactionForUserInterruptEffect(
           command,
           drafts: [],
           pendingToolCancellations: [],
+          sandboxExecutionToolUseEventIds: [],
         },
       )
     );
@@ -3486,9 +3516,88 @@ function installLoadedPendingToolUses(
   }
 }
 
+function installLoadedSandboxExecutions(
+  session: Session,
+  options: AgentLoopRuntimeOptions,
+  executions: readonly RuntimePreloadedSandboxExecutionState[] | undefined,
+  messages: readonly RuntimeMessage[],
+): { readonly ok: true } | { readonly ok: false; readonly error: unknown } {
+  if (executions === undefined || executions.length === 0) {
+    return { ok: true };
+  }
+  try {
+    const currentModel = session.state.currentModel();
+    if (currentModel === undefined) {
+      throw new Error("sandbox execution context has no current model");
+    }
+    const toolCatalog = toolCatalogForSession(session, options);
+    if (toolCatalog === undefined) {
+      throw new Error("sandbox execution context has no tool catalog");
+    }
+    const source: RuntimeProcessorSource = {
+      providerId: currentModel.providerId,
+      modelId: currentModel.modelId,
+    };
+    const seenToolUseEventIds = new Set<string>();
+    for (const [modelOrder, execution] of executions.entries()) {
+      if (seenToolUseEventIds.has(execution.toolUseEventId)) {
+        throw new Error("sandbox execution context contains duplicate tool use id");
+      }
+      seenToolUseEventIds.add(execution.toolUseEventId);
+      const entry = lookupToolEntry(toolCatalog, execution.toolName);
+      if (entry === undefined || entry.route.kind !== "sandbox" || entry.route.operation !== "RunTool") {
+        throw new Error("sandbox execution context references an unavailable sandbox tool");
+      }
+      const input = RuntimeJsonValueSchema.parse(execution.input);
+      const loadedPart = findLoadedPendingToolUsePart(messages, execution);
+      if (loadedPart === undefined) {
+        throw new Error("sandbox execution context is missing its durable message");
+      }
+      const durableMessage = DurableRuntimeMessageSchema.parse(loadedPart.message);
+      if (!session.state.contextManager.messages().some((message) => message.id === durableMessage.id)) {
+        session.state.contextManager.appendMessage(durableMessage);
+      }
+      session.state.recordPendingSandboxExecutionJob({
+        recoveryKind: "sandbox_execution",
+        toolUseEventId: execution.toolUseEventId,
+        modelRequestId: execution.modelRequestId,
+        source,
+        assistantMessage: durableMessage,
+        toolPart: loadedPart.part,
+        job: {
+          id: `${execution.modelRequestId}:${execution.modelToolCallId}`,
+          modelOrder,
+          toolUseEventId: execution.toolUseEventId,
+          modelToolCallId: execution.modelToolCallId,
+          kind: "builtin",
+          name: execution.toolName,
+          route: entry.route,
+          input,
+          runPolicy: inferToolRunPolicy(entry, input),
+          gateState: "runnable",
+        },
+        entry,
+        committedMessages: messages,
+        currentModel,
+      });
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: normalizeContextLoaderError({
+        code: "schema_mismatch",
+        rawError: error,
+        sessionId: session.sessionId,
+        reason: error instanceof Error ? error.message : "sandbox execution context is malformed",
+      }),
+    };
+  }
+}
+
 function findLoadedPendingToolUsePart(
   messages: readonly RuntimeMessage[],
-  pending: ContextLoader.RuntimeLoadedPendingToolUse,
+  pending: Pick<ContextLoader.RuntimeLoadedPendingToolUse, "toolUseEventId" | "modelToolCallId" | "toolName">,
 ): { readonly message: RuntimeMessage; readonly part: Extract<RuntimePart, { readonly type: "tool" }> } | undefined {
   for (const message of messages) {
     for (const part of message.parts) {
@@ -3529,7 +3638,7 @@ function findPendingApprovalSettlementDescriptor(
 function createPendingApprovalSettlementProcessor(
   session: Session,
   options: AgentLoopRuntimeOptions,
-  pending: RuntimePendingApprovalToolJobState,
+  pending: RuntimeRecoveredToolJobState,
   assistantMessage: DurableRuntimeMessage,
   toolPart: Extract<RuntimePart, { readonly type: "tool" }>,
   durability: {
@@ -3581,7 +3690,15 @@ interface PendingApprovalProcessorState {
   readonly settlementGate: Semaphore.Semaphore;
 }
 
-function resumePendingApprovalToolJobsEffect(
+type RuntimeRecoveredToolJobState = RuntimePendingApprovalToolJobState | RuntimePendingSandboxExecutionJobState;
+
+function isPendingSandboxExecution(
+  state: RuntimeRecoveredToolJobState,
+): state is RuntimePendingSandboxExecutionJobState {
+  return "recoveryKind" in state && state.recoveryKind === "sandbox_execution";
+}
+
+function resumeRecoveredToolJobsEffect(
   session: Session,
   options: AgentLoopRuntimeOptions,
   custody: AgentLoopRunCustody,
@@ -3616,14 +3733,17 @@ function resumePendingApprovalToolJobsEffect(
   });
 
   const run = Effect.gen(function* () {
-    const pendingJobs = session.state.pendingApprovalToolJobs();
+    const pendingJobs: readonly RuntimeRecoveredToolJobState[] = [
+      ...session.state.pendingApprovalToolJobs(),
+      ...session.state.pendingSandboxExecutionJobs(),
+    ];
     if (pendingJobs.length === 0) {
       return { type: "none" as const };
     }
 
     const pendingGroups = Object.create(null) as Record<
       string,
-      RuntimePendingApprovalToolJobState[] | undefined
+      RuntimeRecoveredToolJobState[] | undefined
     >;
     for (const pending of pendingJobs) {
       const group = pendingGroups[pending.modelRequestId];
@@ -3700,7 +3820,9 @@ function resumePendingApprovalToolJobsEffect(
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
       return yield* closeForRuntimeControl([]);
     }
-    const unresolved = pendingJobs.filter((pending) => session.state.toolConfirmation(pending.toolUseEventId) === undefined);
+    const unresolved = pendingJobs.filter((pending) =>
+      !isPendingSandboxExecution(pending) && session.state.toolConfirmation(pending.toolUseEventId) === undefined
+    );
     if (unresolved.length > 0) {
       return { type: "waiting_external" as const, blockingEventIds: unresolved.map((pending) => pending.toolUseEventId) };
     }
@@ -3720,8 +3842,12 @@ function resumePendingApprovalToolJobsEffect(
       return pendingApprovalResumeFailed(runtimeFailureFromEventWriter(runningAppend.error), "event_write_failed");
     }
 
-    const allowedJobs: RuntimePendingApprovalToolJobState[] = [];
+    const allowedJobs: RuntimeRecoveredToolJobState[] = [];
     for (const pending of pendingJobs) {
+      if (isPendingSandboxExecution(pending)) {
+        allowedJobs.push(pending);
+        continue;
+      }
       const confirmation = session.state.toolConfirmation(pending.toolUseEventId);
       if (confirmation === undefined) {
         return pendingApprovalResumeFailed(pendingApprovalResumeFailure(session.sessionId, pending.source, "missing approval confirmation"));
@@ -3755,7 +3881,7 @@ function resumePendingApprovalToolJobsEffect(
     }
 
     const scheduler = new ToolScheduler();
-    const statesByJobId = Object.create(null) as Record<string, RuntimePendingApprovalToolJobState | undefined>;
+    const statesByJobId = Object.create(null) as Record<string, RuntimeRecoveredToolJobState | undefined>;
     for (const pending of allowedJobs) {
       const job = {
         ...pending.job,
@@ -3801,7 +3927,7 @@ function resumePendingApprovalToolJobsEffect(
               "approved tool settlement gate is missing",
             ));
           }
-          const fiber = yield* resumeApprovedPendingToolJobEffect(
+          const fiber = yield* resumeRecoveredToolJobEffect(
             session,
             options,
             pending,
@@ -3867,10 +3993,10 @@ function pendingApprovalResumeFailed(
   return { type: "failed", error, releaseSession: { reason: releaseReason } };
 }
 
-function resumeApprovedPendingToolJobEffect(
+function resumeRecoveredToolJobEffect(
   session: Session,
   options: AgentLoopRuntimeOptions,
-  pending: RuntimePendingApprovalToolJobState,
+  pending: RuntimeRecoveredToolJobState,
   processor: SessionProcessor,
   durableOperations: HotDurableOperationOwner,
   settlementGate: Semaphore.Semaphore,
@@ -3884,7 +4010,7 @@ function resumeApprovedPendingToolJobEffect(
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
       return { type: "interrupted" as const };
     }
-    const executionResult: RuntimeToolExecutionResult = tokenRefresh.ok ? yield* runRuntimeToolEffect({
+    const executionRequest: RuntimeSandboxExecutionRequest = {
       workspaceId: session.identity.workspaceId,
       sessionId: session.identity.sessionId,
       sessionThreadId: session.identity.sessionThreadId,
@@ -3901,7 +4027,52 @@ function resumeApprovedPendingToolJobEffect(
       input: pending.job.input,
       ...(currentModel !== undefined ? { currentModel } : {}),
       committedMessages: pending.committedMessages,
-    }, pending.source, options.runTool ?? defaultRuntimeToolRunner) : { type: "error", error: tokenRefresh.error };
+    };
+    let ownsSandboxExecution = isPendingSandboxExecution(pending);
+    let executionResult: RuntimeToolExecutionResult;
+    if (!tokenRefresh.ok) {
+      executionResult = { type: "error", error: tokenRefresh.error };
+    } else if (ownsSandboxExecution) {
+      executionResult = yield* runRuntimeToolEffect(
+        executionRequest,
+        pending.source,
+        options.awaitSandboxExecution ?? defaultRuntimeSandboxExecutionWaiter,
+      );
+    } else if (pending.entry.route.kind === "sandbox" && pending.entry.route.operation === "RunTool") {
+      const acceptance = yield* Effect.promise(() => durableOperations.run(async () => {
+        const accepted = await acceptRuntimeSandboxExecution(
+          executionRequest,
+          pending.source,
+          options.acceptSandboxExecution ?? defaultRuntimeSandboxExecutionAccepter,
+        );
+        if (accepted.type === "accepted") {
+          session.state.recordPendingSandboxExecutionJob({
+            ...pending,
+            recoveryKind: "sandbox_execution",
+            job: { ...pending.job, gateState: "runnable", decision: "allow", approvalSource: "user" },
+          });
+          session.state.removePendingApprovalToolJob(pending.toolUseEventId);
+          runtimeMetrics(options).addPendingApprovals(-1);
+        }
+        return accepted;
+      }));
+      if (acceptance.type === "accepted") {
+        ownsSandboxExecution = true;
+        executionResult = yield* runRuntimeToolEffect(
+          executionRequest,
+          pending.source,
+          options.awaitSandboxExecution ?? defaultRuntimeSandboxExecutionWaiter,
+        );
+      } else {
+        executionResult = acceptance;
+      }
+    } else {
+      executionResult = yield* runRuntimeToolEffect(
+        executionRequest,
+        pending.source,
+        options.runTool ?? defaultRuntimeToolRunner,
+      );
+    }
     if (executionResult.type === "stale_custody") {
       return providerTurnInterruptedWithDiscard();
     }
@@ -3916,8 +4087,12 @@ function resumeApprovedPendingToolJobEffect(
         return { ok: false as const, error: settled.error };
       }
       commitProcessorProjection(session, processor);
-      session.state.removePendingApprovalToolJob(pending.toolUseEventId);
-      runtimeMetrics(options).addPendingApprovals(-1);
+      if (ownsSandboxExecution) {
+        session.state.removePendingSandboxExecutionJob(pending.toolUseEventId);
+      } else {
+        session.state.removePendingApprovalToolJob(pending.toolUseEventId);
+        runtimeMetrics(options).addPendingApprovals(-1);
+      }
       return { ok: true as const };
     }));
     if (!settlement.ok) {
@@ -4175,8 +4350,9 @@ function handleRuntimeToolJobEffect(
       return providerTurnCompleted();
     }
 
+    const tracksSandboxExecution = entry.route.kind === "sandbox" && entry.route.operation === "RunTool";
     const tokenRefresh = yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
-    const executionResult: RuntimeToolExecutionResult = tokenRefresh.ok ? yield* runRuntimeToolEffect({
+    const executionRequest: RuntimeSandboxExecutionRequest = {
       workspaceId: session.identity.workspaceId,
       sessionId: session.identity.sessionId,
       sessionThreadId: session.identity.sessionThreadId,
@@ -4193,7 +4369,59 @@ function handleRuntimeToolJobEffect(
       input: job.input,
       ...(session.state.currentModel() !== undefined ? { currentModel: session.state.currentModel() } : {}),
       committedMessages: session.state.contextManager.messages(),
-    }, source, options.runTool ?? defaultRuntimeToolRunner) : { type: "error", error: tokenRefresh.error };
+    };
+    let executionResult: RuntimeToolExecutionResult;
+    if (!tokenRefresh.ok) {
+      executionResult = { type: "error", error: tokenRefresh.error };
+    } else if (!tracksSandboxExecution) {
+      executionResult = yield* runRuntimeToolEffect(
+        executionRequest,
+        source,
+        options.runTool ?? defaultRuntimeToolRunner,
+      );
+    } else {
+      const settlementDescriptor = findPendingApprovalSettlementDescriptor(
+        processor.messages(),
+        job.modelToolCallId,
+        toolUse.toolUseEventId,
+      );
+      if (settlementDescriptor === undefined) {
+        return yield* Effect.promise(() => handleProcessorFailure(
+          session,
+          options,
+          pendingApprovalResumeFailure(session.sessionId, source, "committed sandbox tool part is unavailable"),
+        ));
+      }
+      const acceptance = yield* Effect.promise(() => state.durableOperations.run(async () => {
+        const accepted = await acceptRuntimeSandboxExecution(
+          executionRequest,
+          source,
+          options.acceptSandboxExecution ?? defaultRuntimeSandboxExecutionAccepter,
+        );
+        if (accepted.type === "accepted") {
+          session.state.recordPendingSandboxExecutionJob({
+            recoveryKind: "sandbox_execution",
+            toolUseEventId: toolUse.toolUseEventId,
+            modelRequestId,
+            source,
+            assistantMessage: DurableRuntimeMessageSchema.parse(settlementDescriptor.message),
+            toolPart: settlementDescriptor.part,
+            job: { ...job, toolUseEventId: toolUse.toolUseEventId, gateState: "runnable" },
+            entry,
+            committedMessages: session.state.contextManager.messages(),
+            ...(session.state.currentModel() !== undefined ? { currentModel: session.state.currentModel() } : {}),
+          });
+        }
+        return accepted;
+      }));
+      executionResult = acceptance.type === "accepted"
+        ? yield* runRuntimeToolEffect(
+          executionRequest,
+          source,
+          options.awaitSandboxExecution ?? defaultRuntimeSandboxExecutionWaiter,
+        )
+        : acceptance;
+    }
     if (executionResult.type === "stale_custody") {
       return providerTurnInterruptedWithDiscard();
     }
@@ -4204,6 +4432,9 @@ function handleRuntimeToolJobEffect(
       return yield* Effect.promise(() => handleProcessorFailure(session, options, settled.error));
     }
     commitProcessorProjectionWithoutStableReasoning(session, processor);
+    if (tracksSandboxExecution) {
+      session.state.removePendingSandboxExecutionJob(toolUse.toolUseEventId);
+    }
     if (executionResult.type !== "cancelled" && executionResult.attachments !== undefined && executionResult.attachments.length > 0) {
       session.state.addPendingAttachments(executionResult.attachments);
     }
@@ -4290,6 +4521,18 @@ function runRuntimeToolEffect(
       resultClosed = true;
     });
   });
+}
+
+async function acceptRuntimeSandboxExecution(
+  request: RuntimeSandboxExecutionRequest,
+  source: RuntimeProcessorSource,
+  accept: RuntimeSandboxExecutionAccepter,
+): Promise<RuntimeSandboxExecutionAcceptanceResult> {
+  try {
+    return await accept(request);
+  } catch (error) {
+    return { type: "error", error: runtimeToolRunnerFailure(request.sessionId, source, error) };
+  }
 }
 
 function waitForToolRouteSettlement(routeSettled: Promise<void>, timeoutMs: number): Promise<void> {
@@ -4536,6 +4779,27 @@ function defaultRuntimeToolRunner(request: RuntimeToolExecutionRequest): Runtime
   };
 }
 
+function defaultRuntimeSandboxExecutionAccepter(
+  request: RuntimeSandboxExecutionRequest,
+): RuntimeSandboxExecutionAcceptanceResult {
+  return {
+    type: "error",
+    error: normalizeRuntimeFailure({
+      type: "runtime",
+      code: "runtime_invalid_sequence",
+      retryable: false,
+      fatal: false,
+      reason: "runtime_contract_validation",
+      sessionId: request.sessionId,
+      rawError: new Error(`sandbox execution acceptance for ${request.entry.name} is not installed in this Runtime Pod harness`),
+    }),
+  };
+}
+
+function defaultRuntimeSandboxExecutionWaiter(request: RuntimeToolExecutionRequest): RuntimeToolExecutionResult {
+  return defaultRuntimeToolRunner(request);
+}
+
 function runtimePolicyForSession(session: Session, options: AgentLoopRuntimeOptions): AgentLoopRuntimePolicy {
   return options.runtimePolicy?.(session) ?? {};
 }
@@ -4729,6 +4993,7 @@ async function closeFailedRunInterval(
     : runtimeFailureFromProviderError(result.error);
   if (isRuntimeTerminationFailure(failure)) {
     const pendingTools = session.state.pendingApprovalToolJobs();
+    const pendingSandboxExecutions = session.state.pendingSandboxExecutionJobs();
     const toolDeclarations = runtimeTerminationToolDeclarations({
       workspaceId: session.identity.workspaceId,
       sessionId: session.sessionId,
@@ -4759,6 +5024,7 @@ async function closeFailedRunInterval(
       failure,
       drafts,
       pendingToolCancellations: [...toolDeclarations.pendingToolCancellations],
+      sandboxExecutionToolUseEventIds: pendingSandboxExecutions.map((pending) => pending.toolUseEventId),
     });
     if (!termination.ok) {
       return {
@@ -4789,6 +5055,7 @@ async function closeFailedRunInterval(
         durableTurnId,
         drafts,
         pendingToolCancellations: toolDeclarations.pendingToolCancellations,
+        sandboxExecutionToolUseEventIds: pendingSandboxExecutions.map((pending) => pending.toolUseEventId),
       }, declaration.receipt);
     } catch (error) {
       return {
@@ -4881,6 +5148,7 @@ function settleRuntimeShutdownEffect(
           command,
           failure,
           new Set(session.state.pendingApprovalToolJobs().map((pending) => pending.toolUseEventId)),
+          new Set(session.state.pendingSandboxExecutionJobs().map((pending) => pending.toolUseEventId)),
         );
       } catch (error) {
         return yield* failRequestCloseout(normalizeRuntimeFailure({
@@ -4913,6 +5181,7 @@ function settleRuntimeShutdownEffect(
             command,
             drafts: settlement.drafts,
             pendingToolCancellations: settlement.pendingToolCancellations,
+            sandboxExecutionToolUseEventIds: settlement.sandboxExecutionToolUseEventIds,
           },
         )
       );
@@ -5122,6 +5391,7 @@ function settleUserInterruptAfterRequestEndEffect(
         command,
         failure,
         new Set(session.state.pendingApprovalToolJobs().map((pending) => pending.toolUseEventId)),
+        new Set(session.state.pendingSandboxExecutionJobs().map((pending) => pending.toolUseEventId)),
       );
     } catch (error) {
       return yield* failRequestCloseout(normalizeRuntimeFailure({
@@ -5155,6 +5425,7 @@ function settleUserInterruptFenceEffect(
       readonly toolUseEventId: string;
       readonly runtimeLocalId: string;
     }[];
+    readonly sandboxExecutionToolUseEventIds: readonly string[];
   },
 ): Effect.Effect<
   | { readonly ok: true }
@@ -5199,6 +5470,7 @@ function settleUserInterruptFenceEffect(
         };
       }
       const pendingTools = session.state.pendingApprovalToolJobs();
+      const pendingSandboxExecutions = session.state.pendingSandboxExecutionJobs();
       const source = pendingTools[0]?.source;
       const failure = source === undefined
         ? normalizeRuntimeFailure({
@@ -5219,6 +5491,7 @@ function settleUserInterruptFenceEffect(
           runtimeInputId: command.runtimeInputId,
           sourceEventId: command.eventIds[0]!,
           pendingTools,
+          pendingSandboxExecutions,
           failure,
           completedAt: options.runtime.now(),
         });
@@ -5280,7 +5553,8 @@ function settleUserInterruptFenceEffect(
           runtimeInputId: command.runtimeInputId,
           eventIds: command.eventIds,
           drafts: declaration.drafts,
-          pendingToolCancellations: declaration.pendingToolCancellations,
+      pendingToolCancellations: declaration.pendingToolCancellations,
+      sandboxExecutionToolUseEventIds: declaration.sandboxExecutionToolUseEventIds,
           existingMessages: session.state.contextManager.messages(),
         }, committed.receipt);
         session.state.contextManager.replaceMessages(messages);
@@ -5893,6 +6167,7 @@ async function appendModelRequestEndEvent(
       readonly toolUseEventId: string;
       readonly runtimeLocalId: string;
     }[];
+    readonly sandboxExecutionToolUseEventIds: readonly string[];
   },
 ): Promise<
   | {
@@ -5964,6 +6239,7 @@ async function appendModelRequestEndEvent(
             sequenceFrom: interrupt.command.sequenceFrom,
             sequenceTo: interrupt.command.sequenceTo,
             pendingToolCancellations: [...interrupt.pendingToolCancellations],
+            sandboxExecutionToolUseEventIds: [...interrupt.sandboxExecutionToolUseEventIds],
           },
         }),
   };

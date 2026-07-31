@@ -30,6 +30,7 @@ export function commitInputsDeclarationDigest(
     | "inputKind"
     | "drafts"
     | "pendingToolCancellations"
+    | "sandboxExecutionToolUseEventIds"
   >,
 ): string {
   const declaration = {
@@ -56,6 +57,7 @@ export function commitInputsDeclarationDigest(
       tool_use_event_id: cancellation.toolUseEventId,
     })),
     runtime_input_id: request.runtimeInputId,
+    sandbox_execution_tool_use_event_ids: request.sandboxExecutionToolUseEventIds,
     sequence_from: request.sequenceFrom,
     sequence_to: request.sequenceTo,
     session_thread_id: request.scope?.sessionThreadId ?? "",
@@ -195,6 +197,7 @@ export function writeRequestEndDeclarationDigest(
             tool_use_event_id: cancellation.toolUseEventId,
           })),
           runtime_input_id: request.interruptSettlement.runtimeInputId,
+          sandbox_execution_tool_use_event_ids: request.interruptSettlement.sandboxExecutionToolUseEventIds,
           sequence_from: request.interruptSettlement.sequenceFrom,
           sequence_to: request.interruptSettlement.sequenceTo,
         },
@@ -251,7 +254,12 @@ export function finishIdleDeclarationDigest(
 export function runtimeTerminationDeclarationDigest(
   request: Pick<
     CommitRuntimeTerminationRequest,
-    "scope" | "runtimeWriteId" | "failureJson" | "drafts" | "pendingToolCancellations"
+    | "scope"
+    | "runtimeWriteId"
+    | "failureJson"
+    | "drafts"
+    | "pendingToolCancellations"
+    | "sandboxExecutionToolUseEventIds"
   >,
 ): string {
   const declaration = {
@@ -263,6 +271,7 @@ export function runtimeTerminationDeclarationDigest(
       tool_use_event_id: cancellation.toolUseEventId,
     })),
     runtime_write_id: request.runtimeWriteId,
+    sandbox_execution_tool_use_event_ids: request.sandboxExecutionToolUseEventIds,
     session_thread_id: request.scope?.sessionThreadId ?? "",
   };
   const canonical = canonicalRunToolJSON(JSON.stringify(declaration));

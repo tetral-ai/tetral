@@ -28,20 +28,6 @@ func (e *SandboxDriverToolExecutor) CheckHealth(ctx context.Context, target Sand
 	return e.Driver.CheckHealth(ctx, toDriverTarget(target))
 }
 
-func (e *SandboxDriverToolExecutor) RunTool(ctx context.Context, invocation SandboxToolInvocation) (SandboxToolExecution, error) {
-	result, err := e.Driver.RunTool(ctx, sandboxdriver.ToolInvocation{
-		Target:               toDriverTarget(invocation.Target),
-		ToolUseEventID:       invocation.ToolUseEventID,
-		ToolName:             invocation.ToolName,
-		InputJSON:            invocation.InputJSON,
-		ApprovalDecisionJSON: invocation.ApprovalDecisionJSON,
-	})
-	if err != nil {
-		return SandboxToolExecution{}, err
-	}
-	return SandboxToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: fromDriverBackgroundTask(result.BackgroundTask)}, nil
-}
-
 func (e *SandboxDriverToolExecutor) ReadCommandResult(ctx context.Context, reference SandboxCommandReference) (SandboxCommandResult, error) {
 	result, err := e.Driver.ReadCommandResult(ctx, sandboxdriver.CommandReference{
 		Target:          toDriverTarget(reference.Target),

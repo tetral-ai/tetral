@@ -248,7 +248,7 @@ with separate anchors.
 
 | Route kind | Operation | Target |
 | --- | --- | --- |
-| `sandbox` | `RunTool` / `CommandIO` | Bridge (helper subcommand per tool) |
+| `sandbox` | `RunTool` / `CommandIO` | Bridge durable acceptance/result read; Sandbox Service executes provider work |
 | `gateway` | `RunWeb` | web-connector container |
 | `gateway` | `RunMcpTool` | mcp-connector container |
 | `bridge` | `RunMemory` | Bridge |

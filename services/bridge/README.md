@@ -5,13 +5,12 @@
 Agent Runtime Bridge is the runtime's durable half. Every fact the agent
 loop needs persisted crosses exactly one boundary — a Bridge RPC — and
 every durable-write RPC is one PostgreSQL transaction; read-only resolvers
-are the exception. The execution RPCs run their out-of-band work against
-durable state without holding it hostage: foreground `RunTool` and the
-command follow-ups take only a preparation readiness read up front — no
-pre-execution reservation or lease — and insert their durable result once, at
-settlement, accepting the execute-to-commit window as an at-least-once
-residual. Only the MCP `Claim`/`Commit` pair brackets execution between two
-durable transactions: a leased reservation first, the refs-only result second.
+are the exception. Sandbox execution crosses two distinct boundaries:
+`AcceptSandboxExecution` atomically records the execution and its refs-only
+Queue job, while `AwaitSandboxExecution` only reads that durable execution
+until Sandbox Service stores a terminal result. Bridge never performs the
+provider call while a Runtime RPC is open. Only the MCP `Claim`/`Commit` pair
+uses a connector-side leased reservation before its refs-only result commit.
 The Runtime Pod
 holds hot state only and mutates it after the Bridge ACK; nothing the pod
 holds is ever the source of truth, so a lost pod loses no durable fact.
@@ -52,7 +51,7 @@ stored ACK; the same identity with a divergent payload is a fatal conflict.
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One semantic event plus its projection in one transaction; a public tool event may carry the anchored prefix of completed reasoning parts, and a web tool-result event may carry one fixed-shape `server_tool_use` usage attachment — both fold into the idempotency hash so replays are byte-identical or rejected; the event-less invalid-tool repair row is atomic and rehydratable |
 | Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` captures outputs then writes idle status as one boundary. `CommitRuntimeTermination` validates the open durable turn, atomically stores current-thread cancellation or abnormal-child mail declared by the live loop, closes started spans, writes terminal status, and returns the complete declaration receipt. |
 | Children | `CreateChildThread`, `ResolveChildThread`, `ListChildThreads`, `MarkChildThreadClosed`, `MarkChildThreadActive`, `ResolveInterAgentDelivery` | Child row plus thread-context-prefix checkpoint; child lifecycle marks; idempotent resolution of one stored inter-agent envelope into its received event, bound Runtime inbox, and durable queue wake |
-| Tools | `RunTool`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Sandbox-backed execution through the in-sandbox helper (a media result creates its transient-attachment rows inside the same durable-result transaction); background-command follow-ups by task id; durable memory writes with content-match conflict checks |
+| Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups by task id; durable memory writes with content-match conflict checks |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
 | MCP | `McpManifestChanged`, `ClaimMcpToolResult`, `CommitMcpToolResult` | Manifest capture-before-deliver and runtime redelivery; leased pre-execution reservation and refs-only durable result commit |
 | Binding | `RefreshRuntimeBindingToken` | Re-mints a thread's gateway token from live binding state under the locking binding fence, so a superseded pod never gets a fresh token |
@@ -462,7 +461,8 @@ never deletes durable history.
 | `bridge_api_events_test.go` | `WriteEvent` atomicity, whitelisted projection, anchored-reasoning and usage-attachment folding, replay conflict |
 | `bridge_api_settlement_test.go` | `WriteRequestEnd` / `FinishIdle` / `CommitRuntimeTermination`, single-terminal-end serialization, reschedule ceiling, best-effort capture gate, stable-reasoning merge |
 | `bridge_api_children_test.go` | Child create/resolve/mark lifecycle and thread-context-prefix checkpoint |
-| `bridge_api_tools_test.go`, `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | `RunTool` / `RunMemory` and background-command follow-ups, media transient-attachment creation in the result transaction, stdin write-sequence dedupe |
+| `bridge_api_tools_test.go` | Sandbox acceptance/result-wait separation, exact replay identity, result custody, and durable memory behavior |
+| `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | Background-command follow-ups and stdin write-sequence dedupe |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
 | `output_capture_full_seam_test.go` | The no-follow, presence-only capture seam end to end |

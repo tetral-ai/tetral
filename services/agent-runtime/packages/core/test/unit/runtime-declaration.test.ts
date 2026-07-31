@@ -89,6 +89,7 @@ describe("runtime declaration identity and message shapes", () => {
         toolUseEventId,
         runtimeLocalId,
       })),
+      sandboxExecutionToolUseEventIds: [],
     };
     const committed = buildRuntimeControlCommitResult(scope, "interrupt_control", declaration);
     if (!committed.ok || !("receipt" in committed)) {
@@ -102,6 +103,7 @@ describe("runtime declaration identity and message shapes", () => {
       eventIds: scope.eventIds,
       drafts: declaration.drafts,
       pendingToolCancellations: declaration.pendingToolCancellations,
+      sandboxExecutionToolUseEventIds: declaration.sandboxExecutionToolUseEventIds,
       existingMessages: [],
     }, committed.receipt);
 

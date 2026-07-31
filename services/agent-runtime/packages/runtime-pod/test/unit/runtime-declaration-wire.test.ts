@@ -115,6 +115,7 @@ function productionDigest(family: PodDeclarationFamily, vector: SharedDeclaratio
         inputKind: vector.input_kind,
         drafts: [runtimeDraft(vector.draft, RuntimeDraftKind.RUNTIME_DRAFT_KIND_USER_INPUT)],
         pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       });
     case "write_event":
       return writeEventDeclarationDigest({
@@ -162,6 +163,7 @@ function productionDigest(family: PodDeclarationFamily, vector: SharedDeclaratio
         failureJson: vector.failure_json,
         drafts: [],
         pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       });
     case "child_lifecycle":
       return childLifecycleDeclarationDigest({

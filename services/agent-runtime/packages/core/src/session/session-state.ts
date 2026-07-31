@@ -90,6 +90,7 @@ export interface RuntimeControlInputDeclaration {
     readonly toolUseEventId: string;
     readonly runtimeLocalId: string;
   }[];
+  readonly sandboxExecutionToolUseEventIds: readonly string[];
 }
 
 export type RuntimeControlInputCommitResult =
@@ -200,6 +201,7 @@ export type RuntimeAcceptedInputState =
 /** Exact durable identities represented by one cold baseline. */
 export interface RuntimeColdCoverage {
   readonly pendingToolIds: readonly string[];
+  readonly pendingSandboxExecutionIds: readonly string[];
   readonly pendingAttachmentIdentities: readonly string[];
   readonly undeliveredMailDeliveryIds: readonly string[];
 }
@@ -214,6 +216,7 @@ export interface RuntimeThreadPreloadState extends RuntimeThreadControlState {
   readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
   readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
   readonly pendingToolUses?: readonly RuntimePreloadedPendingToolUseState[] | undefined;
+  readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
   readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
   readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
   readonly pendingAgentMail?: readonly RuntimeInterAgentAcceptedInputState[] | undefined;
@@ -234,6 +237,16 @@ export interface RuntimePreloadedPendingToolUseState {
   readonly expiresAt: string;
 }
 
+/** Durable accepted Sandbox execution restored before its Tool Result exists. */
+export interface RuntimePreloadedSandboxExecutionState {
+  readonly toolUseEventId: string;
+  readonly modelRequestId: string;
+  readonly modelToolCallId: string;
+  readonly toolName: string;
+  readonly input: RuntimeJsonValue;
+  readonly executionState: "pending" | "preparing" | "running" | "waiting_activation" | "waiting_materialization" | "terminal_unconsumed";
+}
+
 export interface RuntimePreloadedBackgroundToolState {
   readonly taskId: string;
   readonly sourceToolUseEventId: string;
@@ -248,6 +261,20 @@ export interface RuntimeToolConfirmationState extends RuntimeThreadControlState 
 }
 
 export interface RuntimePendingApprovalToolJobState {
+  readonly toolUseEventId: string;
+  readonly modelRequestId: string;
+  readonly source: RuntimeProcessorSource;
+  readonly assistantMessage: DurableRuntimeMessage;
+  readonly toolPart: Extract<RuntimePart, { readonly type: "tool" }>;
+  readonly job: ToolJob;
+  readonly entry: ToolEntry;
+  readonly committedMessages: readonly RuntimeMessage[];
+  readonly currentModel?: SessionCurrentModel | undefined;
+}
+
+/** Hot reconstruction of an accepted Sandbox execution that still needs conversation settlement. */
+export interface RuntimePendingSandboxExecutionJobState {
+  readonly recoveryKind: "sandbox_execution";
   readonly toolUseEventId: string;
   readonly modelRequestId: string;
   readonly source: RuntimeProcessorSource;
@@ -310,6 +337,10 @@ export class SessionState {
   #pendingApprovalToolJobs: Record<string, RuntimePendingApprovalToolJobState | undefined> = Object.create(null) as Record<
     string,
     RuntimePendingApprovalToolJobState | undefined
+  >;
+  #pendingSandboxExecutionJobs: Record<string, RuntimePendingSandboxExecutionJobState | undefined> = Object.create(null) as Record<
+    string,
+    RuntimePendingSandboxExecutionJobState | undefined
   >;
   #taskNotifications: Record<string, RuntimeTaskNotificationState | undefined> = Object.create(null) as Record<
     string,
@@ -476,6 +507,25 @@ export class SessionState {
 
   hasPendingApprovalToolJobs(): boolean {
     return Object.values(this.#pendingApprovalToolJobs).some((state) => state !== undefined);
+  }
+
+  recordPendingSandboxExecutionJob(state: RuntimePendingSandboxExecutionJobState): void {
+    this.#pendingSandboxExecutionJobs[state.toolUseEventId] = state;
+  }
+
+  pendingSandboxExecutionJobs(): readonly RuntimePendingSandboxExecutionJobState[] {
+    return Object.values(this.#pendingSandboxExecutionJobs)
+      .filter((state): state is RuntimePendingSandboxExecutionJobState => state !== undefined)
+      .sort((left, right) => {
+        if (left.modelRequestId !== right.modelRequestId) {
+          return left.modelRequestId.localeCompare(right.modelRequestId);
+        }
+        return left.job.modelOrder - right.job.modelOrder;
+      });
+  }
+
+  removePendingSandboxExecutionJob(toolUseEventId: string): void {
+    delete this.#pendingSandboxExecutionJobs[toolUseEventId];
   }
 
   commitTaskNotification(state: RuntimeTaskNotificationState): "applied" | "duplicate" | "conflict" {
@@ -758,7 +808,11 @@ export class SessionState {
   recordJoinedUserInterruptResult(
     runtimeInputId: string,
     result: RuntimeControlInputCommitResult = { ok: true, joined: true },
-    declaration: RuntimeControlInputDeclaration = { drafts: [], pendingToolCancellations: [] },
+    declaration: RuntimeControlInputDeclaration = {
+      drafts: [],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
+    },
   ): boolean {
     const interrupt = this.#userInterrupt;
     if (interrupt?.command.runtimeInputId !== runtimeInputId) {
@@ -798,6 +852,7 @@ export class SessionState {
     this.#committingAcceptedInputId = undefined;
     this.#toolConfirmations = Object.create(null) as Record<string, RuntimeToolConfirmationState | undefined>;
     this.#pendingApprovalToolJobs = Object.create(null) as Record<string, RuntimePendingApprovalToolJobState | undefined>;
+    this.#pendingSandboxExecutionJobs = Object.create(null) as Record<string, RuntimePendingSandboxExecutionJobState | undefined>;
     this.#taskNotifications = Object.create(null) as Record<string, RuntimeTaskNotificationState | undefined>;
     this.#backgroundTools = Object.create(null) as Record<string, RuntimeBackgroundToolState | undefined>;
     this.#activeAttachmentRide = undefined;

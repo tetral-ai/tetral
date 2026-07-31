@@ -490,15 +490,16 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		t.Fatalf("read Bridge proto: %v", err)
 	}
 	for _, required := range []string{
-		"message RunToolRequest",
+		"message AcceptSandboxExecutionRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
+		"string model_tool_call_id = 7;",
 		"message RunMemoryRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
 	} {
 		if !strings.Contains(string(protoBody), required) {
-			t.Fatalf("Bridge RunMemory proto must expose idempotency field %q", required)
+			t.Fatalf("Bridge tool protocols must expose durable execution identity field %q", required)
 		}
 	}
 	configBody, err := os.ReadFile(filepath.Join(bridgeRoot, "k8s", "configmap.yaml")) //nolint:gosec // repository-local static test path.

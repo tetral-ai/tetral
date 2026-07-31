@@ -79,21 +79,23 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 }
 
 type bridgeLoadContextPayload struct {
-	Messages            []json.RawMessage                    `json:"messages"`
-	ThreadContextPrefix *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
-	DurableTurnID       *string                              `json:"durableTurnId"`
-	Thread              bridgeLoadContextThread              `json:"thread"`
-	RuntimeConfig       bridgeLoadContextRuntimeConfig       `json:"runtimeConfig"`
-	MCPManifests        []bridgeLoadContextMCPManifest       `json:"mcpManifests"`
-	PendingToolUses     []bridgeLoadContextPendingTool       `json:"pendingToolUses"`
-	BackgroundTools     []bridgeLoadContextBackgroundTool    `json:"backgroundTools"`
-	PendingAttachments  []bridgeLoadContextPendingAttachment `json:"pendingAttachments"`
-	PendingAgentMail    []bridgeLoadContextAgentMail         `json:"pendingAgentMail"`
-	ColdCoverage        bridgeLoadContextColdCoverage        `json:"coldCoverage"`
+	Messages                 []json.RawMessage                    `json:"messages"`
+	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
+	DurableTurnID            *string                              `json:"durableTurnId"`
+	Thread                   bridgeLoadContextThread              `json:"thread"`
+	RuntimeConfig            bridgeLoadContextRuntimeConfig       `json:"runtimeConfig"`
+	MCPManifests             []bridgeLoadContextMCPManifest       `json:"mcpManifests"`
+	PendingToolUses          []bridgeLoadContextPendingTool       `json:"pendingToolUses"`
+	PendingSandboxExecutions []bridgeLoadContextSandboxExecution  `json:"pendingSandboxExecutions"`
+	BackgroundTools          []bridgeLoadContextBackgroundTool    `json:"backgroundTools"`
+	PendingAttachments       []bridgeLoadContextPendingAttachment `json:"pendingAttachments"`
+	PendingAgentMail         []bridgeLoadContextAgentMail         `json:"pendingAgentMail"`
+	ColdCoverage             bridgeLoadContextColdCoverage        `json:"coldCoverage"`
 }
 
 type bridgeLoadContextColdCoverage struct {
 	PendingToolIDs              []string `json:"pendingToolIds"`
+	PendingSandboxExecutionIDs  []string `json:"pendingSandboxExecutionIds"`
 	PendingAttachmentIdentities []string `json:"pendingAttachmentIdentities"`
 	UndeliveredMailDeliveryIDs  []string `json:"undeliveredMailDeliveryIds"`
 }
@@ -203,6 +205,15 @@ type bridgeLoadContextPendingTool struct {
 	ExpiresAt       string          `json:"expiresAt"`
 }
 
+type bridgeLoadContextSandboxExecution struct {
+	ToolUseEventID  string          `json:"toolUseEventId"`
+	ModelRequestID  string          `json:"modelRequestId"`
+	ModelToolCallID string          `json:"modelToolCallId"`
+	ToolName        string          `json:"toolName"`
+	Input           json.RawMessage `json:"input"`
+	ExecutionState  string          `json:"executionState"`
+}
+
 type bridgeLoadContextBackgroundTool struct {
 	TaskID               string `json:"taskId"`
 	SourceToolUseEventID string `json:"sourceToolUseEventId"`
@@ -226,6 +237,10 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	pendingToolUses, err := loadThreadPendingToolUsesTx(ctx, tx, scope)
+	if err != nil {
+		return "", err
+	}
+	pendingSandboxExecutions, err := loadThreadSandboxExecutionsTx(ctx, tx, scope)
 	if err != nil {
 		return "", err
 	}
@@ -344,32 +359,38 @@ func loadThreadContextJSONTx(
 		return "", err
 	}
 	return marshalBridgeJSON(bridgeLoadContextPayload{
-		Messages:            messages,
-		ThreadContextPrefix: threadContextPrefix,
-		DurableTurnID:       durableTurnID,
-		Thread:              thread,
-		RuntimeConfig:       runtimeConfig,
-		MCPManifests:        mcpManifests,
-		PendingToolUses:     pendingToolUses,
-		BackgroundTools:     backgroundTools,
-		PendingAttachments:  pendingAttachments,
-		PendingAgentMail:    pendingAgentMail,
-		ColdCoverage:        coldCoverageForLoad(pendingToolUses, pendingAttachments, pendingAgentMail),
+		Messages:                 messages,
+		ThreadContextPrefix:      threadContextPrefix,
+		DurableTurnID:            durableTurnID,
+		Thread:                   thread,
+		RuntimeConfig:            runtimeConfig,
+		MCPManifests:             mcpManifests,
+		PendingToolUses:          pendingToolUses,
+		PendingSandboxExecutions: pendingSandboxExecutions,
+		BackgroundTools:          backgroundTools,
+		PendingAttachments:       pendingAttachments,
+		PendingAgentMail:         pendingAgentMail,
+		ColdCoverage:             coldCoverageForLoad(pendingToolUses, pendingSandboxExecutions, pendingAttachments, pendingAgentMail),
 	})
 }
 
 func coldCoverageForLoad(
 	pendingToolUses []bridgeLoadContextPendingTool,
+	pendingSandboxExecutions []bridgeLoadContextSandboxExecution,
 	pendingAttachments []bridgeLoadContextPendingAttachment,
 	pendingAgentMail []bridgeLoadContextAgentMail,
 ) bridgeLoadContextColdCoverage {
 	coverage := bridgeLoadContextColdCoverage{
 		PendingToolIDs:              make([]string, 0, len(pendingToolUses)),
+		PendingSandboxExecutionIDs:  make([]string, 0, len(pendingSandboxExecutions)),
 		PendingAttachmentIdentities: make([]string, 0, len(pendingAttachments)),
 		UndeliveredMailDeliveryIDs:  make([]string, 0, len(pendingAgentMail)),
 	}
 	for _, pending := range pendingToolUses {
 		coverage.PendingToolIDs = append(coverage.PendingToolIDs, pending.ToolUseEventID)
+	}
+	for _, execution := range pendingSandboxExecutions {
+		coverage.PendingSandboxExecutionIDs = append(coverage.PendingSandboxExecutionIDs, execution.ToolUseEventID)
 	}
 	for _, attachment := range pendingAttachments {
 		switch {
@@ -1035,6 +1056,15 @@ func loadThreadPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		    AND p.session_id = $2
 		    AND p.session_thread_id = $3
 		    AND p.status IN ('pending', 'resolving')
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_runtime_tool_results r
+		         WHERE r.workspace_id = p.workspace_id
+		           AND r.session_id = p.session_id
+		           AND r.session_thread_id = p.session_thread_id
+		           AND r.tool_use_event_id = p.tool_use_event_id
+		           AND r.tool_kind = 'sandbox_tool'
+		    )
 		  ORDER BY e.sequence ASC, p.tool_use_event_id ASC`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
@@ -1080,6 +1110,70 @@ func loadThreadPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		return nil, err
 	}
 	return pending, nil
+}
+
+func loadThreadSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]bridgeLoadContextSandboxExecution, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT r.tool_use_event_id,
+		        COALESCE(e.model_request_id, ''),
+		        r.model_tool_call_id,
+		        r.tool_name,
+		        r.input_json,
+		        r.execution_state
+		   FROM session_runtime_tool_results r
+		   JOIN session_events e
+		     ON e.workspace_id = r.workspace_id
+		    AND e.session_id = r.session_id
+		    AND e.session_thread_id = r.session_thread_id
+		    AND e.event_id = r.tool_use_event_id
+		    AND e.type = 'agent.tool_use'
+		  WHERE r.workspace_id = $1
+		    AND r.session_id = $2
+		    AND r.session_thread_id = $3
+		    AND r.tool_kind = 'sandbox_tool'
+		    AND r.execution_state <> 'consumed'
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_events result
+		         WHERE result.workspace_id = r.workspace_id
+		           AND result.session_id = r.session_id
+		           AND result.session_thread_id = r.session_thread_id
+		           AND result.type IN ('agent.tool_result', 'agent.mcp_tool_result')
+		           AND result.payload_json::jsonb ->> 'tool_use_event_id' = r.tool_use_event_id
+		    )
+		  ORDER BY e.sequence ASC, r.tool_use_event_id ASC`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	executions := make([]bridgeLoadContextSandboxExecution, 0)
+	for rows.Next() {
+		var item bridgeLoadContextSandboxExecution
+		var inputJSON string
+		if err := rows.Scan(
+			&item.ToolUseEventID,
+			&item.ModelRequestID,
+			&item.ModelToolCallID,
+			&item.ToolName,
+			&inputJSON,
+			&item.ExecutionState,
+		); err != nil {
+			return nil, err
+		}
+		if item.ModelRequestID == "" {
+			return nil, status.Error(codes.FailedPrecondition, "sandbox execution has no model request id")
+		}
+		item.Input = bridgeRawJSON(inputJSON, "{}")
+		executions = append(executions, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return executions, nil
 }
 
 type runtimeBindingTokenPayload struct {

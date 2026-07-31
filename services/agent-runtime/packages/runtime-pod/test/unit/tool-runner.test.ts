@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Metadata, status as GrpcStatus } from "@grpc/grpc-js";
+import type { CallOptions } from "@grpc/grpc-js";
 import {
   BridgeWriteStatus,
   ChildLifecycleDisposition,
@@ -19,7 +20,7 @@ import type {
   ResolveChildThreadRequest,
   ResolveInterAgentDeliveryRequest,
   RunMemoryRequest,
-  RunToolRequest,
+  AcceptSandboxExecutionRequest,
   SendCommandInputRequest,
   WriteEventRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -40,6 +41,7 @@ import type {
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
@@ -67,9 +69,10 @@ describe("RuntimePodToolRunner", () => {
     expect(() => canonicalRunToolJSON(`{"unterminated":`)).toThrow();
   });
 
-  test("routes sandbox tools through Bridge RunTool with stable input identity", async () => {
+  test("accepts one durable sandbox execution before independently awaiting its result", async () => {
+    const startedAt = Date.now();
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         summary: "created notes/a.txt",
@@ -92,8 +95,19 @@ describe("RuntimePodToolRunner", () => {
     expect(JSON.stringify(result)).not.toContain("payload");
     expect(JSON.stringify(result)).not.toContain("provider-secret");
     expect(JSON.stringify(result)).not.toContain("sandbox_process");
-    expect(bridge.runToolRequests).toHaveLength(1);
-    expect(bridge.runToolRequests[0]).toMatchObject({
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionOptions).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionOptions[0]?.deadline).toBeNumber();
+    expect(bridge.acceptSandboxExecutionOptions[0]?.deadline as number).toBeGreaterThanOrEqual(
+      startedAt + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    );
+    expect(bridge.acceptSandboxExecutionOptions[0]?.deadline as number).toBeLessThanOrEqual(
+      Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    );
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests[0]).toEqual(bridge.acceptSandboxExecutionRequests[0]);
+    expect(bridge.acceptSandboxExecutionRequests[0]).toMatchObject({
+      modelToolCallId: "tool_call_1",
       toolUseEventId: "sevt_tool_1",
       toolName: "Write",
       inputJson: '{"content":"hello","file_path":"notes/a.txt"}',
@@ -111,10 +125,89 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
+  test("retries the exact durable acceptance before beginning the result wait", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.acceptSandboxExecutionErrors.push(Object.assign(new Error("connection reset"), { code: GrpcStatus.UNAVAILABLE }));
+    const sleep = new ControlledSleep();
+    const runner = makeRunner({ bridge, sleep: sleep.sleep });
+
+    const pending = runner.runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }));
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(0);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+    const result = await pending;
+
+    expect(result.type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(2);
+    expect(bridge.acceptSandboxExecutionRequests[1]!).toEqual(bridge.acceptSandboxExecutionRequests[0]!);
+    expect(bridge.awaitSandboxExecutionRequests).toEqual([bridge.acceptSandboxExecutionRequests[0]!]);
+  });
+
+  test("does not turn an acceptance authentication failure into a tool result", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.acceptSandboxExecutionErrors.push(Object.assign(new Error("token rejected"), { code: GrpcStatus.UNAUTHENTICATED }));
+    const sleep = new ControlledSleep();
+    const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(0);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+
+    expect((await pending).type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(2);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+  });
+
+  test("retries only the result wait after durable sandbox acceptance", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionErrors.push(Object.assign(new Error("connection reset"), { code: GrpcStatus.UNAVAILABLE }));
+    const sleep = new ControlledSleep();
+    const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+
+    expect((await pending).type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
+    expect(bridge.awaitSandboxExecutionRequests[1]).toEqual(bridge.awaitSandboxExecutionRequests[0]);
+  });
+
+  test("does not turn a result-wait rejection into a tool result", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionErrors.push(Object.assign(new Error("binding moved"), { code: GrpcStatus.FAILED_PRECONDITION }));
+    const sleep = new ControlledSleep();
+    const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+
+    expect((await pending).type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
+  });
+
   test("numbers only the requested Read range with true file line numbers", async () => {
     const allLines = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`);
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: `${allLines.slice(9, 14).join("\n")}\n`,
@@ -143,7 +236,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("uses the helper start_line when a Read request offset is zero", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "first\nsecond\n",
@@ -168,7 +261,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("does not number a spurious empty line for trailing-newline Read content", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "one\n\nthree\n",
@@ -188,7 +281,7 @@ describe("RuntimePodToolRunner", () => {
     expect(result.output.text).not.toMatch(/(?:^|\n) {5}7\t(?:\n|$)/u);
 
     const blankBridge = new RecordingBridgeClient();
-    blankBridge.runToolResultJson = JSON.stringify({
+    blankBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "\n",
@@ -216,7 +309,7 @@ describe("RuntimePodToolRunner", () => {
 
     for (const testCase of cases) {
       const bridge = new RecordingBridgeClient();
-      bridge.runToolResultJson = JSON.stringify({
+      bridge.awaitSandboxExecutionResultJson = JSON.stringify({
         status: "success",
         result: { content: "alpha\nbeta\n", start_line: 7 },
       });
@@ -232,7 +325,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("renders truncation without hiding result bodies and never rebuilds expected guards", async () => {
     const truncatedReadBridge = new RecordingBridgeClient();
-    truncatedReadBridge.runToolResultJson = JSON.stringify({
+    truncatedReadBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "long line… [line truncated]\n",
@@ -252,7 +345,7 @@ describe("RuntimePodToolRunner", () => {
     expect(truncatedRead.output.truncated).toBe(true);
 
     const completeReadBridge = new RecordingBridgeClient();
-    completeReadBridge.runToolResultJson = JSON.stringify({
+    completeReadBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "complete\n",
@@ -278,19 +371,19 @@ describe("RuntimePodToolRunner", () => {
       truncatedRead.output.text,
     );
     const editBridge = new RecordingBridgeClient();
-    editBridge.runToolResultJson = JSON.stringify({ status: "success", result: { replacements: 1 } });
+    editBridge.awaitSandboxExecutionResultJson = JSON.stringify({ status: "success", result: { replacements: 1 } });
     await makeRunner({ bridge: editBridge }).runTool({
       ...toolRequest("Edit", { file_path: "notes/a.txt", old_string: "line", new_string: "row" }),
       committedMessages: [readMessage],
     });
-    expect(JSON.parse(editBridge.runToolRequests[0]?.inputJson ?? "{}")).toEqual({
+    expect(JSON.parse(editBridge.acceptSandboxExecutionRequests[0]?.inputJson ?? "{}")).toEqual({
       file_path: "notes/a.txt",
       old_string: "line",
       new_string: "row",
     });
 
     const writeBridge = new RecordingBridgeClient();
-    writeBridge.runToolResultJson = JSON.stringify({
+    writeBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       truncated: true,
       result: { created: true, bytes_written: 12 },
@@ -310,7 +403,7 @@ describe("RuntimePodToolRunner", () => {
     const content = `${Array.from({ length: 2000 }, () => "x".repeat(99)).join("\n")}\n`;
     for (const startLine of [1, 1_000_000, 1_000_000_000, Number.MAX_SAFE_INTEGER]) {
       const bridge = new RecordingBridgeClient();
-      bridge.runToolResultJson = JSON.stringify({
+      bridge.awaitSandboxExecutionResultJson = JSON.stringify({
         status: "success",
         result: {
           content,
@@ -346,7 +439,7 @@ describe("RuntimePodToolRunner", () => {
     }
 
     const unsafeStartBridge = new RecordingBridgeClient();
-    unsafeStartBridge.runToolResultJson = JSON.stringify({
+    unsafeStartBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "alpha\nbeta\n",
@@ -367,7 +460,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("formats failed Read envelopes without content or start_line", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "tool_error",
       error: { kind: "not_found", message: "path does not exist" },
       result: {},
@@ -396,12 +489,12 @@ describe("RuntimePodToolRunner", () => {
 
     for (const testCase of cases) {
       const bridge = new RecordingBridgeClient();
-      bridge.runToolResultJson = JSON.stringify({ status: "success", result: {} });
+      bridge.awaitSandboxExecutionResultJson = JSON.stringify({ status: "success", result: {} });
       await makeRunner({ bridge }).runTool({
         ...toolRequest(testCase.tool, testCase.input),
         committedMessages: [readMessage],
       });
-      expect(JSON.parse(bridge.runToolRequests[0]?.inputJson ?? "{}"), testCase.tool).not.toHaveProperty("expected");
+      expect(JSON.parse(bridge.acceptSandboxExecutionRequests[0]?.inputJson ?? "{}"), testCase.tool).not.toHaveProperty("expected");
     }
 
     const stdinBridge = new RecordingBridgeClient();
@@ -414,15 +507,15 @@ describe("RuntimePodToolRunner", () => {
 
   test("returns background task metadata for sandbox running results", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "running",
       result: {
         task_id: "task_bridge_1",
         stdout: { text: "started", truncated: false },
       },
     });
-    bridge.runToolBackgroundTaskStarted = true;
-    bridge.runToolTaskId = "task_bridge_1";
+    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
+    bridge.awaitSandboxExecutionTaskId = "task_bridge_1";
     const runner = makeRunner({ bridge });
 
     const result = await runner.runTool(toolRequest("exec_command", { cmd: "sleep 10" }));
@@ -439,12 +532,12 @@ describe("RuntimePodToolRunner", () => {
 
   test("provider Bash background execution reaches detached helper after privilege drop", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "running",
       result: { task_id: "sevt_tool_1" },
     });
-    bridge.runToolBackgroundTaskStarted = true;
-    bridge.runToolTaskId = "sevt_tool_1";
+    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
+    bridge.awaitSandboxExecutionTaskId = "sevt_tool_1";
 
     const result = await makeRunner({ bridge }).runTool(toolRequest("Bash", {
       command: "sleep 60",
@@ -453,8 +546,8 @@ describe("RuntimePodToolRunner", () => {
       run_in_background: true,
     }));
 
-    expect(bridge.runToolRequests).toHaveLength(1);
-    expect(bridge.runToolRequests[0]).toMatchObject({
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionRequests[0]).toMatchObject({
       toolUseEventId: "sevt_tool_1",
       toolName: "Bash",
       inputJson: '{"command":"sleep 60","cwd":"/workspace","run_in_background":true,"timeout":120000}',
@@ -468,7 +561,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("turns Bridge view_image attachment refs into pending provider attachments", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "image/png",
@@ -506,12 +599,12 @@ describe("RuntimePodToolRunner", () => {
     });
     expect(JSON.stringify(result)).not.toContain("AAEC");
     expect(JSON.stringify(result)).not.toContain("data_base64");
-    expect(bridge.runToolRequests).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
   });
 
   test("turns Bridge Read PDF attachment refs into pending provider attachments with page range", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "application/pdf",
@@ -553,7 +646,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("does not re-derive missing PDF page range from the original tool input", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "application/pdf",
@@ -577,7 +670,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("rejects raw sandbox media bytes at the Runtime boundary", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "image/png",
@@ -601,7 +694,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("filters transport-only base64 fields out of visible non-media sandbox tool JSON", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "image/png",
@@ -1035,10 +1128,10 @@ describe("RuntimePodToolRunner", () => {
     }
 
     const nonMemoryBridge = new RecordingBridgeClient();
-    nonMemoryBridge.runToolResultJson = memoryProjectionRetryResult();
+    nonMemoryBridge.awaitSandboxExecutionResultJson = memoryProjectionRetryResult();
     const nonMemoryResult = await makeRunner({ bridge: nonMemoryBridge, sleep }).runTool(toolRequest("Write", { file_path: "notes/todo.md", content: "one" }));
     expect(nonMemoryResult.type).toBe("error");
-    expect(nonMemoryBridge.runToolRequests).toHaveLength(1);
+    expect(nonMemoryBridge.acceptSandboxExecutionRequests).toHaveLength(1);
     expect(nonMemoryBridge.runMemoryRequests).toHaveLength(0);
     expect(sleepCalls).toBe(0);
   });
@@ -1091,7 +1184,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("recursively removes formatter-declared forbidden result fields", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         raw_bytes: "top-secret-bytes",
@@ -1108,7 +1201,7 @@ describe("RuntimePodToolRunner", () => {
   test("does not replace a route-bounded Read result with a universal text prefix", async () => {
     const bridge = new RecordingBridgeClient();
     const content = "x".repeat(60 * 1024);
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: { content, next_offset: 61440, total_lines: 2000 },
     });
@@ -2352,7 +2445,11 @@ function sourceToolUseEventIdFromPayload(payloadJson: string): string | undefine
 }
 
 class RecordingBridgeClient {
-  readonly runToolRequests: RunToolRequest[] = [];
+  readonly acceptSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
+  readonly acceptSandboxExecutionOptions: CallOptions[] = [];
+  readonly acceptSandboxExecutionErrors: Error[] = [];
+  readonly awaitSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
+  readonly awaitSandboxExecutionErrors: Error[] = [];
   readonly runMemoryRequests: RunMemoryRequest[] = [];
   readonly runMemoryMetadata: Metadata[] = [];
   readonly sendCommandInputRequests: SendCommandInputRequest[] = [];
@@ -2374,9 +2471,9 @@ class RecordingBridgeClient {
   deferResolveInterAgentDelivery = false;
   createChildThreadErrorCode: GrpcStatus | undefined;
   childStatus = "idle";
-  runToolResultJson = '{"status":"success","result":{"text":"ok"}}';
-  runToolBackgroundTaskStarted = false;
-  runToolTaskId = "";
+  awaitSandboxExecutionResultJson = '{"status":"success","result":{"text":"ok"}}';
+  awaitSandboxExecutionBackgroundTaskStarted = false;
+  awaitSandboxExecutionTaskId = "";
   runMemoryResultJson = '{"status":"completed","summary":"created"}';
   runMemoryResultJsons: string[] = [];
   runMemoryError: Error | undefined;
@@ -2394,7 +2491,8 @@ class RecordingBridgeClient {
   afterWriteEventResponse: (() => void) | undefined;
 
   client(): Pick<AgentRuntimeBridgeServiceClient,
-    | "runTool"
+    | "acceptSandboxExecution"
+    | "awaitSandboxExecution"
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
@@ -2408,7 +2506,8 @@ class RecordingBridgeClient {
     | "writeEvent"
   > {
     return {
-      runTool: this.runTool.bind(this),
+      acceptSandboxExecution: this.acceptSandboxExecution.bind(this),
+      awaitSandboxExecution: this.awaitSandboxExecution.bind(this),
       runMemory: this.runMemory.bind(this),
       sendCommandInput: this.sendCommandInput.bind(this),
       readCommandResult: this.readCommandResult.bind(this),
@@ -2421,7 +2520,8 @@ class RecordingBridgeClient {
       markChildThreadActive: this.markChildThreadActive.bind(this),
       writeEvent: this.writeEvent.bind(this),
     } as unknown as Pick<AgentRuntimeBridgeServiceClient,
-      | "runTool"
+      | "acceptSandboxExecution"
+      | "awaitSandboxExecution"
       | "runMemory"
       | "sendCommandInput"
       | "readCommandResult"
@@ -2436,13 +2536,36 @@ class RecordingBridgeClient {
     >;
   }
 
-  private runTool(request: RunToolRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-    this.runToolRequests.push(request);
+  private acceptSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
+    _metadata: Metadata,
+    options: CallOptions,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    this.acceptSandboxExecutionRequests.push(request);
+    this.acceptSandboxExecutionOptions.push(options);
+    const error = this.acceptSandboxExecutionErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: this.runToolResultJson,
-      backgroundTaskStarted: this.runToolBackgroundTaskStarted,
-      taskId: this.runToolTaskId,
+    });
+    return grpcCall();
+  }
+
+  private awaitSandboxExecution(request: AcceptSandboxExecutionRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.awaitSandboxExecutionRequests.push(request);
+    const error = this.awaitSandboxExecutionErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
+    callback(null, {
+      resultJson: this.awaitSandboxExecutionResultJson,
+      backgroundTaskStarted: this.awaitSandboxExecutionBackgroundTaskStarted,
+      taskId: this.awaitSandboxExecutionTaskId,
     });
     return grpcCall();
   }

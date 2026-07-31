@@ -1165,6 +1165,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
             runtimeInputId: command.runtimeInputId,
             sourceEventId: command.eventIds[0]!,
             pendingTools,
+            pendingSandboxExecutions: threadEntry.session.state.pendingSandboxExecutionJobs(),
             failure,
             completedAt: options.now(),
           });
@@ -1183,6 +1184,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
               eventIds: command.eventIds,
               drafts: application.declaration.drafts,
               pendingToolCancellations: application.declaration.pendingToolCancellations,
+              sandboxExecutionToolUseEventIds: application.declaration.sandboxExecutionToolUseEventIds,
               existingMessages: threadEntry.session.state.contextManager.messages(),
             }, committed.receipt);
             threadEntry.session.state.contextManager.replaceMessages(messages);
@@ -1384,6 +1386,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
               const committed = yield* Effect.promise(() => commit({
                 drafts: [draft],
                 pendingToolCancellations: [],
+                sandboxExecutionToolUseEventIds: [],
               }));
               if (!committed.ok) {
                 return { ok: false, sessionId, reason: "context_load_failed" } as const;
@@ -1638,6 +1641,15 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, AgentL
           threadResult.threadEntry.session.state.replacePendingAttachments(command.pendingAttachments ?? []);
           const pendingToolUseInstall = yield* agentLoop.installLoadedPendingToolUses(threadResult.threadEntry.session, command.pendingToolUses, command.messages);
           if (!pendingToolUseInstall.ok) {
+            yield* releaseThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
+            return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
+          }
+          const sandboxExecutionInstall = yield* agentLoop.installLoadedSandboxExecutions(
+            threadResult.threadEntry.session,
+            command.pendingSandboxExecutions,
+            command.messages,
+          );
+          if (!sandboxExecutionInstall.ok) {
             yield* releaseThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
             return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "context_load_failed" };
           }
@@ -2297,6 +2309,10 @@ function coldCoverageMatchesPreload(command: RuntimeThreadPreloadState): boolean
     loaded.length === covered.length &&
     [...loaded].sort().every((identity, index) => identity === [...covered].sort()[index]);
   const pendingToolIds = (command.pendingToolUses ?? []).map((pending) => pending.toolUseEventId);
+  const pendingSandboxExecutionIds = (command.pendingSandboxExecutions ?? []).map((execution) => execution.toolUseEventId);
+  if (pendingToolIds.some((identity) => pendingSandboxExecutionIds.includes(identity))) {
+    return false;
+  }
   const pendingAttachmentIdentities = (command.pendingAttachments ?? []).map((attachment) => {
     if (attachment.transient !== undefined) {
       return `transient:${attachment.transient.sourceToolUseEventId}:${attachment.transient.attachmentRef}`;
@@ -2305,6 +2321,7 @@ function coldCoverageMatchesPreload(command: RuntimeThreadPreloadState): boolean
   });
   const undeliveredMailDeliveryIds = (command.pendingAgentMail ?? []).map((mail) => mail.deliveryId);
   return sameIdentities(pendingToolIds, command.coldCoverage.pendingToolIds) &&
+    sameIdentities(pendingSandboxExecutionIds, command.coldCoverage.pendingSandboxExecutionIds) &&
     sameIdentities(pendingAttachmentIdentities, command.coldCoverage.pendingAttachmentIdentities) &&
     sameIdentities(undeliveredMailDeliveryIds, command.coldCoverage.undeliveredMailDeliveryIds);
 }

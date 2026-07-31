@@ -64,6 +64,88 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsFreshSignedSnapshot(t *testin
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecutionRecovery(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_bridge_sandbox_recovery"
+		threadID       = "thr_bridge_sandbox_recovery"
+		bindingID      = "bind_bridge_sandbox_recovery"
+		podUID         = "pod_bridge_sandbox_recovery"
+		toolUseEventID = "evt_bridge_sandbox_recovery"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIPendingApproval(t, admin, "default", sessionID, threadID, toolUseEventID, 1)
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mrq_pending_approval", toolUseEventID, "toolu_cleanup_wait", "dangerous_tool")
+	_, inputHash, err := canonicalRunToolInput(`{}`)
+	if err != nil {
+		t.Fatalf("canonical sandbox input: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_pending_tool_uses
+		    SET status = 'resolving', decision = 'allow'
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND tool_use_event_id = $3`,
+		sessionID, threadID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("allow pending sandbox tool: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			background_task_started, created_at, updated_at
+		) VALUES ('default', $1, $2, $3, 'sandbox_tool', $4, 'dangerous_tool', '{}',
+			'committed', NULL, 'toolu_cleanup_wait', 'running', 1, FALSE, NOW(), NOW())`,
+		sessionID, threadID, toolUseEventID, inputHash,
+	); err != nil {
+		t.Fatalf("seed sandbox execution: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-sandbox-recovery-key-32b")
+	load := func(runtimeInputID string) bridgeLoadContextPayload {
+		t.Helper()
+		response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+			Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+			RuntimeInputId: runtimeInputID,
+		})
+		if err != nil {
+			t.Fatalf("LoadContext: %v", err)
+		}
+		var payload bridgeLoadContextPayload
+		if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
+			t.Fatalf("decode context: %v", err)
+		}
+		return payload
+	}
+
+	payload := load("rin_bridge_sandbox_recovery")
+	if len(payload.PendingToolUses) != 0 {
+		t.Fatalf("pending approvals = %#v; want execution-owned approval excluded", payload.PendingToolUses)
+	}
+	if len(payload.PendingSandboxExecutions) != 1 {
+		t.Fatalf("pending sandbox executions = %#v; want one", payload.PendingSandboxExecutions)
+	}
+	execution := payload.PendingSandboxExecutions[0]
+	if execution.ToolUseEventID != toolUseEventID || execution.ModelRequestID != "mrq_pending_approval" ||
+		execution.ModelToolCallID != "toolu_cleanup_wait" || execution.ToolName != "dangerous_tool" ||
+		execution.ExecutionState != "running" || string(execution.Input) != "{}" {
+		t.Fatalf("pending sandbox execution = %#v; want durable execution identity", execution)
+	}
+	if !reflect.DeepEqual(payload.ColdCoverage.PendingSandboxExecutionIDs, []string{toolUseEventID}) ||
+		len(payload.ColdCoverage.PendingToolIDs) != 0 {
+		t.Fatalf("cold coverage = %#v; want disjoint sandbox execution identity", payload.ColdCoverage)
+	}
+
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_bridge_sandbox_terminal", 2, "agent.tool_result",
+		`{"type":"agent.tool_result","tool_use_event_id":"`+toolUseEventID+`","content":[{"type":"text","text":"already settled"}],"is_error":false}`)
+	payload = load("rin_bridge_sandbox_recovery_terminal")
+	if len(payload.PendingSandboxExecutions) != 0 || len(payload.ColdCoverage.PendingSandboxExecutionIDs) != 0 {
+		t.Fatalf("terminal Tool Result left sandbox recovery visible: %#v", payload)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreLoadContextReturnsOnlyUncommittedCompletionMail(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

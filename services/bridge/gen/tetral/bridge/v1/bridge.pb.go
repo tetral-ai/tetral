@@ -2037,17 +2037,18 @@ func (x *RefreshRuntimeBindingTokenResponse) GetRuntimeBindingToken() string {
 }
 
 type CommitInputsRequest struct {
-	state                    protoimpl.MessageState          `protogen:"open.v1"`
-	Scope                    *RuntimeScope                   `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
-	RuntimeInputId           string                          `protobuf:"bytes,2,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
-	EventIds                 []string                        `protobuf:"bytes,3,rep,name=event_ids,json=eventIds,proto3" json:"event_ids,omitempty"`
-	SequenceFrom             int64                           `protobuf:"varint,4,opt,name=sequence_from,json=sequenceFrom,proto3" json:"sequence_from,omitempty"`
-	SequenceTo               int64                           `protobuf:"varint,5,opt,name=sequence_to,json=sequenceTo,proto3" json:"sequence_to,omitempty"`
-	InputKind                string                          `protobuf:"bytes,7,opt,name=input_kind,json=inputKind,proto3" json:"input_kind,omitempty"`
-	Drafts                   []*RuntimeMessageDraft          `protobuf:"bytes,10,rep,name=drafts,proto3" json:"drafts,omitempty"`
-	PendingToolCancellations []*PendingToolCancellationDraft `protobuf:"bytes,11,rep,name=pending_tool_cancellations,json=pendingToolCancellations,proto3" json:"pending_tool_cancellations,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	state                           protoimpl.MessageState          `protogen:"open.v1"`
+	Scope                           *RuntimeScope                   `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	RuntimeInputId                  string                          `protobuf:"bytes,2,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
+	EventIds                        []string                        `protobuf:"bytes,3,rep,name=event_ids,json=eventIds,proto3" json:"event_ids,omitempty"`
+	SequenceFrom                    int64                           `protobuf:"varint,4,opt,name=sequence_from,json=sequenceFrom,proto3" json:"sequence_from,omitempty"`
+	SequenceTo                      int64                           `protobuf:"varint,5,opt,name=sequence_to,json=sequenceTo,proto3" json:"sequence_to,omitempty"`
+	InputKind                       string                          `protobuf:"bytes,7,opt,name=input_kind,json=inputKind,proto3" json:"input_kind,omitempty"`
+	Drafts                          []*RuntimeMessageDraft          `protobuf:"bytes,10,rep,name=drafts,proto3" json:"drafts,omitempty"`
+	PendingToolCancellations        []*PendingToolCancellationDraft `protobuf:"bytes,11,rep,name=pending_tool_cancellations,json=pendingToolCancellations,proto3" json:"pending_tool_cancellations,omitempty"`
+	SandboxExecutionToolUseEventIds []string                        `protobuf:"bytes,12,rep,name=sandbox_execution_tool_use_event_ids,json=sandboxExecutionToolUseEventIds,proto3" json:"sandbox_execution_tool_use_event_ids,omitempty"`
+	unknownFields                   protoimpl.UnknownFields
+	sizeCache                       protoimpl.SizeCache
 }
 
 func (x *CommitInputsRequest) Reset() {
@@ -2132,6 +2133,13 @@ func (x *CommitInputsRequest) GetDrafts() []*RuntimeMessageDraft {
 func (x *CommitInputsRequest) GetPendingToolCancellations() []*PendingToolCancellationDraft {
 	if x != nil {
 		return x.PendingToolCancellations
+	}
+	return nil
+}
+
+func (x *CommitInputsRequest) GetSandboxExecutionToolUseEventIds() []string {
+	if x != nil {
+		return x.SandboxExecutionToolUseEventIds
 	}
 	return nil
 }
@@ -2989,14 +2997,15 @@ func (x *CommitInternalToolRepairResponse) GetDeclaration() *DeclarationResponse
 }
 
 type CommitRuntimeTerminationRequest struct {
-	state                    protoimpl.MessageState          `protogen:"open.v1"`
-	Scope                    *RuntimeScope                   `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
-	RuntimeWriteId           string                          `protobuf:"bytes,2,opt,name=runtime_write_id,json=runtimeWriteId,proto3" json:"runtime_write_id,omitempty"`
-	FailureJson              string                          `protobuf:"bytes,3,opt,name=failure_json,json=failureJson,proto3" json:"failure_json,omitempty"`
-	Drafts                   []*RuntimeMessageDraft          `protobuf:"bytes,4,rep,name=drafts,proto3" json:"drafts,omitempty"`
-	PendingToolCancellations []*PendingToolCancellationDraft `protobuf:"bytes,5,rep,name=pending_tool_cancellations,json=pendingToolCancellations,proto3" json:"pending_tool_cancellations,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	state                           protoimpl.MessageState          `protogen:"open.v1"`
+	Scope                           *RuntimeScope                   `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	RuntimeWriteId                  string                          `protobuf:"bytes,2,opt,name=runtime_write_id,json=runtimeWriteId,proto3" json:"runtime_write_id,omitempty"`
+	FailureJson                     string                          `protobuf:"bytes,3,opt,name=failure_json,json=failureJson,proto3" json:"failure_json,omitempty"`
+	Drafts                          []*RuntimeMessageDraft          `protobuf:"bytes,4,rep,name=drafts,proto3" json:"drafts,omitempty"`
+	PendingToolCancellations        []*PendingToolCancellationDraft `protobuf:"bytes,5,rep,name=pending_tool_cancellations,json=pendingToolCancellations,proto3" json:"pending_tool_cancellations,omitempty"`
+	SandboxExecutionToolUseEventIds []string                        `protobuf:"bytes,6,rep,name=sandbox_execution_tool_use_event_ids,json=sandboxExecutionToolUseEventIds,proto3" json:"sandbox_execution_tool_use_event_ids,omitempty"`
+	unknownFields                   protoimpl.UnknownFields
+	sizeCache                       protoimpl.SizeCache
 }
 
 func (x *CommitRuntimeTerminationRequest) Reset() {
@@ -3060,6 +3069,13 @@ func (x *CommitRuntimeTerminationRequest) GetDrafts() []*RuntimeMessageDraft {
 func (x *CommitRuntimeTerminationRequest) GetPendingToolCancellations() []*PendingToolCancellationDraft {
 	if x != nil {
 		return x.PendingToolCancellations
+	}
+	return nil
+}
+
+func (x *CommitRuntimeTerminationRequest) GetSandboxExecutionToolUseEventIds() []string {
+	if x != nil {
+		return x.SandboxExecutionToolUseEventIds
 	}
 	return nil
 }
@@ -4364,14 +4380,15 @@ func (x *WriteRequestEndRequest) GetInterruptSettlement() *RequestEndInterruptSe
 }
 
 type RequestEndInterruptSettlement struct {
-	state                    protoimpl.MessageState          `protogen:"open.v1"`
-	RuntimeInputId           string                          `protobuf:"bytes,1,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
-	EventIds                 []string                        `protobuf:"bytes,2,rep,name=event_ids,json=eventIds,proto3" json:"event_ids,omitempty"`
-	SequenceFrom             int64                           `protobuf:"varint,3,opt,name=sequence_from,json=sequenceFrom,proto3" json:"sequence_from,omitempty"`
-	SequenceTo               int64                           `protobuf:"varint,4,opt,name=sequence_to,json=sequenceTo,proto3" json:"sequence_to,omitempty"`
-	PendingToolCancellations []*PendingToolCancellationDraft `protobuf:"bytes,5,rep,name=pending_tool_cancellations,json=pendingToolCancellations,proto3" json:"pending_tool_cancellations,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	state                           protoimpl.MessageState          `protogen:"open.v1"`
+	RuntimeInputId                  string                          `protobuf:"bytes,1,opt,name=runtime_input_id,json=runtimeInputId,proto3" json:"runtime_input_id,omitempty"`
+	EventIds                        []string                        `protobuf:"bytes,2,rep,name=event_ids,json=eventIds,proto3" json:"event_ids,omitempty"`
+	SequenceFrom                    int64                           `protobuf:"varint,3,opt,name=sequence_from,json=sequenceFrom,proto3" json:"sequence_from,omitempty"`
+	SequenceTo                      int64                           `protobuf:"varint,4,opt,name=sequence_to,json=sequenceTo,proto3" json:"sequence_to,omitempty"`
+	PendingToolCancellations        []*PendingToolCancellationDraft `protobuf:"bytes,5,rep,name=pending_tool_cancellations,json=pendingToolCancellations,proto3" json:"pending_tool_cancellations,omitempty"`
+	SandboxExecutionToolUseEventIds []string                        `protobuf:"bytes,6,rep,name=sandbox_execution_tool_use_event_ids,json=sandboxExecutionToolUseEventIds,proto3" json:"sandbox_execution_tool_use_event_ids,omitempty"`
+	unknownFields                   protoimpl.UnknownFields
+	sizeCache                       protoimpl.SizeCache
 }
 
 func (x *RequestEndInterruptSettlement) Reset() {
@@ -4435,6 +4452,13 @@ func (x *RequestEndInterruptSettlement) GetSequenceTo() int64 {
 func (x *RequestEndInterruptSettlement) GetPendingToolCancellations() []*PendingToolCancellationDraft {
 	if x != nil {
 		return x.PendingToolCancellations
+	}
+	return nil
+}
+
+func (x *RequestEndInterruptSettlement) GetSandboxExecutionToolUseEventIds() []string {
+	if x != nil {
+		return x.SandboxExecutionToolUseEventIds
 	}
 	return nil
 }
@@ -5697,32 +5721,32 @@ func (*ChildLifecycleSource_SourceToolUseEventId) isChildLifecycleSource_Identit
 
 func (*ChildLifecycleSource_ReviewerReviewId) isChildLifecycleSource_Identity() {}
 
-type RunToolRequest struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	Scope                *RuntimeScope          `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
-	ToolUseEventId       string                 `protobuf:"bytes,2,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
-	NormalizedInputHash  string                 `protobuf:"bytes,3,opt,name=normalized_input_hash,json=normalizedInputHash,proto3" json:"normalized_input_hash,omitempty"`
-	ToolName             string                 `protobuf:"bytes,4,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
-	InputJson            string                 `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
-	ApprovalDecisionJson string                 `protobuf:"bytes,6,opt,name=approval_decision_json,json=approvalDecisionJson,proto3" json:"approval_decision_json,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+type AcceptSandboxExecutionRequest struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Scope               *RuntimeScope          `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	ToolUseEventId      string                 `protobuf:"bytes,2,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
+	NormalizedInputHash string                 `protobuf:"bytes,3,opt,name=normalized_input_hash,json=normalizedInputHash,proto3" json:"normalized_input_hash,omitempty"`
+	ToolName            string                 `protobuf:"bytes,4,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	InputJson           string                 `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	ModelToolCallId     string                 `protobuf:"bytes,7,opt,name=model_tool_call_id,json=modelToolCallId,proto3" json:"model_tool_call_id,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
-func (x *RunToolRequest) Reset() {
-	*x = RunToolRequest{}
+func (x *AcceptSandboxExecutionRequest) Reset() {
+	*x = AcceptSandboxExecutionRequest{}
 	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RunToolRequest) String() string {
+func (x *AcceptSandboxExecutionRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RunToolRequest) ProtoMessage() {}
+func (*AcceptSandboxExecutionRequest) ProtoMessage() {}
 
-func (x *RunToolRequest) ProtoReflect() protoreflect.Message {
+func (x *AcceptSandboxExecutionRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -5734,77 +5758,74 @@ func (x *RunToolRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RunToolRequest.ProtoReflect.Descriptor instead.
-func (*RunToolRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use AcceptSandboxExecutionRequest.ProtoReflect.Descriptor instead.
+func (*AcceptSandboxExecutionRequest) Descriptor() ([]byte, []int) {
 	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{73}
 }
 
-func (x *RunToolRequest) GetScope() *RuntimeScope {
+func (x *AcceptSandboxExecutionRequest) GetScope() *RuntimeScope {
 	if x != nil {
 		return x.Scope
 	}
 	return nil
 }
 
-func (x *RunToolRequest) GetToolUseEventId() string {
+func (x *AcceptSandboxExecutionRequest) GetToolUseEventId() string {
 	if x != nil {
 		return x.ToolUseEventId
 	}
 	return ""
 }
 
-func (x *RunToolRequest) GetNormalizedInputHash() string {
+func (x *AcceptSandboxExecutionRequest) GetNormalizedInputHash() string {
 	if x != nil {
 		return x.NormalizedInputHash
 	}
 	return ""
 }
 
-func (x *RunToolRequest) GetToolName() string {
+func (x *AcceptSandboxExecutionRequest) GetToolName() string {
 	if x != nil {
 		return x.ToolName
 	}
 	return ""
 }
 
-func (x *RunToolRequest) GetInputJson() string {
+func (x *AcceptSandboxExecutionRequest) GetInputJson() string {
 	if x != nil {
 		return x.InputJson
 	}
 	return ""
 }
 
-func (x *RunToolRequest) GetApprovalDecisionJson() string {
+func (x *AcceptSandboxExecutionRequest) GetModelToolCallId() string {
 	if x != nil {
-		return x.ApprovalDecisionJson
+		return x.ModelToolCallId
 	}
 	return ""
 }
 
-type RunToolResponse struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	Ack                   *BridgeWriteAck        `protobuf:"bytes,1,opt,name=ack,proto3" json:"ack,omitempty"`
-	ResultJson            string                 `protobuf:"bytes,2,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
-	BackgroundTaskStarted bool                   `protobuf:"varint,3,opt,name=background_task_started,json=backgroundTaskStarted,proto3" json:"background_task_started,omitempty"`
-	TaskId                string                 `protobuf:"bytes,4,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+type AcceptSandboxExecutionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ack           *BridgeWriteAck        `protobuf:"bytes,1,opt,name=ack,proto3" json:"ack,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RunToolResponse) Reset() {
-	*x = RunToolResponse{}
+func (x *AcceptSandboxExecutionResponse) Reset() {
+	*x = AcceptSandboxExecutionResponse{}
 	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RunToolResponse) String() string {
+func (x *AcceptSandboxExecutionResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RunToolResponse) ProtoMessage() {}
+func (*AcceptSandboxExecutionResponse) ProtoMessage() {}
 
-func (x *RunToolResponse) ProtoReflect() protoreflect.Message {
+func (x *AcceptSandboxExecutionResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -5816,33 +5837,72 @@ func (x *RunToolResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RunToolResponse.ProtoReflect.Descriptor instead.
-func (*RunToolResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use AcceptSandboxExecutionResponse.ProtoReflect.Descriptor instead.
+func (*AcceptSandboxExecutionResponse) Descriptor() ([]byte, []int) {
 	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{74}
 }
 
-func (x *RunToolResponse) GetAck() *BridgeWriteAck {
+func (x *AcceptSandboxExecutionResponse) GetAck() *BridgeWriteAck {
 	if x != nil {
 		return x.Ack
 	}
 	return nil
 }
 
-func (x *RunToolResponse) GetResultJson() string {
+type AwaitSandboxExecutionResponse struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	ResultJson            string                 `protobuf:"bytes,1,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
+	BackgroundTaskStarted bool                   `protobuf:"varint,2,opt,name=background_task_started,json=backgroundTaskStarted,proto3" json:"background_task_started,omitempty"`
+	TaskId                string                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *AwaitSandboxExecutionResponse) Reset() {
+	*x = AwaitSandboxExecutionResponse{}
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[75]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AwaitSandboxExecutionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AwaitSandboxExecutionResponse) ProtoMessage() {}
+
+func (x *AwaitSandboxExecutionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[75]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AwaitSandboxExecutionResponse.ProtoReflect.Descriptor instead.
+func (*AwaitSandboxExecutionResponse) Descriptor() ([]byte, []int) {
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{75}
+}
+
+func (x *AwaitSandboxExecutionResponse) GetResultJson() string {
 	if x != nil {
 		return x.ResultJson
 	}
 	return ""
 }
 
-func (x *RunToolResponse) GetBackgroundTaskStarted() bool {
+func (x *AwaitSandboxExecutionResponse) GetBackgroundTaskStarted() bool {
 	if x != nil {
 		return x.BackgroundTaskStarted
 	}
 	return false
 }
 
-func (x *RunToolResponse) GetTaskId() string {
+func (x *AwaitSandboxExecutionResponse) GetTaskId() string {
 	if x != nil {
 		return x.TaskId
 	}
@@ -5862,7 +5922,7 @@ type ReadCommandResultRequest struct {
 
 func (x *ReadCommandResultRequest) Reset() {
 	*x = ReadCommandResultRequest{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[75]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5874,7 +5934,7 @@ func (x *ReadCommandResultRequest) String() string {
 func (*ReadCommandResultRequest) ProtoMessage() {}
 
 func (x *ReadCommandResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[75]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5887,7 +5947,7 @@ func (x *ReadCommandResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadCommandResultRequest.ProtoReflect.Descriptor instead.
 func (*ReadCommandResultRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{75}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *ReadCommandResultRequest) GetScope() *RuntimeScope {
@@ -5935,7 +5995,7 @@ type ReadCommandResultResponse struct {
 
 func (x *ReadCommandResultResponse) Reset() {
 	*x = ReadCommandResultResponse{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[76]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5947,7 +6007,7 @@ func (x *ReadCommandResultResponse) String() string {
 func (*ReadCommandResultResponse) ProtoMessage() {}
 
 func (x *ReadCommandResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[76]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5960,7 +6020,7 @@ func (x *ReadCommandResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadCommandResultResponse.ProtoReflect.Descriptor instead.
 func (*ReadCommandResultResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{76}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *ReadCommandResultResponse) GetAck() *BridgeWriteAck {
@@ -5990,7 +6050,7 @@ type SendCommandInputRequest struct {
 
 func (x *SendCommandInputRequest) Reset() {
 	*x = SendCommandInputRequest{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[77]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6002,7 +6062,7 @@ func (x *SendCommandInputRequest) String() string {
 func (*SendCommandInputRequest) ProtoMessage() {}
 
 func (x *SendCommandInputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[77]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6015,7 +6075,7 @@ func (x *SendCommandInputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendCommandInputRequest.ProtoReflect.Descriptor instead.
 func (*SendCommandInputRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{77}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *SendCommandInputRequest) GetScope() *RuntimeScope {
@@ -6064,7 +6124,7 @@ type SendCommandInputResponse struct {
 
 func (x *SendCommandInputResponse) Reset() {
 	*x = SendCommandInputResponse{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[78]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6076,7 +6136,7 @@ func (x *SendCommandInputResponse) String() string {
 func (*SendCommandInputResponse) ProtoMessage() {}
 
 func (x *SendCommandInputResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[78]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6089,7 +6149,7 @@ func (x *SendCommandInputResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendCommandInputResponse.ProtoReflect.Descriptor instead.
 func (*SendCommandInputResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{78}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *SendCommandInputResponse) GetAck() *BridgeWriteAck {
@@ -6125,7 +6185,7 @@ type CancelCommandRequest struct {
 
 func (x *CancelCommandRequest) Reset() {
 	*x = CancelCommandRequest{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[79]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6137,7 +6197,7 @@ func (x *CancelCommandRequest) String() string {
 func (*CancelCommandRequest) ProtoMessage() {}
 
 func (x *CancelCommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[79]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6150,7 +6210,7 @@ func (x *CancelCommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelCommandRequest.ProtoReflect.Descriptor instead.
 func (*CancelCommandRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{79}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *CancelCommandRequest) GetScope() *RuntimeScope {
@@ -6191,7 +6251,7 @@ type CancelCommandResponse struct {
 
 func (x *CancelCommandResponse) Reset() {
 	*x = CancelCommandResponse{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[80]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6203,7 +6263,7 @@ func (x *CancelCommandResponse) String() string {
 func (*CancelCommandResponse) ProtoMessage() {}
 
 func (x *CancelCommandResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[80]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6216,7 +6276,7 @@ func (x *CancelCommandResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelCommandResponse.ProtoReflect.Descriptor instead.
 func (*CancelCommandResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{80}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *CancelCommandResponse) GetAck() *BridgeWriteAck {
@@ -6246,7 +6306,7 @@ type RunMemoryRequest struct {
 
 func (x *RunMemoryRequest) Reset() {
 	*x = RunMemoryRequest{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[81]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6258,7 +6318,7 @@ func (x *RunMemoryRequest) String() string {
 func (*RunMemoryRequest) ProtoMessage() {}
 
 func (x *RunMemoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[81]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6271,7 +6331,7 @@ func (x *RunMemoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunMemoryRequest.ProtoReflect.Descriptor instead.
 func (*RunMemoryRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{81}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *RunMemoryRequest) GetScope() *RuntimeScope {
@@ -6319,7 +6379,7 @@ type RunMemoryResponse struct {
 
 func (x *RunMemoryResponse) Reset() {
 	*x = RunMemoryResponse{}
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[82]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6331,7 +6391,7 @@ func (x *RunMemoryResponse) String() string {
 func (*RunMemoryResponse) ProtoMessage() {}
 
 func (x *RunMemoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[82]
+	mi := &file_tetral_bridge_v1_bridge_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6344,7 +6404,7 @@ func (x *RunMemoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunMemoryResponse.ProtoReflect.Descriptor instead.
 func (*RunMemoryResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{82}
+	return file_tetral_bridge_v1_bridge_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *RunMemoryResponse) GetAck() *BridgeWriteAck {
@@ -6496,7 +6556,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"!RefreshRuntimeBindingTokenRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\"X\n" +
 	"\"RefreshRuntimeBindingTokenResponse\x122\n" +
-	"\x15runtime_binding_token\x18\x01 \x01(\tR\x13runtimeBindingToken\"\xfe\x03\n" +
+	"\x15runtime_binding_token\x18\x01 \x01(\tR\x13runtimeBindingToken\"\xcd\x04\n" +
 	"\x13CommitInputsRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12(\n" +
 	"\x10runtime_input_id\x18\x02 \x01(\tR\x0eruntimeInputId\x12\x1b\n" +
@@ -6508,7 +6568,8 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"input_kind\x18\a \x01(\tR\tinputKind\x12=\n" +
 	"\x06drafts\x18\n" +
 	" \x03(\v2%.tetral.bridge.v1.RuntimeMessageDraftR\x06drafts\x12l\n" +
-	"\x1apending_tool_cancellations\x18\v \x03(\v2..tetral.bridge.v1.PendingToolCancellationDraftR\x18pendingToolCancellationsJ\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\x1apending_tool_cancellations\x18\v \x03(\v2..tetral.bridge.v1.PendingToolCancellationDraftR\x18pendingToolCancellations\x12M\n" +
+	"$sandbox_execution_tool_use_event_ids\x18\f \x03(\tR\x1fsandboxExecutionToolUseEventIdsJ\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"R\x16hot_context_patch_jsonR\x18inter_agent_message_jsonR\x14approval_review_json\"\x93\x01\n" +
 	"\x14CommitInputsResponse\x122\n" +
 	"\x03ack\x18\x01 \x01(\v2 .tetral.bridge.v1.BridgeWriteAckR\x03ack\x12G\n" +
@@ -6578,13 +6639,14 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x06drafts\x18\x05 \x03(\v2%.tetral.bridge.v1.RuntimeMessageDraftR\x06drafts\"\x9f\x01\n" +
 	" CommitInternalToolRepairResponse\x122\n" +
 	"\x03ack\x18\x01 \x01(\v2 .tetral.bridge.v1.BridgeWriteAckR\x03ack\x12G\n" +
-	"\vdeclaration\x18\x02 \x01(\v2%.tetral.bridge.v1.DeclarationResponseR\vdeclaration\"\xd1\x02\n" +
+	"\vdeclaration\x18\x02 \x01(\v2%.tetral.bridge.v1.DeclarationResponseR\vdeclaration\"\xa0\x03\n" +
 	"\x1fCommitRuntimeTerminationRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12(\n" +
 	"\x10runtime_write_id\x18\x02 \x01(\tR\x0eruntimeWriteId\x12!\n" +
 	"\ffailure_json\x18\x03 \x01(\tR\vfailureJson\x12=\n" +
 	"\x06drafts\x18\x04 \x03(\v2%.tetral.bridge.v1.RuntimeMessageDraftR\x06drafts\x12l\n" +
-	"\x1apending_tool_cancellations\x18\x05 \x03(\v2..tetral.bridge.v1.PendingToolCancellationDraftR\x18pendingToolCancellations\"\x9f\x01\n" +
+	"\x1apending_tool_cancellations\x18\x05 \x03(\v2..tetral.bridge.v1.PendingToolCancellationDraftR\x18pendingToolCancellations\x12M\n" +
+	"$sandbox_execution_tool_use_event_ids\x18\x06 \x03(\tR\x1fsandboxExecutionToolUseEventIds\"\x9f\x01\n" +
 	" CommitRuntimeTerminationResponse\x122\n" +
 	"\x03ack\x18\x01 \x01(\v2 .tetral.bridge.v1.BridgeWriteAckR\x03ack\x12G\n" +
 	"\vdeclaration\x18\x02 \x01(\v2%.tetral.bridge.v1.DeclarationResponseR\vdeclaration\"\xff\x01\n" +
@@ -6696,14 +6758,15 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\"compacted_through_message_sequence\x18\x10 \x01(\x03H\x00R\x1fcompactedThroughMessageSequence\x88\x01\x01\x12A\n" +
 	"\x1dcompaction_event_payload_json\x18\x11 \x01(\tR\x1acompactionEventPayloadJson\x12b\n" +
 	"\x14interrupt_settlement\x18\x12 \x01(\v2/.tetral.bridge.v1.RequestEndInterruptSettlementR\x13interruptSettlementB%\n" +
-	"#_compacted_through_message_sequence\"\x9a\x02\n" +
+	"#_compacted_through_message_sequence\"\xe9\x02\n" +
 	"\x1dRequestEndInterruptSettlement\x12(\n" +
 	"\x10runtime_input_id\x18\x01 \x01(\tR\x0eruntimeInputId\x12\x1b\n" +
 	"\tevent_ids\x18\x02 \x03(\tR\beventIds\x12#\n" +
 	"\rsequence_from\x18\x03 \x01(\x03R\fsequenceFrom\x12\x1f\n" +
 	"\vsequence_to\x18\x04 \x01(\x03R\n" +
 	"sequenceTo\x12l\n" +
-	"\x1apending_tool_cancellations\x18\x05 \x03(\v2..tetral.bridge.v1.PendingToolCancellationDraftR\x18pendingToolCancellations\"\xe7\x01\n" +
+	"\x1apending_tool_cancellations\x18\x05 \x03(\v2..tetral.bridge.v1.PendingToolCancellationDraftR\x18pendingToolCancellations\x12M\n" +
+	"$sandbox_execution_tool_use_event_ids\x18\x06 \x03(\tR\x1fsandboxExecutionToolUseEventIds\"\xe7\x01\n" +
 	"\x13StableReasoningPart\x12*\n" +
 	"\x11reasoning_part_id\x18\x01 \x01(\tR\x0freasoningPartId\x12(\n" +
 	"\x10provider_part_id\x18\x02 \x01(\tR\x0eproviderPartId\x12#\n" +
@@ -6801,21 +6864,22 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x18source_tool_use_event_id\x18\x01 \x01(\tH\x00R\x14sourceToolUseEventId\x12.\n" +
 	"\x12reviewer_review_id\x18\x02 \x01(\tH\x00R\x10reviewerReviewIdB\n" +
 	"\n" +
-	"\bidentity\"\x97\x02\n" +
-	"\x0eRunToolRequest\x124\n" +
+	"\bidentity\"\xa3\x02\n" +
+	"\x1dAcceptSandboxExecutionRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12)\n" +
 	"\x11tool_use_event_id\x18\x02 \x01(\tR\x0etoolUseEventId\x122\n" +
 	"\x15normalized_input_hash\x18\x03 \x01(\tR\x13normalizedInputHash\x12\x1b\n" +
 	"\ttool_name\x18\x04 \x01(\tR\btoolName\x12\x1d\n" +
 	"\n" +
-	"input_json\x18\x05 \x01(\tR\tinputJson\x124\n" +
-	"\x16approval_decision_json\x18\x06 \x01(\tR\x14approvalDecisionJson\"\xb7\x01\n" +
-	"\x0fRunToolResponse\x122\n" +
-	"\x03ack\x18\x01 \x01(\v2 .tetral.bridge.v1.BridgeWriteAckR\x03ack\x12\x1f\n" +
-	"\vresult_json\x18\x02 \x01(\tR\n" +
+	"input_json\x18\x05 \x01(\tR\tinputJson\x12+\n" +
+	"\x12model_tool_call_id\x18\a \x01(\tR\x0fmodelToolCallIdJ\x04\b\x06\x10\a\"T\n" +
+	"\x1eAcceptSandboxExecutionResponse\x122\n" +
+	"\x03ack\x18\x01 \x01(\v2 .tetral.bridge.v1.BridgeWriteAckR\x03ack\"\x91\x01\n" +
+	"\x1dAwaitSandboxExecutionResponse\x12\x1f\n" +
+	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\x126\n" +
-	"\x17background_task_started\x18\x03 \x01(\bR\x15backgroundTaskStarted\x12\x17\n" +
-	"\atask_id\x18\x04 \x01(\tR\x06taskId\"\xfc\x01\n" +
+	"\x17background_task_started\x18\x02 \x01(\bR\x15backgroundTaskStarted\x12\x17\n" +
+	"\atask_id\x18\x03 \x01(\tR\x06taskId\"\xfc\x01\n" +
 	"\x18ReadCommandResultRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12:\n" +
@@ -6913,7 +6977,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"5SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH\x10\x01*\x7f\n" +
 	"\x1dFileAttachmentRejectionReason\x120\n" +
 	",FILE_ATTACHMENT_REJECTION_REASON_UNSPECIFIED\x10\x00\x12,\n" +
-	"(FILE_ATTACHMENT_REJECTION_REASON_DELETED\x10\x012\xab\x17\n" +
+	"(FILE_ATTACHMENT_REJECTION_REASON_DELETED\x10\x012\xd3\x18\n" +
 	"\x19AgentRuntimeBridgeService\x12Z\n" +
 	"\vLoadContext\x12$.tetral.bridge.v1.LoadContextRequest\x1a%.tetral.bridge.v1.LoadContextResponse\x12\x87\x01\n" +
 	"\x1aRefreshRuntimeBindingToken\x123.tetral.bridge.v1.RefreshRuntimeBindingTokenRequest\x1a4.tetral.bridge.v1.RefreshRuntimeBindingTokenResponse\x12]\n" +
@@ -6929,8 +6993,9 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x10ListChildThreads\x12).tetral.bridge.v1.ListChildThreadsRequest\x1a*.tetral.bridge.v1.ListChildThreadsResponse\x12\x84\x01\n" +
 	"\x19ResolveInterAgentDelivery\x122.tetral.bridge.v1.ResolveInterAgentDeliveryRequest\x1a3.tetral.bridge.v1.ResolveInterAgentDeliveryResponse\x12x\n" +
 	"\x15MarkChildThreadClosed\x12..tetral.bridge.v1.MarkChildThreadClosedRequest\x1a/.tetral.bridge.v1.MarkChildThreadClosedResponse\x12x\n" +
-	"\x15MarkChildThreadActive\x12..tetral.bridge.v1.MarkChildThreadActiveRequest\x1a/.tetral.bridge.v1.MarkChildThreadActiveResponse\x12N\n" +
-	"\aRunTool\x12 .tetral.bridge.v1.RunToolRequest\x1a!.tetral.bridge.v1.RunToolResponse\x12l\n" +
+	"\x15MarkChildThreadActive\x12..tetral.bridge.v1.MarkChildThreadActiveRequest\x1a/.tetral.bridge.v1.MarkChildThreadActiveResponse\x12{\n" +
+	"\x16AcceptSandboxExecution\x12/.tetral.bridge.v1.AcceptSandboxExecutionRequest\x1a0.tetral.bridge.v1.AcceptSandboxExecutionResponse\x12y\n" +
+	"\x15AwaitSandboxExecution\x12/.tetral.bridge.v1.AcceptSandboxExecutionRequest\x1a/.tetral.bridge.v1.AwaitSandboxExecutionResponse\x12l\n" +
 	"\x11ReadCommandResult\x12*.tetral.bridge.v1.ReadCommandResultRequest\x1a+.tetral.bridge.v1.ReadCommandResultResponse\x12i\n" +
 	"\x10SendCommandInput\x12).tetral.bridge.v1.SendCommandInputRequest\x1a*.tetral.bridge.v1.SendCommandInputResponse\x12`\n" +
 	"\rCancelCommand\x12&.tetral.bridge.v1.CancelCommandRequest\x1a'.tetral.bridge.v1.CancelCommandResponse\x12T\n" +
@@ -6957,7 +7022,7 @@ func file_tetral_bridge_v1_bridge_proto_rawDescGZIP() []byte {
 }
 
 var file_tetral_bridge_v1_bridge_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
-var file_tetral_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 83)
+var file_tetral_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 84)
 var file_tetral_bridge_v1_bridge_proto_goTypes = []any{
 	(BridgeWriteStatus)(0),                        // 0: tetral.bridge.v1.BridgeWriteStatus
 	(RuntimeDraftKind)(0),                         // 1: tetral.bridge.v1.RuntimeDraftKind
@@ -7042,16 +7107,17 @@ var file_tetral_bridge_v1_bridge_proto_goTypes = []any{
 	(*MarkChildThreadActiveRequest)(nil),          // 80: tetral.bridge.v1.MarkChildThreadActiveRequest
 	(*MarkChildThreadActiveResponse)(nil),         // 81: tetral.bridge.v1.MarkChildThreadActiveResponse
 	(*ChildLifecycleSource)(nil),                  // 82: tetral.bridge.v1.ChildLifecycleSource
-	(*RunToolRequest)(nil),                        // 83: tetral.bridge.v1.RunToolRequest
-	(*RunToolResponse)(nil),                       // 84: tetral.bridge.v1.RunToolResponse
-	(*ReadCommandResultRequest)(nil),              // 85: tetral.bridge.v1.ReadCommandResultRequest
-	(*ReadCommandResultResponse)(nil),             // 86: tetral.bridge.v1.ReadCommandResultResponse
-	(*SendCommandInputRequest)(nil),               // 87: tetral.bridge.v1.SendCommandInputRequest
-	(*SendCommandInputResponse)(nil),              // 88: tetral.bridge.v1.SendCommandInputResponse
-	(*CancelCommandRequest)(nil),                  // 89: tetral.bridge.v1.CancelCommandRequest
-	(*CancelCommandResponse)(nil),                 // 90: tetral.bridge.v1.CancelCommandResponse
-	(*RunMemoryRequest)(nil),                      // 91: tetral.bridge.v1.RunMemoryRequest
-	(*RunMemoryResponse)(nil),                     // 92: tetral.bridge.v1.RunMemoryResponse
+	(*AcceptSandboxExecutionRequest)(nil),         // 83: tetral.bridge.v1.AcceptSandboxExecutionRequest
+	(*AcceptSandboxExecutionResponse)(nil),        // 84: tetral.bridge.v1.AcceptSandboxExecutionResponse
+	(*AwaitSandboxExecutionResponse)(nil),         // 85: tetral.bridge.v1.AwaitSandboxExecutionResponse
+	(*ReadCommandResultRequest)(nil),              // 86: tetral.bridge.v1.ReadCommandResultRequest
+	(*ReadCommandResultResponse)(nil),             // 87: tetral.bridge.v1.ReadCommandResultResponse
+	(*SendCommandInputRequest)(nil),               // 88: tetral.bridge.v1.SendCommandInputRequest
+	(*SendCommandInputResponse)(nil),              // 89: tetral.bridge.v1.SendCommandInputResponse
+	(*CancelCommandRequest)(nil),                  // 90: tetral.bridge.v1.CancelCommandRequest
+	(*CancelCommandResponse)(nil),                 // 91: tetral.bridge.v1.CancelCommandResponse
+	(*RunMemoryRequest)(nil),                      // 92: tetral.bridge.v1.RunMemoryRequest
+	(*RunMemoryResponse)(nil),                     // 93: tetral.bridge.v1.RunMemoryResponse
 }
 var file_tetral_bridge_v1_bridge_proto_depIdxs = []int32{
 	1,   // 0: tetral.bridge.v1.RuntimeMessageDraft.draft_kind:type_name -> tetral.bridge.v1.RuntimeDraftKind
@@ -7155,8 +7221,8 @@ var file_tetral_bridge_v1_bridge_proto_depIdxs = []int32{
 	82,  // 98: tetral.bridge.v1.MarkChildThreadActiveRequest.source:type_name -> tetral.bridge.v1.ChildLifecycleSource
 	25,  // 99: tetral.bridge.v1.MarkChildThreadActiveResponse.ack:type_name -> tetral.bridge.v1.BridgeWriteAck
 	22,  // 100: tetral.bridge.v1.MarkChildThreadActiveResponse.declaration:type_name -> tetral.bridge.v1.DeclarationResponse
-	24,  // 101: tetral.bridge.v1.RunToolRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
-	25,  // 102: tetral.bridge.v1.RunToolResponse.ack:type_name -> tetral.bridge.v1.BridgeWriteAck
+	24,  // 101: tetral.bridge.v1.AcceptSandboxExecutionRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
+	25,  // 102: tetral.bridge.v1.AcceptSandboxExecutionResponse.ack:type_name -> tetral.bridge.v1.BridgeWriteAck
 	24,  // 103: tetral.bridge.v1.ReadCommandResultRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
 	25,  // 104: tetral.bridge.v1.ReadCommandResultResponse.ack:type_name -> tetral.bridge.v1.BridgeWriteAck
 	24,  // 105: tetral.bridge.v1.SendCommandInputRequest.scope:type_name -> tetral.bridge.v1.RuntimeScope
@@ -7178,47 +7244,49 @@ var file_tetral_bridge_v1_bridge_proto_depIdxs = []int32{
 	76,  // 121: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveInterAgentDelivery:input_type -> tetral.bridge.v1.ResolveInterAgentDeliveryRequest
 	78,  // 122: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadClosed:input_type -> tetral.bridge.v1.MarkChildThreadClosedRequest
 	80,  // 123: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:input_type -> tetral.bridge.v1.MarkChildThreadActiveRequest
-	83,  // 124: tetral.bridge.v1.AgentRuntimeBridgeService.RunTool:input_type -> tetral.bridge.v1.RunToolRequest
-	85,  // 125: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:input_type -> tetral.bridge.v1.ReadCommandResultRequest
-	87,  // 126: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:input_type -> tetral.bridge.v1.SendCommandInputRequest
-	89,  // 127: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:input_type -> tetral.bridge.v1.CancelCommandRequest
-	91,  // 128: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:input_type -> tetral.bridge.v1.RunMemoryRequest
-	47,  // 129: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:input_type -> tetral.bridge.v1.ResolveTransientAttachmentRequest
-	52,  // 130: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:input_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataRequest
-	57,  // 131: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:input_type -> tetral.bridge.v1.ReadFileAttachmentChunkRequest
-	35,  // 132: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:input_type -> tetral.bridge.v1.McpManifestChangedRequest
-	37,  // 133: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:input_type -> tetral.bridge.v1.ClaimMcpToolResultRequest
-	39,  // 134: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:input_type -> tetral.bridge.v1.CommitMcpToolResultRequest
-	42,  // 135: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:input_type -> tetral.bridge.v1.CommitInternalToolRepairRequest
-	44,  // 136: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:input_type -> tetral.bridge.v1.CommitRuntimeTerminationRequest
-	27,  // 137: tetral.bridge.v1.AgentRuntimeBridgeService.LoadContext:output_type -> tetral.bridge.v1.LoadContextResponse
-	29,  // 138: tetral.bridge.v1.AgentRuntimeBridgeService.RefreshRuntimeBindingToken:output_type -> tetral.bridge.v1.RefreshRuntimeBindingTokenResponse
-	31,  // 139: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInputs:output_type -> tetral.bridge.v1.CommitInputsResponse
-	34,  // 140: tetral.bridge.v1.AgentRuntimeBridgeService.CommitTaskNotificationResult:output_type -> tetral.bridge.v1.CommitTaskNotificationResultResponse
-	61,  // 141: tetral.bridge.v1.AgentRuntimeBridgeService.WriteEvent:output_type -> tetral.bridge.v1.WriteEventResponse
-	65,  // 142: tetral.bridge.v1.AgentRuntimeBridgeService.WriteRequestEnd:output_type -> tetral.bridge.v1.WriteRequestEndResponse
-	69,  // 143: tetral.bridge.v1.AgentRuntimeBridgeService.FinishIdle:output_type -> tetral.bridge.v1.FinishIdleResponse
-	71,  // 144: tetral.bridge.v1.AgentRuntimeBridgeService.CreateChildThread:output_type -> tetral.bridge.v1.CreateChildThreadResponse
-	73,  // 145: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveChildThread:output_type -> tetral.bridge.v1.ResolveChildThreadResponse
-	75,  // 146: tetral.bridge.v1.AgentRuntimeBridgeService.ListChildThreads:output_type -> tetral.bridge.v1.ListChildThreadsResponse
-	77,  // 147: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveInterAgentDelivery:output_type -> tetral.bridge.v1.ResolveInterAgentDeliveryResponse
-	79,  // 148: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadClosed:output_type -> tetral.bridge.v1.MarkChildThreadClosedResponse
-	81,  // 149: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:output_type -> tetral.bridge.v1.MarkChildThreadActiveResponse
-	84,  // 150: tetral.bridge.v1.AgentRuntimeBridgeService.RunTool:output_type -> tetral.bridge.v1.RunToolResponse
-	86,  // 151: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:output_type -> tetral.bridge.v1.ReadCommandResultResponse
-	88,  // 152: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:output_type -> tetral.bridge.v1.SendCommandInputResponse
-	90,  // 153: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:output_type -> tetral.bridge.v1.CancelCommandResponse
-	92,  // 154: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:output_type -> tetral.bridge.v1.RunMemoryResponse
-	50,  // 155: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:output_type -> tetral.bridge.v1.ResolveTransientAttachmentResponse
-	56,  // 156: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:output_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataResponse
-	58,  // 157: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:output_type -> tetral.bridge.v1.ReadFileAttachmentChunkResponse
-	36,  // 158: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:output_type -> tetral.bridge.v1.McpManifestChangedResponse
-	38,  // 159: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:output_type -> tetral.bridge.v1.ClaimMcpToolResultResponse
-	41,  // 160: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:output_type -> tetral.bridge.v1.CommitMcpToolResultResponse
-	43,  // 161: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:output_type -> tetral.bridge.v1.CommitInternalToolRepairResponse
-	45,  // 162: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:output_type -> tetral.bridge.v1.CommitRuntimeTerminationResponse
-	137, // [137:163] is the sub-list for method output_type
-	111, // [111:137] is the sub-list for method input_type
+	83,  // 124: tetral.bridge.v1.AgentRuntimeBridgeService.AcceptSandboxExecution:input_type -> tetral.bridge.v1.AcceptSandboxExecutionRequest
+	83,  // 125: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitSandboxExecution:input_type -> tetral.bridge.v1.AcceptSandboxExecutionRequest
+	86,  // 126: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:input_type -> tetral.bridge.v1.ReadCommandResultRequest
+	88,  // 127: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:input_type -> tetral.bridge.v1.SendCommandInputRequest
+	90,  // 128: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:input_type -> tetral.bridge.v1.CancelCommandRequest
+	92,  // 129: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:input_type -> tetral.bridge.v1.RunMemoryRequest
+	47,  // 130: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:input_type -> tetral.bridge.v1.ResolveTransientAttachmentRequest
+	52,  // 131: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:input_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataRequest
+	57,  // 132: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:input_type -> tetral.bridge.v1.ReadFileAttachmentChunkRequest
+	35,  // 133: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:input_type -> tetral.bridge.v1.McpManifestChangedRequest
+	37,  // 134: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:input_type -> tetral.bridge.v1.ClaimMcpToolResultRequest
+	39,  // 135: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:input_type -> tetral.bridge.v1.CommitMcpToolResultRequest
+	42,  // 136: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:input_type -> tetral.bridge.v1.CommitInternalToolRepairRequest
+	44,  // 137: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:input_type -> tetral.bridge.v1.CommitRuntimeTerminationRequest
+	27,  // 138: tetral.bridge.v1.AgentRuntimeBridgeService.LoadContext:output_type -> tetral.bridge.v1.LoadContextResponse
+	29,  // 139: tetral.bridge.v1.AgentRuntimeBridgeService.RefreshRuntimeBindingToken:output_type -> tetral.bridge.v1.RefreshRuntimeBindingTokenResponse
+	31,  // 140: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInputs:output_type -> tetral.bridge.v1.CommitInputsResponse
+	34,  // 141: tetral.bridge.v1.AgentRuntimeBridgeService.CommitTaskNotificationResult:output_type -> tetral.bridge.v1.CommitTaskNotificationResultResponse
+	61,  // 142: tetral.bridge.v1.AgentRuntimeBridgeService.WriteEvent:output_type -> tetral.bridge.v1.WriteEventResponse
+	65,  // 143: tetral.bridge.v1.AgentRuntimeBridgeService.WriteRequestEnd:output_type -> tetral.bridge.v1.WriteRequestEndResponse
+	69,  // 144: tetral.bridge.v1.AgentRuntimeBridgeService.FinishIdle:output_type -> tetral.bridge.v1.FinishIdleResponse
+	71,  // 145: tetral.bridge.v1.AgentRuntimeBridgeService.CreateChildThread:output_type -> tetral.bridge.v1.CreateChildThreadResponse
+	73,  // 146: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveChildThread:output_type -> tetral.bridge.v1.ResolveChildThreadResponse
+	75,  // 147: tetral.bridge.v1.AgentRuntimeBridgeService.ListChildThreads:output_type -> tetral.bridge.v1.ListChildThreadsResponse
+	77,  // 148: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveInterAgentDelivery:output_type -> tetral.bridge.v1.ResolveInterAgentDeliveryResponse
+	79,  // 149: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadClosed:output_type -> tetral.bridge.v1.MarkChildThreadClosedResponse
+	81,  // 150: tetral.bridge.v1.AgentRuntimeBridgeService.MarkChildThreadActive:output_type -> tetral.bridge.v1.MarkChildThreadActiveResponse
+	84,  // 151: tetral.bridge.v1.AgentRuntimeBridgeService.AcceptSandboxExecution:output_type -> tetral.bridge.v1.AcceptSandboxExecutionResponse
+	85,  // 152: tetral.bridge.v1.AgentRuntimeBridgeService.AwaitSandboxExecution:output_type -> tetral.bridge.v1.AwaitSandboxExecutionResponse
+	87,  // 153: tetral.bridge.v1.AgentRuntimeBridgeService.ReadCommandResult:output_type -> tetral.bridge.v1.ReadCommandResultResponse
+	89,  // 154: tetral.bridge.v1.AgentRuntimeBridgeService.SendCommandInput:output_type -> tetral.bridge.v1.SendCommandInputResponse
+	91,  // 155: tetral.bridge.v1.AgentRuntimeBridgeService.CancelCommand:output_type -> tetral.bridge.v1.CancelCommandResponse
+	93,  // 156: tetral.bridge.v1.AgentRuntimeBridgeService.RunMemory:output_type -> tetral.bridge.v1.RunMemoryResponse
+	50,  // 157: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveTransientAttachment:output_type -> tetral.bridge.v1.ResolveTransientAttachmentResponse
+	56,  // 158: tetral.bridge.v1.AgentRuntimeBridgeService.ResolveFileAttachmentMetadata:output_type -> tetral.bridge.v1.ResolveFileAttachmentMetadataResponse
+	58,  // 159: tetral.bridge.v1.AgentRuntimeBridgeService.ReadFileAttachmentChunk:output_type -> tetral.bridge.v1.ReadFileAttachmentChunkResponse
+	36,  // 160: tetral.bridge.v1.AgentRuntimeBridgeService.McpManifestChanged:output_type -> tetral.bridge.v1.McpManifestChangedResponse
+	38,  // 161: tetral.bridge.v1.AgentRuntimeBridgeService.ClaimMcpToolResult:output_type -> tetral.bridge.v1.ClaimMcpToolResultResponse
+	41,  // 162: tetral.bridge.v1.AgentRuntimeBridgeService.CommitMcpToolResult:output_type -> tetral.bridge.v1.CommitMcpToolResultResponse
+	43,  // 163: tetral.bridge.v1.AgentRuntimeBridgeService.CommitInternalToolRepair:output_type -> tetral.bridge.v1.CommitInternalToolRepairResponse
+	45,  // 164: tetral.bridge.v1.AgentRuntimeBridgeService.CommitRuntimeTermination:output_type -> tetral.bridge.v1.CommitRuntimeTerminationResponse
+	138, // [138:165] is the sub-list for method output_type
+	111, // [111:138] is the sub-list for method input_type
 	111, // [111:111] is the sub-list for extension type_name
 	111, // [111:111] is the sub-list for extension extendee
 	0,   // [0:111] is the sub-list for field type_name
@@ -7256,7 +7324,7 @@ func file_tetral_bridge_v1_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_bridge_v1_bridge_proto_rawDesc), len(file_tetral_bridge_v1_bridge_proto_rawDesc)),
 			NumEnums:      10,
-			NumMessages:   83,
+			NumMessages:   84,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

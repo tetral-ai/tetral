@@ -1050,12 +1050,13 @@ func insertRuntimePodLostSubAgentDeliveryErrorTx(ctx context.Context, tx *dbconn
 }
 
 type runtimeTerminalToolResult struct {
-	WriteIDPrefix string
-	Reason        string
-	ErrorType     string
-	Message       string
-	Retryable     bool
-	Success       bool
+	WriteIDPrefix     string
+	Reason            string
+	ErrorType         string
+	Message           string
+	Retryable         bool
+	Success           bool
+	ConsumptionReason string
 }
 
 func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, terminal runtimeTerminalToolResult, now time.Time) (bool, error) {
@@ -1112,6 +1113,13 @@ func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, wo
 		return false, err
 	}
 	if err := settleRuntimeTerminalToolPartTx(ctx, tx, scope, toolUse, eventID, terminal, now); err != nil {
+		return false, err
+	}
+	consumptionReason := terminal.ConsumptionReason
+	if consumptionReason == "" {
+		consumptionReason = "pod_lost"
+	}
+	if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUse.EventID, eventID, consumptionReason, now); err != nil {
 		return false, err
 	}
 	if terminal.Success {

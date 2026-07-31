@@ -68,7 +68,6 @@ const (
 	bridgeOpListChildThreads               = "list_child_threads"
 	bridgeOpMarkChildThreadClosed          = "mark_child_thread_closed"
 	bridgeOpMarkChildThreadActive          = "mark_child_thread_active"
-	bridgeOpRunTool                        = "run_tool"
 	bridgeOpReadCommandResult              = "read_command_result"
 	bridgeOpSendCommandInput               = "send_command_input"
 	bridgeOpCancelCommand                  = "cancel_command"
@@ -181,7 +180,6 @@ type transientAttachmentGCRow struct {
 
 type SandboxToolExecutor interface {
 	CheckHealth(context.Context, SandboxToolTarget) error
-	RunTool(context.Context, SandboxToolInvocation) (SandboxToolExecution, error)
 	ReadCommandResult(context.Context, SandboxCommandReference) (SandboxCommandResult, error)
 	SendCommandInput(context.Context, SandboxCommandInput) (SandboxCommandResult, error)
 	CancelCommand(context.Context, SandboxCommandCancel) (SandboxCommandResult, error)
@@ -205,19 +203,6 @@ type SandboxToolTarget struct {
 	ProviderSandboxID    string
 	PreparationAttemptID string
 	ResourceRootsJSON    string
-}
-
-type SandboxToolInvocation struct {
-	Target               SandboxToolTarget
-	ToolUseEventID       string
-	ToolName             string
-	InputJSON            string
-	ApprovalDecisionJSON string
-}
-
-type SandboxToolExecution struct {
-	ResultJSON     string
-	BackgroundTask *SandboxBackgroundTask
 }
 
 type SandboxBackgroundTask struct {
@@ -547,6 +532,8 @@ type runtimeToolResult struct {
 	InputJSON              string
 	AckStatus              string
 	ResultJSON             string
+	ModelToolCallID        sql.NullString
+	ExecutionState         sql.NullString
 	BackgroundTaskStarted  bool
 	TaskID                 sql.NullString
 	MemoryProjectionState  sql.NullString
@@ -581,7 +568,10 @@ func readRuntimeToolResultReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scop
 }
 
 func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool) (runtimeToolResult, bool, error) {
-	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status, result_json, background_task_started, task_id, memory_projection_state, mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
+	               COALESCE(result_json, ''), model_tool_call_id, execution_state,
+	               background_task_started, task_id, memory_projection_state,
+	               mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -599,7 +589,12 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		toolUseEventID,
 	)
 	var existing runtimeToolResult
-	if err := row.Scan(&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON, &existing.AckStatus, &existing.ResultJSON, &existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState, &existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt); dbconnect.IsNoRows(err) {
+	if err := row.Scan(
+		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
+		&existing.AckStatus, &existing.ResultJSON, &existing.ModelToolCallID, &existing.ExecutionState,
+		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
+		&existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt,
+	); dbconnect.IsNoRows(err) {
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {
 		return runtimeToolResult{}, false, err

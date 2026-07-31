@@ -30,14 +30,17 @@ func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
 	if err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_CommitMcpToolResult_FullMethodName); err != nil {
 		t.Fatalf("gateway CommitMcpToolResult authorization error = %v; want nil", err)
 	}
-	err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_RunTool_FullMethodName)
+	err := BridgeAPIMethodAuthorizer(gateway, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName)
 	if status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("gateway RunTool authorization error = %v; want PermissionDenied", err)
+		t.Fatalf("gateway AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
 	}
 
 	runtimePod := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}}
-	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_RunTool_FullMethodName); err != nil {
-		t.Fatalf("runtime pod RunTool authorization error = %v; want nil", err)
+	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName); err != nil {
+		t.Fatalf("runtime pod AcceptSandboxExecution authorization error = %v; want nil", err)
+	}
+	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName); err != nil {
+		t.Fatalf("runtime pod AwaitSandboxExecution authorization error = %v; want nil", err)
 	}
 	if err := BridgeAPIMethodAuthorizer(runtimePod, bridgev1.AgentRuntimeBridgeService_CommitInternalToolRepair_FullMethodName); err != nil {
 		t.Fatalf("runtime pod CommitInternalToolRepair authorization error = %v; want nil", err)
@@ -56,12 +59,12 @@ func TestBridgeAPIMethodAuthorizerScopesGatewayServiceAccount(t *testing.T) {
 	if err := BridgeAPIMethodAuthorizer(bridge, bridgev1.AgentRuntimeBridgeService_ReadCommandResult_FullMethodName); err != nil {
 		t.Fatalf("bridge ReadCommandResult authorization error = %v; want nil", err)
 	}
-	if err := BridgeAPIMethodAuthorizer(bridge, bridgev1.AgentRuntimeBridgeService_RunTool_FullMethodName); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("bridge RunTool authorization error = %v; want PermissionDenied", err)
+	if err := BridgeAPIMethodAuthorizer(bridge, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("bridge AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
 	}
 
 	unknown := auth.Identity{ServiceAccount: auth.ServiceAccount{Namespace: "tetral-system", Name: "unknown"}}
-	if err := BridgeAPIMethodAuthorizer(unknown, bridgev1.AgentRuntimeBridgeService_RunTool_FullMethodName); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("unknown RunTool authorization error = %v; want PermissionDenied", err)
+	if err := BridgeAPIMethodAuthorizer(unknown, bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unknown AcceptSandboxExecution authorization error = %v; want PermissionDenied", err)
 	}
 }

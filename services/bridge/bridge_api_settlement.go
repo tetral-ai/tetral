@@ -1390,6 +1390,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			request.GetRuntimeWriteId(),
 			request.GetDrafts(),
 			request.GetPendingToolCancellations(),
+			request.GetSandboxExecutionToolUseEventIds(),
 			now,
 		)
 		if err != nil {

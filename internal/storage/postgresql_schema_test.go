@@ -1142,8 +1142,8 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
 			created_at, updated_at
 		) VALUES (
-			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_sandbox_null_claim', 'sandbox_tool',
-			'hash_sandbox_null_claim', 'Bash', '{}', 'committed', '{}',
+			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_memory_null_claim', 'memory',
+			'hash_memory_null_claim', 'memory', '{}', 'committed', '{}',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err != nil {
 		t.Fatalf("insert non-MCP row with null claim state: %v", err)
@@ -1156,7 +1156,7 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'workspace_mcp_claim'
 		    AND session_id = 'sesn_mcp_claim'
-		    AND tool_use_event_id = 'tool_sandbox_null_claim'`).Scan(&claimStatus, &claimOwner, &claimLease); err != nil {
+		    AND tool_use_event_id = 'tool_memory_null_claim'`).Scan(&claimStatus, &claimOwner, &claimLease); err != nil {
 		t.Fatalf("read non-MCP claim state: %v", err)
 	}
 	if claimStatus.Valid || claimOwner.Valid || claimLease.Valid {
@@ -1209,8 +1209,8 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 			mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at,
 			created_at, updated_at
 		) VALUES (
-			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_sandbox_claim', 'sandbox_tool',
-			'hash_sandbox_claim', 'Bash', '{}', 'committed', '{}',
+			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_memory_claim', 'memory',
+			'hash_memory_claim', 'memory', '{}', 'committed', '{}',
 			'stored', NULL, NULL,
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err == nil {
@@ -1543,6 +1543,41 @@ func TestSandboxExecutionHandoffSchemaShape(t *testing.T) {
 		  AND session_thread_id = 'thr_sandbox_execution'
 		  AND tool_use_event_id = 'evt_sandbox_execution'`); err == nil {
 		t.Fatal("submitted cancellation without request/submission timestamps was accepted")
+	}
+	assertSandboxExecutionShapeRejected(t, db, `UPDATE session_runtime_tool_results
+		SET execution_state = 'consumed'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`, "consumed execution without terminal event and reason")
+	assertSandboxExecutionShapeRejected(t, db, `UPDATE session_runtime_tool_results
+		SET consumed_by_terminal_event_id = 'evt_missing', consumption_reason = 'runtime_terminated'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`, "non-consumed execution with consumption fields")
+	mustInsertSessionEventLedgerRow(t, db, "workspace_sandbox_execution", "sesn_sandbox_execution", "evt_sandbox_consumed", 1)
+	assertSandboxExecutionShapeRejected(t, db, `UPDATE session_runtime_tool_results
+		SET execution_state = 'consumed', result_digest = '',
+		    consumed_by_terminal_event_id = 'evt_sandbox_consumed', consumption_reason = 'runtime_terminated'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`, "consumed execution with empty digest")
+}
+
+func assertSandboxExecutionShapeRejected(t *testing.T, db *sql.DB, statement string, description string) {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin %s transaction: %v", description, err)
+	}
+	_, executionErr := tx.ExecContext(context.Background(), statement)
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback %s transaction: %v", description, err)
+	}
+	if executionErr == nil {
+		t.Fatalf("schema accepted %s", description)
 	}
 }
 

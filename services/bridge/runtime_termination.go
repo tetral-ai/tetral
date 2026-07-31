@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -174,6 +175,7 @@ func commitRuntimeTerminationDeclarationsTx(
 	runtimeWriteID string,
 	drafts []*bridgev1.RuntimeMessageDraft,
 	cancellations []*bridgev1.PendingToolCancellationDraft,
+	sandboxExecutionToolUseEventIDs []string,
 	now time.Time,
 ) (*bridgev1.DeclarationReceipt, error) {
 	cancellationByLocalID := make(map[string]*bridgev1.PendingToolCancellationDraft, len(cancellations))
@@ -201,6 +203,20 @@ func commitRuntimeTerminationDeclarationsTx(
 	for _, toolUseID := range pendingToolUseIDs {
 		if _, ok := cancellationByToolUseID[toolUseID]; !ok {
 			return nil, status.Error(codes.FailedPrecondition, "runtime termination pending tool declaration is incomplete")
+		}
+	}
+	sandboxExecutionIDs, err := runtimeTerminationSandboxExecutionIDsTx(ctx, tx, scope)
+	if err != nil {
+		return nil, err
+	}
+	providedSandboxExecutionIDs := append([]string(nil), sandboxExecutionToolUseEventIDs...)
+	sort.Strings(providedSandboxExecutionIDs)
+	if !sameBridgeStringSlice(sandboxExecutionIDs, providedSandboxExecutionIDs) {
+		return nil, status.Error(codes.FailedPrecondition, "runtime termination sandbox execution declaration is incomplete")
+	}
+	for _, toolUseID := range sandboxExecutionIDs {
+		if _, overlap := cancellationByToolUseID[toolUseID]; overlap {
+			return nil, status.Error(codes.InvalidArgument, "runtime termination tool ownership sets overlap")
 		}
 	}
 
@@ -288,6 +304,16 @@ func commitRuntimeTerminationDeclarationsTx(
 	if threadScope.role != "subagent" && seenCompletionMail {
 		return nil, status.Error(codes.InvalidArgument, "runtime termination completion mail requires a sub-agent")
 	}
+	if err := settleRuntimeTerminationSandboxExecutionsTx(
+		ctx,
+		tx,
+		scope,
+		runtimeWriteID,
+		sandboxExecutionIDs,
+		now,
+	); err != nil {
+		return nil, err
+	}
 	return receipt, nil
 }
 
@@ -298,13 +324,22 @@ func runtimeTerminationPendingToolUseIDsTx(
 ) ([]string, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT tool_use_event_id
-		   FROM session_pending_tool_uses
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND status IN ('pending', 'resolving')
-		  ORDER BY tool_use_event_id
-		  FOR UPDATE`,
+		   FROM session_pending_tool_uses p
+		  WHERE p.workspace_id = $1
+		    AND p.session_id = $2
+		    AND p.session_thread_id = $3
+		    AND p.status IN ('pending', 'resolving')
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_runtime_tool_results r
+		       WHERE r.workspace_id = p.workspace_id
+		         AND r.session_id = p.session_id
+		         AND r.session_thread_id = p.session_thread_id
+		         AND r.tool_use_event_id = p.tool_use_event_id
+		         AND r.tool_kind = 'sandbox_tool'
+		         AND r.execution_state <> 'consumed'
+		    )
+		  ORDER BY p.tool_use_event_id
+		  FOR UPDATE OF p`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -322,6 +357,78 @@ func runtimeTerminationPendingToolUseIDsTx(
 		ids = append(ids, toolUseID)
 	}
 	return ids, rows.Err()
+}
+
+func runtimeTerminationSandboxExecutionIDsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT tool_use_event_id
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_kind = 'sandbox_tool' AND execution_state <> 'consumed'
+		  ORDER BY tool_use_event_id
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var toolUseEventID string
+		if err := rows.Scan(&toolUseEventID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, toolUseEventID)
+	}
+	return ids, rows.Err()
+}
+
+func settleRuntimeTerminationSandboxExecutionsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	runtimeWriteID string,
+	toolUseEventIDs []string,
+	now time.Time,
+) error {
+	if len(toolUseEventIDs) == 0 {
+		return nil
+	}
+	orphanToolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, scope, false)
+	if err != nil {
+		return err
+	}
+	orphansByID := make(map[string]runtimeOrphanToolUse, len(orphanToolUses))
+	for _, toolUse := range orphanToolUses {
+		orphansByID[toolUse.EventID] = toolUse
+	}
+	binding := runtimeTerminationBinding(scope)
+	for _, toolUseEventID := range toolUseEventIDs {
+		toolUse, ok := orphansByID[toolUseEventID]
+		if !ok {
+			return status.Error(codes.FailedPrecondition, "runtime termination sandbox execution has no live Tool Use")
+		}
+		inserted, err := insertRuntimeTerminalToolResultTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), binding, toolUse, runtimeTerminalToolResult{
+			WriteIDPrefix:     "rwrite_runtime_termination_tool_" + runtimeWriteID + "_",
+			Reason:            "runtime_terminated",
+			ErrorType:         "runtime_terminated",
+			Message:           "Tool result unavailable because the runtime terminated.",
+			Retryable:         false,
+			ConsumptionReason: "runtime_terminated",
+		}, now)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return status.Error(codes.FailedPrecondition, "runtime termination sandbox execution result already exists")
+		}
+	}
+	return nil
 }
 
 func appendDeclaredRuntimeTerminationToolResultTx(
@@ -430,6 +537,11 @@ func appendDeclaredRuntimeTerminationToolResultTx(
 	)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	if eventType == "agent.tool_result" {
+		if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, toolUseEventID, eventID, "runtime_terminated", now); err != nil {
+			return nil, nil, "", err
+		}
 	}
 	result, err := tx.Exec(ctx,
 		`UPDATE session_pending_tool_uses

@@ -78,6 +78,7 @@ interface PackageJson {
 const createdAt = "2026-06-14T00:00:00.000Z";
 const emptyColdCoverage = {
   pendingToolIds: [],
+  pendingSandboxExecutionIds: [],
   pendingAttachmentIdentities: [],
   undeliveredMailDeliveryIds: [],
 } as const;
@@ -1300,6 +1301,8 @@ function runtimeAgentLoopLayer(
     readonly compaction?: Parameters<typeof AgentLoop.layer>[0]["compaction"];
     readonly approvalMode?: Parameters<typeof AgentLoop.layer>[0]["approvalMode"];
     readonly runTool?: Parameters<typeof AgentLoop.layer>[0]["runTool"];
+    readonly acceptSandboxExecution?: Parameters<typeof AgentLoop.layer>[0]["acceptSandboxExecution"];
+    readonly awaitSandboxExecution?: Parameters<typeof AgentLoop.layer>[0]["awaitSandboxExecution"];
     readonly reviewApproval?: Parameters<typeof AgentLoop.layer>[0]["reviewApproval"];
     readonly runtimeModel?: Parameters<typeof AgentLoop.layer>[0]["runtimeModel"];
     readonly runtimePolicy?: Parameters<typeof AgentLoop.layer>[0]["runtimePolicy"];
@@ -1339,6 +1342,12 @@ function runtimeAgentLoopLayer(
     ...(options.compaction !== undefined ? { compaction: { timeoutMs: 1_800_000, ...options.compaction } } : {}),
     ...(options.approvalMode !== undefined ? { approvalMode: options.approvalMode } : {}),
     ...(options.runTool !== undefined ? { runTool: options.runTool } : {}),
+    acceptSandboxExecution: options.acceptSandboxExecution ?? (() => ({ type: "accepted" as const })),
+    ...(options.awaitSandboxExecution !== undefined
+      ? { awaitSandboxExecution: options.awaitSandboxExecution }
+      : options.runTool !== undefined
+      ? { awaitSandboxExecution: options.runTool }
+      : {}),
     ...(options.reviewApproval !== undefined ? { reviewApproval: options.reviewApproval } : {}),
     runtimeModel: options.runtimeModel ?? (() => ({ providerId: "fake", modelId: "fake-chat" })),
     runtimePolicy: options.runtimePolicy ?? (() => ({
@@ -7679,6 +7688,7 @@ Previous anchored summary.
         sequenceFrom: command.sequenceFrom,
         sequenceTo: command.sequenceTo,
         pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       });
       expect(await Effect.runPromise(manager.inspectThread(command))).toMatchObject({
         ok: true,
@@ -8524,6 +8534,7 @@ Previous anchored summary.
       sequenceFrom: 9,
       sequenceTo: 9,
       pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
     expect(requestEnds[0]?.drafts?.filter((draft) => draft.draftKind === "cancellation")).toEqual([
       expect.objectContaining({
@@ -9393,6 +9404,67 @@ Previous anchored summary.
     }
   });
 
+  test("runtime shutdown joins durable Sandbox acceptance before freezing execution ownership", async () => {
+    const session = new Session("sesn_1");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const acceptanceStarted = deferred<void>();
+    const releaseAcceptance = deferred<void>();
+    let awaitCalls = 0;
+    const catalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
+    const runFiber = Effect.runFork(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        events: [
+          {
+            type: "tool-call",
+            id: "tool-accept-fence",
+            toolName: "Write",
+            input: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+          },
+          { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+          systemInstructions: "sandbox acceptance fence test",
+          toolCatalog: {
+            ...catalog,
+            entries: catalog.entries.map((entry) => ({
+              ...entry,
+              route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+            })),
+          },
+        },
+        acceptSandboxExecution: async () => {
+          acceptanceStarted.resolve();
+          await releaseAcceptance.promise;
+          return { type: "accepted" };
+        },
+        awaitSandboxExecution: () => {
+          awaitCalls += 1;
+          return { type: "completed", output: { text: "must not wait after shutdown", truncated: false } };
+        },
+      }))),
+    );
+
+    await acceptanceStarted.promise;
+    session.state.beginRuntimeShutdown();
+    let interruptSettled = false;
+    const interrupted = Effect.runPromise(Fiber.interrupt(runFiber)).then((exit) => {
+      interruptSettled = true;
+      return exit;
+    });
+    await flushMicrotasks(20);
+    expect(interruptSettled).toBe(false);
+
+    releaseAcceptance.resolve();
+    await interrupted;
+
+    expect(awaitCalls).toBe(0);
+    expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(1);
+    expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
+  });
+
   test("runtime shutdown aborts active ToolFiber route execution", async () => {
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
@@ -9714,6 +9786,7 @@ Previous anchored summary.
     });
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
+    const sandboxAcceptanceCalls: string[] = [];
     const processors: SessionProcessor[] = [];
     const store = new AgentLoopRuntimeStore([]);
     const layer = runtimeAgentLoopLayer(loader, {
@@ -9738,11 +9811,23 @@ Previous anchored summary.
       ], requests),
       providerCallRuntime: {
         systemInstructions: "approval resume test system",
-        toolCatalog: catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }),
+        toolCatalog: {
+          ...catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }),
+          entries: [{
+            ...catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" }).entries[0]!,
+            route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+          }],
+        },
       },
       runTool: (request) => {
         runToolCalls.push(`${request.modelToolCallId}:${request.toolUseEventId}`);
         return { type: "completed", output: { text: "approved write", truncated: false } };
+      },
+      acceptSandboxExecution: (request) => {
+        sandboxAcceptanceCalls.push(`${request.modelToolCallId}:${request.toolUseEventId}`);
+        expect(session.state.pendingApprovalToolJobs()).toHaveLength(1);
+        expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
+        return { type: "accepted" };
       },
       createProcessor: (options) => {
         const processor = new SessionProcessor(options);
@@ -9761,6 +9846,7 @@ Previous anchored summary.
     expect(first).toMatchObject({ type: "completed" });
     expect(toolUseEventIds).toEqual(["sevt_tool_1"]);
     expect(runToolCalls).toEqual([]);
+    expect(sandboxAcceptanceCalls).toEqual([]);
     expect(processors).toHaveLength(1);
     const pendingApproval = session.state.pendingApprovalToolJobs()[0];
     expect(pendingApproval?.assistantMessage.role).toBe("assistant");
@@ -9798,7 +9884,10 @@ Previous anchored summary.
 
     expect(second).toMatchObject({ type: "completed" });
     expect(requests).toHaveLength(2);
+    expect(sandboxAcceptanceCalls).toEqual(["tool-1:sevt_tool_1"]);
     expect(runToolCalls).toEqual(["tool-1:sevt_tool_1"]);
+    expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
+    expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
     expect(processors).toHaveLength(3);
     expect(processors[1]).not.toBe(processors[0]);
     expect(appended.map((event) => event.type)).toEqual([
@@ -9968,6 +10057,108 @@ Previous anchored summary.
       "span.model_request_end",
       "session.status_idle",
     ]);
+  });
+
+  test("LoadContext pendingSandboxExecutions rejoins the original durable Tool Use", async () => {
+    const session = new Session("sesn_1");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_cold_sandbox_recovery"));
+    const input = { file_path: "src/a.ts", content: "ok" };
+    const durableToolMessage = DurableRuntimeMessageSchema.parse({
+      id: "assistant-cold-sandbox",
+      sessionId: "sesn_1",
+      owningEventId: "sevt_sandbox_tool_1",
+      eventSequence: 2,
+      role: "assistant",
+      origin: "agent",
+      sequence: 1,
+      status: "completed",
+      createdAt,
+      parts: [{
+        id: "assistant-cold-sandbox-tool",
+        sessionId: "sesn_1",
+        messageId: "assistant-cold-sandbox",
+        sequence: 0,
+        type: "tool",
+        toolCallId: "tool-sandbox-1",
+        toolName: "Write",
+        toolUseEventId: "sevt_sandbox_tool_1",
+        toolEvent: { kind: "tool" },
+        state: {
+          status: "running",
+          input: { value: input, preview: JSON.stringify(input), truncated: false },
+        },
+        startedAt: createdAt,
+        createdAt,
+      }],
+    });
+    const loadedMessages = [userMessage("user-cold-sandbox", 0, "hello"), durableToolMessage];
+    const pendingSandboxExecutions = [{
+      toolUseEventId: "sevt_sandbox_tool_1",
+      modelRequestId: "mrq_cold_sandbox",
+      modelToolCallId: "tool-sandbox-1",
+      toolName: "Write",
+      input,
+      executionState: "running" as const,
+    }];
+    const loader = new QueuedContextLoader([], []);
+    const appended: SessionEvent[] = [];
+    const writer = writerFrom(
+      (envelope) => {
+        appended.push(envelope.event);
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+      },
+      undefined,
+      [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }],
+    );
+    const requests: LLMRequest[] = [];
+    const runToolCalls: string[] = [];
+    const store = new AgentLoopRuntimeStore([]);
+    const sandboxCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
+    const layer = runtimeAgentLoopLayer(loader, {
+      store,
+      writer,
+      llmService: queuedLLMService([[
+        { type: "text-start", id: "text-1" },
+        { type: "text-delta", id: "text-1", text_delta: "after sandbox recovery" },
+        { type: "text-end", id: "text-1" },
+        { type: "finish", finishReason: "stop" },
+      ]], requests),
+      providerCallRuntime: {
+        systemInstructions: "cold sandbox recovery test system",
+        toolCatalog: {
+          ...sandboxCatalog,
+          entries: sandboxCatalog.entries.map((entry) => ({
+            ...entry,
+            route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+          })),
+        },
+      },
+      runTool: (request) => {
+        runToolCalls.push(`${request.modelRequestId}:${request.modelToolCallId}:${request.toolUseEventId}`);
+        expect(request.input).toEqual(input);
+        return { type: "completed", output: { text: "cold sandbox write", truncated: false } };
+      },
+      acceptSandboxExecution: () => {
+        throw new Error("cold accepted Sandbox execution must not be accepted again");
+      },
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        session.state.contextManager.replaceMessages(loadedMessages);
+        session.state.markPersistentContextLoaded();
+        agentLoop.seedRuntimeModel(session);
+        expect(yield* agentLoop.installLoadedSandboxExecutions(session, pendingSandboxExecutions, loadedMessages)).toEqual({ ok: true });
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(runToolCalls).toEqual(["mrq_cold_sandbox:tool-sandbox-1:sevt_sandbox_tool_1"]);
+    expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(0);
+    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(true);
+    expect(requests).toHaveLength(1);
   });
 
   test("LoadContext pendingToolUses applies recorded deny decisions without re-waiting or executing the tool", async () => {

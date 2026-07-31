@@ -36,14 +36,18 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc ListChildThreads(ListChildThreadsRequest) returns (ListChildThreadsResponse);",
 		"rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);",
 		"rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);",
-		"rpc RunTool(RunToolRequest) returns (RunToolResponse);",
+		"rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);",
+		"rpc AwaitSandboxExecution(AcceptSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);",
 		"rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);",
 		"rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);",
 		"rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);",
 		"rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);",
-		"message RunToolRequest",
+		"message AcceptSandboxExecutionRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
+		"string model_tool_call_id = 7;",
+		"message AcceptSandboxExecutionResponse",
+		"message AwaitSandboxExecutionResponse",
 		"message RunMemoryRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
@@ -60,6 +64,9 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"rpc RunTool(",
+		"message RunToolRequest",
+		"message RunToolResponse",
 		"string memory" + "_store_id",
 		"memory" + "_store_id =",
 	} {

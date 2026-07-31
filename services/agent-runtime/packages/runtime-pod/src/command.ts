@@ -250,6 +250,8 @@ export async function buildRuntimePodCommandDependencies(input: {
           approvalReviewerToolCatalog,
         ),
       runTool: (request) => toolRunner.runTool(request),
+      acceptSandboxExecution: (request) => toolRunner.acceptSandboxExecution(request),
+      awaitSandboxExecution: (request) => toolRunner.awaitSandboxExecution(request),
       reviewApproval: createRuntimeApprovalReviewer(() => subAgentRunHost, {
         model: input.config.platformModels.approvalReviewer,
         threadCreator: approvalReviewerThreadCreator,

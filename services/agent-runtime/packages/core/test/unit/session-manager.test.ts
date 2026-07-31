@@ -66,11 +66,13 @@ function pendingApprovalAssistantMessage(sessionId: string, toolUseEventId: stri
 
 function coldCoverage(overrides: {
   readonly pendingToolIds?: readonly string[];
+  readonly pendingSandboxExecutionIds?: readonly string[];
   readonly pendingAttachmentIdentities?: readonly string[];
   readonly undeliveredMailDeliveryIds?: readonly string[];
 } = {}) {
   return {
     pendingToolIds: overrides.pendingToolIds ?? [],
+    pendingSandboxExecutionIds: overrides.pendingSandboxExecutionIds ?? [],
     pendingAttachmentIdentities: overrides.pendingAttachmentIdentities ?? [],
     undeliveredMailDeliveryIds: overrides.undeliveredMailDeliveryIds ?? [],
   };
@@ -227,6 +229,7 @@ function agentLoopService(overrides: Pick<AgentLoop.Interface, "run"> & Partial<
     closeFailedRun: () => Effect.succeed({ type: "landed" }),
     seedRuntimeModel: () => {},
     installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
+    installLoadedSandboxExecutions: () => Effect.succeed({ ok: true }),
     ...overrides,
   });
 }
@@ -306,7 +309,11 @@ function makeInterruptRecordingAgentLoop(): InterruptRecordingAgentLoop {
             });
             if (session.state.userInterruptRequested()) {
               const runtimeInputId = session.state.userInterruptCommand()?.runtimeInputId;
-              await session.state.commitUserInterruptInput({ drafts: [], pendingToolCancellations: [] });
+              await session.state.commitUserInterruptInput({
+                drafts: [],
+                pendingToolCancellations: [],
+                sandboxExecutionToolUseEventIds: [],
+              });
               if (runtimeInputId !== undefined) {
                 session.state.completeUserInterrupt(runtimeInputId);
               }
@@ -347,7 +354,11 @@ function makeInterruptCleanupAgentLoop(): InterruptCleanupAgentLoop {
               cleanupStartedResolve();
               await cleanupReleased;
               if (session.state.userInterruptRequested()) {
-                await session.state.commitUserInterruptInput({ drafts: [], pendingToolCancellations: [] });
+                await session.state.commitUserInterruptInput({
+                  drafts: [],
+                  pendingToolCancellations: [],
+                  sandboxExecutionToolUseEventIds: [],
+                });
                 const runtimeInputId = session.state.userInterruptCommand()?.runtimeInputId;
                 if (runtimeInputId !== undefined) {
                   session.state.completeUserInterrupt(runtimeInputId);
@@ -1978,6 +1989,58 @@ describe("SessionManager", () => {
         applied: true,
       });
       expect(modelsObservedDuringRecovery).toEqual([{ providerId: "seeded", modelId: "before-install" }]);
+    });
+  });
+
+  test("cold preload rejects overlap between approval and sandbox execution recovery", async () => {
+    let approvalInstalls = 0;
+    let executionInstalls = 0;
+    const agentLoop = makeControlledAgentLoop({
+      installLoadedPendingToolUses: () => Effect.sync(() => {
+        approvalInstalls += 1;
+        return { ok: true as const };
+      }),
+      installLoadedSandboxExecutions: () => Effect.sync(() => {
+        executionInstalls += 1;
+        return { ok: true as const };
+      }),
+    });
+    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+      const sessionID = "sesn_cold_recovery_overlap";
+      const toolUseEventID = "sevt_cold_recovery_overlap";
+      const message = pendingApprovalAssistantMessage(sessionID, toolUseEventID);
+      const control = threadControl(sessionID, "rin_cold_recovery_overlap");
+      const shared = {
+        toolUseEventId: toolUseEventID,
+        modelRequestId: "mrq_cold_recovery_overlap",
+        modelToolCallId: `call_${toolUseEventID}`,
+        toolName: "Write",
+        input: {},
+      };
+      expect(await Effect.runPromise(manager.preloadThread({
+        ...control,
+        runtimeBindingToken: "runtime-binding-token-overlap",
+        messages: [message],
+        pendingToolUses: [{
+          ...shared,
+          kind: "approval",
+          status: "resolving",
+          decision: "allow",
+          expiresAt: "2026-06-14T00:30:00.000Z",
+        }],
+        pendingSandboxExecutions: [{ ...shared, executionState: "running" }],
+        coldCoverage: coldCoverage({
+          pendingToolIds: [toolUseEventID],
+          pendingSandboxExecutionIds: [toolUseEventID],
+        }),
+      }))).toEqual({
+        ok: false,
+        sessionId: sessionID,
+        sessionThreadId: control.sessionThreadId,
+        reason: "context_load_failed",
+      });
+      expect(approvalInstalls).toBe(0);
+      expect(executionInstalls).toBe(0);
     });
   });
 

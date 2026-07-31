@@ -637,6 +637,7 @@ describe("Runtime Pod command entrypoint", () => {
               runtimeBindingToken: "runtime-binding-token-command-test",
               coldCoverage: {
                 pendingToolIds: [],
+                pendingSandboxExecutionIds: [],
                 pendingAttachmentIdentities: [],
                 undeliveredMailDeliveryIds: [],
               },

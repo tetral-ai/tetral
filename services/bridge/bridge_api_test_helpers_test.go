@@ -770,60 +770,59 @@ func assertDeleteCleanupSettlementCounts(t *testing.T, db *sql.DB, sessionID str
 	}
 }
 
-func testPostgreSQLRunToolTerminalIdentityFencing(t *testing.T) {
+func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_identity", "prep_bridge_tool_identity")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_identity", "2026-01-01T00:00:00Z")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity", 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf '<>&'","workdir":"/workspace"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id = 'mreq_tool_identity' WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
+		t.Fatalf("stamp durable tool-use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "mreq_tool_identity", "evt_tool_identity", "call_tool_identity", "exec_command")
 
-	executor := &recordingSandboxToolExecutor{execution: SandboxToolExecution{ResultJSON: `{"status":"success","result":{"exit_code":0,"stdout":"ok"}}`}}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.SandboxToolExecutor = executor
 	canonicalInput := `{"cmd":"printf '<>&'","workdir":"/workspace"}`
-	request := &bridgev1.RunToolRequest{
+	request := &bridgev1.AcceptSandboxExecutionRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_tool_identity", "thr_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity"),
 		ToolUseEventId:      "evt_tool_identity",
+		ModelToolCallId:     "call_tool_identity",
 		NormalizedInputHash: sha256Hex(canonicalInput),
 		ToolName:            "exec_command",
 		InputJson:           canonicalInput,
 	}
-	first, err := store.RunTool(context.Background(), request)
+	first, err := store.AcceptSandboxExecution(context.Background(), request)
 	if err != nil {
-		t.Fatalf("RunTool terminal: %v", err)
+		t.Fatalf("AcceptSandboxExecution: %v", err)
 	}
-	reordered := proto.Clone(request).(*bridgev1.RunToolRequest)
+	reordered := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
 	reordered.Scope.RequestId = "req_bridge_tool_identity_replay"
 	reordered.InputJson = "{ \"workdir\" : \"/workspace\", \"cmd\" : \"printf '<>&'\" }"
-	replay, err := store.RunTool(context.Background(), reordered)
+	replay, err := store.AcceptSandboxExecution(context.Background(), reordered)
 	if err != nil {
-		t.Fatalf("RunTool canonical replay: %v", err)
+		t.Fatalf("AcceptSandboxExecution canonical replay: %v", err)
 	}
 	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-		first.GetResultJson() != replay.GetResultJson() ||
-		first.GetBackgroundTaskStarted() != replay.GetBackgroundTaskStarted() ||
-		first.GetTaskId() != replay.GetTaskId() || len(executor.invocations) != 1 {
-		t.Fatalf("terminal first/replay/calls = %+v / %+v / %d; want field-identical logical replay and one helper call", first, replay, len(executor.invocations))
+		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+		t.Fatalf("accept first/replay = %+v / %+v; want committed then duplicate", first, replay)
 	}
 
-	for name, mutate := range map[string]func(*bridgev1.RunToolRequest){
-		"hash": func(conflict *bridgev1.RunToolRequest) { conflict.NormalizedInputHash = "different_hash" },
-		"name": func(conflict *bridgev1.RunToolRequest) { conflict.ToolName = "Bash" },
-		"payload_reusing_hash": func(conflict *bridgev1.RunToolRequest) {
+	for name, mutate := range map[string]func(*bridgev1.AcceptSandboxExecutionRequest){
+		"hash": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+			conflict.NormalizedInputHash = "different_hash"
+		},
+		"name": func(conflict *bridgev1.AcceptSandboxExecutionRequest) { conflict.ToolName = "Bash" },
+		"payload_reusing_hash": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.InputJson = `{"cmd":"printf different","workdir":"/workspace"}`
 		},
 	} {
 		t.Run(name+" conflict", func(t *testing.T) {
-			conflict := proto.Clone(request).(*bridgev1.RunToolRequest)
+			conflict := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
 			conflict.Scope.RequestId = "req_bridge_tool_identity_conflict_" + name
 			mutate(conflict)
-			if _, err := store.RunTool(context.Background(), conflict); status.Code(err) != codes.AlreadyExists && status.Code(err) != codes.InvalidArgument {
-				t.Fatalf("RunTool %s conflict error = %v; want fatal identity rejection", name, err)
-			}
-			if len(executor.invocations) != 1 {
-				t.Fatalf("helper calls after %s conflict = %d; want one", name, len(executor.invocations))
+			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists && status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("AcceptSandboxExecution %s conflict error = %v; want fatal identity rejection", name, err)
 			}
 		})
 	}
@@ -832,9 +831,6 @@ func testPostgreSQLRunToolTerminalIdentityFencing(t *testing.T) {
 		McpServerName: "github", ToolName: "create_issue", InputJson: request.GetInputJson(),
 	}); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("cross-kind MCP claim error = %v; want AlreadyExists", err)
-	}
-	if len(executor.invocations) != 1 {
-		t.Fatalf("helper calls after cross-kind conflict = %d; want one", len(executor.invocations))
 	}
 	var rowCount int
 	var claimStatus, claimOwner, claimLease sql.NullString
@@ -846,7 +842,7 @@ func testPostgreSQLRunToolTerminalIdentityFencing(t *testing.T) {
 		t.Fatalf("read terminal settlement row: %v", err)
 	}
 	if rowCount != 1 || claimStatus.Valid || claimOwner.Valid || claimLease.Valid {
-		t.Fatalf("terminal rows/claims = %d/%+v/%+v/%+v; want one row and all MCP claim fields NULL", rowCount, claimStatus, claimOwner, claimLease)
+		t.Fatalf("accepted rows/claims = %d/%+v/%+v/%+v; want one row and all MCP claim fields NULL", rowCount, claimStatus, claimOwner, claimLease)
 	}
 }
 
@@ -2812,16 +2808,13 @@ func capturedOutputFile(sourcePath string, body string) outputcapture.SandboxOut
 }
 
 type recordingSandboxToolExecutor struct {
-	invocations   []SandboxToolInvocation
 	healthChecks  []SandboxToolTarget
-	execution     SandboxToolExecution
 	reads         []SandboxCommandReference
 	inputs        []SandboxCommandInput
 	commandResult SandboxCommandResult
 	inputResult   SandboxCommandResult
 	cancelResult  SandboxCommandResult
 	cancels       []SandboxCommandCancel
-	onRun         func(SandboxToolInvocation)
 	onRead        func(SandboxCommandReference)
 	onInput       func(SandboxCommandInput)
 	onCancel      func(SandboxCommandCancel)
@@ -2833,17 +2826,6 @@ type recordingSandboxToolExecutor struct {
 func (e *recordingSandboxToolExecutor) CheckHealth(_ context.Context, target SandboxToolTarget) error {
 	e.healthChecks = append(e.healthChecks, target)
 	return e.healthErr
-}
-
-func (e *recordingSandboxToolExecutor) RunTool(_ context.Context, invocation SandboxToolInvocation) (SandboxToolExecution, error) {
-	e.invocations = append(e.invocations, invocation)
-	if e.onRun != nil {
-		e.onRun(invocation)
-	}
-	if e.err != nil {
-		return SandboxToolExecution{}, e.err
-	}
-	return e.execution, nil
 }
 
 func (e *recordingSandboxToolExecutor) ReadCommandResult(_ context.Context, reference SandboxCommandReference) (SandboxCommandResult, error) {

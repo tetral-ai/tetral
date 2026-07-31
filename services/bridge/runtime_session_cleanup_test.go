@@ -109,6 +109,25 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupActiveSessionClaimsSettlesReleases
 	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_cleanup", "2026-01-01T00:00:00Z")
 	seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_cleanup", "thr_bridge_cleanup", "bind_bridge_cleanup", "task_cleanup", "sevt_cleanup_tool")
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_cleanup", "thr_bridge_cleanup", "sevt_cleanup_wait", 1)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_cleanup", "thr_bridge_cleanup", "sevt_cleanup_execution", 2, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id = 'mreq_cleanup_execution'
+		  WHERE workspace_id = 'default' AND event_id = 'sevt_cleanup_execution'`); err != nil {
+		t.Fatalf("stamp cleanup execution model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_cleanup", "thr_bridge_cleanup", "mreq_cleanup_execution", "sevt_cleanup_execution", "call_cleanup_execution", "exec_command")
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, model_tool_call_id,
+			execution_state, execution_attempt_generation, created_at, updated_at
+		) VALUES (
+			'default', 'sesn_bridge_cleanup', 'thr_bridge_cleanup', 'sevt_cleanup_execution', 'sandbox_tool',
+			'input_hash_cleanup_execution', 'exec_command', '{"cmd":"true"}', 'committed', 'call_cleanup_execution',
+			'pending', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		)`); err != nil {
+		t.Fatalf("seed cleanup Sandbox execution: %v", err)
+	}
 	seedBridgeAPIFileSessionResource(t, admin, "default", "sesn_bridge_cleanup", "sesrsc_cleanup_file")
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -276,6 +295,26 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupActiveSessionClaimsSettlesReleases
 	if messageKind != "assistant" || !strings.Contains(messageData, `"toolUseEventId":"sevt_cleanup_wait"`) ||
 		!strings.Contains(messageData, `"status":"error"`) {
 		t.Fatalf("cleanup tool result projection = %q/%s; want assistant terminal tool error", messageKind, messageData)
+	}
+	var executionState string
+	var executionResult sql.NullString
+	var executionDigest sql.NullString
+	var executionTerminalEventID sql.NullString
+	var executionConsumptionReason sql.NullString
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT execution_state, result_json, result_digest, consumed_by_terminal_event_id, consumption_reason
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_cleanup'
+		    AND session_thread_id = 'thr_bridge_cleanup'
+		    AND tool_use_event_id = 'sevt_cleanup_execution'`).Scan(
+		&executionState, &executionResult, &executionDigest, &executionTerminalEventID, &executionConsumptionReason,
+	); err != nil {
+		t.Fatalf("read cleanup Sandbox execution: %v", err)
+	}
+	if executionState != "consumed" || executionResult.Valid || !executionDigest.Valid || executionDigest.String == "" || !executionTerminalEventID.Valid ||
+		!executionConsumptionReason.Valid || executionConsumptionReason.String != "cleanup_wait_expired" {
+		t.Fatalf("cleanup Sandbox execution = %q/%v/%v/%v/%v; want consumed with digest and cleanup event", executionState, executionResult, executionDigest, executionTerminalEventID, executionConsumptionReason)
 	}
 	var afterClaimProcessedAt sql.NullString
 	if err := admin.QueryRowContext(context.Background(),

@@ -9,15 +9,16 @@
  * delivery and lifecycle mutation. Model order sorts entries that are still
  * pending, while an already-running first arrival is not preempted.
  *
- * `buildRuntimePodCommandDependencies` constructs this module and installs
- * `RuntimePodToolRunner.runTool` as the Agent Loop tool callback. The runner
- * calls Agent Runtime Bridge for sandbox, memory, command, event, and durable
- * child-thread operations; Provider Gateway for web tools; MCP Connector for
- * MCP tools; and `RuntimeSubAgentRunHost` for local child-thread execution.
+ * `buildRuntimePodCommandDependencies` constructs this module and installs its
+ * general tool callback plus the separate Sandbox acceptance and result-wait
+ * callbacks into Agent Loop. The runner calls Agent Runtime Bridge for durable
+ * sandbox handoff, memory, command, event, and child-thread operations;
+ * Provider Gateway for web tools; MCP Connector for MCP tools; and
+ * `RuntimeSubAgentRunHost` for local child-thread execution.
  */
 import { createHash } from "node:crypto";
 import { credentials, status } from "@grpc/grpc-js";
-import type { ClientUnaryCall, Metadata, ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, ClientUnaryCall, Metadata, ServiceError } from "@grpc/grpc-js";
 import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions } from "./bounds.js";
 import {
   AgentRuntimeBridgeServiceClient,
@@ -42,8 +43,9 @@ import type {
   ResolveInterAgentDeliveryResponse,
   RunMemoryRequest,
   RunMemoryResponse,
-  RunToolRequest,
-  RunToolResponse,
+  AcceptSandboxExecutionResponse,
+  AwaitSandboxExecutionResponse,
+  AcceptSandboxExecutionRequest,
   RuntimeScope,
   SendCommandInputRequest,
   SendCommandInputResponse,
@@ -68,10 +70,16 @@ import type {
   ProviderRequestAttachment,
   WebToolInput,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { RuntimeBoundedTextSchema, RuntimeFailureSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import {
+  RuntimeBoundedTextSchema,
+  RuntimeFailureSchema,
+  SessionEventWriterRetryPolicy,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
+  RuntimeSandboxExecutionAcceptanceResult,
+  RuntimeSandboxExecutionRequest,
   RuntimeToolExecutionRequest,
   RuntimeToolExecutionResult,
 } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
@@ -96,6 +104,10 @@ import { validateChildLifecycleDeclarationResponse } from "./bridge-client.js";
 // the abort is re-checked after each wait.
 // UPDATE-WITH: runBridgeTool replay loop (isMemoryProjectionReplayResult / this.sleep).
 const MEMORY_PROJECTION_REPLAY_DELAY_MS = 300;
+// Sandbox acceptance and result-wait transport retries rejoin one durable
+// execution. This delay paces only transport uncertainty; it is not an
+// execution-attempt budget.
+const SANDBOX_EXECUTION_REJOIN_DELAY_MS = 300;
 // WEB_SEARCH_REQUESTS_MAX / WEB_FETCH_REQUESTS_MAX bound the per-call
 // server_tool_use counters accepted from a RunWebResponse usage block before that
 // block is attached to the durable web tool result (webServerToolUse below). They
@@ -129,7 +141,8 @@ export interface RuntimePodToolRunnerOptions {
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   readonly sleep?: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
   readonly bridgeClient?: Pick<AgentRuntimeBridgeServiceClient,
-    | "runTool"
+    | "acceptSandboxExecution"
+    | "awaitSandboxExecution"
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
@@ -173,7 +186,8 @@ interface ChildTaskOperationQueueState {
  */
 export class RuntimePodToolRunner {
   private readonly bridgeClient: Pick<AgentRuntimeBridgeServiceClient,
-    | "runTool"
+    | "acceptSandboxExecution"
+    | "awaitSandboxExecution"
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
@@ -235,29 +249,66 @@ export class RuntimePodToolRunner {
   }
 
   private async runSandboxTool(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
+    const acceptance = await this.acceptSandboxExecution(request);
+    if (acceptance.type !== "accepted") {
+      return acceptance;
+    }
+    return await this.awaitSandboxExecution(request);
+  }
+
+  /** Durably registers one Sandbox execution before any result wait begins. */
+  async acceptSandboxExecution(request: RuntimeSandboxExecutionRequest): Promise<RuntimeSandboxExecutionAcceptanceResult> {
     const scope = this.scope(request);
     const inputJson = stableJsonStringify(request.input);
-    try {
-      const response = await runTool(this.bridgeClient, {
-        scope,
-        toolUseEventId: request.toolUseEventId,
-        normalizedInputHash: normalizedInputHash(inputJson),
-        toolName: request.entry.name,
-        inputJson,
-        approvalDecisionJson: "",
-      }, await this.metadata(), request.abortSignal);
-      if (!bridgeAckAccepted(response.ack?.status)) {
-        return toolFailure(request, "Bridge rejected the sandbox tool call.", true);
+    const durableRequest: AcceptSandboxExecutionRequest = {
+      scope,
+      toolUseEventId: request.toolUseEventId,
+      modelToolCallId: request.modelToolCallId,
+      normalizedInputHash: normalizedInputHash(inputJson),
+      toolName: request.entry.name,
+      inputJson,
+    };
+    for (;;) {
+      try {
+        const response = await acceptSandboxExecution(this.bridgeClient, durableRequest, await this.metadata());
+        if (!bridgeAckAccepted(response.ack?.status)) {
+          return toolFailure(request, "Bridge rejected the sandbox tool call.", true);
+        }
+        return { type: "accepted" };
+      } catch (error) {
+        if (isSandboxAcceptanceRejection(error)) {
+          return toolFailure(request, "Bridge rejected the sandbox tool call.", false);
+        }
+        await this.sleep(SANDBOX_EXECUTION_REJOIN_DELAY_MS, new AbortController().signal);
       }
-      if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
-        return await this.mediaResultToAttachment(request, response.resultJson);
+    }
+  }
+
+  /** Waits for one already-accepted Sandbox execution without re-registering it. */
+  async awaitSandboxExecution(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
+    const scope = this.scope(request);
+    const inputJson = stableJsonStringify(request.input);
+    const durableRequest: AcceptSandboxExecutionRequest = {
+      scope,
+      toolUseEventId: request.toolUseEventId,
+      modelToolCallId: request.modelToolCallId,
+      normalizedInputHash: normalizedInputHash(inputJson),
+      toolName: request.entry.name,
+      inputJson,
+    };
+    for (;;) {
+      try {
+        const response = await awaitSandboxExecution(this.bridgeClient, durableRequest, await this.metadata(), request.abortSignal);
+        if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
+          return await this.mediaResultToAttachment(request, response.resultJson);
+        }
+        return resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId));
+      } catch (error) {
+        if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+          return toolCancelled(request, "Sandbox tool execution was cancelled.");
+        }
+        await this.sleep(SANDBOX_EXECUTION_REJOIN_DELAY_MS, request.abortSignal);
       }
-      return resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId));
-    } catch (error) {
-      if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-        return toolCancelled(request, "Sandbox tool execution was cancelled.");
-      }
-      return toolFailure(request, "Bridge sandbox tool execution is unavailable.", true);
     }
   }
 
@@ -1161,7 +1212,7 @@ export class RuntimePodToolRunner {
     }
   }
 
-  private scope(request: RuntimeToolExecutionRequest): RuntimeScope {
+  private scope(request: RuntimeSandboxExecutionRequest): RuntimeScope {
     return {
       requestId: stableId("req", `tool:${request.modelRequestId}:${request.modelToolCallId}`),
       workspaceId: request.workspaceId,
@@ -1418,14 +1469,37 @@ function recordInput(input: RuntimeJsonValue): Record<string, RuntimeJsonValue> 
   return isRecord(input) ? input : {};
 }
 
-function runTool(
-  client: Pick<AgentRuntimeBridgeServiceClient, "runTool">,
-  request: RunToolRequest,
+function acceptSandboxExecution(
+  client: Pick<AgentRuntimeBridgeServiceClient, "acceptSandboxExecution">,
+  request: AcceptSandboxExecutionRequest,
+  metadata: Metadata,
+): Promise<AcceptSandboxExecutionResponse> {
+  const options: CallOptions = {
+    deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+  };
+  return new Promise((resolve, reject) => {
+    try {
+      client.acceptSandboxExecution(request, metadata, options, (error, response) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function awaitSandboxExecution(
+  client: Pick<AgentRuntimeBridgeServiceClient, "awaitSandboxExecution">,
+  request: AcceptSandboxExecutionRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
-): Promise<RunToolResponse> {
+): Promise<AwaitSandboxExecutionResponse> {
   return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.runTool(unaryRequest, unaryMetadata, callback)
+    client.awaitSandboxExecution(unaryRequest, unaryMetadata, callback)
   );
 }
 
@@ -1723,6 +1797,21 @@ function isToolRouteAborted(error: unknown): boolean {
 
 function isGrpcStatus(error: unknown, code: status): boolean {
   return typeof error === "object" && error !== null && (error as Partial<ServiceError>).code === code;
+}
+
+function isSandboxAcceptanceRejection(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || typeof (error as Partial<ServiceError>).code !== "number") {
+    return false;
+  }
+  switch ((error as Partial<ServiceError>).code) {
+    case status.INVALID_ARGUMENT:
+    case status.NOT_FOUND:
+    case status.ALREADY_EXISTS:
+    case status.FAILED_PRECONDITION:
+      return true;
+    default:
+      return false;
+  }
 }
 
 function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
@@ -2051,7 +2140,7 @@ function webServerToolUse(response: RunWebResponse): { readonly webSearchRequest
 }
 
 function toolFailure(
-  request: RuntimeToolExecutionRequest,
+  request: RuntimeSandboxExecutionRequest,
   message: string,
   retryable: boolean,
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,
@@ -2059,7 +2148,7 @@ function toolFailure(
   attachments?: readonly ProviderRequestAttachment[],
   serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
   mcpMaterializationHandle?: string,
-): RuntimeToolExecutionResult {
+): Extract<RuntimeToolExecutionResult, { readonly type: "error" }> {
   return {
     type: "error",
     error: runtimeFailure(request, message, retryable, retryStatus),
@@ -2078,7 +2167,7 @@ function toolCancelled(request: RuntimeToolExecutionRequest, message: string): R
 }
 
 function runtimeFailure(
-  request: RuntimeToolExecutionRequest,
+  request: RuntimeSandboxExecutionRequest,
   message: string,
   retryable: boolean,
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,

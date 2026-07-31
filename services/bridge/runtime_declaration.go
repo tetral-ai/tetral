@@ -63,15 +63,16 @@ func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputK
 		})
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"drafts":                     drafts,
-		"event_ids":                  request.GetEventIds(),
-		"input_kind":                 inputKind,
-		"operation_kind":             bridgeOpCommitInputs,
-		"pending_tool_cancellations": pendingToolCancellations,
-		"runtime_input_id":           request.GetRuntimeInputId(),
-		"sequence_from":              request.GetSequenceFrom(),
-		"sequence_to":                request.GetSequenceTo(),
-		"session_thread_id":          request.GetScope().GetSessionThreadId(),
+		"drafts":                               drafts,
+		"event_ids":                            request.GetEventIds(),
+		"input_kind":                           inputKind,
+		"operation_kind":                       bridgeOpCommitInputs,
+		"pending_tool_cancellations":           pendingToolCancellations,
+		"runtime_input_id":                     request.GetRuntimeInputId(),
+		"sandbox_execution_tool_use_event_ids": append([]string{}, request.GetSandboxExecutionToolUseEventIds()...),
+		"sequence_from":                        request.GetSequenceFrom(),
+		"sequence_to":                          request.GetSequenceTo(),
+		"session_thread_id":                    request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err
@@ -171,11 +172,12 @@ func writeRequestEndDeclarationDigest(
 			})
 		}
 		interruptSettlement = map[string]any{
-			"event_ids":                  value.GetEventIds(),
-			"pending_tool_cancellations": pendingToolCancellations,
-			"runtime_input_id":           value.GetRuntimeInputId(),
-			"sequence_from":              value.GetSequenceFrom(),
-			"sequence_to":                value.GetSequenceTo(),
+			"event_ids":                            value.GetEventIds(),
+			"pending_tool_cancellations":           pendingToolCancellations,
+			"runtime_input_id":                     value.GetRuntimeInputId(),
+			"sandbox_execution_tool_use_event_ids": append([]string{}, value.GetSandboxExecutionToolUseEventIds()...),
+			"sequence_from":                        value.GetSequenceFrom(),
+			"sequence_to":                          value.GetSequenceTo(),
 		}
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
@@ -249,12 +251,13 @@ func runtimeTerminationDeclarationDigest(
 		})
 	}
 	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"drafts":                     drafts,
-		"failure":                    json.RawMessage(failureJSON),
-		"operation_kind":             bridgeOpCommitRuntimeTermination,
-		"pending_tool_cancellations": pendingToolCancellations,
-		"runtime_write_id":           request.GetRuntimeWriteId(),
-		"session_thread_id":          request.GetScope().GetSessionThreadId(),
+		"drafts":                               drafts,
+		"failure":                              json.RawMessage(failureJSON),
+		"operation_kind":                       bridgeOpCommitRuntimeTermination,
+		"pending_tool_cancellations":           pendingToolCancellations,
+		"runtime_write_id":                     request.GetRuntimeWriteId(),
+		"sandbox_execution_tool_use_event_ids": append([]string{}, request.GetSandboxExecutionToolUseEventIds()...),
+		"session_thread_id":                    request.GetScope().GetSessionThreadId(),
 	})
 	if err != nil {
 		return "", err

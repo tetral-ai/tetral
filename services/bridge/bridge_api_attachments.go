@@ -389,7 +389,17 @@ func (s *PostgreSQLBridgeAPIStore) markTransientAttachmentsForDeletion(ctx conte
 				  FROM session_transient_attachments
 				 WHERE status = 'deleting'
 				    OR status = 'consumed'
-				    OR (status IN ('staged', 'active') AND expires_at <= $1)
+				    OR (status IN ('staged', 'active') AND expires_at <= $1
+				        AND NOT (status = 'staged' AND EXISTS (
+				          SELECT 1
+				            FROM session_runtime_tool_results AS execution
+				           WHERE execution.workspace_id = session_transient_attachments.workspace_id
+				             AND execution.session_id = session_transient_attachments.session_id
+				             AND execution.session_thread_id = session_transient_attachments.session_thread_id
+				             AND execution.tool_use_event_id = session_transient_attachments.source_tool_use_event_id
+				             AND execution.tool_kind = 'sandbox_tool'
+				             AND execution.execution_state <> 'consumed'
+				        )))
 				 ORDER BY storage_sequence
 				 LIMIT $2
 				 FOR UPDATE SKIP LOCKED

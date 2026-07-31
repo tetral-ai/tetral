@@ -41,7 +41,7 @@ export interface RuntimeCoreHosts {
  */
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
-  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
+  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptThread: (command: Parameters<SessionRunHost.Interface["handleInterruptThread"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
@@ -124,6 +124,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               ...(context.runtimeConfigPatch !== undefined ? { runtimeConfigPatch: context.runtimeConfigPatch } : {}),
               ...(context.mcpManifests !== undefined ? { mcpManifests: context.mcpManifests } : {}),
               ...(context.pendingToolUses !== undefined ? { pendingToolUses: context.pendingToolUses } : {}),
+              ...(context.pendingSandboxExecutions !== undefined ? { pendingSandboxExecutions: context.pendingSandboxExecutions } : {}),
               ...(context.backgroundTools !== undefined ? { backgroundTools: context.backgroundTools } : {}),
               ...(context.pendingAttachments !== undefined ? { pendingAttachments: context.pendingAttachments } : {}),
               pendingAgentMail,

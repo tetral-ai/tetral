@@ -202,6 +202,21 @@ function assertPendingToolCancellationDeltas(
   }
 }
 
+function assertDisjointToolUseIds(
+  pendingToolCancellations: readonly { readonly toolUseEventId: string }[],
+  sandboxExecutionToolUseEventIds: readonly string[],
+): void {
+  const approvalIds = new Set(pendingToolCancellations.map((cancellation) => cancellation.toolUseEventId));
+  const sandboxIds = new Set(sandboxExecutionToolUseEventIds);
+  if (
+    approvalIds.size !== pendingToolCancellations.length ||
+    sandboxIds.size !== sandboxExecutionToolUseEventIds.length ||
+    [...sandboxIds].some((toolUseEventId) => approvalIds.has(toolUseEventId))
+  ) {
+    throw new Error("approval and sandbox execution cancellation identities overlap");
+  }
+}
+
 /** Applies a complete current-custody receipt to the exact submitted drafts. */
 export function applyAcceptedInputReceipt(
   input: RuntimeAcceptedInputState,
@@ -321,6 +336,7 @@ export function applyInterruptInputReceipt(
       readonly toolUseEventId: string;
       readonly runtimeLocalId: string;
     }[];
+    readonly sandboxExecutionToolUseEventIds: readonly string[];
     readonly existingMessages: readonly RuntimeMessage[];
   },
   receipt: RuntimeDeclarationReceipt,
@@ -346,6 +362,10 @@ export function applyInterruptInputReceipt(
   ) {
     throw new Error("interrupt declaration receipt event stamp is invalid");
   }
+  assertDisjointToolUseIds(
+    input.pendingToolCancellations,
+    input.sandboxExecutionToolUseEventIds,
+  );
   assertPendingToolCancellationDeltas(input.pendingToolCancellations, receipt.pendingToolDelta);
   return applyCreatedControlDraftStamps({
     sessionId: input.sessionId,
@@ -464,6 +484,7 @@ export function interruptPendingToolDeclarations(input: {
   readonly runtimeInputId: string;
   readonly sourceEventId: string;
   readonly pendingTools: readonly RuntimePendingApprovalToolJobState[];
+  readonly pendingSandboxExecutions: readonly { readonly toolUseEventId: string }[];
   readonly failure: RuntimeFailure;
   readonly completedAt: string;
 }): {
@@ -472,6 +493,7 @@ export function interruptPendingToolDeclarations(input: {
     readonly toolUseEventId: string;
     readonly runtimeLocalId: string;
   }[];
+  readonly sandboxExecutionToolUseEventIds: readonly string[];
 } {
   const runtimeLocalId = stableRuntimeID(
     "runtime_message_draft",
@@ -546,6 +568,7 @@ export function interruptPendingToolDeclarations(input: {
       toolUseEventId: pending.toolUseEventId,
       runtimeLocalId,
     })),
+    sandboxExecutionToolUseEventIds: input.pendingSandboxExecutions.map((pending) => pending.toolUseEventId),
   };
 }
 
@@ -883,6 +906,7 @@ export function validateRuntimeTerminationReceipt(input: {
     readonly toolUseEventId: string;
     readonly runtimeLocalId: string;
   }[];
+  readonly sandboxExecutionToolUseEventIds: readonly string[];
 }, receipt: RuntimeDeclarationReceipt): void {
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
@@ -927,6 +951,10 @@ export function validateRuntimeTerminationReceipt(input: {
       throw new Error("runtime termination declaration receipt has an invalid part stamp");
     }
   }
+  assertDisjointToolUseIds(
+    input.pendingToolCancellations,
+    input.sandboxExecutionToolUseEventIds,
+  );
   const messageEventIds = new Set(receipt.messages.map((message) => message.owningEventId));
   const terminalEvents = receipt.events.filter((event) => !messageEventIds.has(event.eventId));
   if (

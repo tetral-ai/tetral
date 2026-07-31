@@ -1218,10 +1218,179 @@ func applyWriteEventToolBookkeepingTx(
 		if eventType == "agent.tool_result" && projection.MCPServerName != "" {
 			return status.Error(codes.FailedPrecondition, "tool result declaration server is invalid")
 		}
-		return markPendingToolResultResolvedTx(ctx, tx, scope, toolUseEventID, eventID, now)
+		if err := markPendingToolResultResolvedTx(ctx, tx, scope, toolUseEventID, eventID, now); err != nil {
+			return err
+		}
+		if eventType == "agent.tool_result" {
+			return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, eventID, projection, now)
+		}
+		return nil
 	default:
 		return nil
 	}
+}
+
+func consumeSandboxExecutionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+	terminalEventID string,
+	projection runtimeToolProjectionPayload,
+	now time.Time,
+) error {
+	var toolKind, toolName, executionState string
+	var modelToolCallID sql.NullString
+	var resultJSON sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT tool_kind, tool_name, model_tool_call_id, execution_state, result_json
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
+	).Scan(&toolKind, &toolName, &modelToolCallID, &executionState, &resultJSON)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if toolKind != bridgeToolKindSandbox {
+		return nil
+	}
+	if !modelToolCallID.Valid || modelToolCallID.String != projection.ModelToolCallID || toolName != projection.ToolName {
+		return status.Error(codes.FailedPrecondition, "sandbox tool result identity does not match its execution")
+	}
+	if executionState != "terminal_unconsumed" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
+		return status.Error(codes.FailedPrecondition, "sandbox tool execution is not ready for conversation settlement")
+	}
+	attachmentRefs, err := sandboxExecutionAttachmentRefs(resultJSON.String)
+	if err != nil {
+		return err
+	}
+	for _, attachmentRef := range attachmentRefs {
+		updated, err := tx.Exec(ctx,
+			`UPDATE session_transient_attachments
+			    SET status = 'active', expires_at = $6, updated_at = $5
+			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+			    AND source_tool_use_event_id = $4 AND attachment_ref = $7
+			    AND status = 'staged'`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+			toolUseEventID, now, now.Add(defaultTransientAttachmentTTL), attachmentRef,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(updated) {
+			return status.Error(codes.FailedPrecondition, "sandbox tool attachment is not staged")
+		}
+	}
+	updated, err := tx.Exec(ctx,
+		`UPDATE session_runtime_tool_results
+		    SET execution_state = 'consumed', result_json = NULL,
+		        consumed_by_terminal_event_id = $5,
+		        consumption_reason = 'conversation_tool_result', updated_at = $6
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4 AND tool_kind = 'sandbox_tool'
+		    AND execution_state = 'terminal_unconsumed'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+		toolUseEventID, terminalEventID, now,
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(updated) {
+		return status.Error(codes.FailedPrecondition, "sandbox tool execution consume failed")
+	}
+	return nil
+}
+
+func consumeSandboxExecutionForTerminalWriterTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	toolUseEventID string,
+	terminalEventID string,
+	reason string,
+	now time.Time,
+) error {
+	if reason != "pod_lost" && reason != "runtime_terminated" && reason != "cleanup_wait_expired" {
+		return status.Error(codes.Internal, "sandbox execution terminal consumption reason is invalid")
+	}
+	var terminalPayloadJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json
+		   FROM session_events
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND event_id = $4`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), terminalEventID,
+	).Scan(&terminalPayloadJSON); err != nil {
+		return err
+	}
+	// Alternate terminal writers preserve a provider result digest when one
+	// exists; otherwise the terminal event they just authored is the result
+	// evidence retained by the thin execution receipt.
+	fallbackDigest := sha256Hex(terminalPayloadJSON)
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_tool_results
+		    SET execution_state = 'consumed', result_json = NULL,
+		        result_digest = COALESCE(NULLIF(result_digest, ''), $8),
+		        consumed_by_terminal_event_id = $5,
+		        consumption_reason = $6, updated_at = $7
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4 AND tool_kind = 'sandbox_tool'
+		    AND execution_state <> 'consumed'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+		toolUseEventID, terminalEventID, reason, now, fallbackDigest,
+	)
+	if err != nil {
+		return err
+	}
+	_ = result
+	return nil
+}
+
+func sandboxExecutionAttachmentRefs(resultJSON string) ([]string, error) {
+	var decoded any
+	if err := json.Unmarshal([]byte(resultJSON), &decoded); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "sandbox tool execution result is invalid")
+	}
+	seen := make(map[string]struct{})
+	var refs []string
+	var visit func(any) error
+	visit = func(value any) error {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				if err := visit(item); err != nil {
+					return err
+				}
+			}
+		case map[string]any:
+			for key, item := range typed {
+				if key == "attachment_ref" {
+					ref, ok := item.(string)
+					if !ok || ref == "" {
+						return status.Error(codes.FailedPrecondition, "sandbox tool attachment reference is invalid")
+					}
+					if _, duplicate := seen[ref]; !duplicate {
+						seen[ref] = struct{}{}
+						refs = append(refs, ref)
+					}
+					continue
+				}
+				if err := visit(item); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := visit(decoded); err != nil {
+		return nil, err
+	}
+	return refs, nil
 }
 
 func runtimeToolProjectionInputJSON(primary json.RawMessage, fallback json.RawMessage) (string, error) {

@@ -718,6 +718,67 @@ func TestPostgreSQLBridgeAPIStoreWriteEventToolUseAllowDenyDoNotOpenPendingAppro
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_sandbox_consume", "thr_bridge_sandbox_consume")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_sandbox_consume", "bind_bridge_sandbox_consume", 1, "pod_uid_bridge_sandbox_consume")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_sandbox_consume", "thr_bridge_sandbox_consume", "bind_bridge_sandbox_consume", 1, "pod_uid_bridge_sandbox_consume")
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_consume_use", ModelRequestId: "mreq_bridge_sandbox_consume",
+		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"file_path":"a.txt","content":"ok"},"evaluated_permission":"allow"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_bridge_sandbox_consume_use", "agent.tool_use", "streaming",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_sandbox_consume","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"a.txt","content":"ok"},"preview":"{}","truncated":false}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sandbox tool use: %v", err)
+	}
+	const resultJSON = `{"status":"success","result":{"summary":"created a.txt"}}`
+	resultDigest := sha256Hex(resultJSON)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			result_digest, created_at, updated_at
+		) VALUES ('default', 'sesn_bridge_sandbox_consume', 'thr_bridge_sandbox_consume', $1, 'sandbox_tool',
+			$2, 'Write', $3, 'committed', $4, 'call_bridge_sandbox_consume',
+			'terminal_unconsumed', 1, $5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		toolUse.GetEventId(), sha256Hex(`{"content":"ok","file_path":"a.txt"}`), `{"content":"ok","file_path":"a.txt"}`, resultJSON, resultDigest,
+	); err != nil {
+		t.Fatalf("seed terminal sandbox execution: %v", err)
+	}
+
+	settled, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_consume_result", ModelRequestId: "mreq_bridge_sandbox_consume",
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"created a.txt"}]}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_bridge_sandbox_consume_result", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_sandbox_consume","toolName":"Write","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"file_path":"a.txt","content":"ok"},"preview":"{}","truncated":false},"output":{"text":"created a.txt","truncated":false}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sandbox tool result: %v", err)
+	}
+	var state string
+	var storedResult sql.NullString
+	var storedDigest, terminalEventID, reason string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT execution_state, result_json, result_digest, consumed_by_terminal_event_id, consumption_reason
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_sandbox_consume'
+		    AND session_thread_id = 'thr_bridge_sandbox_consume' AND tool_use_event_id = $1`,
+		toolUse.GetEventId(),
+	).Scan(&state, &storedResult, &storedDigest, &terminalEventID, &reason); err != nil {
+		t.Fatalf("read consumed sandbox execution: %v", err)
+	}
+	if state != "consumed" || storedResult.Valid || storedDigest != resultDigest || terminalEventID != settled.GetEventId() || reason != "conversation_tool_result" {
+		t.Fatalf("consumed execution = state %q result %+v digest %q event %q reason %q; want thin conversation receipt", state, storedResult, storedDigest, terminalEventID, reason)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteEventForInternalReviewerStaysInternal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_reviewer_event", "thr_bridge_reviewer_parent")

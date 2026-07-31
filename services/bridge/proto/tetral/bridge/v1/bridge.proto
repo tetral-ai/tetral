@@ -18,7 +18,8 @@ service AgentRuntimeBridgeService {
   rpc ResolveInterAgentDelivery(ResolveInterAgentDeliveryRequest) returns (ResolveInterAgentDeliveryResponse);
   rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);
   rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);
-  rpc RunTool(RunToolRequest) returns (RunToolResponse);
+  rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);
+  rpc AwaitSandboxExecution(AcceptSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
@@ -271,6 +272,7 @@ message CommitInputsRequest {
   string input_kind = 7;
   repeated RuntimeMessageDraft drafts = 10;
   repeated PendingToolCancellationDraft pending_tool_cancellations = 11;
+  repeated string sandbox_execution_tool_use_event_ids = 12;
 }
 
 message CommitInputsResponse {
@@ -366,6 +368,7 @@ message CommitRuntimeTerminationRequest {
   string failure_json = 3;
   repeated RuntimeMessageDraft drafts = 4;
   repeated PendingToolCancellationDraft pending_tool_cancellations = 5;
+  repeated string sandbox_execution_tool_use_event_ids = 6;
 }
 
 message CommitRuntimeTerminationResponse {
@@ -509,6 +512,7 @@ message RequestEndInterruptSettlement {
   int64 sequence_from = 3;
   int64 sequence_to = 4;
   repeated PendingToolCancellationDraft pending_tool_cancellations = 5;
+  repeated string sandbox_execution_tool_use_event_ids = 6;
 }
 
 message StableReasoningPart {
@@ -642,20 +646,24 @@ message ChildLifecycleSource {
   }
 }
 
-message RunToolRequest {
+message AcceptSandboxExecutionRequest {
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
   string normalized_input_hash = 3;
   string tool_name = 4;
   string input_json = 5;
-  string approval_decision_json = 6;
+  reserved 6;
+  string model_tool_call_id = 7;
 }
 
-message RunToolResponse {
+message AcceptSandboxExecutionResponse {
   BridgeWriteAck ack = 1;
-  string result_json = 2;
-  bool background_task_started = 3;
-  string task_id = 4;
+}
+
+message AwaitSandboxExecutionResponse {
+  string result_json = 1;
+  bool background_task_started = 2;
+  string task_id = 3;
 }
 
 message ReadCommandResultRequest {

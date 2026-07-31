@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/memory"
@@ -32,222 +31,290 @@ import (
 
 // This file owns the Bridge tools protocol-family boundary.
 
-// RunTool settles at-least-once, identity-fenced by tool_use_event_id, and holds
-// no pre-execution reservation or wall-clock lease. Its executor is
-// Bridge-in-process; the MCP connector's out-of-band executor is the only tool
-// path that carries a claim. The queue admits one in-flight runtime_input per
-// session partition, so the sole delivery overlap is a suspected-pod-loss
-// redelivery, whose re-execution is the at-least-once residual bounded by that
-// identity fence. Long-running work detaches into session_background_tasks and
-// recovers by the same identity.
-func (s *PostgreSQLBridgeAPIStore) RunTool(ctx context.Context, request *bridgev1.RunToolRequest) (*bridgev1.RunToolResponse, error) {
-	if request.GetToolUseEventId() == "" || request.GetNormalizedInputHash() == "" || request.GetToolName() == "" || request.GetInputJson() == "" {
-		return nil, status.Error(codes.InvalidArgument, "invalid run tool request")
-	}
-	if !json.Valid([]byte(request.GetInputJson())) {
-		return nil, status.Error(codes.InvalidArgument, "tool input must be JSON")
-	}
-	canonicalInputJSON, canonicalInputHash, err := canonicalRunToolInput(request.GetInputJson())
+const (
+	sandboxToolExecuteMaxAttempts = 5
+	runToolResultPollInterval     = 25 * time.Millisecond
+	runToolWaitAttemptTimeout     = 30 * time.Second
+)
+
+// AcceptSandboxExecution durably transfers one already-authored Tool Use to
+// Sandbox Service. The execution row and refs-only Queue job become visible
+// together, and the ACK returns immediately after that transaction commits.
+func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error) {
+	canonicalInputJSON, canonicalInputHash, err := validateSandboxExecutionRequest(request)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "tool input must be JSON")
+		return nil, err
 	}
-	if request.GetNormalizedInputHash() != canonicalInputHash {
-		return nil, status.Error(codes.InvalidArgument, "normalized input hash does not match canonical tool input")
-	}
-	if request.GetApprovalDecisionJson() != "" && !json.Valid([]byte(request.GetApprovalDecisionJson())) {
-		return nil, status.Error(codes.InvalidArgument, "approval decision must be JSON")
-	}
-	now := s.now()
-	var response *bridgev1.RunToolResponse
-	var target SandboxToolTarget
-	var readinessResultJSON string
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.execute_tool", func(tx *dbconnect.Tx) error {
+	created := false
+	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.accept_sandbox_execution", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeThreadScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := lockSandboxExecutionThreadTx(ctx, tx, request.GetScope()); err != nil {
 			return err
+		}
+		if _, settled, err := toolResultForToolUseExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetToolUseEventId()); err != nil {
+			return err
+		} else if settled {
+			return status.Error(codes.FailedPrecondition, "sandbox tool use is already settled")
 		}
 		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		} else if ok {
-			if existing.ToolKind != bridgeToolKindSandbox || existing.NormalizedInputHash != canonicalInputHash || existing.ToolName != request.GetToolName() || existing.InputJSON != canonicalInputJSON {
+			if !sandboxExecutionIdentityMatches(existing, request, canonicalInputJSON, canonicalInputHash) {
 				return status.Error(codes.AlreadyExists, "tool use id conflicts with existing result")
 			}
-			response = &bridgev1.RunToolResponse{
-				Ack:                   duplicateAck("", ""),
-				ResultJson:            existing.ResultJSON,
-				BackgroundTaskStarted: existing.BackgroundTaskStarted,
-				TaskId:                existing.TaskID.String,
+			if existing.ExecutionState.String == "consumed" {
+				return status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
 			}
 			return nil
 		}
-		loadedTarget, readyResultJSON, err := runToolTargetTx(ctx, tx, request.GetScope(), s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), now)
+		if err := verifySandboxExecutionDurableIdentityTx(ctx, tx, request, canonicalInputJSON); err != nil {
+			return err
+		}
+		if err := verifyApprovedSandboxExecutionHandoffTx(ctx, tx, request, canonicalInputJSON); err != nil {
+			return err
+		}
+		now := s.now()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO session_runtime_tool_results (
+				workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+				normalized_input_hash, tool_name, input_json, ack_status, result_json,
+				model_tool_call_id, execution_state, execution_attempt_generation,
+				background_task_started, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, 'sandbox_tool', $5, $6, $7, 'committed', NULL,
+				$8, 'pending', 1, FALSE, $9, $9)`,
+			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+			request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+			canonicalInputHash, request.GetToolName(), canonicalInputJSON,
+			request.GetModelToolCallId(), now,
+		); err != nil {
+			return err
+		}
+		payload, err := marshalBridgeJSON(map[string]string{
+			"workspace_id": request.GetScope().GetWorkspaceId(), "session_id": request.GetScope().GetSessionId(),
+			"session_thread_id": request.GetScope().GetSessionThreadId(), "tool_use_event_id": request.GetToolUseEventId(),
+		})
 		if err != nil {
 			return err
 		}
-		target = loadedTarget
-		readinessResultJSON = readyResultJSON
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if response != nil {
-		return response, nil
-	}
-
-	// Ordinary Runtime delivery is queue-serialized, so generic RunTool has no
-	// pre-execution lease or reservation. A suspected pod loss can redeliver in
-	// this execute-to-commit window; the stable event id fences settlement (and
-	// the helper task id), but external foreground effects are not exactly once.
-	execution := SandboxToolExecution{ResultJSON: readinessResultJSON}
-	transientResourceHelperFailure := false
-	if readinessResultJSON == "" {
-		if s.SandboxToolExecutor == nil {
-			execution.ResultJSON = mustMarshalToolRuntimeError("sandbox_helper_unavailable", "sandbox helper execution is not installed for "+request.GetToolName(), true)
-		} else {
-			if err := s.SandboxToolExecutor.CheckHealth(ctx, target); err != nil {
-				execution = SandboxToolExecution{ResultJSON: sandboxHelperExecutionErrorResult(err, "sandbox helper health check failed before "+request.GetToolName())}
-			} else {
-				var err error
-				execution, err = s.SandboxToolExecutor.RunTool(ctx, SandboxToolInvocation{
-					Target:               target,
-					ToolUseEventID:       request.GetToolUseEventId(),
-					ToolName:             request.GetToolName(),
-					InputJSON:            canonicalInputJSON,
-					ApprovalDecisionJSON: request.GetApprovalDecisionJson(),
-				})
-				if err != nil {
-					transientResourceHelperFailure = sandboxHelperFailureError(err) && runToolReadsResourceRoot(request.GetToolName(), canonicalInputJSON, target.ResourceRootsJSON)
-					execution = SandboxToolExecution{ResultJSON: sandboxHelperExecutionErrorResult(err, "sandbox helper execution failed for "+request.GetToolName())}
-				}
-			}
-		}
-	}
-	if execution.ResultJSON == "" || !json.Valid([]byte(execution.ResultJSON)) {
-		execution.ResultJSON = mustMarshalToolRuntimeError("sandbox_helper_protocol_error", "sandbox helper returned an invalid result", false)
-	}
-	execution.ResultJSON = stripInternalProviderFields(execution.ResultJSON)
-	var pendingAttachment *uploadedTransientAttachment
-	execution.ResultJSON, pendingAttachment = s.materializeSandboxMediaResult(ctx, request.GetScope(), request.GetToolUseEventId(), request.GetToolName(), canonicalInputJSON, execution.ResultJSON)
-	attachmentCommitted := false
-	attachmentCleanupTracked := false
-	attachmentCleanupInserted := false
-	defer func() {
-		if pendingAttachment != nil && !attachmentCommitted && !attachmentCleanupTracked {
-			_ = s.AttachmentBlobStore.Delete(context.WithoutCancel(ctx), pendingAttachment.BlobPointer)
-		}
-	}()
-	durableResultJSON := durableSandboxToolResultJSON(request.GetToolName(), execution.ResultJSON)
-	if execution.BackgroundTask != nil {
-		if err := validateSandboxBackgroundTask(*execution.BackgroundTask); err != nil {
-			return nil, err
-		}
-	}
-	var taskID sql.NullString
-	if execution.BackgroundTask != nil {
-		taskID = sql.NullString{String: execution.BackgroundTask.TaskID, Valid: true}
-	}
-	commitNow := s.now()
-	attachmentInserted := false
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.execute_tool", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
-			return err
-		} else if ok {
-			if existing.ToolKind != bridgeToolKindSandbox || existing.NormalizedInputHash != canonicalInputHash || existing.ToolName != request.GetToolName() || existing.InputJSON != canonicalInputJSON {
-				return status.Error(codes.AlreadyExists, "tool use id conflicts with existing result")
-			}
-			response = &bridgev1.RunToolResponse{
-				Ack:                   duplicateAck("", ""),
-				ResultJson:            existing.ResultJSON,
-				BackgroundTaskStarted: existing.BackgroundTaskStarted,
-				TaskId:                existing.TaskID.String,
-			}
-			if pendingAttachment != nil {
-				if err := insertTransientAttachmentForDeletionTx(ctx, tx, pendingAttachment.Create, pendingAttachment.Attachment, pendingAttachment.BlobPointer, commitNow); err != nil {
-					return err
-				}
-				attachmentCleanupInserted = true
-			}
-			return nil
-		}
-		if transientResourceHelperFailure {
-			requeued, err := resetResourcePreparationAfterHelperFailureTx(ctx, tx, request.GetScope(), target, commitNow, s.resourceCredentialRefreshMargin())
-			if err != nil {
-				return err
-			}
-			if requeued {
-				if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
-					ToolUseEventID: request.GetToolUseEventId(), ToolKind: bridgeToolKindSandbox,
-					NormalizedInputHash: canonicalInputHash, ToolName: request.GetToolName(), InputJSON: canonicalInputJSON,
-					AckStatus: bridgeAckCommitted, ResultJSON: durableResultJSON, Now: commitNow,
-				}); err != nil {
-					return err
-				}
-				response = &bridgev1.RunToolResponse{
-					Ack:        committedAck("", ""),
-					ResultJson: execution.ResultJSON,
-				}
-				return nil
-			}
-		}
-		if execution.BackgroundTask != nil {
-			// Once the helper has started a task, its original launch target and
-			// provider recovery identity own that process even if the session's
-			// current sandbox changes before settlement.
-			if err := insertBackgroundTaskTx(ctx, tx, request.GetScope(), target, request.GetToolUseEventId(), *execution.BackgroundTask, commitNow); err != nil {
-				return err
-			}
-		}
-		if pendingAttachment != nil {
-			if err := insertTransientAttachmentTx(ctx, tx, pendingAttachment.Create, pendingAttachment.Attachment, pendingAttachment.BlobPointer, commitNow); err != nil {
-				return err
-			}
-			attachmentInserted = true
-		}
-		if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
-			ToolUseEventID:        request.GetToolUseEventId(),
-			ToolKind:              bridgeToolKindSandbox,
-			NormalizedInputHash:   canonicalInputHash,
-			ToolName:              request.GetToolName(),
-			InputJSON:             canonicalInputJSON,
-			AckStatus:             bridgeAckCommitted,
-			ResultJSON:            durableResultJSON,
-			BackgroundTaskStarted: execution.BackgroundTask != nil,
-			TaskID:                taskID,
-			Now:                   commitNow,
+		workspaceID := workspace.ID(request.GetScope().GetWorkspaceId())
+		if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+			ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxToolExecute,
+			PartitionKey:   queue.FormatSandboxExecutionPartitionKey(workspaceID, request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetToolUseEventId()),
+			DedupeKey:      queue.FormatSandboxToolExecuteDedupeKey(workspaceID, request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(), 1),
+			PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: sandboxToolExecuteMaxAttempts, Now: now,
 		}); err != nil {
 			return err
 		}
-		response = &bridgev1.RunToolResponse{
-			Ack:                   committedAck("", ""),
-			ResultJson:            execution.ResultJSON,
-			BackgroundTaskStarted: execution.BackgroundTask != nil,
-			TaskId:                taskID.String,
-		}
+		created = true
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	attachmentCommitted = attachmentInserted
-	attachmentCleanupTracked = attachmentCleanupInserted
-	if attachmentCleanupTracked {
-		cleanupCtx := context.WithoutCancel(ctx)
-		deleteErr := s.AttachmentBlobStore.Delete(cleanupCtx, pendingAttachment.BlobPointer)
-		var notFound *blob.NotFoundError
-		if deleteErr == nil || errors.As(deleteErr, &notFound) {
-			_ = s.markTransientAttachmentDeleted(cleanupCtx, transientAttachmentGCRow{
-				WorkspaceID:    pendingAttachment.Create.Scope.GetWorkspaceId(),
-				AttachmentRef:  pendingAttachment.Attachment.GetAttachmentRef(),
-				BlobPointer:    pendingAttachment.BlobPointer,
-				PreviousStatus: "deleting",
-			}, s.now())
+	ack := duplicateAck("", "")
+	if created {
+		ack = committedAck("", "")
+	}
+	return &bridgev1.AcceptSandboxExecutionResponse{Ack: ack}, nil
+}
+
+// AwaitSandboxExecution reads one accepted execution until Sandbox Service
+// settles it. It never creates an execution row or Queue job.
+func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
+	if _, _, err := validateSandboxExecutionRequest(request); err != nil {
+		return nil, err
+	}
+	if err := s.withScopeReadOnlyTx(ctx, request.GetScope(), "agentruntimebridge.await_sandbox_execution", func(tx *dbconnect.Tx) error {
+		return verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope())
+	}); err != nil {
+		return nil, err
+	}
+	terminal, err := s.waitForSandboxExecutionResult(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.AwaitSandboxExecutionResponse{
+		ResultJson:            terminal.ResultJSON,
+		BackgroundTaskStarted: terminal.BackgroundTaskStarted,
+		TaskId:                terminal.TaskID.String,
+	}, nil
+}
+
+func validateSandboxExecutionRequest(request *bridgev1.AcceptSandboxExecutionRequest) (string, string, error) {
+	if request.GetToolUseEventId() == "" || request.GetModelToolCallId() == "" || request.GetNormalizedInputHash() == "" || request.GetToolName() == "" || request.GetInputJson() == "" {
+		return "", "", status.Error(codes.InvalidArgument, "invalid sandbox execution request")
+	}
+	if !json.Valid([]byte(request.GetInputJson())) {
+		return "", "", status.Error(codes.InvalidArgument, "tool input must be JSON")
+	}
+	canonicalInputJSON, canonicalInputHash, err := canonicalRunToolInput(request.GetInputJson())
+	if err != nil {
+		return "", "", status.Error(codes.InvalidArgument, "tool input must be JSON")
+	}
+	if request.GetNormalizedInputHash() != canonicalInputHash {
+		return "", "", status.Error(codes.InvalidArgument, "normalized input hash does not match canonical tool input")
+	}
+	return canonicalInputJSON, canonicalInputHash, nil
+}
+
+func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var threadID string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM session_threads
+		  WHERE workspace_id = $1 AND session_id = $2 AND id = $3
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	).Scan(&threadID); dbconnect.IsNoRows(err) {
+		return closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.AcceptSandboxExecutionRequest, canonicalInputJSON string) error {
+	var payloadJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json FROM session_events
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND event_id = $4 AND type = 'agent.tool_use'
+		  FOR UPDATE`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+	).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "durable sandbox tool use is missing")
+	} else if err != nil {
+		return err
+	}
+	var payload runtimeToolUseEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name != request.GetToolName() {
+		return status.Error(codes.FailedPrecondition, "durable sandbox tool use identity is invalid")
+	}
+	eventInputJSON, _, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
+	if err != nil || eventInputJSON != canonicalInputJSON {
+		return status.Error(codes.FailedPrecondition, "durable sandbox tool use input does not match")
+	}
+	var messageJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT data_json FROM session_messages
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND source_event_id = $4 AND kind = 'assistant'
+		  ORDER BY sequence ASC LIMIT 1`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+	).Scan(&messageJSON); dbconnect.IsNoRows(err) {
+		return status.Error(codes.FailedPrecondition, "durable sandbox tool message is missing")
+	} else if err != nil {
+		return err
+	}
+	var message struct {
+		Parts []struct {
+			Type           string `json:"type"`
+			ToolCallID     string `json:"toolCallId"`
+			ToolName       string `json:"toolName"`
+			ToolUseEventID string `json:"toolUseEventId"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(messageJSON), &message); err != nil {
+		return status.Error(codes.FailedPrecondition, "durable sandbox tool message is invalid")
+	}
+	for _, part := range message.Parts {
+		if part.Type == "tool" && part.ToolUseEventID == request.GetToolUseEventId() &&
+			part.ToolCallID == request.GetModelToolCallId() && part.ToolName == request.GetToolName() {
+			return nil
 		}
 	}
-	return response, nil
+	return status.Error(codes.FailedPrecondition, "durable sandbox tool call identity does not match")
+}
+
+func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMessage {
+	if len(value) == 0 || string(value) == "null" {
+		return fallback
+	}
+	return value
+}
+
+func verifyApprovedSandboxExecutionHandoffTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.AcceptSandboxExecutionRequest, canonicalInputJSON string) error {
+	var modelToolCallID, toolName, inputJSON, statusValue string
+	var decision sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT model_tool_call_id, tool_name, input_json, status, decision
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4 AND kind = 'approval'
+		  FOR UPDATE`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	canonicalApprovalInput, _, err := canonicalRunToolInput(inputJSON)
+	if err != nil || modelToolCallID != request.GetModelToolCallId() || toolName != request.GetToolName() ||
+		canonicalApprovalInput != canonicalInputJSON {
+		return status.Error(codes.AlreadyExists, "approved tool identity conflicts with execution")
+	}
+	if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
+		return status.Error(codes.FailedPrecondition, "sandbox tool approval is not executable")
+	}
+	return nil
+}
+
+func mustCanonicalRunToolInput(raw string) string {
+	canonical, _, err := canonicalRunToolInput(raw)
+	if err != nil {
+		return ""
+	}
+	return canonical
+}
+
+func sandboxExecutionIdentityMatches(existing runtimeToolResult, request *bridgev1.AcceptSandboxExecutionRequest, canonicalInputJSON string, canonicalInputHash string) bool {
+	return existing.ToolKind == bridgeToolKindSandbox && existing.NormalizedInputHash == canonicalInputHash &&
+		existing.ToolName == request.GetToolName() && existing.InputJSON == canonicalInputJSON &&
+		existing.ModelToolCallID.Valid && existing.ModelToolCallID.String == request.GetModelToolCallId()
+}
+
+func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (runtimeToolResult, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, runToolWaitAttemptTimeout)
+	defer cancel()
+	ticker := time.NewTicker(runToolResultPollInterval)
+	defer ticker.Stop()
+	for {
+		var stored runtimeToolResult
+		var found bool
+		err := s.Client.WithWorkspaceReadOnlyTx(waitCtx, request.GetScope().GetWorkspaceId(), "agentruntimebridge.wait_sandbox_tool", func(tx *dbconnect.Tx) error {
+			var err error
+			stored, found, err = readRuntimeToolResultReadOnlyTx(waitCtx, tx, request.GetScope(), request.GetToolUseEventId())
+			return err
+		})
+		if err != nil {
+			if waitCtx.Err() != nil {
+				return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
+			}
+			return runtimeToolResult{}, err
+		}
+		if !found || !sandboxExecutionIdentityMatches(stored, request, mustCanonicalRunToolInput(request.GetInputJson()), request.GetNormalizedInputHash()) {
+			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool execution identity changed while waiting")
+		}
+		if stored.ExecutionState.Valid && stored.ExecutionState.String == "terminal_unconsumed" {
+			if stored.ResultJSON == "" || !json.Valid([]byte(stored.ResultJSON)) {
+				return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool execution result is invalid")
+			}
+			return stored, nil
+		}
+		if stored.ExecutionState.Valid && stored.ExecutionState.String == "consumed" {
+			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
+		}
+		select {
+		case <-waitCtx.Done():
+			return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
+		case <-ticker.C:
+		}
+	}
 }
 
 // RunMemory is commit-then-push, giving exactly-once mutation and at-least-once

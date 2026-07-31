@@ -22,6 +22,7 @@ import { acceptedInputReceipt } from "../../../core/test/unit/runtime-declaratio
 
 const emptyColdCoverage = {
   pendingToolIds: [],
+  pendingSandboxExecutionIds: [],
   pendingAttachmentIdentities: [],
   undeliveredMailDeliveryIds: [],
 } as const;

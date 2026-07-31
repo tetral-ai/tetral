@@ -665,6 +665,7 @@ export interface CommitInputsRequest {
   inputKind: string;
   drafts: RuntimeMessageDraft[];
   pendingToolCancellations: PendingToolCancellationDraft[];
+  sandboxExecutionToolUseEventIds: string[];
 }
 
 export interface CommitInputsResponse {
@@ -760,6 +761,7 @@ export interface CommitRuntimeTerminationRequest {
   failureJson: string;
   drafts: RuntimeMessageDraft[];
   pendingToolCancellations: PendingToolCancellationDraft[];
+  sandboxExecutionToolUseEventIds: string[];
 }
 
 export interface CommitRuntimeTerminationResponse {
@@ -892,6 +894,7 @@ export interface RequestEndInterruptSettlement {
   sequenceFrom: number;
   sequenceTo: number;
   pendingToolCancellations: PendingToolCancellationDraft[];
+  sandboxExecutionToolUseEventIds: string[];
 }
 
 export interface StableReasoningPart {
@@ -1019,17 +1022,20 @@ export interface ChildLifecycleSource {
   reviewerReviewId?: string | undefined;
 }
 
-export interface RunToolRequest {
+export interface AcceptSandboxExecutionRequest {
   scope: RuntimeScope | undefined;
   toolUseEventId: string;
   normalizedInputHash: string;
   toolName: string;
   inputJson: string;
-  approvalDecisionJson: string;
+  modelToolCallId: string;
 }
 
-export interface RunToolResponse {
+export interface AcceptSandboxExecutionResponse {
   ack: BridgeWriteAck | undefined;
+}
+
+export interface AwaitSandboxExecutionResponse {
   resultJson: string;
   backgroundTaskStarted: boolean;
   taskId: string;
@@ -3870,6 +3876,7 @@ function createBaseCommitInputsRequest(): CommitInputsRequest {
     inputKind: "",
     drafts: [],
     pendingToolCancellations: [],
+    sandboxExecutionToolUseEventIds: [],
   };
 }
 
@@ -3898,6 +3905,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     }
     for (const v of message.pendingToolCancellations) {
       PendingToolCancellationDraft.encode(v!, writer.uint32(90).fork()).join();
+    }
+    for (const v of message.sandboxExecutionToolUseEventIds) {
+      writer.uint32(98).string(v!);
     }
     return writer;
   },
@@ -3973,6 +3983,14 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
           message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.sandboxExecutionToolUseEventIds.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4018,6 +4036,11 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         : globalThis.Array.isArray(object?.pending_tool_cancellations)
         ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
         : [],
+      sandboxExecutionToolUseEventIds: globalThis.Array.isArray(object?.sandboxExecutionToolUseEventIds)
+        ? object.sandboxExecutionToolUseEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.sandbox_execution_tool_use_event_ids)
+        ? object.sandbox_execution_tool_use_event_ids.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -4049,6 +4072,9 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         PendingToolCancellationDraft.toJSON(e)
       );
     }
+    if (message.sandboxExecutionToolUseEventIds?.length) {
+      obj.sandboxExecutionToolUseEventIds = message.sandboxExecutionToolUseEventIds;
+    }
     return obj;
   },
 
@@ -4068,6 +4094,7 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     message.pendingToolCancellations =
       object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
+    message.sandboxExecutionToolUseEventIds = object.sandboxExecutionToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
@@ -5591,7 +5618,14 @@ export const CommitInternalToolRepairResponse: MessageFns<CommitInternalToolRepa
 };
 
 function createBaseCommitRuntimeTerminationRequest(): CommitRuntimeTerminationRequest {
-  return { scope: undefined, runtimeWriteId: "", failureJson: "", drafts: [], pendingToolCancellations: [] };
+  return {
+    scope: undefined,
+    runtimeWriteId: "",
+    failureJson: "",
+    drafts: [],
+    pendingToolCancellations: [],
+    sandboxExecutionToolUseEventIds: [],
+  };
 }
 
 export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminationRequest> = {
@@ -5610,6 +5644,9 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     }
     for (const v of message.pendingToolCancellations) {
       PendingToolCancellationDraft.encode(v!, writer.uint32(42).fork()).join();
+    }
+    for (const v of message.sandboxExecutionToolUseEventIds) {
+      writer.uint32(50).string(v!);
     }
     return writer;
   },
@@ -5661,6 +5698,14 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
           message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.sandboxExecutionToolUseEventIds.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5691,6 +5736,11 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
         : globalThis.Array.isArray(object?.pending_tool_cancellations)
         ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
         : [],
+      sandboxExecutionToolUseEventIds: globalThis.Array.isArray(object?.sandboxExecutionToolUseEventIds)
+        ? object.sandboxExecutionToolUseEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.sandbox_execution_tool_use_event_ids)
+        ? object.sandbox_execution_tool_use_event_ids.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -5713,6 +5763,9 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
         PendingToolCancellationDraft.toJSON(e)
       );
     }
+    if (message.sandboxExecutionToolUseEventIds?.length) {
+      obj.sandboxExecutionToolUseEventIds = message.sandboxExecutionToolUseEventIds;
+    }
     return obj;
   },
 
@@ -5731,6 +5784,7 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     message.pendingToolCancellations =
       object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
+    message.sandboxExecutionToolUseEventIds = object.sandboxExecutionToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
@@ -7906,7 +7960,14 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
 };
 
 function createBaseRequestEndInterruptSettlement(): RequestEndInterruptSettlement {
-  return { runtimeInputId: "", eventIds: [], sequenceFrom: 0, sequenceTo: 0, pendingToolCancellations: [] };
+  return {
+    runtimeInputId: "",
+    eventIds: [],
+    sequenceFrom: 0,
+    sequenceTo: 0,
+    pendingToolCancellations: [],
+    sandboxExecutionToolUseEventIds: [],
+  };
 }
 
 export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettlement> = {
@@ -7925,6 +7986,9 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
     }
     for (const v of message.pendingToolCancellations) {
       PendingToolCancellationDraft.encode(v!, writer.uint32(42).fork()).join();
+    }
+    for (const v of message.sandboxExecutionToolUseEventIds) {
+      writer.uint32(50).string(v!);
     }
     return writer;
   },
@@ -7976,6 +8040,14 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
           message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.sandboxExecutionToolUseEventIds.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8012,6 +8084,11 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
         : globalThis.Array.isArray(object?.pending_tool_cancellations)
         ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
         : [],
+      sandboxExecutionToolUseEventIds: globalThis.Array.isArray(object?.sandboxExecutionToolUseEventIds)
+        ? object.sandboxExecutionToolUseEventIds.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.sandbox_execution_tool_use_event_ids)
+        ? object.sandbox_execution_tool_use_event_ids.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -8034,6 +8111,9 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
         PendingToolCancellationDraft.toJSON(e)
       );
     }
+    if (message.sandboxExecutionToolUseEventIds?.length) {
+      obj.sandboxExecutionToolUseEventIds = message.sandboxExecutionToolUseEventIds;
+    }
     return obj;
   },
 
@@ -8050,6 +8130,7 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
     message.sequenceTo = object.sequenceTo ?? 0;
     message.pendingToolCancellations =
       object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
+    message.sandboxExecutionToolUseEventIds = object.sandboxExecutionToolUseEventIds?.map((e) => e) || [];
     return message;
   },
 };
@@ -10214,19 +10295,19 @@ export const ChildLifecycleSource: MessageFns<ChildLifecycleSource> = {
   },
 };
 
-function createBaseRunToolRequest(): RunToolRequest {
+function createBaseAcceptSandboxExecutionRequest(): AcceptSandboxExecutionRequest {
   return {
     scope: undefined,
     toolUseEventId: "",
     normalizedInputHash: "",
     toolName: "",
     inputJson: "",
-    approvalDecisionJson: "",
+    modelToolCallId: "",
   };
 }
 
-export const RunToolRequest: MessageFns<RunToolRequest> = {
-  encode(message: RunToolRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const AcceptSandboxExecutionRequest: MessageFns<AcceptSandboxExecutionRequest> = {
+  encode(message: AcceptSandboxExecutionRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.scope !== undefined) {
       RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
     }
@@ -10242,16 +10323,16 @@ export const RunToolRequest: MessageFns<RunToolRequest> = {
     if (message.inputJson !== "") {
       writer.uint32(42).string(message.inputJson);
     }
-    if (message.approvalDecisionJson !== "") {
-      writer.uint32(50).string(message.approvalDecisionJson);
+    if (message.modelToolCallId !== "") {
+      writer.uint32(58).string(message.modelToolCallId);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RunToolRequest {
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptSandboxExecutionRequest {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRunToolRequest();
+    const message = createBaseAcceptSandboxExecutionRequest();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -10295,12 +10376,12 @@ export const RunToolRequest: MessageFns<RunToolRequest> = {
           message.inputJson = reader.string();
           continue;
         }
-        case 6: {
-          if (tag !== 50) {
+        case 7: {
+          if (tag !== 58) {
             break;
           }
 
-          message.approvalDecisionJson = reader.string();
+          message.modelToolCallId = reader.string();
           continue;
         }
       }
@@ -10312,7 +10393,7 @@ export const RunToolRequest: MessageFns<RunToolRequest> = {
     return message;
   },
 
-  fromJSON(object: any): RunToolRequest {
+  fromJSON(object: any): AcceptSandboxExecutionRequest {
     return {
       scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
       toolUseEventId: isSet(object.toolUseEventId)
@@ -10335,15 +10416,15 @@ export const RunToolRequest: MessageFns<RunToolRequest> = {
         : isSet(object.input_json)
         ? globalThis.String(object.input_json)
         : "",
-      approvalDecisionJson: isSet(object.approvalDecisionJson)
-        ? globalThis.String(object.approvalDecisionJson)
-        : isSet(object.approval_decision_json)
-        ? globalThis.String(object.approval_decision_json)
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
         : "",
     };
   },
 
-  toJSON(message: RunToolRequest): unknown {
+  toJSON(message: AcceptSandboxExecutionRequest): unknown {
     const obj: any = {};
     if (message.scope !== undefined) {
       obj.scope = RuntimeScope.toJSON(message.scope);
@@ -10360,17 +10441,19 @@ export const RunToolRequest: MessageFns<RunToolRequest> = {
     if (message.inputJson !== "") {
       obj.inputJson = message.inputJson;
     }
-    if (message.approvalDecisionJson !== "") {
-      obj.approvalDecisionJson = message.approvalDecisionJson;
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RunToolRequest>, I>>(base?: I): RunToolRequest {
-    return RunToolRequest.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<AcceptSandboxExecutionRequest>, I>>(base?: I): AcceptSandboxExecutionRequest {
+    return AcceptSandboxExecutionRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RunToolRequest>, I>>(object: I): RunToolRequest {
-    const message = createBaseRunToolRequest();
+  fromPartial<I extends Exact<DeepPartial<AcceptSandboxExecutionRequest>, I>>(
+    object: I,
+  ): AcceptSandboxExecutionRequest {
+    const message = createBaseAcceptSandboxExecutionRequest();
     message.scope = (object.scope !== undefined && object.scope !== null)
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
@@ -10378,36 +10461,27 @@ export const RunToolRequest: MessageFns<RunToolRequest> = {
     message.normalizedInputHash = object.normalizedInputHash ?? "";
     message.toolName = object.toolName ?? "";
     message.inputJson = object.inputJson ?? "";
-    message.approvalDecisionJson = object.approvalDecisionJson ?? "";
+    message.modelToolCallId = object.modelToolCallId ?? "";
     return message;
   },
 };
 
-function createBaseRunToolResponse(): RunToolResponse {
-  return { ack: undefined, resultJson: "", backgroundTaskStarted: false, taskId: "" };
+function createBaseAcceptSandboxExecutionResponse(): AcceptSandboxExecutionResponse {
+  return { ack: undefined };
 }
 
-export const RunToolResponse: MessageFns<RunToolResponse> = {
-  encode(message: RunToolResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+export const AcceptSandboxExecutionResponse: MessageFns<AcceptSandboxExecutionResponse> = {
+  encode(message: AcceptSandboxExecutionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.ack !== undefined) {
       BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
-    }
-    if (message.resultJson !== "") {
-      writer.uint32(18).string(message.resultJson);
-    }
-    if (message.backgroundTaskStarted !== false) {
-      writer.uint32(24).bool(message.backgroundTaskStarted);
-    }
-    if (message.taskId !== "") {
-      writer.uint32(34).string(message.taskId);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RunToolResponse {
+  decode(input: BinaryReader | Uint8Array, length?: number): AcceptSandboxExecutionResponse {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRunToolResponse();
+    const message = createBaseAcceptSandboxExecutionResponse();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -10419,24 +10493,84 @@ export const RunToolResponse: MessageFns<RunToolResponse> = {
           message.ack = BridgeWriteAck.decode(reader, reader.uint32());
           continue;
         }
-        case 2: {
-          if (tag !== 18) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AcceptSandboxExecutionResponse {
+    return { ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined };
+  },
+
+  toJSON(message: AcceptSandboxExecutionResponse): unknown {
+    const obj: any = {};
+    if (message.ack !== undefined) {
+      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AcceptSandboxExecutionResponse>, I>>(base?: I): AcceptSandboxExecutionResponse {
+    return AcceptSandboxExecutionResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AcceptSandboxExecutionResponse>, I>>(
+    object: I,
+  ): AcceptSandboxExecutionResponse {
+    const message = createBaseAcceptSandboxExecutionResponse();
+    message.ack = (object.ack !== undefined && object.ack !== null)
+      ? BridgeWriteAck.fromPartial(object.ack)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseAwaitSandboxExecutionResponse(): AwaitSandboxExecutionResponse {
+  return { resultJson: "", backgroundTaskStarted: false, taskId: "" };
+}
+
+export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResponse> = {
+  encode(message: AwaitSandboxExecutionResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.resultJson !== "") {
+      writer.uint32(10).string(message.resultJson);
+    }
+    if (message.backgroundTaskStarted !== false) {
+      writer.uint32(16).bool(message.backgroundTaskStarted);
+    }
+    if (message.taskId !== "") {
+      writer.uint32(26).string(message.taskId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AwaitSandboxExecutionResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAwaitSandboxExecutionResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
             break;
           }
 
           message.resultJson = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 24) {
+        case 2: {
+          if (tag !== 16) {
             break;
           }
 
           message.backgroundTaskStarted = reader.bool();
           continue;
         }
-        case 4: {
-          if (tag !== 34) {
+        case 3: {
+          if (tag !== 26) {
             break;
           }
 
@@ -10452,9 +10586,8 @@ export const RunToolResponse: MessageFns<RunToolResponse> = {
     return message;
   },
 
-  fromJSON(object: any): RunToolResponse {
+  fromJSON(object: any): AwaitSandboxExecutionResponse {
     return {
-      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
       resultJson: isSet(object.resultJson)
         ? globalThis.String(object.resultJson)
         : isSet(object.result_json)
@@ -10473,11 +10606,8 @@ export const RunToolResponse: MessageFns<RunToolResponse> = {
     };
   },
 
-  toJSON(message: RunToolResponse): unknown {
+  toJSON(message: AwaitSandboxExecutionResponse): unknown {
     const obj: any = {};
-    if (message.ack !== undefined) {
-      obj.ack = BridgeWriteAck.toJSON(message.ack);
-    }
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
     }
@@ -10490,14 +10620,13 @@ export const RunToolResponse: MessageFns<RunToolResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RunToolResponse>, I>>(base?: I): RunToolResponse {
-    return RunToolResponse.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<AwaitSandboxExecutionResponse>, I>>(base?: I): AwaitSandboxExecutionResponse {
+    return AwaitSandboxExecutionResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RunToolResponse>, I>>(object: I): RunToolResponse {
-    const message = createBaseRunToolResponse();
-    message.ack = (object.ack !== undefined && object.ack !== null)
-      ? BridgeWriteAck.fromPartial(object.ack)
-      : undefined;
+  fromPartial<I extends Exact<DeepPartial<AwaitSandboxExecutionResponse>, I>>(
+    object: I,
+  ): AwaitSandboxExecutionResponse {
+    const message = createBaseAwaitSandboxExecutionResponse();
     message.resultJson = object.resultJson ?? "";
     message.backgroundTaskStarted = object.backgroundTaskStarted ?? false;
     message.taskId = object.taskId ?? "";
@@ -11537,14 +11666,28 @@ export const AgentRuntimeBridgeServiceService = {
       Buffer.from(MarkChildThreadActiveResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): MarkChildThreadActiveResponse => MarkChildThreadActiveResponse.decode(value),
   },
-  runTool: {
-    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/RunTool" as const,
+  acceptSandboxExecution: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: RunToolRequest): Buffer => Buffer.from(RunToolRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): RunToolRequest => RunToolRequest.decode(value),
-    responseSerialize: (value: RunToolResponse): Buffer => Buffer.from(RunToolResponse.encode(value).finish()),
-    responseDeserialize: (value: Buffer): RunToolResponse => RunToolResponse.decode(value),
+    requestSerialize: (value: AcceptSandboxExecutionRequest): Buffer =>
+      Buffer.from(AcceptSandboxExecutionRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AcceptSandboxExecutionRequest => AcceptSandboxExecutionRequest.decode(value),
+    responseSerialize: (value: AcceptSandboxExecutionResponse): Buffer =>
+      Buffer.from(AcceptSandboxExecutionResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AcceptSandboxExecutionResponse =>
+      AcceptSandboxExecutionResponse.decode(value),
+  },
+  awaitSandboxExecution: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AcceptSandboxExecutionRequest): Buffer =>
+      Buffer.from(AcceptSandboxExecutionRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AcceptSandboxExecutionRequest => AcceptSandboxExecutionRequest.decode(value),
+    responseSerialize: (value: AwaitSandboxExecutionResponse): Buffer =>
+      Buffer.from(AwaitSandboxExecutionResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AwaitSandboxExecutionResponse => AwaitSandboxExecutionResponse.decode(value),
   },
   readCommandResult: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/ReadCommandResult" as const,
@@ -11703,7 +11846,8 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   resolveInterAgentDelivery: handleUnaryCall<ResolveInterAgentDeliveryRequest, ResolveInterAgentDeliveryResponse>;
   markChildThreadClosed: handleUnaryCall<MarkChildThreadClosedRequest, MarkChildThreadClosedResponse>;
   markChildThreadActive: handleUnaryCall<MarkChildThreadActiveRequest, MarkChildThreadActiveResponse>;
-  runTool: handleUnaryCall<RunToolRequest, RunToolResponse>;
+  acceptSandboxExecution: handleUnaryCall<AcceptSandboxExecutionRequest, AcceptSandboxExecutionResponse>;
+  awaitSandboxExecution: handleUnaryCall<AcceptSandboxExecutionRequest, AwaitSandboxExecutionResponse>;
   readCommandResult: handleUnaryCall<ReadCommandResultRequest, ReadCommandResultResponse>;
   sendCommandInput: handleUnaryCall<SendCommandInputRequest, SendCommandInputResponse>;
   cancelCommand: handleUnaryCall<CancelCommandRequest, CancelCommandResponse>;
@@ -11917,20 +12061,35 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: MarkChildThreadActiveResponse) => void,
   ): ClientUnaryCall;
-  runTool(
-    request: RunToolRequest,
-    callback: (error: ServiceError | null, response: RunToolResponse) => void,
+  acceptSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
+    callback: (error: ServiceError | null, response: AcceptSandboxExecutionResponse) => void,
   ): ClientUnaryCall;
-  runTool(
-    request: RunToolRequest,
+  acceptSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
     metadata: Metadata,
-    callback: (error: ServiceError | null, response: RunToolResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptSandboxExecutionResponse) => void,
   ): ClientUnaryCall;
-  runTool(
-    request: RunToolRequest,
+  acceptSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
-    callback: (error: ServiceError | null, response: RunToolResponse) => void,
+    callback: (error: ServiceError | null, response: AcceptSandboxExecutionResponse) => void,
+  ): ClientUnaryCall;
+  awaitSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
+    callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,
+  ): ClientUnaryCall;
+  awaitSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,
+  ): ClientUnaryCall;
+  awaitSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,
   ): ClientUnaryCall;
   readCommandResult(
     request: ReadCommandResultRequest,

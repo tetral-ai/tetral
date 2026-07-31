@@ -719,7 +719,6 @@ const (
 			'list_child_threads',
 			'mark_child_thread_closed',
 			'mark_child_thread_active',
-			'run_tool',
 			'read_command_result',
 			'send_command_input',
 			'cancel_command',
@@ -773,6 +772,7 @@ const (
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, consumed_by_terminal_event_id) REFERENCES session_events(workspace_id, event_id),
 		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'memory', 'mcp')),
 		CONSTRAINT session_runtime_tool_results_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
 		CONSTRAINT session_runtime_tool_results_execution_state_shape CHECK (
@@ -816,8 +816,19 @@ const (
 			OR (cancel_requested_at IS NOT NULL AND cancel_state = 'submitted' AND cancel_submitted_at IS NOT NULL)
 		),
 		CONSTRAINT session_runtime_tool_results_consumption_shape CHECK (
-			consumption_reason IS NULL OR consumption_reason IN (
-				'conversation_tool_result', 'pod_lost', 'runtime_terminated', 'cleanup_wait_expired'
+			tool_kind <> 'sandbox_tool' OR (
+				(execution_state IN ('pending', 'preparing', 'running', 'waiting_activation', 'waiting_materialization')
+					AND result_json IS NULL AND result_digest IS NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (execution_state = 'terminal_unconsumed'
+					AND result_json IS NOT NULL AND result_digest IS NOT NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (execution_state = 'consumed'
+					AND result_json IS NULL AND result_digest IS NOT NULL AND result_digest <> ''
+					AND consumed_by_terminal_event_id IS NOT NULL
+					AND consumption_reason IN (
+						'conversation_tool_result', 'pod_lost', 'runtime_terminated', 'cleanup_wait_expired'
+					))
 			)
 		),
 		CONSTRAINT session_runtime_tool_results_helper_recovery_shape CHECK (helper_recovery_count >= 0 AND helper_recovery_count <= 1),
@@ -1995,6 +2006,16 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 			USING (current_setting('tetral.transient_attachment_gc', true) = 'true')
 			WITH CHECK (current_setting('tetral.transient_attachment_gc', true) = 'true')`,
 		},
+		postgresqlSchemaStep{
+			name: "rls_policy_transient_attachment_gc_execution_drop",
+			ddl:  "DROP POLICY IF EXISTS transient_attachment_gc_select ON session_runtime_tool_results",
+		},
+		postgresqlSchemaStep{
+			name: "rls_policy_transient_attachment_gc_execution_select",
+			ddl: `CREATE POLICY transient_attachment_gc_select ON session_runtime_tool_results
+			FOR SELECT
+			USING (current_setting('tetral.transient_attachment_gc', true) = 'true')`,
+		},
 	)
 
 	// Pre-release schema edits fold into this baseline. The statements below
@@ -2115,7 +2136,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 				'list_child_threads',
 				'mark_child_thread_closed',
 				'mark_child_thread_active',
-				'run_tool',
 				'read_command_result',
 				'send_command_input',
 				'cancel_command',
@@ -2340,7 +2360,6 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 				'list_child_threads',
 				'mark_child_thread_closed',
 				'mark_child_thread_active',
-				'run_tool',
 				'read_command_result',
 				'send_command_input',
 				'cancel_command',

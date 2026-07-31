@@ -222,17 +222,39 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsDeletesExpiredAndC
 	expired := createBridgeTransientAttachmentForTest(t, store, scope, "gc_expired", "sevt_gc_expired", []byte("expired"))
 	consumed := createBridgeTransientAttachmentForTest(t, store, scope, "gc_consumed", "sevt_gc_consumed", []byte("consumed"))
 	fresh := createBridgeTransientAttachmentForTest(t, store, scope, "gc_fresh", "sevt_gc_fresh", []byte("fresh"))
+	protected := createBridgeTransientAttachmentForTest(t, store, scope, "gc_protected", "sevt_gc_protected", []byte("protected"))
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_transient_attachments
-		    SET status = CASE WHEN attachment_ref = $1 THEN 'consumed' ELSE status END,
+		    SET status = CASE
+		          WHEN attachment_ref = $1 THEN 'consumed'
+		          WHEN attachment_ref = $4 THEN 'staged'
+		          ELSE status
+		        END,
 		        expires_at = CASE WHEN attachment_ref = $2 THEN '2026-01-01T13:00:00Z' ELSE expires_at END
 		  WHERE workspace_id = 'default'
-		    AND attachment_ref IN ($1, $2, $3)`,
+		    AND attachment_ref IN ($1, $2, $3, $4)`,
 		consumed.GetAttachmentRef(),
 		fresh.GetAttachmentRef(),
 		expired.GetAttachmentRef(),
+		protected.GetAttachmentRef(),
 	); err != nil {
 		t.Fatalf("prepare attachment gc rows: %v", err)
+	}
+	protectedResult := `{"status":"success","attachment_ref":"` + protected.GetAttachmentRef() + `"}`
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			result_digest, created_at, updated_at
+		) VALUES (
+			'default', 'sesn_bridge_attachment_gc', 'thr_bridge_attachment_gc', 'sevt_gc_protected', 'sandbox_tool',
+			'input_hash_gc_protected', 'view_image', '{}', 'committed', $1,
+			'call_gc_protected', 'terminal_unconsumed', 1,
+			$2, '2026-01-01T12:00:00Z', '2026-01-01T12:00:00Z'
+		)`, protectedResult, sha256Hex(protectedResult),
+	); err != nil {
+		t.Fatalf("seed unconsumed Sandbox execution for staged attachment: %v", err)
 	}
 	checkedStateBeforeDelete := 0
 	blobStore.SetDeleteHook(func(_ context.Context, key string) error {
@@ -269,8 +291,14 @@ func TestPostgreSQLBridgeAPIStoreReconcileTransientAttachmentsDeletesExpiredAndC
 	if got := bridgeTransientAttachmentStatus(t, admin, fresh.GetAttachmentRef()); got != "active" {
 		t.Fatalf("fresh status = %q; want active", got)
 	}
+	if got := bridgeTransientAttachmentStatus(t, admin, protected.GetAttachmentRef()); got != "staged" {
+		t.Fatalf("unconsumed execution attachment status = %q; want staged", got)
+	}
 	if _, ok := blobStore.Bytes(transientAttachmentBlobPointer(scope, fresh.GetAttachmentRef())); !ok {
 		t.Fatalf("fresh attachment blob was deleted")
+	}
+	if _, ok := blobStore.Bytes(transientAttachmentBlobPointer(scope, protected.GetAttachmentRef())); !ok {
+		t.Fatalf("unconsumed execution attachment blob was deleted")
 	}
 }
 

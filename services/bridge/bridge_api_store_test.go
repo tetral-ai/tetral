@@ -1,18 +1,9 @@
 package agentruntimebridge
 
 import (
-	"context"
-	"database/sql"
 	"os"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/internal/workspace"
-	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 func TestStripInternalProviderFieldsRemovesNestedProviderMetadata(t *testing.T) {
@@ -25,75 +16,6 @@ func TestStripInternalProviderFieldsRemovesNestedProviderMetadata(t *testing.T) 
 	}
 	if !strings.Contains(result, `"text":"ok"`) {
 		t.Fatalf("recursive strip removed safe content: %s", result)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRequeueResetsExpiredLeasedSessionPrepareJob(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_stale_leased", "thr_bridge_tool_stale_leased")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_stale_leased", "bind_bridge_tool_stale_leased", 1, "pod_uid_tool_stale_leased")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_stale_leased", "prep_bridge_tool_stale_leased")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale_leased", "2026-01-01T00:00:00Z")
-
-	ws := workspace.ID("default")
-	partitionKey := queue.FormatSessionPartitionKey(ws, "sesn_bridge_tool_stale_leased")
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO queue_partition_counters (
-			workspace_id, partition_key, last_sequence, created_at, updated_at
-		 ) VALUES ('default', $1, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		partitionKey,
-	); err != nil {
-		t.Fatalf("seed session_prepare partition sequence: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key, status,
-			payload_json, lease_token, leased_by, leased_at, leased_until,
-			available_at, created_at, updated_at
-		) VALUES (
-			'qjob_bridge_tool_stale_leased_existing', 'default', 'session_prepare', $1, 1, $2, 'leased',
-			'{"preparation_attempt_id":"old_payload"}', 'lease_old_prepare', 'sandbox-service',
-			'2026-01-01T00:00:10Z', '2026-01-01T00:01:10Z',
-			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z'
-		)`,
-		partitionKey,
-		queue.FormatSessionPrepareDedupeKey(ws, "sesn_bridge_tool_stale_leased", "prep_bridge_tool_stale_leased"),
-	); err != nil {
-		t.Fatalf("seed leased session_prepare job: %v", err)
-	}
-
-	executor := &recordingSandboxToolExecutor{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_stale_leased", "thr_bridge_tool_stale_leased", "bind_bridge_tool_stale_leased", 1, "pod_uid_tool_stale_leased"),
-		ToolUseEventId:      "evt_tool_stale_leased",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool stale sandbox with leased prepare job: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-	assertSessionPrepareRequeued(t, admin, "default", "sesn_bridge_tool_stale_leased", "prep_bridge_tool_stale_leased")
-
-	var status string
-	var leaseToken sql.NullString
-	var leasedBy sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status, lease_token, leased_by
-		   FROM queue_jobs
-		  WHERE workspace_id = 'default'
-		    AND id = 'qjob_bridge_tool_stale_leased_existing'`,
-	).Scan(&status, &leaseToken, &leasedBy); err != nil {
-		t.Fatalf("read reset leased session_prepare job: %v", err)
-	}
-	if status != "leased" || !leaseToken.Valid || leaseToken.String != "lease_old_prepare" || !leasedBy.Valid || leasedBy.String != "sandbox-service" {
-		t.Fatalf("leased session_prepare status=%q lease=%v leased_by=%v; want old leased job unchanged", status, leaseToken, leasedBy)
 	}
 }
 
