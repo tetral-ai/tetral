@@ -164,6 +164,38 @@ func EnqueueTx(ctx context.Context, tx enqueueTransaction, request EnqueueReques
 	return jobs[0], nil
 }
 
+func EnqueueSandboxOutputCaptureCleanupTx(
+	ctx context.Context,
+	tx enqueueTransaction,
+	workspaceID workspace.ID,
+	sessionID string,
+	finishIdleWriteID string,
+	captureGeneration int64,
+	cleanupGeneration int64,
+	now time.Time,
+) error {
+	payload, err := json.Marshal(struct {
+		WorkspaceID       string `json:"workspace_id"`
+		SessionID         string `json:"session_id"`
+		FinishIdleWriteID string `json:"finish_idle_write_id"`
+		CaptureGeneration int64  `json:"capture_generation"`
+		CleanupGeneration int64  `json:"cleanup_generation"`
+	}{
+		WorkspaceID: string(workspaceID), SessionID: sessionID, FinishIdleWriteID: finishIdleWriteID,
+		CaptureGeneration: captureGeneration, CleanupGeneration: cleanupGeneration,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = EnqueueTx(ctx, tx, EnqueueRequest{
+		ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindSandboxOutputCaptureCleanup,
+		PartitionKey:   FormatSandboxCapturePartitionKey(workspaceID, sessionID, finishIdleWriteID),
+		DedupeKey:      FormatSandboxOutputCaptureCleanupDedupeKey(workspaceID, sessionID, finishIdleWriteID, captureGeneration, cleanupGeneration),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: SandboxOutputCaptureCleanupMaxAttempts, Now: now,
+	})
+	return err
+}
+
 // CancelTx conditionally cancels one exact pending Queue notification inside
 // its owning business transaction. It never searches by a partial business
 // identity and never changes leased or terminal work.

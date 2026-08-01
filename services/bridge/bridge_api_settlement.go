@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
@@ -931,16 +929,20 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		return nil, err
 	}
 	now := s.now()
+	capture, err := s.ensureFinishIdleOutputCapture(ctx, request, sourceKind, key, declarationDigest, now)
+	if err != nil {
+		return nil, err
+	}
+	capture, err = s.waitForFinishIdleOutputCapture(ctx, request.GetScope(), key, capture)
+	if err != nil {
+		return nil, err
+	}
 	var (
 		ack     *bridgev1.BridgeWriteAck
 		receipt *bridgev1.DeclarationReceipt
 	)
-	var cleanupCapture func()
-	var skippedCapture []outputcapture.SkippedFile
-	var captureScanRecords []outputcapture.ScanRecord
-	var captureScanFailure *outputcapture.CaptureScanError
-	var finishIdleErr error
-	err = s.withScopeTxAndCleanup(ctx, request.GetScope(), "agentruntimebridge.finish_idle", func(tx *dbconnect.Tx) error {
+	var adoptedCapture adoptedOutputCapture
+	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.finish_idle", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
 			ctx,
 			tx,
@@ -1000,38 +1002,9 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			projectionEventType = "session.thread_status_idle"
 		}
 		visibility, sessionVisible := threadScope.publicProjection(projectionEventType)
-		if s.OutputCapturer == nil {
-			return status.Error(codes.FailedPrecondition, "output capture is not installed")
-		}
-		target, err := outputCaptureTargetTx(ctx, tx, request.GetScope(), s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), now)
+		adoptedCapture, err = adoptFinishIdleOutputCaptureTx(ctx, tx, request.GetScope(), key, capture.Generation, now)
 		if err != nil {
-			if isOutputCapturePreparationRequeued(err) {
-				finishIdleErr = err
-				return nil
-			}
 			return err
-		}
-		captureResult, err := s.OutputCapturer.CaptureOutputs(ctx, tx, outputcapture.Request{
-			WorkspaceID:    request.GetScope().GetWorkspaceId(),
-			SessionID:      request.GetScope().GetSessionId(),
-			RuntimeWriteID: key,
-			Target:         target,
-			CapturedAt:     now,
-		})
-		if err != nil {
-			var scanErr *outputcapture.CaptureScanError
-			if !errors.As(err, &scanErr) {
-				return err
-			}
-			// Output capture is best-effort by design, but settlement is not:
-			// only typed pre-persistence scan outcomes are swallowed here. The
-			// error-level record is the alarm; every persistence error still
-			// aborts FinishIdle.
-			captureScanFailure = scanErr
-		} else {
-			cleanupCapture = captureResult.Cleanup
-			skippedCapture = captureResult.Skipped
-			captureScanRecords = captureResult.ScanRecords
 		}
 		if idleStopReasonSettlesTurn(stopReasonJSON) {
 			if err := resetTurnRetryCountersTx(ctx, tx, request.GetScope(), now); err != nil {
@@ -1202,23 +1175,12 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		}
 		ack = committedAck("", key)
 		return nil
-	}, func() {
-		if cleanupCapture != nil {
-			cleanupCapture()
-		}
 	})
 	if err != nil {
-		if cleanupCapture != nil {
-			cleanupCapture()
-		}
 		return nil, err
 	}
-	if finishIdleErr != nil {
-		return nil, finishIdleErr
-	}
-	logOutputCaptureFailure(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), captureScanFailure)
-	logOutputCaptureSkips(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), skippedCapture)
-	logOutputCaptureScanRecords(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), captureScanRecords)
+	logOutputCaptureSkips(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), adoptedCapture.Skipped)
+	logOutputCaptureScanRecords(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), adoptedCapture.ScanRecords)
 	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
 	if err != nil {
 		return nil, err
@@ -1244,39 +1206,7 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	}, nil
 }
 
-func logOutputCaptureFailure(logger *slog.Logger, workspaceID string, sessionID string, captureErr *outputcapture.CaptureScanError) {
-	if logger == nil || captureErr == nil {
-		return
-	}
-	logger.Error("bridge.output_capture.scan_failed",
-		slog.String("operation", "output_capture.finish_idle"),
-		slog.String("event.kind", "output_capture.scan_failed"),
-		slog.String("component", ServiceNameBridgeAPI),
-		slog.String("workspace.id", workspaceID),
-		slog.String("session.id", sessionID),
-		slog.String("error.class", "output_capture_scan_error"),
-		slog.String("error.code", captureErr.Kind()),
-		slog.String("error.capture_kind", captureErr.CaptureKind),
-		slog.String("error.capture_detail", boundedOutputCaptureFailureDetail(captureErr.CaptureDetail)),
-		slog.Bool("retryable", true),
-		slog.String("alert.family", "output_capture"),
-	)
-}
-
-const outputCaptureFailureDetailMaxBytes = 512
-
-func boundedOutputCaptureFailureDetail(detail string) string {
-	if len(detail) <= outputCaptureFailureDetailMaxBytes {
-		return detail
-	}
-	end := outputCaptureFailureDetailMaxBytes
-	for end > 0 && !utf8.ValidString(detail[:end]) {
-		end--
-	}
-	return detail[:end]
-}
-
-func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID string, skipped []outputcapture.SkippedFile) {
+func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID string, skipped []stagedOutputCaptureSkipped) {
 	if logger == nil {
 		return
 	}
@@ -1294,7 +1224,7 @@ func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID st
 	}
 }
 
-func logOutputCaptureScanRecords(logger *slog.Logger, workspaceID string, sessionID string, records []outputcapture.ScanRecord) {
+func logOutputCaptureScanRecords(logger *slog.Logger, workspaceID string, sessionID string, records []stagedOutputCaptureScanRecord) {
 	if logger == nil {
 		return
 	}

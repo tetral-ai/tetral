@@ -15,7 +15,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -149,7 +148,6 @@ type PostgreSQLBridgeAPIStore struct {
 	Client                          *dbconnect.Client
 	Logger                          *slog.Logger
 	Clock                           func() time.Time
-	OutputCapturer                  OutputCapturer
 	AttachmentBlobStore             blob.BlobStore
 	FileBlobStore                   blob.BlobStore
 	MCPManifestLister               MCPManifestLister
@@ -172,10 +170,6 @@ type transientAttachmentGCRow struct {
 	AttachmentRef  string
 	BlobPointer    string
 	PreviousStatus string
-}
-
-type OutputCapturer interface {
-	CaptureOutputs(context.Context, *dbconnect.Tx, outputcapture.Request) (outputcapture.Result, error)
 }
 
 type SandboxToolTarget struct {

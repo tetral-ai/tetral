@@ -11,6 +11,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -109,6 +110,7 @@ func run(ctx context.Context, env envReader) error {
 	lifecycleStore := tetralsandbox.NewPostgreSQLSandboxLifecycleStore(openResult.Client, store, cfg.ResourceCredentialRefreshMargin)
 	backgroundCommandStore := tetralsandbox.NewPostgreSQLSandboxBackgroundCommandStore(openResult.Client)
 	memoryProjectionStore := tetralsandbox.NewPostgreSQLSandboxMemoryProjectionStore(openResult.Client)
+	outputCaptureStore := tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(openResult.Client)
 	overLimitFinalizer := tetralsandbox.NewPostgreSQLSandboxQueueOverLimitFinalizer(openResult.Client)
 	environmentStore := tetralsandbox.NewEnvironmentArtifactStore(openResult.Client)
 	overLimitLoopCtx, cancelOverLimitLoop := context.WithCancel(ctx)
@@ -132,6 +134,42 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
+		})
+	}()
+	outputCaptureLoopCtx, cancelOutputCaptureLoop := context.WithCancel(ctx)
+	defer cancelOutputCaptureLoop()
+	go func() {
+		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+			return (&tetralsandbox.SandboxOutputCaptureJobRunner{
+				Queue: queueClient, Store: outputCaptureStore, Providers: providerRegistry, BlobStore: providerAdapter.BlobStore, Logger: logger,
+				Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
+					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
+					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
+				},
+			}).RunOnceWithActivity(cycleCtx)
+		})
+	}()
+	outputCaptureCleanupLoopCtx, cancelOutputCaptureCleanupLoop := context.WithCancel(ctx)
+	defer cancelOutputCaptureCleanupLoop()
+	go func() {
+		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureCleanupLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+			return (&tetralsandbox.SandboxOutputCaptureCleanupRunner{
+				Queue: queueClient, Store: outputCaptureStore, BlobStore: providerAdapter.BlobStore,
+				Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
+					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
+					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
+					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
+				},
+			}).RunOnceWithActivity(cycleCtx)
+		})
+	}()
+	outputCaptureSweepLoopCtx, cancelOutputCaptureSweepLoop := context.WithCancel(ctx)
+	defer cancelOutputCaptureSweepLoop()
+	go func() {
+		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureSweepLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+			count, err := outputCaptureStore.SweepExpiredCaptures(cycleCtx, workspaceID.String(), storage.Now(), tetralsandbox.SandboxOutputCaptureCleanupBatchSize)
+			return count > 0, err
 		})
 	}()
 	executionLoopCtx, cancelExecutionLoop := context.WithCancel(ctx)

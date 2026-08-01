@@ -172,6 +172,34 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 		}
 		errorKind = "sandbox_memory_projection_attempts_exhausted"
 		errorMessage = "sandbox memory projection attempt budget exhausted"
+	case queue.KindSandboxOutputCapture:
+		queueJob := &queuev1.QueueJob{
+			Id: candidate.JobID, WorkspaceId: candidate.WorkspaceID.String(), Kind: candidate.Kind,
+			PartitionKey: candidate.PartitionKey, DedupeKey: candidate.DedupeKey,
+		}
+		identity, err := decodeSandboxOutputCaptureTransportIdentity(queueJob)
+		if err != nil {
+			return false, err
+		}
+		finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
+			return finalizeOutputCaptureExhaustionTx(ctx, tx, identity, now)
+		}
+		errorKind = "sandbox_output_capture_attempts_exhausted"
+		errorMessage = "sandbox output capture attempt budget exhausted"
+	case queue.KindSandboxOutputCaptureCleanup:
+		queueJob := &queuev1.QueueJob{
+			Id: candidate.JobID, WorkspaceId: candidate.WorkspaceID.String(), Kind: candidate.Kind,
+			PartitionKey: candidate.PartitionKey, DedupeKey: candidate.DedupeKey,
+		}
+		identity, err := decodeSandboxOutputCaptureCleanupTransportIdentity(queueJob)
+		if err != nil {
+			return false, err
+		}
+		finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
+			return advanceOutputCaptureCleanupTx(ctx, tx, identity, now)
+		}
+		errorKind = "sandbox_output_capture_cleanup_attempts_exhausted"
+		errorMessage = "sandbox output capture cleanup attempt budget exhausted"
 	default:
 		return false, errors.New("sandbox over-limit job kind is not owned by an installed finalizer")
 	}

@@ -16,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	"golang.org/x/sys/unix"
 
+	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
@@ -52,6 +54,37 @@ func TestDaytonaOutputCaptureUsesOneHelperInvocationPerVisitedPath(t *testing.T)
 	_ = reader.Close()
 	if err != nil || string(body) != "captured body" || file.SHA256 != "343e5564b69e7e1d964f81995f66c0836156ac283ea7601921051d299145dcf3" {
 		t.Fatalf("captured body/hash = %q/%q err=%v", body, file.SHA256, err)
+	}
+}
+
+func TestDaytonaOutputCaptureClassifiesProviderTransportErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		client captureSandboxGetter
+		stage  sandbox.ProviderStage
+	}{
+		{
+			name:   "inspect",
+			client: captureSandboxGetter{err: daytonaerrors.NewDaytonaRateLimitError("busy", nil)},
+			stage:  sandbox.StageStatus,
+		},
+		{
+			name: "helper command",
+			client: captureSandboxGetter{handle: daytonaSandboxHandle{Process: captureErrorProcess{
+				err: daytonaerrors.NewDaytonaRateLimitError("busy", nil),
+			}}},
+			stage: sandbox.StageExecuteTool,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor := NewDaytonaHelperExecutorForClient(test.client)
+			_, err := executor.CaptureOutputs(context.Background(), OutputCaptureTarget{ProviderSandboxID: "provider_transport_error"})
+			var providerErr *sandbox.ProviderError
+			if !errors.As(err, &providerErr) || providerErr.Stage != test.stage || !providerErr.Retryable {
+				t.Fatalf("CaptureOutputs error = %#v; want retryable %s ProviderError", err, test.stage)
+			}
+		})
 	}
 }
 
@@ -338,17 +371,27 @@ func TestDaytonaOutputCaptureDoesNotHideAbortBehindExpiredScanBudget(t *testing.
 	_, err := executor.captureOutputs(context.Background(), OutputCaptureTarget{
 		ProviderSandboxID: "provider_late_abort", MaxFiles: 10, MaxFileBytes: 10, MaxTotalBytes: 10,
 	}, 10, time.Now().Add(time.Millisecond))
-	if err == nil || !strings.Contains(err.Error(), "transport failed") {
-		t.Fatalf("late abort err = %v; want original transport failure", err)
+	var providerErr *sandbox.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Stage != sandbox.StageExecuteTool {
+		t.Fatalf("late abort err = %#v; want classified execute-tool failure", err)
 	}
 }
 
 type captureSandboxGetter struct {
 	handle daytonaSandboxHandle
+	err    error
 }
 
 func (g captureSandboxGetter) Get(context.Context, string) (daytonaSandboxHandle, error) {
-	return g.handle, nil
+	return g.handle, g.err
+}
+
+type captureErrorProcess struct {
+	err error
+}
+
+func (p captureErrorProcess) ExecuteCommand(context.Context, string, ...func(*options.ExecuteCommand)) (*types.ExecuteResponse, error) {
+	return nil, p.err
 }
 
 type captureProcess struct {

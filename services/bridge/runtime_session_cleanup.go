@@ -632,7 +632,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
 	}
 	if state.SandboxStatus == "" {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+		return s.finalizeSessionDeleteSandboxCustody(ctx, job, now)
 	}
 	if state.PreparationAttemptID == "" || state.SandboxID == "" {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "delete_cleanup_preparation_fence_invalid", ErrorMessage: "hard-delete cleanup preparation fence is missing"}, nil
@@ -650,7 +650,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 	}
 	switch release.Status {
 	case SandboxReleaseReleased, SandboxReleaseAlreadyReleased:
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+		return s.finalizeSessionDeleteSandboxCustody(ctx, job, now)
 	case SandboxReleaseRetryLater:
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_release_retry_later", ErrorMessage: "sandbox release is not complete"}, nil
 	case SandboxReleaseFailed:
@@ -660,6 +660,27 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 		_ = s.markSessionDeleteCleanupFailure(ctx, job, "sandbox_release_protocol_error", now)
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "sandbox_release_protocol_error", ErrorMessage: "sandbox release status is invalid"}, nil
 	}
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx context.Context, job RuntimeJob, now time.Time) (RuntimeDeliveryResult, error) {
+	pending := false
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_sandbox_custody", func(tx *dbconnect.Tx) error {
+		var err error
+		pending, err = ensureSessionOutputCaptureCleanupTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
+		return err
+	})
+	if err != nil {
+		return RuntimeDeliveryResult{}, err
+	}
+	if pending {
+		return RuntimeDeliveryResult{
+			Status:       RuntimeDeliveryRejected,
+			Retryable:    true,
+			ErrorKind:    "sandbox_output_capture_cleanup_pending",
+			ErrorMessage: "sandbox output capture cleanup is not complete",
+		}, nil
+	}
+	return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) markSessionDeleteCleanupFailure(ctx context.Context, job RuntimeJob, errorKind string, now time.Time) error {

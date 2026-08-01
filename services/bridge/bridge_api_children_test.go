@@ -14,11 +14,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge children protocol-family boundary.
@@ -712,15 +710,10 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		)`); err != nil {
 		t.Fatalf("seed running runtime status sentinel: %v", err)
 	}
-	blobStore := blob.NewFakeBlobStore()
-	scanner := &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/child-report.txt", "captured child output"),
-	}}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	clockNow := time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC)
 	store.Clock = func() time.Time { return clockNow }
 	store.SandboxStatusFreshnessWindow = 5 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blobStore, scanner)
 	parentScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_parent", "bind_bridge_child_status", 1, "pod_uid_child_status")
 	childScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_worker", "bind_bridge_child_status", 1, "pod_uid_child_status")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_status", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", 1, "agent.tool_use", `{}`)
@@ -806,18 +799,6 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	if finishIdleReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("FinishIdle child replay ack = %s; want duplicate", finishIdleReplay.GetAck().GetStatus())
 	}
-	if len(scanner.targets) != 1 {
-		t.Fatalf("child output scanner calls after replay = %d; want 1", len(scanner.targets))
-	}
-	scanTarget := scanner.targets[0]
-	if scanTarget.WorkspaceID != "default" ||
-		scanTarget.SessionID != "sesn_bridge_child_status" ||
-		scanTarget.SessionThreadID != "thr_bridge_child_status_worker" ||
-		scanTarget.BindingID != "bind_bridge_child_status" ||
-		scanTarget.BindingGeneration != 1 {
-		t.Fatalf("child output scan target = %+v; want request workspace/session/child thread/binding", scanTarget)
-	}
-
 	var runningType string
 	var runningPayload string
 	var runningThreadID string
@@ -935,38 +916,6 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	}
 	if finishIdleOperationCount != 1 {
 		t.Fatalf("child finish_idle operation count after replay = %d; want 1", finishIdleOperationCount)
-	}
-	var outputCaptureCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_output_captures
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_child_status'
-		    AND source_path = '/mnt/session/outputs/child-report.txt'`).Scan(&outputCaptureCount); err != nil {
-		t.Fatalf("count child output captures: %v", err)
-	}
-	if outputCaptureCount != 1 {
-		t.Fatalf("child output capture rows after replay = %d; want 1", outputCaptureCount)
-	}
-	var capturedFileCount int
-	var capturedObjectKey string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), max(o.blob_key)
-		   FROM files f
-		   JOIN file_objects o
-		     ON o.workspace_id = f.workspace_id
-		    AND o.object_id = f.object_id
-		  WHERE f.workspace_id = 'default'
-		    AND f.scope_type = 'session'
-		    AND f.scope_id = 'sesn_bridge_child_status'
-		    AND f.filename = 'child-report.txt'`).Scan(&capturedFileCount, &capturedObjectKey); err != nil {
-		t.Fatalf("read child captured file projection: %v", err)
-	}
-	if capturedFileCount != 1 {
-		t.Fatalf("child captured file rows after replay = %d; want 1", capturedFileCount)
-	}
-	if body, ok := blobStore.Bytes(capturedObjectKey); !ok || string(body) != "captured child output" {
-		t.Fatalf("child captured blob = %q present=%v; want captured child output", string(body), ok)
 	}
 	assertBridgeAPIChildFinishIdlePreservesSessionState(t, admin, "sesn_bridge_child_status", "thr_bridge_child_status_parent", "bind_bridge_child_status", 1)
 	firstCloseSource := seedBridgeAPIChildLifecycleToolSource(
@@ -1214,7 +1163,6 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	if closedEvents != 2 || completionMail != 0 {
 		t.Fatalf("closed child tree events/mail = %d/%d; want 2/0", closedEvents, completionMail)
 	}
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
 		Scope:          bridgeAPIScope(sessionID, grandchildID, bindingID, 1, podUID),
 		DurableTurnId:  "evt_bridge_close_tree_grandchild_running",

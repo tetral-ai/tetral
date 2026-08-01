@@ -1,13 +1,11 @@
 package agentruntimebridge
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,7 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
@@ -26,9 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
@@ -2356,7 +2351,6 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	request := bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -2461,6 +2455,185 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreFinishIdleReplaysFailedCaptureWithNewGeneration(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_finish_idle_capture_generation"
+		threadID  = "thr_finish_idle_capture_generation"
+		bindingID = "bind_finish_idle_capture_generation"
+		writeID   = "evt_finish_idle_capture_generation"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_finish_idle_capture_generation")
+	if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id, environment_generation,
+		provider, provider_resource_id, binding_revision, materialized_resource_revision,
+		resource_roots_json, provider_metadata_json, created_at, updated_at
+	) VALUES ('default',$1,'sbox_finish_idle_capture_generation',$2,1,'daytona',
+		'provider_finish_idle_capture_generation',1,1,'[]','{}',$3,$3)`,
+		sessionID, "env_"+sessionID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed sandbox binding: %v", err)
+	}
+	request := bridgeAPIFinishIdleRequest(t, admin,
+		bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_finish_idle_capture_generation"),
+		writeID, `{"type":"end_turn"}`)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
+
+	failDone := make(chan error, 1)
+	go func() {
+		failDone <- settleOutputCaptureGenerationForTest(admin, sessionID, writeID, 1, "failed")
+	}()
+	if _, err := store.FinishIdle(context.Background(), request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("FinishIdle failed capture error = %v; want Unavailable", err)
+	}
+	if err := <-failDone; err != nil {
+		t.Fatalf("settle failed capture: %v", err)
+	}
+
+	stageDone := make(chan error, 1)
+	go func() {
+		stageDone <- settleOutputCaptureGenerationForTest(admin, sessionID, writeID, 2, "staged")
+	}()
+	response, err := store.FinishIdle(context.Background(), request)
+	if err != nil {
+		t.Fatalf("FinishIdle replay: %v", err)
+	}
+	if err := <-stageDone; err != nil {
+		t.Fatalf("stage replay capture: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("FinishIdle replay status = %s; want committed", response.GetAck().GetStatus())
+	}
+	rows, err := admin.Query(`SELECT capture_generation, state FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 ORDER BY capture_generation`, sessionID, writeID)
+	if err != nil {
+		t.Fatalf("read capture generations: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var generations []string
+	for rows.Next() {
+		var generation int
+		var state string
+		if err := rows.Scan(&generation, &state); err != nil {
+			t.Fatalf("scan capture generation: %v", err)
+		}
+		generations = append(generations, fmt.Sprintf("%d:%s", generation, state))
+	}
+	if !reflect.DeepEqual(generations, []string{"1:failed", "2:adopted"}) {
+		t.Fatalf("capture generations = %v; want immutable failure then adopted successor", generations)
+	}
+	var idleEvents int
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
+		t.Fatalf("count idle events: %v", err)
+	}
+	if idleEvents != 1 {
+		t.Fatalf("idle event count = %d; want one", idleEvents)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreFinishIdleCannotAdoptAfterPodLossSettlesTurn(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_finish_idle_pod_loss"
+		threadID  = "thr_finish_idle_pod_loss"
+		bindingID = "bind_finish_idle_pod_loss"
+		writeID   = "evt_finish_idle_pod_loss"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_"+sessionID)
+	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_"+sessionID)
+	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	now := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+	if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id, environment_generation,
+		provider, provider_resource_id, binding_revision, materialized_resource_revision,
+		resource_roots_json, provider_metadata_json, created_at, updated_at
+	) VALUES ('default',$1,'sbox_finish_idle_pod_loss',$2,1,'daytona',
+		'provider_finish_idle_pod_loss',1,1,'[]','{}',$3,$3)`, sessionID, "env_"+sessionID, now); err != nil {
+		t.Fatalf("seed sandbox binding: %v", err)
+	}
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_"+sessionID)
+	request := bridgeAPIFinishIdleRequest(t, admin, scope, writeID, `{"type":"end_turn"}`)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return now }
+	finishDone := make(chan error, 1)
+	go func() {
+		_, err := store.FinishIdle(context.Background(), request)
+		finishDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var exists bool
+		if err := admin.QueryRow(`SELECT EXISTS (SELECT 1 FROM sandbox_output_capture_operations
+			WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2)`, sessionID, writeID).Scan(&exists); err != nil {
+			t.Fatalf("inspect output capture: %v", err)
+		}
+		if exists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("FinishIdle did not create output capture")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	binding := runtimePodLostReleaseFenceBinding(sessionID, bindingID, 1)
+	if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtime, sessionID, binding, now.Add(time.Second)); err != nil {
+		t.Fatalf("settle runtime pod loss: %v", err)
+	}
+	if err := settleOutputCaptureGenerationForTest(admin, sessionID, writeID, 1, "staged"); err != nil {
+		t.Fatalf("stage output capture: %v", err)
+	}
+	if err := <-finishDone; status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("FinishIdle after pod-loss settlement error = %v; want FailedPrecondition", err)
+	}
+	var idleEvents int
+	var captureState string
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
+		t.Fatalf("count idle events: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT state FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2`, sessionID, writeID).Scan(&captureState); err != nil {
+		t.Fatalf("read capture state: %v", err)
+	}
+	if idleEvents != 1 || captureState != "staged" {
+		t.Fatalf("pod-loss/FinishIdle result = %d idle events and %s capture; want one/staged", idleEvents, captureState)
+	}
+}
+
+func settleOutputCaptureGenerationForTest(db *sql.DB, sessionID string, writeID string, generation int, state string) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var current string
+		err := db.QueryRow(`SELECT state FROM sandbox_output_capture_operations
+			WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=$3`,
+			sessionID, writeID, generation).Scan(&current)
+		if err == nil && (current == "pending" || current == "running") {
+			digest := strings.Repeat("a", 64)
+			if state == "failed" {
+				_, err = db.Exec(`UPDATE sandbox_output_capture_operations SET state='failed',
+					failure_kind='capture_test_failure', failure_detail='capture test failure',
+					outcome_state='failed', outcome_digest=$4, updated_at=clock_timestamp()
+					WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=$3`,
+					sessionID, writeID, generation, digest)
+			} else {
+				_, err = db.Exec(`UPDATE sandbox_output_capture_operations SET state='staged',
+					outcome_state='staged', outcome_digest=$4, staged_at=clock_timestamp(), updated_at=clock_timestamp()
+					WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=$3`,
+					sessionID, writeID, generation, digest)
+			}
+			return err
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("capture generation was not created")
+}
+
 func TestPostgreSQLBridgeAPIStoreFinishIdleRequiresActionPreservesTurnRetryCounters(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_requires_action", "thr_bridge_requires_action")
@@ -2486,7 +2659,6 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRequiresActionPreservesTurnRetryCount
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -3039,592 +3211,6 @@ func TestParseRuntimeTerminationFailureRejectsNonTerminalClasses(t *testing.T) {
 				t.Fatalf("parseRuntimeTerminationFailure: %v", err)
 			}
 		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleRecordsScanAbortAndCommitsIdle(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle_capture_fail", "thr_bridge_finish_idle_capture_fail")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle_capture_fail", "bind_bridge_finish_idle_capture_fail", 1, "pod_uid_finish_idle_capture_fail")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_finish_idle_capture_fail", "prep_bridge_finish_idle_capture_fail")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_finish_idle_capture_fail", "2026-01-01T00:00:00Z")
-
-	var logs bytes.Buffer
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{err: &sandboxdriver.OutputCaptureEntryError{
-		Kind:    "permission_denied",
-		Message: "capture mode requires root",
-	}})
-	response, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope("sesn_bridge_finish_idle_capture_fail", "thr_bridge_finish_idle_capture_fail", "bind_bridge_finish_idle_capture_fail", 1, "pod_uid_finish_idle_capture_fail"),
-		"evt_bridge_finish_idle_capture_fail_running",
-		`{"type":"end_turn"}`,
-	))
-	if err != nil {
-		t.Fatalf("FinishIdle scan abort: %v", err)
-	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("FinishIdle scan-abort ack = %s; want committed", response.GetAck().GetStatus())
-	}
-	var idleEvents int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_finish_idle_capture_fail'
-		    AND type = 'session.status_idle'`).Scan(&idleEvents); err != nil {
-		t.Fatalf("read idle event count: %v", err)
-	}
-	var runtimeStatusRows int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_runtime_status
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_finish_idle_capture_fail'`).Scan(&runtimeStatusRows); err != nil {
-		t.Fatalf("read runtime status count: %v", err)
-	}
-	if idleEvents != 1 || runtimeStatusRows != 1 {
-		t.Fatalf("capture scan abort wrote idleEvents=%d runtimeStatusRows=%d; want 1/1", idleEvents, runtimeStatusRows)
-	}
-	for _, field := range []string{
-		`"level":"ERROR"`,
-		`"msg":"bridge.output_capture.scan_failed"`,
-		`"event.kind":"output_capture.scan_failed"`,
-		`"error.class":"output_capture_scan_error"`,
-		`"error.code":"scan_outputs"`,
-		`"error.capture_kind":"permission_denied"`,
-		`"error.capture_detail":"capture mode requires root"`,
-		`"alert.family":"output_capture"`,
-	} {
-		if !strings.Contains(logs.String(), field) {
-			t.Fatalf("capture failure log = %s; want %s", logs.String(), field)
-		}
-	}
-	if strings.Contains(logs.String(), "capture failed") {
-		t.Fatalf("capture failure log leaked scanner text: %s", logs.String())
-	}
-}
-
-func TestOutputCaptureFailureDetailIsUTF8Bounded(t *testing.T) {
-	detail := strings.Repeat("界", outputCaptureFailureDetailMaxBytes) + "CAPTURE_DETAIL_SECRET"
-	got := boundedOutputCaptureFailureDetail(detail)
-	if len(got) > outputCaptureFailureDetailMaxBytes {
-		t.Fatalf("bounded detail bytes = %d; want <= %d", len(got), outputCaptureFailureDetailMaxBytes)
-	}
-	if !utf8.ValidString(got) {
-		t.Fatalf("bounded detail is not valid UTF-8: %q", got)
-	}
-	if strings.Contains(got, "CAPTURE_DETAIL_SECRET") {
-		t.Fatalf("bounded detail retained suffix secret: %q", got)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleFailsOnCapturePersistenceError(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const sessionID = "sesn_bridge_finish_idle_capture_persist"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_bridge_finish_idle_capture_persist")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_finish_idle_capture_persist", 1, "pod_uid_finish_idle_capture_persist")
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_finish_idle_capture_persist")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-
-	blobStore := blob.NewFakeBlobStore()
-	blobStore.SetPutHook(func(context.Context, string) error { return errors.New("blob unavailable") })
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blobStore, &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
-	}})
-	_, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope(sessionID, "thr_bridge_finish_idle_capture_persist", "bind_bridge_finish_idle_capture_persist", 1, "pod_uid_finish_idle_capture_persist"),
-		"evt_bridge_finish_idle_capture_persist_running",
-		`{"type":"end_turn"}`,
-	))
-	if status.Code(err) != codes.Internal {
-		t.Fatalf("FinishIdle blob persistence err = %v; want Internal", err)
-	}
-	var idleEvents, operationRows int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
-		t.Fatalf("count idle events: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='finish_idle'`, sessionID).Scan(&operationRows); err != nil {
-		t.Fatalf("count finish-idle operations: %v", err)
-	}
-	if idleEvents != 0 || operationRows != 0 {
-		t.Fatalf("persistence failure state = idle events %d operations %d; want 0/0", idleEvents, operationRows)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleDisconnectDuringCaptureRollsBackAndCleansBlob(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const sessionID = "sesn_bridge_finish_idle_capture_disconnect"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_bridge_finish_idle_capture_disconnect")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_finish_idle_capture_disconnect", 1, "pod_uid_finish_idle_capture_disconnect")
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_finish_idle_capture_disconnect")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-
-	blobStore := blob.NewFakeBlobStore()
-	putStarted := make(chan struct{})
-	putCalls := 0
-	blobStore.SetPutHook(func(ctx context.Context, _ string) error {
-		putCalls++
-		if putCalls == 1 {
-			return nil
-		}
-		close(putStarted)
-		<-ctx.Done()
-		return ctx.Err()
-	})
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blobStore, &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/a-uploaded.txt", "uploaded before disconnect"),
-		capturedOutputFile("/mnt/session/outputs/b-disconnected.txt", "cancelled during upload"),
-	}})
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	request := bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope(sessionID, "thr_bridge_finish_idle_capture_disconnect", "bind_bridge_finish_idle_capture_disconnect", 1, "pod_uid_finish_idle_capture_disconnect"),
-		"evt_bridge_finish_idle_capture_disconnect_running",
-		`{"type":"end_turn"}`,
-	)
-	go func() {
-		_, err := store.FinishIdle(ctx, request)
-		result <- err
-	}()
-	<-putStarted
-	cancel()
-	if err := <-result; err == nil {
-		t.Fatal("FinishIdle after capture disconnect succeeded; want cancellation")
-	}
-
-	if blobStore.Len() != 0 || len(blobStore.Deletes()) != 2 {
-		t.Fatalf("blob state after disconnect = len %d deletes %v; want 0 and cleanup of the uploaded and interrupted keys", blobStore.Len(), blobStore.Deletes())
-	}
-	var captureRows, fileRows, idleEvents, operationRows int
-	if err := admin.QueryRowContext(context.Background(), `
-		SELECT
-			(SELECT count(*) FROM session_output_captures WHERE workspace_id='default' AND session_id=$1),
-			(SELECT count(*) FROM files WHERE workspace_id='default' AND scope_type='session' AND scope_id=$1),
-			(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'),
-			(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND operation='finish_idle')`,
-		sessionID,
-	).Scan(&captureRows, &fileRows, &idleEvents, &operationRows); err != nil {
-		t.Fatalf("read capture disconnect rollback evidence: %v", err)
-	}
-	if captureRows != 0 || fileRows != 0 || idleEvents != 0 || operationRows != 0 {
-		t.Fatalf("capture disconnect durable rows = captures %d files %d idle %d operations %d; want all zero",
-			captureRows, fileRows, idleEvents, operationRows)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleDowngradesOldHelperRootTransportFailure(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const sessionID = "sesn_bridge_finish_idle_old_helper"
-	seedBridgeAPISession(t, admin, "default", sessionID, "thr_bridge_finish_idle_old_helper")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_finish_idle_old_helper", 1, "pod_uid_finish_idle_old_helper")
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_finish_idle_old_helper")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-
-	var logs bytes.Buffer
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), newOldHelperRootFailureOutputCaptureScanner())
-	response, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope(sessionID, "thr_bridge_finish_idle_old_helper", "bind_bridge_finish_idle_old_helper", 1, "pod_uid_finish_idle_old_helper"),
-		"evt_bridge_finish_idle_old_helper_running",
-		`{"type":"end_turn"}`,
-	))
-	if err != nil {
-		t.Fatalf("FinishIdle old-helper root failure: %v", err)
-	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("old-helper root failure ack = %s; want committed", response.GetAck().GetStatus())
-	}
-	var idleEvents int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
-		t.Fatalf("count idle events: %v", err)
-	}
-	if idleEvents != 1 || !strings.Contains(logs.String(), `"error.code":"scan_outputs"`) {
-		t.Fatalf("old-helper root failure state = idle events %d log %s; want committed idle and scan failure record", idleEvents, logs.String())
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleRequeuesStaleSandboxPreparation(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle_stale", "thr_bridge_finish_idle_stale")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle_stale", "bind_bridge_finish_idle_stale", 1, "pod_uid_finish_idle_stale")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_finish_idle_stale", "prep_bridge_finish_idle_stale")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_finish_idle_stale", "2026-01-01T00:00:00Z")
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
-	}})
-	_, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope("sesn_bridge_finish_idle_stale", "thr_bridge_finish_idle_stale", "bind_bridge_finish_idle_stale", 1, "pod_uid_finish_idle_stale"),
-		"evt_bridge_finish_idle_stale_running",
-		`{"type":"end_turn"}`,
-	))
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("FinishIdle stale sandbox err = %v; want FailedPrecondition", err)
-	}
-	assertSessionPrepareRequeued(t, admin, "default", "sesn_bridge_finish_idle_stale", "prep_bridge_finish_idle_stale")
-	var idleEvents int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_finish_idle_stale'
-		    AND type = 'session.status_idle'`).Scan(&idleEvents); err != nil {
-		t.Fatalf("read stale idle event count: %v", err)
-	}
-	if idleEvents != 0 {
-		t.Fatalf("stale output capture wrote idle events = %d; want 0", idleEvents)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleRequeuesExpiringResourceCredential(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle_cred_expiring", "thr_bridge_finish_idle_cred_expiring")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle_cred_expiring", "bind_bridge_finish_idle_cred_expiring", 1, "pod_uid_finish_idle_cred_expiring")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_finish_idle_cred_expiring", "prep_bridge_finish_idle_cred_expiring")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_finish_idle_cred_expiring", "2026-01-01T00:05:00Z")
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_finish_idle_cred_expiring", "prep_bridge_finish_idle_cred_expiring", "2026-01-01T00:30:00Z")
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Hour
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
-	}})
-	_, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope("sesn_bridge_finish_idle_cred_expiring", "thr_bridge_finish_idle_cred_expiring", "bind_bridge_finish_idle_cred_expiring", 1, "pod_uid_finish_idle_cred_expiring"),
-		"evt_bridge_finish_idle_cred_expiring_running",
-		`{"type":"end_turn"}`,
-	))
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("FinishIdle expiring resource credential err = %v; want FailedPrecondition", err)
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_finish_idle_cred_expiring", "prep_bridge_finish_idle_cred_expiring")
-	var idleEvents int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_finish_idle_cred_expiring'
-		    AND type = 'session.status_idle'`).Scan(&idleEvents); err != nil {
-		t.Fatalf("read expiring credential idle event count: %v", err)
-	}
-	if idleEvents != 0 {
-		t.Fatalf("expiring resource credential output capture wrote idle events = %d; want 0", idleEvents)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleCapturesOutputs(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle_outputs", "thr_bridge_finish_idle_outputs")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle_outputs", "bind_bridge_finish_idle_outputs", 1, "pod_uid_finish_idle_outputs")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_finish_idle_outputs", "prep_bridge_finish_idle_outputs")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_finish_idle_outputs", "2026-01-01T00:00:00Z")
-
-	blobStore := blob.NewFakeBlobStore()
-	scanner := &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/report.txt", "captured body"),
-	}}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blobStore, scanner)
-
-	request := bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope("sesn_bridge_finish_idle_outputs", "thr_bridge_finish_idle_outputs", "bind_bridge_finish_idle_outputs", 1, "pod_uid_finish_idle_outputs"),
-		"evt_bridge_finish_idle_outputs_running",
-		`{"type":"end_turn"}`,
-	)
-	response, err := store.FinishIdle(context.Background(), request)
-	if err != nil {
-		t.Fatalf("FinishIdle capture outputs: %v", err)
-	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
-	}
-	var fileID string
-	var sourcePath string
-	var sizeBytes int64
-	var digest string
-	var capturedAt string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT source_path, last_file_id, last_size_bytes, last_sha256, last_captured_at
-		   FROM session_output_captures
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_finish_idle_outputs'
-		    AND source_path = '/mnt/session/outputs/report.txt'`).Scan(&sourcePath, &fileID, &sizeBytes, &digest, &capturedAt); err != nil {
-		t.Fatalf("read output capture row: %v", err)
-	}
-	wantDigest := sha256Hex("captured body")
-	if sourcePath != "/mnt/session/outputs/report.txt" || fileID == "" || sizeBytes != int64(len("captured body")) ||
-		digest != wantDigest || capturedAt != "2026-01-01T00:00:45Z" {
-		t.Fatalf("capture row = path=%q file=%q size=%d sha=%q captured=%q",
-			sourcePath, fileID, sizeBytes, digest, capturedAt)
-	}
-	var objectKey string
-	var filename string
-	var downloadable bool
-	var scopeType string
-	var scopeID string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT o.blob_key, f.filename, f.downloadable, f.scope_type, f.scope_id
-		   FROM files f
-		   JOIN file_objects o ON o.workspace_id = f.workspace_id AND o.object_id = f.object_id
-		  WHERE f.workspace_id = 'default'
-		    AND f.file_id = $1`,
-		fileID,
-	).Scan(&objectKey, &filename, &downloadable, &scopeType, &scopeID); err != nil {
-		t.Fatalf("read captured file row: %v", err)
-	}
-	body, ok := blobStore.Bytes(objectKey)
-	if !ok || string(body) != "captured body" || filename != "report.txt" || !downloadable || scopeType != "session" || scopeID != "sesn_bridge_finish_idle_outputs" {
-		t.Fatalf("captured file object key=%q body=%q filename=%q downloadable=%v scope=%q/%q",
-			objectKey, string(body), filename, downloadable, scopeType, scopeID)
-	}
-	replay, err := store.FinishIdle(context.Background(), request)
-	if err != nil {
-		t.Fatalf("FinishIdle replay capture outputs: %v", err)
-	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("replay ack = %s; want duplicate", replay.GetAck().GetStatus())
-	}
-	if len(scanner.targets) != 1 {
-		t.Fatalf("scanner calls after replay = %d; want 1", len(scanner.targets))
-	}
-	var fileRows int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM files WHERE workspace_id = 'default' AND scope_id = 'sesn_bridge_finish_idle_outputs'`).Scan(&fileRows); err != nil {
-		t.Fatalf("read captured file rows: %v", err)
-	}
-	if fileRows != 1 {
-		t.Fatalf("captured file rows after replay = %d; want 1", fileRows)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreFinishIdleCommitsAndLogsSkippedOutput(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle_skip", "thr_bridge_finish_idle_skip")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle_skip", "bind_bridge_finish_idle_skip", 1, "pod_uid_finish_idle_skip")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_finish_idle_skip", "prep_bridge_finish_idle_skip")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_finish_idle_skip", "2026-01-01T00:00:00Z")
-
-	var logs bytes.Buffer
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), newRealOutputCaptureScanner(t))
-
-	response, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
-		t,
-		admin,
-		bridgeAPIScope("sesn_bridge_finish_idle_skip", "thr_bridge_finish_idle_skip", "bind_bridge_finish_idle_skip", 1, "pod_uid_finish_idle_skip"),
-		"evt_bridge_finish_idle_skip_running",
-		`{"type":"end_turn"}`,
-	))
-	if err != nil {
-		t.Fatalf("FinishIdle skipped output: %v", err)
-	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
-	}
-	logText := logs.String()
-	for _, field := range []string{`"msg":"bridge.output_capture.file_skipped"`, `"output.path":"/mnt/session/outputs/stream.pipe"`, `"output.skip.reason":"non_regular"`, `"output.size_bytes":0`} {
-		if !strings.Contains(logText, field) {
-			t.Fatalf("output capture log = %s; want %s", logText, field)
-		}
-	}
-	for _, field := range []string{`"msg":"bridge.output_capture.scan_record"`, `"output.parent_path":"/mnt/session/outputs"`, `"output.scan.reason":"unrepresentable_names"`, `"output.scan.count":1`} {
-		if !strings.Contains(logText, field) {
-			t.Fatalf("output capture scan log = %s; want %s", logText, field)
-		}
-	}
-	var capturedFiles int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_output_captures WHERE workspace_id='default' AND session_id='sesn_bridge_finish_idle_skip'`).Scan(&capturedFiles); err != nil {
-		t.Fatalf("count full-seam captured outputs: %v", err)
-	}
-	if capturedFiles != 1 {
-		t.Fatalf("full-seam captured output rows = %d; want 1 regular file", capturedFiles)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreChildFinishIdleFailsClosedWithoutOutputCapturer(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, "missing_capture")
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	_, err := store.FinishIdle(context.Background(), bridgeAPIChildFinishIdleFailureRequest("missing_capture"))
-	if err == nil {
-		t.Fatal("FinishIdle child with nil output capturer unexpectedly succeeded")
-	}
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("FinishIdle child with nil output capturer err = %v; want FailedPrecondition", err)
-	}
-	assertBridgeAPIChildFinishIdleFailedClosed(t, admin, "missing_capture")
-}
-
-func TestPostgreSQLBridgeAPIStoreChildFinishIdleRecordsScanAbortAndCommitsIdle(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, "capture_error")
-
-	captureErr := errors.New("child output scan failed")
-	scanner := &recordingOutputScanner{err: captureErr}
-	var logs bytes.Buffer
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), scanner)
-	response, err := store.FinishIdle(context.Background(), bridgeAPIChildFinishIdleFailureRequest("capture_error"))
-	if err != nil {
-		t.Fatalf("FinishIdle child scan abort: %v", err)
-	}
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("FinishIdle child scan-abort ack = %s; want committed", response.GetAck().GetStatus())
-	}
-	if len(scanner.targets) != 1 {
-		t.Fatalf("child output scanner calls on capture failure = %d; want 1", len(scanner.targets))
-	}
-	if scanner.targets[0].SessionThreadID != "thr_bridge_child_finish_idle_capture_error" {
-		t.Fatalf("child output scanner target thread = %q; want thr_bridge_child_finish_idle_capture_error", scanner.targets[0].SessionThreadID)
-	}
-	var childStatus string
-	var idleEvents, sentEvents, agentMailJobs, operationRows int
-	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_threads WHERE workspace_id='default' AND id='thr_bridge_child_finish_idle_capture_error'`).Scan(&childStatus); err != nil {
-		t.Fatalf("read child status: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_bridge_child_finish_idle_capture_error' AND type='session.thread_status_idle'`).Scan(&idleEvents); err != nil {
-		t.Fatalf("count child idle events: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id='sesn_bridge_child_finish_idle_capture_error' AND type='agent.thread_message_sent'`).Scan(&sentEvents); err != nil {
-		t.Fatalf("count child completion sent events: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind='runtime_input' AND payload_json::jsonb ->> 'input_kind'='agent_mail'`).Scan(&agentMailJobs); err != nil {
-		t.Fatalf("count child completion wake jobs: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id='sesn_bridge_child_finish_idle_capture_error' AND operation='finish_idle'`).Scan(&operationRows); err != nil {
-		t.Fatalf("count child finish-idle operations: %v", err)
-	}
-	if childStatus != "idle" || idleEvents != 1 || sentEvents != 1 || agentMailJobs != 1 || operationRows != 1 {
-		t.Fatalf("child scan-abort state = status %q idleEvents %d sentEvents %d agentMailJobs %d operations %d; want idle/1/1/1/1", childStatus, idleEvents, sentEvents, agentMailJobs, operationRows)
-	}
-	if !strings.Contains(logs.String(), `"level":"ERROR"`) || !strings.Contains(logs.String(), `"event.kind":"output_capture.scan_failed"`) {
-		t.Fatalf("child scan-abort log = %s; want alert-suitable capture failure", logs.String())
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreConcurrentSameWriteFinishIdleSerializesBeforeCapture(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const suffix = "concurrent_same_write"
-	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
-	scanner := newBlockingOutputScanner()
-	defer scanner.Release()
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), scanner)
-	request := bridgeAPIChildFinishIdleFailureRequest(suffix)
-
-	type outcome struct {
-		response *bridgev1.FinishIdleResponse
-		err      error
-	}
-	results := make(chan outcome, 2)
-	go func() {
-		response, err := store.FinishIdle(
-			context.Background(),
-			proto.Clone(request).(*bridgev1.FinishIdleRequest),
-		)
-		results <- outcome{response: response, err: err}
-	}()
-	<-scanner.entered
-	go func() {
-		response, err := store.FinishIdle(
-			context.Background(),
-			proto.Clone(request).(*bridgev1.FinishIdleRequest),
-		)
-		results <- outcome{response: response, err: err}
-	}()
-	waitDeadline := time.Now().Add(5 * time.Second)
-	for {
-		var waiting bool
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT EXISTS (
-			   SELECT 1
-			     FROM pg_stat_activity
-			    WHERE datname = current_database()
-			      AND wait_event_type = 'Lock'
-			      AND query LIKE '%FROM sessions%'
-			)`,
-		).Scan(&waiting); err != nil {
-			t.Fatalf("observe concurrent FinishIdle session-lock wait: %v", err)
-		}
-		if waiting {
-			break
-		}
-		if time.Now().After(waitDeadline) {
-			t.Fatal("second FinishIdle did not reach the session-row lock while the winner was capturing")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	scanner.Release()
-	statuses := map[bridgev1.BridgeWriteStatus]int{}
-	for range 2 {
-		result := <-results
-		if result.err != nil {
-			t.Fatalf("concurrent FinishIdle: %v", result.err)
-		}
-		statuses[result.response.GetAck().GetStatus()]++
-	}
-	if statuses[bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED] != 1 ||
-		statuses[bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE] != 1 {
-		t.Fatalf("concurrent FinishIdle statuses = %#v; want one committed and one duplicate", statuses)
-	}
-	if scanner.CallCount() != 1 {
-		t.Fatalf("concurrent FinishIdle capture calls = %d; want exactly one", scanner.CallCount())
-	}
-	var idleEvents, completionMail int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT
-			(SELECT count(*) FROM session_events
-			  WHERE workspace_id='default' AND session_id=$1
-			    AND session_thread_id=$2 AND type='session.thread_status_idle'),
-			(SELECT count(*) FROM session_events
-			  WHERE workspace_id='default' AND session_id=$1
-			    AND session_thread_id=$2 AND type='agent.thread_message_sent')`,
-		completionTestSessionID(suffix),
-		completionTestChildID(suffix),
-	).Scan(&idleEvents, &completionMail); err != nil {
-		t.Fatalf("read concurrent FinishIdle evidence: %v", err)
-	}
-	if idleEvents != 1 || completionMail != 1 {
-		t.Fatalf("concurrent FinishIdle idle/mail events = %d/%d; want 1/1", idleEvents, completionMail)
 	}
 }
 

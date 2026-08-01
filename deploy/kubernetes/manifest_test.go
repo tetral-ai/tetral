@@ -1323,7 +1323,7 @@ func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 
 	bridge := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
 	requireContains(t, bridge, "policyTypes:\n    - Ingress\n    - Egress")
-	requireContains(t, bridge, `tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"`)
+	requireContains(t, bridge, `tetral.ai/egress-intent: "blob.example.internal"`)
 	requireNetworkPolicyEgressEdge(t, bridge, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
 	requireNetworkPolicyEgressEdge(t, bridge, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "queue"})
 	requireNetworkPolicyEgressEdge(t, bridge, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
@@ -1458,14 +1458,15 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"name: KUBERNETES_API_CA_CERT_PATH\n              value: /var/run/secrets/tetral-kubernetes-api/ca.crt",
 		"name: TETRAL_BLOB_ENDPOINT",
 		"name: TETRAL_BLOB_SECRET_KEY",
-		"name: TETRAL_SANDBOX_DRIVER",
-		"name: DAYTONA_API_URL",
-		"name: DAYTONA_TARGET",
-		"name: DAYTONA_API_KEY",
 		"mountPath: /var/run/secrets/tetral-internal-grpc/gateway",
 	} {
 		if !manifestTextContains(bridgeAPI, required) {
 			t.Fatalf("bridge-api container missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"TETRAL_SANDBOX_DRIVER", "DAYTONA_"} {
+		if manifestTextContains(configMap.text, forbidden) || strings.Contains(bridgeAPI, forbidden) {
+			t.Fatalf("Bridge must not receive Sandbox-provider configuration %q", forbidden)
 		}
 	}
 	for _, required := range []string{

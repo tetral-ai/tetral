@@ -1380,7 +1380,7 @@ func TestBridgeAPIReadinessGatesLockSessionBeforePreparationForUpdate(t *testing
 		t.Fatalf("read bridge_api_tools.go: %v", err)
 	}
 	text := string(source)
-	for _, name := range []string{"runToolTargetTx", "outputCaptureTargetTx"} {
+	for _, name := range []string{"runToolTargetTx"} {
 		t.Run(name, func(t *testing.T) {
 			start := strings.Index(text, "func "+name)
 			if start < 0 {

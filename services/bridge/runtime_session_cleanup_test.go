@@ -8,18 +8,115 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 // This file owns cleanup-session and delete-cleanup state-machine tests.
+
+func TestSessionDeleteCleanupDrainsUnadoptedOutputCaptureBeforeRemovingReceipt(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_delete_output_capture"
+	seedBridgeAPISession(t, admin, "default", sessionID, "thr_delete_output_capture")
+	now := time.Date(2026, 7, 31, 20, 0, 0, 0, time.UTC)
+	if _, err := admin.Exec(`INSERT INTO sandbox_output_capture_operations (
+		workspace_id, session_id, session_thread_id, finish_idle_write_id, capture_generation,
+		state, binding_id, binding_generation,
+		outcome_state, outcome_digest, retain_until, created_at, updated_at, staged_at
+	) VALUES ('default',$1,'thr_delete_output_capture','rwrite_delete_output_capture',1,
+		'staged','bind_delete_output_capture',1,
+		'staged',$2,$3,$3,$3,$3)`, sessionID, strings.Repeat("a", 64), now.Add(time.Hour)); err != nil {
+		t.Fatalf("seed output capture: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtime)
+	const openTransportJobID = "qjob_cap"
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.delete_output_capture.open_transport", func(tx *dbconnect.Tx) error {
+		_, err := queue.EnqueueTx(context.Background(), tx, queue.EnqueueRequest{
+			ID: openTransportJobID, WorkspaceID: "default", Kind: queue.KindSandboxToolExecute,
+			PartitionKey:   queue.FormatSandboxExecutionPartitionKey("default", sessionID, "thr_delete_output_capture", "evt_delete_capture_tool"),
+			DedupeKey:      queue.FormatSandboxToolExecuteDedupeKey("default", sessionID, "thr_delete_output_capture", "evt_delete_capture_tool", 1),
+			PayloadVersion: 1,
+			PayloadJSON:    []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"thr_delete_output_capture","tool_use_event_id":"evt_delete_capture_tool"}`),
+			MaxAttempts:    1, Now: now,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed open Sandbox transport: %v", err)
+	}
+	var pending bool
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.delete_output_capture.ensure", func(tx *dbconnect.Tx) error {
+		var err error
+		pending, err = ensureSessionOutputCaptureCleanupTx(context.Background(), tx, "default", sessionID, now)
+		return err
+	}); err != nil {
+		t.Fatalf("ensure output capture cleanup: %v", err)
+	}
+	if !pending {
+		t.Fatal("output capture cleanup was not held pending")
+	}
+	var captureState string
+	var cleanupJobs int
+	if err := admin.QueryRow(`SELECT state FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&captureState); err != nil {
+		t.Fatalf("read capture behind open transport: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND kind=$1`, queue.KindSandboxOutputCaptureCleanup).Scan(&cleanupJobs); err != nil {
+		t.Fatalf("count capture cleanup jobs: %v", err)
+	}
+	if captureState != "staged" || cleanupJobs != 0 {
+		t.Fatalf("capture behind open transport = %s with %d cleanup jobs; want staged/0", captureState, cleanupJobs)
+	}
+	if _, err := admin.Exec(`UPDATE queue_jobs SET status='acknowledged', acknowledged_at=$2, updated_at=$2
+		WHERE workspace_id='default' AND id=$1`, openTransportJobID, now.Add(time.Second)); err != nil {
+		t.Fatalf("close Sandbox transport: %v", err)
+	}
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.delete_output_capture.ensure_after_transport", func(tx *dbconnect.Tx) error {
+		var err error
+		pending, err = ensureSessionOutputCaptureCleanupTx(context.Background(), tx, "default", sessionID, now.Add(2*time.Second))
+		return err
+	}); err != nil {
+		t.Fatalf("ensure output capture cleanup after transport: %v", err)
+	}
+	var queueStatus string
+	if err := admin.QueryRow(`SELECT state FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&captureState); err != nil {
+		t.Fatalf("read capture state: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT status FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND payload_json::jsonb ->> 'session_id'=$2`, queue.KindSandboxOutputCaptureCleanup, sessionID).Scan(&queueStatus); err != nil {
+		t.Fatalf("read capture cleanup job: %v", err)
+	}
+	if captureState != "cleanup_pending" || queueStatus != queue.StatusPending {
+		t.Fatalf("capture cleanup = %s/%s; want cleanup_pending/pending", captureState, queueStatus)
+	}
+	if _, err := admin.Exec(`UPDATE queue_jobs SET status='acknowledged', acknowledged_at=$2, updated_at=$2
+		WHERE workspace_id='default' AND kind=$1 AND payload_json::jsonb ->> 'session_id'=$3`, queue.KindSandboxOutputCaptureCleanup, now.Add(time.Minute), sessionID); err != nil {
+		t.Fatalf("close cleanup transport: %v", err)
+	}
+	if _, err := admin.Exec(`UPDATE sandbox_output_capture_operations SET state='cleaned', cleaned_at=$2, updated_at=$2
+		WHERE workspace_id='default' AND session_id=$1`, sessionID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("complete output capture cleanup: %v", err)
+	}
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.delete_output_capture.finish", func(tx *dbconnect.Tx) error {
+		var err error
+		pending, err = ensureSessionOutputCaptureCleanupTx(context.Background(), tx, "default", sessionID, now.Add(2*time.Minute))
+		return err
+	}); err != nil {
+		t.Fatalf("finish output capture cleanup: %v", err)
+	}
+	var rows int
+	if err := admin.QueryRow(`SELECT count(*) FROM sandbox_output_capture_operations WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&rows); err != nil {
+		t.Fatalf("count output capture receipts: %v", err)
+	}
+	if pending || rows != 0 {
+		t.Fatalf("finished output capture cleanup = pending %t rows %d; want false/0", pending, rows)
+	}
+}
 
 func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -30,7 +127,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsNewInputBeforeClaim(
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -132,7 +228,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupActiveSessionClaimsSettlesReleases
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -345,7 +440,6 @@ func TestPostgreSQLRuntimeDeliveryStoreSessionDeleteCleanupClearsHotStateBeforeP
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -427,7 +521,6 @@ func TestPostgreSQLRuntimeDeliveryStoreSessionDeleteCleanupRetriesReleaseAfterBi
 	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -824,7 +917,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionKeepsResolvingConfirmationA
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -924,7 +1016,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionIgnoresPreIdleUnprocessedIn
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -974,7 +1065,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionRejectsPostIdleChildInputBy
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -1205,7 +1295,6 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -1332,7 +1421,6 @@ func seedBridgeCleanupTreeFixture(t *testing.T, runtime *sql.DB, admin *sql.DB, 
 	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := bridgeStore.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
 		t,
 		admin,

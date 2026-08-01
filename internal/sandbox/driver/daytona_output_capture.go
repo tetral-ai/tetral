@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/pathvalidation"
+	sandboxpkg "github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
@@ -68,7 +69,7 @@ func (e *DaytonaHelperExecutor) captureOutputs(ctx context.Context, target Outpu
 	}
 	sandbox, err := e.client.Get(ctx, target.ProviderSandboxID)
 	if err != nil {
-		return OutputCaptureScan{}, err
+		return OutputCaptureScan{}, mapDaytonaError(sandboxpkg.StageStatus, err)
 	}
 	if sandbox.Process == nil {
 		return OutputCaptureScan{}, errors.New("daytona sandbox is missing process service")
@@ -292,7 +293,7 @@ func daytonaCaptureOutputEntry(
 		" --max-name-bytes " + strconv.FormatInt(maxNameBytes, 10)
 	response, err := sandbox.Process.ExecuteCommand(ctx, command)
 	if err != nil {
-		return protocol.CaptureResult{}, err
+		return protocol.CaptureResult{}, mapDaytonaError(sandboxpkg.StageExecuteTool, err)
 	}
 	if response == nil {
 		return protocol.CaptureResult{}, errors.New("daytona capture returned no response")

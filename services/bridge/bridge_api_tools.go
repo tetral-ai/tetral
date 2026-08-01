@@ -26,7 +26,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge tools protocol-family boundary.
@@ -724,52 +723,6 @@ func runToolTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.Runt
 		PreparationAttemptID: readiness.PreparationAttemptID,
 		ResourceRootsJSON:    readiness.ResourceRootsJSON.String,
 	}, "", nil
-}
-
-func outputCaptureTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (outputcapture.SandboxOutputTarget, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return outputcapture.SandboxOutputTarget{}, err
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil {
-		return outputcapture.SandboxOutputTarget{}, err
-	}
-	if !ok || readiness.Status != "ready" {
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "sandbox preparation is not ready for output capture")
-	}
-	if readiness.SandboxStatus != "active" || readiness.ProviderSandboxID == "" {
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "sandbox is not active for output capture")
-	}
-	if resourceCredentialNeedsLiveRotation(readiness.ResourceCredentialExpiresAt, now, resourceCredentialRefreshMargin) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-			return outputcapture.SandboxOutputTarget{}, err
-		}
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "resource materialization credential is expiring for output capture")
-	}
-	if !sandboxRefreshIsFresh(readiness.StatusRefreshedAt, now, freshnessWindow) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, true); err != nil {
-			return outputcapture.SandboxOutputTarget{}, err
-		}
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "sandbox readiness is stale for output capture")
-	}
-	return outputcapture.SandboxOutputTarget{
-		WorkspaceID:       scope.GetWorkspaceId(),
-		SessionID:         scope.GetSessionId(),
-		SessionThreadID:   scope.GetSessionThreadId(),
-		BindingID:         scope.GetBinding().GetBindingId(),
-		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
-		SandboxID:         readiness.SandboxID,
-		ProviderSandboxID: readiness.ProviderSandboxID,
-	}, nil
-}
-
-func isOutputCapturePreparationRequeued(err error) bool {
-	if status.Code(err) != codes.FailedPrecondition {
-		return false
-	}
-	message := err.Error()
-	return strings.Contains(message, "sandbox readiness is stale for output capture") ||
-		strings.Contains(message, "resource materialization credential is expiring for output capture")
 }
 
 type sessionPreparationReadiness struct {
@@ -1886,13 +1839,6 @@ func mustMarshalToolRuntimeError(errorCode string, message string, retryable boo
 		return `{"status":"runtime_error","error_code":"serialization_failed","message":"sandbox tool result serialization failed","retryable":false}`
 	}
 	return result
-}
-
-func sandboxHelperExecutionErrorResult(err error, defaultMessage string) string {
-	if sandboxHelperFailureError(err) {
-		return mustMarshalToolRuntimeError("helper_failure", "sandbox helper failed before emitting an authoritative envelope", true)
-	}
-	return mustMarshalToolRuntimeError("sandbox_helper_unavailable", defaultMessage, true)
 }
 
 func marshalMemoryToolError(errorCode string, message string, rereadRequired bool) (string, error) {

@@ -11,11 +11,9 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
-	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/sessionrpc"
 	"github.com/tetral-ai/tetral/internal/workload"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 
 	"google.golang.org/grpc"
 )
@@ -82,18 +80,6 @@ func run(ctx context.Context, env envReader) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
 	}
 	store.SandboxStatusFreshnessWindow = freshnessWindow
-	driverConfig, err := agentruntimebridge.SandboxDriverConfigFromEnv(env)
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
-	}
-	executor, err := sandboxdriver.NewDaytonaHelperExecutor(sandboxdriver.Config{
-		DaytonaAPIURL: driverConfig.DaytonaAPIURL,
-		DaytonaTarget: driverConfig.DaytonaTarget,
-		DaytonaAPIKey: driverConfig.DaytonaAPIKey,
-	})
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
-	}
 	blobConfig, err := blob.LoadConfig()
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
@@ -105,10 +91,8 @@ func run(ctx context.Context, env envReader) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, fmt.Errorf("blob store: %w", err))
 	}
-	sandboxExecutor := agentruntimebridge.NewSandboxDriverToolExecutor(executor)
 	store.AttachmentBlobStore = blobStore
 	store.FileBlobStore = blobStore
-	store.OutputCapturer = outputcapture.NewCapturer(blobStore, sandboxExecutor)
 	store.MCPManifestLister = agentruntimebridge.NewGatewayMCPManifestLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
 	})

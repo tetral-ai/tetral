@@ -7,9 +7,6 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
 data:
-  TETRAL_SANDBOX_DRIVER: daytona
-  DAYTONA_API_URL: https://daytona.example.internal
-  DAYTONA_TARGET: us
   TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
   TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
@@ -132,26 +129,6 @@ spec:
                 secretKeyRef:
                   name: tetral-blob
                   key: secret-key
-            - name: TETRAL_SANDBOX_DRIVER
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_SANDBOX_DRIVER
-            - name: DAYTONA_API_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: DAYTONA_API_URL
-            - name: DAYTONA_TARGET
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: DAYTONA_TARGET
-            - name: DAYTONA_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: bridge-daytona
-                  key: DAYTONA_API_KEY
           ports:
             - name: http
               containerPort: 8080
@@ -368,7 +345,7 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
   annotations:
-    tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"
+    tetral.ai/egress-intent: "blob.example.internal"
 spec:
   podSelector:
     matchLabels:

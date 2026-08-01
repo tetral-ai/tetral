@@ -61,6 +61,7 @@ func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client
 		Resolver:  lifecycle,
 		Tools:     helper,
 		Resources: resources,
+		BlobStore: projection.blob,
 	}, nil
 }
 

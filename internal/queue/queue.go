@@ -59,6 +59,11 @@ const (
 	// SandboxMemoryProjectionMaxAttempts bounds projection-only retries after
 	// the authoritative memory mutation has committed.
 	SandboxMemoryProjectionMaxAttempts = 5
+	// Output capture and staged-blob cleanup use separate bounded generations.
+	// Exhaustion closes the current generation before replay or cleanup creates
+	// a successor with a new durable identity.
+	SandboxOutputCaptureMaxAttempts        = 5
+	SandboxOutputCaptureCleanupMaxAttempts = 5
 	// Bridge/Sandbox startup knobs own lease_owner; Lease admission rechecks
 	// it, and deployed service identifiers are below 32 bytes.
 	MaxQueueLeaseOwnerBytes = 256

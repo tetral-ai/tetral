@@ -222,7 +222,7 @@ driver implements; nothing above the driver names Daytona.
 | `sandbox.LifecycleProvider` | `internal/sandbox/sandbox.go` | `driver.DaytonaLifecycleProvider` | `CreateSandbox`, `StartSandbox`, `CheckBaseTemplateHealth`, `ApplyNetworkPolicy`, `PrepareBaseDirectories`, `GetStatus`, `ReleaseSandbox` |
 | `sandbox.ArtifactBuilder` | `internal/sandbox/sandbox.go` | driver artifact builder (`artifact_builder.go`) | `BuildArtifact(normalized packages) -> provider_artifact_ref` |
 | `driver.ToolExecutor` | `internal/sandbox/driver/types.go` | `driver.DaytonaHelperExecutor` | `CheckHealth`, `RunTool`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand` |
-| `driver.OutputCapturer` | `driver/types.go` | `DaytonaHelperExecutor` | `CaptureOutputs` (Bridge-driven idle output capture) |
+| `OutputCaptureAdapter`, `driver.OutputCapturer` | `provider_adapter.go`, `driver/types.go` | `DaytonaAdapter`, `DaytonaHelperExecutor` | Queue-owned idle output capture, deterministic Blob staging, and durable adoption handoff |
 | `MemoryProjectionAdapter`, `driver.PreparationCommandRunner`, `driver.PreparationFileStager` | `provider_adapter.go`, `driver/types.go` | `DaytonaAdapter`, `DaytonaHelperExecutor` | Queue-owned live memory refresh and materialization transport |
 
 Callers above the adapter pass and receive only Tetral identifiers and normalized results

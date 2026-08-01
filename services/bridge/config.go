@@ -41,10 +41,6 @@ const (
 	EnvAgentRuntimeLabelSelector           = "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR"
 	EnvAgentRuntimeGRPCPort                = "TETRAL_AGENT_RUNTIME_GRPC_PORT"
 	EnvRuntimePodServiceTokenPath          = "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
-	EnvSandboxDriver                       = "TETRAL_SANDBOX_DRIVER"
-	EnvDaytonaAPIURL                       = "DAYTONA_API_URL"
-	EnvDaytonaTarget                       = "DAYTONA_TARGET"
-	EnvDaytonaAPIKey                       = "DAYTONA_API_KEY" //nolint:gosec // G101: env-var name, not a credential value
 	defaultJobRunnerLeaseDuration          = 30 * time.Second
 	defaultJobRunnerMaxJobs                = 1
 	defaultRuntimeInboxRepairBatch         = 32
@@ -59,13 +55,6 @@ const (
 
 type Env interface {
 	Getenv(string) string
-}
-
-type SandboxDriverConfig struct {
-	Driver        string
-	DaytonaAPIURL string
-	DaytonaTarget string
-	DaytonaAPIKey string
 }
 
 type BridgeAPIConfig struct {
@@ -122,31 +111,6 @@ func RuntimeBindingTokenHMACKeyFromEnv(env Env) ([]byte, error) {
 		return nil, workload.NewConfigError(EnvRuntimeBindingTokenHMACKey + " is required")
 	}
 	return []byte(key), nil
-}
-
-func SandboxDriverConfigFromEnv(env Env) (SandboxDriverConfig, error) {
-	if env == nil {
-		return SandboxDriverConfig{}, workload.NewConfigError("environment is required")
-	}
-	cfg := SandboxDriverConfig{
-		Driver:        strings.TrimSpace(env.Getenv(EnvSandboxDriver)),
-		DaytonaAPIURL: strings.TrimSpace(env.Getenv(EnvDaytonaAPIURL)),
-		DaytonaTarget: strings.TrimSpace(env.Getenv(EnvDaytonaTarget)),
-		DaytonaAPIKey: strings.TrimSpace(env.Getenv(EnvDaytonaAPIKey)),
-	}
-	if cfg.Driver == "" {
-		return SandboxDriverConfig{}, workload.NewConfigError(EnvSandboxDriver + " is required")
-	}
-	if cfg.Driver != "daytona" {
-		return SandboxDriverConfig{}, workload.NewConfigError(fmt.Sprintf("%s must be daytona", EnvSandboxDriver))
-	}
-	if cfg.DaytonaAPIURL == "" {
-		return SandboxDriverConfig{}, workload.NewConfigError(EnvDaytonaAPIURL + " is required")
-	}
-	if cfg.DaytonaAPIKey == "" {
-		return SandboxDriverConfig{}, workload.NewConfigError(EnvDaytonaAPIKey + " is required")
-	}
-	return cfg, nil
 }
 
 func ResourceCredentialRefreshMarginFromEnv(env Env) (time.Duration, error) {

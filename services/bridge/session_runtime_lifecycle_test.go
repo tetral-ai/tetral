@@ -2,17 +2,12 @@ package agentruntimebridge
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
-	"io"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/agent"
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/environment"
 	"github.com/tetral-ai/tetral/internal/files"
@@ -24,7 +19,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 	tetralcleanup "github.com/tetral-ai/tetral/services/cleanup"
 )
 
@@ -120,12 +114,8 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 	markLifecycleQueueJobAcknowledged(t, adminDB, ws, runtimeInputJob.JobID)
 	assertLifecycleMessageProjected(t, adminDB, ws, sessionID, messageEventID)
 
-	blobStore := blob.NewFakeBlobStore()
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	bridgeStore.SandboxStatusFreshnessWindow = time.Hour
-	bridgeStore.OutputCapturer = outputcapture.NewCapturer(blobStore, &lifecycleOutputScanner{files: []outputcapture.SandboxOutputFile{
-		lifecycleCapturedOutput("/mnt/session/outputs/report.txt", "report body"),
-	}})
 	idleScope := lifecycleScope(sessionID, threadID, bindingID, 1, podUID)
 	seedBridgeAPIOpenDurableTurn(t, adminDB, idleScope, "evt_lifecycle_running")
 	if _, err := bridgeStore.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
@@ -135,7 +125,6 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 	}); err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
-	assertLifecycleOutputCaptured(t, adminDB, blobStore, ws, sessionID)
 
 	cleanupScheduler := tetralcleanup.NewScheduler(client)
 	cleanupScheduler.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 1, 0, time.UTC) }
@@ -177,7 +166,6 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 	}
 	assertLifecycleCleanupFinalized(t, adminDB, ws, sessionID)
 	assertLifecycleMessageProjected(t, adminDB, ws, sessionID, messageEventID)
-	assertLifecycleOutputCaptured(t, adminDB, blobStore, ws, sessionID)
 
 	coldEventService := sessionevent.NewService(
 		sessionevent.NewPostgreSQLStore(client),
@@ -217,7 +205,6 @@ func TestSessionRuntimeLifecycleCreatePrepareRunIdleCleanupColdReturn(t *testing
 	}
 	assertLifecycleFreshPreparationQueued(t, adminDB, ws, sessionID, preparationAttemptID)
 	assertLifecycleMessageProjected(t, adminDB, ws, sessionID, messageEventID)
-	assertLifecycleOutputCaptured(t, adminDB, blobStore, ws, sessionID)
 }
 
 type lifecycleSessionEncryptor struct{}
@@ -308,29 +295,6 @@ func (lifecycleSandboxReleaseClient) ReleaseSandbox(context.Context, SandboxRele
 		Status:        SandboxReleaseReleased,
 		SandboxStatus: "released",
 	}, nil
-}
-
-type lifecycleOutputScanner struct {
-	files []outputcapture.SandboxOutputFile
-}
-
-func (s *lifecycleOutputScanner) ScanOutputs(context.Context, outputcapture.SandboxOutputTarget) (outputcapture.SandboxOutputScan, error) {
-	return outputcapture.SandboxOutputScan{Files: append([]outputcapture.SandboxOutputFile(nil), s.files...)}, nil
-}
-
-func lifecycleCapturedOutput(sourcePath string, body string) outputcapture.SandboxOutputFile {
-	digest := sha256.Sum256([]byte(body))
-	return outputcapture.SandboxOutputFile{
-		SourcePath: sourcePath,
-		Kind:       "regular",
-		LinkCount:  1,
-		SizeBytes:  int64(len(body)),
-		SHA256:     hex.EncodeToString(digest[:]),
-		MIMEType:   "text/plain",
-		Open: func(context.Context) (io.ReadCloser, error) {
-			return io.NopCloser(strings.NewReader(body)), nil
-		},
-	}
 }
 
 func lifecycleIDs(values ...string) func(string) string {
@@ -580,33 +544,6 @@ func assertLifecycleMessageProjected(t *testing.T, db *sql.DB, ws workspace.ID, 
 	}
 	if messages != 1 {
 		t.Fatalf("projected messages = %d; want 1", messages)
-	}
-}
-
-func assertLifecycleOutputCaptured(t *testing.T, db *sql.DB, blobStore *blob.FakeBlobStore, ws workspace.ID, sessionID string) {
-	t.Helper()
-	var fileID string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT last_file_id
-		   FROM session_output_captures
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND source_path = '/mnt/session/outputs/report.txt'`,
-		string(ws), sessionID).Scan(&fileID); err != nil {
-		t.Fatalf("read lifecycle output capture: %v", err)
-	}
-	var objectKey string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT o.blob_key
-		   FROM files f
-		   JOIN file_objects o ON o.workspace_id = f.workspace_id AND o.object_id = f.object_id
-		  WHERE f.workspace_id = $1 AND f.file_id = $2`,
-		string(ws), fileID).Scan(&objectKey); err != nil {
-		t.Fatalf("read lifecycle output file: %v", err)
-	}
-	body, ok := blobStore.Bytes(objectKey)
-	if !ok || string(body) != "report body" {
-		t.Fatalf("output blob body = %q present=%v; want report body", string(body), ok)
 	}
 }
 

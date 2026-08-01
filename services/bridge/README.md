@@ -20,8 +20,8 @@ verifies before any read or mutation. Bridge runs as one Kubernetes pod with
 two containers — `bridge-api` (`cmd/bridge-api`) serving the Runtime RPC
 surface, and `job-runner` (`cmd/job-runner`) consuming runtime-facing queue
 jobs and owning the binding fence — sharing one trust boundary but with
-credentials split per container: only `bridge-api` receives Daytona and blob
-credentials, and manifests plus tests keep that split inspectable. Bridge
+credentials split per container: only `bridge-api` receives blob credentials
+for attachment reads, and manifests plus tests keep that split inspectable. Bridge
 owns no provider lowering, no model calls, no sandbox lifecycle, and no
 public HTTP; it never deletes durable history.
 
@@ -31,8 +31,8 @@ public HTTP; it never deletes durable history.
 
 | Container | Command | Serves / consumes | Credentials |
 | --- | --- | --- | --- |
-| `bridge-api` | `/usr/local/bin/bridge-api` | The Runtime→Bridge RPC surface (below), plus Gateway-facing read-only attachment resolvers | Daytona helper transport + blob (from `k8s/configmap.yaml` + `k8s/secret.example.yaml`), scoped to this container only |
-| `job-runner` | `/usr/local/bin/job-runner` | Queue kinds `runtime_input`, `runtime_config_update`, `cleanup_session`, `session_delete_cleanup`; owns delivery, the binding fence, repair, cleanup | Projected Gateway credential for initial MCP manifest discovery; no Daytona or blob credentials — asserted by tests |
+| `bridge-api` | `/usr/local/bin/bridge-api` | The Runtime→Bridge RPC surface (below), plus Gateway-facing read-only attachment resolvers | Blob credentials for the read-only attachment surface, scoped to this container only |
+| `job-runner` | `/usr/local/bin/job-runner` | Queue kinds `runtime_input`, `runtime_config_update`, `cleanup_session`, `session_delete_cleanup`; owns delivery, the binding fence, repair, cleanup | Projected Gateway credential for initial MCP manifest discovery; no Sandbox-provider or blob credentials — asserted by tests |
 
 Both containers run in one pod, so ServiceAccount and NetworkPolicy treat
 Bridge as a single trust boundary; the per-container credential split limits
@@ -49,7 +49,7 @@ stored ACK; the same identity with a divergent payload is a fatal conflict.
 | Context | `LoadContext` | Cold-start one thread: messages from the newest compaction boundary forward, unresolved pending tool waits with any recorded decision, the per-server MCP manifests in-band (or an unready server's diagnostic with no tools), and the thread's pending media for both origins (active transient rows plus the file-backed derivation) |
 | Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction; interrupt and tool-confirmation variants process their already-admitted source event, project the loop-authored cancellation or approval message, and settle the named pending-tool state in that same transaction; background-task settlement rides the shared compare-and-set row, never a second public tool result, and its record family also fences pre-inbox notification-delivery exhaustion |
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One semantic event plus its projection in one transaction; a public tool event may carry the anchored prefix of completed reasoning parts, and a web tool-result event may carry one fixed-shape `server_tool_use` usage attachment — both fold into the idempotency hash so replays are byte-identical or rejected; the event-less invalid-tool repair row is atomic and rehydratable |
-| Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` captures outputs then writes idle status as one boundary. `CommitRuntimeTermination` validates the open durable turn, atomically stores current-thread cancellation or abnormal-child mail declared by the live loop, closes started spans, writes terminal status, and returns the complete declaration receipt. |
+| Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, waits without a database transaction, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn, atomically stores current-thread cancellation or abnormal-child mail declared by the live loop, closes started spans, writes terminal status, and returns the complete declaration receipt. |
 | Children | `CreateChildThread`, `ResolveChildThread`, `ListChildThreads`, `MarkChildThreadClosed`, `MarkChildThreadActive`, `ResolveInterAgentDelivery` | Child row plus thread-context-prefix checkpoint; child lifecycle marks; idempotent resolution of one stored inter-agent envelope into its received event, bound Runtime inbox, and durable queue wake |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups by task id; durable memory writes with content-match conflict checks |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
@@ -71,12 +71,12 @@ as a retryable stale-binding error.
 | `requires_action` | Runtime `FinishIdle` | Blocking approval / external wait; carries the blocking public event ids |
 | `retries_exhausted` | Runtime `FinishIdle`, or pod-loss repair | The reschedule budget is spent or a reschedule was Bridge-denied; the turn is dead but the session stays resumable |
 
-Output capture runs before the idle write and is best-effort: no capture
-outcome — success, per-entry skip, or scan-level abort — ever gates the idle
-write. `FinishIdle` ACK gates on the idle status commit only; the structured
-capture-failure record replaces the former blocking signal. Persistence
-faults inside capture (locks, index reads, object puts, quota checks) still
-fail the RPC; only capture-scan outcomes are downgraded.
+Output capture runs before the idle write through durable Sandbox-owned work.
+No Sandbox means an empty capture; per-entry skips and scan/normalization
+failures stage a best-effort result. Provider, Blob, lock, quota, index, or
+persistence failure fails `FinishIdle`, whose retry rejoins or advances the
+durable capture generation. The final transaction adopts staged Blob custody,
+updates the file index, rearms completion mail, and records idle together.
 
 ### The binding fence and pod visibility
 
@@ -218,8 +218,9 @@ replacement must preserve, and the conformance suites that prove it.
   interrupt; callers match them by operation and source identity, never by
   response order.
   The reschedule leg increments `session_turn_retries` and writes rescheduled
-  status only when the ceiling admits. `FinishIdle` captures outputs into `session_output_captures`
-  then writes `session.status_idle`. `CommitRuntimeTermination` accepts only the
+  status only when the ceiling admits. `FinishIdle` adopts a Sandbox-staged
+  output-capture generation into `session_output_captures` and the file tables,
+  then writes `session.status_idle` in the same transaction. `CommitRuntimeTermination` accepts only the
   live loop's current-thread declarations under the open durable-turn identity,
   persists those declarations with failure and terminal status, and returns
   their database-assigned stamps atomically.
@@ -233,11 +234,11 @@ replacement must preserve, and the conformance suites that prove it.
   gone, the pod-loss and cleanup repair paths own the postmortem closeout.
 - **Invariants a replacement must preserve.** The request-end transaction is
   the sole provider/model-usage writer (web `server_tool_use` counters arrive
-  on `WriteEvent`, not here); output capture is best-effort and never gates
-  idle; cumulative usage never double-counts; current-thread live closeout is
+  on `WriteEvent`, not here); output capture scan failures are best-effort while
+  staged-custody and persistence failures prevent idle; cumulative usage never double-counts; current-thread live closeout is
   atomic, and postmortem writers remain disjoint from live loop authorship.
 - **Conformance.** `bridge_api_settlement_test.go`, `runtime_termination.go`
-  with `session_runtime_lifecycle_test.go`, `output_capture_full_seam_test.go`,
+  with `session_runtime_lifecycle_test.go`, Sandbox output-capture runner/store tests,
   `closeout_sentinel_test.go`.
 
 ### Stable reasoning commit (two write vectors)
@@ -325,32 +326,25 @@ replacement must preserve, and the conformance suites that prove it.
   `completion_mail_test.go`, `completion_mail_delivery_test.go`,
   `runtime_pod_lost_delivery_repair_test.go`.
 
-### Sandbox-helper transport (tools and idle output capture)
+### Sandbox handoff and output adoption
 
-- **Contract.** `bridge-api` alone holds the Daytona configuration
-  (`config.go`, `sandbox_driver_executor.go`) and reaches the in-sandbox helper
-  for tool execution and output capture — never sandbox lifecycle, which is
-  Sandbox Service's. Idle output capture (`internal/outputcapture`) drives the
-  helper's Bridge-internal capture mode over driver exec, one invocation per
-  path.
-- **Lifecycle.** Capture is best-effort and split by construction: enumeration
-  is helper-owned — a directory is classified and listed in one helper
-  invocation on one verified inode, so what was checked is exactly what is
-  enumerated, and no provider file-listing API takes part. Every candidate is
-  classified by the helper's no-follow open (the sole symlink authority — a
-  trailing symlink opens as a handle to the link itself and returns a skip);
-  only regular files are captured, with `(st_dev, st_ino)`, regular type, and
-  link count re-verified across the classify and byte-read descriptors on the
-  same inode before streaming.
-- **Invariants a replacement must preserve.** No layer ever follows a link; the
-  capture claims presence only (`session_output_captures` is append/update-only,
-  one row per path, making no absence claims); a per-entry outcome never fails
-  the capture — only scan-level infrastructure faults abort, and an abort still
-  never blocks idle. The mode requires `euid == 0` and reads only what the
-  model can already read under `/mnt/session/outputs`.
-- **Conformance.** `output_capture_full_seam_test.go`, `bridge_api_tools_test.go`,
-  `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`,
-  `attachment_transport_test.go`, `scoped_transport_capacity_test.go`.
+- **Contract.** Bridge records refs-only Sandbox execution, command, memory,
+  and output-capture work. It never imports a provider SDK or calls a helper.
+  Sandbox Service resolves the provider adapter and persists normalized
+  outcomes for Bridge to consume.
+- **Lifecycle.** `FinishIdle` creates or joins a capture generation and waits
+  outside a transaction. Sandbox Service stages deterministic Blob children
+  before the parent result. Bridge's final transaction either adopts that
+  exact generation with the file index and idle event or rolls back without
+  losing staged custody. Expired, unadopted generations are cleaned by
+  Sandbox-owned cleanup jobs.
+- **Invariants a replacement must preserve.** One open generation exists per
+  FinishIdle write id; failed generations remain immutable; Blob custody moves
+  only in the final adoption transaction; a stale Runtime scope cannot adopt
+  or write a second idle event.
+- **Conformance.** `bridge_api_settlement_test.go` and
+  `services/sandbox/output_capture_runner_test.go` plus
+  `services/sandbox/output_capture_store_test.go`.
 
 ### MCP durable claim/commit idempotency
 
@@ -446,9 +440,8 @@ never mutates machine lifecycle.
 Boundaries it does not cross: no hot loop state (no run slots, fibers, or
 provider streams); no provider lowering, credentials, or model calls; no
 sandbox lifecycle (start/stop/archive/delete belong to Sandbox Service — the
-`bridge-api` Daytona configuration reaches only the in-sandbox helper, and
-`job-runner` receives no Daytona or blob credentials, inspectable in the
-manifests and asserted by tests); no public HTTP termination; and cleanup
+Bridge carries no Sandbox-provider configuration, and `job-runner` receives
+no blob credentials, inspectable in the manifests and asserted by tests); no public HTTP termination; and cleanup
 never deletes durable history.
 
 ## Testing guide
@@ -465,7 +458,6 @@ never deletes durable history.
 | `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | Background-command follow-ups and stdin write-sequence dedupe |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
-| `output_capture_full_seam_test.go` | The no-follow, presence-only capture seam end to end |
 | `closeout_sentinel_test.go` | `scope_superseded` / `closeout_unrepairable` typing and `errorCode`-keyed ack mapping |
 | `job_runner_test.go`, `runtime_delivery_test.go`, `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go` | Queue reconcile, direct-to-pod delivery, inbox upsert, delivery-exhaustion fencing |
 | `completion_mail_test.go`, `completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-wake write |
@@ -476,7 +468,7 @@ never deletes durable history.
 | `bridge_visibility_test.go` + `internal/kubernetes/*_test.go` | Pod/EndpointSlice visibility and the proven-gone vs merely-unavailable classification |
 | `config_test.go`, `cmd/bridge-api/main_test.go`, `cmd/job-runner/main_test.go` | Startup config validation (schema/inbox/refresh-margin env parsing) |
 | `runtime_delivery_store_test.go` (`TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly`) | Production Job Runner assembly reaches the configured MCP connector over TCP, captures the first manifest durably, and admits the retried input |
-| `deploy/kubernetes/manifest_test.go` (`TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers`) | The per-container credential split — the `job-runner` container carries no `TETRAL_BLOB_`, `TETRAL_SANDBOX_DRIVER`, or `DAYTONA_` env. The config-layer split is structural (a separate `JobRunnerConfig` in `config.go` with no Daytona/blob fields), not test-asserted |
+| `deploy/kubernetes/manifest_test.go` (`TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers`) | Bridge carries no Sandbox-provider configuration; only `bridge-api` carries Blob credentials for attachment reads, while `job-runner` carries neither |
 
 If a PR changes an RPC's idempotency identity, the binding fence, the repair
 rules, the queue reply mapping, the cleanup order, the closeout dispositions,

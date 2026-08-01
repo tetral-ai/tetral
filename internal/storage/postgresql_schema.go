@@ -986,6 +986,69 @@ const (
 		FOREIGN KEY (workspace_id, last_file_id) REFERENCES files(workspace_id, file_id)
 	)`
 
+	createPostgreSQLSandboxOutputCaptureOperationsTable = `CREATE TABLE IF NOT EXISTS sandbox_output_capture_operations (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		finish_idle_write_id TEXT NOT NULL,
+		capture_generation BIGINT NOT NULL,
+		state TEXT NOT NULL,
+		binding_id TEXT NOT NULL,
+		binding_generation BIGINT NOT NULL,
+		logical_sandbox_id TEXT,
+		provider TEXT,
+		provider_resource_id TEXT,
+		sandbox_binding_revision BIGINT,
+		manifest_json TEXT NOT NULL DEFAULT '[]',
+		skipped_json TEXT NOT NULL DEFAULT '[]',
+		scan_records_json TEXT NOT NULL DEFAULT '[]',
+		failure_kind TEXT,
+		failure_detail TEXT,
+		outcome_state TEXT,
+		outcome_digest TEXT,
+		retain_until TIMESTAMPTZ NOT NULL,
+		cleanup_generation BIGINT NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		staged_at TIMESTAMPTZ,
+		adopted_at TIMESTAMPTZ,
+		cleaned_at TIMESTAMPTZ,
+		PRIMARY KEY (workspace_id, session_id, finish_idle_write_id, capture_generation),
+		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT sandbox_output_capture_generation_shape CHECK (capture_generation > 0 AND binding_generation > 0 AND cleanup_generation >= 0 AND (sandbox_binding_revision IS NULL OR sandbox_binding_revision > 0)),
+		CONSTRAINT sandbox_output_capture_state_shape CHECK (state IN ('pending', 'running', 'staged', 'skipped_unavailable', 'failed', 'cleanup_pending', 'cleaned', 'adopted')),
+		CONSTRAINT sandbox_output_capture_outcome_shape CHECK (
+			(outcome_state IS NULL AND outcome_digest IS NULL)
+			OR (outcome_state IN ('staged', 'skipped_unavailable', 'failed') AND outcome_digest IS NOT NULL AND outcome_digest <> '')
+		),
+		CONSTRAINT sandbox_output_capture_provider_shape CHECK ((provider IS NULL) = (provider_resource_id IS NULL) AND (provider IS NULL) = (logical_sandbox_id IS NULL) AND (provider IS NULL) = (sandbox_binding_revision IS NULL))
+	)`
+
+	createPostgreSQLSandboxOutputCaptureBlobsTable = `CREATE TABLE IF NOT EXISTS sandbox_output_capture_blobs (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		finish_idle_write_id TEXT NOT NULL,
+		capture_generation BIGINT NOT NULL,
+		source_path TEXT NOT NULL,
+		blob_pointer TEXT NOT NULL,
+		size_bytes BIGINT NOT NULL,
+		sha256 TEXT NOT NULL,
+		state TEXT NOT NULL,
+		file_id TEXT,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		uploaded_at TIMESTAMPTZ,
+		adopted_at TIMESTAMPTZ,
+		PRIMARY KEY (workspace_id, session_id, finish_idle_write_id, capture_generation, source_path),
+		UNIQUE (blob_pointer),
+		FOREIGN KEY (workspace_id, session_id, finish_idle_write_id, capture_generation)
+			REFERENCES sandbox_output_capture_operations(workspace_id, session_id, finish_idle_write_id, capture_generation) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, file_id) REFERENCES files(workspace_id, file_id),
+		CONSTRAINT sandbox_output_capture_blob_size_shape CHECK (size_bytes >= 0),
+		CONSTRAINT sandbox_output_capture_blob_state_shape CHECK (state IN ('pending', 'uploaded', 'adopted'))
+	)`
+
 	createPostgreSQLSessionTransientAttachmentsTable = `CREATE TABLE IF NOT EXISTS session_transient_attachments (
 		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
 		workspace_id TEXT NOT NULL,
@@ -1637,6 +1700,8 @@ END $$`
 	createPostgreSQLSessionResourcePrefixGCDueIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resource_prefix_gc_due ON session_resource_prefix_gc(workspace_id, next_attempt_at, created_at) WHERE status IN ('pending', 'retryable_failed')`
 	createPostgreSQLSessionPreparationsActiveIndex          = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_preparations_active ON session_preparations(workspace_id, session_id) WHERE superseded_at IS NULL AND status IN ('pending', 'waiting_environment', 'preparing', 'ready')`
 	createPostgreSQLSessionOutputCapturesIndex              = `CREATE INDEX IF NOT EXISTS idx_session_output_captures_session ON session_output_captures(workspace_id, session_id, updated_at)`
+	createPostgreSQLSandboxOutputCaptureOpenIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_output_capture_open ON sandbox_output_capture_operations(workspace_id, session_id, finish_idle_write_id) WHERE state IN ('pending', 'running', 'staged', 'skipped_unavailable')`
+	createPostgreSQLSandboxOutputCaptureExpiryIndex         = `CREATE INDEX IF NOT EXISTS idx_sandbox_output_capture_expiry ON sandbox_output_capture_operations(workspace_id, retain_until) WHERE state IN ('staged', 'skipped_unavailable', 'failed')`
 	createPostgreSQLRequestUsageDetailsThreadIndex          = `CREATE INDEX IF NOT EXISTS idx_request_usage_details_thread ON request_usage_details(workspace_id, session_id, session_thread_id, created_at)`
 	createPostgreSQLSessionProviderAuthCredentialIndex      = `CREATE INDEX IF NOT EXISTS idx_session_provider_auth_credential ON session_provider_auth(workspace_id, vault_id, credential_id) WHERE deleted_at IS NULL` //nolint:gosec // Credential id index name, not a secret value.
 	createPostgreSQLSessionProviderAuthActiveSessionIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_provider_auth_active_session ON session_provider_auth(workspace_id, session_id) WHERE deleted_at IS NULL`
@@ -1781,6 +1846,8 @@ var rlsTargets = []string{
 	"session_runtime_tool_results",
 	"session_preparations",
 	"session_output_captures",
+	"sandbox_output_capture_operations",
+	"sandbox_output_capture_blobs",
 	"request_usage_details",
 	"session_provider_auth",
 	"queue_partition_counters",
@@ -1896,6 +1963,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_session_runtime_tool_results", createPostgreSQLSessionRuntimeToolResultsTable},
 		{"create_session_preparations", createPostgreSQLSessionPreparationsTable},
 		{"create_session_output_captures", createPostgreSQLSessionOutputCapturesTable},
+		{"create_sandbox_output_capture_operations", createPostgreSQLSandboxOutputCaptureOperationsTable},
+		{"create_sandbox_output_capture_blobs", createPostgreSQLSandboxOutputCaptureBlobsTable},
 		{"create_session_transient_attachments", createPostgreSQLSessionTransientAttachmentsTable},
 		{"create_session_resources", createPostgreSQLSessionResourcesTable},
 		{"create_session_resource_prefix_gc", createPostgreSQLSessionResourcePrefixGCTable},
@@ -1950,6 +2019,8 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_runtime_tool_results_kind", createPostgreSQLRuntimeToolResultsKindIndex},
 		{"index_session_preparations_active", createPostgreSQLSessionPreparationsActiveIndex},
 		{"index_session_output_captures_session", createPostgreSQLSessionOutputCapturesIndex},
+		{"index_sandbox_output_capture_open", createPostgreSQLSandboxOutputCaptureOpenIndex},
+		{"index_sandbox_output_capture_expiry", createPostgreSQLSandboxOutputCaptureExpiryIndex},
 		{"index_request_usage_details_thread", createPostgreSQLRequestUsageDetailsThreadIndex},
 		{"index_session_provider_auth_credential", createPostgreSQLSessionProviderAuthCredentialIndex},
 		{"index_session_provider_auth_active_session", createPostgreSQLSessionProviderAuthActiveSessionIndex},

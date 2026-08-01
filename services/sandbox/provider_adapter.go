@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 )
@@ -129,6 +130,10 @@ type MemoryProjectionAdapter interface {
 	RefreshMemoryProjection(context.Context, sandboxdriver.MemoryProjectionRefresh) ProviderOutcome[struct{}]
 }
 
+type OutputCaptureAdapter interface {
+	CaptureOutputs(context.Context, sandboxdriver.OutputCaptureTarget) ProviderOutcome[sandboxdriver.OutputCaptureScan]
+}
+
 type ProviderRegistry struct {
 	adapters map[string]ProviderAdapter
 }
@@ -157,6 +162,7 @@ type DaytonaAdapter struct {
 	Resolver  DaytonaSandboxResolver
 	Tools     DaytonaToolExecutor
 	Resources DaytonaResourceMaterialization
+	BlobStore blob.BlobStore
 }
 
 type DaytonaSandboxResolver interface {
@@ -225,6 +231,29 @@ func (a *DaytonaAdapter) RefreshMemoryProjection(ctx context.Context, refresh sa
 		return outcomeFromProviderError[struct{}](err, ProviderOutcomeUnknown)
 	}
 	return ProviderOutcome[struct{}]{Value: struct{}{}}
+}
+
+func (a *DaytonaAdapter) CaptureOutputs(ctx context.Context, target sandboxdriver.OutputCaptureTarget) ProviderOutcome[sandboxdriver.OutputCaptureScan] {
+	if a == nil || a.Tools == nil {
+		return terminalProviderFailure[sandboxdriver.OutputCaptureScan]("provider_configuration_invalid", "daytona output capture adapter is unavailable")
+	}
+	capturer, ok := a.Tools.(sandboxdriver.OutputCapturer)
+	if !ok {
+		return terminalProviderFailure[sandboxdriver.OutputCaptureScan]("provider_configuration_invalid", "daytona output capture adapter is unavailable")
+	}
+	scan, err := capturer.CaptureOutputs(ctx, target)
+	if err == nil {
+		return ProviderOutcome[sandboxdriver.OutputCaptureScan]{Value: scan}
+	}
+	var captureErr *sandboxdriver.OutputCaptureEntryError
+	if errors.As(err, &captureErr) {
+		kind := strings.TrimSpace(captureErr.Kind)
+		if kind == "" {
+			kind = "capture_failed"
+		}
+		return terminalProviderFailure[sandboxdriver.OutputCaptureScan]("output_capture_scan_"+kind, captureErr.Message)
+	}
+	return outcomeFromProviderError[sandboxdriver.OutputCaptureScan](err, ProviderProvedNotStarted)
 }
 
 // DaytonaResourceMaterialization owns Daytona-specific credentials, mounts,

@@ -477,7 +477,6 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		filepath.Join("k8s", "configmap.yaml"),
 		filepath.Join("k8s", "deployment.yaml"),
 		filepath.Join("k8s", "networkpolicy.yaml"),
-		filepath.Join("k8s", "secret.example.yaml"),
 		"api.go",
 		"job_runner.go",
 	} {
@@ -501,26 +500,6 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		if !strings.Contains(string(protoBody), required) {
 			t.Fatalf("Bridge tool protocols must expose durable execution identity field %q", required)
 		}
-	}
-	configBody, err := os.ReadFile(filepath.Join(bridgeRoot, "k8s", "configmap.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge k8s/configmap.yaml: %v", err)
-	}
-	for _, required := range []string{
-		"TETRAL_SANDBOX_DRIVER",
-		"DAYTONA_API_URL",
-		"DAYTONA_TARGET",
-	} {
-		if !strings.Contains(string(configBody), required) {
-			t.Fatalf("Bridge service-local ConfigMap missing %q", required)
-		}
-	}
-	secretBody, err := os.ReadFile(filepath.Join(bridgeRoot, "k8s", "secret.example.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge k8s/secret.example.yaml: %v", err)
-	}
-	if !strings.Contains(string(secretBody), "DAYTONA_API_KEY") {
-		t.Fatal("Bridge service-local secret example must document DAYTONA_API_KEY")
 	}
 	apiBody, err := os.ReadFile(filepath.Join(bridgeRoot, "api.go")) //nolint:gosec // repository-local static test path.
 	if err != nil {

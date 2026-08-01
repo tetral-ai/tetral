@@ -26,7 +26,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -752,7 +751,6 @@ func finishBridgeDeleteFixtureIdle(t *testing.T, runtime *sql.DB, admin *sql.DB,
 	t.Helper()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, generation, podUID)
 	durableTurnID := "evt_running_" + sessionID
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
@@ -2496,60 +2494,6 @@ func setBridgeAPISandboxStatus(t *testing.T, db *sql.DB, workspaceID string, ses
 	}
 }
 
-type recordingOutputScanner struct {
-	targets   []outputcapture.SandboxOutputTarget
-	files     []outputcapture.SandboxOutputFile
-	truncated bool
-	err       error
-}
-
-func (s *recordingOutputScanner) ScanOutputs(_ context.Context, target outputcapture.SandboxOutputTarget) (outputcapture.SandboxOutputScan, error) {
-	s.targets = append(s.targets, target)
-	if s.err != nil {
-		return outputcapture.SandboxOutputScan{}, s.err
-	}
-	return outputcapture.SandboxOutputScan{Files: s.files, Truncated: s.truncated}, nil
-}
-
-type blockingOutputScanner struct {
-	entered     chan struct{}
-	release     chan struct{}
-	enterOnce   sync.Once
-	releaseOnce sync.Once
-	mu          sync.Mutex
-	targets     []outputcapture.SandboxOutputTarget
-}
-
-func newBlockingOutputScanner() *blockingOutputScanner {
-	return &blockingOutputScanner{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-}
-
-func (s *blockingOutputScanner) ScanOutputs(ctx context.Context, target outputcapture.SandboxOutputTarget) (outputcapture.SandboxOutputScan, error) {
-	s.mu.Lock()
-	s.targets = append(s.targets, target)
-	s.mu.Unlock()
-	s.enterOnce.Do(func() { close(s.entered) })
-	select {
-	case <-s.release:
-		return outputcapture.SandboxOutputScan{}, nil
-	case <-ctx.Done():
-		return outputcapture.SandboxOutputScan{}, ctx.Err()
-	}
-}
-
-func (s *blockingOutputScanner) Release() {
-	s.releaseOnce.Do(func() { close(s.release) })
-}
-
-func (s *blockingOutputScanner) CallCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.targets)
-}
-
 type beforePutBlobStore struct {
 	inner     blob.BlobStore
 	beforePut func(key string)
@@ -2699,20 +2643,6 @@ func (r *recordingRuntimeTargetResolver) ResolveRuntimeTarget(_ context.Context,
 		return runtimeBindingForDelivery{}, r.err
 	}
 	return r.binding, nil
-}
-
-func capturedOutputFile(sourcePath string, body string) outputcapture.SandboxOutputFile {
-	return outputcapture.SandboxOutputFile{
-		SourcePath: sourcePath,
-		Kind:       "regular",
-		LinkCount:  1,
-		SizeBytes:  int64(len(body)),
-		SHA256:     sha256Hex(body),
-		MIMEType:   "text/plain",
-		Open: func(context.Context) (io.ReadCloser, error) {
-			return io.NopCloser(strings.NewReader(body)), nil
-		},
-	}
 }
 
 type recordingMCPManifestLister struct {
