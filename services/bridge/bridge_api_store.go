@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -113,15 +112,16 @@ const (
 	//
 	//   NULL          non-memory result, or a memory result whose refresh plan
 	//                 is empty. Terminal.
-	//   pending       durable mutation committed; projection push not yet
-	//                 confirmed. -> refreshed | skipped_cold.
+	//   pending       durable mutation committed; Sandbox projection job not yet
+	//                 settled. -> refreshed | skipped_cold | failed.
 	//   refreshed     projection push confirmed. Terminal.
 	//   skipped_cold  no reachable sandbox at push time. Terminal, superseded
 	//                 only by cold-return re-materialization.
+	//   failed        projection retries exhausted or failed terminally. Terminal;
+	//                 result_json carries projection_refresh_failed.
 	//
-	//   writers: RunMemory phase 1 sets NULL or pending;
-	//     advancePendingMemoryProjectionState / updateMemoryProjectionStateTx
-	//     move pending -> refreshed | skipped_cold.
+	//   writers: RunMemory sets NULL, pending, or skipped_cold; Sandbox Service
+	//     moves pending to a terminal state.
 	//   reader: completePendingMemoryProjection replay dispatch.
 	memoryProjectionStatePending     = "pending"
 	memoryProjectionStateRefreshed   = "refreshed"
@@ -145,8 +145,6 @@ const (
 	maxRescheduleBackoff          = 120 * time.Second
 )
 
-var errMemoryProjectionPushLockContended = errors.New("memory projection push lock is contended")
-
 type PostgreSQLBridgeAPIStore struct {
 	Client                          *dbconnect.Client
 	Logger                          *slog.Logger
@@ -154,11 +152,9 @@ type PostgreSQLBridgeAPIStore struct {
 	OutputCapturer                  OutputCapturer
 	AttachmentBlobStore             blob.BlobStore
 	FileBlobStore                   blob.BlobStore
-	MemoryProjectionRefresher       MemoryProjectionRefresher
 	MCPManifestLister               MCPManifestLister
 	SandboxStatusFreshnessWindow    time.Duration
 	ResourceCredentialRefreshMargin time.Duration
-	MemoryProjectionPushTimeout     time.Duration
 	RuntimeBindingTokenHMACKey      []byte
 	RuntimeBindingTokenTTL          time.Duration
 	ProviderRescheduleBudget        int64
@@ -182,10 +178,6 @@ type OutputCapturer interface {
 	CaptureOutputs(context.Context, *dbconnect.Tx, outputcapture.Request) (outputcapture.Result, error)
 }
 
-type MemoryProjectionRefresher interface {
-	RefreshMemoryProjection(context.Context, MemoryProjectionRefresh) error
-}
-
 type SandboxToolTarget struct {
 	WorkspaceID          string
 	SessionID            string
@@ -198,26 +190,12 @@ type SandboxToolTarget struct {
 	ResourceRootsJSON    string
 }
 
-type MemoryProjectionRefresh struct {
-	Target     SandboxToolTarget
-	MountPaths []string
-	Ops        []MemoryProjectionOp
-}
-
-type MemoryProjectionOp struct {
-	Kind          string
-	RelativePath  string
-	Content       string
-	ContentSHA256 string
-}
-
 func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIStore {
 	return &PostgreSQLBridgeAPIStore{
 		Client:                          client,
 		Clock:                           func() time.Time { return storage.Now() },
 		SandboxStatusFreshnessWindow:    defaultSandboxStatusFreshness,
 		ResourceCredentialRefreshMargin: defaultResourceCredentialRefreshMargin,
-		MemoryProjectionPushTimeout:     defaultMemoryProjectionPushTimeout,
 		RuntimeBindingTokenTTL:          defaultRuntimeBindingTokenTTL,
 		ProviderRescheduleBudget:        defaultProviderRescheduleBudget,
 		CompactionRescheduleBudget:      defaultCompactionRescheduleBudget,
@@ -273,13 +251,6 @@ func (s *PostgreSQLBridgeAPIStore) resourceCredentialRefreshMargin() time.Durati
 		return s.ResourceCredentialRefreshMargin
 	}
 	return defaultResourceCredentialRefreshMargin
-}
-
-func (s *PostgreSQLBridgeAPIStore) memoryProjectionPushTimeout() time.Duration {
-	if s != nil && s.MemoryProjectionPushTimeout > 0 {
-		return s.MemoryProjectionPushTimeout
-	}
-	return defaultMemoryProjectionPushTimeout
 }
 
 func (s *PostgreSQLBridgeAPIStore) providerRescheduleBudget() int64 {

@@ -12,7 +12,6 @@ data:
   DAYTONA_TARGET: us
   TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
   TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
-  TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT: 30s
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: "2"
 ---
@@ -92,11 +91,6 @@ spec:
                 configMapKeyRef:
                   name: bridge-config
                   key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-            - name: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
             - name: TETRAL_PROVIDER_RESCHEDULE_BUDGET
               valueFrom:
                 configMapKeyRef:

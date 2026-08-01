@@ -108,6 +108,7 @@ func run(ctx context.Context, env envReader) error {
 	executionCoordinator := tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(openResult.Client, cfg.ResourceCredentialRefreshMargin)
 	lifecycleStore := tetralsandbox.NewPostgreSQLSandboxLifecycleStore(openResult.Client, store, cfg.ResourceCredentialRefreshMargin)
 	backgroundCommandStore := tetralsandbox.NewPostgreSQLSandboxBackgroundCommandStore(openResult.Client)
+	memoryProjectionStore := tetralsandbox.NewPostgreSQLSandboxMemoryProjectionStore(openResult.Client)
 	overLimitFinalizer := tetralsandbox.NewPostgreSQLSandboxQueueOverLimitFinalizer(openResult.Client)
 	environmentStore := tetralsandbox.NewEnvironmentArtifactStore(openResult.Client)
 	overLimitLoopCtx, cancelOverLimitLoop := context.WithCancel(ctx)
@@ -169,6 +170,20 @@ func run(ctx context.Context, env envReader) error {
 			return (&tetralsandbox.SandboxBackgroundCommandJobRunner{
 				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
+					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
+					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
+					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
+				},
+			}).RunOnceWithActivity(cycleCtx)
+		})
+	}()
+	memoryProjectionLoopCtx, cancelMemoryProjectionLoop := context.WithCancel(ctx)
+	defer cancelMemoryProjectionLoop()
+	go func() {
+		_ = tetralsandbox.RunWorkspaceConsumerLoop(memoryProjectionLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+			return (&tetralsandbox.SandboxMemoryProjectionJobRunner{
+				Queue: queueClient, Store: memoryProjectionStore, Providers: providerRegistry,
+				Config: tetralsandbox.SandboxMemoryProjectionRunnerConfig{
 					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
 					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,

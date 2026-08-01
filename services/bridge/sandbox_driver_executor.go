@@ -9,7 +9,6 @@ import (
 )
 
 var ErrSandboxOutputCaptureUnavailable = errors.New("sandbox output capture is unavailable")
-var ErrSandboxMemoryProjectionUnavailable = errors.New("sandbox memory projection is unavailable")
 
 func sandboxHelperFailureError(err error) bool {
 	var helperErr *sandboxdriver.HelperFailureError
@@ -73,27 +72,6 @@ func (e *SandboxDriverToolExecutor) ScanOutputs(ctx context.Context, target outp
 		UnrepresentableNames: result.UnrepresentableNames,
 		Records:              records,
 	}, nil
-}
-
-func (e *SandboxDriverToolExecutor) RefreshMemoryProjection(ctx context.Context, refresh MemoryProjectionRefresh) error {
-	refresher, ok := e.Driver.(sandboxdriver.MemoryProjectionRefresher)
-	if !ok {
-		return ErrSandboxMemoryProjectionUnavailable
-	}
-	ops := make([]sandboxdriver.MemoryProjectionOp, 0, len(refresh.Ops))
-	for _, op := range refresh.Ops {
-		ops = append(ops, sandboxdriver.MemoryProjectionOp{
-			Kind:          op.Kind,
-			RelativePath:  op.RelativePath,
-			Content:       op.Content,
-			ContentSHA256: op.ContentSHA256,
-		})
-	}
-	return refresher.RefreshMemoryProjection(ctx, sandboxdriver.MemoryProjectionRefresh{
-		Target:     toDriverTarget(refresh.Target),
-		MountPaths: append([]string(nil), refresh.MountPaths...),
-		Ops:        ops,
-	})
 }
 
 func toDriverTarget(target SandboxToolTarget) sandboxdriver.ToolTarget {

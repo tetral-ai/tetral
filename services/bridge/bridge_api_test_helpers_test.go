@@ -22,7 +22,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
@@ -2549,108 +2548,6 @@ func (s *blockingOutputScanner) CallCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.targets)
-}
-
-type recordingMemoryProjectionRefresher struct {
-	calls      []MemoryProjectionRefresh
-	deadlines  []time.Time
-	observedAt []time.Time
-	err        error
-}
-
-func (r *recordingMemoryProjectionRefresher) RefreshMemoryProjection(ctx context.Context, refresh MemoryProjectionRefresh) error {
-	copied := MemoryProjectionRefresh{
-		Target:     refresh.Target,
-		MountPaths: append([]string(nil), refresh.MountPaths...),
-		Ops:        append([]MemoryProjectionOp(nil), refresh.Ops...),
-	}
-	r.calls = append(r.calls, copied)
-	r.observedAt = append(r.observedAt, time.Now())
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Time{}
-	}
-	r.deadlines = append(r.deadlines, deadline)
-	return r.err
-}
-
-type blockingMemoryProjectionRefresher struct {
-	entered chan struct{}
-	release chan struct{}
-	err     error
-	once    sync.Once
-}
-
-func newBlockingMemoryProjectionRefresher(err error) *blockingMemoryProjectionRefresher {
-	return &blockingMemoryProjectionRefresher{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-		err:     err,
-	}
-}
-
-func (r *blockingMemoryProjectionRefresher) RefreshMemoryProjection(context.Context, MemoryProjectionRefresh) error {
-	r.once.Do(func() { close(r.entered) })
-	<-r.release
-	return r.err
-}
-
-func tryMemoryStoreMutationLockWithTimeout(db *sql.DB, storeID string, timeout time.Duration) error {
-	ctx := context.Background()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-	if _, err := tx.ExecContext(ctx, "SELECT set_config('lock_timeout', $1, true)", strconv.FormatInt(timeout.Milliseconds(), 10)+"ms"); err != nil {
-		return err
-	}
-	if err := storage.AcquireMemoryStoreMutationLock(ctx, tx, "default", storeID); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	committed = true
-	return nil
-}
-
-func seedPendingMemoryProjectionResult(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, toolUseID string, inputHash string, inputJSON string, resultJSON string) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_runtime_tool_results (
-			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
-			normalized_input_hash, tool_name, input_json, ack_status, result_json,
-			memory_projection_state, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'memory', $5, 'memory', $6, 'committed', $7, $8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID,
-		sessionID,
-		threadID,
-		toolUseID,
-		inputHash,
-		inputJSON,
-		resultJSON,
-		memoryProjectionStatePending,
-	); err != nil {
-		t.Fatalf("seed pending memory projection result: %v", err)
-	}
-}
-
-func assertMemoryProjectionOps(t *testing.T, got []MemoryProjectionOp, want []MemoryProjectionOp) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("memory projection ops = %+v; want %+v", got, want)
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("memory projection op[%d] = %+v; want %+v; full ops %+v", index, got[index], want[index], got)
-		}
-	}
 }
 
 type beforePutBlobStore struct {

@@ -64,11 +64,6 @@ spec:
                 configMapKeyRef:
                   name: bridge-config
                   key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-            - name: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
             - name: TETRAL_PROVIDER_RESCHEDULE_BUDGET
               valueFrom:
                 configMapKeyRef:

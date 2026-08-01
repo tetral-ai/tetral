@@ -317,8 +317,10 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 	}
 }
 
-// RunMemory is commit-then-push, giving exactly-once mutation and at-least-once
-// projection push. Two-phase control flow:
+// RunMemory is commit-then-project. The mutation and, when a live Sandbox is
+// currently bound, its projection job commit atomically. Bridge never calls a
+// Sandbox provider; it waits on the durable projection state written by the
+// Sandbox worker.
 //
 //	phase 1  (withScopeTx here): scope-verify, idempotency read, applyMemoryToolTx,
 //	         compute the refresh plan, and insert the tool result with
@@ -326,20 +328,12 @@ func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Con
 //	         On replay of a row already at pending, the mutation is SKIPPED (it is
 //	         already committed) and control drops straight into phase 2.
 //	phase 2  (completePendingMemoryProjection): runs with no open transaction and
-//	         is self-contained — it re-derives the plan, writable store, mount
-//	         paths, target sandbox, and per-path ops entirely from committed truth,
-//	         carrying nothing from any earlier delivery. A crash between the phases
-//	         leaves the row pending for the Runtime's normal retry.
+//	         waits for Sandbox Service to settle the durable projection row. A
+//	         disconnect leaves the row pending for the Runtime's normal replay.
 //
 // INVARIANTS:
-//   - Refresh op content is the CURRENT committed PostgreSQL head
-//     (memoryProjectionHeadsTx), never the request input. That is what makes
-//     refresh self-healing: the pushed bytes match durable truth for the touched
-//     paths regardless of what the projection held before.
-//   - Re-resolving the writable store on replay is safe because session resources
-//     are immutable while a session runs and the memory route is session-serialized
-//     (no concurrent memory mutation), so the re-resolved store is the one the
-//     mutation committed against.
+//   - The Queue job carries only durable identities. Sandbox Service derives the
+//     current committed heads and provider target after leasing the job.
 //   - Scope is deliberately narrow: RunMemory refreshes ONLY the mutating session's
 //     own bound sandbox projection. Other sessions that attach the same store are
 //     not fanned out and see the change only at their own next materialization
@@ -377,7 +371,43 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		}
 		var projectionState sql.NullString
 		if len(memoryProjectionPlanPaths(request.GetInputJson(), resultJSON)) > 0 {
-			projectionState = sql.NullString{String: memoryProjectionStatePending, Valid: true}
+			storeID, bindingResultJSON, err := resolveWritableMemoryStoreTx(ctx, tx, request.GetScope())
+			if err != nil {
+				return err
+			}
+			if bindingResultJSON != "" {
+				return status.Error(codes.FailedPrecondition, "writable memory store binding changed during mutation")
+			}
+			var providerResourceID sql.NullString
+			if err := tx.QueryRow(ctx,
+				`SELECT provider_resource_id
+				   FROM session_sandbox_bindings
+				  WHERE workspace_id = $1 AND session_id = $2 AND release_requested_at IS NULL`,
+				request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+			).Scan(&providerResourceID); err != nil && !dbconnect.IsNoRows(err) {
+				return err
+			}
+			if providerResourceID.Valid && providerResourceID.String != "" {
+				projectionState = sql.NullString{String: memoryProjectionStatePending, Valid: true}
+				payload, err := marshalBridgeJSON(map[string]string{
+					"workspace_id": request.GetScope().GetWorkspaceId(), "session_id": request.GetScope().GetSessionId(),
+					"memory_store_id": storeID, "memory_write_id": request.GetToolUseEventId(),
+				})
+				if err != nil {
+					return err
+				}
+				workspaceID := workspace.ID(request.GetScope().GetWorkspaceId())
+				if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+					ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxMemoryProjection,
+					PartitionKey:   queue.FormatSandboxMemoryPartitionKey(workspaceID, storeID),
+					DedupeKey:      queue.FormatSandboxMemoryProjectionDedupeKey(workspaceID, storeID, request.GetToolUseEventId()),
+					PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: queue.SandboxMemoryProjectionMaxAttempts, Now: now,
+				}); err != nil {
+					return err
+				}
+			} else {
+				projectionState = sql.NullString{String: memoryProjectionStateSkippedCold, Valid: true}
+			}
 		}
 		if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
 			ToolUseEventID:        request.GetToolUseEventId(),
@@ -392,7 +422,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		}); err != nil {
 			return err
 		}
-		if projectionState.Valid {
+		if projectionState.Valid && projectionState.String == memoryProjectionStatePending {
 			phaseTwoAck = committedAck("", "")
 			return nil
 		}
@@ -606,173 +636,44 @@ func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolNa
 	return "internal_invalid_tool_" + hex.EncodeToString(hash.Sum(nil))
 }
 
-type memoryProjectionRefreshLoad struct {
-	ResultJSON string
-	StoreID    string
-	Target     SandboxToolTarget
-	MountPaths []string
-	Ops        []MemoryProjectionOp
-}
-
-type memoryProjectionHead struct {
-	Content       string
-	ContentSHA256 string
-}
-
 func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, ack *bridgev1.BridgeWriteAck) (*bridgev1.RunMemoryResponse, error) {
 	if ack == nil {
 		ack = duplicateAck("", "")
 	}
-	var response *bridgev1.RunMemoryResponse
-	var loaded memoryProjectionRefreshLoad
-	var noProjectionWork bool
-	var skipCold bool
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_memory_projection_refresh", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		existing, ok, err := readRuntimeToolResultReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "memory tool result is missing")
-		}
-		if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
-			return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
-		}
-		if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
-			response = &bridgev1.RunMemoryResponse{Ack: duplicateAck("", ""), ResultJson: existing.ResultJSON}
-			return nil
-		}
-		planPaths := memoryProjectionPlanPaths(existing.InputJSON, existing.ResultJSON)
-		if len(planPaths) == 0 {
-			noProjectionWork = true
-			return nil
-		}
-		if s.MemoryProjectionRefresher == nil {
-			return status.Error(codes.FailedPrecondition, "memory projection refresh is not installed")
-		}
-		storeID, resultJSON, err := resolveWritableMemoryStoreTx(ctx, tx, request.GetScope())
-		if err != nil {
-			return err
-		}
-		if resultJSON != "" {
-			return status.Error(codes.FailedPrecondition, "writable memory store binding changed before projection refresh")
-		}
-		target, reachable, err := memoryProjectionTargetTx(ctx, tx, request.GetScope(), s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), s.now())
-		if err != nil {
-			return err
-		}
-		if !reachable {
-			skipCold = true
-			return nil
-		}
-		mountPaths, err := memoryProjectionMountPathsTx(ctx, tx, request.GetScope(), storeID)
-		if err != nil {
-			return err
-		}
-		heads, err := memoryProjectionHeadsTx(ctx, tx, request.GetScope().GetWorkspaceId(), storeID, planPaths)
-		if err != nil {
-			return err
-		}
-		loaded = memoryProjectionRefreshLoad{
-			ResultJSON: existing.ResultJSON,
-			StoreID:    storeID,
-			Target:     target,
-			MountPaths: mountPaths,
-			Ops:        memoryProjectionOps(planPaths, heads),
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if response != nil {
-		return response, nil
-	}
-	if noProjectionWork {
-		finalResultJSON, err := s.advancePendingMemoryProjectionState(ctx, request, "agentruntimebridge.finish_memory_projection_without_refresh", sql.NullString{}, false)
-		if err != nil {
-			return nil, err
-		}
-		return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: finalResultJSON}, nil
-	}
-	if skipCold {
-		finalResultJSON, err := s.advancePendingMemoryProjectionState(ctx, request, "agentruntimebridge.skip_cold_memory_projection_refresh", sql.NullString{String: memoryProjectionStateSkippedCold, Valid: true}, false)
-		if err != nil {
-			return nil, err
-		}
-		return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: finalResultJSON}, nil
-	}
-	pushCtx, cancelPush := context.WithTimeout(ctx, s.memoryProjectionPushTimeout())
-	defer cancelPush()
-	if err := s.withMemoryProjectionPushLock(pushCtx, request.GetScope(), loaded.StoreID, func() error {
-		return s.MemoryProjectionRefresher.RefreshMemoryProjection(pushCtx, MemoryProjectionRefresh{
-			Target:     loaded.Target,
-			MountPaths: loaded.MountPaths,
-			Ops:        loaded.Ops,
-		})
-	}); err != nil {
-		resultJSON, marshalErr := marshalToolRuntimeError("projection_refresh_failed", "memory projection refresh failed", true)
-		if marshalErr != nil {
-			return nil, marshalErr
-		}
-		return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: resultJSON}, nil
-	}
-	finalResultJSON, err := s.advancePendingMemoryProjectionState(ctx, request, "agentruntimebridge.finish_memory_projection_refresh", sql.NullString{String: memoryProjectionStateRefreshed, Valid: true}, true)
-	if err != nil {
-		return nil, err
-	}
-	return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: finalResultJSON}, nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) withMemoryProjectionPushLock(ctx context.Context, scope *bridgev1.RuntimeScope, memoryStoreID string, fn func() error) error {
-	category, resource, err := storage.MemoryStoreMutationAdvisoryLockKey(scope.GetWorkspaceId(), memoryStoreID)
-	if err != nil {
-		return err
-	}
-	locked, err := s.Client.TryWithAdvisoryLock(ctx, "agentruntimebridge.memory_projection_push_lock", category, resource, fn)
-	if err != nil {
-		return err
-	}
-	if !locked {
-		return errMemoryProjectionPushLockContended
-	}
-	return nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) advancePendingMemoryProjectionState(ctx context.Context, request *bridgev1.RunMemoryRequest, operation string, nextState sql.NullString, rewriteStaleResult bool) (string, error) {
-	var finalResultJSON string
-	if err := s.withScopeTx(ctx, request.GetScope(), operation, func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "memory tool result is missing")
-		}
-		if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
-			return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
-		}
-		finalResultJSON = existing.ResultJSON
-		if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
-			return nil
-		}
-		if rewriteStaleResult && memoryResultIsStaleToolError(existing.ResultJSON) {
-			var err error
-			finalResultJSON, err = rewriteMemoryProjectionRefreshed(existing.ResultJSON, true)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var response *bridgev1.RunMemoryResponse
+		if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.await_memory_projection", func(tx *dbconnect.Tx) error {
+			if err := verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
+				return err
+			}
+			existing, ok, err := readRuntimeToolResultReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 			if err != nil {
 				return err
 			}
+			if !ok {
+				return status.Error(codes.FailedPrecondition, "memory tool result is missing")
+			}
+			if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
+				return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
+			}
+			if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
+				response = &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: existing.ResultJSON}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
-		return updateMemoryProjectionStateTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), nextState, finalResultJSON, s.now())
-	}); err != nil {
-		return "", err
+		if response != nil {
+			return response, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, status.Error(codes.DeadlineExceeded, "memory projection result is not ready")
+		case <-ticker.C:
+		}
 	}
-	return finalResultJSON, nil
 }
 
 func runToolTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (SandboxToolTarget, string, error) {
@@ -869,184 +770,6 @@ func isOutputCapturePreparationRequeued(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "sandbox readiness is stale for output capture") ||
 		strings.Contains(message, "resource materialization credential is expiring for output capture")
-}
-
-func memoryProjectionTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (SandboxToolTarget, bool, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return SandboxToolTarget{}, false, err
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil {
-		return SandboxToolTarget{}, false, err
-	}
-	if !ok || readiness.Status != "ready" {
-		return SandboxToolTarget{}, false, nil
-	}
-	if readiness.SandboxStatus != "active" {
-		if sandboxStatusNeedsPreparationReset(readiness.SandboxStatus) {
-			if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-				return SandboxToolTarget{}, false, err
-			}
-		}
-		return SandboxToolTarget{}, false, nil
-	}
-	if readiness.ProviderSandboxID == "" {
-		return SandboxToolTarget{}, false, nil
-	}
-	if resourceCredentialNeedsLiveRotation(readiness.ResourceCredentialExpiresAt, now, resourceCredentialRefreshMargin) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-			return SandboxToolTarget{}, false, err
-		}
-		return SandboxToolTarget{}, false, nil
-	}
-	if !sandboxRefreshIsFresh(readiness.StatusRefreshedAt, now, freshnessWindow) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, true); err != nil {
-			return SandboxToolTarget{}, false, err
-		}
-		return SandboxToolTarget{}, false, nil
-	}
-	return SandboxToolTarget{
-		WorkspaceID:          scope.GetWorkspaceId(),
-		SessionID:            scope.GetSessionId(),
-		SessionThreadID:      scope.GetSessionThreadId(),
-		BindingID:            scope.GetBinding().GetBindingId(),
-		BindingGeneration:    scope.GetBinding().GetBindingGeneration(),
-		SandboxID:            readiness.SandboxID,
-		ProviderSandboxID:    readiness.ProviderSandboxID,
-		PreparationAttemptID: readiness.PreparationAttemptID,
-		ResourceRootsJSON:    readiness.ResourceRootsJSON.String,
-	}, true, nil
-}
-
-func memoryProjectionMountPathsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, storeID string) ([]string, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT smr.mount_path
-		   FROM session_memory_store_resources smr
-		   JOIN session_resources sr
-		     ON sr.workspace_id = smr.workspace_id
-		    AND sr.session_id = smr.session_id
-		    AND sr.resource_id = smr.resource_id
-		    AND sr.type = 'memory_store'
-		    AND sr.detached_at IS NULL
-		    AND sr.delete_requested_at IS NULL
-		  WHERE smr.workspace_id = $1
-		    AND smr.session_id = $2
-		    AND smr.memory_store_id = $3
-		  ORDER BY smr.resource_id ASC`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		storeID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var mountPaths []string
-	for rows.Next() {
-		var mountPath string
-		if err := rows.Scan(&mountPath); err != nil {
-			return nil, err
-		}
-		mountPaths = append(mountPaths, mountPath)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(mountPaths) == 0 {
-		return nil, status.Error(codes.FailedPrecondition, "memory store has no session projection mounts")
-	}
-	return mountPaths, nil
-}
-
-func memoryProjectionHeadsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, storeID string, paths []string) (map[string]memoryProjectionHead, error) {
-	if len(paths) == 0 {
-		return map[string]memoryProjectionHead{}, nil
-	}
-	heads := map[string]memoryProjectionHead{}
-	const queryPathLimit = 10_000
-	for offset := 0; offset < len(paths); offset += queryPathLimit {
-		end := min(offset+queryPathLimit, len(paths))
-		placeholders := make([]string, 0, end-offset)
-		args := []any{workspaceID, storeID}
-		for index, pathValue := range paths[offset:end] {
-			placeholders = append(placeholders, "$"+strconv.Itoa(index+3))
-			args = append(args, pathValue)
-		}
-		rows, err := tx.Query(ctx,
-			`SELECT m.path, v.content, m.content_sha256
-			   FROM memories m
-			   JOIN memory_versions v
-			     ON v.workspace_id = m.workspace_id
-			    AND v.memory_store_id = m.memory_store_id
-			    AND v.memory_id = m.memory_id
-			    AND v.memory_version_id = m.current_version_id
-			  WHERE m.workspace_id = $1
-			    AND m.memory_store_id = $2
-			    AND m.deleted_at IS NULL
-			    AND m.path IN (`+strings.Join(placeholders, ", ")+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var pathValue string
-			var head memoryProjectionHead
-			if err := rows.Scan(&pathValue, &head.Content, &head.ContentSHA256); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			heads[pathValue] = head
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-	}
-	return heads, nil
-}
-
-func memoryProjectionOps(paths []string, heads map[string]memoryProjectionHead) []MemoryProjectionOp {
-	ops := make([]MemoryProjectionOp, 0, len(paths))
-	for _, pathValue := range paths {
-		if head, ok := heads[pathValue]; ok {
-			ops = append(ops, MemoryProjectionOp{Kind: "upsert", RelativePath: pathValue, Content: head.Content, ContentSHA256: head.ContentSHA256})
-		} else {
-			ops = append(ops, MemoryProjectionOp{Kind: "remove", RelativePath: pathValue})
-		}
-	}
-	return ops
-}
-
-func updateMemoryProjectionStateTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, state sql.NullString, resultJSON string, now time.Time) error {
-	result, err := tx.Exec(ctx,
-		`UPDATE session_runtime_tool_results
-		    SET memory_projection_state = $5,
-		        result_json = $6,
-		        updated_at = $7
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND tool_use_event_id = $4
-		    AND tool_kind = 'memory'`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		toolUseEventID,
-		state,
-		resultJSON,
-		now,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "memory projection state update failed")
-	}
-	return nil
 }
 
 type sessionPreparationReadiness struct {
@@ -1674,23 +1397,6 @@ func isMemoryStaleErrorCode(errorCode string) bool {
 	default:
 		return false
 	}
-}
-
-func memoryResultIsStaleToolError(resultJSON string) bool {
-	var result memoryToolResultShape
-	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-		return false
-	}
-	return result.Status == "tool_error" && result.RereadRequired && isMemoryStaleErrorCode(result.ErrorCode)
-}
-
-func rewriteMemoryProjectionRefreshed(resultJSON string, refreshed bool) (string, error) {
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(resultJSON), &payload); err != nil {
-		return "", err
-	}
-	payload["projection_refreshed"] = refreshed
-	return marshalBridgeJSON(payload)
 }
 
 func applyMemoryToolTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, requestedOperation string, inputJSON string) (string, error) {

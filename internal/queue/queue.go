@@ -56,6 +56,9 @@ const (
 	// The all-kind accept fuse is over five times the largest current
 	// refs-only payload (a 512-event runtime_input job).
 	MaxQueueJobPayloadBytes = 64 * 1024
+	// SandboxMemoryProjectionMaxAttempts bounds projection-only retries after
+	// the authoritative memory mutation has committed.
+	SandboxMemoryProjectionMaxAttempts = 5
 	// Bridge/Sandbox startup knobs own lease_owner; Lease admission rechecks
 	// it, and deployed service identifiers are below 32 bytes.
 	MaxQueueLeaseOwnerBytes = 256

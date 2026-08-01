@@ -223,7 +223,7 @@ driver implements; nothing above the driver names Daytona.
 | `sandbox.ArtifactBuilder` | `internal/sandbox/sandbox.go` | driver artifact builder (`artifact_builder.go`) | `BuildArtifact(normalized packages) -> provider_artifact_ref` |
 | `driver.ToolExecutor` | `internal/sandbox/driver/types.go` | `driver.DaytonaHelperExecutor` | `CheckHealth`, `RunTool`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand` |
 | `driver.OutputCapturer` | `driver/types.go` | `DaytonaHelperExecutor` | `CaptureOutputs` (Bridge-driven idle output capture) |
-| `driver.MemoryProjectionRefresher`, `PreparationCommandRunner`, `PreparationFileStager` | `driver/types.go` | `DaytonaHelperExecutor` | preparation-time transport |
+| `MemoryProjectionAdapter`, `driver.PreparationCommandRunner`, `driver.PreparationFileStager` | `provider_adapter.go`, `driver/types.go` | `DaytonaAdapter`, `DaytonaHelperExecutor` | Queue-owned live memory refresh and materialization transport |
 
 Callers above the adapter pass and receive only Tetral identifiers and normalized results
 (`ToolTarget`, `ToolInvocation`, `ToolExecution`, `CommandReference`,
@@ -607,13 +607,14 @@ step before any materializer call — the scan walks each path's `/`-boundary
 prefixes, not an adjacent-pair sort, because byte order places `/a.txt` between
 `/a` and `/a/b`.
 
-**Live refresh (per-file).** Post-mutation refresh (driven by Bridge's
-`RunMemory`, orchestration owned there) never swaps the whole directory while a
-model may be reading: the same driver surface pushes per-file staged upload +
-`mv -f` (atomic rename) for an upsert, and `rm -f` plus `rmdir` of
-exactly-emptied ancestors for a remove, never touching the mount root
-(`MaterializeMemoryStore` and `RefreshMemoryProjection` are one driver method
-family, two callers).
+**Live refresh (per-file).** `RunMemory` commits the PostgreSQL mutation and a
+refs-only `sandbox_memory_projection` job together. Sandbox Service leases the
+job, inspects the current provider handle through `ProviderAdapter`, derives the
+current durable heads, and invokes `MemoryProjectionAdapter`. The driver pushes
+per-file staged upload + `mv -f` (atomic rename) for an upsert, and `rm -f` plus
+`rmdir` of exactly-emptied ancestors for a remove, never touching the mount
+root. A cold or absent provider handle skips refresh; later materialization
+rebuilds the complete durable head.
 
 **Seams and serialization.** The prepare unit is pure planning + orchestration
 with no Daytona import, depending on three consumer-side interfaces beside it:

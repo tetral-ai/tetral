@@ -1432,7 +1432,6 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 	service := requireDocument(t, documents, "bridge.yaml", "Service", "bridge")
 	networkPolicy := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
 	requireContains(t, configMap, "TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s")
-	requireContains(t, configMap, "TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT: 30s")
 	requireContains(t, configMap, "TETRAL_PROVIDER_RESCHEDULE_BUDGET: \"3\"")
 	requireContains(t, configMap, "TETRAL_COMPACTION_RESCHEDULE_BUDGET: \"2\"")
 
@@ -1452,7 +1451,6 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"key: hmac-key",
 		"name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN",
 		"name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW",
-		"name: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT",
 		"name: TETRAL_PROVIDER_RESCHEDULE_BUDGET",
 		"name: TETRAL_COMPACTION_RESCHEDULE_BUDGET",
 		"name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH\n              value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token",

@@ -36,7 +36,6 @@ const (
 	EnvSandboxServiceTokenPath             = "TETRAL_BRIDGE_SANDBOX_TOKEN_PATH"    //nolint:gosec // Env-var name, not a token value.
 	EnvResourceCredRefreshMargin           = "TETRAL_RESOURCE_CRED_REFRESH_MARGIN" //nolint:gosec // Env-var name, not a credential value.
 	EnvSandboxStatusFreshnessWindow        = "TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW"
-	EnvMemoryProjectionPushTimeout         = "TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT"
 	EnvDatabaseURL                         = "TETRAL_DATABASE_URL"
 	EnvKubernetesNamespace                 = "TETRAL_KUBERNETES_NAMESPACE"
 	EnvAgentRuntimeLabelSelector           = "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR"
@@ -54,7 +53,6 @@ const (
 	defaultAgentRuntimeGRPCPort            = 9090
 	defaultSandboxStatusFreshness          = time.Minute
 	defaultResourceCredentialRefreshMargin = 30 * time.Minute
-	defaultMemoryProjectionPushTimeout     = 30 * time.Second
 	defaultProviderRescheduleBudget        = int64(3)
 	defaultCompactionRescheduleBudget      = int64(2)
 )
@@ -171,17 +169,6 @@ func SandboxStatusFreshnessWindowFromEnv(env Env) (time.Duration, error) {
 		return defaultSandboxStatusFreshness, nil
 	}
 	return parsePositiveDuration(raw, EnvSandboxStatusFreshnessWindow)
-}
-
-func MemoryProjectionPushTimeoutFromEnv(env Env) (time.Duration, error) {
-	if env == nil {
-		return 0, workload.NewConfigError("environment is required")
-	}
-	raw := strings.TrimSpace(env.Getenv(EnvMemoryProjectionPushTimeout))
-	if raw == "" {
-		return defaultMemoryProjectionPushTimeout, nil
-	}
-	return parsePositiveDuration(raw, EnvMemoryProjectionPushTimeout)
 }
 
 type JobRunnerConfig struct {

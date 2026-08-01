@@ -71,6 +71,7 @@ func TestTetralSandboxCommandStartsAllSandboxOwnedQueueRunners(t *testing.T) {
 		"SandboxToolExecutionJobRunner",
 		"SandboxActivationJobRunner",
 		"SandboxMaterializationJobRunner",
+		"SandboxMemoryProjectionJobRunner",
 		"SandboxQueueOverLimitReconciler",
 		"RunSandboxQueueOverLimitLoop",
 		"SessionPrepareJobRunner",

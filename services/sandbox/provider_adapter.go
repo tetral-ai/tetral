@@ -125,6 +125,10 @@ type ProviderAdapter interface {
 	Release(context.Context, ReleaseRequest) ProviderOutcome[ReleaseResult]
 }
 
+type MemoryProjectionAdapter interface {
+	RefreshMemoryProjection(context.Context, sandboxdriver.MemoryProjectionRefresh) ProviderOutcome[struct{}]
+}
+
 type ProviderRegistry struct {
 	adapters map[string]ProviderAdapter
 }
@@ -207,6 +211,20 @@ func normalizeBackgroundCommandResult(result sandboxdriver.CommandResult) Provid
 		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_response_malformed", "daytona returned a malformed background command result")
 	}
 	return ProviderOutcome[sandboxdriver.CommandResult]{Value: result}
+}
+
+func (a *DaytonaAdapter) RefreshMemoryProjection(ctx context.Context, refresh sandboxdriver.MemoryProjectionRefresh) ProviderOutcome[struct{}] {
+	if a == nil || a.Tools == nil {
+		return terminalProviderFailure[struct{}]("provider_configuration_invalid", "daytona memory projection adapter is unavailable")
+	}
+	refresher, ok := a.Tools.(sandboxdriver.MemoryProjectionRefresher)
+	if !ok {
+		return terminalProviderFailure[struct{}]("provider_configuration_invalid", "daytona memory projection adapter is unavailable")
+	}
+	if err := refresher.RefreshMemoryProjection(ctx, refresh); err != nil {
+		return outcomeFromProviderError[struct{}](err, ProviderOutcomeUnknown)
+	}
+	return ProviderOutcome[struct{}]{Value: struct{}{}}
 }
 
 // DaytonaResourceMaterialization owns Daytona-specific credentials, mounts,

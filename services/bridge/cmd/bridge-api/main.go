@@ -82,11 +82,6 @@ func run(ctx context.Context, env envReader) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
 	}
 	store.SandboxStatusFreshnessWindow = freshnessWindow
-	memoryPushTimeout, err := agentruntimebridge.MemoryProjectionPushTimeoutFromEnv(env)
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
-	}
-	store.MemoryProjectionPushTimeout = memoryPushTimeout
 	driverConfig, err := agentruntimebridge.SandboxDriverConfigFromEnv(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
@@ -114,7 +109,6 @@ func run(ctx context.Context, env envReader) error {
 	store.AttachmentBlobStore = blobStore
 	store.FileBlobStore = blobStore
 	store.OutputCapturer = outputcapture.NewCapturer(blobStore, sandboxExecutor)
-	store.MemoryProjectionRefresher = sandboxExecutor
 	store.MCPManifestLister = agentruntimebridge.NewGatewayMCPManifestLister(bridgeConfig.MCPConnectorGRPCAddress, grpcauth.FileTokenSource{
 		Path: bridgeConfig.GatewayTokenPath,
 	})

@@ -8,6 +8,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 const (
@@ -157,6 +158,20 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 			errorKind = "sandbox_background_command_attempts_exhausted"
 			errorMessage = "sandbox background command attempt budget exhausted"
 		}
+	case queue.KindSandboxMemoryProjection:
+		queueJob := &queuev1.QueueJob{
+			Id: candidate.JobID, WorkspaceId: candidate.WorkspaceID.String(), Kind: candidate.Kind,
+			PartitionKey: candidate.PartitionKey, DedupeKey: candidate.DedupeKey,
+		}
+		_, memoryWriteID, err := decodeMemoryProjectionTransportIdentity(queueJob)
+		if err != nil {
+			return false, err
+		}
+		finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
+			return settleMemoryProjectionTx(ctx, tx, memoryWriteID, "failed", "memory projection attempt budget exhausted", now)
+		}
+		errorKind = "sandbox_memory_projection_attempts_exhausted"
+		errorMessage = "sandbox memory projection attempt budget exhausted"
 	default:
 		return false, errors.New("sandbox over-limit job kind is not owned by an installed finalizer")
 	}

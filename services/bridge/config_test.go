@@ -88,35 +88,6 @@ func TestSandboxStatusFreshnessWindowFromEnv(t *testing.T) {
 	})
 }
 
-func TestMemoryProjectionPushTimeoutFromEnv(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		timeout, err := MemoryProjectionPushTimeoutFromEnv(configTestEnv{})
-		if err != nil {
-			t.Fatalf("MemoryProjectionPushTimeoutFromEnv: %v", err)
-		}
-		if timeout != 30*time.Second {
-			t.Fatalf("timeout = %s; want 30s", timeout)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		timeout, err := MemoryProjectionPushTimeoutFromEnv(configTestEnv{EnvMemoryProjectionPushTimeout: "45s"})
-		if err != nil {
-			t.Fatalf("MemoryProjectionPushTimeoutFromEnv: %v", err)
-		}
-		if timeout != 45*time.Second {
-			t.Fatalf("timeout = %s; want 45s", timeout)
-		}
-	})
-
-	t.Run("rejects nonpositive", func(t *testing.T) {
-		_, err := MemoryProjectionPushTimeoutFromEnv(configTestEnv{EnvMemoryProjectionPushTimeout: "0s"})
-		if err == nil || !strings.Contains(err.Error(), EnvMemoryProjectionPushTimeout+" must be a positive duration") {
-			t.Fatalf("MemoryProjectionPushTimeoutFromEnv error = %v; want positive duration validation", err)
-		}
-	})
-}
-
 func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 	env := configTestEnv{
 		EnvBridgeMCPConnectorGRPCAddr: "gateway.tetral-system.svc.cluster.local:9091",
