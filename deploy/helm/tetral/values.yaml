@@ -90,7 +90,6 @@ secrets:
   runtimeBindingToken: runtime-binding-token
   sandboxBlob: sandbox-blob
   sandboxDaytona: sandbox-daytona
-  sandboxInternalGRPC: sandbox-internal-grpc
   sandboxR2Parent: sandbox-r2-parent
   tetralBlob: tetral-blob
   tetralDatabase: tetral-database

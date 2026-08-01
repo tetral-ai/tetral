@@ -13,10 +13,11 @@ import (
 
 type EnvironmentReadyFanoutStore interface {
 	FanoutReadyEnvironment(context.Context, EnvironmentReadyFanoutJob, time.Time) (int, error)
+	FinalizeReadyEnvironmentFanout(context.Context, EnvironmentReadyFanoutJob, time.Time) error
 }
 
 type EnvironmentReadyFanoutJobRunner struct {
-	Queue  SessionPrepareQueueClient
+	Queue  SandboxQueueClient
 	Store  EnvironmentReadyFanoutStore
 	Config EnvironmentRunnerConfig
 	Clock  func() time.Time
@@ -79,6 +80,15 @@ func (r *EnvironmentReadyFanoutJobRunner) processJob(ctx context.Context, queueJ
 		return heartbeatErr
 	}
 	if fanoutErr != nil {
+		if queueJob.GetMaxAttempts() > 0 && queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
+			if err := r.Store.FinalizeReadyEnvironmentFanout(ctx, job, r.now()); err != nil {
+				return err
+			}
+			return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+				WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+				ErrorKind: "environment_ready_fanout_attempts_exhausted", ErrorMessage: "environment ready fanout attempt budget exhausted",
+			}))
+		}
 		return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 			WorkspaceId:  job.WorkspaceID,
 			JobId:        job.JobID,

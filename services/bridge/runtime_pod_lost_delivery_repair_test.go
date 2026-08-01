@@ -197,54 +197,14 @@ func TestPostgreSQLRuntimePodLossAllowsErroredRequestWithDeliveredSpawn(t *testi
 	}
 }
 
-func TestPostgreSQLRuntimePodLossDeliverySettlementFailurePreventsRelease(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 21, "spawn_agent", "idle", true, true, false, true, false)
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_messages SET data_json = '{}'
-		  WHERE workspace_id = 'default' AND session_id = $1 AND source_event_id = $2`, fixture.sessionID, fixture.toolUseEventID); err != nil {
-		t.Fatalf("break durable spawn tool message: %v", err)
-	}
-	releaser := &recordingSandboxReleaseClient{}
-	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
-	err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, fixture.now)
-	if err == nil {
-		t.Fatal("repair with invalid delivery settlement succeeded; want failure")
-	}
-	if len(releaser.requests) != 0 {
-		t.Fatalf("sandbox releases = %d; want none before settlement commits", len(releaser.requests))
-	}
-	var bindingCount int
-	var resultCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_runtime_bindings
-		  WHERE workspace_id = 'default' AND session_id = $1 AND binding_id = $2 AND binding_generation = $3`,
-		fixture.sessionID, fixture.binding.BindingID, fixture.binding.BindingGeneration).Scan(&bindingCount); err != nil {
-		t.Fatalf("count binding after failed settlement: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events
-		  WHERE workspace_id = 'default' AND session_id = $1 AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'tool_use_event_id' = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount); err != nil {
-		t.Fatalf("count result after failed settlement: %v", err)
-	}
-	if bindingCount != 1 || resultCount != 0 {
-		t.Fatalf("failed settlement binding=%d results=%d; want rollback 1/0", bindingCount, resultCount)
-	}
-}
-
 func TestPostgreSQLRuntimePodLossDeliveryStaleBindingFencePreventsSettlement(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 22, "send_message", "idle", true, true, false, true, false)
 	stale := fixture.binding
 	stale.BindingGeneration--
-	releaser := &recordingSandboxReleaseClient{}
-	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, stale, fixture.now)
 	assertRuntimePodLostRetryableError(t, err, "runtime_pod_lost_claim_stale")
-	if len(releaser.requests) != 0 {
-		t.Fatalf("stale binding releases = %d; want none", len(releaser.requests))
-	}
 	var resultCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_events
@@ -368,51 +328,6 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 }
 
-func TestPostgreSQLRuntimePodLossDeliverySettlementCommitsBeforeRelease(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 23, "spawn_agent", "idle", true, false, false, true, false)
-	releaser := &recordingSandboxReleaseClient{
-		beforeRelease: func(SandboxReleaseRequest) error {
-			var wakeCount int
-			var resultCount int
-			var bindingCount int
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM queue_jobs
-				  WHERE workspace_id = 'default'
-				    AND kind = 'runtime_input'
-				    AND payload_json::jsonb ->> 'runtime_input_id' = $1`,
-				completionRuntimeInputID(fixture.deliveryID),
-			).Scan(&wakeCount); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_events
-				  WHERE workspace_id = 'default' AND session_id = $1
-				    AND type = 'agent.tool_result'
-				    AND payload_json::jsonb ->> 'tool_use_event_id' = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_runtime_bindings
-				  WHERE workspace_id = 'default' AND session_id = $1 AND binding_id = $2 AND binding_generation = $3`,
-				fixture.sessionID, fixture.binding.BindingID, fixture.binding.BindingGeneration).Scan(&bindingCount); err != nil {
-				return err
-			}
-			if wakeCount != 1 || resultCount != 1 || bindingCount != 1 {
-				return fmt.Errorf("release observed wakes=%d results=%d binding=%d; want 1/1/1", wakeCount, resultCount, bindingCount)
-			}
-			return nil
-		},
-	}
-	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
-	if err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, fixture.now); err != nil {
-		t.Fatalf("repair with delivery release fence: %v", err)
-	}
-	if len(releaser.requests) != 1 {
-		t.Fatalf("sandbox releases = %d; want one after settlement", len(releaser.requests))
-	}
-}
-
 func TestPostgreSQLRuntimePodLossDeliveryChildCloseSerializesBeforeRedrive(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 24, "send_message", "idle", true, false, false, true, false)
@@ -502,11 +417,9 @@ func seedRuntimePodLostDeliveryFixture(
 		now:            time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
 	}
 	bindingID := fmt.Sprintf("bind_pod_loss_delivery_%d", index)
-	fixture.binding = runtimePodLostReleaseFenceBinding(fixture.sessionID, bindingID, int64(index+2))
+	fixture.binding = runtimePodLostBinding(fixture.sessionID, bindingID, int64(index+2))
 	seedBridgeAPISession(t, db, "default", fixture.sessionID, fixture.parentThreadID)
 	seedBridgeAPIRuntimeBinding(t, db, "default", fixture.sessionID, bindingID, fixture.binding.BindingGeneration, fixture.binding.PodUID)
-	seedBridgeAPIPreparationReady(t, db, "default", fixture.sessionID, "prep_"+fixture.sessionID)
-	seedBridgeAPIActiveSandbox(t, db, "default", fixture.sessionID, "2026-01-01T00:04:59Z")
 	seedRuntimePodLostStatusFence(t, db, fixture.sessionID, bindingID, fixture.binding.BindingGeneration)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_threads (

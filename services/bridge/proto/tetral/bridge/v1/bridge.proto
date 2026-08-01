@@ -19,7 +19,7 @@ service AgentRuntimeBridgeService {
   rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);
   rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);
   rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);
-  rpc AwaitSandboxExecution(AcceptSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);
+  rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
@@ -99,11 +99,6 @@ enum ChildLifecycleDisposition {
   CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED = 6;
 }
 
-enum SealedAgentMailDisposition {
-  SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED = 0;
-  SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH = 1;
-}
-
 message RuntimeMessageDraft {
   string runtime_local_id = 1;
   string source_kind = 2;
@@ -178,13 +173,6 @@ message ChildLifecycleStamp {
   string effective_at = 3;
 }
 
-message SealedAgentMailStamp {
-  string runtime_input_id = 1;
-  string birth_preparation_attempt_id = 2;
-  string failed_preparation_attempt_id = 3;
-  SealedAgentMailDisposition disposition = 4;
-}
-
 message IdleCloseoutStamp {
   string durable_turn_id = 1;
   string idle_event_id = 2;
@@ -205,7 +193,6 @@ message DeclarationReceipt {
   string declaration_digest = 10;
   RequestRescheduleStamp request_reschedule = 11;
   repeated ChildLifecycleStamp child_lifecycle = 12;
-  SealedAgentMailStamp sealed_agent_mail = 13;
   IdleCloseoutStamp idle_closeout = 14;
   optional int64 compacted_through_message_sequence = 15;
 }
@@ -658,6 +645,16 @@ message AcceptSandboxExecutionRequest {
 
 message AcceptSandboxExecutionResponse {
   BridgeWriteAck ack = 1;
+}
+
+message AwaitSandboxExecutionRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string normalized_input_hash = 3;
+  string tool_name = 4;
+  string input_json = 5;
+  reserved 6;
+  string model_tool_call_id = 7;
 }
 
 message AwaitSandboxExecutionResponse {

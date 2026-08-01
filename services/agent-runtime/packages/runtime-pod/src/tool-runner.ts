@@ -25,8 +25,6 @@ import {
   BridgeWriteStatus,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
-  CancelCommandRequest,
-  CancelCommandResponse,
   CreateChildThreadRequest,
   CreateChildThreadResponse,
   ListChildThreadsRequest,
@@ -44,6 +42,7 @@ import type {
   RunMemoryRequest,
   RunMemoryResponse,
   AcceptSandboxExecutionResponse,
+  AwaitSandboxExecutionRequest,
   AwaitSandboxExecutionResponse,
   AcceptSandboxExecutionRequest,
   RuntimeScope,
@@ -92,22 +91,10 @@ import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import { validateChildLifecycleDeclarationResponse } from "./bridge-client.js";
 
-// MEMORY_PROJECTION_REPLAY_DELAY_MS bounds the wait between reissues of the same
-// tool_use_event_id after a memory tool result reports projection_refresh_failed
-// (the replay loop in runBridgeTool below). Value: pinned at 300 ms, the top of
-// the established 100-300 ms retry-backoff family. It is fixed (not ramped), with
-// no attempt ceiling and no total deadline: the common trigger is brief push-lock
-// contention on the Bridge side that clears within one lock holder's push, so a
-// short fixed delay recovers fastest; the loop instead ends only when the replay
-// lands or the memory tool returns a non-replay result. The wait is
-// cancellation-aware — the injected sleep honors the tool route's AbortSignal and
-// the abort is re-checked after each wait.
-// UPDATE-WITH: runBridgeTool replay loop (isMemoryProjectionReplayResult / this.sleep).
-const MEMORY_PROJECTION_REPLAY_DELAY_MS = 300;
-// Sandbox acceptance and result-wait transport retries rejoin one durable
-// execution. This delay paces only transport uncertainty; it is not an
-// execution-attempt budget.
-const SANDBOX_EXECUTION_REJOIN_DELAY_MS = 300;
+// Durable tool-route transport retries rejoin one accepted identity. This
+// delay paces only transport uncertainty; it is not an execution-attempt
+// budget and never authorizes the provider operation a second time.
+const DURABLE_TOOL_REJOIN_DELAY_MS = 300;
 // WEB_SEARCH_REQUESTS_MAX / WEB_FETCH_REQUESTS_MAX bound the per-call
 // server_tool_use counters accepted from a RunWebResponse usage block before that
 // block is attached to the durable web tool result (webServerToolUse below). They
@@ -146,7 +133,6 @@ export interface RuntimePodToolRunnerOptions {
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
-    | "cancelCommand"
     | "createChildThread"
     | "resolveChildThread"
     | "listChildThreads"
@@ -191,7 +177,6 @@ export class RuntimePodToolRunner {
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
-    | "cancelCommand"
     | "createChildThread"
     | "resolveChildThread"
     | "listChildThreads"
@@ -260,7 +245,7 @@ export class RuntimePodToolRunner {
   async acceptSandboxExecution(request: RuntimeSandboxExecutionRequest): Promise<RuntimeSandboxExecutionAcceptanceResult> {
     const scope = this.scope(request);
     const inputJson = stableJsonStringify(request.input);
-    const durableRequest: AcceptSandboxExecutionRequest = {
+    const durableRequest: AwaitSandboxExecutionRequest = {
       scope,
       toolUseEventId: request.toolUseEventId,
       modelToolCallId: request.modelToolCallId,
@@ -276,10 +261,10 @@ export class RuntimePodToolRunner {
         }
         return { type: "accepted" };
       } catch (error) {
-        if (isSandboxAcceptanceRejection(error)) {
+        if (isDurableBridgeRejection(error)) {
           return toolFailure(request, "Bridge rejected the sandbox tool call.", false);
         }
-        await this.sleep(SANDBOX_EXECUTION_REJOIN_DELAY_MS, new AbortController().signal);
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, new AbortController().signal);
       }
     }
   }
@@ -307,7 +292,10 @@ export class RuntimePodToolRunner {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Sandbox tool execution was cancelled.");
         }
-        await this.sleep(SANDBOX_EXECUTION_REJOIN_DELAY_MS, request.abortSignal);
+        if (isDurableBridgeRejection(error)) {
+          return { type: "stale_custody" };
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
     }
   }
@@ -377,45 +365,42 @@ export class RuntimePodToolRunner {
       ...scope,
       requestId: stableId("req", `command-followup:${request.toolUseEventId}`),
     };
-    try {
-      const metadata = await this.metadata();
-      const cancelOnAbort = (): void => {
-        void cancelCommand(this.bridgeClient, {
+    for (;;) {
+      try {
+        const metadata = await this.metadata();
+        if (chars === undefined || chars.length === 0) {
+          const response = await readCommandResult(this.bridgeClient, {
+            scope: commandScope,
+            taskId,
+            deferTerminalSettlement: false,
+            maxOutputTokens,
+            toolUseEventId: request.toolUseEventId,
+          }, metadata, request.abortSignal);
+          if (!bridgeAckAccepted(response.ack?.status)) {
+            return toolFailure(request, "Bridge rejected the command poll.", true);
+          }
+          return resultJsonToExecutionResult(request, response.resultJson);
+        }
+        const response = await sendCommandInput(this.bridgeClient, {
           scope: commandScope,
           taskId,
-          reason: "runtime_interrupted",
-          toolUseEventId: request.toolUseEventId,
-        }, metadata, new AbortController().signal).catch(() => undefined);
-      };
-      if (chars === undefined || chars.length === 0) {
-        const response = await readCommandResult(this.bridgeClient, {
-          scope: commandScope,
-          taskId,
-          deferTerminalSettlement: false,
           maxOutputTokens,
+          inputJson: stableJsonStringify(request.input),
           toolUseEventId: request.toolUseEventId,
-        }, metadata, request.abortSignal, cancelOnAbort);
+        }, metadata, request.abortSignal);
         if (!bridgeAckAccepted(response.ack?.status)) {
-          return toolFailure(request, "Bridge rejected the command poll.", true);
+          return toolFailure(request, "Bridge rejected the command input.", true);
         }
         return resultJsonToExecutionResult(request, response.resultJson);
+      } catch (error) {
+        if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+          return toolCancelled(request, "Command task was cancelled.");
+        }
+        if (isDurableBridgeRejection(error)) {
+          return toolFailure(request, "Bridge rejected the command operation.", false);
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
-      const response = await sendCommandInput(this.bridgeClient, {
-        scope: commandScope,
-        taskId,
-        maxOutputTokens,
-        inputJson: stableJsonStringify(request.input),
-        toolUseEventId: request.toolUseEventId,
-      }, metadata, request.abortSignal, cancelOnAbort);
-      if (!bridgeAckAccepted(response.ack?.status)) {
-        return toolFailure(request, "Bridge rejected the command input.", true);
-      }
-      return resultJsonToExecutionResult(request, response.resultJson);
-    } catch (error) {
-      if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-        return toolCancelled(request, "Command task was cancelled.");
-      }
-      return toolFailure(request, "Bridge command input route is unavailable.", true);
     }
   }
 
@@ -432,8 +417,8 @@ export class RuntimePodToolRunner {
       operation: stringField(request.input, "action") ?? "",
       inputJson,
     };
-    try {
-      while (true) {
+    while (true) {
+      try {
         throwIfToolRouteAborted(request.abortSignal);
         const metadata = await this.metadata();
         throwIfToolRouteAborted(request.abortSignal);
@@ -441,18 +426,13 @@ export class RuntimePodToolRunner {
         if (!bridgeAckAccepted(response.ack?.status)) {
           return toolFailure(request, "Bridge rejected the memory tool call.", true);
         }
-        if (!isMemoryProjectionReplayResult(response.resultJson)) {
-          return resultJsonToExecutionResult(request, response.resultJson);
+        return resultJsonToExecutionResult(request, response.resultJson);
+      } catch (error) {
+        if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+          return toolCancelled(request, "Memory tool execution was cancelled.");
         }
-        throwIfToolRouteAborted(request.abortSignal);
-        await this.sleep(MEMORY_PROJECTION_REPLAY_DELAY_MS, request.abortSignal);
-        throwIfToolRouteAborted(request.abortSignal);
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
-    } catch (error) {
-      if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-        return toolCancelled(request, "Memory tool execution was cancelled.");
-      }
-      return toolFailure(request, "Bridge memory tool execution is unavailable.", true);
     }
   }
 
@@ -1494,7 +1474,7 @@ function acceptSandboxExecution(
 
 function awaitSandboxExecution(
   client: Pick<AgentRuntimeBridgeServiceClient, "awaitSandboxExecution">,
-  request: AcceptSandboxExecutionRequest,
+  request: AwaitSandboxExecutionRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
 ): Promise<AwaitSandboxExecutionResponse> {
@@ -1519,10 +1499,9 @@ function sendCommandInput(
   request: SendCommandInputRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
-  onAbort: () => void,
 ): Promise<SendCommandInputResponse> {
   return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.sendCommandInput(unaryRequest, unaryMetadata, callback), onAbort
+    client.sendCommandInput(unaryRequest, unaryMetadata, callback)
   );
 }
 
@@ -1531,21 +1510,9 @@ function readCommandResult(
   request: ReadCommandResultRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
-  onAbort: () => void,
 ): Promise<ReadCommandResultResponse> {
   return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.readCommandResult(unaryRequest, unaryMetadata, callback), onAbort
-  );
-}
-
-function cancelCommand(
-  client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
-  request: CancelCommandRequest,
-  metadata: Metadata,
-  abortSignal: AbortSignal,
-): Promise<CancelCommandResponse> {
-  return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.cancelCommand(unaryRequest, unaryMetadata, callback)
+    client.readCommandResult(unaryRequest, unaryMetadata, callback)
   );
 }
 
@@ -1749,11 +1716,9 @@ function cancellableUnaryCall<Request, Response>(
   metadata: Metadata,
   abortSignal: AbortSignal,
   invoke: UnaryInvoker<Request, Response>,
-  onAbort?: () => void,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
     if (abortSignal.aborted) {
-      onAbort?.();
       reject(new ToolRouteAborted());
       return;
     }
@@ -1771,7 +1736,6 @@ function cancellableUnaryCall<Request, Response>(
       settlement();
     };
     const abort = (): void => {
-      onAbort?.();
       call?.cancel();
       settle(() => reject(new ToolRouteAborted()));
     };
@@ -1799,7 +1763,7 @@ function isGrpcStatus(error: unknown, code: status): boolean {
   return typeof error === "object" && error !== null && (error as Partial<ServiceError>).code === code;
 }
 
-function isSandboxAcceptanceRejection(error: unknown): boolean {
+function isDurableBridgeRejection(error: unknown): boolean {
   if (typeof error !== "object" || error === null || typeof (error as Partial<ServiceError>).code !== "number") {
     return false;
   }
@@ -1865,14 +1829,6 @@ function parseResultJson(resultJson: string): RuntimeJsonValue | undefined {
   } catch {
     return undefined;
   }
-}
-
-function isMemoryProjectionReplayResult(resultJson: string): boolean {
-  const parsed = parseResultJson(resultJson);
-  return isRecord(parsed) &&
-    stringField(parsed, "status") === "runtime_error" &&
-    stringField(parsed, "error_code") === "projection_refresh_failed" &&
-    parsed.retryable === true;
 }
 
 function withBackgroundTask(resultJson: string, taskId: string): string {

@@ -70,16 +70,6 @@ func run(ctx context.Context, env envReader) error {
 	store.RuntimeBindingTokenHMACKey = tokenKey
 	store.ProviderRescheduleBudget = bridgeConfig.ProviderRescheduleBudget
 	store.CompactionRescheduleBudget = bridgeConfig.CompactionRescheduleBudget
-	refreshMargin, err := agentruntimebridge.ResourceCredentialRefreshMarginFromEnv(env)
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
-	}
-	store.ResourceCredentialRefreshMargin = refreshMargin
-	freshnessWindow, err := agentruntimebridge.SandboxStatusFreshnessWindowFromEnv(env)
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
-	}
-	store.SandboxStatusFreshnessWindow = freshnessWindow
 	blobConfig, err := blob.LoadConfig()
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)

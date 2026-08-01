@@ -970,7 +970,7 @@ func (s *PostgreSQLQueueStore) SweepEmptyPartitionCounters(ctx context.Context, 
 			         WHERE jobs.workspace_id = counters.workspace_id
 			           AND jobs.partition_key = counters.partition_key
 			  )
-			  ORDER BY counters.updated_at ASC, counters.workspace_id ASC, counters.partition_key ASC
+			  ORDER BY counters.workspace_id ASC, counters.partition_key ASC
 			  LIMIT $1`,
 			request.Limit,
 		)
@@ -1084,7 +1084,44 @@ func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (boo
 	if request.Now.IsZero() {
 		request.Now = storage.Now()
 	}
-	return s.fencedTerminalUpdate(ctx, request.WorkspaceID, request.JobID, request.LeaseToken, StatusAcknowledged, "acknowledged_at", "", "", request.Now.UTC())
+	if s == nil || s.client == nil {
+		return false, &ValidationError{Message: "queue store is required"}
+	}
+	var updated bool
+	err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.acknowledged", func(tx *dbconnect.Tx) error {
+		var err error
+		updated, err = AckTx(ctx, tx, request)
+		return err
+	})
+	return updated, err
+}
+
+// AckTx acknowledges one leased job inside a caller-owned business
+// transaction. It is used when durable business state and removal of the
+// current Queue notification must become visible together.
+func AckTx(ctx context.Context, tx queueMutationTransaction, request AckRequest) (bool, error) {
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
+		return false, err
+	}
+	if tx == nil {
+		return false, &ValidationError{Message: "queue transaction is required"}
+	}
+	if request.Now.IsZero() {
+		request.Now = storage.Now()
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE queue_jobs
+		    SET status = 'acknowledged', acknowledged_at = $4,
+		        lease_token = NULL, leased_by = NULL, leased_at = NULL,
+		        leased_until = NULL, last_error_kind = NULL,
+		        last_error_message = NULL, updated_at = $4
+		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'`,
+		string(request.WorkspaceID), request.JobID, request.LeaseToken, request.Now.UTC(),
+	)
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected(result), nil
 }
 
 func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) (bool, error) {
@@ -1221,7 +1258,7 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 		} else if err != nil {
 			return err
 		}
-		if kind != KindSessionPrepare && kind != KindRuntimeConfigUpdate {
+		if kind != KindRuntimeConfigUpdate {
 			return &ValidationError{Message: "queue job kind cannot be deferred"}
 		}
 		if attemptCount < 1 {
@@ -1319,8 +1356,8 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 // client delay authority: RetryRequest reports only the failure (ErrorKind,
 // ErrorMessage) and has no retry_after field, so the durable available_at is
 // derived here from the transition-owned counter as capped exponential backoff
-// with full jitter. Retry and session_prepare Defer supply attempt_count;
-// runtime_config_update Defer supplies its scoped defer_count. The doubling
+// with full jitter. Retry supplies attempt_count; runtime_config_update Defer
+// supplies its scoped defer_count. The doubling
 // loop yields capDelay = min(MaxDelay, BaseDelay*2^(count-1)), saturating at MaxDelay, and the
 // returned delay is uniform in [0, capDelay] (RandomInt64(capDelay+1) makes the
 // cap inclusive). The transitions share this computation; the RetryPolicy inputs

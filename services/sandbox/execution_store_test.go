@@ -15,7 +15,7 @@ import (
 )
 
 func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 
@@ -97,7 +97,7 @@ func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *
 }
 
 func TestPostgreSQLSandboxActivationAttachmentLocksExecutionBeforeQueuePartition(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	if _, err := adminDB.Exec(`INSERT INTO session_sandbox_bindings (
@@ -125,7 +125,7 @@ func TestPostgreSQLSandboxActivationAttachmentLocksExecutionBeforeQueuePartition
 }
 
 func TestPostgreSQLSandboxMaterializationAttachmentLocksExecutionBeforeQueuePartition(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	if _, err := adminDB.Exec(`INSERT INTO session_sandbox_bindings (
@@ -185,7 +185,7 @@ func assertExecutionBeforeQueueLockOrder(t *testing.T, db *sql.DB, partition str
 }
 
 func TestPostgreSQLSandboxExecutionRequiresExactMaterializedRevision(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	if _, err := adminDB.Exec(`INSERT INTO session_sandbox_bindings (
@@ -214,7 +214,7 @@ func TestPostgreSQLSandboxExecutionRequiresExactMaterializedRevision(t *testing.
 }
 
 func TestPostgreSQLSandboxExecutionCannotAuthorizeAfterPreparationDeadline(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
@@ -247,8 +247,39 @@ func TestPostgreSQLSandboxExecutionCannotAuthorizeAfterPreparationDeadline(t *te
 	assertSandboxExecutionState(t, adminDB, "evt_execution_a", "terminal_unconsumed", 1)
 }
 
+func TestPostgreSQLSandboxExecutionReturnsPreSubmissionDisappearanceToActivation(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	work := loadReadySandboxExecutionWork(t, coordinator)
+	if prepared, err := coordinator.BeginPreparing(context.Background(), work, now.Add(time.Minute)); err != nil || !prepared {
+		t.Fatalf("BeginPreparing = %t, %v", prepared, err)
+	}
+	if err := coordinator.WaitForActivation(context.Background(), work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation after provider disappearance: %v", err)
+	}
+	var state string
+	var authorizedRevision sql.NullInt64
+	var authorizedHandle sql.NullString
+	var preparationDeadline sql.NullTime
+	if err := adminDB.QueryRow(`SELECT execution_state, authorized_binding_revision,
+		authorized_provider_resource_id, preparation_deadline
+		FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND tool_use_event_id='evt_execution_a'`).Scan(
+		&state, &authorizedRevision, &authorizedHandle, &preparationDeadline,
+	); err != nil {
+		t.Fatalf("read execution after activation handoff: %v", err)
+	}
+	if state != "waiting_activation" || authorizedRevision.Valid || authorizedHandle.Valid || preparationDeadline.Valid {
+		t.Fatalf("execution after activation handoff = %q/%v/%v/%v; want waiting_activation with cleared preparation authority", state, authorizedRevision, authorizedHandle, preparationDeadline)
+	}
+}
+
 func TestPostgreSQLSandboxExecutionUsesDatabaseTimeForCredentialReadiness(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
@@ -274,7 +305,7 @@ func TestPostgreSQLSandboxExecutionUsesDatabaseTimeForCredentialReadiness(t *tes
 func TestPostgreSQLSandboxExecutionLoadsReclaimableAuthorizationStates(t *testing.T) {
 	for _, state := range []string{"preparing", "running"} {
 		t.Run(state, func(t *testing.T) {
-			runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+			runtimeDB, adminDB := newSandboxServiceTestDB(t)
 			seedSandboxExecutionStoreFixture(t, adminDB)
 			now := time.Now().UTC()
 			seedReadySandboxBinding(t, adminDB, now)
@@ -303,12 +334,12 @@ func TestPostgreSQLSandboxExecutionAuthorizationRechecksDurableGates(t *testing.
 		name   string
 		mutate string
 	}{
-		{name: "release fence", mutate: `UPDATE session_sandbox_bindings SET release_requested_at = CURRENT_TIMESTAMP, release_reason = 'explicit_release' WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`},
+		{name: "release fence", mutate: `UPDATE session_sandbox_bindings SET release_requested_at = CURRENT_TIMESTAMP, release_reason = 'session_delete' WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`},
 		{name: "resource revision", mutate: `UPDATE sessions SET sandbox_resource_revision = sandbox_resource_revision + 1 WHERE workspace_id = 'ws_execution_store' AND id = 'sesn_execution_store'`},
 		{name: "credential expiry", mutate: `UPDATE session_sandbox_bindings SET resource_credential_expires_at = CURRENT_TIMESTAMP WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+			runtimeDB, adminDB := newSandboxServiceTestDB(t)
 			seedSandboxExecutionStoreFixture(t, adminDB)
 			now := time.Now().UTC()
 			seedReadySandboxBinding(t, adminDB, now)
@@ -342,7 +373,7 @@ func TestPostgreSQLSandboxExecutionAuthorizationRechecksDurableGates(t *testing.
 }
 
 func TestPostgreSQLSandboxExecutionRejectsStaleActivationObservation(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
@@ -368,7 +399,7 @@ func TestPostgreSQLSandboxExecutionRejectsStaleActivationObservation(t *testing.
 }
 
 func TestPostgreSQLSandboxExecutionRejectsStaleMissingBindingObservation(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
@@ -389,7 +420,7 @@ func TestPostgreSQLSandboxExecutionRejectsStaleMissingBindingObservation(t *test
 }
 
 func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningActivation(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
@@ -415,7 +446,7 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningActivation(t *testing.
 }
 
 func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
@@ -444,8 +475,38 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *tes
 	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "pending", 1)
 }
 
+func TestPostgreSQLSandboxExecutionJoinsInFlightEarlierResourceRevision(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings SET materialized_resource_revision = 0
+		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`); err != nil {
+		t.Fatalf("make materialization necessary: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	first := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForMaterialization(context.Background(), first); err != nil {
+		t.Fatalf("create R1 materialization: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE sandbox_lifecycle_operations SET state = 'running'
+		WHERE workspace_id = 'ws_execution_store' AND kind = 'materialize'`); err != nil {
+		t.Fatalf("mark R1 materialization running: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE sessions SET sandbox_resource_revision = 2
+		WHERE workspace_id = 'ws_execution_store' AND id = 'sesn_execution_store'`); err != nil {
+		t.Fatalf("advance desired resource revision: %v", err)
+	}
+
+	second := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_b")
+	if err := coordinator.WaitForMaterialization(context.Background(), second); err != nil {
+		t.Fatalf("join R1 while R2 is desired: %v", err)
+	}
+	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "waiting_materialization", 1)
+}
+
 func TestPostgreSQLSandboxExecutionStartsBackgroundReconciliationAtomically(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
@@ -492,7 +553,7 @@ func TestPostgreSQLSandboxExecutionStartsBackgroundReconciliationAtomically(t *t
 }
 
 func TestPostgreSQLSandboxStartActivationUsesBoundEnvironmentGenerationWithoutCurrentArtifact(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedReadySandboxBinding(t, adminDB, time.Now().UTC())
 	if _, err := adminDB.Exec(`UPDATE environments SET current_generation = 2

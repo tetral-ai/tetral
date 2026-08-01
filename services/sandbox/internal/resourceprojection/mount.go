@@ -50,8 +50,8 @@ func MountAliveCommand() string {
 	return b.String()
 }
 
-func RunMountBindVerify(ctx context.Context, runner driver.PreparationCommandRunner, target driver.PreparationCommandTarget, plan Plan, config MountBindVerifyCommandConfig, env map[string]string, timeout time.Duration) error {
-	return runner.RunPreparationCommand(ctx, target, MountBindVerifyCommand(plan, config), env, timeout)
+func RunMountBindVerify(ctx context.Context, runner driver.DaytonaCommandRunner, target driver.DaytonaCommandTarget, plan Plan, config MountBindVerifyCommandConfig, env map[string]string, timeout time.Duration) error {
+	return runner.RunDaytonaCommand(ctx, target, MountBindVerifyCommand(plan, config), env, timeout)
 }
 
 func MountBindVerifyCommand(plan Plan, config MountBindVerifyCommandConfig) string {

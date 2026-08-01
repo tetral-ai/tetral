@@ -58,16 +58,18 @@ var startupErrorInventory = map[string][]startupInventoryEntry{
 		{expression: `fmt.Errorf("schema migration: %w", err)`, bucket: bucketDependency, count: 1},
 	},
 	"BuildRouter": {
-		// Six `err` returns share this text: five forward already-classified
+		// Seven `err` returns share this text: five forward already-classified
 		// callee errors (validatePublicAPIConfig, EnsureDataDir,
 		// loadDefaultEnvironmentArtifactRefFromEnv, buildOptionalBlobStore,
 		// buildSkillHandler),
-		// and one is the encryption.NewAES256GCMEncryptor construction leaf (D).
+		// one is the encryption.NewAES256GCMEncryptor construction leaf (D), and
+		// one is the Session-delete transaction's Sandbox release callback.
 		// That encryptor leaf is env-unreachable for bad keys — ValidateVaultKey
 		// validates hex+length up front — so it owes no A.3/A.4 case (its D label is
-		// a type-statement only). None of the six produce a ConfigError textually,
+		// a type-statement only). The transaction callback is not a startup path.
+		// None of the seven produce a ConfigError textually,
 		// so the aggregate is labelled propagate for the text-keyed bucket checks.
-		{expression: "err", bucket: bucketPropagate, count: 6},
+		{expression: "err", bucket: bucketPropagate, count: 7},
 		{expression: `fmt.Errorf("runtime client is required")`, bucket: bucketPropagate, count: 1},
 		{expression: `fmt.Errorf("raw database is required")`, bucket: bucketPropagate, count: 1},
 		{expression: `fmt.Errorf("internal principal verifier configuration: %w", err)`, bucket: bucketConfig, count: 1},

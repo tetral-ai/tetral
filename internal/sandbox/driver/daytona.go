@@ -67,8 +67,8 @@ var helperCommandNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var helperPayloadIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type DaytonaHelperExecutor struct {
-	client                    daytonaSandboxGetter
-	preparationCommandTimeout time.Duration
+	client         daytonaSandboxGetter
+	commandTimeout time.Duration
 }
 
 type daytonaSandboxGetter interface {
@@ -138,16 +138,13 @@ func (g daytonaClientSandboxGetter) Get(ctx context.Context, providerSandboxID s
 	return daytonaSandboxHandle{FileSystem: got.FileSystem, Process: got.Process}, nil
 }
 
-func NewDaytonaHelperExecutor(cfg Config) (*DaytonaHelperExecutor, error) {
-	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
-		APIKey: cfg.DaytonaAPIKey,
-		APIUrl: cfg.DaytonaAPIURL,
-		Target: cfg.DaytonaTarget,
-	})
-	if err != nil {
-		return nil, err
+// NewDaytonaHelperExecutorForSDKClient binds helper operations to the
+// process-wide Daytona client owned by the Sandbox Service adapter.
+func NewDaytonaHelperExecutorForSDKClient(client *daytona.Client, timeout time.Duration) (*DaytonaHelperExecutor, error) {
+	if client == nil || timeout <= 0 {
+		return nil, errors.New("daytona helper client and command timeout are required")
 	}
-	return &DaytonaHelperExecutor{client: daytonaClientSandboxGetter{client: client}, preparationCommandTimeout: cfg.PreparationCommandTimeout}, nil
+	return &DaytonaHelperExecutor{client: daytonaClientSandboxGetter{client: client}, commandTimeout: timeout}, nil
 }
 
 func NewDaytonaHelperExecutorForClient(client daytonaSandboxGetter) *DaytonaHelperExecutor {
@@ -158,16 +155,8 @@ func NewDaytonaHelperExecutorForSandboxServices(get func(context.Context, string
 	return &DaytonaHelperExecutor{client: daytonaSandboxServicesGetter{get: get}}
 }
 
-func NewDaytonaHelperExecutorForClientWithPreparationTimeout(client daytonaSandboxGetter, timeout time.Duration) *DaytonaHelperExecutor {
-	return &DaytonaHelperExecutor{client: client, preparationCommandTimeout: timeout}
-}
-
-func (e *DaytonaHelperExecutor) RunTool(ctx context.Context, invocation ToolInvocation) (ToolExecution, error) {
-	prepared, err := e.PrepareTool(ctx, invocation)
-	if err != nil {
-		return ToolExecution{}, err
-	}
-	return e.ExecutePreparedTool(ctx, prepared)
+func NewDaytonaHelperExecutorForClientWithCommandTimeout(client daytonaSandboxGetter, timeout time.Duration) *DaytonaHelperExecutor {
+	return &DaytonaHelperExecutor{client: client, commandTimeout: timeout}
 }
 
 // PrepareTool validates and stages one deterministic helper payload. It may
@@ -672,7 +661,7 @@ func (e *DaytonaHelperExecutor) CancelCommand(ctx context.Context, cancel Comman
 	return e.executeCommandHelper(ctx, cancel.CommandReference, helperSubcommandCancel, input)
 }
 
-func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, target PreparationCommandTarget, command string, env map[string]string, timeout time.Duration) error {
+func (e *DaytonaHelperExecutor) RunDaytonaCommand(ctx context.Context, target DaytonaCommandTarget, command string, env map[string]string, timeout time.Duration) error {
 	if e == nil || e.client == nil {
 		return errors.New("daytona sandbox client is unavailable")
 	}
@@ -680,13 +669,13 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return errors.New("provider sandbox id is required")
 	}
 	if strings.TrimSpace(command) == "" {
-		return errors.New("preparation command is required")
+		return errors.New("daytona command is required")
 	}
 	if timeout <= 0 {
-		return errors.New("preparation command timeout is required")
+		return errors.New("daytona command timeout is required")
 	}
-	if e.preparationCommandTimeout <= 0 || timeout != e.preparationCommandTimeout {
-		return errors.New("preparation command timeout does not match configured server-side timeout")
+	if e.commandTimeout <= 0 || timeout != e.commandTimeout {
+		return errors.New("daytona command timeout does not match configured server-side timeout")
 	}
 	sandboxHandle, err := e.client.Get(ctx, target.ProviderSandboxID)
 	if err != nil {
@@ -696,7 +685,7 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnavailable, true, 0, "daytona sandbox is missing process service", nil)
 	}
 	opts := []func(*options.ExecuteCommand){
-		options.WithExecuteTimeout(e.preparationCommandTimeout),
+		options.WithExecuteTimeout(e.commandTimeout),
 	}
 	if len(env) > 0 {
 		opts = append(opts, options.WithCommandEnv(cloneCommandEnv(env)))
@@ -706,19 +695,19 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return mapDaytonaError(sandbox.StageMountResources, err)
 	}
 	if response == nil {
-		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona preparation command returned no response", nil)
+		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona daytona command returned no response", nil)
 	}
 	if response.ExitCode != 0 {
 		// Command output is deliberately NOT surfaced: tool errors (rclone
 		// especially) can embed signed URLs or other capability material, and
 		// the no-leak contract is pinned by test. Callers label the error
 		// with the engine-authored command name instead.
-		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona preparation command failed", nil)
+		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona daytona command failed", nil)
 	}
 	return nil
 }
 
-func (e *DaytonaHelperExecutor) StagePreparationFile(ctx context.Context, target PreparationCommandTarget, remotePath string, content io.Reader) error {
+func (e *DaytonaHelperExecutor) StageDaytonaFile(ctx context.Context, target DaytonaCommandTarget, remotePath string, content io.Reader) error {
 	if e == nil || e.client == nil {
 		return errors.New("daytona sandbox client is unavailable")
 	}
@@ -805,7 +794,7 @@ func (e *DaytonaHelperExecutor) stageHelperPayload(ctx context.Context, target T
 		return e.client.Get(ctx, target.ProviderSandboxID)
 	}, nil)
 	if err != nil {
-		return "", nil, err
+		return "", nil, MarkProviderOperationNotSubmitted(mapDaytonaError(sandbox.StageExecuteTool, err))
 	}
 	if providerSandbox.Process == nil || providerSandbox.FileSystem == nil {
 		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona sandbox is missing process or filesystem service", nil)

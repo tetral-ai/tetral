@@ -17,17 +17,18 @@ import (
 
 type EnvironmentBuildStore interface {
 	ClaimEnvironmentBuild(context.Context, EnvironmentBuildJob, time.Time) (EnvironmentArtifactBuildInput, bool, error)
+	AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error)
 	MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, string, time.Time) error
-	MarkEnvironmentBuildRetryableFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, time.Time) error
+	MarkEnvironmentBuildRetryableFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, bool, time.Time) error
 	MarkEnvironmentBuildTerminalFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, time.Time) error
 }
 
 type EnvironmentBuildJobRunner struct {
-	Queue   SessionPrepareQueueClient
-	Store   EnvironmentBuildStore
-	Builder sandbox.ArtifactBuilder
-	Config  EnvironmentRunnerConfig
-	Clock   func() time.Time
+	Queue     SandboxQueueClient
+	Store     EnvironmentBuildStore
+	Providers *ProviderRegistry
+	Config    EnvironmentRunnerConfig
+	Clock     func() time.Time
 }
 
 type EnvironmentRunnerConfig struct {
@@ -41,6 +42,7 @@ type EnvironmentRunnerConfig struct {
 type EnvironmentBuildJob struct {
 	JobID         string
 	LeaseToken    string
+	AttemptCount  int
 	WorkspaceID   string
 	EnvironmentID string
 	Generation    int64
@@ -58,8 +60,8 @@ func (r *EnvironmentBuildJobRunner) RunOnceWithActivity(ctx context.Context) (bo
 	if r.Store == nil {
 		return false, errors.New("sandbox environment_build store is required")
 	}
-	if r.Builder == nil {
-		return false, errors.New("sandbox environment artifact builder is required")
+	if r.Providers == nil {
+		return false, errors.New("sandbox provider registry is required")
 	}
 	cfg := normalizedEnvironmentRunnerConfig(r.Config)
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
@@ -104,21 +106,28 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 			LeaseToken:  job.LeaseToken,
 		}))
 	}
+	builder, ok := r.Providers.ResolveEnvironmentArtifacts(input.Provider)
+	if !ok {
+		return r.retryEnvironmentBuild(ctx, job, cfg, "provider_configuration_invalid", "environment artifact provider is unavailable")
+	}
 	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	result, buildErr := r.Builder.BuildArtifact(workCtx, sandbox.BuildArtifactRequest{
+	outcome := builder.BuildEnvironmentArtifact(workCtx, sandbox.BuildArtifactRequest{
 		WorkspaceID:        input.WorkspaceID,
 		EnvironmentID:      input.EnvironmentID,
 		Generation:         input.Generation,
 		ArtifactInputHash:  input.ArtifactInputHash,
 		NormalizedPackages: input.NormalizedPackages,
+		AuthorizeProviderCreate: func(ctx context.Context) (bool, error) {
+			return r.Store.AuthorizeEnvironmentArtifactCreate(ctx, job, r.now())
+		},
 	})
 	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
 		return heartbeatErr
 	}
-	if buildErr != nil {
-		return r.handleBuildError(ctx, queueJob, job, cfg, buildErr)
+	if outcome.Failed() {
+		return r.handleBuildFailure(ctx, queueJob, job, cfg, outcome)
 	}
-	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, result.ProviderArtifactRef, r.now()); err != nil {
+	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value.ProviderArtifactRef, r.now()); err != nil {
 		return r.retryEnvironmentBuild(ctx, job, cfg, "environment_build_store_error", "environment build ready commit failed")
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
@@ -128,9 +137,12 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	}))
 }
 
-func (r *EnvironmentBuildJobRunner) handleBuildError(ctx context.Context, queueJob *queuev1.QueueJob, job EnvironmentBuildJob, cfg EnvironmentRunnerConfig, buildErr error) error {
-	failure := environmentArtifactFailureForError(buildErr)
-	if !retryableEnvironmentBuildError(buildErr) {
+func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, queueJob *queuev1.QueueJob, job EnvironmentBuildJob, cfg EnvironmentRunnerConfig, outcome ProviderOutcome[sandbox.BuildArtifactResult]) error {
+	failure := EnvironmentArtifactFailure{
+		Stage: "build_artifact", LastErrorKind: valueOrDefault(outcome.ErrorKind, "environment_build_error"),
+		Reason: valueOrDefault(outcome.SafeMessage, "environment build failed"), Retryable: outcome.Disposition == ProviderRetryable,
+	}
+	if outcome.Disposition != ProviderRetryable {
 		failure.Retryable = false
 		if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
 			return err
@@ -150,7 +162,8 @@ func (r *EnvironmentBuildJobRunner) handleBuildError(ctx context.Context, queueJ
 		}
 	} else {
 		failure.Retryable = true
-		if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, r.now()); err != nil {
+		rearmCreate := outcome.EffectBoundary == ProviderProvedNotStarted
+		if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, rearmCreate, r.now()); err != nil {
 			return err
 		}
 	}
@@ -178,12 +191,13 @@ func DecodeEnvironmentBuildJob(queueJob *queuev1.QueueJob) (EnvironmentBuildJob,
 	if err != nil {
 		return EnvironmentBuildJob{}, err
 	}
-	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" {
+	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" || queueJob.GetAttemptCount() <= 0 {
 		return EnvironmentBuildJob{}, errors.New("environment_build queue identity is incomplete")
 	}
 	return EnvironmentBuildJob{
 		JobID:         queueJob.GetId(),
 		LeaseToken:    queueJob.GetLeaseToken(),
+		AttemptCount:  int(queueJob.GetAttemptCount()),
 		WorkspaceID:   workspaceID,
 		EnvironmentID: environmentID,
 		Generation:    generation,
@@ -236,39 +250,4 @@ func normalizedEnvironmentRunnerConfig(cfg EnvironmentRunnerConfig) EnvironmentR
 
 func environmentRetryWillExhaust(queueJob *queuev1.QueueJob) bool {
 	return queueJob != nil && queueJob.GetMaxAttempts() > 0 && queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts()
-}
-
-func retryableEnvironmentBuildError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var providerErr *sandbox.ProviderError
-	if errors.As(err, &providerErr) {
-		return providerErr.Retryable || providerErr.Kind == sandbox.ProviderErrorTimeout || providerErr.Kind == sandbox.ProviderErrorUnavailable
-	}
-	var validation *sandbox.ValidationError
-	if errors.As(err, &validation) {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	return true
-}
-
-func environmentArtifactFailureForError(err error) EnvironmentArtifactFailure {
-	failure := EnvironmentArtifactFailure{
-		Stage:         "environment_build",
-		LastErrorKind: "environment_build_error",
-		Reason:        "environment_build_error",
-		Retryable:     retryableEnvironmentBuildError(err),
-	}
-	var providerErr *sandbox.ProviderError
-	if errors.As(err, &providerErr) {
-		failure.Stage = string(providerErr.Stage)
-		failure.LastErrorKind = string(providerErr.Kind)
-		failure.Reason = valueOrDefault(providerErr.SafeMessage, string(providerErr.Kind))
-		failure.Retryable = providerErr.Retryable
-	}
-	return failure
 }

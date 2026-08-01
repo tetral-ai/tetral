@@ -14,7 +14,7 @@ import (
 )
 
 func TestPostgreSQLBackgroundTaskReconcileAdvancesOneGeneration(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	store := NewPostgreSQLSandboxBackgroundCommandStore(dbconnect.NewClientForTesting(runtimeDB))
@@ -52,7 +52,7 @@ func TestPostgreSQLBackgroundTaskReconcileAdvancesOneGeneration(t *testing.T) {
 }
 
 func TestPostgreSQLBackgroundReconcileExhaustionIgnoresPoisonPayload(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	store := NewPostgreSQLSandboxBackgroundCommandStore(dbconnect.NewClientForTesting(runtimeDB))
@@ -77,7 +77,7 @@ func TestPostgreSQLBackgroundReconcileExhaustionIgnoresPoisonPayload(t *testing.
 }
 
 func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	store := NewPostgreSQLSandboxBackgroundCommandStore(dbconnect.NewClientForTesting(runtimeDB))
@@ -113,7 +113,7 @@ func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t 
 		AND kind='runtime_input' AND dedupe_key='runtime_input:ws_execution_store:sesn_execution_store:task_notification:task_execution'`).Scan(&payload); err != nil {
 		t.Fatalf("read notification Queue payload: %v", err)
 	}
-	if strings.Contains(payload, "preparation_attempt_id") || strings.Contains(payload, "binding_id") {
+	if strings.Contains(payload, "binding_id") {
 		t.Fatalf("notification payload contains retired delivery identity: %s", payload)
 	}
 }

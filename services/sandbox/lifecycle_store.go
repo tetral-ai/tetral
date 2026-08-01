@@ -13,9 +13,12 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
+
+var errSandboxReleaseBlocked = errors.New("sandbox release is waiting for active provider work")
 
 type SandboxSessionResourceSource interface {
 	ListSessionResourcesTx(context.Context, *dbconnect.Tx, workspace.ID, string) (sandbox.ResourceSetup, error)
@@ -246,7 +249,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 				return err
 			}
 			if binding.ReleaseRequested() {
-				return nil
+				return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 			}
 			waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_activation_operation_id")
 			if err != nil {
@@ -255,6 +258,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 			return releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
 		}
 		releaseRequested := binding.ReleaseRequested()
+		displacedHandle := binding.ProviderResourceID
 		generation := binding.EnvironmentGeneration
 		if targetGeneration.Valid {
 			generation = targetGeneration.Int64
@@ -313,11 +317,19 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 			binding.ResourceCredentialExpiresAt = nil
 			binding.ResourceRootsJSON = "[]"
 		}
+		if kind == string(ActivationReplace) && displacedHandle != "" && displacedHandle != handle.SandboxID {
+			if _, _, err := EnsureSandboxReleaseTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, SandboxReleaseReplacedHandle, displacedHandle, now); err != nil {
+				return err
+			}
+		}
 		// Provider work that crossed its submission boundary remains durable even
-		// when release was requested during the call. Release owns the handle next;
-		// cancelled execution waiters must not be revived here.
+		// when release was requested during the call. Release owns the adopted
+		// handle next; cancelled execution waiters must not be revived here.
 		if releaseRequested {
-			return nil
+			if _, _, err := EnsureSandboxReleaseTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, SandboxReleaseSessionDelete, handle.SandboxID, now); err != nil {
+				return err
+			}
+			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 		}
 		if err := requeueActivationMaterializationsTx(ctx, tx, work.Job, binding, now); err != nil {
 			return err
@@ -430,7 +442,8 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 		).Scan(&generation); err != nil {
 			return err
 		}
-		var artifactStatus, artifactProvider, providerArtifactRef, networkJSON string
+		var artifactStatus, artifactProvider, networkJSON string
+		var providerArtifactRef sql.NullString
 		if err := tx.QueryRow(ctx,
 			`SELECT status, provider, provider_artifact_ref, runtime_network_policy_json
 			   FROM environment_artifacts
@@ -439,9 +452,6 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 			work.Job.WorkspaceID, environmentID, generation,
 		).Scan(&artifactStatus, &artifactProvider, &providerArtifactRef, &networkJSON); err != nil {
 			return err
-		}
-		if artifactStatus != "ready" || artifactProvider != sandboxdriver.DaytonaProviderName || providerArtifactRef == "" {
-			return errors.New("sandbox replacement environment artifact is not ready")
 		}
 		binding, exists, err := lockSandboxBinding(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID)
 		if err != nil || !exists {
@@ -462,10 +472,67 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 			binding.ProviderResourceID != work.CurrentHandle.SandboxID || binding.ReleaseRequested() {
 			return nil
 		}
+		if artifactProvider != sandboxdriver.DaytonaProviderName {
+			return errors.New("sandbox replacement environment artifact provider is invalid")
+		}
 		labels := sandboxActivationLabels(work.Job.WorkspaceID, work.Job.SessionID, environmentID, binding.LogicalSandboxID, work.Job.OperationID)
 		labelsJSON, err := json.Marshal(labels)
 		if err != nil {
 			return err
+		}
+		if artifactStatus == "pending" || artifactStatus == "building" {
+			_, err := tx.Exec(ctx,
+				`UPDATE sandbox_lifecycle_operations
+				    SET kind = 'replace', state = 'waiting_artifact',
+				        target_environment_generation = $3,
+				        target_provider_resource_id = NULL, provider_create_name = $4,
+				        provider_request_labels_json = $5,
+				        queue_job_id = NULL, queue_kind = NULL,
+				        queue_partition_key = NULL, queue_dedupe_key = NULL,
+				        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+				        outcome_effect_boundary = NULL, outcome_disposition = NULL,
+				        error_kind = NULL, safe_message = NULL, updated_at = $6
+				  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'running'`,
+				work.Job.WorkspaceID, work.Job.OperationID, generation,
+				binding.LogicalSandboxID, string(labelsJSON), now.UTC(),
+			)
+			return err
+		}
+		if artifactStatus == "failed" {
+			if _, err := tx.Exec(ctx,
+				`UPDATE sandbox_lifecycle_operations
+				    SET kind = 'replace', state = 'failed',
+				        target_environment_generation = $3,
+				        target_provider_resource_id = NULL, provider_create_name = $4,
+				        provider_request_labels_json = $5,
+				        queue_job_id = NULL, queue_kind = NULL,
+				        queue_partition_key = NULL, queue_dedupe_key = NULL,
+				        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+				        outcome_effect_boundary = 'proved_not_started',
+				        outcome_disposition = 'terminal',
+				        error_kind = 'environment_artifact_failed',
+				        safe_message = 'sandbox environment artifact is unavailable',
+				        completed_at = $6, updated_at = $6
+				  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'running'`,
+				work.Job.WorkspaceID, work.Job.OperationID, generation,
+				binding.LogicalSandboxID, string(labelsJSON), now.UTC(),
+			); err != nil {
+				return err
+			}
+			waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_activation_operation_id")
+			if err != nil {
+				return err
+			}
+			if err := settleExecutionWaitersTx(ctx, tx, waiters, "environment_artifact_failed", "sandbox environment artifact is unavailable", now); err != nil {
+				return err
+			}
+			if err := failActivationMaterializationDependentsTx(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "environment_artifact_failed", "sandbox environment artifact is unavailable", now); err != nil {
+				return err
+			}
+			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
+		}
+		if artifactStatus != "ready" || !providerArtifactRef.Valid || providerArtifactRef.String == "" {
+			return errors.New("sandbox replacement environment artifact is malformed")
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE sandbox_lifecycle_operations
@@ -492,7 +559,7 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 				WorkspaceID: workspace.ID(work.Job.WorkspaceID), SessionID: work.Job.SessionID,
 				SandboxID: binding.LogicalSandboxID, LifecycleOperationID: work.Job.OperationID,
 				EnvironmentID: environmentID, EnvironmentGeneration: generation,
-				ProviderArtifactRef: providerArtifactRef, Network: network,
+				ProviderArtifactRef: providerArtifactRef.String, Network: network,
 			},
 		}
 		current = true
@@ -544,7 +611,10 @@ func (s *PostgreSQLSandboxLifecycleStore) FailActivation(ctx context.Context, wo
 		if err := settleExecutionWaitersTx(ctx, tx, waiters, kind, message, now); err != nil {
 			return err
 		}
-		return failActivationMaterializationDependentsTx(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, kind, message, now)
+		if err := failActivationMaterializationDependentsTx(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, kind, message, now); err != nil {
+			return err
+		}
+		return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 	})
 }
 
@@ -691,14 +761,18 @@ func (s *PostgreSQLSandboxLifecycleStore) WaitMaterializationForActivation(ctx c
 			return errors.New("sandbox materialization binding disappeared")
 		}
 		var operationState string
+		var leaseOwner, leaseToken sql.NullString
 		if err := tx.QueryRow(ctx,
-			`SELECT state FROM sandbox_lifecycle_operations
+			`SELECT state, lease_owner, lease_token FROM sandbox_lifecycle_operations
 			  WHERE workspace_id = $1 AND operation_id = $2 FOR UPDATE`,
 			work.Job.WorkspaceID, work.Job.OperationID,
-		).Scan(&operationState); err != nil {
+		).Scan(&operationState, &leaseOwner, &leaseToken); err != nil {
 			return err
 		}
 		if operationState != "running" {
+			return nil
+		}
+		if !lifecycleLeaseIdentityMatches(work.Job, leaseOwner, leaseToken) {
 			return nil
 		}
 		waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_materialization_operation_id")
@@ -765,20 +839,25 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 		var state string
 		var observedRevision, targetEnvironmentGeneration, targetRevision int64
 		var targetHandle string
+		var leaseOwner, leaseToken sql.NullString
 		if err := tx.QueryRow(ctx,
 			`SELECT state, observed_binding_revision, target_environment_generation, target_resource_revision,
-			        target_provider_resource_id
+			        target_provider_resource_id, lease_owner, lease_token
 			   FROM sandbox_lifecycle_operations
 			  WHERE workspace_id = $1 AND operation_id = $2
 			  FOR UPDATE`,
 			work.Job.WorkspaceID, work.Job.OperationID,
-		).Scan(&state, &observedRevision, &targetEnvironmentGeneration, &targetRevision, &targetHandle); err != nil {
+		).Scan(&state, &observedRevision, &targetEnvironmentGeneration, &targetRevision, &targetHandle, &leaseOwner, &leaseToken); err != nil {
 			return err
 		}
 		if state == "completed" {
 			return nil
 		}
 		if state != "running" {
+			return nil
+		}
+		if work.Job.LeaseOwner != "" && work.Job.LeaseToken != "" &&
+			(!leaseOwner.Valid || leaseOwner.String != work.Job.LeaseOwner || !leaseToken.Valid || leaseToken.String != work.Job.LeaseToken) {
 			return nil
 		}
 		if observedRevision != binding.BindingRevision || targetHandle != binding.ProviderResourceID ||
@@ -793,7 +872,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 				return err
 			}
 			if binding.ReleaseRequested() {
-				return nil
+				return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 			}
 			waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_materialization_operation_id")
 			if err != nil {
@@ -856,7 +935,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 		// Materialization that already reached the provider is recorded before a
 		// concurrent release takes ownership. It must not release cancelled waiters.
 		if releaseRequested {
-			return nil
+			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 		}
 		waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_materialization_operation_id")
 		if err != nil {
@@ -904,6 +983,17 @@ func (s *PostgreSQLSandboxLifecycleStore) FailMaterialization(ctx context.Contex
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
+		var leaseOwner, leaseToken sql.NullString
+		if err := tx.QueryRow(ctx,
+			`SELECT lease_owner, lease_token FROM sandbox_lifecycle_operations
+			  WHERE workspace_id = $1 AND operation_id = $2`,
+			work.Job.WorkspaceID, work.Job.OperationID,
+		).Scan(&leaseOwner, &leaseToken); err != nil {
+			return err
+		}
+		if !lifecycleLeaseIdentityMatches(work.Job, leaseOwner, leaseToken) {
+			return nil
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE sandbox_lifecycle_operations
 			    SET state = 'failed', outcome_effect_boundary = $3,
@@ -920,8 +1010,297 @@ func (s *PostgreSQLSandboxLifecycleStore) FailMaterialization(ctx context.Contex
 		if err != nil {
 			return err
 		}
-		return settleExecutionWaitersTx(ctx, tx, waiters, kind, message, now)
+		if err := settleExecutionWaitersTx(ctx, tx, waiters, kind, message, now); err != nil {
+			return err
+		}
+		return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 	})
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) ClaimRelease(ctx context.Context, job SandboxLifecycleJob, now time.Time) (SandboxReleaseWork, bool, error) {
+	if s == nil || s.client == nil {
+		return SandboxReleaseWork{}, false, errors.New("sandbox lifecycle store is required")
+	}
+	var work SandboxReleaseWork
+	var claimed bool
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.release.claim", func(tx *dbconnect.Tx) error {
+		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}); err != nil {
+			return err
+		}
+		binding, exists, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID)
+		if err != nil || !exists {
+			return err
+		}
+		var state, kind, targetHandle, releaseReason string
+		var effectBoundary sql.NullString
+		var storedJobID, storedKind, storedPartition, storedDedupe sql.NullString
+		if err := tx.QueryRow(ctx,
+			`SELECT state, kind, target_provider_resource_id, release_reason,
+			        outcome_effect_boundary, queue_job_id, queue_kind,
+			        queue_partition_key, queue_dedupe_key
+			   FROM sandbox_lifecycle_operations
+			  WHERE workspace_id=$1 AND operation_id=$2
+			    AND session_id=$3 AND logical_sandbox_id=$4
+			  FOR UPDATE`,
+			job.WorkspaceID, job.OperationID, job.SessionID, job.LogicalSandboxID,
+		).Scan(&state, &kind, &targetHandle, &releaseReason, &effectBoundary,
+			&storedJobID, &storedKind, &storedPartition, &storedDedupe); err != nil {
+			if dbconnect.IsNoRows(err) {
+				return nil
+			}
+			return err
+		}
+		if kind != "release" || (state != "pending" && state != "running") ||
+			!sandboxLifecycleQueueIdentityMatches(job, queue.KindSandboxRelease, storedJobID, storedKind, storedPartition, storedDedupe) {
+			return nil
+		}
+		blocked, err := sandboxReleaseBlockedTx(ctx, tx, job.WorkspaceID, job.SessionID, job.LogicalSandboxID, job.OperationID, targetHandle)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return errSandboxReleaseBlocked
+		}
+		if err := recordLifecycleLease(ctx, tx, job, now); err != nil {
+			return err
+		}
+		work = SandboxReleaseWork{
+			Job: job, Provider: binding.Provider,
+			Handle: sandbox.ProviderHandle{Provider: binding.Provider, SandboxID: targetHandle},
+			Reason: SandboxReleaseReason(releaseReason),
+			ObserveOnly: effectBoundary.Valid &&
+				(effectBoundary.String == string(ProviderSubmitted) || effectBoundary.String == string(ProviderOutcomeUnknown)),
+		}
+		claimed = true
+		return nil
+	})
+	return work, claimed, err
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) ParkBlockedRelease(ctx context.Context, job SandboxLifecycleJob, now time.Time) (bool, error) {
+	if s == nil || s.client == nil {
+		return false, errors.New("sandbox lifecycle store is required")
+	}
+	var parked bool
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.release.park", func(tx *dbconnect.Tx) error {
+		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}); err != nil {
+			return err
+		}
+		if _, exists, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID); err != nil || !exists {
+			return err
+		}
+		var state, kind, targetHandle string
+		var storedJobID, storedKind, storedPartition, storedDedupe sql.NullString
+		if err := tx.QueryRow(ctx,
+			`SELECT state, kind, target_provider_resource_id, queue_job_id, queue_kind,
+			        queue_partition_key, queue_dedupe_key
+			   FROM sandbox_lifecycle_operations
+			  WHERE workspace_id=$1 AND operation_id=$2 AND session_id=$3
+			    AND logical_sandbox_id=$4 FOR UPDATE`,
+			job.WorkspaceID, job.OperationID, job.SessionID, job.LogicalSandboxID,
+		).Scan(&state, &kind, &targetHandle, &storedJobID, &storedKind, &storedPartition, &storedDedupe); err != nil {
+			if dbconnect.IsNoRows(err) {
+				return nil
+			}
+			return err
+		}
+		if state != "pending" || kind != "release" ||
+			!sandboxLifecycleQueueIdentityMatches(job, queue.KindSandboxRelease, storedJobID, storedKind, storedPartition, storedDedupe) {
+			return nil
+		}
+		blocked, err := sandboxReleaseBlockedTx(ctx, tx, job.WorkspaceID, job.SessionID, job.LogicalSandboxID, job.OperationID, targetHandle)
+		if err != nil || !blocked {
+			return err
+		}
+		updated, err := queue.AckTx(ctx, tx, queue.AckRequest{
+			WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID,
+			LeaseToken: job.LeaseToken, Now: now.UTC(),
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("sandbox release queue lease is stale")
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET queue_job_id=NULL, queue_kind=NULL, queue_partition_key=NULL,
+			        queue_dedupe_key=NULL, updated_at=$3
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state='pending'`,
+			job.WorkspaceID, job.OperationID, now.UTC(),
+		); err != nil {
+			return err
+		}
+		parked = true
+		return nil
+	})
+	return parked, err
+}
+
+func sandboxReleaseBlockedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, logicalSandboxID string, operationID string, targetHandle string) (bool, error) {
+	var blocked bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM session_runtime_tool_results
+			 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
+			   AND execution_state IN ('preparing','running')
+			   AND authorized_provider_resource_id=$3
+			UNION ALL
+			SELECT 1 FROM session_background_tasks
+			 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
+			   AND provider_session_id=$3
+			UNION ALL
+			SELECT 1 FROM sandbox_lifecycle_operations
+			 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
+			   AND kind IN ('create','start','replace','materialize') AND state='running'
+		)`,
+		workspaceID, sessionID, targetHandle, logicalSandboxID, operationID,
+	).Scan(&blocked)
+	return blocked, err
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) AuthorizeRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) (bool, error) {
+	var authorized bool
+	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.authorize", func(tx *dbconnect.Tx) error {
+		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET outcome_effect_boundary='submitted', outcome_disposition='terminal', updated_at=$3
+			  WHERE workspace_id=$1 AND operation_id=$2 AND kind='release' AND state='running'
+			    AND target_provider_resource_id=$4
+			    AND lease_owner=$5 AND lease_token=$6
+			    AND outcome_effect_boundary IS NULL`,
+			work.Job.WorkspaceID, work.Job.OperationID, now.UTC(), work.Handle.SandboxID,
+			work.Job.LeaseOwner, work.Job.LeaseToken,
+		)
+		if err != nil {
+			return err
+		}
+		authorized = transitionRowsAffected(result)
+		return nil
+	})
+	return authorized, err
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) RearmRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.rearm", func(tx *dbconnect.Tx) error {
+		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
+			return err
+		}
+		var state, targetHandle string
+		var effectBoundary, leaseOwner, leaseToken sql.NullString
+		if err := tx.QueryRow(ctx,
+			`SELECT state, target_provider_resource_id, outcome_effect_boundary, lease_owner, lease_token
+			   FROM sandbox_lifecycle_operations
+			  WHERE workspace_id=$1 AND operation_id=$2 AND kind='release'
+			  FOR UPDATE`,
+			work.Job.WorkspaceID, work.Job.OperationID,
+		).Scan(&state, &targetHandle, &effectBoundary, &leaseOwner, &leaseToken); err != nil {
+			return err
+		}
+		if state != "running" || targetHandle != work.Handle.SandboxID ||
+			!lifecycleLeaseIdentityMatches(work.Job, leaseOwner, leaseToken) {
+			return nil
+		}
+		if !effectBoundary.Valid {
+			return nil
+		}
+		if effectBoundary.String != string(ProviderSubmitted) {
+			return errors.New("sandbox release outcome boundary cannot be rearmed")
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET outcome_effect_boundary=NULL, outcome_disposition=NULL,
+			        error_kind=NULL, safe_message=NULL, updated_at=$3
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state='running'
+			    AND outcome_effect_boundary='submitted'`,
+			work.Job.WorkspaceID, work.Job.OperationID, now.UTC(),
+		)
+		return err
+	})
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) CompleteRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.complete", func(tx *dbconnect.Tx) error {
+		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: work.Job.WorkspaceID, SessionID: work.Job.SessionID}); err != nil {
+			return err
+		}
+		binding, exists, err := lockSandboxBinding(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID)
+		if err != nil || !exists {
+			return err
+		}
+		var state, reason, targetHandle string
+		var leaseOwner, leaseToken sql.NullString
+		if err := tx.QueryRow(ctx,
+			`SELECT state, release_reason, target_provider_resource_id, lease_owner, lease_token
+			   FROM sandbox_lifecycle_operations
+			  WHERE workspace_id=$1 AND operation_id=$2 FOR UPDATE`,
+			work.Job.WorkspaceID, work.Job.OperationID,
+		).Scan(&state, &reason, &targetHandle, &leaseOwner, &leaseToken); err != nil {
+			return err
+		}
+		if state == "completed" {
+			return nil
+		}
+		if state != "running" || targetHandle != work.Handle.SandboxID ||
+			!lifecycleLeaseIdentityMatches(work.Job, leaseOwner, leaseToken) {
+			return nil
+		}
+		if err := applySandboxReleasePostconditionTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, binding, targetHandle, SandboxReleaseReason(reason), now); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state='completed', outcome_effect_boundary=NULL, outcome_disposition=NULL,
+			        error_kind=NULL, safe_message=NULL, lease_owner=NULL, lease_token=NULL,
+			        lease_expires_at=NULL, completed_at=$3, updated_at=$3
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state='running'`,
+			work.Job.WorkspaceID, work.Job.OperationID, now.UTC(),
+		)
+		return err
+	})
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) ObserveUnknownRelease(ctx context.Context, work SandboxReleaseWork, kind string, now time.Time) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.observe_unknown", func(tx *dbconnect.Tx) error {
+		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET outcome_effect_boundary='outcome_unknown', outcome_disposition='terminal',
+			        error_kind=$3, safe_message='sandbox release outcome is unknown', updated_at=$4
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state='running'
+			    AND lease_owner=$5 AND lease_token=$6`,
+			work.Job.WorkspaceID, work.Job.OperationID, kind, now.UTC(), work.Job.LeaseOwner, work.Job.LeaseToken,
+		)
+		return err
+	})
+}
+
+func (s *PostgreSQLSandboxLifecycleStore) FailRelease(ctx context.Context, work SandboxReleaseWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string, now time.Time) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.fail", func(tx *dbconnect.Tx) error {
+		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state='failed', outcome_effect_boundary=$3, outcome_disposition=$4,
+			        error_kind=$5, safe_message=$6, lease_owner=NULL, lease_token=NULL,
+			        lease_expires_at=NULL, completed_at=$7, updated_at=$7
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state IN ('pending','running')
+			    AND lease_owner=$8 AND lease_token=$9`,
+			work.Job.WorkspaceID, work.Job.OperationID, boundary, disposition, kind, message, now.UTC(),
+			work.Job.LeaseOwner, work.Job.LeaseToken,
+		)
+		return err
+	})
+}
+
+func applySandboxReleasePostconditionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding SandboxBinding, targetHandle string, reason SandboxReleaseReason, now time.Time) error {
+	return sandboxrelease.ApplyPostconditionTx(ctx, tx, workspaceID, sessionID, binding.ProviderResourceID, targetHandle, reason, now)
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) FinalizeExhaustedLifecycle(ctx context.Context, queueJob *queuev1.QueueJob, queueKind string, now time.Time) error {
@@ -933,7 +1312,7 @@ func (s *PostgreSQLSandboxLifecycleStore) FinalizeInvalidLifecycle(ctx context.C
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) finalizeClosedLifecycle(ctx context.Context, queueJob *queuev1.QueueJob, queueKind string, errorKind string, safeMessage string, now time.Time) error {
-	if queueKind != queue.KindSandboxActivate && queueKind != queue.KindSandboxMaterialize {
+	if queueKind != queue.KindSandboxActivate && queueKind != queue.KindSandboxMaterialize && queueKind != queue.KindSandboxRelease {
 		return errors.New("sandbox lifecycle exhaustion kind is invalid")
 	}
 	if queueJob == nil || queueJob.GetWorkspaceId() == "" || queueJob.GetId() == "" || queueJob.GetKind() != queueKind {
@@ -984,7 +1363,7 @@ func lookupSandboxLifecycleJobByQueueIdentity(
 }
 
 func finalizeExhaustedSandboxLifecycleTx(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, queueKind string, forcedErrorKind string, forcedSafeMessage string, now time.Time) error {
-	if queueKind != queue.KindSandboxActivate && queueKind != queue.KindSandboxMaterialize {
+	if queueKind != queue.KindSandboxActivate && queueKind != queue.KindSandboxMaterialize && queueKind != queue.KindSandboxRelease {
 		return errors.New("sandbox lifecycle exhaustion kind is invalid")
 	}
 	errorKind := "sandbox_activation_attempts_exhausted"
@@ -994,6 +1373,11 @@ func finalizeExhaustedSandboxLifecycleTx(ctx context.Context, tx *dbconnect.Tx, 
 		errorKind = "sandbox_materialization_attempts_exhausted"
 		safeMessage = "sandbox resources could not be materialized"
 		waiterColumn = "waiting_materialization_operation_id"
+	}
+	if queueKind == queue.KindSandboxRelease {
+		errorKind = "sandbox_release_attempts_exhausted"
+		safeMessage = "sandbox release could not be completed"
+		waiterColumn = ""
 	}
 	if forcedErrorKind != "" {
 		errorKind = forcedErrorKind
@@ -1029,7 +1413,8 @@ func finalizeExhaustedSandboxLifecycleTx(ctx context.Context, tx *dbconnect.Tx, 
 		return errors.New("sandbox lifecycle exhaustion queue identity does not match")
 	}
 	if (queueKind == queue.KindSandboxActivate && operationKind != string(ActivationCreate) && operationKind != string(ActivationStart) && operationKind != string(ActivationReplace)) ||
-		(queueKind == queue.KindSandboxMaterialize && operationKind != "materialize") {
+		(queueKind == queue.KindSandboxMaterialize && operationKind != "materialize") ||
+		(queueKind == queue.KindSandboxRelease && operationKind != "release") {
 		return errors.New("sandbox lifecycle exhaustion operation kind does not match")
 	}
 	outcomeBoundary := ProviderProvedNotStarted
@@ -1037,6 +1422,11 @@ func finalizeExhaustedSandboxLifecycleTx(ctx context.Context, tx *dbconnect.Tx, 
 		outcomeBoundary = ProviderOutcomeUnknown
 		errorKind = "activation_outcome_unknown"
 		safeMessage = "sandbox creation outcome could not be reconciled"
+	}
+	if queueKind == queue.KindSandboxRelease && (storedEffectBoundary.String == string(ProviderSubmitted) || storedEffectBoundary.String == string(ProviderOutcomeUnknown)) {
+		outcomeBoundary = ProviderOutcomeUnknown
+		errorKind = "sandbox_release_outcome_unknown"
+		safeMessage = "sandbox release outcome could not be reconciled"
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE sandbox_lifecycle_operations
@@ -1048,6 +1438,9 @@ func finalizeExhaustedSandboxLifecycleTx(ctx context.Context, tx *dbconnect.Tx, 
 		job.WorkspaceID, job.OperationID, outcomeBoundary, errorKind, safeMessage, now.UTC(),
 	); err != nil {
 		return err
+	}
+	if queueKind == queue.KindSandboxRelease {
+		return nil
 	}
 	waiters, err := lockExecutionWaiters(ctx, tx, job.WorkspaceID, job.OperationID, waiterColumn)
 	if err != nil {
@@ -1343,6 +1736,13 @@ func recordLifecycleLease(ctx context.Context, tx *dbconnect.Tx, job SandboxLife
 	return err
 }
 
+func lifecycleLeaseIdentityMatches(job SandboxLifecycleJob, leaseOwner sql.NullString, leaseToken sql.NullString) bool {
+	if job.LeaseOwner == "" || job.LeaseToken == "" {
+		return true
+	}
+	return leaseOwner.Valid && leaseOwner.String == job.LeaseOwner && leaseToken.Valid && leaseToken.String == job.LeaseToken
+}
+
 func lockLifecycleSessionBindingOperation(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob) error {
 	if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}); err != nil {
 		return err
@@ -1364,12 +1764,7 @@ func lockLifecycleSessionBindingOperation(ctx context.Context, tx *dbconnect.Tx,
 	if _, _, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 		return err
 	}
-	var exists bool
-	return tx.QueryRow(ctx,
-		`SELECT TRUE FROM sandbox_lifecycle_operations
-		  WHERE workspace_id = $1 AND operation_id = $2 FOR UPDATE`,
-		job.WorkspaceID, job.OperationID,
-	).Scan(&exists)
+	return lockSandboxLifecycleOperationsForSession(ctx, tx, job.WorkspaceID, job.SessionID)
 }
 
 func sandboxLifecycleQueueIdentityMatches(job SandboxLifecycleJob, kind string, jobID sql.NullString, storedKind sql.NullString, partition sql.NullString, dedupe sql.NullString) bool {
@@ -1419,7 +1814,6 @@ func decodeSandboxNetworkSetup(raw string) (sandbox.NetworkSetup, error) {
 func encodeMaterializationResources(resources sandbox.ResourceSetup) (string, error) {
 	resources.ResourceCredExpiresAt = nil
 	resources.ResourceRootsJSON = ""
-	resources.PreparationAttemptCreatedAt = time.Time{}
 	encoded, err := json.Marshal(resources)
 	if err != nil {
 		return "", err

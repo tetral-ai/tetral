@@ -99,7 +99,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	}
 	waitResult := make(chan result, 1)
 	go func() {
-		response, err := store.AwaitSandboxExecution(context.Background(), request)
+		response, err := store.AwaitSandboxExecution(context.Background(), awaitSandboxExecutionRequest(request))
 		waitResult <- result{response: response, err: err}
 	}()
 	select {
@@ -129,6 +129,15 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	case <-time.After(2 * time.Second):
 		t.Fatal("AwaitSandboxExecution did not observe durable sandbox settlement")
 	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		release_requested_at, release_reason, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, $6, 'session_delete', $6, $6)`,
+		workspaceID, sessionID, "sbox_"+sessionID, "env_"+sessionID, "provider_"+sessionID,
+		time.Date(2026, 1, 1, 0, 0, 32, 0, time.UTC)); err != nil {
+		t.Fatalf("seed release fence before accepted replay: %v", err)
+	}
 
 	replayRequest := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
 	replayRequest.Scope.RequestId = "req_bridge_durable_tool_replay"
@@ -151,7 +160,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		t.Fatalf("hold unrelated Session lock: %v", err)
 	}
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	replayedResult, err := replayStore.AwaitSandboxExecution(waitCtx, replayRequest)
+	replayedResult, err := replayStore.AwaitSandboxExecution(waitCtx, awaitSandboxExecutionRequest(replayRequest))
 	cancelWait()
 	if rollbackErr := lockTx.Rollback(); rollbackErr != nil {
 		t.Fatalf("rollback unrelated Session lock: %v", rollbackErr)
@@ -164,6 +173,72 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	conflict.ModelToolCallId = "call_bridge_durable_tool_changed"
 	if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("AcceptSandboxExecution model call conflict error = %v; want AlreadyExists", err)
+	}
+}
+
+func awaitSandboxExecutionRequest(request *bridgev1.AcceptSandboxExecutionRequest) *bridgev1.AwaitSandboxExecutionRequest {
+	return &bridgev1.AwaitSandboxExecutionRequest{
+		Scope: request.GetScope(), ToolUseEventId: request.GetToolUseEventId(),
+		NormalizedInputHash: request.GetNormalizedInputHash(), ToolName: request.GetToolName(),
+		InputJson: request.GetInputJson(), ModelToolCallId: request.GetModelToolCallId(),
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsNewWorkAfterReleaseFence(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_released_tool"
+		threadID    = "thr_bridge_released_tool"
+		toolUseID   = "evt_bridge_released_tool"
+		modelCallID = "call_bridge_released_tool"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id = 'mreq_bridge_released_tool' WHERE workspace_id = $1 AND event_id = $2`,
+		workspaceID, toolUseID,
+	); err != nil {
+		t.Fatalf("stamp durable tool-use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_released_tool", toolUseID, modelCallID, "exec_command")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		release_requested_at, release_reason, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, $6, 'session_delete', $6, $6)`,
+		workspaceID, sessionID, "sbox_"+sessionID, "env_"+sessionID, "provider_"+sessionID,
+		time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)); err != nil {
+		t.Fatalf("seed release fence: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope:               bridgeAPIScope(sessionID, threadID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool"),
+		ToolUseEventId:      toolUseID,
+		ModelToolCallId:     modelCallID,
+		NormalizedInputHash: sha256Hex(`{"cmd":"true"}`),
+		ToolName:            "exec_command",
+		InputJson:           `{"cmd":"true"}`,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("AcceptSandboxExecution after release fence error = %v; want FailedPrecondition", err)
+	}
+	var executionCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id = $1 AND session_id = $2 AND tool_use_event_id = $3`,
+		workspaceID, sessionID, toolUseID,
+	).Scan(&executionCount); err != nil {
+		t.Fatalf("count fenced execution rows: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = 'sandbox_tool_execute'`, workspaceID,
+	).Scan(&queueCount); err != nil {
+		t.Fatalf("count fenced execution jobs: %v", err)
+	}
+	if executionCount != 0 || queueCount != 0 {
+		t.Fatalf("release-fenced execution/queue counts = %d/%d; want 0/0", executionCount, queueCount)
 	}
 }
 
@@ -785,8 +860,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors(t *tes
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_validation")
 			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_validation_"+strconv.Itoa(index))
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 			if tc.seed != nil {
 				tc.seed(t, admin, storeID)
 			}
@@ -913,8 +986,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryReadsLegacyOversizedRows(t *testing.T)
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_legacy_large", "memstore_bridge_memory_legacy_large")
 	legacyContent := strings.Repeat("x", memoryToolContentMaxBytes+1)
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_legacy_large", "mem_bridge_memory_legacy_large", "/notes/legacy-large.md", legacyContent)
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_legacy_large", "prep_bridge_memory_legacy_large")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_legacy_large", "2026-01-01T00:00:00Z")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_legacy_large", "thr_bridge_memory_legacy_large", "bind_bridge_memory_legacy_large", 1, "pod_uid_memory_legacy_large"),
@@ -1072,8 +1143,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_prefix", "thr_bridge_memory_prefix")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix")
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_prefix", "memstore_bridge_memory_prefix")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_prefix", "prep_bridge_memory_prefix")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_prefix", "2026-01-01T00:00:00Z")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_a", "/a", "a")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_parent_child", "/parent/child", "child")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_parent_other", "/parent/other", "other")
@@ -1191,8 +1260,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsPathConflictWire(t *testing.T) {
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_memory_conflict_bound", 1, "pod_uid_memory_conflict_bound")
 			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_conflict_bound")
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 
 			targetPath := "/root/target"
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_00_exact", targetPath, "exact")
@@ -1319,90 +1386,6 @@ func TestCanonicalRunToolInputSharedCrossLanguageVectors(t *testing.T) {
 	}
 }
 
-func TestBridgePreparationResetLocksSessionBeforePreparationForUpdate(t *testing.T) {
-	source, err := os.ReadFile("bridge_api_tools.go")
-	if err != nil {
-		t.Fatalf("read bridge_api_tools.go: %v", err)
-	}
-	text := string(source)
-	resetStart := strings.Index(text, "func resetSessionPreparationAndEnqueuePrepareTx")
-	if resetStart < 0 {
-		t.Fatal("resetSessionPreparationAndEnqueuePrepareTx not found")
-	}
-	resetBody := text[resetStart:]
-	lockIndex := strings.Index(resetBody, "lockSessionPreparationResetFenceTx")
-	forUpdateIndex := strings.Index(resetBody, "loadLatestSessionPreparationReadinessForUpdateTx")
-	if lockIndex < 0 || forUpdateIndex < 0 || lockIndex > forUpdateIndex {
-		t.Fatalf("preparation reset must lock the sessions row before loading preparation FOR UPDATE; lock=%d load=%d", lockIndex, forUpdateIndex)
-	}
-	lockStart := strings.Index(text, "func lockSessionPreparationResetFenceTx")
-	if lockStart < 0 {
-		t.Fatal("lockSessionPreparationResetFenceTx not found")
-	}
-	lockBody := text[lockStart:]
-	lockEnd := strings.Index(lockBody, "\n}\n")
-	if lockEnd < 0 {
-		t.Fatal("lockSessionPreparationResetFenceTx body end not found")
-	}
-	lockBody = lockBody[:lockEnd]
-	for _, fragment := range []string{"FROM sessions", "FOR UPDATE"} {
-		if !strings.Contains(lockBody, fragment) {
-			t.Fatalf("session reset fence lock missing %q in:\n%s", fragment, lockBody)
-		}
-	}
-}
-
-func TestRuntimePreparationReadinessLocksSessionBeforePreparationForUpdate(t *testing.T) {
-	source, err := os.ReadFile("runtime_delivery.go")
-	if err != nil {
-		t.Fatalf("read runtime_delivery.go: %v", err)
-	}
-	body := string(source)
-	start := strings.Index(body, "func requireRuntimePreparationReadyTx")
-	if start < 0 {
-		t.Fatal("requireRuntimePreparationReadyTx not found")
-	}
-	body = body[start:]
-	lockIndex := strings.Index(body, "lockSessionPreparationResetFenceTx")
-	forUpdateIndex := strings.Index(body, "loadLatestSessionPreparationReadinessForUpdateTx")
-	plainReadIndex := strings.Index(body, "loadLatestSessionPreparationReadinessTx")
-	if lockIndex < 0 || forUpdateIndex < 0 || lockIndex > forUpdateIndex {
-		t.Fatalf("runtime preparation readiness must lock session before loading preparation FOR UPDATE; lock=%d load=%d", lockIndex, forUpdateIndex)
-	}
-	if plainReadIndex >= 0 && plainReadIndex < strings.Index(body, "\n}\n") {
-		t.Fatalf("runtime preparation readiness uses non-locking readiness load at index %d", plainReadIndex)
-	}
-}
-
-func TestBridgeAPIReadinessGatesLockSessionBeforePreparationForUpdate(t *testing.T) {
-	source, err := os.ReadFile("bridge_api_tools.go")
-	if err != nil {
-		t.Fatalf("read bridge_api_tools.go: %v", err)
-	}
-	text := string(source)
-	for _, name := range []string{"runToolTargetTx"} {
-		t.Run(name, func(t *testing.T) {
-			start := strings.Index(text, "func "+name)
-			if start < 0 {
-				t.Fatalf("%s not found", name)
-			}
-			body := text[start:]
-			if next := strings.Index(body[len("func "+name):], "\nfunc "); next >= 0 {
-				body = body[:len("func "+name)+next]
-			}
-			lockIndex := strings.Index(body, "lockSessionPreparationResetFenceTx")
-			forUpdateIndex := strings.Index(body, "loadLatestSessionPreparationReadinessForUpdateTx")
-			plainReadIndex := strings.Index(body, "loadLatestSessionPreparationReadinessTx")
-			if lockIndex < 0 || forUpdateIndex < 0 || lockIndex > forUpdateIndex {
-				t.Fatalf("%s must lock session before preparation FOR UPDATE; lock=%d load=%d", name, lockIndex, forUpdateIndex)
-			}
-			if plainReadIndex >= 0 {
-				t.Fatalf("%s uses non-locking readiness load at index %d", name, plainReadIndex)
-			}
-		})
-	}
-}
-
 func TestVerifyRuntimeScopeRejectsRuntimePodUIDMismatchFromIdentity(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_scope_identity", "thr_bridge_scope_identity")
@@ -1492,73 +1475,5 @@ func TestVerifyRuntimeScopeRejectsDeletedSessionWithLiveBinding(t *testing.T) {
 	}
 	if bindingRows != 1 {
 		t.Fatalf("binding rows = %d; want retained for cleanup finalization", bindingRows)
-	}
-}
-
-func TestResourceCredentialExpiresFresh(t *testing.T) {
-	now := time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)
-	tests := []struct {
-		name      string
-		expiresAt sql.NullString
-		want      bool
-	}{
-		{name: "null means no file resource projection credential", expiresAt: sql.NullString{}, want: true},
-		{name: "outside margin", expiresAt: sql.NullString{String: "2026-01-01T01:01:00Z", Valid: true}, want: true},
-		{name: "exact margin boundary", expiresAt: sql.NullString{String: "2026-01-01T01:00:00Z", Valid: true}, want: true},
-		{name: "inside margin", expiresAt: sql.NullString{String: "2026-01-01T00:59:59Z", Valid: true}, want: false},
-		{name: "malformed fails closed", expiresAt: sql.NullString{String: "not-rfc3339", Valid: true}, want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := resourceCredentialExpiresFresh(tc.expiresAt, now, 30*time.Minute); got != tc.want {
-				t.Fatalf("resourceCredentialExpiresFresh() = %v; want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestResourceCredentialMaterializationRecorded(t *testing.T) {
-	tests := []struct {
-		name      string
-		expiresAt sql.NullString
-		want      bool
-	}{
-		{name: "null means no file resource projection credential", expiresAt: sql.NullString{}, want: false},
-		{name: "blank means no materialized file resource credential", expiresAt: sql.NullString{String: "   ", Valid: true}, want: false},
-		{name: "future expiry records materialization", expiresAt: sql.NullString{String: "2026-01-01T00:30:01Z", Valid: true}, want: true},
-		{name: "past expiry still records materialization", expiresAt: sql.NullString{String: "2026-01-01T00:29:59Z", Valid: true}, want: true},
-		{name: "malformed expiry still fails toward rotation", expiresAt: sql.NullString{String: "not-rfc3339", Valid: true}, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := resourceCredentialMaterializationRecorded(tc.expiresAt); got != tc.want {
-				t.Fatalf("resourceCredentialMaterializationRecorded() = %v; want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRunToolReadsResourceRoot(t *testing.T) {
-	rootsJSON := `[{"path":"/workspace/data/report.csv","mode":"read"},{"path":"/mnt/session/uploads","mode":"read"},{"path":"/workspace/writable","mode":"read_write"}]`
-	tests := []struct {
-		name      string
-		toolName  string
-		inputJSON string
-		want      bool
-	}{
-		{name: "absolute resource path", toolName: "Read", inputJSON: `{"path":"/workspace/data/report.csv"}`, want: true},
-		{name: "relative resource path resolves under workspace", toolName: "read", inputJSON: `{"path":"data/report.csv"}`, want: true},
-		{name: "read under resource directory", toolName: "Read", inputJSON: `{"path":"/mnt/session/uploads/nested/file.txt"}`, want: true},
-		{name: "non read tool ignored", toolName: "Write", inputJSON: `{"path":"/workspace/data/report.csv"}`, want: false},
-		{name: "writable root ignored", toolName: "Read", inputJSON: `{"path":"/workspace/writable/file.txt"}`, want: false},
-		{name: "non resource path ignored", toolName: "Read", inputJSON: `{"path":"/workspace/other.txt"}`, want: false},
-		{name: "runtime file path field", toolName: "Read", inputJSON: `{"file_path":"/workspace/data/report.csv"}`, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := runToolReadsResourceRoot(tc.toolName, tc.inputJSON, rootsJSON); got != tc.want {
-				t.Fatalf("runToolReadsResourceRoot() = %v; want %v", got, tc.want)
-			}
-		})
 	}
 }

@@ -11,14 +11,13 @@ type Config struct {
 	// FROM. It must name the deployed sandbox image: a drifting or absent tag
 	// fails every non-empty-packages environment build at its first
 	// Dockerfile line.
-	ArtifactBaseImage         string
-	PreparationCommandTimeout time.Duration
-	Lifecycle                 LifecyclePolicy
+	ArtifactBaseImage string
+	CommandTimeout    time.Duration
+	Lifecycle         LifecyclePolicy
 }
 
 type LifecyclePolicy struct {
 	StopTimeout         time.Duration
-	StopForceAfter      time.Duration
 	AutoStopInterval    time.Duration
 	AutoArchiveInterval time.Duration
 	AutoDeleteInterval  time.Duration

@@ -18,7 +18,6 @@ func (e configTestEnv) Getenv(key string) string {
 func validSandboxConfigEnv() configTestEnv {
 	return configTestEnv{ //nolint:gosec // Test env values are fixture credentials only.
 		EnvPostgresDSN:         "postgres://tetral-sandbox@example.invalid/tetral",
-		EnvSandboxDriver:       "daytona",
 		EnvSandboxBaseImage:    "ghcr.io/tetral-ai/sandbox:0.1.0-alpha.test",
 		EnvDaytonaAPIURL:       "https://daytona.example.invalid/api",
 		EnvDaytonaAPIKey:       "daytona-test-key",
@@ -80,7 +79,7 @@ func TestConfigFromEnvRejectsEveryLeaseConcurrencyAboveTransportCapacity(t *test
 	for _, envName := range []string{
 		EnvSandboxEnvironmentBuildConcurrency,
 		EnvSandboxEnvironmentReadyFanoutConcurrency,
-		EnvSandboxSessionPrepareConcurrency,
+		EnvSandboxWorkerConcurrency,
 	} {
 		t.Run(envName, func(t *testing.T) {
 			env := validSandboxConfigEnv()
@@ -92,120 +91,9 @@ func TestConfigFromEnvRejectsEveryLeaseConcurrencyAboveTransportCapacity(t *test
 	}
 }
 
-func TestConfigFromEnvPinsCleanupAttemptBudget(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		cfg, err := ConfigFromEnv(validSandboxConfigEnv())
-		if err != nil {
-			t.Fatalf("ConfigFromEnv: %v", err)
-		}
-		if cfg.CleanupMaxAttempts != 20 {
-			t.Fatalf("CleanupMaxAttempts = %d; want 20", cfg.CleanupMaxAttempts)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		env := validSandboxConfigEnv()
-		env[EnvSandboxCleanupMaxAttempts] = "7"
-		cfg, err := ConfigFromEnv(env)
-		if err != nil {
-			t.Fatalf("ConfigFromEnv: %v", err)
-		}
-		if cfg.CleanupMaxAttempts != 7 {
-			t.Fatalf("CleanupMaxAttempts = %d; want 7", cfg.CleanupMaxAttempts)
-		}
-	})
-
-	t.Run("rejects nonpositive", func(t *testing.T) {
-		env := validSandboxConfigEnv()
-		env[EnvSandboxCleanupMaxAttempts] = "0"
-		if _, err := ConfigFromEnv(env); err == nil {
-			t.Fatal("ConfigFromEnv accepted zero cleanup attempt budget")
-		}
-	})
-}
-
-func TestConfigFromEnvPinsStartupCleanupLease(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		cfg, err := ConfigFromEnv(validSandboxConfigEnv())
-		if err != nil {
-			t.Fatalf("ConfigFromEnv: %v", err)
-		}
-		if cfg.CleanupLeaseDuration != 120*time.Second {
-			t.Fatalf("CleanupLeaseDuration = %s; want 120s", cfg.CleanupLeaseDuration)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		env := validSandboxConfigEnv()
-		env[EnvSandboxCleanupLeaseDuration] = "75s"
-		env[EnvSandboxDaytonaStopTimeout] = "30s"
-		env[EnvSandboxDaytonaStopForceAfter] = "20s"
-		cfg, err := ConfigFromEnv(env)
-		if err != nil {
-			t.Fatalf("ConfigFromEnv: %v", err)
-		}
-		if cfg.CleanupLeaseDuration != 75*time.Second {
-			t.Fatalf("CleanupLeaseDuration = %s; want 75s", cfg.CleanupLeaseDuration)
-		}
-	})
-
-	t.Run("rejects nonpositive", func(t *testing.T) {
-		env := validSandboxConfigEnv()
-		env[EnvSandboxCleanupLeaseDuration] = "0s"
-		if _, err := ConfigFromEnv(env); err == nil {
-			t.Fatal("ConfigFromEnv accepted zero cleanup lease duration")
-		}
-	})
-}
-
-func TestConfigFromEnvRequiresStartupCleanupDeadlineToExceedConfiguredStopLegs(t *testing.T) {
-	tests := []struct {
-		name       string
-		lease      string
-		stop       string
-		forceAfter string
-		wantErr    bool
-	}{
-		{name: "strictly greater without force", lease: "41s", stop: "30s"},
-		{name: "equality rejected", lease: "40s", stop: "30s", wantErr: true},
-		{name: "force after included", lease: "61s", stop: "30s", forceAfter: "20s"},
-		{name: "force after equality rejected", lease: "60s", stop: "30s", forceAfter: "20s", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			env := validSandboxConfigEnv()
-			env[EnvSandboxCleanupLeaseDuration] = tc.lease
-			env[EnvSandboxDaytonaStopTimeout] = tc.stop
-			env[EnvSandboxDaytonaStopForceAfter] = tc.forceAfter
-			cfg, err := ConfigFromEnv(env)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("ConfigFromEnv = %+v, nil; want cleanup lease floor error", cfg)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ConfigFromEnv: %v", err)
-			}
-		})
-	}
-}
-
-func TestConfigFromEnvRejectsOverflowingStartupCleanupStopBudget(t *testing.T) {
-	env := validSandboxConfigEnv()
-	env[EnvSandboxCleanupLeaseDuration] = "1m"
-	env[EnvSandboxDaytonaStopTimeout] = "2562047h47m16.854775807s"
-	env[EnvSandboxDaytonaStopForceAfter] = "1s"
-	if _, err := ConfigFromEnv(env); err == nil {
-		t.Fatal("ConfigFromEnv accepted a stop budget that exceeds the cleanup lease")
-	}
-}
-
 func TestConfigFromEnvCarriesLifecyclePolicyIntoDaytonaDriver(t *testing.T) {
 	env := validSandboxConfigEnv()
 	env[EnvSandboxDaytonaStopTimeout] = "45s"
-	env[EnvSandboxDaytonaStopForceAfter] = "3m"
-	env[EnvSandboxCleanupLeaseDuration] = "4m"
 	env[EnvSandboxAutoStopInterval] = "31m"
 	env[EnvSandboxAutoArchiveInterval] = "25h"
 	env[EnvSandboxAutoDeleteInterval] = "720h"
@@ -215,8 +103,7 @@ func TestConfigFromEnvCarriesLifecyclePolicyIntoDaytonaDriver(t *testing.T) {
 		t.Fatalf("ConfigFromEnv: %v", err)
 	}
 	policy := cfg.Daytona.Lifecycle
-	if policy.StopTimeout != 45*time.Second || policy.StopForceAfter != 3*time.Minute ||
-		policy.AutoStopInterval != 31*time.Minute || policy.AutoArchiveInterval != 25*time.Hour ||
+	if policy.StopTimeout != 45*time.Second || policy.AutoStopInterval != 31*time.Minute || policy.AutoArchiveInterval != 25*time.Hour ||
 		policy.AutoDeleteInterval != 720*time.Hour {
 		t.Fatalf("Daytona lifecycle policy = %+v; want configured service values", policy)
 	}
@@ -227,11 +114,11 @@ func TestConfigFromEnvPinsLateCommandFenceDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigFromEnv: %v", err)
 	}
-	if cfg.SessionPrepareLeaseDuration != 120*time.Second || cfg.PreparationCommandTimeout != 45*time.Second || cfg.LateCommandMargin != 30*time.Second {
-		t.Fatalf("late-command defaults = lease %s timeout %s margin %s", cfg.SessionPrepareLeaseDuration, cfg.PreparationCommandTimeout, cfg.LateCommandMargin)
+	if cfg.JobLeaseDuration != 120*time.Second || cfg.ProviderCommandTimeout != 45*time.Second || cfg.LateCommandMargin != 30*time.Second {
+		t.Fatalf("late-command defaults = lease %s timeout %s margin %s", cfg.JobLeaseDuration, cfg.ProviderCommandTimeout, cfg.LateCommandMargin)
 	}
-	if cfg.Daytona.PreparationCommandTimeout != cfg.PreparationCommandTimeout {
-		t.Fatalf("Daytona timeout = %s; want %s", cfg.Daytona.PreparationCommandTimeout, cfg.PreparationCommandTimeout)
+	if cfg.Daytona.CommandTimeout != cfg.ProviderCommandTimeout {
+		t.Fatalf("Daytona timeout = %s; want %s", cfg.Daytona.CommandTimeout, cfg.ProviderCommandTimeout)
 	}
 }
 
@@ -255,9 +142,9 @@ func TestConfigFromEnvValidatesLateCommandFenceInWholeSeconds(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			env := validSandboxConfigEnv()
-			env[EnvSandboxSessionPrepareLeaseDuration] = tc.lease
+			env[EnvSandboxJobLeaseDuration] = tc.lease
 			env[EnvSandboxLeaseHeartbeatInterval] = tc.heart
-			env[EnvSandboxPreparationCommandTimeout] = tc.timeout
+			env[EnvSandboxProviderCommandTimeout] = tc.timeout
 			env[EnvSandboxLateCommandMargin] = tc.margin
 			cfg, err := ConfigFromEnv(env)
 			if tc.wantErr {
@@ -269,20 +156,20 @@ func TestConfigFromEnvValidatesLateCommandFenceInWholeSeconds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ConfigFromEnv: %v", err)
 			}
-			if cfg.SessionPrepareLeaseDuration != 90*time.Second {
-				t.Fatalf("lease = %s; want equality boundary 90s", cfg.SessionPrepareLeaseDuration)
+			if cfg.JobLeaseDuration != 90*time.Second {
+				t.Fatalf("lease = %s; want equality boundary 90s", cfg.JobLeaseDuration)
 			}
 		})
 	}
 }
 
-func TestQueueRunnerLeaseDurationsPromoteOnlySessionPrepare(t *testing.T) {
-	cfg := Config{LeaseHeartbeatInterval: 15 * time.Second, SessionPrepareLeaseDuration: 120 * time.Second}
+func TestQueueRunnerLeaseDurationsSeparateProviderAndEnvironmentWork(t *testing.T) {
+	cfg := Config{LeaseHeartbeatInterval: 15 * time.Second, JobLeaseDuration: 120 * time.Second}
 	if got := EnvironmentQueueLeaseDuration(cfg); got != 60*time.Second {
 		t.Fatalf("environment runner lease = %s; want heartbeat*4 = 60s", got)
 	}
-	if got := SessionPrepareQueueLeaseDuration(cfg); got != 120*time.Second {
-		t.Fatalf("session_prepare runner lease = %s; want explicit 120s", got)
+	if cfg.JobLeaseDuration != 120*time.Second {
+		t.Fatalf("provider runner lease = %s; want explicit 120s", cfg.JobLeaseDuration)
 	}
 }
 
@@ -358,6 +245,16 @@ func TestConfigFromEnvCarriesResourceCredentialRefreshMargin(t *testing.T) {
 			t.Fatalf("ConfigFromEnv error = %v; want positive duration validation", err)
 		}
 	})
+}
+
+func TestConfigFromEnvRejectsCredentialTTLInsideRefreshMargin(t *testing.T) {
+	env := validSandboxConfigEnv()
+	env[EnvResourceCredentialTTL] = "30m"
+	env[EnvResourceCredentialRefreshMargin] = "30m"
+	_, err := ConfigFromEnv(env)
+	if err == nil || !strings.Contains(err.Error(), EnvResourceCredentialTTL+" must be greater than "+EnvResourceCredentialRefreshMargin) {
+		t.Fatalf("ConfigFromEnv error = %v; want credential lifetime fence", err)
+	}
 }
 
 func TestConfigFromEnvCarriesRcloneCacheKnobs(t *testing.T) {

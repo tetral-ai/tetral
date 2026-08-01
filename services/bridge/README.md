@@ -20,8 +20,9 @@ verifies before any read or mutation. Bridge runs as one Kubernetes pod with
 two containers — `bridge-api` (`cmd/bridge-api`) serving the Runtime RPC
 surface, and `job-runner` (`cmd/job-runner`) consuming runtime-facing queue
 jobs and owning the binding fence — sharing one trust boundary but with
-credentials split per container: only `bridge-api` receives blob credentials
-for attachment reads, and manifests plus tests keep that split inspectable. Bridge
+credentials split per container: `bridge-api` receives Blob credentials for
+attachment reads, while `job-runner` receives them for Session cleanup. Manifests
+and tests keep that split inspectable. Bridge
 owns no provider lowering, no model calls, no sandbox lifecycle, and no
 public HTTP; it never deletes durable history.
 
@@ -32,7 +33,7 @@ public HTTP; it never deletes durable history.
 | Container | Command | Serves / consumes | Credentials |
 | --- | --- | --- | --- |
 | `bridge-api` | `/usr/local/bin/bridge-api` | The Runtime→Bridge RPC surface (below), plus Gateway-facing read-only attachment resolvers | Blob credentials for the read-only attachment surface, scoped to this container only |
-| `job-runner` | `/usr/local/bin/job-runner` | Queue kinds `runtime_input`, `runtime_config_update`, `cleanup_session`, `session_delete_cleanup`; owns delivery, the binding fence, repair, cleanup | Projected Gateway credential for initial MCP manifest discovery; no Sandbox-provider or blob credentials — asserted by tests |
+| `job-runner` | `/usr/local/bin/job-runner` | Queue kinds `runtime_input`, `runtime_config_update`, `cleanup_session`, `session_delete_cleanup`; owns delivery, the binding fence, repair, cleanup | Projected Gateway credential for initial MCP manifest discovery and Blob credentials for Session-owned attachment cleanup; no Sandbox-provider credentials |
 
 Both containers run in one pod, so ServiceAccount and NetworkPolicy treat
 Bridge as a single trust boundary; the per-container credential split limits
@@ -93,9 +94,8 @@ unavailable**:
 
 For `runtime_input` the runner reconciles referenced events first — all
 already processed → stale-ack with no command; superseded by a processed
-interrupt fence → never delivered; sealed by a terminally-failed preparation →
-settled with an error event instead of delivered — then upserts the
-delivery-inbox row and sends the typed command addressed to the bound pod
+interrupt fence → never delivered — then upserts the delivery-inbox row and
+sends the typed command addressed to the bound pod
 **directly** (never through a load-balanced service, which could livelock on
 identity rejection). At each interrupt claim it also cancels older same-thread
 pending message jobs below the interrupt fence — inputs the user retracted by
@@ -109,23 +109,21 @@ alone: unfinished request spans close as errors (`runtime_pod_lost`, original
 terminal result (`spawn_agent` / `send_message` settle delivery-aware by their
 `delivery_id`, keyed on the durable inter-agent delivery state); a delivered-
 but-uncommitted input replays from the inbox; pending waits owned by the lost
-turn are cancelled; running background tasks settle `cancelled_by_cleanup`
-before the sandbox is released; every live scope the loss left unsettled
+turn are cancelled; every live scope the loss left unsettled
 resolves to idle with its `session.error` — **except** an interrupted-then-
 lost scope, which settles quietly as `end_turn` with no error because the
 user's own processed `user.interrupt` (the thread's highest-sequence committed
 input) is the durable proof the stop was requested; the retry budget resets;
-only then is the stale binding released. Provider text is never reconstructed
+only then is the stale Runtime binding released. Sandbox lifecycle is
+independent of Runtime Pod loss. Provider text is never reconstructed
 — only ledgers are repaired.
 
-### Cleanup order (hot-release-first)
+### Cleanup order (hot Runtime state only)
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
-2. `pending`-status external waits expire by terminal projection and background tasks settle;
-3. outputs/resources capture or release per lifecycle;
-4. Sandbox Service releases the bound sandbox (it owns `stop`/archive/delete);
-5. the binding and `session_runtime_status` finalize only after terminal settlements are durable and release is ACKed — release precedes finalization because the ordinary release retry is fenced by the **binding** identity, and finalizing first would erase that fence;
-6. durable `session_threads`, `session_events`, `session_messages` are never deleted.
+2. `pending`-status external waits expire by terminal projection;
+3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
+4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
 
 **The tree fence.** The cleanup alarm is a hint and may be stale (armed while
 children still run); the **claim** carries the proof. Inside the claim
@@ -141,11 +139,11 @@ finalize would strand `cleanup_job_id` set on a past-due row forever. The
 pod-side eviction refusal (`session_busy` while any run slot is active or any
 thread's accepted-input queue is non-empty) remains the final authority.
 
-**Delete exception (`reason=delete`).** The `session_delete_cleanup` branch
-inverts steps 4/5 — hot-clear → pending/background settlement → **binding
-finalization** → preparation-scoped `ReleaseSandbox(reason=delete)` — because
-its release re-drive is fenced by the preparation-scoped identity, which is
-binding-independent and stable across crashes.
+**Delete exception.** The Session-delete transaction is the producer of the
+durable `sandbox_release` operation. The `session_delete_cleanup` branch clears
+hot Runtime custody, joins that release operation idempotently, and waits for
+Sandbox Service and Sandbox Queue custody to close before deleting private
+Sandbox rows. Bridge never performs the provider call.
 
 ### Closeout failure dispositions
 
@@ -162,14 +160,12 @@ default:
 | --- | --- | --- |
 | Retryable (default) | Any closeout-write failure with no release sentinel — transport codes and every un-sentineled Bridge rejection of any code | The pod retries whole-envelope cycles (1 s doubling to 60 s cap) until the write lands, a sentinel arrives, or shutdown supersedes; duplicate acks are success |
 | Superseded (`scope_superseded`) | Custody has demonstrably ended: binding row absent, binding replaced (stale generation), session deleted or not found, caller pod-UID mismatch, or a write targeting a terminal child (`terminated` / `archived` / `failed`) | Bridge converts the condition at the `WriteEvent` / `WriteRequestEnd` / `FinishIdle` handlers into an OK response carrying a REJECTED ack with `errorCode = scope_superseded`; the pod releases without writing. Message string-matching is forbidden — the sentinel is typed |
-| Unrepairable (`closeout_unrepairable`) | Rejections known to be durable: closeout-write validation failures, missing thread row, incomplete preparation identity; plus the pod-side self-detections `schema_mismatch` / `ack_mismatch` | Bridge sentinel-types the rejection; the pod terminates retry, emits a bounded redacted record, and releases — the durable row may stay running until pod identity changes, a next delivery cold-resumes, or an operator acts. Loud, never silent |
+| Unrepairable (`closeout_unrepairable`) | Rejections known to be durable: closeout-write validation failures, missing thread row, or incomplete declaration identity; plus the pod-side self-detections `schema_mismatch` / `ack_mismatch` | Bridge sentinel-types the rejection; the pod terminates retry, emits a bounded redacted record, and releases — the durable row may stay running until pod identity changes, a next delivery cold-resumes, or an operator acts. Loud, never silent |
 
 Bridge echoes the committed `runtime_write_id` on every committed and
 duplicate ack (so the pod can trip `ack_mismatch` on an empty or divergent
 id), and its ack mapping is `errorCode`-keyed — a superseded condition must
-never fall through into the retryable code and loop forever. Transient
-sandbox-preparation conditions carry no sentinel and stay retryable by
-construction.
+never fall through into the retryable code and loop forever.
 
 ## Seams
 
@@ -237,9 +233,8 @@ replacement must preserve, and the conformance suites that prove it.
   on `WriteEvent`, not here); output capture scan failures are best-effort while
   staged-custody and persistence failures prevent idle; cumulative usage never double-counts; current-thread live closeout is
   atomic, and postmortem writers remain disjoint from live loop authorship.
-- **Conformance.** `bridge_api_settlement_test.go`, `runtime_termination.go`
-  with `session_runtime_lifecycle_test.go`, Sandbox output-capture runner/store tests,
-  `closeout_sentinel_test.go`.
+- **Conformance.** `bridge_api_settlement_test.go`, Runtime termination tests,
+  Sandbox output-capture runner/store tests, and `closeout_sentinel_test.go`.
 
 ### Stable reasoning commit (two write vectors)
 
@@ -375,24 +370,19 @@ replacement must preserve, and the conformance suites that prove it.
 
 ### Resource roots snapshot and credential-expiry readiness gate
 
-- **Contract.** Bridge reads `session_preparations` for readiness and gains two
-  read-only obligations from it: it builds the helper payload `roots[]` from the
-  `resource_roots_json` snapshot (`{ path, mode: "read" }` per projected file),
-  and it gates delivery on `resource_cred_expires_at`. Bridge never mints,
-  refreshes, mounts, or binds.
-- **Lifecycle.** When the materialization credential is within the refresh
-  margin (`TETRAL_RESOURCE_CRED_REFRESH_MARGIN`) or expired, Bridge resets the
-  preparation to pending, re-enqueues `session_prepare` in the same transaction,
-  and returns a tool-visible retryable transient error, retrying the input until
-  preparation is ready. The same reset covers a cold return to a released,
-  stopped, or archived sandbox.
-- **Invariants a replacement must preserve.** Bridge stays out of the resource
-  tables entirely — its source is the preparation column, not the resource row;
-  it never mutates sandbox or preparation state beyond the pending reset; the
-  per-file `read` roots must reach the helper payload, since containment is
-  lexical on that list.
-- **Conformance.** `session_runtime_lifecycle_test.go`, the sandbox-readiness
-  paths in `runtime_delivery_store_test.go`.
+- **Contract.** Bridge records the approved Sandbox execution and its Queue job
+  in one transaction. It does not inspect provider state, mint credentials,
+  mount resources, build helper payloads, or reset lifecycle state.
+- **Lifecycle.** Sandbox Service resolves the current binding, performs fresh
+  provider inspection, and converges activation and materialization before it
+  authorizes command submission. The materialization receipt carries the
+  resource roots and credential expiry used by the provider adapter.
+- **Invariants a replacement must preserve.** Bridge remains a durable clerk:
+  it validates declaration identity, writes refs-only business facts, and
+  publishes Queue work. Provider and helper behavior stays behind the Sandbox
+  Service adapter registry.
+- **Conformance.** Sandbox lifecycle/execution store suites and Runtime Pod
+  tool-runner tests.
 
 ### Kubernetes pod visibility (engine-root `internal/kubernetes`)
 
@@ -414,7 +404,7 @@ replacement must preserve, and the conformance suites that prove it.
   unavailable, because only the former is allowed to replace a binding; a
   not-ready snapshot must retry, never finalize.
 - **Conformance.** Bridge-local: `bridge_visibility_test.go`,
-  `runtime_pod_lost_release_fence_test.go`. Engine-root (under
+  `runtime_pod_lost_store_test.go`. Engine-root (under
   `internal/kubernetes/`): `visibility_client_test.go`, `cache_test.go`
   (covering the `WatcherCache` type in `watcher_cache.go`),
   `static_visibility_test.go`.
@@ -433,15 +423,15 @@ claim/stage/consume lifecycle); `session_runtime_status` (running/idle writes an
 and the runtime-side writes on `session_threads` (child lifecycle; public
 archive admission stays with api). Through its RPCs it also writes the
 memory tables (`RunMemory`), the event change-log rows that ride every public
-event write, and — on the cold-return path — `session_preparations` plus the
-`session_prepare` queue row. It reads `sandboxes` for readiness gating and
-never mutates machine lifecycle.
+event write, and refs-only Sandbox execution requests plus their Queue rows.
+It never inspects provider state or mutates Sandbox lifecycle.
 
 Boundaries it does not cross: no hot loop state (no run slots, fibers, or
 provider streams); no provider lowering, credentials, or model calls; no
-sandbox lifecycle (start/stop/archive/delete belong to Sandbox Service — the
-Bridge carries no Sandbox-provider configuration, and `job-runner` receives
-no blob credentials, inspectable in the manifests and asserted by tests); no public HTTP termination; and cleanup
+Sandbox provider execution (create/start/release belong to Sandbox Service — the
+Bridge carries no Sandbox-provider configuration, while `job-runner` receives
+only the Blob credentials needed for Session cleanup, inspectable in the
+manifests and asserted by tests); no public HTTP termination; and cleanup
 never deletes durable history.
 
 ## Testing guide
@@ -454,21 +444,19 @@ never deletes durable history.
 | `bridge_api_events_test.go` | `WriteEvent` atomicity, whitelisted projection, anchored-reasoning and usage-attachment folding, replay conflict |
 | `bridge_api_settlement_test.go` | `WriteRequestEnd` / `FinishIdle` / `CommitRuntimeTermination`, single-terminal-end serialization, reschedule ceiling, best-effort capture gate, stable-reasoning merge |
 | `bridge_api_children_test.go` | Child create/resolve/mark lifecycle and thread-context-prefix checkpoint |
-| `bridge_api_tools_test.go` | Sandbox acceptance/result-wait separation, exact replay identity, result custody, and durable memory behavior |
+| Sandbox execution store/runner suites and Runtime Pod tool-runner tests | Sandbox acceptance/result-wait separation, exact replay identity, result custody, and durable memory behavior |
 | `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | Background-command follow-ups and stdin write-sequence dedupe |
 | `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`, `mcp_collision_split_test.go` | MCP claim/commit idempotency, reservation fencing, capture-before-deliver, generation-ordered supersession, collision split |
 | `bridge_api_attachments_test.go`, `bridge_api_file_attachments_test.go`, `attachment_transport_test.go`, `scoped_transport_capacity_test.go` | Read-only Gateway resolvers, scope validation, offset-addressed file chunk reads, helper-transport capacity scoping |
 | `closeout_sentinel_test.go` | `scope_superseded` / `closeout_unrepairable` typing and `errorCode`-keyed ack mapping |
 | `job_runner_test.go`, `runtime_delivery_test.go`, `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go` | Queue reconcile, direct-to-pod delivery, inbox upsert, delivery-exhaustion fencing |
 | `completion_mail_test.go`, `completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-wake write |
-| `runtime_pod_lost.go` suites (`runtime_pod_lost_release_fence_test.go`, `runtime_pod_lost_interrupt_fence_test.go`, `runtime_pod_lost_delivery_repair_test.go`, `runtime_pod_lost_store_test.go`) | Proven-gone repair, interrupted-then-lost quiet settlement, release-before-finalize fencing |
-| `runtime_session_cleanup_test.go` | Cleanup order, the tree fence claim proof, reschedule-at-both-points, the `reason=delete` inversion |
-| `release_handler_delete_integration_test.go`, `sandbox_release_client_test.go` | Sandbox-release handoff and the delete-path release identity |
-| `session_runtime_lifecycle_test.go` | Cold-return preparation reset and the credential-expiry readiness gate |
+| `runtime_pod_lost.go` suites (`runtime_pod_lost_interrupt_fence_test.go`, `runtime_pod_lost_delivery_repair_test.go`, `runtime_pod_lost_store_test.go`) | Proven-gone repair, interrupted-then-lost quiet settlement, and Sandbox-lifecycle independence |
+| `runtime_session_cleanup_test.go` | Cleanup order, the tree fence claim proof, reschedule-at-both-points, and the durable Sandbox release gate |
 | `bridge_visibility_test.go` + `internal/kubernetes/*_test.go` | Pod/EndpointSlice visibility and the proven-gone vs merely-unavailable classification |
-| `config_test.go`, `cmd/bridge-api/main_test.go`, `cmd/job-runner/main_test.go` | Startup config validation (schema/inbox/refresh-margin env parsing) |
+| `config_test.go`, `cmd/bridge-api/main_test.go`, `cmd/job-runner/main_test.go` | Startup config validation and production dependency assembly |
 | `runtime_delivery_store_test.go` (`TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly`) | Production Job Runner assembly reaches the configured MCP connector over TCP, captures the first manifest durably, and admits the retried input |
-| `deploy/kubernetes/manifest_test.go` (`TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers`) | Bridge carries no Sandbox-provider configuration; only `bridge-api` carries Blob credentials for attachment reads, while `job-runner` carries neither |
+| `deploy/kubernetes/manifest_test.go` (`TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers`) | Bridge carries no Sandbox-provider configuration; `bridge-api` and `job-runner` receive only the Blob credentials required by their attachment-read and Session-cleanup responsibilities |
 
 If a PR changes an RPC's idempotency identity, the binding fence, the repair
 rules, the queue reply mapping, the cleanup order, the closeout dispositions,

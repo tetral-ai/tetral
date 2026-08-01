@@ -38,9 +38,9 @@ var helperIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // controlRequest / controlResponse are the control.sock wire protocol between
 // an invoking helper and a live supervisor: one connection per operation, one
 // JSON document each way, then close, versioned by schema_version. This
-// protocol is helper-internal — the Bridge driver never sees it. The invoking
+// protocol is helper-internal — the Sandbox adapter never sees it. The invoking
 // helper (controlTask) maps a controlResponse back onto the standard result
-// envelope, so the socket shape and the Bridge-facing envelope are independent.
+// envelope, so the socket shape and the adapter-facing envelope are independent.
 type controlRequest struct {
 	SchemaVersion int    `json:"schema_version"`
 	Op            string `json:"op"`

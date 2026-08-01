@@ -237,18 +237,6 @@ func (s *PostgreSQLBridgeAPIStore) ResolveInterAgentDelivery(ctx context.Context
 		if !directInstruction && !completionReturn {
 			return status.Error(codes.FailedPrecondition, "agent mail envelope does not match the parent-child relationship")
 		}
-		readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(
-			ctx,
-			tx,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-		)
-		if err != nil {
-			return err
-		}
-		if !ok || readiness.PreparationAttemptID == "" {
-			return status.Error(codes.FailedPrecondition, "agent mail delivery has no active preparation")
-		}
 		binding, err := readRuntimeBindingForDeliveryTx(
 			ctx,
 			tx,
@@ -264,7 +252,6 @@ func (s *PostgreSQLBridgeAPIStore) ResolveInterAgentDelivery(ctx context.Context
 			tx,
 			targetScope,
 			envelope,
-			readiness.PreparationAttemptID,
 			binding,
 			now,
 		)
@@ -279,7 +266,6 @@ func (s *PostgreSQLBridgeAPIStore) ResolveInterAgentDelivery(ctx context.Context
 				targetScope.GetSessionId(),
 				targetScope.GetSessionThreadId(),
 				envelope.DeliveryID,
-				admitted.PreparationAttemptID,
 				now,
 			); err != nil {
 				return err

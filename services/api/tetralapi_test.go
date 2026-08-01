@@ -78,7 +78,7 @@ func TestTetralAPIProductionRouterExercisesRepresentativeMatureFamilies(t *testi
 	assertTetralAPIStatus(t, env.router, http.MethodGet, "/v1/skills", "", tetralAPITestAPIKeyID, http.StatusOK, "")
 
 	sessionID := createTetralAPIResource(t, env.router, "/v1/sessions?beta=true", `{"agent":"`+agentID+`","environment_id":"`+environmentID+`","vault_ids":[],"resources":[{"type":"file","file_id":"`+fileID+`","mount_path":"/workspace/router-file.txt"}]}`)
-	sessionFileID := assertTetralAPISessionPreparation(t, env.admin, sessionID, "pending")
+	sessionFileID := assertTetralAPISessionResources(t, env.admin, sessionID)
 	assertTetralAPIStatus(t, env.router, http.MethodPost, "/v1/sessions/"+sessionID+"/events", `{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`, tetralAPITestAPIKeyID, http.StatusOK, "")
 	eventList := requestTetralAPI(env.router, http.MethodGet, "/v1/sessions/"+sessionID+"/events?limit=10&order=asc", "", tetralAPITestAPIKeyID)
 	if eventList.Code != http.StatusOK {
@@ -434,22 +434,8 @@ func assertCredentialEncryptedAtRest(t *testing.T, db *sql.DB, credentialID stri
 	}
 }
 
-func assertTetralAPISessionPreparation(t *testing.T, db *sql.DB, sessionID string, wantStatus string) string {
+func assertTetralAPISessionResources(t *testing.T, db *sql.DB, sessionID string) string {
 	t.Helper()
-	var preparationStatus string
-	var environmentGeneration int64
-	var sandboxID string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status, environment_generation, sandbox_id
-		   FROM session_preparations
-		  WHERE workspace_id = $1 AND session_id = $2`,
-		"default", sessionID,
-	).Scan(&preparationStatus, &environmentGeneration, &sandboxID); err != nil {
-		t.Fatalf("load session preparation: %v", err)
-	}
-	if preparationStatus != wantStatus || environmentGeneration != 1 || !strings.HasPrefix(sandboxID, "sandbox_") {
-		t.Fatalf("session preparation status/generation/sandbox = %q/%d/%q; want %q/1/sandbox_", preparationStatus, environmentGeneration, sandboxID, wantStatus)
-	}
 	var sessionFileID string
 	var mountPath string
 	if err := db.QueryRowContext(context.Background(),

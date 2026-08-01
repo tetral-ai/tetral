@@ -53,7 +53,7 @@ func TestGatewayMCPManifestListerReceivesManifestAboveSharedSessionCap(t *testin
 
 	lister := NewGatewayMCPManifestLister(
 		"passthrough:///mcp-manifest-capacity",
-		sandboxReleaseClientTestTokenSource{},
+		&countingRuntimeCommandTokenSource{},
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
 	)
 	result, err := lister.ListMCPTools(context.Background(), MCPManifestListRequest{WorkspaceID: "default", SessionID: "sesn_capacity", MCPServerName: "github"})

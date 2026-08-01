@@ -329,6 +329,27 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndSettlesOpenInterruptAtomically(t
 	}
 }
 
+func TestRequestEndInterruptCommitCarriesAcceptedSandboxExecutions(t *testing.T) {
+	request, _, err := requestEndInterruptCommitRequest(&bridgev1.WriteRequestEndRequest{
+		IsError:      true,
+		ErrorKind:    "runtime_interrupted",
+		FinishReason: "cancelled",
+		InterruptSettlement: &bridgev1.RequestEndInterruptSettlement{
+			RuntimeInputId:                  "rin_interrupt_request_end",
+			EventIds:                        []string{"sevt_interrupt_request_end"},
+			SequenceFrom:                    4,
+			SequenceTo:                      4,
+			SandboxExecutionToolUseEventIds: []string{"sevt_sandbox_execution"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("requestEndInterruptCommitRequest: %v", err)
+	}
+	if got := request.GetSandboxExecutionToolUseEventIds(); !reflect.DeepEqual(got, []string{"sevt_sandbox_execution"}) {
+		t.Fatalf("sandbox execution ids = %v; want accepted execution identity", got)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsWebToolCounters(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_end_web_usage", "thr_bridge_request_end_web_usage")
@@ -2306,8 +2327,6 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle", "thr_bridge_finish_idle")
 	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_finish_idle", "thr_bridge_finish_idle", "thr_bridge_finish_idle_sender")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle", "bind_bridge_finish_idle", 1, "pod_uid_finish_idle")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_finish_idle", "prep_bridge_finish_idle")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_finish_idle", "2026-01-01T00:00:00Z")
 	seedBridgeAPIEvent(
 		t,
 		admin,
@@ -2358,7 +2377,7 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 		"evt_bridge_finish_idle_running",
 		`{"type":"end_turn"}`,
 	)
-	response, err := store.FinishIdle(context.Background(), request)
+	response, err := finishIdleWithStagedCaptureForTest(t, admin, store, request)
 	if err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
@@ -2542,8 +2561,6 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleCannotAdoptAfterPodLossSettlesTurn(t 
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_"+sessionID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_"+sessionID)
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	now := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
 	if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
@@ -2578,7 +2595,7 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleCannotAdoptAfterPodLossSettlesTurn(t 
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	binding := runtimePodLostReleaseFenceBinding(sessionID, bindingID, 1)
+	binding := runtimePodLostBinding(sessionID, bindingID, 1)
 	if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtime, sessionID, binding, now.Add(time.Second)); err != nil {
 		t.Fatalf("settle runtime pod loss: %v", err)
 	}
@@ -2634,12 +2651,23 @@ func settleOutputCaptureGenerationForTest(db *sql.DB, sessionID string, writeID 
 	return errors.New("capture generation was not created")
 }
 
+func finishIdleWithStagedCaptureForTest(t *testing.T, db *sql.DB, store *PostgreSQLBridgeAPIStore, request *bridgev1.FinishIdleRequest) (*bridgev1.FinishIdleResponse, error) {
+	t.Helper()
+	settled := make(chan error, 1)
+	go func() {
+		settled <- settleOutputCaptureGenerationForTest(db, request.GetScope().GetSessionId(), request.GetDurableTurnId(), 1, "staged")
+	}()
+	response, err := store.FinishIdle(context.Background(), request)
+	if settleErr := <-settled; settleErr != nil {
+		t.Fatalf("stage output capture: %v", settleErr)
+	}
+	return response, err
+}
+
 func TestPostgreSQLBridgeAPIStoreFinishIdleRequiresActionPreservesTurnRetryCounters(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_requires_action", "thr_bridge_requires_action")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_requires_action", "bind_bridge_requires_action", 1, "pod_uid_requires_action")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_requires_action", "prep_bridge_requires_action")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_requires_action", "2026-01-01T00:00:00Z")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
 			workspace_id, session_id, status, running_since, active_seconds_total,
@@ -2659,13 +2687,14 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleRequiresActionPreservesTurnRetryCount
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	if _, err := store.FinishIdle(context.Background(), bridgeAPIFinishIdleRequest(
+	request := bridgeAPIFinishIdleRequest(
 		t,
 		admin,
 		bridgeAPIScope("sesn_bridge_requires_action", "thr_bridge_requires_action", "bind_bridge_requires_action", 1, "pod_uid_requires_action"),
 		"evt_bridge_requires_action_running",
 		`{"type":"requires_action"}`,
-	)); err != nil {
+	)
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err != nil {
 		t.Fatalf("FinishIdle requires_action: %v", err)
 	}
 
@@ -3028,7 +3057,6 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_terminate", "thr_bridge_child_terminate", "evt_bridge_child_terminate_created", 1, "session.thread_created",
 		`{"type":"session.thread_created","parent_thread_id":"thr_bridge_child_terminate_main","source_tool_use_event_id":"sevt_bridge_child_terminate_spawn"}`)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_terminate", "bind_bridge_child_terminate", 1, "pod_uid_child_terminate")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_child_terminate", "prep_bridge_child_terminate")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
 

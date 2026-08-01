@@ -7,7 +7,5 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
 data:
-  TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
-  TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: "2"

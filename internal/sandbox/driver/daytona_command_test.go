@@ -19,7 +19,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
 
-func TestPreparationCommandsSerializeExactServerSideTimeoutOnDaytonaWire(t *testing.T) {
+func TestDaytonaCommandsSerializeExactServerSideTimeoutOnWire(t *testing.T) {
 	var timeouts []int
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/process/execute" {
@@ -39,39 +39,39 @@ func TestPreparationCommandsSerializeExactServerSideTimeoutOnDaytonaWire(t *test
 	toolboxConfig := toolbox.NewConfiguration()
 	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
 	process := daytonasdk.NewProcessService(toolbox.NewAPIClient(toolboxConfig), nil, "")
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(staticPreparationGetter{handle: daytonaSandboxHandle{Process: process, FileSystem: &recordingMemoryProjectionFileSystem{}}}, 37*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(staticPreparationGetter{handle: daytonaSandboxHandle{Process: process, FileSystem: &recordingMemoryProjectionFileSystem{}}}, 37*time.Second)
 
-	if err := executor.RunPreparationCommand(context.Background(), PreparationCommandTarget{ProviderSandboxID: "provider"}, "true", nil, 37*time.Second); err != nil {
-		t.Fatalf("file/resource preparation command: %v", err)
+	if err := executor.RunDaytonaCommand(context.Background(), DaytonaCommandTarget{ProviderSandboxID: "provider"}, "true", nil, 37*time.Second); err != nil {
+		t.Fatalf("file/resource daytona command: %v", err)
 	}
 	if err := executor.RemoveMemoryStore(context.Background(), "provider", sandbox.MemoryStoreMount{MountPath: "/mnt/memory/store"}); err != nil {
-		t.Fatalf("Memory preparation command: %v", err)
+		t.Fatalf("Memory daytona command: %v", err)
 	}
 	if err := executor.RemoveGitHubRepository(context.Background(), "provider", sandbox.GitHubRepositoryMount{MountPath: "/workspace/repo"}); err != nil {
-		t.Fatalf("GitHub preparation command: %v", err)
+		t.Fatalf("GitHub daytona command: %v", err)
 	}
 	if fmt.Sprint(timeouts) != "[37 37 37]" {
 		t.Fatalf("Daytona wire timeouts = %v; want exact integer seconds for file, Memory, GitHub", timeouts)
 	}
 }
 
-func TestRunPreparationCommandPassesSecretEnvAndTimeout(t *testing.T) {
+func TestRunDaytonaCommandPassesSecretEnvAndTimeout(t *testing.T) {
 	process := &recordingPreparationProcess{}
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(recordingPreparationGetter{process: process}, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(recordingPreparationGetter{process: process}, 45*time.Second)
 	env := map[string]string{
 		"RCLONE_CONFIG_R2_ACCESS_KEY_ID":     "access-key",
 		"RCLONE_CONFIG_R2_SECRET_ACCESS_KEY": "secret-key",
 		"RCLONE_CONFIG_R2_SESSION_TOKEN":     "session-token",
 	}
 
-	err := executor.RunPreparationCommand(context.Background(), PreparationCommandTarget{ProviderSandboxID: "provider_sandbox"}, "setsid sudo rclone mount </dev/null >/dev/null 2>&1", env, 45*time.Second)
+	err := executor.RunDaytonaCommand(context.Background(), DaytonaCommandTarget{ProviderSandboxID: "provider_sandbox"}, "setsid sudo rclone mount </dev/null >/dev/null 2>&1", env, 45*time.Second)
 	if err != nil {
-		t.Fatalf("RunPreparationCommand: %v", err)
+		t.Fatalf("RunDaytonaCommand: %v", err)
 	}
 	env["RCLONE_CONFIG_R2_SECRET_ACCESS_KEY"] = "mutated-secret"
 
 	if process.command != "setsid sudo rclone mount </dev/null >/dev/null 2>&1" {
-		t.Fatalf("command = %q; want preparation command", process.command)
+		t.Fatalf("command = %q; want daytona command", process.command)
 	}
 	if process.opts.Timeout == nil || *process.opts.Timeout != 45*time.Second {
 		t.Fatalf("timeout = %v; want 45s", process.opts.Timeout)
@@ -84,7 +84,7 @@ func TestRunPreparationCommandPassesSecretEnvAndTimeout(t *testing.T) {
 	}
 }
 
-func TestRunPreparationCommandFailureDoesNotLeakCommandEnvOrOutput(t *testing.T) {
+func TestRunDaytonaCommandFailureDoesNotLeakCommandEnvOrOutput(t *testing.T) {
 	const (
 		commandSecret = "command-secret-sentinel"
 		envSecret     = "env-secret-sentinel"
@@ -93,11 +93,11 @@ func TestRunPreparationCommandFailureDoesNotLeakCommandEnvOrOutput(t *testing.T)
 	process := &recordingPreparationProcess{
 		response: &types.ExecuteResponse{ExitCode: 23, Result: "rclone failed " + outputSecret},
 	}
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(recordingPreparationGetter{process: process}, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(recordingPreparationGetter{process: process}, 45*time.Second)
 
-	err := executor.RunPreparationCommand(context.Background(), PreparationCommandTarget{ProviderSandboxID: "provider_sandbox"}, "echo "+commandSecret, map[string]string{"SECRET": envSecret}, 45*time.Second)
+	err := executor.RunDaytonaCommand(context.Background(), DaytonaCommandTarget{ProviderSandboxID: "provider_sandbox"}, "echo "+commandSecret, map[string]string{"SECRET": envSecret}, 45*time.Second)
 	if err == nil {
-		t.Fatal("RunPreparationCommand succeeded; want failure")
+		t.Fatal("RunDaytonaCommand succeeded; want failure")
 	}
 	var providerErr *sandbox.ProviderError
 	if !errors.As(err, &providerErr) {
@@ -109,16 +109,16 @@ func TestRunPreparationCommandFailureDoesNotLeakCommandEnvOrOutput(t *testing.T)
 	rendered := strings.Join([]string{err.Error(), fmt.Sprintf("%+v", err), fmt.Sprintf("%#v", err)}, "\n")
 	for _, secret := range []string{commandSecret, envSecret, outputSecret} {
 		if strings.Contains(rendered, secret) {
-			t.Fatalf("preparation command error leaked %q:\n%s", secret, rendered)
+			t.Fatalf("daytona command error leaked %q:\n%s", secret, rendered)
 		}
 	}
 }
 
-func TestRunPreparationCommandExecuteErrorMapsThroughDaytonaBoundary(t *testing.T) {
+func TestRunDaytonaCommandExecuteErrorMapsThroughDaytonaBoundary(t *testing.T) {
 	process := &recordingPreparationProcess{err: context.DeadlineExceeded}
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(recordingPreparationGetter{process: process}, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(recordingPreparationGetter{process: process}, 45*time.Second)
 
-	err := executor.RunPreparationCommand(context.Background(), PreparationCommandTarget{ProviderSandboxID: "provider_sandbox"}, "mount", nil, 45*time.Second)
+	err := executor.RunDaytonaCommand(context.Background(), DaytonaCommandTarget{ProviderSandboxID: "provider_sandbox"}, "mount", nil, 45*time.Second)
 	var providerErr *sandbox.ProviderError
 	if !errors.As(err, &providerErr) {
 		t.Fatalf("error = %T %v; want ProviderError", err, err)
@@ -128,13 +128,13 @@ func TestRunPreparationCommandExecuteErrorMapsThroughDaytonaBoundary(t *testing.
 	}
 }
 
-func TestStagePreparationFileUploadsUnderTetralRuntime(t *testing.T) {
+func TestStageDaytonaFileUploadsUnderTetralRuntime(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 
-	err := executor.StagePreparationFile(context.Background(), PreparationCommandTarget{ProviderSandboxID: "provider_sandbox"}, "/tmp/tetral-runtime/resource-projection/session/resource/file", strings.NewReader("canonical"))
+	err := executor.StageDaytonaFile(context.Background(), DaytonaCommandTarget{ProviderSandboxID: "provider_sandbox"}, "/tmp/tetral-runtime/resource-projection/session/resource/file", strings.NewReader("canonical"))
 	if err != nil {
-		t.Fatalf("StagePreparationFile: %v", err)
+		t.Fatalf("StageDaytonaFile: %v", err)
 	}
 	if len(client.fileSystem.created) != 1 ||
 		client.fileSystem.created[0].path != "/tmp/tetral-runtime/resource-projection/session/resource" ||
@@ -151,12 +151,12 @@ func TestStagePreparationFileUploadsUnderTetralRuntime(t *testing.T) {
 	}
 }
 
-func TestStagePreparationFileRejectsPathOutsideTetralRuntime(t *testing.T) {
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(newRecordingMemoryProjectionClient(), 45*time.Second)
+func TestStageDaytonaFileRejectsPathOutsideTetralRuntime(t *testing.T) {
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(newRecordingMemoryProjectionClient(), 45*time.Second)
 
-	err := executor.StagePreparationFile(context.Background(), PreparationCommandTarget{ProviderSandboxID: "provider_sandbox"}, "/workspace/leak", strings.NewReader("canonical"))
+	err := executor.StageDaytonaFile(context.Background(), DaytonaCommandTarget{ProviderSandboxID: "provider_sandbox"}, "/workspace/leak", strings.NewReader("canonical"))
 	if err == nil || !strings.Contains(err.Error(), "under /tmp/tetral-runtime") {
-		t.Fatalf("StagePreparationFile error = %v; want path boundary rejection", err)
+		t.Fatalf("StageDaytonaFile error = %v; want path boundary rejection", err)
 	}
 }
 

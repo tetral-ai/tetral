@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +67,9 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 			}
 			return nil
 		}
+		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		if err := verifySandboxExecutionDurableIdentityTx(ctx, tx, request, canonicalInputJSON); err != nil {
 			return err
 		}
@@ -118,9 +120,26 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 	return &bridgev1.AcceptSandboxExecutionResponse{Ack: ack}, nil
 }
 
+func rejectSandboxExecutionAfterReleaseFenceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var releaseRequested bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM session_sandbox_bindings
+			 WHERE workspace_id = $1 AND session_id = $2 AND release_requested_at IS NOT NULL
+		)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(),
+	).Scan(&releaseRequested); err != nil {
+		return err
+	}
+	if releaseRequested {
+		return status.Error(codes.FailedPrecondition, "sandbox release is already requested")
+	}
+	return nil
+}
+
 // AwaitSandboxExecution reads one accepted execution until Sandbox Service
 // settles it. It never creates an execution row or Queue job.
-func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
+func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
 	if _, _, err := validateSandboxExecutionRequest(request); err != nil {
 		return nil, err
 	}
@@ -140,7 +159,16 @@ func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, re
 	}, nil
 }
 
-func validateSandboxExecutionRequest(request *bridgev1.AcceptSandboxExecutionRequest) (string, string, error) {
+type sandboxExecutionRequest interface {
+	GetScope() *bridgev1.RuntimeScope
+	GetToolUseEventId() string
+	GetNormalizedInputHash() string
+	GetToolName() string
+	GetInputJson() string
+	GetModelToolCallId() string
+}
+
+func validateSandboxExecutionRequest(request sandboxExecutionRequest) (string, string, error) {
 	if request.GetToolUseEventId() == "" || request.GetModelToolCallId() == "" || request.GetNormalizedInputHash() == "" || request.GetToolName() == "" || request.GetInputJson() == "" {
 		return "", "", status.Error(codes.InvalidArgument, "invalid sandbox execution request")
 	}
@@ -172,7 +200,7 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.AcceptSandboxExecutionRequest, canonicalInputJSON string) error {
+func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) error {
 	var payloadJSON string
 	if err := tx.QueryRow(ctx,
 		`SELECT payload_json FROM session_events
@@ -234,7 +262,7 @@ func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMes
 	return value
 }
 
-func verifyApprovedSandboxExecutionHandoffTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.AcceptSandboxExecutionRequest, canonicalInputJSON string) error {
+func verifyApprovedSandboxExecutionHandoffTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) error {
 	var modelToolCallID, toolName, inputJSON, statusValue string
 	var decision sql.NullString
 	err := tx.QueryRow(ctx,
@@ -271,13 +299,13 @@ func mustCanonicalRunToolInput(raw string) string {
 	return canonical
 }
 
-func sandboxExecutionIdentityMatches(existing runtimeToolResult, request *bridgev1.AcceptSandboxExecutionRequest, canonicalInputJSON string, canonicalInputHash string) bool {
+func sandboxExecutionIdentityMatches(existing runtimeToolResult, request sandboxExecutionRequest, canonicalInputJSON string, canonicalInputHash string) bool {
 	return existing.ToolKind == bridgeToolKindSandbox && existing.NormalizedInputHash == canonicalInputHash &&
 		existing.ToolName == request.GetToolName() && existing.InputJSON == canonicalInputJSON &&
 		existing.ModelToolCallID.Valid && existing.ModelToolCallID.String == request.GetModelToolCallId()
 }
 
-func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (runtimeToolResult, error) {
+func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request sandboxExecutionRequest) (runtimeToolResult, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, runToolWaitAttemptTimeout)
 	defer cancel()
 	ticker := time.NewTicker(runToolResultPollInterval)
@@ -673,553 +701,6 @@ func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.C
 		case <-ticker.C:
 		}
 	}
-}
-
-func runToolTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (SandboxToolTarget, string, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return SandboxToolTarget{}, "", err
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil {
-		return SandboxToolTarget{}, "", err
-	}
-	if !ok || readiness.Status != "ready" {
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox preparation is not ready", true), nil
-	}
-	if readiness.SandboxStatus == "failed" {
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_failed", "sandbox preparation failed", false), nil
-	}
-	if readiness.SandboxStatus != "active" {
-		if sandboxStatusNeedsPreparationReset(readiness.SandboxStatus) {
-			if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-				return SandboxToolTarget{}, "", err
-			}
-		}
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox is not active", true), nil
-	}
-	if readiness.ProviderSandboxID == "" {
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox provider handle is unavailable", true), nil
-	}
-	if resourceCredentialNeedsLiveRotation(readiness.ResourceCredentialExpiresAt, now, resourceCredentialRefreshMargin) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-			return SandboxToolTarget{}, "", err
-		}
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "resource materialization credential is expiring", true), nil
-	}
-	if !sandboxRefreshIsFresh(readiness.StatusRefreshedAt, now, freshnessWindow) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, true); err != nil {
-			return SandboxToolTarget{}, "", err
-		}
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox readiness is stale", true), nil
-	}
-	return SandboxToolTarget{
-		WorkspaceID:          scope.GetWorkspaceId(),
-		SessionID:            scope.GetSessionId(),
-		SessionThreadID:      scope.GetSessionThreadId(),
-		BindingID:            scope.GetBinding().GetBindingId(),
-		BindingGeneration:    scope.GetBinding().GetBindingGeneration(),
-		SandboxID:            readiness.SandboxID,
-		ProviderSandboxID:    readiness.ProviderSandboxID,
-		PreparationAttemptID: readiness.PreparationAttemptID,
-		ResourceRootsJSON:    readiness.ResourceRootsJSON.String,
-	}, "", nil
-}
-
-type sessionPreparationReadiness struct {
-	PreparationAttemptID        string
-	EnvironmentID               string
-	EnvironmentGeneration       int64
-	Status                      string
-	SandboxID                   string
-	ProviderSandboxID           string
-	SandboxStatus               string
-	StatusRefreshedAt           sql.NullString
-	ResourceCredentialExpiresAt sql.NullString
-	ResourceRootsJSON           sql.NullString
-	ResourceHelperRecoveryCount int
-	FailureStage                sql.NullString
-	LastErrorKind               sql.NullString
-	FailureReason               sql.NullString
-	FailureResourceID           sql.NullString
-	FailureResourceURL          sql.NullString
-	Retryable                   sql.NullBool
-}
-
-func loadLatestSessionPreparationReadinessTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (sessionPreparationReadiness, bool, error) {
-	return loadLatestSessionPreparationReadiness(ctx, tx, workspaceID, sessionID, false)
-}
-
-func loadLatestSessionPreparationReadinessForUpdateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (sessionPreparationReadiness, bool, error) {
-	return loadLatestSessionPreparationReadiness(ctx, tx, workspaceID, sessionID, true)
-}
-
-func loadLatestSessionPreparationReadiness(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, forUpdate bool) (sessionPreparationReadiness, bool, error) {
-	query := `SELECT p.preparation_attempt_id, p.environment_id, p.environment_generation,
-	        p.status, p.sandbox_id,
-	        COALESCE(s.provider_sandbox_id, ''), COALESCE(s.status, ''), s.status_refreshed_at,
-	        p.resource_cred_expires_at, p.resource_roots_json, p.resource_helper_recovery_count,
-	        p.failure_stage, p.last_error_kind, p.failure_reason,
-	        p.failure_resource_id, p.failure_resource_url, p.retryable
-	   FROM session_preparations p
-	   LEFT JOIN sandboxes s
-	     ON s.workspace_id = p.workspace_id
-	    AND s.session_id = p.session_id
-	    AND s.id = p.sandbox_id
-		  WHERE p.workspace_id = $1
-		    AND p.session_id = $2
-		    AND p.superseded_at IS NULL
-		  ORDER BY p.created_at DESC, p.preparation_attempt_id DESC
-		  LIMIT 1`
-	if forUpdate {
-		query += `
-		  FOR UPDATE OF p`
-	}
-	row := tx.QueryRow(ctx,
-		query,
-		workspaceID,
-		sessionID,
-	)
-	var readiness sessionPreparationReadiness
-	if err := row.Scan(
-		&readiness.PreparationAttemptID,
-		&readiness.EnvironmentID,
-		&readiness.EnvironmentGeneration,
-		&readiness.Status,
-		&readiness.SandboxID,
-		&readiness.ProviderSandboxID,
-		&readiness.SandboxStatus,
-		&readiness.StatusRefreshedAt,
-		&readiness.ResourceCredentialExpiresAt,
-		&readiness.ResourceRootsJSON,
-		&readiness.ResourceHelperRecoveryCount,
-		&readiness.FailureStage,
-		&readiness.LastErrorKind,
-		&readiness.FailureReason,
-		&readiness.FailureResourceID,
-		&readiness.FailureResourceURL,
-		&readiness.Retryable,
-	); dbconnect.IsNoRows(err) {
-		return sessionPreparationReadiness{}, false, nil
-	} else if err != nil {
-		return sessionPreparationReadiness{}, false, err
-	}
-	return readiness, true, nil
-}
-
-func loadEarliestFailedPreparationAtOrAfterTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	birthPreparationAttemptID string,
-	forUpdate bool,
-) (sessionPreparationReadiness, bool, error) {
-	if birthPreparationAttemptID == "" {
-		return sessionPreparationReadiness{}, false, runtimeDeliveryPrepareError{
-			kind:      "invalid_runtime_job_payload",
-			message:   "runtime input birth preparation attempt is missing",
-			retryable: false,
-		}
-	}
-	if forUpdate {
-		if err := lockSessionPreparationResetFenceTx(ctx, tx, workspaceID, sessionID); err != nil {
-			return sessionPreparationReadiness{}, false, err
-		}
-	}
-	birthQuery := `SELECT created_at
-	   FROM session_preparations
-	  WHERE workspace_id = $1
-	    AND session_id = $2
-	    AND preparation_attempt_id = $3`
-	var birthCreatedAt time.Time
-	if err := tx.QueryRow(ctx, birthQuery, workspaceID, sessionID, birthPreparationAttemptID).Scan(&birthCreatedAt); dbconnect.IsNoRows(err) {
-		return sessionPreparationReadiness{}, false, runtimeDeliveryPrepareError{
-			kind:      "runtime_preparation_failure_unavailable",
-			message:   "runtime input birth preparation attempt is unavailable",
-			retryable: true,
-		}
-	} else if err != nil {
-		return sessionPreparationReadiness{}, false, err
-	}
-	if forUpdate {
-		rows, err := tx.Query(ctx,
-			`SELECT preparation_attempt_id
-			   FROM session_preparations
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND (
-			        created_at > $3
-			        OR (
-			            created_at = $3
-			            AND preparation_attempt_id >= $4
-			        )
-			    )
-			  ORDER BY created_at ASC, preparation_attempt_id ASC
-			  FOR UPDATE`,
-			workspaceID,
-			sessionID,
-			birthCreatedAt,
-			birthPreparationAttemptID,
-		)
-		if err != nil {
-			return sessionPreparationReadiness{}, false, err
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var preparationAttemptID string
-			if err := rows.Scan(&preparationAttemptID); err != nil {
-				return sessionPreparationReadiness{}, false, err
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return sessionPreparationReadiness{}, false, err
-		}
-	}
-	query := `SELECT p.preparation_attempt_id, p.environment_id, p.environment_generation,
-	        p.status, p.sandbox_id,
-	        COALESCE(s.provider_sandbox_id, ''), COALESCE(s.status, ''), s.status_refreshed_at,
-	        p.resource_cred_expires_at, p.resource_roots_json, p.resource_helper_recovery_count,
-	        p.failure_stage, p.last_error_kind, p.failure_reason,
-	        p.failure_resource_id, p.failure_resource_url, p.retryable
-	   FROM session_preparations p
-	   LEFT JOIN sandboxes s
-	     ON s.workspace_id = p.workspace_id
-	    AND s.session_id = p.session_id
-	    AND s.id = p.sandbox_id
-	  WHERE p.workspace_id = $1
-	    AND p.session_id = $2
-	    AND p.status = 'failed'
-	    AND (
-	        p.created_at > $3
-	        OR (
-	            p.created_at = $3
-	            AND p.preparation_attempt_id >= $4
-	        )
-	    )
-	  ORDER BY p.created_at ASC, p.preparation_attempt_id ASC
-	  LIMIT 1`
-	row := tx.QueryRow(ctx, query, workspaceID, sessionID, birthCreatedAt, birthPreparationAttemptID)
-	var readiness sessionPreparationReadiness
-	if err := row.Scan(
-		&readiness.PreparationAttemptID,
-		&readiness.EnvironmentID,
-		&readiness.EnvironmentGeneration,
-		&readiness.Status,
-		&readiness.SandboxID,
-		&readiness.ProviderSandboxID,
-		&readiness.SandboxStatus,
-		&readiness.StatusRefreshedAt,
-		&readiness.ResourceCredentialExpiresAt,
-		&readiness.ResourceRootsJSON,
-		&readiness.ResourceHelperRecoveryCount,
-		&readiness.FailureStage,
-		&readiness.LastErrorKind,
-		&readiness.FailureReason,
-		&readiness.FailureResourceID,
-		&readiness.FailureResourceURL,
-		&readiness.Retryable,
-	); dbconnect.IsNoRows(err) {
-		return sessionPreparationReadiness{}, false, nil
-	} else if err != nil {
-		return sessionPreparationReadiness{}, false, err
-	}
-	return readiness, true, nil
-}
-
-func lockSessionPreparationResetFenceTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
-	var lockedSessionID string
-	if err := tx.QueryRow(ctx,
-		`SELECT id
-		   FROM sessions
-		  WHERE workspace_id = $1
-		    AND id = $2
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-	).Scan(&lockedSessionID); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.NotFound, "session not found"))
-	} else if err != nil {
-		return err
-	}
-	return nil
-}
-
-func resetSessionPreparationAndEnqueuePrepareTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, readiness sessionPreparationReadiness, now time.Time, preserveResourceCredentialExpiry bool) error {
-	if workspaceID == "" || sessionID == "" || readiness.PreparationAttemptID == "" || readiness.EnvironmentID == "" || readiness.EnvironmentGeneration <= 0 || readiness.SandboxID == "" {
-		return closeoutUnrepairableError(status.Error(codes.Internal, "session preparation identity is incomplete"))
-	}
-	requestedResourceCredentialExpiresAt := readiness.ResourceCredentialExpiresAt
-	requestedResourceHelperRecoveryCount := readiness.ResourceHelperRecoveryCount
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, workspaceID, sessionID); err != nil {
-		return err
-	}
-	current, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return err
-	}
-	if !ok || current.PreparationAttemptID != readiness.PreparationAttemptID || current.Status != "ready" {
-		return nil
-	}
-	readiness = current
-	if requestedResourceHelperRecoveryCount > readiness.ResourceHelperRecoveryCount {
-		readiness.ResourceHelperRecoveryCount = requestedResourceHelperRecoveryCount
-	}
-	timestamp := now
-	preparationAttemptID := id.New("prep_")
-	freshAttemptTime, err := nextSessionPreparationCreatedAtTx(ctx, tx, workspaceID, sessionID, now)
-	if err != nil {
-		return err
-	}
-	freshAttemptTimestamp := freshAttemptTime
-	resourceCredExpiresAt := any(nil)
-	if preserveResourceCredentialExpiry && requestedResourceCredentialExpiresAt.Valid {
-		resourceCredExpiresAt = requestedResourceCredentialExpiresAt.String
-	}
-	result, err := tx.Exec(ctx,
-		`UPDATE session_preparations
-		    SET superseded_at = $4, updated_at = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3
-		    AND status = 'ready'
-		    AND superseded_at IS NULL`,
-		workspaceID,
-		sessionID,
-		readiness.PreparationAttemptID,
-		timestamp,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "session preparation is no longer ready")
-	}
-	result, err = tx.Exec(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, resource_cred_expires_at,
-			resource_helper_recovery_count, created_at, updated_at
-		)
-		SELECT workspace_id, session_id, $4, environment_id,
-		       environment_generation, sandbox_id, 'pending', $5, $6,
-		       $7, $7
-		  FROM session_preparations
-		 WHERE workspace_id = $1
-		   AND session_id = $2
-		   AND preparation_attempt_id = $3
-		   AND status = 'ready'`,
-		workspaceID,
-		sessionID,
-		readiness.PreparationAttemptID,
-		preparationAttemptID,
-		resourceCredExpiresAt,
-		readiness.ResourceHelperRecoveryCount,
-		freshAttemptTimestamp,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "session preparation is no longer ready")
-	}
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":           workspaceID,
-		"session_id":             sessionID,
-		"preparation_attempt_id": preparationAttemptID,
-	})
-	if err != nil {
-		return err
-	}
-	ws := workspace.ID(workspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		ID:             id.New(queue.JobIDPrefix),
-		WorkspaceID:    ws,
-		Kind:           queue.KindSessionPrepare,
-		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
-		DedupeKey:      queue.FormatSessionPrepareDedupeKey(ws, sessionID, preparationAttemptID),
-		PayloadVersion: 1,
-		PayloadJSON:    payload,
-		MaxAttempts:    queue.DefaultMaxAttempts,
-		Now:            now,
-	})
-	return err
-}
-
-func nextSessionPreparationCreatedAtTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, requested time.Time) (time.Time, error) {
-	var latest sql.NullTime
-	if err := tx.QueryRow(ctx,
-		`SELECT MAX(created_at)
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		workspaceID,
-		sessionID,
-	).Scan(&latest); err != nil {
-		return time.Time{}, err
-	}
-	next := requested.UTC()
-	if latest.Valid && !next.After(latest.Time.UTC()) {
-		next = latest.Time.UTC().Add(time.Microsecond)
-	}
-	return next, nil
-}
-
-// resetResourcePreparationAfterHelperFailureTx handles the edge where a
-// helper_failure on a resource-ROOT read is treated as a retryable transient that
-// re-preps EVEN WHEN the stored resource_cred_expires_at has not yet passed: a
-// silently capped credential fails the read before the local expiry, so waiting
-// for the margin would never recover. The re-prep is bounded per preparation
-// (maxResourceHelperRecoveries) so a non-credential fault cannot loop, and it
-// fires only for resource-root reads — helper failures elsewhere never trigger
-// re-preparation.
-func resetResourcePreparationAfterHelperFailureTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, target SandboxToolTarget, now time.Time, _ time.Duration) (bool, error) {
-	if target.PreparationAttemptID == "" {
-		return false, nil
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil || !ok {
-		return false, err
-	}
-	if readiness.PreparationAttemptID != target.PreparationAttemptID || readiness.Status != "ready" || readiness.SandboxID != target.SandboxID {
-		return false, nil
-	}
-	if !resourceCredentialMaterializationRecorded(readiness.ResourceCredentialExpiresAt) ||
-		readiness.ResourceHelperRecoveryCount >= maxResourceHelperRecoveries {
-		return false, nil
-	}
-	readiness.ResourceHelperRecoveryCount++
-	if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func sandboxRefreshIsFresh(refreshedAt sql.NullString, now time.Time, freshnessWindow time.Duration) bool {
-	if !refreshedAt.Valid || strings.TrimSpace(refreshedAt.String) == "" {
-		return false
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, refreshedAt.String)
-	if err != nil {
-		return false
-	}
-	return !parsed.Before(now.Add(-freshnessWindow))
-}
-
-// sandboxStatusNeedsPreparationReset is one arm of a closed partition over
-// sandboxes.status that the readiness gate (runToolTargetTx and its siblings)
-// applies before tool execution:
-//
-//	status                          action
-//	stopped | archived | released   reset-and-re-enqueue (this function true) —
-//	                                  cold-return re-preparation
-//	active but stale, or an          reset-and-re-enqueue via the freshness /
-//	  expiring resource credential    credential sub-conditions in the gate
-//	creating | resuming | releasing  retry-only, NEVER reset — their in-flight
-//	                                  transitions are advanced by their own queue
-//	                                  jobs, and a reset would race the preparation
-//	                                  Sandbox Service is already driving
-//	failed                          terminal preparation path
-//
-// This function returns true only for the reset set; the in-flight statuses fall
-// through to the default (retry-only) precisely so a reset cannot race an
-// in-flight transition.
-func sandboxStatusNeedsPreparationReset(status string) bool {
-	switch status {
-	case "stopped", "archived", "released":
-		return true
-	default:
-		return false
-	}
-}
-
-func resourceCredentialExpiresFresh(expiresAt sql.NullString, now time.Time, refreshMargin time.Duration) bool {
-	if !expiresAt.Valid || strings.TrimSpace(expiresAt.String) == "" {
-		return true
-	}
-	if refreshMargin <= 0 {
-		refreshMargin = defaultResourceCredentialRefreshMargin
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, expiresAt.String)
-	if err != nil {
-		return false
-	}
-	return !now.After(parsed.Add(-refreshMargin))
-}
-
-// resourceCredentialNeedsLiveRotation is true once now() passes
-// resource_cred_expires_at minus the refresh margin. Bridge is READ-ONLY on the
-// credential: on this signal the readiness gate resets the preparation to
-// pending, enqueues session_prepare, and returns a retryable transient tool
-// error. Bridge never mints, refreshes, or calls the credential driver — the
-// re-mint happens inside the re-run session_prepare on Sandbox Service, which
-// owns the credential lifecycle and the expiry field Bridge only reads.
-func resourceCredentialNeedsLiveRotation(expiresAt sql.NullString, now time.Time, refreshMargin time.Duration) bool {
-	return !resourceCredentialExpiresFresh(expiresAt, now, refreshMargin)
-}
-
-func resourceCredentialMaterializationRecorded(expiresAt sql.NullString) bool {
-	return expiresAt.Valid && strings.TrimSpace(expiresAt.String) != ""
-}
-
-type resourceRootSnapshotEntry struct {
-	Path string `json:"path"`
-	Mode string `json:"mode"`
-}
-
-func runToolReadsResourceRoot(toolName string, inputJSON string, resourceRootsJSON string) bool {
-	if toolName != "Read" && toolName != "read" {
-		return false
-	}
-	if strings.TrimSpace(resourceRootsJSON) == "" {
-		return false
-	}
-	var input struct {
-		Path     string `json:"path"`
-		FilePath string `json:"file_path"`
-	}
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return false
-	}
-	path := input.Path
-	if strings.TrimSpace(path) == "" {
-		path = input.FilePath
-	}
-	candidate, ok := normalizeSandboxToolPath(path)
-	if !ok {
-		return false
-	}
-	var roots []resourceRootSnapshotEntry
-	if err := json.Unmarshal([]byte(resourceRootsJSON), &roots); err != nil {
-		return false
-	}
-	for _, root := range roots {
-		if root.Mode != "read" {
-			continue
-		}
-		rootPath, ok := normalizeSandboxToolPath(root.Path)
-		if !ok || rootPath == "/workspace" {
-			continue
-		}
-		if candidate == rootPath || strings.HasPrefix(candidate, rootPath+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeSandboxToolPath(raw string) (string, bool) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", false
-	}
-	if !path.IsAbs(trimmed) {
-		trimmed = path.Join("/workspace", trimmed)
-	}
-	cleaned := path.Clean(trimmed)
-	if !path.IsAbs(cleaned) || cleaned == "/" {
-		return "", false
-	}
-	return cleaned, true
 }
 
 type memoryToolInput struct {
@@ -1822,23 +1303,6 @@ func marshalBridgeDataJSON(value any) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(body.String(), "\n"), nil
-}
-
-func marshalToolRuntimeError(errorCode string, message string, retryable bool) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"status":     "runtime_error",
-		"error_code": errorCode,
-		"message":    message,
-		"retryable":  retryable,
-	})
-}
-
-func mustMarshalToolRuntimeError(errorCode string, message string, retryable bool) string {
-	result, err := marshalToolRuntimeError(errorCode, message, retryable)
-	if err != nil {
-		return `{"status":"runtime_error","error_code":"serialization_failed","message":"sandbox tool result serialization failed","retryable":false}`
-	}
-	return result
 }
 
 func marshalMemoryToolError(errorCode string, message string, rereadRequired bool) (string, error) {

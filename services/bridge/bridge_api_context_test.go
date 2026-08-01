@@ -347,8 +347,6 @@ func TestPostgreSQLBridgeAPIStoreLoadContextBoundsCompletionMailAcrossColdPasses
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_completion_window")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	for index := 1; index <= 6; index++ {
 		childID := "thr_bridge_completion_window_child_" + strconv.Itoa(index)
 		seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
@@ -561,14 +559,21 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsRuntimeSurface(t *testing.T) 
 		"metadata":{}
 	}`)
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_load_surface", "memstore_bridge_load_surface")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_load_surface", "prep_bridge_load_surface")
 	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET skills_index_json = '[{"skill_id":"sk_docs","skill_version_id":"skv_docs_3","version":"3.0.0","name":"Docs","description":"Read the project documentation.","directory":"docs"}]'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_load_surface'
-		    AND preparation_attempt_id = 'prep_bridge_load_surface'`); err != nil {
-		t.Fatalf("seed prepared skills index: %v", err)
+		`INSERT INTO skills (workspace_id, skill_id, display_title, latest_version, created_at, updated_at)
+		 VALUES ('default', 'sk_docs', 'Docs', '3.0.0', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed skill: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO skill_versions (
+			workspace_id, skill_id, skill_version_id, version, name, description,
+			directory, blob_key, size_bytes, sha256, created_at
+		 ) VALUES (
+			'default', 'sk_docs', 'skv_docs_3', '3.0.0', 'Docs',
+			'Read the project documentation.', 'docs', 'skills/sk_docs/3.0.0', 1,
+			'sha256_docs', '2026-01-01T00:00:00Z'
+		 )`); err != nil {
+		t.Fatalf("seed skill version: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE sessions
@@ -607,7 +612,8 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsRuntimeSurface(t *testing.T) 
 	); err != nil {
 		t.Fatalf("seed runtime inbox: %v", err)
 	}
-	seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_load_surface", "thr_bridge_load_surface", "bind_bridge_load_surface", "task_bridge_load_surface", "evt_bridge_load_background")
+	seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_load_surface", "thr_bridge_load_surface", "", "task_bridge_load_surface", "evt_bridge_load_background")
+	seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_load_surface", "thr_bridge_load_surface", "bind_bridge_load_stale", "task_bridge_load_stale", "evt_bridge_load_stale")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")

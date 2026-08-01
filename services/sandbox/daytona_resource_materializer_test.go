@@ -11,7 +11,7 @@ import (
 func TestDaytonaResourceMaterializerConvergesEveryResourceFamily(t *testing.T) {
 	events := []string{}
 	expiresAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	projection := &recordingSessionResourceProjection{
+	projection := &recordingDaytonaFileResourceMaterialization{
 		events: &events,
 		result: sandbox.ResourceSetup{
 			MemoryStores:          []sandbox.MemoryStoreMount{{ResourceID: "memory", MemoryStoreID: "mem_1", MountPath: "/mnt/memory/project"}},
@@ -54,12 +54,12 @@ func TestDaytonaResourceMaterializerConvergesEveryResourceFamily(t *testing.T) {
 	}
 }
 
-type recordingSessionResourceProjection struct {
+type recordingDaytonaFileResourceMaterialization struct {
 	events *[]string
 	result sandbox.ResourceSetup
 }
 
-func (p *recordingSessionResourceProjection) PrepareSessionResources(context.Context, sandbox.SandboxSetup, sandbox.ProviderHandle) (sandbox.ResourceSetup, error) {
+func (p *recordingDaytonaFileResourceMaterialization) MaterializeFileResources(context.Context, sandbox.SandboxSetup, sandbox.ProviderHandle) (sandbox.ResourceSetup, error) {
 	*p.events = append(*p.events, "projection")
 	return p.result, nil
 }

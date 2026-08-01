@@ -165,7 +165,6 @@ func reservedMountSubtrees() []string {
 		"/mnt/tetral/r2",
 		"/tmp/tetral-runtime",
 		"/dev/shm/tetral-runtime",
-		"/tmp/tetral/session-prepare",
 		"/mnt/memory",
 		"/skills",
 		"/mnt/session/outputs",

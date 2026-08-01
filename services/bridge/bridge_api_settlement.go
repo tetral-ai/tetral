@@ -291,14 +291,15 @@ func requestEndInterruptCommitRequest(
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement requires an interrupted terminal end")
 	}
 	interruptRequest := &bridgev1.CommitInputsRequest{
-		Scope:                    request.GetScope(),
-		RuntimeInputId:           settlement.GetRuntimeInputId(),
-		EventIds:                 settlement.GetEventIds(),
-		SequenceFrom:             settlement.GetSequenceFrom(),
-		SequenceTo:               settlement.GetSequenceTo(),
-		InputKind:                "interrupt_control",
-		Drafts:                   cancellationDrafts,
-		PendingToolCancellations: settlement.GetPendingToolCancellations(),
+		Scope:                           request.GetScope(),
+		RuntimeInputId:                  settlement.GetRuntimeInputId(),
+		EventIds:                        settlement.GetEventIds(),
+		SequenceFrom:                    settlement.GetSequenceFrom(),
+		SequenceTo:                      settlement.GetSequenceTo(),
+		InputKind:                       "interrupt_control",
+		Drafts:                          cancellationDrafts,
+		PendingToolCancellations:        settlement.GetPendingToolCancellations(),
+		SandboxExecutionToolUseEventIds: settlement.GetSandboxExecutionToolUseEventIds(),
 	}
 	if interruptRequest.GetRuntimeInputId() == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement is missing its runtime input")
@@ -1388,11 +1389,6 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			ApplicationDisposition:    observation.Disposition,
 		},
 	}, nil
-}
-
-type writeEventResult struct {
-	EventID  string `json:"event_id"`
-	Sequence int64  `json:"sequence"`
 }
 
 type requestEndDispositionResult struct {

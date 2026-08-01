@@ -98,7 +98,7 @@ type SandboxOutputCaptureRunnerConfig struct {
 }
 
 type SandboxOutputCaptureJobRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxOutputCaptureStore
 	Providers *ProviderRegistry
 	BlobStore blob.BlobStore

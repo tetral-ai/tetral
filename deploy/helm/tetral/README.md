@@ -68,7 +68,7 @@ finishes bootstrap after API has created the schema.
    decoration. Do not enable the edge with another ingress controller.
 
 5. **Create all in-cluster Secrets.** The chart creates no Secret values.
-   Create the following 16 Secrets with the keys referenced by the canonical
+   Create the following 15 Secrets with the keys referenced by the canonical
    manifests, using the names selected under `secrets`:
 
    ```text
@@ -83,7 +83,6 @@ finishes bootstrap after API has created the schema.
    runtime-binding-token
    sandbox-blob
    sandbox-daytona
-   sandbox-internal-grpc
    sandbox-r2-parent
    tetral-blob
    tetral-database

@@ -26,7 +26,7 @@ func TestSandboxOutputCaptureRunnerStagesBlobBeforeCaptureResult(t *testing.T) {
 		PayloadJson:  `{"workspace_id":"ws_capture","session_id":"sesn_capture","finish_idle_write_id":"rwrite_idle","capture_generation":1}`,
 		LeaseToken:   "lease_capture", AttemptCount: 1, MaxAttempts: queue.SandboxOutputCaptureMaxAttempts,
 	}
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{queueJob}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{queueJob}}
 	store := &recordingOutputCaptureStore{current: true, work: SandboxOutputCaptureWork{
 		SandboxOutputCaptureJob: SandboxOutputCaptureJob{WorkspaceID: "ws_capture", SessionID: "sesn_capture", FinishIdleWriteID: "rwrite_idle", CaptureGeneration: 1},
 		SessionThreadID:         "thr_capture", BindingID: "bind_capture", BindingGeneration: 1,
@@ -94,7 +94,7 @@ func TestSandboxOutputCaptureCleanupDeletesStagedBlobsBeforeClosingCustody(t *te
 		PayloadJson:  `{"workspace_id":"ws_capture","session_id":"sesn_capture","finish_idle_write_id":"rwrite_idle","capture_generation":1,"cleanup_generation":1}`,
 		LeaseToken:   "lease_cleanup", AttemptCount: 1, MaxAttempts: queue.SandboxOutputCaptureCleanupMaxAttempts,
 	}
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{queueJob}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{queueJob}}
 	store := &recordingOutputCaptureCleanupStore{current: true, work: SandboxOutputCaptureCleanupWork{
 		SandboxOutputCaptureCleanupJob: SandboxOutputCaptureCleanupJob{WorkspaceID: "ws_capture", SessionID: "sesn_capture", FinishIdleWriteID: "rwrite_idle", CaptureGeneration: 1, CleanupGeneration: 1},
 		BlobPointers:                   []string{"output-captures/staged"},
@@ -122,6 +122,9 @@ type recordingOutputCaptureAdapter struct {
 
 func (a *recordingOutputCaptureAdapter) InspectForExecution(context.Context, string) ProviderOutcome[ExecutionReadiness] {
 	return ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady}
+}
+func (a *recordingOutputCaptureAdapter) InspectForRelease(context.Context, string) ProviderOutcome[bool] {
+	return ProviderOutcome[bool]{Value: true}
 }
 
 func (a *recordingOutputCaptureAdapter) CaptureOutputs(context.Context, sandboxdriver.OutputCaptureTarget) ProviderOutcome[sandboxdriver.OutputCaptureScan] {

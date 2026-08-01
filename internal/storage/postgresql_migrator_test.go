@@ -57,7 +57,7 @@ func TestMigrateSchemaCreatesQueuePartitionSequenceSchema(t *testing.T) {
 	}
 }
 
-func TestMigrateSchemaVersionSixCreatesSessionMCPManifestsShapeAndRLS(t *testing.T) {
+func TestMigrateSchemaCreatesSessionMCPManifestsShapeAndRLS(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
@@ -70,7 +70,7 @@ func TestMigrateSchemaVersionSixCreatesSessionMCPManifestsShapeAndRLS(t *testing
 	assertSessionMCPManifestsSchemaShapeAndRLS(t, db, schema)
 }
 
-func TestMigrateSchemaVersionSevenCreatesStableReasoningMessageAssociation(t *testing.T) {
+func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
@@ -125,23 +125,10 @@ func TestMigrateSchemaVersionSevenCreatesStableReasoningMessageAssociation(t *te
 		}
 	}
 
-	var operationConstraintDefinition string
-	if err := db.QueryRowContext(ctx, `SELECT pg_get_constraintdef(c.oid)
-		FROM pg_constraint c
-		JOIN pg_class t ON t.oid = c.conrelid
-		JOIN pg_namespace n ON n.oid = t.relnamespace
-		WHERE n.nspname = current_schema()
-		  AND t.relname = 'session_bridge_operations'
-		  AND c.conname = 'session_bridge_operations_operation_shape'`).Scan(&operationConstraintDefinition); err != nil {
-		t.Fatalf("read Bridge operation constraint: %v", err)
-	}
-	if strings.Contains(operationConstraintDefinition, "commit_stable_reasoning_part") {
-		t.Fatalf("Bridge operation constraint retains retired standalone reasoning operation: %q", operationConstraintDefinition)
-	}
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "7e11d1f5aa2f14e234a3aca9a5e2508eef810cec63f642b7d7a0ba329167017a"
+	const want = "e4cc1e46d0842cb5499119d47711b7a3ebf8a1258e7ebba6fefedb563e14a1d8"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -433,13 +420,13 @@ func TestMigrateSchemaConcurrentReplicasSerialize(t *testing.T) {
 	}
 }
 
-func TestMigrateSchemaVersionNineAddsNullableGitHubResourceCredential(t *testing.T) {
+func TestMigrateSchemaRequiresGitHubResourceCredential(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
 		t.Fatalf("MigrateSchema: %v", err)
 	}
-	seedStorageSchemaSession(t, db, "wksp_v9_upgrade", "sesn_v9_upgrade")
+	seedStorageSchemaSession(t, db, "wksp_github_credential", "sesn_github_credential")
 
 	var nullable string
 	if err := db.QueryRowContext(ctx, `SELECT is_nullable
@@ -449,14 +436,14 @@ func TestMigrateSchemaVersionNineAddsNullableGitHubResourceCredential(t *testing
 		  AND column_name = 'authorization_token_encrypted'`).Scan(&nullable); err != nil {
 		t.Fatalf("read token column nullability: %v", err)
 	}
-	if nullable != "YES" {
-		t.Fatalf("authorization_token_encrypted nullable = %q; want YES", nullable)
+	if nullable != "NO" {
+		t.Fatalf("authorization_token_encrypted nullable = %q; want NO", nullable)
 	}
 
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_resources (
 			workspace_id, session_id, resource_id, type, created_at, updated_at
 		) VALUES (
-			'wksp_v9_upgrade', 'sesn_v9_upgrade', 'sesrsc_token', 'github_repository',
+			'wksp_github_credential', 'sesn_github_credential', 'sesrsc_token', 'github_repository',
 			'2026-07-17T00:00:00Z', '2026-07-17T00:00:00Z'
 		)`); err != nil {
 		t.Fatalf("insert token resource: %v", err)
@@ -465,7 +452,7 @@ func TestMigrateSchemaVersionNineAddsNullableGitHubResourceCredential(t *testing
 			workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
 			authorization_token_encrypted
 		) VALUES (
-			'wksp_v9_upgrade', 'sesn_v9_upgrade', 'sesrsc_token',
+			'wksp_github_credential', 'sesn_github_credential', 'sesrsc_token',
 			'https://github.com/tetral-ai/tetral', '/workspace/tetral', NULL, NULL,
 			decode('0102', 'hex')
 		)`); err != nil {
@@ -475,7 +462,7 @@ func TestMigrateSchemaVersionNineAddsNullableGitHubResourceCredential(t *testing
 	if _, err := db.ExecContext(ctx, `INSERT INTO session_resources (
 			workspace_id, session_id, resource_id, type, created_at, updated_at
 		) VALUES (
-			'wksp_v9_upgrade', 'sesn_v9_upgrade', 'sesrsc_nulltoken', 'github_repository',
+			'wksp_github_credential', 'sesn_github_credential', 'sesrsc_nulltoken', 'github_repository',
 			'2026-07-17T00:01:00Z', '2026-07-17T00:01:00Z'
 		)`); err != nil {
 		t.Fatalf("insert null-token resource: %v", err)
@@ -484,14 +471,14 @@ func TestMigrateSchemaVersionNineAddsNullableGitHubResourceCredential(t *testing
 			workspace_id, session_id, resource_id, url, mount_path, checkout_type, checkout_ref,
 			authorization_token_encrypted
 		) VALUES (
-			'wksp_v9_upgrade', 'sesn_v9_upgrade', 'sesrsc_nulltoken',
+			'wksp_github_credential', 'sesn_github_credential', 'sesrsc_nulltoken',
 			'https://github.com/tetral-ai/nulltoken', '/workspace/nulltoken', NULL, NULL, NULL
 		)`); err == nil {
 		t.Fatal("GitHub resource accepted a NULL authorization token")
 	}
 }
 
-func TestMigrateSchemaVersionSixteenAddsCompletionMailReconciliationIndex(t *testing.T) {
+func TestMigrateSchemaCreatesCompletionMailReconciliationIndex(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
@@ -520,27 +507,7 @@ func TestMigrateSchemaVersionSixteenAddsCompletionMailReconciliationIndex(t *tes
 	}
 }
 
-func TestMigrateSchemaVersionFifteenAuthorizesSilentAgentMailSettlement(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema: %v", err)
-	}
-	var definition string
-	if err := db.QueryRowContext(ctx,
-		`SELECT pg_get_constraintdef(oid)
-		   FROM pg_constraint
-		  WHERE conrelid='session_bridge_operations'::regclass
-		    AND conname='session_bridge_operations_operation_shape'`,
-	).Scan(&definition); err != nil {
-		t.Fatalf("read bridge operation constraint: %v", err)
-	}
-	if !strings.Contains(definition, "settle_sealed_agent_mail") {
-		t.Fatalf("bridge operation constraint = %q; want sealed agent mail settlement", definition)
-	}
-}
-
-func TestMigrateSchemaVersionFourteenAddsMultimodalFileAttachmentState(t *testing.T) {
+func TestMigrateSchemaCreatesMultimodalFileAttachmentState(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
@@ -765,133 +732,6 @@ func TestMultimodalConsumptionPoliciesPermitInsertAndSessionCascadeOnly(t *testi
 	}
 	if remaining != 0 {
 		t.Fatalf("policy consumption rows after session hard delete = %d; want 0", remaining)
-	}
-}
-
-func TestMigrateSchemaVersionThirteenAddsExclusiveStartupCleanupLeaseShape(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema: %v", err)
-	}
-	seedStorageSchemaSession(t, db, "wksp_cleanup_lease", "sesn_cleanup_lease")
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO sandboxes (
-			workspace_id, id, session_id, status, provider, provider_metadata_json,
-			created_at, updated_at, startup_failure_reason, cleanup_status,
-			cleanup_lease_token, cleanup_lease_expires_at
-		) VALUES (
-			'wksp_cleanup_lease', 'sandbox_cleanup_lease', 'sesn_cleanup_lease',
-			'failed', 'tetral', '{}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z',
-			'startup_interrupted', 'in_progress', 'lease_test', '2026-07-18T00:02:00Z'
-		)`); err != nil {
-		t.Fatalf("insert leased cleanup row: %v", err)
-	}
-	if _, err := db.ExecContext(ctx,
-		`UPDATE sandboxes
-		    SET cleanup_status = 'pending'
-		  WHERE workspace_id = 'wksp_cleanup_lease'
-		    AND id = 'sandbox_cleanup_lease'`); err == nil {
-		t.Fatal("cleanup lease columns survived a non-in-progress status transition")
-	}
-	if _, err := db.ExecContext(ctx,
-		`UPDATE sandboxes
-		    SET cleanup_status = 'in_progress',
-		        cleanup_lease_token = NULL,
-		        cleanup_lease_expires_at = NULL
-		  WHERE workspace_id = 'wksp_cleanup_lease'
-		    AND id = 'sandbox_cleanup_lease'`); err == nil {
-		t.Fatal("in_progress cleanup accepted without its lease pair")
-	}
-	if _, err := db.ExecContext(ctx,
-		`UPDATE sandboxes
-		    SET cleanup_status='released',
-		        cleanup_lease_token=NULL,
-		        cleanup_lease_expires_at=NULL
-		  WHERE workspace_id='wksp_cleanup_lease'
-		    AND id='sandbox_cleanup_lease'`); err != nil {
-		t.Fatalf("settle cleanup lease row before retired-status checks: %v", err)
-	}
-	for _, retired := range []string{"not_found", "no_handle"} {
-		if _, err := db.ExecContext(ctx,
-			`UPDATE sandboxes SET cleanup_status=$1
-			  WHERE workspace_id='wksp_cleanup_lease' AND id='sandbox_cleanup_lease'`,
-			retired,
-		); err == nil {
-			t.Fatalf("retired cleanup status %q was accepted", retired)
-		}
-	}
-}
-
-func TestMigrateSchemaVersionTenAddsNullableSandboxMachineUsabilityFact(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema: %v", err)
-	}
-	var nullable string
-	if err := db.QueryRowContext(ctx,
-		`SELECT is_nullable
-		   FROM information_schema.columns
-		  WHERE table_schema = current_schema()
-		    AND table_name = 'sandboxes'
-		    AND column_name = 'machine_was_usable'`,
-	).Scan(&nullable); err != nil {
-		t.Fatalf("read sandboxes.machine_was_usable nullability: %v", err)
-	}
-	if nullable != "YES" {
-		t.Fatalf("sandboxes.machine_was_usable is_nullable = %q; want YES", nullable)
-	}
-}
-
-func TestMigrateSchemaVersionElevenEnforcesActiveSandboxUsabilityOnNewWrites(t *testing.T) {
-	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
-	ctx := context.Background()
-	if err := storage.MigrateSchema(ctx, db); err != nil {
-		t.Fatalf("MigrateSchema: %v", err)
-	}
-	var validated bool
-	if err := db.QueryRowContext(ctx,
-		`SELECT convalidated
-		   FROM pg_constraint
-		  WHERE conrelid = 'sandboxes'::regclass
-		    AND conname = 'sandboxes_active_machine_was_usable'`,
-	).Scan(&validated); err != nil {
-		t.Fatalf("read active usability constraint: %v", err)
-	}
-	if validated {
-		t.Fatal("active usability constraint is validated; want NOT VALID rollout")
-	}
-	seedStorageSchemaSession(t, db, "wksp_active_fact", "sesn_active_fact")
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO sandboxes (
-			workspace_id, id, session_id, status, provider, provider_metadata_json,
-			created_at, updated_at, machine_was_usable
-		) VALUES (
-			'wksp_active_fact', 'sandbox_active_fact', 'sesn_active_fact', 'active', 'tetral', '{}',
-			'2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z', FALSE
-	)`); err == nil {
-		t.Fatal("active sandbox write with false machine_was_usable succeeded")
-	}
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO sandboxes (
-			workspace_id, id, session_id, status, provider, provider_metadata_json,
-			created_at, updated_at, machine_was_usable
-		) VALUES (
-			'wksp_active_fact', 'sandbox_active_fact_null', 'sesn_active_fact', 'active', 'tetral', '{}',
-			'2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z', NULL
-		)`); err == nil {
-		t.Fatal("active sandbox write with NULL machine_was_usable succeeded")
-	}
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO sandboxes (
-			workspace_id, id, session_id, status, provider, provider_metadata_json,
-			created_at, updated_at
-		) VALUES (
-			'wksp_active_fact', 'sandbox_active_fact_omitted', 'sesn_active_fact', 'active', 'tetral', '{}',
-			'2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z'
-		)`); err == nil {
-		t.Fatal("active sandbox write omitting machine_was_usable succeeded")
 	}
 }
 

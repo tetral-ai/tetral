@@ -661,6 +661,19 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) 
 		setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "evt_bridge_pending_tool", "resolving")
 		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "evt_bridge_commit_confirm", 2, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"evt_bridge_pending_tool","result":"deny","deny_message":"not now"}`)
 		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "rin_bridge_commit_confirm", "tool_confirmation", `["evt_bridge_commit_confirm"]`, "accepted", "bind_bridge_commit_confirm", "pod_uid_commit_confirm", 2, 2)
+		if _, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_runtime_tool_results (
+				workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+				normalized_input_hash, tool_name, input_json, ack_status, result_json,
+				model_tool_call_id, execution_state, execution_attempt_generation,
+				provider_command_reference_json, created_at, updated_at
+			) VALUES ('default', 'sesn_bridge_commit_confirm', 'thr_bridge_commit_confirm',
+				'evt_bridge_parallel_execution', 'sandbox_tool', $1, 'Read', $2, 'committed', NULL,
+				'tool-parallel', 'running', 1, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			sha256Hex(`{"file_path":"README.md"}`), `{"file_path":"README.md"}`, `{"command_id":"cmd_parallel"}`,
+		); err != nil {
+			t.Fatalf("seed parallel sandbox execution: %v", err)
+		}
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 		request := &bridgev1.CommitInputsRequest{
@@ -925,8 +938,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inter_agent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_inter_agent", "prep_bridge_inter_agent")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_inter_agent", "2026-01-01T00:00:00Z")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "evt_bridge_inter_agent_spawn", 1, "agent.tool_use", `{}`)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	parentScope := bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
@@ -997,7 +1008,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}
 	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	deliveryStore.Clock = func() time.Time { return now.Add(2 * time.Second) }
-	deliveryStore.SandboxStatusFreshnessWindow = 5 * time.Minute
 	plan, err := deliveryStore.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil || plan.Request == nil || plan.StaleAccepted {
 		t.Fatalf("PrepareRuntimeCommand inter-agent delivery = %#v/%v; want live Runtime command", plan, err)
@@ -1178,8 +1188,6 @@ func TestPostgreSQLBridgeAPIStorePullSelectsOldestCompletionAndEnsuresDurableWak
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_completion_pull")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	firstMessageJSON := bridgeRuntimeNotificationMessageJSON(
 		t,
@@ -1618,7 +1626,6 @@ func TestPostgreSQLBridgeAPIStoreReceivedInterAgentMessageUsesSourceCallableTask
 	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_inter_agent_source_name")
 	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_bridge_inter_agent_source_name", "child complete")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	childScope := bridgeAPIScope(sessionID, childThreadID, bindingID, 1, podUID)
@@ -1816,7 +1823,6 @@ func TestAdmitAgentMailDeliveryRejectsApprovalReviewerTarget(t *testing.T) {
 				SourceToolUseEventID: "sevt_reviewer_rejected_spawn",
 				MessageJSON:          json.RawMessage(bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_reviewer_rejected", "completion")),
 			},
-			"prep_reviewer_rejected",
 			binding,
 			time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC),
 		)

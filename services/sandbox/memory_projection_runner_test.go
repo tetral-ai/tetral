@@ -29,7 +29,7 @@ func TestSandboxMemoryProjectionRunnerNormalizesProviderState(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			job := sandboxMemoryProjectionQueueJob()
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 			work := sandboxMemoryProjectionWork()
 			if tc.noHandle {
 				work.ProviderResourceID = ""
@@ -109,6 +109,9 @@ type recordingMemoryProjectionAdapter struct {
 func (a *recordingMemoryProjectionAdapter) InspectForExecution(context.Context, string) ProviderOutcome[ExecutionReadiness] {
 	a.calls = append(a.calls, "inspect")
 	return a.readiness
+}
+func (a *recordingMemoryProjectionAdapter) InspectForRelease(context.Context, string) ProviderOutcome[bool] {
+	return ProviderOutcome[bool]{Value: true}
 }
 
 func (a *recordingMemoryProjectionAdapter) RefreshMemoryProjection(context.Context, sandboxdriver.MemoryProjectionRefresh) ProviderOutcome[struct{}] {

@@ -376,7 +376,7 @@ func runtimeTerminationSandboxExecutionIDsTx(
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ids []string
 	for rows.Next() {
 		var toolUseEventID string

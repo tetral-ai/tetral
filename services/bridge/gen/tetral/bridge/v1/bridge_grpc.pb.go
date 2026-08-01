@@ -66,7 +66,7 @@ type AgentRuntimeBridgeServiceClient interface {
 	MarkChildThreadClosed(ctx context.Context, in *MarkChildThreadClosedRequest, opts ...grpc.CallOption) (*MarkChildThreadClosedResponse, error)
 	MarkChildThreadActive(ctx context.Context, in *MarkChildThreadActiveRequest, opts ...grpc.CallOption) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(ctx context.Context, in *AcceptSandboxExecutionRequest, opts ...grpc.CallOption) (*AcceptSandboxExecutionResponse, error)
-	AwaitSandboxExecution(ctx context.Context, in *AcceptSandboxExecutionRequest, opts ...grpc.CallOption) (*AwaitSandboxExecutionResponse, error)
+	AwaitSandboxExecution(ctx context.Context, in *AwaitSandboxExecutionRequest, opts ...grpc.CallOption) (*AwaitSandboxExecutionResponse, error)
 	ReadCommandResult(ctx context.Context, in *ReadCommandResultRequest, opts ...grpc.CallOption) (*ReadCommandResultResponse, error)
 	SendCommandInput(ctx context.Context, in *SendCommandInputRequest, opts ...grpc.CallOption) (*SendCommandInputResponse, error)
 	CancelCommand(ctx context.Context, in *CancelCommandRequest, opts ...grpc.CallOption) (*CancelCommandResponse, error)
@@ -229,7 +229,7 @@ func (c *agentRuntimeBridgeServiceClient) AcceptSandboxExecution(ctx context.Con
 	return out, nil
 }
 
-func (c *agentRuntimeBridgeServiceClient) AwaitSandboxExecution(ctx context.Context, in *AcceptSandboxExecutionRequest, opts ...grpc.CallOption) (*AwaitSandboxExecutionResponse, error) {
+func (c *agentRuntimeBridgeServiceClient) AwaitSandboxExecution(ctx context.Context, in *AwaitSandboxExecutionRequest, opts ...grpc.CallOption) (*AwaitSandboxExecutionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AwaitSandboxExecutionResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName, in, out, cOpts...)
@@ -377,7 +377,7 @@ type AgentRuntimeBridgeServiceServer interface {
 	MarkChildThreadClosed(context.Context, *MarkChildThreadClosedRequest) (*MarkChildThreadClosedResponse, error)
 	MarkChildThreadActive(context.Context, *MarkChildThreadActiveRequest) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AcceptSandboxExecutionResponse, error)
-	AwaitSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error)
+	AwaitSandboxExecution(context.Context, *AwaitSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error)
 	ReadCommandResult(context.Context, *ReadCommandResultRequest) (*ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *SendCommandInputRequest) (*SendCommandInputResponse, error)
 	CancelCommand(context.Context, *CancelCommandRequest) (*CancelCommandResponse, error)
@@ -442,7 +442,7 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) MarkChildThreadActive(contex
 func (UnimplementedAgentRuntimeBridgeServiceServer) AcceptSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AcceptSandboxExecutionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AcceptSandboxExecution not implemented")
 }
-func (UnimplementedAgentRuntimeBridgeServiceServer) AwaitSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error) {
+func (UnimplementedAgentRuntimeBridgeServiceServer) AwaitSandboxExecution(context.Context, *AwaitSandboxExecutionRequest) (*AwaitSandboxExecutionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AwaitSandboxExecution not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) ReadCommandResult(context.Context, *ReadCommandResultRequest) (*ReadCommandResultResponse, error) {
@@ -756,7 +756,7 @@ func _AgentRuntimeBridgeService_AcceptSandboxExecution_Handler(srv interface{}, 
 }
 
 func _AgentRuntimeBridgeService_AwaitSandboxExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AcceptSandboxExecutionRequest)
+	in := new(AwaitSandboxExecutionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -768,7 +768,7 @@ func _AgentRuntimeBridgeService_AwaitSandboxExecution_Handler(srv interface{}, c
 		FullMethod: AgentRuntimeBridgeService_AwaitSandboxExecution_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(AgentRuntimeBridgeServiceServer).AwaitSandboxExecution(ctx, req.(*AcceptSandboxExecutionRequest))
+		return srv.(AgentRuntimeBridgeServiceServer).AwaitSandboxExecution(ctx, req.(*AwaitSandboxExecutionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }

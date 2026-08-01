@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -41,7 +42,6 @@ func TestTetralSandboxSchemaBehindStopsBeforeQueueAndListeners(t *testing.T) {
 func validSandboxSchemaEnv() sandboxEnvMap {
 	return sandboxEnvMap{
 		tetralsandbox.EnvPostgresDSN:         "postgres://runtime@postgres/tetral",
-		tetralsandbox.EnvSandboxDriver:       "daytona",
 		tetralsandbox.EnvSandboxBaseImage:    "ghcr.io/tetral-ai/sandbox:0.1.0-alpha.test",
 		tetralsandbox.EnvDaytonaAPIURL:       "https://daytona.example",
 		tetralsandbox.EnvDaytonaAPIKey:       "test-key",
@@ -69,23 +69,65 @@ func TestTetralSandboxCommandStartsAllSandboxOwnedQueueRunners(t *testing.T) {
 		"EnvironmentBuildJobRunner",
 		"EnvironmentReadyFanoutJobRunner",
 		"SandboxToolExecutionJobRunner",
+		"SandboxToolCancelJobRunner",
+		"SandboxBackgroundReconcileJobRunner",
+		"SandboxBackgroundCommandJobRunner",
 		"SandboxActivationJobRunner",
 		"SandboxMaterializationJobRunner",
+		"SandboxReleaseJobRunner",
 		"SandboxMemoryProjectionJobRunner",
 		"SandboxOutputCaptureJobRunner",
 		"SandboxOutputCaptureCleanupRunner",
 		"SweepExpiredCaptures",
 		"SandboxQueueOverLimitReconciler",
 		"RunSandboxQueueOverLimitLoop",
-		"SessionPrepareJobRunner",
 		"ResourcePrefixGCRunner",
-		"StaleCreatingReconciler",
-		"StartupCleanupReconciler",
-		"MethodAuthorizer:  tetralsandbox.SandboxServiceMethodAuthorizer",
 	}
 	for _, symbol := range required {
 		if !strings.Contains(string(source), symbol) {
 			t.Fatalf("main.go does not start %s", symbol)
+		}
+	}
+}
+
+func TestSandboxWorkerPoolBoundsQueueKindsTogether(t *testing.T) {
+	pool := newSandboxWorkerPool(1)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondEntered := make(chan struct{})
+	done := make(chan error, 2)
+
+	go func() {
+		_, err := pool.run(context.Background(), func(context.Context) (bool, error) {
+			close(firstEntered)
+			<-releaseFirst
+			return true, nil
+		})
+		done <- err
+	}()
+	<-firstEntered
+	go func() {
+		_, err := pool.run(context.Background(), func(context.Context) (bool, error) {
+			close(secondEntered)
+			return true, nil
+		})
+		done <- err
+	}()
+
+	select {
+	case <-secondEntered:
+		t.Fatal("second queue kind entered while the global worker slot was occupied")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseFirst)
+	select {
+	case <-secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second queue kind did not enter after the worker slot was released")
+	}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("worker pool run: %v", err)
 		}
 	}
 }

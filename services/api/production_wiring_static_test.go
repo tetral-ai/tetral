@@ -73,9 +73,18 @@ func TestTetralAPIProductionConstructionUsesDurableSessionEventAdmissionWithoutD
 	}
 }
 
-func TestTetralAPIProductionConstructionKeepsSandboxLifecycleOutOfPublicSessionService(t *testing.T) {
+func TestTetralAPIProductionConstructionRecordsSessionDeleteReleaseWithoutProviderWork(t *testing.T) {
 	source := readTetralAPIProductionSource(t)
+	for _, required := range []string{
+		"session.WithSessionDeleteSandboxRelease(",
+		"sandboxrelease.EnsureTx(",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("tetralapi.go missing Session-delete Sandbox release wiring %q", required)
+		}
+	}
 	for _, forbidden := range []string{
+		`"github.com/tetral-ai/tetral/services/sandbox"`,
 		"session.WithSandboxLifecycle(",
 		"sandbox.NewService(",
 		"sandbox.NewUnavailableLifecycleProvider(",

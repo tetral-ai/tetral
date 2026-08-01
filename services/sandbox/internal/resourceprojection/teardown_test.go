@@ -57,7 +57,7 @@ func TestRunDeletedFileCleanupPropagatesCommandFailure(t *testing.T) {
 	err := RunDeletedFileCleanup(
 		context.Background(),
 		runner,
-		driver.PreparationCommandTarget{ProviderSandboxID: "provider_sandbox"},
+		driver.DaytonaCommandTarget{ProviderSandboxID: "provider_sandbox"},
 		[]DeletedFileCleanupTarget{{ResourceID: "sesrsc_deleted", MountPath: "/mnt/session/uploads/deleted"}},
 		false,
 		45*time.Second,
@@ -75,7 +75,7 @@ type failingCleanupCommandRunner struct {
 	calls int
 }
 
-func (r *failingCleanupCommandRunner) RunPreparationCommand(context.Context, driver.PreparationCommandTarget, string, map[string]string, time.Duration) error {
+func (r *failingCleanupCommandRunner) RunDaytonaCommand(context.Context, driver.DaytonaCommandTarget, string, map[string]string, time.Duration) error {
 	r.calls++
 	return r.err
 }

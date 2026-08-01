@@ -18,15 +18,14 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-func TestPostgreSQLSessionCreateAdmitsPreparationAndSessionPrepareJobForReadyArtifact(t *testing.T) {
+func TestPostgreSQLSessionCreateCommitsSessionThreadAndResources(t *testing.T) {
 	env := newSessionPostgreSQLProofEnv(t)
-	seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, "ready")
 	seedSessionSourceFile(t, env.admin, workspace.DefaultID, "file_session_create_source", 5)
 	service := env.newService(time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC))
-	service.sessionIDStrategy = fixedSessionIDs("sesn_prepare_ready")
-	service.threadIDStrategy = fixedSessionIDs("thread_prepare_ready")
-	service.resourceIDStrategy = fixedSessionIDs("sesrsc_prepare_ready")
-	service.fileIDStrategy = fixedSessionIDs("file_prepare_ready")
+	service.sessionIDStrategy = fixedSessionIDs("sesn_create")
+	service.threadIDStrategy = fixedSessionIDs("thread_create")
+	service.resourceIDStrategy = fixedSessionIDs("sesrsc_create")
+	service.fileIDStrategy = fixedSessionIDs("file_create")
 	mountPath := "/workspace/input.txt"
 
 	created, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
@@ -41,110 +40,15 @@ func TestPostgreSQLSessionCreateAdmitsPreparationAndSessionPrepareJobForReadyArt
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if created.ID != "sesn_prepare_ready" || created.Status != StatusIdle {
+	if created.ID != "sesn_create" || created.Status != StatusIdle {
 		t.Fatalf("created session = %+v; want admitted idle session", created)
 	}
-	assertMainThreadPinned(t, env.admin, workspace.DefaultID, "sesn_prepare_ready", "thread_prepare_ready")
-	assertSessionRuntimeStatus(t, env.admin, workspace.DefaultID, "sesn_prepare_ready", "idle", "2026-05-11T12:00:00Z")
-	preparation := loadSessionPreparation(t, env.admin, workspace.DefaultID, "sesn_prepare_ready")
-	if preparation.status != "pending" || preparation.environmentGeneration != 1 || preparation.environmentID != "env_test" {
-		t.Fatalf("preparation = %+v; want pending env_test generation 1", preparation)
-	}
-	if !strings.HasPrefix(preparation.preparationAttemptID, "prep_") || !strings.HasPrefix(preparation.sandboxID, "sandbox_") {
-		t.Fatalf("preparation identities = %+v; want prep_/sandbox_ identities", preparation)
-	}
-	job := loadQueueJobByDedupe(t, env.admin, workspace.DefaultID, queue.FormatSessionPrepareDedupeKey(workspace.DefaultID, "sesn_prepare_ready", preparation.preparationAttemptID))
-	if job.kind != queue.KindSessionPrepare || job.partitionKey != queue.FormatSessionPartitionKey(workspace.DefaultID, "sesn_prepare_ready") || job.status != queue.StatusPending {
-		t.Fatalf("queue job = %+v; want pending canonical session_prepare", job)
-	}
-	var payload map[string]string
-	if err := json.Unmarshal([]byte(job.payloadJSON), &payload); err != nil {
-		t.Fatalf("decode queue payload: %v", err)
-	}
-	if payload["workspace_id"] != string(workspace.DefaultID) || payload["session_id"] != "sesn_prepare_ready" || payload["preparation_attempt_id"] != preparation.preparationAttemptID {
-		t.Fatalf("queue payload = %#v; want preparation identity", payload)
-	}
-	if sessionRowCount(t, env.admin, `SELECT count(*) FROM sandboxes WHERE workspace_id = $1 AND session_id = $2`, string(workspace.DefaultID), "sesn_prepare_ready") != 0 {
-		t.Fatal("session create allocated a sandbox row; sandbox allocation belongs to Sandbox Service session_prepare")
-	}
-}
-
-func TestPostgreSQLSessionCreateWaitsForEnvironmentArtifactBeforeSessionPrepare(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		artifactStatus string
-	}{
-		{name: "pending_artifact", artifactStatus: "pending"},
-		{name: "building_artifact", artifactStatus: "building"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newSessionPostgreSQLProofEnv(t)
-			if tc.artifactStatus != "" {
-				seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, tc.artifactStatus)
-			}
-			service := env.newService(time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC))
-			sessionID := "sesn_" + tc.name
-			service.sessionIDStrategy = fixedSessionIDs(sessionID)
-			service.threadIDStrategy = fixedSessionIDs("thread_" + tc.name)
-
-			if _, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-				Agent:         AgentReference{ID: "agent_test"},
-				EnvironmentID: "env_test",
-			}); err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-			preparation := loadSessionPreparation(t, env.admin, workspace.DefaultID, sessionID)
-			if preparation.status != "waiting_environment" {
-				t.Fatalf("preparation status = %q; want waiting_environment", preparation.status)
-			}
-			if got := sessionRowCount(t, env.admin, `SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = $2`, string(workspace.DefaultID), queue.KindSessionPrepare); got != 0 {
-				t.Fatalf("session_prepare jobs = %d; want none until environment_ready_fanout", got)
-			}
-		})
-	}
-}
-
-func TestPostgreSQLSessionCreateRejectsMissingCurrentEnvironmentArtifactAtomically(t *testing.T) {
-	env := newSessionPostgreSQLProofEnv(t)
-	service := env.newService(time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC))
-	service.sessionIDStrategy = fixedSessionIDs("sesn_missing_artifact")
-	service.threadIDStrategy = fixedSessionIDs("thread_missing_artifact")
-
-	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-		Agent:         AgentReference{ID: "agent_test"},
-		EnvironmentID: "env_test",
-	})
-	var validation *ValidationError
-	if !errors.As(err, &validation) {
-		t.Fatalf("Create error = %v; want validation error", err)
-	}
-	for _, table := range []string{"sessions", "session_threads", "session_preparations", "queue_jobs"} {
-		if got := sessionRowCount(t, env.admin, `SELECT count(*) FROM `+table+` WHERE workspace_id = $1`, string(workspace.DefaultID)); got != 0 {
-			t.Fatalf("%s rows = %d; want transaction rollback", table, got)
-		}
-	}
-}
-
-func TestPostgreSQLSessionCreateRejectsFailedEnvironmentArtifact(t *testing.T) {
-	env := newSessionPostgreSQLProofEnv(t)
-	seedEnvironmentArtifact(t, env.admin, workspace.DefaultID, "env_test", 1, "failed")
-	service := env.newService(time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC))
-	service.sessionIDStrategy = fixedSessionIDs("sesn_failed_artifact")
-	service.threadIDStrategy = fixedSessionIDs("thread_failed_artifact")
-
-	_, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-		Agent:         AgentReference{ID: "agent_test"},
-		EnvironmentID: "env_test",
-	})
-	var validation *ValidationError
-	if !errors.As(err, &validation) {
-		t.Fatalf("Create err = %T %v; want ValidationError", err, err)
-	}
-	if sessionRowCount(t, env.admin, `SELECT count(*) FROM sessions WHERE workspace_id = $1 AND id = $2`, string(workspace.DefaultID), "sesn_failed_artifact") != 0 {
-		t.Fatal("session row persisted after failed environment artifact rejection")
-	}
-	if sessionRowCount(t, env.admin, `SELECT count(*) FROM session_preparations WHERE workspace_id = $1 AND session_id = $2`, string(workspace.DefaultID), "sesn_failed_artifact") != 0 {
-		t.Fatal("preparation row persisted after failed environment artifact rejection")
+	assertMainThreadPinned(t, env.admin, workspace.DefaultID, "sesn_create", "thread_create")
+	assertSessionRuntimeStatus(t, env.admin, workspace.DefaultID, "sesn_create", "idle", "2026-05-11T12:00:00Z")
+	if got := sessionRowCount(t, env.admin,
+		`SELECT count(*) FROM session_resources WHERE workspace_id = $1 AND session_id = $2`,
+		string(workspace.DefaultID), "sesn_create"); got != 1 {
+		t.Fatalf("session resources = %d; want 1", got)
 	}
 }
 
@@ -178,9 +82,6 @@ func TestPostgreSQLSessionCreateRollsBackAfterSessionFileIdentityInsert(t *testi
 	}
 	if sessionRowCount(t, env.admin, `SELECT count(*) FROM sessions WHERE workspace_id = $1 AND id = $2`, string(workspace.DefaultID), "sesn_session_rollback") != 0 {
 		t.Fatal("session row persisted after duplicate resource rollback")
-	}
-	if sessionRowCount(t, env.admin, `SELECT count(*) FROM session_preparations WHERE workspace_id = $1 AND session_id = $2`, string(workspace.DefaultID), "sesn_session_rollback") != 0 {
-		t.Fatal("preparation row persisted after duplicate resource rollback")
 	}
 	if sessionRowCount(t, env.admin, `SELECT count(*) FROM files WHERE workspace_id = $1 AND scope_id = $2`, string(workspace.DefaultID), "sesn_session_rollback") != 0 {
 		t.Fatal("session file identity persisted after duplicate resource rollback")
@@ -678,7 +579,6 @@ func seedActiveRuntimeQueueJob(t *testing.T, db *sql.DB, workspaceID workspace.I
 		payload["sequence_from"] = 1
 		payload["sequence_to"] = 1
 		payload["input_kind"] = "messages"
-		payload["preparation_attempt_id"] = "prep_" + suffix
 		dedupeKey = queue.FormatRuntimeInputDedupeKey(workspaceID, sessionID, "rin_"+suffix)
 	case queue.KindRuntimeConfigUpdate:
 		payload["config_generation"] = 7
@@ -709,158 +609,6 @@ func seedActiveRuntimeQueueJob(t *testing.T, db *sql.DB, workspaceID workspace.I
 	}); err != nil {
 		t.Fatalf("seed active queue job: %v", err)
 	}
-}
-
-type preparationRow struct {
-	preparationAttemptID  string
-	environmentID         string
-	environmentGeneration int64
-	sandboxID             string
-	status                string
-}
-
-func loadSessionPreparation(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) preparationRow {
-	t.Helper()
-	var row preparationRow
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT preparation_attempt_id, environment_id, environment_generation, sandbox_id, status
-		   FROM session_preparations
-			  WHERE workspace_id = $1 AND session_id = $2
-			    AND superseded_at IS NULL
-			  ORDER BY created_at DESC, preparation_attempt_id DESC
-			  LIMIT 1`,
-		string(workspaceID), sessionID,
-	).Scan(&row.preparationAttemptID, &row.environmentID, &row.environmentGeneration, &row.sandboxID, &row.status); err != nil {
-		t.Fatalf("load session preparation: %v", err)
-	}
-	return row
-}
-
-func markSessionPreparationStatus(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, preparationAttemptID string, status string) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET status = $4,
-		        resource_cred_expires_at = '2026-05-11T13:00:00Z',
-		        resource_roots_json = '[{"path":"/mnt/session/uploads/file","mode":"read"}]',
-		        ready_at = CASE WHEN $4 = 'ready' THEN '2026-05-11T12:05:00Z' ELSE ready_at END,
-		        updated_at = '2026-05-11T12:05:00Z'
-		  WHERE workspace_id = $1 AND session_id = $2 AND preparation_attempt_id = $3`,
-		string(workspaceID), sessionID, preparationAttemptID, status); err != nil {
-		t.Fatalf("mark preparation %s: %v", status, err)
-	}
-}
-
-func ackSessionPrepareJobs(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, preparationAttemptID string) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`UPDATE queue_jobs
-		    SET status = 'acknowledged',
-		        updated_at = '2026-05-11T12:06:00Z'
-		  WHERE workspace_id = $1
-		    AND dedupe_key = $2
-		    AND status IN ('pending', 'leased')`,
-		string(workspaceID), queue.FormatSessionPrepareDedupeKey(workspaceID, sessionID, preparationAttemptID)); err != nil {
-		t.Fatalf("ack session_prepare jobs: %v", err)
-	}
-}
-
-func assertPendingSessionPrepareJob(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, preparationAttemptID string) {
-	t.Helper()
-	if got := sessionRowCount(t, db,
-		`SELECT count(*)
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND partition_key = $3
-		    AND dedupe_key = $4
-		    AND status = 'pending'`,
-		string(workspaceID),
-		queue.KindSessionPrepare,
-		queue.FormatSessionPartitionKey(workspaceID, sessionID),
-		queue.FormatSessionPrepareDedupeKey(workspaceID, sessionID, preparationAttemptID),
-	); got != 1 {
-		t.Fatalf("pending session_prepare jobs = %d; want 1", got)
-	}
-}
-
-func assertSessionPreparationSuperseded(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, preparationAttemptID string) {
-	t.Helper()
-	var supersededAt sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT superseded_at
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		string(workspaceID),
-		sessionID,
-		preparationAttemptID,
-	).Scan(&supersededAt); err != nil {
-		t.Fatalf("read preparation superseded_at: %v", err)
-	}
-	if !supersededAt.Valid || supersededAt.String == "" {
-		t.Fatalf("preparation %s superseded_at = %v; want non-null", preparationAttemptID, supersededAt)
-	}
-	if got := sessionRowCount(t, db,
-		`SELECT count(*)
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND superseded_at IS NULL
-		    AND status IN ('pending', 'waiting_environment', 'preparing', 'ready')`,
-		string(workspaceID),
-		sessionID,
-	); got != 1 {
-		t.Fatalf("active preparation attempts = %d; want exactly 1", got)
-	}
-}
-
-func assertSessionPreparationClearedResourceProjectionState(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, preparationAttemptID string) {
-	t.Helper()
-	assertSessionPreparationResourceProjectionState(t, db, workspaceID, sessionID, preparationAttemptID, "")
-}
-
-func assertSessionPreparationResourceProjectionState(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, preparationAttemptID string, wantExpiresAt string) {
-	t.Helper()
-	var expiresAt sql.NullString
-	var rootsJSON sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT resource_cred_expires_at, resource_roots_json
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		string(workspaceID),
-		sessionID,
-		preparationAttemptID,
-	).Scan(&expiresAt, &rootsJSON); err != nil {
-		t.Fatalf("read preparation resource projection state: %v", err)
-	}
-	if wantExpiresAt == "" {
-		if expiresAt.Valid {
-			t.Fatalf("resource_cred_expires_at = %v; want cleared after resource mutation", expiresAt)
-		}
-	} else if !expiresAt.Valid || expiresAt.String != wantExpiresAt {
-		t.Fatalf("resource_cred_expires_at = %v; want %q", expiresAt, wantExpiresAt)
-	}
-	if rootsJSON.Valid {
-		t.Fatalf("resource_roots_json = %v; want cleared after resource mutation", rootsJSON)
-	}
-}
-
-func sessionPrepareJobCount(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) int {
-	t.Helper()
-	return sessionRowCount(t, db,
-		`SELECT count(*)
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND partition_key = $3`,
-		string(workspaceID),
-		queue.KindSessionPrepare,
-		queue.FormatSessionPartitionKey(workspaceID, sessionID),
-	)
 }
 
 type queueJobRow struct {

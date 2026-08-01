@@ -21,6 +21,7 @@ import type {
   ResolveInterAgentDeliveryRequest,
   RunMemoryRequest,
   AcceptSandboxExecutionRequest,
+  AwaitSandboxExecutionRequest,
   SendCommandInputRequest,
   WriteEventRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -185,23 +186,18 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.awaitSandboxExecutionRequests[1]).toEqual(bridge.awaitSandboxExecutionRequests[0]);
   });
 
-  test("does not turn a result-wait rejection into a tool result", async () => {
+  test("returns stale custody when Bridge permanently rejects the result wait", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.awaitSandboxExecutionErrors.push(Object.assign(new Error("binding moved"), { code: GrpcStatus.FAILED_PRECONDITION }));
     const sleep = new ControlledSleep();
-    const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+    const result = await makeRunner({ bridge, sleep: sleep.sleep }).runTool(
       toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
     );
-    await Bun.sleep(0);
 
     expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
     expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
-    expect(sleep.calls).toHaveLength(1);
-    sleep.releaseNext();
-
-    expect((await pending).type).toBe("completed");
-    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
-    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
+    expect(sleep.calls).toHaveLength(0);
+    expect(result).toEqual({ type: "stale_custody" });
   });
 
   test("numbers only the requested Read range with true file line numbers", async () => {
@@ -748,6 +744,37 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
+  test("rejoins write_stdin send and poll after transport loss with the same request identity", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.sendCommandInputErrors.push(new Error("send disconnected"));
+    bridge.readCommandResultErrors.push(new Error("poll disconnected"));
+    const sleep = new ControlledSleep();
+    const runner = makeRunner({ bridge, sleep: sleep.sleep });
+
+    const sendPending = runner.runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "hello" },
+      "sevt_tool_send",
+    ));
+    await waitForCondition(() => sleep.calls.length === 1, "command send rejoin wait");
+    sleep.releaseNext();
+    expect((await sendPending).type).toBe("completed");
+
+    const pollPending = runner.runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "" },
+      "sevt_tool_poll",
+    ));
+    await waitForCondition(() => sleep.calls.length === 2, "command poll rejoin wait");
+    sleep.releaseNext();
+    expect((await pollPending).type).toBe("completed");
+
+    expect(bridge.sendCommandInputRequests).toHaveLength(2);
+    expect(bridge.sendCommandInputRequests[1]).toEqual(bridge.sendCommandInputRequests[0]);
+    expect(bridge.readCommandResultRequests).toHaveLength(2);
+    expect(bridge.readCommandResultRequests[1]).toEqual(bridge.readCommandResultRequests[0]);
+  });
+
   test("write_stdin ignores undeclared task and camel-case token aliases", async () => {
     const bridge = new RecordingBridgeClient();
     const runner = makeRunner({ bridge });
@@ -778,7 +805,7 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.sendCommandInputRequests.every((request) => !("stdinWriteSequence" in request))).toBe(true);
   });
 
-  test("cancels background command tasks through Bridge CancelCommand on tool abort", async () => {
+  test("cancels only the local command wait when its tool fiber aborts", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.deferReadCommandResult = true;
     const runner = makeRunner({ bridge });
@@ -795,13 +822,28 @@ describe("RuntimePodToolRunner", () => {
     const result = await resultPromise;
 
     expect(result.type).toBe("cancelled");
-    expect(bridge.cancelCommandRequests).toEqual([
-      expect.objectContaining({
-        taskId: "task_1",
-        reason: "runtime_interrupted",
-        toolUseEventId: "sevt_tool_poll",
-      }),
-    ]);
+    expect(bridge.cancelCommandRequests).toEqual([]);
+  });
+
+  test.each([
+    ["missing task", GrpcStatus.NOT_FOUND],
+    ["stale task", GrpcStatus.FAILED_PRECONDITION],
+  ])("does not retry typed command rejection: %s", async (_name, code) => {
+    const bridge = new RecordingBridgeClient();
+    bridge.readCommandResultErrors.push(Object.assign(new Error("typed rejection"), { code }));
+    const sleep = new ControlledSleep();
+    const result = await makeRunner({ bridge, sleep: sleep.sleep }).runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "" },
+      "sevt_tool_poll",
+    ));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: { retryable: false, message: "Bridge rejected the command operation." },
+    });
+    expect(bridge.readCommandResultRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(0);
   });
 
   test("routes memory through Bridge RunMemory", async () => {
@@ -821,342 +863,22 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
-  test("parks for 300 ms before an identical same-ID Memory replay and refreshes metadata only after release", async () => {
+  test("rejoins Memory after transport loss with the same request identity", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" })];
-    bridge.deferRunMemoryCall = 2;
-    const controlledSleep = new ControlledSleep();
-    let tokenGeneration = 0;
-    const runner = makeRunner({
+    bridge.runMemoryErrors.push(new Error("bridge unavailable"));
+    const sleep = new ControlledSleep();
+
+    const pending = makeRunner({
       bridge,
-      sleep: controlledSleep.sleep,
-      metadataFactory: async () => {
-        tokenGeneration++;
-        const metadata = new Metadata();
-        metadata.set("authorization", `Bearer rotated-token-${tokenGeneration}`);
-        return metadata;
-      },
-    });
-    let settlements = 0;
-    const request = toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" });
-
-    const resultPromise = runner.runTool(request);
-    void resultPromise.then(() => {
-      settlements++;
-    });
-    await waitForCondition(() => controlledSleep.calls.length === 1, "same-ID Memory projection replay wait");
-
-    expect(controlledSleep.calls[0]).toMatchObject({ delayMs: 300, abortSignal: request.abortSignal });
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-    expect(tokenGeneration).toBe(1);
-    expect(settlements).toBe(0);
-
-    controlledSleep.releaseNext();
-    await waitForCondition(() => bridge.runMemoryRequests.length === 2, "same-ID Memory projection replay");
-    expect(settlements).toBe(0);
-    expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
-    expect(bridge.runMemoryMetadata.map((metadata) => metadata.get("authorization"))).toEqual([
-      ["Bearer rotated-token-1"],
-      ["Bearer rotated-token-2"],
-    ]);
-    expect(tokenGeneration).toBe(2);
-
-    bridge.completeDeferredRunMemory();
-    const result = await resultPromise;
-    expect(result.type).toBe("completed");
-    expect(settlements).toBe(1);
-    expect(controlledSleep.calls).toHaveLength(1);
-  });
-
-  test("refreshes Runtime Bridge metadata for every same-ID Memory replay", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" })];
-    let tokenGeneration = 0;
-    const runner = makeRunner({
-      bridge,
-      sleep: immediateSleep,
-      metadataFactory: async () => {
-        tokenGeneration++;
-        const metadata = new Metadata();
-        metadata.set("authorization", `Bearer rotated-token-${tokenGeneration}`);
-        return metadata;
-      },
-    });
-
-    const result = await runner.runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
-
-    expect(result.type).toBe("completed");
-    expect(bridge.runMemoryRequests).toHaveLength(2);
-    expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
-    expect(bridge.runMemoryMetadata.map((metadata) => metadata.get("authorization"))).toEqual([
-      ["Bearer rotated-token-1"],
-      ["Bearer rotated-token-2"],
-    ]);
-    expect(tokenGeneration).toBe(2);
-  });
-
-  test("keeps retrying the exact Memory projection envelope without a retry-count ceiling", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [
-      memoryProjectionRetryResult(),
-      memoryProjectionRetryResult(),
-      memoryProjectionRetryResult(),
-      memoryProjectionRetryResult(),
-      JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" }),
-    ];
-
-    const sleepCalls: Array<{ readonly delayMs: number; readonly abortSignal: AbortSignal }> = [];
-    const request = toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" });
-    const result = await makeRunner({
-      bridge,
-      sleep: async (delayMs, abortSignal) => {
-        sleepCalls.push({ delayMs, abortSignal });
-      },
-    }).runTool(request);
-
-    expect(result.type).toBe("completed");
-    expect(bridge.runMemoryRequests).toHaveLength(5);
-    expect(bridge.runMemoryRequests.every((request) => JSON.stringify(request) === JSON.stringify(bridge.runMemoryRequests[0]))).toBe(true);
-    expect(sleepCalls).toEqual([
-      { delayMs: 300, abortSignal: request.abortSignal },
-      { delayMs: 300, abortSignal: request.abortSignal },
-      { delayMs: 300, abortSignal: request.abortSignal },
-      { delayMs: 300, abortSignal: request.abortSignal },
-    ]);
-  });
-
-  test("cancellation after a projection failure prevents another Memory replay", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    const abortController = new AbortController();
-    bridge.afterRunMemoryResponse = (callNumber) => {
-      if (callNumber === 1) {
-        abortController.abort();
-      }
-    };
-
-    let sleepCalls = 0;
-    const result = await makeRunner({
-      bridge,
-      sleep: async () => {
-        sleepCalls++;
-      },
-    }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-
-    expect(result.type).toBe("cancelled");
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-    expect(sleepCalls).toBe(0);
-  });
-
-  test("cancelling a parked Memory replay settles before release and cannot resume later", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    const controlledSleep = new ControlledSleep();
-    const abortController = new AbortController();
-    let settlements = 0;
-    const resultPromise = makeRunner({ bridge, sleep: controlledSleep.sleep }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-    void resultPromise.then(() => {
-      settlements++;
-    });
-    await waitForCondition(() => controlledSleep.calls.length === 1, "parked Memory projection replay");
-
-    abortController.abort();
-    const result = await resultPromise;
-    expect(result.type).toBe("cancelled");
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-
-    controlledSleep.releaseNext();
-    await Promise.resolve();
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-  });
-
-  test("post-wait abort fence prevents metadata refresh and Memory replay", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    const abortController = new AbortController();
-    let metadataCalls = 0;
-    const result = await makeRunner({
-      bridge,
-      metadataFactory: async () => {
-        metadataCalls++;
-        return new Metadata();
-      },
-      sleep: async (_delayMs, abortSignal) => {
-        expect(abortSignal).toBe(abortController.signal);
-        abortController.abort();
-      },
-    }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-
-    expect(result.type).toBe("cancelled");
-    expect(metadataCalls).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-  });
-
-  test("cancelling an in-flight Memory replay has no orphan call or duplicate settlement", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    bridge.deferRunMemoryCall = 2;
-    const abortController = new AbortController();
-    let settlements = 0;
-    const resultPromise = makeRunner({ bridge, sleep: immediateSleep }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-    void resultPromise.then(() => {
-      settlements++;
-    });
-    await waitForCondition(() => bridge.runMemoryRequests.length === 2, "in-flight Memory projection replay");
-
-    abortController.abort();
-    const result = await resultPromise;
-    expect(result.type).toBe("cancelled");
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(2);
-
-    bridge.completeDeferredRunMemory();
-    await Promise.resolve();
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(2);
-  });
-
-  test("production replay sleep removes its abort listener after timer completion", async () => {
-    jest.useFakeTimers();
-    try {
-      const bridge = new RecordingBridgeClient();
-      bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-      const abortController = new AbortController();
-      const addListener = jest.spyOn(abortController.signal, "addEventListener");
-      const removeListener = jest.spyOn(abortController.signal, "removeEventListener");
-      const resultPromise = makeRunner({ bridge }).runTool(toolRequest(
-        "memory",
-        { action: "create", path: "notes/todo.md", content: "one" },
-        "sevt_tool_1",
-        abortController.signal,
-      ));
-      await flushMicrotasks();
-
-      expect(bridge.runMemoryRequests).toHaveLength(1);
-      expect(jest.getTimerCount()).toBe(1);
-      const sleepAbortListener = addListener.mock.calls.at(-1)?.[1];
-      expect(sleepAbortListener).toBeDefined();
-
-      jest.advanceTimersByTime(300);
-      await flushMicrotasks();
-      const result = await resultPromise;
-
-      expect(result.type).toBe("completed");
-      expect(bridge.runMemoryRequests).toHaveLength(2);
-      expect(removeListener).toHaveBeenCalledWith("abort", sleepAbortListener);
-      expect(jest.getTimerCount()).toBe(0);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  test("production replay sleep clears its timer and listener when aborted", async () => {
-    jest.useFakeTimers();
-    try {
-      const bridge = new RecordingBridgeClient();
-      bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-      const abortController = new AbortController();
-      const addListener = jest.spyOn(abortController.signal, "addEventListener");
-      const removeListener = jest.spyOn(abortController.signal, "removeEventListener");
-      const resultPromise = makeRunner({ bridge }).runTool(toolRequest(
-        "memory",
-        { action: "create", path: "notes/todo.md", content: "one" },
-        "sevt_tool_1",
-        abortController.signal,
-      ));
-      await flushMicrotasks();
-
-      expect(bridge.runMemoryRequests).toHaveLength(1);
-      expect(jest.getTimerCount()).toBe(1);
-      const sleepAbortListener = addListener.mock.calls.at(-1)?.[1];
-      expect(sleepAbortListener).toBeDefined();
-      abortController.abort();
-      await flushMicrotasks();
-      const result = await resultPromise;
-
-      expect(result.type).toBe("cancelled");
-      expect(removeListener).toHaveBeenCalledWith("abort", sleepAbortListener);
-      expect(jest.getTimerCount()).toBe(0);
-
-      jest.advanceTimersByTime(300);
-      await flushMicrotasks();
-      expect(bridge.runMemoryRequests).toHaveLength(1);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  test("does not sleep for nonqualifying Memory results or non-Memory routes", async () => {
-    let sleepCalls = 0;
-    const sleep = async (): Promise<void> => {
-      sleepCalls++;
-    };
-    const terminalMemoryResults = [
-      { name: "validation tool error", result: { status: "tool_error", error_code: "invalid_input", retryable: false } },
-      { name: "projection error not retryable", result: { status: "runtime_error", error_code: "projection_refresh_failed", retryable: false } },
-      { name: "different retryable Runtime code", result: { status: "runtime_error", error_code: "database_unavailable", retryable: true } },
-      { name: "missing retryable flag", result: { status: "runtime_error", error_code: "projection_refresh_failed" } },
-    ];
-    for (const testCase of terminalMemoryResults) {
-      const bridge = new RecordingBridgeClient();
-      bridge.runMemoryResultJson = JSON.stringify(testCase.result);
-      const result = await makeRunner({ bridge, sleep }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
-      expect(result.type, testCase.name).toBe("error");
-      expect(bridge.runMemoryRequests, testCase.name).toHaveLength(1);
-    }
-
-    const nonMemoryBridge = new RecordingBridgeClient();
-    nonMemoryBridge.awaitSandboxExecutionResultJson = memoryProjectionRetryResult();
-    const nonMemoryResult = await makeRunner({ bridge: nonMemoryBridge, sleep }).runTool(toolRequest("Write", { file_path: "notes/todo.md", content: "one" }));
-    expect(nonMemoryResult.type).toBe("error");
-    expect(nonMemoryBridge.acceptSandboxExecutionRequests).toHaveLength(1);
-    expect(nonMemoryBridge.runMemoryRequests).toHaveLength(0);
-    expect(sleepCalls).toBe(0);
-  });
-
-  test("Memory transport errors preserve retryable failure mapping without replay sleep", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryError = new Error("bridge unavailable");
-    let sleepCalls = 0;
-
-    const result = await makeRunner({
-      bridge,
-      sleep: async () => {
-        sleepCalls++;
-      },
+      sleep: sleep.sleep,
     }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+    await waitForCondition(() => sleep.calls.length === 1, "Memory transport rejoin wait");
+    sleep.releaseNext();
+    const result = await pending;
 
-    expect(result).toMatchObject({
-      type: "error",
-      error: {
-        message: "Bridge memory tool execution is unavailable.",
-        retryable: true,
-      },
-    });
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-    expect(sleepCalls).toBe(0);
+    expect(result.type).toBe("completed");
+    expect(bridge.runMemoryRequests).toHaveLength(2);
+    expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
   });
 
   test("preserves model-visible Memory stale and refresh signals", async () => {
@@ -2381,15 +2103,6 @@ function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
-function memoryProjectionRetryResult(): string {
-  return JSON.stringify({
-    status: "runtime_error",
-    error_code: "projection_refresh_failed",
-    retryable: true,
-    message: "projection refresh failed",
-  });
-}
-
 const immediateSleep = async (): Promise<void> => undefined;
 
 class ControlledSleep {
@@ -2448,7 +2161,7 @@ class RecordingBridgeClient {
   readonly acceptSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
   readonly acceptSandboxExecutionOptions: CallOptions[] = [];
   readonly acceptSandboxExecutionErrors: Error[] = [];
-  readonly awaitSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
+  readonly awaitSandboxExecutionRequests: AwaitSandboxExecutionRequest[] = [];
   readonly awaitSandboxExecutionErrors: Error[] = [];
   readonly runMemoryRequests: RunMemoryRequest[] = [];
   readonly runMemoryMetadata: Metadata[] = [];
@@ -2476,7 +2189,9 @@ class RecordingBridgeClient {
   awaitSandboxExecutionTaskId = "";
   runMemoryResultJson = '{"status":"completed","summary":"created"}';
   runMemoryResultJsons: string[] = [];
-  runMemoryError: Error | undefined;
+  readonly runMemoryErrors: Error[] = [];
+  readonly sendCommandInputErrors: Error[] = [];
+  readonly readCommandResultErrors: Error[] = [];
   deferRunMemoryCall = 0;
   afterRunMemoryResponse: ((callNumber: number) => void) | undefined;
   markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
@@ -2555,7 +2270,7 @@ class RecordingBridgeClient {
     return grpcCall();
   }
 
-  private awaitSandboxExecution(request: AcceptSandboxExecutionRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+  private awaitSandboxExecution(request: AwaitSandboxExecutionRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.awaitSandboxExecutionRequests.push(request);
     const error = this.awaitSandboxExecutionErrors.shift();
     if (error !== undefined) {
@@ -2573,8 +2288,9 @@ class RecordingBridgeClient {
   private runMemory(request: RunMemoryRequest, metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.runMemoryRequests.push(request);
     this.runMemoryMetadata.push(metadata);
-    if (this.runMemoryError !== undefined) {
-      callback(this.runMemoryError, undefined);
+    const error = this.runMemoryErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
       return grpcCall();
     }
     const resultJson = this.runMemoryResultJsons.shift() ?? this.runMemoryResultJson;
@@ -2604,6 +2320,11 @@ class RecordingBridgeClient {
 
   private sendCommandInput(request: SendCommandInputRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.sendCommandInputRequests.push(request);
+    const error = this.sendCommandInputErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
       resultJson: '{"status":"accepted"}',
@@ -2614,6 +2335,11 @@ class RecordingBridgeClient {
 
   private readCommandResult(request: ReadCommandResultRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.readCommandResultRequests.push(request);
+    const error = this.readCommandResultErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
     if (this.deferReadCommandResult) {
       return grpcCall();
     }

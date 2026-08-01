@@ -143,14 +143,16 @@ func commitInputDeclarationTx(
 		if err != nil {
 			return nil, err
 		}
-		if err := cancelInterruptedSandboxExecutionsTx(
-			ctx,
-			tx,
-			request.GetScope(),
-			request.GetSandboxExecutionToolUseEventIds(),
-			now,
-		); err != nil {
-			return nil, err
+		if inputKind == "interrupt_control" {
+			if err := cancelInterruptedSandboxExecutionsTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetSandboxExecutionToolUseEventIds(),
+				now,
+			); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if inboxStatus == "committed" {
@@ -661,7 +663,7 @@ func pendingApprovalToolUseIDsTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []string
 	for rows.Next() {
 		var toolUseEventID string
@@ -757,7 +759,7 @@ func sandboxExecutionDependencyIDsTx(ctx context.Context, tx *dbconnect.Tx, scop
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	seen := make(map[string]struct{})
 	for rows.Next() {
 		var activationID, materializationID sql.NullString
@@ -817,7 +819,7 @@ func lockInterruptedSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var executions []interruptedSandboxExecution
 	for rows.Next() {
 		var execution interruptedSandboxExecution

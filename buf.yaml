@@ -3,7 +3,6 @@ modules:
   - path: services/bridge/proto
   - path: services/agent-runtime/proto
   - path: services/gateway/proto
-  - path: services/sandbox/proto
   - path: services/queue/proto
 lint:
   use:

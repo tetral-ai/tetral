@@ -49,7 +49,6 @@ func TestRuntimeDeliveryExhaustionEventIDMatchesDatabaseDerivation(t *testing.T)
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFenceSurvivesRepair(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_exhaust_inbox", "prep_sesn_exhaust_inbox")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox", "evt_exhaust_inbox", 1, "user.message", `{"type":"user.message"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_inbox", "thr_exhaust_inbox", "rin_exhaust_inbox", "messages", `["evt_exhaust_inbox"]`, "accepted", "bind_exhaust_inbox", "pod_exhaust_inbox", 1, 1)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
@@ -92,7 +91,6 @@ func TestPostgreSQLRuntimeDeliveryStoreExhaustionFenceSurvivesRepair(t *testing.
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesEventAnchoredPreInboxOnce(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_preinbox", "thr_exhaust_preinbox")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_exhaust_preinbox", "prep_sesn_exhaust_preinbox")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_preinbox", "thr_exhaust_preinbox", "evt_exhaust_preinbox", 1, "user.message", `{"type":"user.message"}`)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 1, 0, 0, time.UTC) }
@@ -125,7 +123,6 @@ func TestPostgreSQLRuntimeDeliveryStoreConcurrentEventAnchoredPreInboxFinalizati
 	const threadID = "thr_exhaust_concurrent_event"
 	const eventID = "evt_exhaust_concurrent_event"
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_"+sessionID)
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, 1, "user.message", `{"type":"user.message"}`)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 1, 1, 30, 0, time.UTC) }
@@ -155,7 +152,6 @@ func TestPostgreSQLRuntimeDeliveryStoreConcurrentEventAnchoredPreInboxFinalizati
 func TestPostgreSQLRuntimeDeliveryStoreExhaustionFinalizesDeliveringInbox(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_exhaust_delivering", "prep_sesn_exhaust_delivering")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "evt_exhaust_delivering", 1, "user.message", `{"type":"user.message"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_exhaust_delivering", "thr_exhaust_delivering", "rin_exhaust_delivering", "messages", `["evt_exhaust_delivering"]`, "delivering", "bind_exhaust_delivering", "pod_exhaust_delivering", 1, 1)
 	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
@@ -311,20 +307,19 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 
 func exhaustionRuntimeJob(sessionID string, threadID string, runtimeInputID string, inputKind string, eventIDs []string) RuntimeJob {
 	return RuntimeJob{
-		JobID:                "qjob_" + runtimeInputID,
-		LeaseToken:           "lease_" + runtimeInputID,
-		Kind:                 queue.KindRuntimeInput,
-		WorkspaceID:          "default",
-		SessionID:            sessionID,
-		SessionThreadID:      threadID,
-		RuntimeInputID:       runtimeInputID,
-		PreparationAttemptID: "prep_" + sessionID,
-		EventIDs:             append([]string(nil), eventIDs...),
-		SequenceFrom:         1,
-		SequenceTo:           1,
-		InputKind:            inputKind,
-		AttemptCount:         2,
-		MaxAttempts:          2,
+		JobID:           "qjob_" + runtimeInputID,
+		LeaseToken:      "lease_" + runtimeInputID,
+		Kind:            queue.KindRuntimeInput,
+		WorkspaceID:     "default",
+		SessionID:       sessionID,
+		SessionThreadID: threadID,
+		RuntimeInputID:  runtimeInputID,
+		EventIDs:        append([]string(nil), eventIDs...),
+		SequenceFrom:    1,
+		SequenceTo:      1,
+		InputKind:       inputKind,
+		AttemptCount:    2,
+		MaxAttempts:     2,
 	}
 }
 
@@ -476,10 +471,6 @@ func (d *postgresFinalizingDeliverer) ReplayRuntimeDeliveryFinalization(ctx cont
 	return d.store.ReplayRuntimeDeliveryFinalization(ctx, job)
 }
 
-func (d *postgresFinalizingDeliverer) ResolveRuntimeInputSeal(ctx context.Context, job RuntimeJob) (string, error) {
-	return d.store.ResolveRuntimeInputSeal(ctx, job)
-}
-
 type fixedLeaseQueueClient struct {
 	QueueClient
 	job    *queuev1.QueueJob
@@ -517,7 +508,6 @@ func seedCrossDatabaseExhaustionFixture(t *testing.T, bridgeAdmin *sql.DB, suffi
 	runtimeInputID := "rin_cross_" + suffix
 	eventID := "evt_cross_" + suffix
 	seedBridgeAPISession(t, bridgeAdmin, "default", sessionID, threadID)
-	seedBridgeAPIPreparationReady(t, bridgeAdmin, "default", sessionID, "prep_"+sessionID)
 	seedBridgeAPIEvent(t, bridgeAdmin, "default", sessionID, threadID, eventID, 1, "user.message", `{"type":"user.message"}`)
 	if existingInbox {
 		seedBridgeAPIRuntimeInbox(t, bridgeAdmin, "default", sessionID, threadID, runtimeInputID, "messages", fmt.Sprintf(`[%q]`, eventID), "accepted", "bind_cross", "pod_cross", 1, 1)
@@ -527,7 +517,7 @@ func seedCrossDatabaseExhaustionFixture(t *testing.T, bridgeAdmin *sql.DB, suffi
 
 func enqueueExhaustionJob(t *testing.T, store *queue.PostgreSQLQueueStore, job RuntimeJob, now time.Time) *queue.Job {
 	t.Helper()
-	payload := fmt.Sprintf(`{"workspace_id":"default","session_id":%q,"session_thread_id":%q,"runtime_input_id":%q,"event_ids":[%q],"sequence_from":1,"sequence_to":1,"input_kind":"messages","preparation_attempt_id":%q}`, job.SessionID, job.SessionThreadID, job.RuntimeInputID, job.EventIDs[0], job.PreparationAttemptID)
+	payload := fmt.Sprintf(`{"workspace_id":"default","session_id":%q,"session_thread_id":%q,"runtime_input_id":%q,"event_ids":[%q],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`, job.SessionID, job.SessionThreadID, job.RuntimeInputID, job.EventIDs[0])
 	queued, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
 		WorkspaceID:    workspace.DefaultID,
 		Kind:           queue.KindRuntimeInput,

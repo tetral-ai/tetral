@@ -1,5 +1,5 @@
-// Package health implements the health subcommand run during sandbox
-// preparation.
+// Package health implements the health subcommand run before Sandbox Service
+// authorizes provider-backed tool execution.
 //
 // OWNS:
 //   - The base-template invariant checks and the health envelope shape.
@@ -15,7 +15,7 @@
 //     the invariants the base-template build actually prepares, so it co-updates
 //     with the template build — the two must never drift apart.
 //   - Any failed item makes the whole result an error with kind helper_failure,
-//     and preparation fails on that error.
+//     and the Sandbox lifecycle operation fails on that error.
 //
 // UPDATE-WITH:
 //   - internal/sandbox/helper/internal/health/health.go

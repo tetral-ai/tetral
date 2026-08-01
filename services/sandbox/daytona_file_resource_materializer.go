@@ -26,39 +26,16 @@ import (
 )
 
 const (
-	defaultResourcePreparationTimeout = 45 * time.Second
-	defaultRcloneVFSCacheMaxSize      = "2G"
-	defaultRcloneVFSMinFree           = "1G"
-	skillProjectionStagingRoot        = "/tmp/tetral-runtime/skill-projection"
+	defaultDaytonaCommandTimeout = 45 * time.Second
+	defaultRcloneVFSCacheMaxSize = "2G"
+	defaultRcloneVFSMinFree      = "1G"
+	skillProjectionStagingRoot   = "/tmp/tetral-runtime/skill-projection"
 )
 
-// ResourceProjectionLevel selects how projected files reach the sandbox.
-//
-// fuse_bind (L1) is the privileged path: an rclone read-only mount plus a
-// per-file bind. It requires the minted read-only credential (enforced in
-// NewResourceProjectionPreparer) and the bytes are read directly from R2 by the
-// in-sandbox rclone, never through this process.
-//
-// local_copy (L2) has the driver stream the session-copy bytes into a 0444
-// local file (stageLocalCopyResources reads them through this process into the
-// sandbox — the one exception to bytes never transiting our process). It does
-// not inject the bounded materialization credential into the sandbox, and its
-// read-only-ness is soft afterward (a 0444 file the runtime user can chmod
-// back).
-//
-// UPDATE-WITH: mount.go (fuse_bind command), verify.go (local_copy command),
-// credential.go (the minter fuse_bind requires).
-type ResourceProjectionLevel string
-
-const (
-	ResourceProjectionLevelFUSEBind  ResourceProjectionLevel = "fuse_bind"
-	ResourceProjectionLevelLocalCopy ResourceProjectionLevel = "local_copy"
-)
-
-type ResourceProjectionPreparerConfig struct {
+type DaytonaFileResourceMaterializerConfig struct {
 	Blob                    blob.BlobStore
 	CredentialMinter        resourceCredentialMinter
-	CommandRunner           driver.PreparationCommandRunner
+	CommandRunner           driver.DaytonaCommandRunner
 	Bucket                  string
 	AccountID               string
 	CredentialTTL           time.Duration
@@ -66,7 +43,6 @@ type ResourceProjectionPreparerConfig struct {
 	CommandTimeout          time.Duration
 	RcloneVFSCacheMaxSize   string
 	RcloneVFSMinFree        string
-	ProjectionLevel         ResourceProjectionLevel
 	Clock                   func() time.Time
 }
 
@@ -74,11 +50,11 @@ type resourceCredentialMinter interface {
 	Mint(context.Context, resourceprojection.CredentialMintRequest) (resourceprojection.CredentialMintResult, error)
 }
 
-type ResourceProjectionPreparer struct {
+type DaytonaFileResourceMaterializer struct {
 	blob                    blob.BlobStore
 	copyExecutor            resourceprojection.CopyExecutor
 	credentialMinter        resourceCredentialMinter
-	commandRunner           driver.PreparationCommandRunner
+	commandRunner           driver.DaytonaCommandRunner
 	bucket                  string
 	accountID               string
 	credentialTTL           time.Duration
@@ -86,24 +62,15 @@ type ResourceProjectionPreparer struct {
 	commandTimeout          time.Duration
 	rcloneVFSCacheMaxSize   string
 	rcloneVFSMinFree        string
-	projectionLevel         ResourceProjectionLevel
 	clock                   func() time.Time
 }
 
-func NewResourceProjectionPreparer(config ResourceProjectionPreparerConfig) (*ResourceProjectionPreparer, error) {
+func NewDaytonaFileResourceMaterializer(config DaytonaFileResourceMaterializerConfig) (*DaytonaFileResourceMaterializer, error) {
 	if config.Blob == nil {
 		return nil, &ConfigError{Message: "resource projection blob store is required"}
 	}
 	if config.CommandRunner == nil {
 		return nil, &ConfigError{Message: "resource projection command runner is required"}
-	}
-	if config.ProjectionLevel == "" {
-		config.ProjectionLevel = ResourceProjectionLevelFUSEBind
-	}
-	switch config.ProjectionLevel {
-	case ResourceProjectionLevelFUSEBind, ResourceProjectionLevelLocalCopy:
-	default:
-		return nil, &ConfigError{Message: "resource projection level must be fuse_bind or local_copy"}
 	}
 	if config.CredentialMinter == nil {
 		return nil, &ConfigError{Message: "resource projection credential minter is required"}
@@ -121,7 +88,7 @@ func NewResourceProjectionPreparer(config ResourceProjectionPreparerConfig) (*Re
 		config.CredentialRefreshMargin = defaultResourceCredentialRefreshMargin
 	}
 	if config.CommandTimeout <= 0 {
-		config.CommandTimeout = defaultResourcePreparationTimeout
+		config.CommandTimeout = defaultDaytonaCommandTimeout
 	}
 	if strings.TrimSpace(config.RcloneVFSCacheMaxSize) == "" {
 		config.RcloneVFSCacheMaxSize = defaultRcloneVFSCacheMaxSize
@@ -133,7 +100,7 @@ func NewResourceProjectionPreparer(config ResourceProjectionPreparerConfig) (*Re
 	if clock == nil {
 		clock = func() time.Time { return storage.Now() }
 	}
-	return &ResourceProjectionPreparer{
+	return &DaytonaFileResourceMaterializer{
 		blob:                    config.Blob,
 		copyExecutor:            resourceprojection.CopyExecutor{Blob: config.Blob},
 		credentialMinter:        config.CredentialMinter,
@@ -145,12 +112,11 @@ func NewResourceProjectionPreparer(config ResourceProjectionPreparerConfig) (*Re
 		commandTimeout:          config.CommandTimeout,
 		rcloneVFSCacheMaxSize:   strings.TrimSpace(config.RcloneVFSCacheMaxSize),
 		rcloneVFSMinFree:        strings.TrimSpace(config.RcloneVFSMinFree),
-		projectionLevel:         config.ProjectionLevel,
 		clock:                   clock,
 	}, nil
 }
 
-// PrepareSessionResources projects the session's file resources, choosing one
+// MaterializeFileResources projects the session's file resources, choosing one
 // of three credential/mount modes for the fuse_bind level. Minting is a
 // sub-step of mounting, so an incremental add over an already-live mount
 // performs no mint and carries the prior expiry forward.
@@ -172,7 +138,7 @@ func NewResourceProjectionPreparer(config ResourceProjectionPreparerConfig) (*Re
 //
 // UPDATE-WITH: mount.go (MountBindVerifyCommand, MountAliveCommand),
 // credential.go (Mint), rotation.go (live-rotation teardown).
-func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context, setup sandbox.SandboxSetup, handle sandbox.ProviderHandle) (preparedSetup sandbox.ResourceSetup, returnErr error) {
+func (p *DaytonaFileResourceMaterializer) MaterializeFileResources(ctx context.Context, setup sandbox.SandboxSetup, handle sandbox.ProviderHandle) (preparedSetup sandbox.ResourceSetup, returnErr error) {
 	prepared := cloneResourceSetupFromSandbox(setup.Resources)
 	if p == nil {
 		return prepared, &ConfigError{Message: "resource projection preparer is required"}
@@ -215,7 +181,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 			if handle.SandboxID == "" {
 				return sandbox.ResourceSetup{}, missingProviderSandboxIDError()
 			}
-			if err := p.cleanupDeletedFiles(ctx, handle, deletedTargets, true, setup.ResourceCleanup); err != nil {
+			if err := p.cleanupDeletedFiles(ctx, handle, deletedTargets, true); err != nil {
 				return sandbox.ResourceSetup{}, err
 			}
 			prepared.Files = nil
@@ -230,7 +196,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 			if handle.SandboxID == "" {
 				return sandbox.ResourceSetup{}, missingProviderSandboxIDError()
 			}
-			if err := p.cleanupDeletedFiles(ctx, handle, deletedTargets, true, setup.ResourceCleanup); err != nil {
+			if err := p.cleanupDeletedFiles(ctx, handle, deletedTargets, true); err != nil {
 				return sandbox.ResourceSetup{}, err
 			}
 			prepared.DeletedFiles = nil
@@ -243,13 +209,13 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		return sandbox.ResourceSetup{}, missingProviderSandboxIDError()
 	}
 	if len(deletedTargets) > 0 {
-		if err := p.cleanupDeletedFiles(ctx, handle, deletedTargets, false, setup.ResourceCleanup); err != nil {
+		if err := p.cleanupDeletedFiles(ctx, handle, deletedTargets, false); err != nil {
 			return sandbox.ResourceSetup{}, err
 		}
 	}
 	reuseExistingCredential := false
 	if setup.Resources.ResourceCredExpiresAt != nil {
-		err := p.commandRunner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, resourceprojection.MountAliveCommand(), nil, p.commandTimeout)
+		err := p.commandRunner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, resourceprojection.MountAliveCommand(), nil, p.commandTimeout)
 		reuseExistingCredential = err == nil
 	}
 	copyActions := resourceprojection.ActionsOfType(plan.Actions, resourceprojection.ActionCopyObject)
@@ -263,23 +229,6 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		if result.Status == resourceprojection.CopyStatusCopied || result.Status == resourceprojection.CopyStatusRecopiedMismatch {
 			copiedThisAttempt = append(copiedThisAttempt, action)
 		}
-	}
-	if p.projectionLevel == ResourceProjectionLevelLocalCopy {
-		if err := p.stageLocalCopyResources(ctx, handle, plan, copyActions); err != nil {
-			_ = p.cleanupLocalCopyStage(ctx, handle, plan)
-			_ = p.deleteCopiedSessionObjects(ctx, copiedThisAttempt)
-			return sandbox.ResourceSetup{}, projectionFailureFromError(err)
-		}
-		if err := resourceprojection.RunLocalCopyVerify(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, plan, p.commandTimeout); err != nil {
-			_ = p.cleanupLocalCopyStage(ctx, handle, plan)
-			_ = p.deleteCopiedSessionObjects(ctx, copiedThisAttempt)
-			return sandbox.ResourceSetup{}, labelPreparationCommandError(err, "local_copy_verify")
-		}
-		prepared.Files = nil
-		prepared.DeletedFiles = nil
-		prepared.ResourceRootsJSON = plan.ResourceRootsJSON
-		prepared.ResourceCredExpiresAt = nil
-		return p.ensureMaterializationCredential(ctx, setup, prepared)
 	}
 	env := map[string]string{}
 	expiresAt := time.Time{}
@@ -299,7 +248,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		env = resourceprojection.RcloneEnv(p.accountID, mintResult.Credential)
 		expiresAt = mintResult.ExpiresAt.UTC()
 	}
-	if err := resourceprojection.RunMountBindVerify(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, plan, resourceprojection.MountBindVerifyCommandConfig{
+	if err := resourceprojection.RunMountBindVerify(ctx, p.commandRunner, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, plan, resourceprojection.MountBindVerifyCommandConfig{
 		Bucket:                  p.bucket,
 		RcloneVFSCacheMaxSize:   p.rcloneVFSCacheMaxSize,
 		RcloneVFSMinFree:        p.rcloneVFSMinFree,
@@ -307,7 +256,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 		ReuseExistingCredential: reuseExistingCredential,
 	}, env, p.commandTimeout); err != nil {
 		_ = p.deleteCopiedSessionObjects(ctx, copiedThisAttempt)
-		return sandbox.ResourceSetup{}, labelPreparationCommandError(err, "mount_bind_verify")
+		return sandbox.ResourceSetup{}, labelDaytonaCommandError(err, "mount_bind_verify")
 	}
 	prepared.Files = nil
 	prepared.DeletedFiles = nil
@@ -316,7 +265,7 @@ func (p *ResourceProjectionPreparer) PrepareSessionResources(ctx context.Context
 	return prepared, nil
 }
 
-func (p *ResourceProjectionPreparer) ensureMaterializationCredential(ctx context.Context, setup sandbox.SandboxSetup, prepared sandbox.ResourceSetup) (sandbox.ResourceSetup, error) {
+func (p *DaytonaFileResourceMaterializer) ensureMaterializationCredential(ctx context.Context, setup sandbox.SandboxSetup, prepared sandbox.ResourceSetup) (sandbox.ResourceSetup, error) {
 	if prepared.ResourceCredExpiresAt != nil {
 		return prepared, nil
 	}
@@ -336,54 +285,6 @@ func (p *ResourceProjectionPreparer) ensureMaterializationCredential(ctx context
 	expiresAt := mintResult.ExpiresAt.UTC()
 	prepared.ResourceCredExpiresAt = &expiresAt
 	return prepared, nil
-}
-
-func (p *ResourceProjectionPreparer) CompensateSessionResourcePreparation(ctx context.Context, setup sandbox.SandboxSetup, handle sandbox.ProviderHandle) error {
-	if p == nil {
-		return &ConfigError{Message: "resource projection preparer is required"}
-	}
-	if len(setup.Resources.Files) == 0 && len(setup.Resources.Skills) == 0 {
-		return nil
-	}
-	if handle.SandboxID == "" {
-		return missingProviderSandboxIDError()
-	}
-	var joined error
-	if len(setup.Resources.Files) > 0 {
-		plan, err := resourceprojection.BuildPlan(resourceprojection.PlanRequest{
-			WorkspaceID:        string(setup.WorkspaceID),
-			SessionID:          setup.SessionID,
-			Files:              fileResourcesFromSandbox(setup.Resources.Files),
-			GitHubRepositories: githubResourcesFromSandbox(setup.Resources.GitHubRepositories),
-			MemoryStores:       memoryResourcesFromSandbox(setup.Resources.MemoryStores),
-		})
-		if err != nil {
-			return projectionFailureFromError(err)
-		}
-		if err := resourceprojection.RunFileProjectionCompensation(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, plan, p.commandTimeout); err != nil {
-			joined = errors.Join(joined, labelPreparationCommandError(err, "file_projection_compensation"))
-		}
-	}
-	if len(setup.Resources.Skills) > 0 {
-		joined = errors.Join(joined, p.cleanupSkills(ctx, handle, setup.Resources.Skills))
-	}
-	return joined
-}
-
-// DeleteSessionResourceCopiesForGC removes the session-copy prefix only from a
-// true session teardown/GC path. Sandbox release must not call this: cold-return
-// relies on session copies surviving sandbox recycle.
-func (p *ResourceProjectionPreparer) DeleteSessionResourceCopiesForGC(ctx context.Context, setup sandbox.SandboxSetup) error {
-	if p == nil {
-		return &ConfigError{Message: "resource projection preparer is required"}
-	}
-	if setup.WorkspaceID == "" {
-		return &ConfigError{Message: "resource projection cleanup workspace_id is required"}
-	}
-	if setup.SessionID == "" {
-		return &ConfigError{Message: "resource projection cleanup session_id is required"}
-	}
-	return p.blob.DeletePrefix(ctx, resourceprojection.SessionPrefix(string(setup.WorkspaceID), setup.SessionID))
 }
 
 func validateSkillMounts(skills []sandbox.SkillMount) error {
@@ -425,33 +326,33 @@ func validateSkillDirectory(directory string) (string, error) {
 	return directory, nil
 }
 
-func (p *ResourceProjectionPreparer) materializeSkills(ctx context.Context, handle sandbox.ProviderHandle, skills []sandbox.SkillMount) error {
-	stager, ok := p.commandRunner.(driver.PreparationFileStager)
+func (p *DaytonaFileResourceMaterializer) materializeSkills(ctx context.Context, handle sandbox.ProviderHandle, skills []sandbox.SkillMount) error {
+	stager, ok := p.commandRunner.(driver.DaytonaFileStager)
 	if !ok {
-		return &ConfigError{Message: "skill materialization requires a preparation file stager"}
+		return &ConfigError{Message: "skill materialization requires a Daytona file stager"}
 	}
-	target := driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}
+	target := driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}
 	for _, mount := range skills {
 		archive, err := p.skillArchiveForSandbox(ctx, mount)
 		if err != nil {
 			return err
 		}
-		if err := stager.StagePreparationFile(ctx, target, skillProjectionArchivePath(mount), bytes.NewReader(archive)); err != nil {
+		if err := stager.StageDaytonaFile(ctx, target, skillProjectionArchivePath(mount), bytes.NewReader(archive)); err != nil {
 			return errors.Join(err, p.cleanupSkills(ctx, handle, skills))
 		}
 	}
-	if err := p.commandRunner.RunPreparationCommand(ctx, target, skillMaterializationCommand(skills), nil, p.commandTimeout); err != nil {
-		return errors.Join(labelPreparationCommandError(err, "skill_materialization"), p.cleanupSkills(ctx, handle, skills))
+	if err := p.commandRunner.RunDaytonaCommand(ctx, target, skillMaterializationCommand(skills), nil, p.commandTimeout); err != nil {
+		return errors.Join(labelDaytonaCommandError(err, "skill_materialization"), p.cleanupSkills(ctx, handle, skills))
 	}
 	return nil
 }
 
-// labelPreparationCommandError prepends the engine-authored name of the
-// failing preparation command to a provider error's safe message. The runner
+// labelDaytonaCommandError prepends the engine-authored name of the
+// failing daytona command to a provider error's safe message. The runner
 // deliberately never surfaces command output (it can embed capability
-// material), so the label is what makes a dead-lettered preparation name its
+// material), so the label is what makes a dead-lettered materialization name its
 // culprit.
-func labelPreparationCommandError(err error, label string) error {
+func labelDaytonaCommandError(err error, label string) error {
 	var providerErr *sandbox.ProviderError
 	if errors.As(err, &providerErr) {
 		labeled := *providerErr
@@ -461,7 +362,7 @@ func labelPreparationCommandError(err error, label string) error {
 	return fmt.Errorf("%s: %w", label, err)
 }
 
-func (p *ResourceProjectionPreparer) skillArchiveForSandbox(ctx context.Context, mount sandbox.SkillMount) ([]byte, error) {
+func (p *DaytonaFileResourceMaterializer) skillArchiveForSandbox(ctx context.Context, mount sandbox.SkillMount) ([]byte, error) {
 	reader, err := p.blob.Get(ctx, mount.BlobKey)
 	if err != nil {
 		return nil, err
@@ -606,11 +507,11 @@ func skillMaterializationCommand(skills []sandbox.SkillMount) string {
 	return b.String()
 }
 
-func (p *ResourceProjectionPreparer) cleanupSkills(ctx context.Context, handle sandbox.ProviderHandle, skills []sandbox.SkillMount) error {
+func (p *DaytonaFileResourceMaterializer) cleanupSkills(ctx context.Context, handle sandbox.ProviderHandle, skills []sandbox.SkillMount) error {
 	if len(skills) == 0 {
 		return nil
 	}
-	return p.commandRunner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, skillProjectionCleanupCommand(skills), nil, p.commandTimeout)
+	return p.commandRunner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, skillProjectionCleanupCommand(skills), nil, p.commandTimeout)
 }
 
 func skillProjectionCleanupCommand(skills []sandbox.SkillMount) string {
@@ -637,7 +538,7 @@ func skillProjectionArchivePath(mount sandbox.SkillMount) string {
 
 func missingProviderSandboxIDError() error {
 	return &sandbox.ProviderError{
-		Provider:    internalSandboxProviderName,
+		Provider:    driver.DaytonaProviderName,
 		Stage:       sandbox.StageMountResources,
 		Kind:        sandbox.ProviderErrorInvalidRequest,
 		Retryable:   false,
@@ -670,14 +571,14 @@ func deletedFileCleanupTargets(ws workspace.ID, sessionID string, files []sandbo
 	return targets, nil
 }
 
-func (p *ResourceProjectionPreparer) cleanupDeletedFiles(ctx context.Context, handle sandbox.ProviderHandle, targets []resourceprojection.DeletedFileCleanupTarget, unmountStaging bool, cleanup sandbox.SessionResourceCleanupCoordinator) error {
+func (p *DaytonaFileResourceMaterializer) cleanupDeletedFiles(ctx context.Context, handle sandbox.ProviderHandle, targets []resourceprojection.DeletedFileCleanupTarget, unmountStaging bool) error {
 	if len(targets) == 0 && !unmountStaging {
 		return nil
 	}
 	for _, target := range targets {
 		remove := func(ctx context.Context) error {
-			if err := resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, []resourceprojection.DeletedFileCleanupTarget{target}, false, p.commandTimeout); err != nil {
-				return labelPreparationCommandError(err, "deleted_file_cleanup")
+			if err := resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, []resourceprojection.DeletedFileCleanupTarget{target}, false, p.commandTimeout); err != nil {
+				return labelDaytonaCommandError(err, "deleted_file_cleanup")
 			}
 			if target.DestinationKey == "" {
 				return nil
@@ -690,26 +591,20 @@ func (p *ResourceProjectionPreparer) cleanupDeletedFiles(ctx context.Context, ha
 			}
 			return nil
 		}
-		if cleanup == nil {
-			if err := remove(ctx); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := cleanup.CleanupSessionResource(ctx, target.ResourceID, remove); err != nil {
+		if err := remove(ctx); err != nil {
 			return err
 		}
 	}
 	if unmountStaging {
-		if err := resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, nil, true, p.commandTimeout); err != nil {
-			return labelPreparationCommandError(err, "deleted_file_cleanup")
+		if err := resourceprojection.RunDeletedFileCleanup(ctx, p.commandRunner, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, nil, true, p.commandTimeout); err != nil {
+			return labelDaytonaCommandError(err, "deleted_file_cleanup")
 		}
 		return nil
 	}
 	return nil
 }
 
-func (p *ResourceProjectionPreparer) deleteCopiedSessionObjects(ctx context.Context, copyActions []resourceprojection.Action) error {
+func (p *DaytonaFileResourceMaterializer) deleteCopiedSessionObjects(ctx context.Context, copyActions []resourceprojection.Action) error {
 	var joined error
 	for _, action := range copyActions {
 		if action.DestinationKey == "" {
@@ -723,41 +618,6 @@ func (p *ResourceProjectionPreparer) deleteCopiedSessionObjects(ctx context.Cont
 		}
 	}
 	return joined
-}
-
-func (p *ResourceProjectionPreparer) stageLocalCopyResources(ctx context.Context, handle sandbox.ProviderHandle, plan resourceprojection.Plan, copyActions []resourceprojection.Action) error {
-	stager, ok := p.commandRunner.(driver.PreparationFileStager)
-	if !ok {
-		return &ConfigError{Message: "resource projection local_copy requires a preparation file stager"}
-	}
-	destinationByResourceID := make(map[string]string, len(copyActions))
-	for _, action := range copyActions {
-		destinationByResourceID[action.ResourceID] = action.DestinationKey
-	}
-	target := driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}
-	for _, action := range resourceprojection.ActionsOfType(plan.Actions, resourceprojection.ActionBind) {
-		destinationKey := destinationByResourceID[action.ResourceID]
-		if destinationKey == "" {
-			return &resourceprojection.PlanError{Code: "invalid_resource", ResourceID: action.ResourceID, Message: "resource projection local_copy destination is missing"}
-		}
-		reader, err := p.blob.Get(ctx, destinationKey)
-		if err != nil {
-			return err
-		}
-		stageErr := stager.StagePreparationFile(ctx, target, resourceprojection.LocalCopyStagePath(plan, action.ResourceID), reader)
-		closeErr := reader.Close()
-		if stageErr != nil {
-			return stageErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-	}
-	return nil
-}
-
-func (p *ResourceProjectionPreparer) cleanupLocalCopyStage(ctx context.Context, handle sandbox.ProviderHandle, plan resourceprojection.Plan) error {
-	return p.commandRunner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, "rm -rf -- "+shellQuote(resourceprojection.LocalCopyStageRoot(plan))+"\n", nil, p.commandTimeout)
 }
 
 func fileResourcesFromSandbox(files []sandbox.FileMount) []resourceprojection.FileResource {

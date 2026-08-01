@@ -260,7 +260,6 @@ func TestGitCredentialVectorFileIsExercisedCompletely(t *testing.T) {
 	wantNames := map[string]struct{}{
 		"mounted token":          {},
 		"two repositories":       {},
-		"mounted null token":     {},
 		"mounted undecryptable":  {},
 		"repository not mounted": {},
 	}
@@ -291,8 +290,6 @@ func TestGitCredentialVectorFileIsExercisedCompletely(t *testing.T) {
 						t.Fatalf("repository %s token is required", repository.ResourceID)
 					}
 					env.seedRepository(t, sessionID, repository.ResourceID, repository.URL, tokenPointer(repository.Token))
-				case "null":
-					env.seedNullTokenRepository(t, sessionID, repository.ResourceID, repository.URL)
 				case "undecryptable":
 					env.seedRepositoryCiphertext(t, sessionID, repository.ResourceID, repository.URL, []byte("not-valid-ciphertext"))
 				default:
@@ -446,24 +443,6 @@ func (e *repositoryTokenTestEnv) seedRepository(t *testing.T, sessionID string, 
 		}
 	}
 	e.seedRepositoryCiphertext(t, sessionID, resourceID, repoURL, encrypted)
-}
-
-func (e *repositoryTokenTestEnv) seedNullTokenRepository(t *testing.T, sessionID string, resourceID string, repoURL string) {
-	t.Helper()
-	if _, err := e.admin.ExecContext(context.Background(),
-		`ALTER TABLE session_github_repository_resources
-			DROP CONSTRAINT session_github_repository_authorization_token_required`,
-	); err != nil {
-		t.Fatalf("drop current-write constraint to seed pre-baseline row: %v", err)
-	}
-	e.seedRepositoryCiphertext(t, sessionID, resourceID, repoURL, nil)
-	if _, err := e.admin.ExecContext(context.Background(),
-		`ALTER TABLE session_github_repository_resources
-			ADD CONSTRAINT session_github_repository_authorization_token_required
-			CHECK (authorization_token_encrypted IS NOT NULL) NOT VALID`,
-	); err != nil {
-		t.Fatalf("restore current-write constraint around pre-baseline row: %v", err)
-	}
 }
 
 func (e *repositoryTokenTestEnv) seedRepositoryCiphertext(t *testing.T, sessionID string, resourceID string, repoURL string, encrypted []byte) {

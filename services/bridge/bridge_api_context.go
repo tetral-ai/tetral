@@ -14,6 +14,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -910,7 +912,7 @@ func loadThreadBackgroundToolsTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
-		    AND binding_id = $4
+		    AND (binding_id IS NULL OR binding_id = $4)
 		    AND status = 'running'
 		  ORDER BY created_at ASC, task_id ASC`,
 		scope.GetWorkspaceId(),
@@ -945,7 +947,6 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		agentConfig      string
 		envGeneration    int64
 		envConfig        string
-		skillsIndex      string
 	)
 	err := tx.QueryRow(ctx,
 		`SELECT s.agent_id,
@@ -957,17 +958,7 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		        s.installed_tools_json,
 		        av.config_json,
 		        e.current_generation,
-		        e.config_json,
-		        COALESCE((
-		            SELECT p.skills_index_json
-		              FROM session_preparations p
-		             WHERE p.workspace_id = s.workspace_id
-		               AND p.session_id = s.id
-		               AND p.status = 'ready'
-		               AND p.superseded_at IS NULL
-		             ORDER BY p.created_at DESC, p.preparation_attempt_id DESC
-		             LIMIT 1
-		        ), '[]')
+		        e.config_json
 		   FROM sessions s
 		   JOIN agent_versions av
 		     ON av.workspace_id = s.workspace_id
@@ -990,10 +981,17 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		&agentConfig,
 		&envGeneration,
 		&envConfig,
-		&skillsIndex,
 	)
 	if err != nil {
 		return bridgeLoadContextRuntimeConfig{}, err
+	}
+	skillIndex, err := sandbox.ResolveSessionSkillIndex(ctx, tx, workspace.ID(scope.GetWorkspaceId()), scope.GetSessionId())
+	if err != nil {
+		return bridgeLoadContextRuntimeConfig{}, err
+	}
+	skillsIndex, err := json.Marshal(skillIndex)
+	if err != nil {
+		return bridgeLoadContextRuntimeConfig{}, status.Error(codes.Internal, "api_error")
 	}
 	agentConfigRaw := bridgeRawJSON(agentConfig, "{}")
 	memoryStores, err := bridgeRuntimeMemoryStoresTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
@@ -1029,7 +1027,7 @@ func loadThreadRuntimeConfigTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		},
 		ToolPolicy:     settings.ToolPolicy,
 		Skills:         bridgeJSONFieldRaw(agentConfigRaw, "skills", "[]"),
-		SkillsIndex:    bridgeRawJSON(skillsIndex, "[]"),
+		SkillsIndex:    skillsIndex,
 		InstalledTools: json.RawMessage(installedToolDeclarations),
 	}, nil
 }

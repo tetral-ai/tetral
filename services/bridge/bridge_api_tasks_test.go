@@ -107,6 +107,100 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID    = "default"
+		sessionID      = "sesn_bridge_cancel_receipt"
+		threadID       = "thr_bridge_cancel_receipt"
+		bindingID      = "bind_bridge_cancel_receipt"
+		taskID         = "task_bridge_cancel_receipt"
+		toolUseEventID = "evt_bridge_cancel_receipt"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_cancel_receipt")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, "evt_source_cancel_receipt")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,'sandbox_background','poll_hash','write_stdin','{}','committed',
+		'poll','pending','req_poll',$5,0,now(),now())`, workspaceID, sessionID, threadID, toolUseEventID, taskID); err != nil {
+		t.Fatalf("seed poll receipt: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_cancel_receipt")
+	scope.RequestId = "req_bridge_cancel_receipt"
+	request := &bridgev1.CancelCommandRequest{
+		Scope: scope, TaskId: taskID, ToolUseEventId: toolUseEventID, Reason: "runtime_interrupted",
+	}
+	type callResult struct {
+		response *bridgev1.CancelCommandResponse
+		err      error
+	}
+	done := make(chan callResult, 1)
+	go func() {
+		response, err := store.CancelCommand(context.Background(), request)
+		done <- callResult{response: response, err: err}
+	}()
+
+	requestID := scope.RequestId + ":cancel"
+	receiptID := backgroundCommandReceiptID(requestID)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var count int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			  AND tool_use_event_id=$4 AND background_operation_kind='cancel'
+			  AND background_request_id=$5 AND background_operation_state='pending'`,
+			workspaceID, sessionID, threadID, receiptID, requestID).Scan(&count); err != nil {
+			t.Fatalf("read cancel receipt: %v", err)
+		}
+		if count == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancel receipt was not accepted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var pollState string
+	if err := admin.QueryRowContext(context.Background(), `SELECT background_operation_state
+		FROM session_runtime_tool_results WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND tool_use_event_id=$4`, workspaceID, sessionID, threadID, toolUseEventID).Scan(&pollState); err != nil {
+		t.Fatalf("read original poll receipt: %v", err)
+	}
+	if pollState != "pending" {
+		t.Fatalf("original poll state = %q; want pending", pollState)
+	}
+	terminalJSON := `{"status":"cancelled"}`
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_tool_results
+		SET background_operation_state='terminal', result_json=$5, result_digest='digest', updated_at=now()
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+		workspaceID, sessionID, threadID, receiptID, terminalJSON); err != nil {
+		t.Fatalf("settle cancel receipt: %v", err)
+	}
+	first := <-done
+	if first.err != nil || first.response.GetResultJson() != terminalJSON {
+		t.Fatalf("CancelCommand = response %+v err %v", first.response, first.err)
+	}
+	replay, err := store.CancelCommand(context.Background(), request)
+	if err != nil || replay.GetResultJson() != terminalJSON {
+		t.Fatalf("replay CancelCommand = response %+v err %v", replay, err)
+	}
+	var receipts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3`, workspaceID, sessionID, threadID).Scan(&receipts); err != nil {
+		t.Fatalf("count background receipts: %v", err)
+	}
+	if receipts != 2 {
+		t.Fatalf("background receipts = %d; want poll and cancel", receipts)
+	}
+}
+
 func TestCanonicalTaskNotificationPayloadRejectsNullRequiredStreamFields(t *testing.T) {
 	_, err := canonicalTaskNotificationPayloadJSON(
 		"task_bridge_null",
@@ -198,7 +292,6 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationProjectsRuntimeNotificati
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_notify", "thr_bridge_task_notify")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_notify", "bind_bridge_task_notify", 1, "pod_uid_task_notify")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_task_notify", "2026-01-01T00:00:00Z")
 	seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_task_notify", "thr_bridge_task_notify", "bind_bridge_task_notify", "task_bridge_notify", "sevt_tool_notify")
 	resultJSON := `{"task_id":"task_bridge_notify","source_tool_use_event_id":"sevt_tool_notify","status":"expired","stdout":{"text":"","truncated":false},"stderr":{"text":"","truncated":false},"exit_code":null}`
 	settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_notify", "task_bridge_notify", "expired", resultJSON)
@@ -355,7 +448,6 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_source_fence", "bind_bridge_task_source_fence", 1, "pod_uid_task_source_fence")
-		seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_task_source_fence", "2026-01-01T00:00:00Z")
 		seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "bind_bridge_task_source_fence", "task_source_fence", "sevt_tool_original")
 		settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_source_fence", "task_source_fence", "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
 		seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_source_fence", "thr_bridge_task_source_fence", "rin_task_source_fence", "bind_bridge_task_source_fence", "pod_uid_task_source_fence")
@@ -373,50 +465,10 @@ func TestPostgreSQLBridgeAPIStoreCommitTaskNotificationRequiresSettlementFences(
 		}
 	})
 
-	t.Run("released launch sandbox still permits terminal settlement", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_sandbox_fence", "thr_bridge_task_sandbox_fence")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_sandbox_fence", "bind_bridge_task_sandbox_fence", 1, "pod_uid_task_sandbox_fence")
-		seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_task_sandbox_fence", "2026-01-01T00:00:00Z")
-		seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_task_sandbox_fence", "thr_bridge_task_sandbox_fence", "bind_bridge_task_sandbox_fence", "task_sandbox_fence", "sevt_tool_sandbox")
-		settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_sandbox_fence", "task_sandbox_fence", "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
-		seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_sandbox_fence", "thr_bridge_task_sandbox_fence", "rin_task_sandbox_fence", "bind_bridge_task_sandbox_fence", "pod_uid_task_sandbox_fence")
-		if _, err := admin.ExecContext(context.Background(), `UPDATE sandboxes SET status = 'released' WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_task_sandbox_fence'`); err != nil {
-			t.Fatalf("release sandbox: %v", err)
-		}
-
-		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		response, err := store.CommitTaskNotificationResult(context.Background(), bridgeTaskNotificationRequestForTest(
-			t,
-			bridgeAPIScope("sesn_bridge_task_sandbox_fence", "thr_bridge_task_sandbox_fence", "bind_bridge_task_sandbox_fence", 1, "pod_uid_task_sandbox_fence"),
-			"rin_task_sandbox_fence",
-			"task_sandbox_fence",
-			`{"task_id":"task_sandbox_fence","source_tool_use_event_id":"sevt_tool_sandbox","status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`,
-		))
-		if err != nil {
-			t.Fatalf("CommitTaskNotificationResult sandbox mismatch: %v", err)
-		}
-		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-			len(response.GetDeclaration().GetReceipts()) != 1 {
-			t.Fatalf("released sandbox response = %#v; want committed terminal receipt", response)
-		}
-		var taskStatus string
-		var terminalEventID sql.NullString
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status, terminal_event_id FROM session_background_tasks WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_task_sandbox_fence' AND task_id = 'task_sandbox_fence'`,
-		).Scan(&taskStatus, &terminalEventID); err != nil {
-			t.Fatalf("read released sandbox terminal task: %v", err)
-		}
-		if taskStatus != "completed" || !terminalEventID.Valid {
-			t.Fatalf("released sandbox terminal task = %q/%v; want completed durable event", taskStatus, terminalEventID)
-		}
-	})
-
 	t.Run("runtime inbox target pod mismatch is not deliverable", func(t *testing.T) {
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 		seedBridgeAPISession(t, admin, "default", "sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence")
 		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_task_inbox_fence", "bind_bridge_task_inbox_fence", 1, "pod_uid_task_inbox_fence")
-		seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_task_inbox_fence", "2026-01-01T00:00:00Z")
 		seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence", "bind_bridge_task_inbox_fence", "task_inbox_fence", "sevt_tool_inbox")
 		settleBridgeAPIBackgroundTask(t, admin, "sesn_bridge_task_inbox_fence", "task_inbox_fence", "completed", `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`)
 		seedBridgeAPITaskNotificationInbox(t, admin, "default", "sesn_bridge_task_inbox_fence", "thr_bridge_task_inbox_fence", "rin_task_inbox_fence", "bind_bridge_task_inbox_fence", "pod_uid_other")

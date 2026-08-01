@@ -297,29 +297,6 @@ func childLifecycleDeclarationDigest(
 	return sha256Hex(canonical), nil
 }
 
-func sealedAgentMailDeclarationDigest(
-	sessionThreadID string,
-	runtimeInputID string,
-	birthPreparationAttemptID string,
-	failedPreparationAttemptID string,
-) (string, error) {
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
-		"birth_preparation_attempt_id":  birthPreparationAttemptID,
-		"failed_preparation_attempt_id": failedPreparationAttemptID,
-		"operation_kind":                bridgeOpSettleSealedAgentMail,
-		"runtime_input_id":              runtimeInputID,
-		"session_thread_id":             sessionThreadID,
-	})
-	if err != nil {
-		return "", err
-	}
-	canonical, err := canonicalRunToolJSON(string(raw))
-	if err != nil {
-		return "", err
-	}
-	return sha256Hex(canonical), nil
-}
-
 func internalToolRepairDeclarationDigest(
 	request *bridgev1.CommitInternalToolRepairRequest,
 	repairKey string,

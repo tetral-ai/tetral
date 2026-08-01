@@ -28,10 +28,8 @@ const (
 	KindRuntimeConfigUpdate         = "runtime_config_update"
 	KindCleanupSession              = "cleanup_session"
 	KindSessionDeleteCleanup        = "session_delete_cleanup"
-	KindSessionPrepare              = "session_prepare"
 	KindEnvironmentBuild            = "environment_build"
 	KindEnvironmentReadyFanout      = "environment_ready_fanout"
-	KindEnvironmentFailedFanout     = "environment_failed_fanout"
 	KindSandboxToolExecute          = "sandbox_tool_execute"
 	KindSandboxActivate             = "sandbox_activate"
 	KindSandboxMaterialize          = "sandbox_materialize"
@@ -610,20 +608,12 @@ func FormatSessionDeleteCleanupDedupeKey(workspaceID workspace.ID, sessionID str
 	return formatQueueDedupeKey(KindSessionDeleteCleanup, workspaceID, sessionID, deleteCleanupID)
 }
 
-func FormatSessionPrepareDedupeKey(workspaceID workspace.ID, sessionID string, preparationAttemptID string) string {
-	return formatQueueDedupeKey(KindSessionPrepare, workspaceID, sessionID, preparationAttemptID)
-}
-
 func FormatEnvironmentBuildDedupeKey(workspaceID workspace.ID, environmentID string, generation string) string {
 	return formatQueueDedupeKey(KindEnvironmentBuild, workspaceID, environmentID, generation)
 }
 
 func FormatEnvironmentReadyFanoutDedupeKey(workspaceID workspace.ID, environmentID string, generation string) string {
 	return formatQueueDedupeKey(KindEnvironmentReadyFanout, workspaceID, environmentID, generation)
-}
-
-func FormatEnvironmentFailedFanoutDedupeKey(workspaceID workspace.ID, environmentID string, generation string) string {
-	return formatQueueDedupeKey(KindEnvironmentFailedFanout, workspaceID, environmentID, generation)
 }
 
 func FormatSandboxExecutionPartitionKey(workspaceID workspace.ID, sessionID string, sessionThreadID string, toolUseEventID string) string {
@@ -850,15 +840,6 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 			return err
 		}
 		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatSessionDeleteCleanupDedupeKey(request.WorkspaceID, sessionID, deleteCleanupID))
-	case KindSessionPrepare:
-		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "preparation_attempt_id"); err != nil {
-			return err
-		}
-		sessionID, preparationAttemptID, err := requiredPayloadTokens(payload, "session_id", "preparation_attempt_id")
-		if err != nil {
-			return err
-		}
-		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatSessionPrepareDedupeKey(request.WorkspaceID, sessionID, preparationAttemptID))
 	case KindEnvironmentBuild:
 		if err := validatePayloadKeys(rawPayload, "workspace_id", "environment_id", "generation"); err != nil {
 			return err
@@ -877,15 +858,6 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 			return err
 		}
 		return requireCanonicalKeys(request, FormatEnvironmentPartitionKey(request.WorkspaceID, environmentID), FormatEnvironmentReadyFanoutDedupeKey(request.WorkspaceID, environmentID, generation))
-	case KindEnvironmentFailedFanout:
-		if err := validatePayloadKeys(rawPayload, "workspace_id", "environment_id", "generation"); err != nil {
-			return err
-		}
-		environmentID, generation, err := requiredPayloadTokens(payload, "environment_id", "generation")
-		if err != nil {
-			return err
-		}
-		return requireCanonicalKeys(request, FormatEnvironmentPartitionKey(request.WorkspaceID, environmentID), FormatEnvironmentFailedFanoutDedupeKey(request.WorkspaceID, environmentID, generation))
 	case KindSandboxToolExecute:
 		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "session_thread_id", "tool_use_event_id"); err != nil {
 			return err
@@ -1222,7 +1194,7 @@ func payloadStringArray(raw map[string]json.RawMessage, key string, allowEmpty b
 
 func isKnownKind(kind string) bool {
 	switch kind {
-	case KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindSessionPrepare, KindEnvironmentBuild, KindEnvironmentReadyFanout, KindEnvironmentFailedFanout,
+	case KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindEnvironmentBuild, KindEnvironmentReadyFanout,
 		KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
 		KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup, KindSandboxMemoryProjection, KindSandboxBackgroundCommand, KindSandboxBackgroundReconcile:
 		return true

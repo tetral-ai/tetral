@@ -176,8 +176,8 @@ func (s *S3BlobStore) HeadObject(ctx context.Context, key string) (ObjectMetadat
 }
 
 // CopyObject copies an existing object to a new key using provider-side
-// S3-compatible copy semantics. The destination is create-only so mount
-// preparation cannot silently overwrite another prepared file.
+// S3-compatible copy semantics. The destination is create-only so resource
+// materialization cannot silently overwrite another projected file.
 func (s *S3BlobStore) CopyObject(ctx context.Context, sourceKey string, destinationKey string) error {
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),

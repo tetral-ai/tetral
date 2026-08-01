@@ -74,7 +74,6 @@ const (
 	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
 	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
 	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
-	bridgeOpSettleSealedAgentMail          = "settle_sealed_agent_mail"
 	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
 
 	bridgeToolKindSandbox           = "sandbox_tool"
@@ -145,18 +144,16 @@ const (
 )
 
 type PostgreSQLBridgeAPIStore struct {
-	Client                          *dbconnect.Client
-	Logger                          *slog.Logger
-	Clock                           func() time.Time
-	AttachmentBlobStore             blob.BlobStore
-	FileBlobStore                   blob.BlobStore
-	MCPManifestLister               MCPManifestLister
-	SandboxStatusFreshnessWindow    time.Duration
-	ResourceCredentialRefreshMargin time.Duration
-	RuntimeBindingTokenHMACKey      []byte
-	RuntimeBindingTokenTTL          time.Duration
-	ProviderRescheduleBudget        int64
-	CompactionRescheduleBudget      int64
+	Client                     *dbconnect.Client
+	Logger                     *slog.Logger
+	Clock                      func() time.Time
+	AttachmentBlobStore        blob.BlobStore
+	FileBlobStore              blob.BlobStore
+	MCPManifestLister          MCPManifestLister
+	RuntimeBindingTokenHMACKey []byte
+	RuntimeBindingTokenTTL     time.Duration
+	ProviderRescheduleBudget   int64
+	CompactionRescheduleBudget int64
 }
 
 type TransientAttachmentGCResult struct {
@@ -172,27 +169,13 @@ type transientAttachmentGCRow struct {
 	PreviousStatus string
 }
 
-type SandboxToolTarget struct {
-	WorkspaceID          string
-	SessionID            string
-	SessionThreadID      string
-	BindingID            string
-	BindingGeneration    int64
-	SandboxID            string
-	ProviderSandboxID    string
-	PreparationAttemptID string
-	ResourceRootsJSON    string
-}
-
 func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIStore {
 	return &PostgreSQLBridgeAPIStore{
-		Client:                          client,
-		Clock:                           func() time.Time { return storage.Now() },
-		SandboxStatusFreshnessWindow:    defaultSandboxStatusFreshness,
-		ResourceCredentialRefreshMargin: defaultResourceCredentialRefreshMargin,
-		RuntimeBindingTokenTTL:          defaultRuntimeBindingTokenTTL,
-		ProviderRescheduleBudget:        defaultProviderRescheduleBudget,
-		CompactionRescheduleBudget:      defaultCompactionRescheduleBudget,
+		Client:                     client,
+		Clock:                      func() time.Time { return storage.Now() },
+		RuntimeBindingTokenTTL:     defaultRuntimeBindingTokenTTL,
+		ProviderRescheduleBudget:   defaultProviderRescheduleBudget,
+		CompactionRescheduleBudget: defaultCompactionRescheduleBudget,
 	}
 }
 
@@ -231,20 +214,6 @@ func (s *PostgreSQLBridgeAPIStore) now() time.Time {
 		return s.Clock().UTC()
 	}
 	return storage.Now()
-}
-
-func (s *PostgreSQLBridgeAPIStore) sandboxStatusFreshnessWindow() time.Duration {
-	if s != nil && s.SandboxStatusFreshnessWindow > 0 {
-		return s.SandboxStatusFreshnessWindow
-	}
-	return defaultSandboxStatusFreshness
-}
-
-func (s *PostgreSQLBridgeAPIStore) resourceCredentialRefreshMargin() time.Duration {
-	if s != nil && s.ResourceCredentialRefreshMargin > 0 {
-		return s.ResourceCredentialRefreshMargin
-	}
-	return defaultResourceCredentialRefreshMargin
 }
 
 func (s *PostgreSQLBridgeAPIStore) providerRescheduleBudget() int64 {
@@ -419,34 +388,6 @@ func insertBridgeDeclarationOperationTx(
 		declarationDigest,
 		receiptJSON,
 		bridgeAckCommitted,
-		now,
-	)
-	return err
-}
-
-func updateBridgeOperationResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operation string, key string, resultJSON string, stdinWriteSeq sql.NullInt64, now time.Time) error {
-	if resultJSON == "" {
-		resultJSON = "{}"
-	}
-	_, err := tx.Exec(ctx,
-		`UPDATE session_bridge_operations
-		    SET result_json = $7,
-		        stdin_write_seq = COALESCE(stdin_write_seq, $8),
-		        updated_at = $9
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND operation = $4
-		    AND source_kind = $5
-		    AND idempotency_key = $6`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		operation,
-		operation,
-		key,
-		resultJSON,
-		stdinWriteSeq,
 		now,
 	)
 	return err
@@ -722,34 +663,16 @@ func rejectedAck(errorCode string) *bridgev1.BridgeWriteAck {
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.
-func defaultTime(value string, fallback time.Time) (time.Time, error) {
-	if value == "" {
-		return fallback, nil
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, err
-	}
-	// Truncate like a minted timestamp: the column keeps microseconds, so an
-	// untruncated wire value would be echoed and hashed at nanosecond precision
-	// while the stored row holds something else.
-	return storage.Durable(parsed), nil
-}
+
+// Truncate like a minted timestamp: the column keeps microseconds, so an
+// untruncated wire value would be echoed and hashed at nanosecond precision
+// while the stored row holds something else.
 
 func defaultString(value string, fallback string) string {
 	if value == "" {
 		return fallback
 	}
 	return value
-}
-
-func firstNonEmptyJSON(values ...string) string {
-	for _, value := range values {
-		if value != "" && value != "{}" {
-			return value
-		}
-	}
-	return "{}"
 }
 
 func bridgeRawJSON(value string, fallback string) json.RawMessage {

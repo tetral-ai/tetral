@@ -49,7 +49,7 @@ type SandboxMemoryProjectionRunnerConfig struct {
 }
 
 type SandboxMemoryProjectionJobRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxMemoryProjectionStore
 	Providers *ProviderRegistry
 	Config    SandboxMemoryProjectionRunnerConfig

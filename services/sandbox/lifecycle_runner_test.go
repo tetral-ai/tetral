@@ -56,16 +56,16 @@ func TestSandboxActivationRunnerAdoptsBeforeCreateAndDoesNotReplayUnknownCreate(
 			wantTransitions: []string{"retry:qjob_activation:provider_timeout"},
 		},
 		{
-			name:        "observing retry never creates again",
+			name:        "observing retry waits for bounded negative probes",
 			work:        sandboxActivationTestWork(false),
 			resolution:  ProviderOutcome[ActivationResolution]{Value: ActivationResolution{Found: false}},
-			wantAdapter: []string{"resolve"}, wantStore: []string{"claim", "fail:outcome_unknown:activation_outcome_unknown"},
-			wantTransitions: []string{"dead:qjob_activation:activation_outcome_unknown"},
+			wantAdapter: []string{"resolve"}, wantStore: []string{"claim"},
+			wantTransitions: []string{"retry:qjob_activation:activation_observation_not_visible"},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
 			store := &recordingSandboxLifecycleStore{activation: test.work, current: true}
 			adapter := &recordingLifecycleAdapter{resolution: test.resolution, activation: test.activation, inspection: test.inspection}
 			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
@@ -92,8 +92,157 @@ func TestSandboxActivationRunnerAdoptsBeforeCreateAndDoesNotReplayUnknownCreate(
 	}
 }
 
+func TestSandboxReleaseRunnerCompletesAnAlreadyAbsentHandleWithoutReleaseCall(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxReleaseQueueJob()}}
+	store := &recordingSandboxLifecycleStore{
+		release: SandboxReleaseWork{
+			Job: SandboxLifecycleJob{
+				JobID: "qjob_release", LeaseToken: "lease_release", WorkspaceID: "ws_lifecycle",
+				SessionID: "sesn_lifecycle", LogicalSandboxID: "sbox_lifecycle", OperationID: "sop_release",
+			},
+			Provider: sandboxdriver.DaytonaProviderName,
+			Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_deleted"},
+			Reason:   SandboxReleaseSessionDelete,
+		},
+		current: true,
+	}
+	adapter := &recordingLifecycleAdapter{releasePresenceSet: true, releasePresence: ProviderOutcome[bool]{Value: false}}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(adapter.calls, []string{"inspect-release"}) {
+		t.Fatalf("adapter calls = %v; want inspection without duplicate release", adapter.calls)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"claim-release", "complete-release"}) {
+		t.Fatalf("store calls = %v; want durable release completion", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_release"}) {
+		t.Fatalf("queue transitions = %v; want release ACK", queueClient.transitions)
+	}
+}
+
+func TestSandboxReleaseRunnerDeletesPresentNonExecutableHandle(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxReleaseQueueJob()}}
+	store := &recordingSandboxLifecycleStore{
+		release: SandboxReleaseWork{
+			Job: SandboxLifecycleJob{
+				JobID: "qjob_release", LeaseToken: "lease_release", WorkspaceID: "ws_lifecycle",
+				SessionID: "sesn_lifecycle", LogicalSandboxID: "sbox_lifecycle", OperationID: "sop_release",
+			},
+			Provider: sandboxdriver.DaytonaProviderName,
+			Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_destroyed"},
+			Reason:   SandboxReleaseSessionDelete,
+		},
+		current: true,
+	}
+	adapter := &recordingLifecycleAdapter{releasePresenceSet: true, releasePresence: ProviderOutcome[bool]{Value: true}}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(adapter.calls, []string{"inspect-release", "release"}) {
+		t.Fatalf("adapter calls = %v; want successful provider inspection followed by release", adapter.calls)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"claim-release", "authorize-release", "complete-release"}) {
+		t.Fatalf("store calls = %v; want authorized provider release", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_release"}) {
+		t.Fatalf("queue transitions = %v; want release ACK", queueClient.transitions)
+	}
+}
+
+func TestSandboxReleaseRunnerParksBlockedReleaseWithoutSpendingRetryBudget(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxReleaseQueueJob()}}
+	store := &recordingSandboxLifecycleStore{claimReleaseErr: errSandboxReleaseBlocked}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"claim-release", "park-release"}) {
+		t.Fatalf("store calls = %v; want one transactional blocked-release park", store.calls)
+	}
+	if len(queueClient.transitions) != 0 {
+		t.Fatalf("queue transitions = %v; blocked release ACK belongs to the store transaction", queueClient.transitions)
+	}
+}
+
+func TestSandboxReleaseRunnerReauthorizesAfterProviderProvesNoReleaseStarted(t *testing.T) {
+	first := sandboxReleaseQueueJob()
+	second := sandboxReleaseQueueJob()
+	second.AttemptCount = 2
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{first, second}}
+	store := &recordingSandboxLifecycleStore{
+		release: SandboxReleaseWork{
+			Job: SandboxLifecycleJob{
+				JobID: "qjob_release", LeaseToken: "lease_release", WorkspaceID: "ws_lifecycle",
+				SessionID: "sesn_lifecycle", LogicalSandboxID: "sbox_lifecycle", OperationID: "sop_release",
+			},
+			Provider: sandboxdriver.DaytonaProviderName,
+			Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_release"},
+			Reason:   SandboxReleaseSessionDelete,
+		},
+		current: true,
+	}
+	adapter := &recordingLifecycleAdapter{
+		releaseSequence: []ProviderOutcome[ReleaseResult]{
+			{EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_transition_in_progress"},
+			{Value: ReleaseResult{}},
+		},
+	}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{
+		"claim-release", "authorize-release", "rearm-release",
+		"claim-release", "authorize-release", "complete-release",
+	}) {
+		t.Fatalf("store calls = %v; want release authorization on both deliveries", store.calls)
+	}
+	if !reflect.DeepEqual(adapter.calls, []string{"inspect-release", "release", "inspect-release", "release"}) {
+		t.Fatalf("adapter calls = %v; want one provider call per authorized delivery", adapter.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{
+		"retry:qjob_release:provider_transition_in_progress", "ack:qjob_release",
+	}) {
+		t.Fatalf("queue transitions = %v", queueClient.transitions)
+	}
+}
+
 func TestSandboxActivationRunnerConvertsMissingStartToReplacement(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
 	work := sandboxActivationTestWork(true)
 	work.Kind = ActivationStart
 	work.CurrentHandle = sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_deleted"}
@@ -136,7 +285,7 @@ func TestSandboxActivationRunnerRetainsObservationAfterFinalSubmissionAttempt(t 
 	queueJob := sandboxActivationQueueJob()
 	queueJob.AttemptCount = sandboxActivationSubmissionMaxAttempts
 	queueJob.MaxAttempts = sandboxActivationMaxAttempts
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{queueJob}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{queueJob}}
 	store := &recordingSandboxLifecycleStore{activation: sandboxActivationTestWork(true), current: true}
 	adapter := &recordingLifecycleAdapter{
 		resolution: ProviderOutcome[ActivationResolution]{Value: ActivationResolution{Found: false}},
@@ -162,7 +311,7 @@ func TestSandboxActivationRunnerRetainsObservationAfterFinalSubmissionAttempt(t 
 }
 
 func TestSandboxActivationRunnerReinspectsAfterAmbiguousStart(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
 	work := sandboxActivationTestWork(true)
 	work.Kind = ActivationStart
 	work.CurrentHandle = sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_stopped"}
@@ -219,7 +368,7 @@ func TestSandboxMaterializationRunnerRechecksReadinessBeforeProjection(t *testin
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxMaterializationQueueJob()}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxMaterializationQueueJob()}}
 			store := &recordingSandboxLifecycleStore{materialization: sandboxMaterializationTestWork(), current: true}
 			adapter := &recordingLifecycleAdapter{inspection: test.inspection, materialization: test.materialization}
 			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
@@ -247,7 +396,7 @@ func TestSandboxMaterializationRunnerRechecksReadinessBeforeProjection(t *testin
 }
 
 func TestSandboxMaterializationRunnerDoesNotReplaySubmittedFailure(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxMaterializationQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxMaterializationQueueJob()}}
 	store := &recordingSandboxLifecycleStore{materialization: sandboxMaterializationTestWork(), current: true}
 	adapter := &recordingLifecycleAdapter{
 		inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady},
@@ -280,13 +429,13 @@ func TestSandboxLifecycleRunnersFinalizeExhaustedAttempts(t *testing.T) {
 		name      string
 		kind      string
 		queueJob  *queuev1.QueueJob
-		run       func(*recordingSessionPrepareQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
+		run       func(*recordingSandboxQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
 		wantStore string
 		wantDead  string
 	}{
 		{
 			name: "activation", kind: queue.KindSandboxActivate, queueJob: sandboxActivationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxActivationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -294,7 +443,7 @@ func TestSandboxLifecycleRunnersFinalizeExhaustedAttempts(t *testing.T) {
 		},
 		{
 			name: "materialization", kind: queue.KindSandboxMaterialize, queueJob: sandboxMaterializationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxMaterializationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -309,7 +458,7 @@ func TestSandboxLifecycleRunnersFinalizeExhaustedAttempts(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			test.queueJob.AttemptCount = test.queueJob.MaxAttempts + 1
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{test.queueJob}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{test.queueJob}}
 			store := &recordingSandboxLifecycleStore{}
 			if err := test.run(queueClient, store, registry); err != nil {
 				t.Fatalf("RunOnce: %v", err)
@@ -329,13 +478,13 @@ func TestSandboxLifecycleRunnersCheckAttemptBudgetBeforePayloadDecode(t *testing
 		name      string
 		kind      string
 		queueJob  *queuev1.QueueJob
-		run       func(*recordingSessionPrepareQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
+		run       func(*recordingSandboxQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
 		wantStore string
 		wantDead  string
 	}{
 		{
 			name: "activation", kind: queue.KindSandboxActivate, queueJob: sandboxActivationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxActivationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -343,7 +492,7 @@ func TestSandboxLifecycleRunnersCheckAttemptBudgetBeforePayloadDecode(t *testing
 		},
 		{
 			name: "materialization", kind: queue.KindSandboxMaterialize, queueJob: sandboxMaterializationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxMaterializationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -359,7 +508,7 @@ func TestSandboxLifecycleRunnersCheckAttemptBudgetBeforePayloadDecode(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			test.queueJob.AttemptCount = test.queueJob.MaxAttempts + 1
 			test.queueJob.PayloadJson = `{not-json`
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{test.queueJob}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{test.queueJob}}
 			store := &recordingSandboxLifecycleStore{}
 			if err := test.run(queueClient, store, registry); err != nil {
 				t.Fatalf("RunOnce: %v", err)
@@ -374,17 +523,42 @@ func TestSandboxLifecycleRunnersCheckAttemptBudgetBeforePayloadDecode(t *testing
 	}
 }
 
+func TestSandboxReleaseRunnerTreatsMissingAttemptBudgetAsIntegrityFailure(t *testing.T) {
+	job := sandboxReleaseQueueJob()
+	job.MaxAttempts = 0
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+	store := &recordingSandboxLifecycleStore{}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"invalid:sandbox_release"}) {
+		t.Fatalf("store calls = %v; want invalid lifecycle finalization", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_release:sandbox_queue_integrity_error"}) {
+		t.Fatalf("queue transitions = %v; want integrity dead letter", queueClient.transitions)
+	}
+}
+
 func TestSandboxLifecycleRunnersSettleBusinessStateBeforeDeadLetteringInvalidPayload(t *testing.T) {
 	tests := []struct {
 		name     string
 		kind     string
 		queueJob *queuev1.QueueJob
-		run      func(*recordingSessionPrepareQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
+		run      func(*recordingSandboxQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
 		wantDead string
 	}{
 		{
 			name: "activation", kind: queue.KindSandboxActivate, queueJob: sandboxActivationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxActivationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -392,7 +566,7 @@ func TestSandboxLifecycleRunnersSettleBusinessStateBeforeDeadLetteringInvalidPay
 		},
 		{
 			name: "materialization", kind: queue.KindSandboxMaterialize, queueJob: sandboxMaterializationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxMaterializationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -406,7 +580,7 @@ func TestSandboxLifecycleRunnersSettleBusinessStateBeforeDeadLetteringInvalidPay
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			test.queueJob.PayloadJson = `{not-json`
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{test.queueJob}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{test.queueJob}}
 			store := &recordingSandboxLifecycleStore{}
 			if err := test.run(queueClient, store, registry); err != nil {
 				t.Fatalf("RunOnce: %v", err)
@@ -425,20 +599,20 @@ func TestSandboxLifecycleRunnersExecuteTheLastPermittedAttempt(t *testing.T) {
 	tests := []struct {
 		name     string
 		queueJob *queuev1.QueueJob
-		run      func(*recordingSessionPrepareQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
+		run      func(*recordingSandboxQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
 		wantCall string
 		wantAck  string
 	}{
 		{
 			name: "activation", queueJob: sandboxActivationQueueJob(), wantCall: "claim", wantAck: "ack:qjob_activation",
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxActivationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
 		},
 		{
 			name: "materialization", queueJob: sandboxMaterializationQueueJob(), wantCall: "claim-materialization", wantAck: "ack:qjob_materialization",
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxMaterializationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second}}).RunOnce(context.Background())
 			},
@@ -451,7 +625,7 @@ func TestSandboxLifecycleRunnersExecuteTheLastPermittedAttempt(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			test.queueJob.AttemptCount = test.queueJob.MaxAttempts
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{test.queueJob}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{test.queueJob}}
 			store := &recordingSandboxLifecycleStore{current: false}
 			if err := test.run(queueClient, store, registry); err != nil {
 				t.Fatalf("RunOnce: %v", err)
@@ -471,12 +645,12 @@ func TestSandboxLifecycleRunnersFinalizeRetryFromLastPermittedAttempt(t *testing
 		name     string
 		kind     string
 		queueJob *queuev1.QueueJob
-		run      func(*recordingSessionPrepareQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
+		run      func(*recordingSandboxQueue, *recordingSandboxLifecycleStore, *ProviderRegistry) error
 		wantDead string
 	}{
 		{
 			name: "activation", kind: queue.KindSandboxActivate, queueJob: sandboxActivationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxActivationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second}}).RunOnce(context.Background())
 			},
@@ -484,7 +658,7 @@ func TestSandboxLifecycleRunnersFinalizeRetryFromLastPermittedAttempt(t *testing
 		},
 		{
 			name: "materialization", kind: queue.KindSandboxMaterialize, queueJob: sandboxMaterializationQueueJob(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingSandboxLifecycleStore, registry *ProviderRegistry) error {
 				return (&SandboxMaterializationJobRunner{Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second}}).RunOnce(context.Background())
 			},
@@ -494,7 +668,7 @@ func TestSandboxLifecycleRunnersFinalizeRetryFromLastPermittedAttempt(t *testing
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			test.queueJob.AttemptCount = test.queueJob.MaxAttempts
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{test.queueJob}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{test.queueJob}}
 			store := &recordingSandboxLifecycleStore{activation: sandboxActivationTestWork(false), materialization: sandboxMaterializationTestWork(), current: true}
 			adapter := &recordingLifecycleAdapter{
 				resolution: ProviderOutcome[ActivationResolution]{EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_transition_in_progress"},
@@ -559,11 +733,23 @@ func sandboxMaterializationQueueJob() *queuev1.QueueJob {
 	}
 }
 
+func sandboxReleaseQueueJob() *queuev1.QueueJob {
+	return &queuev1.QueueJob{
+		Id: "qjob_release", WorkspaceId: "ws_lifecycle", Kind: queue.KindSandboxRelease,
+		PartitionKey: queue.FormatSandboxLifecyclePartitionKey("ws_lifecycle", "sbox_lifecycle"),
+		DedupeKey:    queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxRelease, "ws_lifecycle", "sbox_lifecycle", "sop_release"),
+		PayloadJson:  `{"workspace_id":"ws_lifecycle","session_id":"sesn_lifecycle","logical_sandbox_id":"sbox_lifecycle","operation_id":"sop_release"}`,
+		LeaseToken:   "lease_release", AttemptCount: 1, MaxAttempts: 5,
+	}
+}
+
 type recordingSandboxLifecycleStore struct {
 	activation      SandboxActivationWork
 	replacement     SandboxActivationWork
 	materialization SandboxMaterializationWork
+	release         SandboxReleaseWork
 	current         bool
+	claimReleaseErr error
 	calls           []string
 }
 
@@ -603,6 +789,34 @@ func (s *recordingSandboxLifecycleStore) FailMaterialization(_ context.Context, 
 	s.calls = append(s.calls, "fail-materialization:"+string(boundary)+":"+string(disposition)+":"+kind)
 	return nil
 }
+func (s *recordingSandboxLifecycleStore) ClaimRelease(context.Context, SandboxLifecycleJob, time.Time) (SandboxReleaseWork, bool, error) {
+	s.calls = append(s.calls, "claim-release")
+	return s.release, s.current, s.claimReleaseErr
+}
+func (s *recordingSandboxLifecycleStore) ParkBlockedRelease(context.Context, SandboxLifecycleJob, time.Time) (bool, error) {
+	s.calls = append(s.calls, "park-release")
+	return true, nil
+}
+func (s *recordingSandboxLifecycleStore) AuthorizeRelease(context.Context, SandboxReleaseWork, time.Time) (bool, error) {
+	s.calls = append(s.calls, "authorize-release")
+	return true, nil
+}
+func (s *recordingSandboxLifecycleStore) RearmRelease(context.Context, SandboxReleaseWork, time.Time) error {
+	s.calls = append(s.calls, "rearm-release")
+	return nil
+}
+func (s *recordingSandboxLifecycleStore) CompleteRelease(context.Context, SandboxReleaseWork, time.Time) error {
+	s.calls = append(s.calls, "complete-release")
+	return nil
+}
+func (s *recordingSandboxLifecycleStore) ObserveUnknownRelease(context.Context, SandboxReleaseWork, string, time.Time) error {
+	s.calls = append(s.calls, "observe-release")
+	return nil
+}
+func (s *recordingSandboxLifecycleStore) FailRelease(_ context.Context, _ SandboxReleaseWork, boundary ProviderEffectBoundary, _ ProviderDisposition, kind string, _ string, _ time.Time) error {
+	s.calls = append(s.calls, "fail-release:"+string(boundary)+":"+kind)
+	return nil
+}
 func (s *recordingSandboxLifecycleStore) FinalizeExhaustedLifecycle(_ context.Context, _ *queuev1.QueueJob, kind string, _ time.Time) error {
 	s.calls = append(s.calls, "exhausted:"+kind)
 	return nil
@@ -617,7 +831,10 @@ type recordingLifecycleAdapter struct {
 	activation         ProviderOutcome[sandbox.ProviderHandle]
 	inspection         ProviderOutcome[ExecutionReadiness]
 	inspectionSequence []ProviderOutcome[ExecutionReadiness]
+	releasePresence    ProviderOutcome[bool]
+	releasePresenceSet bool
 	materialization    ProviderOutcome[MaterializationResult]
+	releaseSequence    []ProviderOutcome[ReleaseResult]
 	calls              []string
 }
 
@@ -638,6 +855,13 @@ func (a *recordingLifecycleAdapter) InspectForExecution(context.Context, string)
 	}
 	return a.inspection
 }
+func (a *recordingLifecycleAdapter) InspectForRelease(context.Context, string) ProviderOutcome[bool] {
+	a.calls = append(a.calls, "inspect-release")
+	if !a.releasePresenceSet {
+		return ProviderOutcome[bool]{Value: true}
+	}
+	return a.releasePresence
+}
 func (a *recordingLifecycleAdapter) MaterializeResources(context.Context, MaterializationRequest) ProviderOutcome[MaterializationResult] {
 	a.calls = append(a.calls, "materialize")
 	return a.materialization
@@ -652,5 +876,11 @@ func (a *recordingLifecycleAdapter) ObserveTool(context.Context, sandboxdriver.F
 	return ProviderOutcome[sandboxdriver.ToolExecution]{}
 }
 func (a *recordingLifecycleAdapter) Release(context.Context, ReleaseRequest) ProviderOutcome[ReleaseResult] {
+	a.calls = append(a.calls, "release")
+	if len(a.releaseSequence) > 0 {
+		outcome := a.releaseSequence[0]
+		a.releaseSequence = a.releaseSequence[1:]
+		return outcome
+	}
 	return ProviderOutcome[ReleaseResult]{}
 }

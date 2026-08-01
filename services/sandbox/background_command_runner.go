@@ -32,6 +32,7 @@ type SandboxBackgroundTaskWork struct {
 	TaskID              string
 	Provider            string
 	ReconcileGeneration int64
+	ReleaseOperationID  string
 	Reference           sandboxdriver.CommandReference
 }
 
@@ -97,7 +98,7 @@ type SandboxBackgroundRunnerConfig struct {
 }
 
 type SandboxBackgroundReconcileJobRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxBackgroundCommandStore
 	Providers *ProviderRegistry
 	Config    SandboxBackgroundRunnerConfig
@@ -205,7 +206,7 @@ func (r *SandboxBackgroundReconcileJobRunner) now() time.Time {
 }
 
 type SandboxBackgroundCommandJobRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxBackgroundCommandStore
 	Providers *ProviderRegistry
 	Config    SandboxBackgroundRunnerConfig
@@ -404,7 +405,7 @@ func normalizeSandboxBackgroundRunnerConfig(cfg SandboxBackgroundRunnerConfig) (
 	return cfg, nil
 }
 
-func deadLetterBackgroundJob(ctx context.Context, client SessionPrepareQueueClient, job *queuev1.QueueJob, kind string) error {
+func deadLetterBackgroundJob(ctx context.Context, client SandboxQueueClient, job *queuev1.QueueJob, kind string) error {
 	return transitionUpdated(client.DeadLetter(ctx, &queuev1.DeadLetterRequest{WorkspaceId: job.GetWorkspaceId(), JobId: job.GetId(), LeaseToken: job.GetLeaseToken(), ErrorKind: kind, ErrorMessage: "sandbox background job could not complete"}))
 }
 

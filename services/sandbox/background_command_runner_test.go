@@ -14,7 +14,7 @@ import (
 
 func TestSandboxBackgroundReconcileRunnerSchedulesOneSuccessor(t *testing.T) {
 	job := sandboxBackgroundReconcileQueueJob()
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 	store := &recordingBackgroundCommandStore{reconcileCurrent: true, task: sandboxBackgroundTaskWork()}
 	adapter := &recordingBackgroundProviderAdapter{poll: ProviderOutcome[sandboxdriver.CommandResult]{Value: sandboxdriver.CommandResult{ResultJSON: `{"status":"running"}`}}}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
@@ -42,7 +42,7 @@ func TestSandboxBackgroundReconcileRunnerSchedulesOneSuccessor(t *testing.T) {
 
 func TestSandboxBackgroundCommandRunnerDoesNotReplaySubmittedInput(t *testing.T) {
 	job := sandboxBackgroundCommandQueueJob("stdin")
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 	store := &recordingBackgroundCommandStore{commandCurrent: true, operation: SandboxBackgroundOperationWork{
 		Task: sandboxBackgroundTaskWork(), Kind: SandboxBackgroundOperationStdin, State: SandboxBackgroundOperationSubmitted,
 	}}
@@ -70,7 +70,7 @@ func TestSandboxBackgroundRunnersSettleBusinessStateBeforeDeadLetteringInvalidPa
 	tests := []struct {
 		name            string
 		job             *queuev1.QueueJob
-		run             func(*recordingSessionPrepareQueue, *recordingBackgroundCommandStore, *ProviderRegistry) error
+		run             func(*recordingSandboxQueue, *recordingBackgroundCommandStore, *ProviderRegistry) error
 		wantStore       []string
 		wantTransitions []string
 	}{
@@ -81,7 +81,7 @@ func TestSandboxBackgroundRunnersSettleBusinessStateBeforeDeadLetteringInvalidPa
 				job.PayloadJson = `{}`
 				return job
 			}(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingBackgroundCommandStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingBackgroundCommandStore, registry *ProviderRegistry) error {
 				return (&SandboxBackgroundReconcileJobRunner{
 					Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxBackgroundRunnerConfig{WorkspaceID: "ws_background", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second},
@@ -97,7 +97,7 @@ func TestSandboxBackgroundRunnersSettleBusinessStateBeforeDeadLetteringInvalidPa
 				job.PayloadJson = `{}`
 				return job
 			}(),
-			run: func(queueClient *recordingSessionPrepareQueue, store *recordingBackgroundCommandStore, registry *ProviderRegistry) error {
+			run: func(queueClient *recordingSandboxQueue, store *recordingBackgroundCommandStore, registry *ProviderRegistry) error {
 				return (&SandboxBackgroundCommandJobRunner{
 					Queue: queueClient, Store: store, Providers: registry,
 					Config: SandboxBackgroundRunnerConfig{WorkspaceID: "ws_background", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second},
@@ -113,7 +113,7 @@ func TestSandboxBackgroundRunnersSettleBusinessStateBeforeDeadLetteringInvalidPa
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{tc.job}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{tc.job}}
 			store := &recordingBackgroundCommandStore{}
 			if err := tc.run(queueClient, store, registry); err != nil {
 				t.Fatalf("RunOnce: %v", err)

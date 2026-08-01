@@ -130,8 +130,6 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 	now := s.clock().UTC()
 	sessionID := s.sessionIDStrategy()
 	threadID := s.threadIDStrategy()
-	preparationAttemptID := id.New("prep_")
-	sandboxID := id.New("sandbox_")
 	stored := &Session{
 		ID:               sessionID,
 		Type:             "session",
@@ -195,13 +193,7 @@ func (s *Service) Create(ctx context.Context, ws workspace.ID, request CreateReq
 				return err
 			}
 		}
-		return tx.CreateSessionPreparation(ctx, SessionPreparationAdmission{
-			SessionID:            sessionID,
-			EnvironmentID:        request.EnvironmentID,
-			PreparationAttemptID: preparationAttemptID,
-			SandboxID:            sandboxID,
-			CreatedAt:            now,
-		})
+		return nil
 	}, nil); err != nil {
 		return nil, err
 	}

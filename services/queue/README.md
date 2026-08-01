@@ -16,7 +16,7 @@ admission — a gRPC transition API (`services/queue/proto/tetral/queue/v1`,
 `QueueService`) that consumers drive, plus one background goroutine that rescues
 leases their owners abandoned and bounds Sandbox notification retention. The store reads and writes only `queue_jobs` and
 `queue_partition_counters`; it never touches the business tables (`session_events`,
-`sandboxes`, `session_preparations`, and the rest), never calls Runtime Pod,
+`session_sandbox_bindings`, `sandbox_lifecycle_operations`, and the rest), never calls Runtime Pod,
 Bridge, Sandbox Service, or any provider, and never infers that referenced work
 completed — a consumer's `Ack` is the only signal that it did. Queue also owns
 `queue_partition_counters`, whose locked rows allocate causal admission order.
@@ -69,7 +69,7 @@ changes nothing.
 | `Heartbeat` | lease-token | any | pushes `leased_until` forward |
 | `Ack` | lease-token | any | → `acknowledged`; legal only after the consumer reconciled durable state and delivered/resolved the command |
 | `Retry` | lease-token | any | carries an error kind/message only, no delay authority. If `attempt_count` reached the effective `max_attempts`, dead-letters instead. Otherwise → `pending` with capped exponential backoff + full jitter |
-| `Defer` | lease-token | `session_prepare` and the two canonical `runtime_config_update` payload classes | → `pending` with Queue-owned capped backoff while decrementing `attempt_count`, so the lease consumes no retry budget. `session_prepare` retains its existing attempt-based backoff and never reads or changes `defer_count`. A locked SDK config-generation or MCP manifest-generation row is revalidated from its stored refs-only payload, increments `defer_count`, and derives backoff from that counter without approaching `max_attempts` |
+| `Defer` | lease-token | the two canonical `runtime_config_update` payload classes | → `pending` with Queue-owned capped backoff while decrementing `attempt_count`; the locked SDK config-generation or MCP manifest-generation row is revalidated from its refs-only payload, increments `defer_count`, and derives backoff from that counter without approaching `max_attempts` |
 | `DeadLetter` | lease-token | any | → `dead_lettered` straight, carrying the error, for terminal invariant failures |
 | `Cancel` | partition-scoped, **not** lease-fenced | `runtime_input` `input_kind = messages` only | requires `workspace_id`, `session_id`, `session_thread_id`, and a positive `interrupt_fence_sequence`; marks `cancelled` every `pending` matching row in that thread whose `sequence_to` is below the fence; touches no `leased`/terminal row and deletes no `session_events` |
 | `ReclaimExpiredLeases` | exempt (matches `workspace_id`/`id`/`status = 'leased'` without the stale token) | any | background loop only; clears lease bookkeeping on rows `leased` with `leased_until <= now` and returns them to `pending` at `available_at = now` with a `lease_expired` error stamp |
@@ -84,7 +84,7 @@ row before calling `DeadLetterExhaustedTx`, which rechecks pending status and th
 observed attempt count in that same transaction. None of these are Queue RPCs.
 
 Backoff is `delay = rand(0, min(cap, base * 2^(count-1)))`, where `count` is
-`attempt_count` for Retry and `session_prepare` Defer, and `defer_count` for
+`attempt_count` for Retry, and `defer_count` for
 config Defer. The full-jitter distribution is fixed, not a knob. Lease expiry alone never
 dead-letters: the prior owner may have committed business success and only lost
 the acknowledgement, so the next lease holder revalidates the durable row under
@@ -108,7 +108,7 @@ writers uphold them under concurrency.
 
 One background goroutine (`RunStalledLeaseMaintenance`) runs
 `ReclaimExpiredLeases` across all workspaces on a fixed interval, taking a bounded
-batch per scan. This is what unsticks a `runtime_input`, `session_prepare`,
+batch per scan. This is what unsticks a `runtime_input`,
 `cleanup_session`, `session_delete_cleanup`, or Sandbox job stranded by a crashed
 consumer. After a successful reclaim pass, the same tick deletes at most 100
 Sandbox-owned terminal notifications whose matching terminal timestamp is at
@@ -149,7 +149,7 @@ and DNS, and ingress on both ports to `api`, `bridge`, and
 
 ### Seam 1 — Job kind registry
 
-Eighteen kinds share the table. The queue stores `kind` as an opaque label and
+Sixteen kinds share the table. The queue stores `kind` as an opaque label and
 never performs Sandbox business behavior; admission shape, partition identity,
 and a few transport transitions are kind-specific.
 
@@ -159,10 +159,8 @@ and a few transport transitions are kind-specific.
 | `runtime_config_update` | `session:…` | Bridge Job Runner |
 | `cleanup_session` | `session:…` | Bridge Job Runner |
 | `session_delete_cleanup` | `session:…` | Bridge Job Runner |
-| `session_prepare` | `session:…` | Sandbox Service |
 | `environment_build` | `environment:<workspace_id>:<environment_id>` | Sandbox Service |
 | `environment_ready_fanout` | `environment:…` | Sandbox Service |
-| `environment_failed_fanout` | `environment:…` | Sandbox Service |
 | `sandbox_tool_execute` | `sandbox-execution:<workspace>:<session>:<thread>:<tool-use-event>` | dedicated Sandbox execution runner |
 | `sandbox_activate` | `sandbox-lifecycle:<workspace>:<logical-sandbox>` | Sandbox Service |
 | `sandbox_materialize` | `sandbox-lifecycle:…` | Sandbox Service |
@@ -184,7 +182,7 @@ non-whitelisted field, or whose partition/dedupe keys differ from the computed
 forms. A single kind may carry more than one canonical payload sub-shape: the
 `runtime_mcp_manifest_update` shape (with its own `Format…DedupeKey` helper and
 `validateCanonicalQueueShape` branch) is a variant of `runtime_config_update`,
-not an additional kind — `isKnownKind` still admits only the eighteen above.
+not an additional kind — `isKnownKind` still admits only the sixteen above.
 
 The `runtime_input` kind carries an `input_kind` discriminator, checked by
 `isRuntimeInputKind`, over a closed set: `messages`, `interrupt_control`,
@@ -200,8 +198,8 @@ lease the kinds they serve by name in `Lease.kinds`; an unknown kind there is a
 validation error.
 
 **Kind-specific behaviors a replacement must preserve.**
-- `Defer` accepts `session_prepare` plus refs-only SDK config-generation and
-  MCP manifest-generation `runtime_config_update` rows. It validates the
+- `Defer` accepts refs-only SDK config-generation and MCP
+  manifest-generation `runtime_config_update` rows. It validates the
   locked stored payload before admitting either config arm.
 - `Cancel` touches **only** `runtime_input` `input_kind = messages` rows.
 - Priority-based lease overtaking applies **only** among `runtime_input`
@@ -277,7 +275,7 @@ the next holder re-leases under a new token.
 `TestPostgreSQLStoreLeaseCandidateWindowCannotStarveEarlierBarrierJob`,
 `TestPostgreSQLStoreCancelInterruptFenceOnlyCancelsPendingOlderSameThreadMessages`,
 `TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases`,
-`TestPostgreSQLStoreDeferPreservesSessionPrepareAttemptBudgetAndFencesKind`
+`TestPostgreSQLStoreDeferCanonicalRuntimeConfigUsesScopedCounter`
 (`internal/queue`).
 
 ## Testing guide

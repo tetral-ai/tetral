@@ -16,16 +16,16 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-func TestPrepareGitHubRepositoriesPostgreSQLPhaseOrderRequiresLiveBeforeClone(t *testing.T) {
+func TestGitHubRepositoryConvergerPostgreSQLPhaseOrderRequiresLiveBeforeClone(t *testing.T) {
 	ctx := context.Background()
 	store, admin := newGitHubPreparationTicketStore(t, "sesn_git_phase")
 	events := []string{}
 	rotator := &eventingGitTicketRotator{delegate: store, events: &events}
 	materializer := &persistedGitConfigMaterializer{admin: admin, events: &events}
-	service := newGitHubPreparationService(rotator, materializer, bytes.NewReader(bytes.Repeat([]byte{1}, gitticket.TokenBytes)))
+	service := newGitHubRepositoryConverger(rotator, materializer, bytes.NewReader(bytes.Repeat([]byte{1}, gitticket.TokenBytes)))
 
-	if err := service.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_phase", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(time.Time{})); err != nil {
-		t.Fatalf("prepareGitHubRepositories: %v", err)
+	if err := service.materialize(ctx, workspace.DefaultID, "sesn_git_phase", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err != nil {
+		t.Fatalf("MaterializeGitHubRepositories: %v", err)
 	}
 	if got := strings.Join(events, " -> "); got != "pending -> config install -> activate -> clone" {
 		t.Fatalf("phase order = %s; want pending -> config install -> activate -> clone", got)
@@ -33,16 +33,16 @@ func TestPrepareGitHubRepositoriesPostgreSQLPhaseOrderRequiresLiveBeforeClone(t 
 	assertGitTicketCounts(t, admin, "sesn_git_phase", 0, 1, 0)
 }
 
-func TestPrepareGitHubRepositoriesExistingCheckoutSkipsCloneAfterActivation(t *testing.T) {
+func TestGitHubRepositoryConvergerExistingCheckoutSkipsCloneAfterActivation(t *testing.T) {
 	ctx := context.Background()
 	store, admin := newGitHubPreparationTicketStore(t, "sesn_git_skip")
 	events := []string{}
 	rotator := &eventingGitTicketRotator{delegate: store, events: &events}
 	materializer := &persistedGitConfigMaterializer{admin: admin, events: &events, skipClone: true}
-	service := newGitHubPreparationService(rotator, materializer, bytes.NewReader(bytes.Repeat([]byte{2}, gitticket.TokenBytes)))
+	service := newGitHubRepositoryConverger(rotator, materializer, bytes.NewReader(bytes.Repeat([]byte{2}, gitticket.TokenBytes)))
 
-	if err := service.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_skip", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(time.Time{})); err != nil {
-		t.Fatalf("prepareGitHubRepositories: %v", err)
+	if err := service.materialize(ctx, workspace.DefaultID, "sesn_git_skip", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err != nil {
+		t.Fatalf("MaterializeGitHubRepositories: %v", err)
 	}
 	if got := strings.Join(events, " -> "); got != "pending -> config install -> activate -> clone skipped" {
 		t.Fatalf("phase order = %s; want pending -> config install -> activate -> clone skipped", got)
@@ -53,57 +53,14 @@ func TestPrepareGitHubRepositoriesExistingCheckoutSkipsCloneAfterActivation(t *t
 	assertGitTicketCounts(t, admin, "sesn_git_skip", 0, 1, 0)
 }
 
-func TestPrepareGitHubRepositoriesRetryBeforeInstallMintsSafely(t *testing.T) {
-	ctx := context.Background()
-	store, admin := newGitHubPreparationTicketStore(t, "sesn_git_before_install")
-	attemptCreatedAt := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
-	oldToken, oldHash := deterministicGitHubPreparationTicket(t, 3)
-	old, err := store.CreatePending(ctx, workspace.DefaultID, "sesn_git_before_install", "gitt_old", oldHash, attemptCreatedAt.Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("CreatePending old: %v", err)
-	}
-	if _, err := store.ActivatePending(ctx, workspace.DefaultID, "sesn_git_before_install", old.TicketID, attemptCreatedAt.Add(-time.Hour)); err != nil {
-		t.Fatalf("ActivatePending old: %v", err)
-	}
-	materializer := &persistedGitConfigMaterializer{admin: admin, installedHash: oldHash, failInstallOnce: true}
-	first := newGitHubPreparationService(store, materializer, bytes.NewReader(bytes.Repeat([]byte{4}, gitticket.TokenBytes)))
-
-	if err := first.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_before_install", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(attemptCreatedAt)); err == nil {
-		t.Fatal("first preparation succeeded; want pre-install failure")
-	}
-	assertGitTicketCounts(t, admin, "sesn_git_before_install", 1, 1, 0)
-	if !bytes.Equal(materializer.installedHash, oldHash) {
-		t.Fatal("pre-install failure replaced the previously installed live ticket")
-	}
-
-	// The retry has a fresh service and store and receives no raw ticket from the
-	// failed service. It may abandon the unreachable pending row and mint anew.
-	freshStore := gitticket.NewPostgreSQLStore(dbconnect.NewClientForTesting(admin))
-	retry := newGitHubPreparationService(freshStore, materializer, bytes.NewReader(bytes.Repeat([]byte{5}, gitticket.TokenBytes)))
-	if err := retry.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_before_install", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(attemptCreatedAt)); err != nil {
-		t.Fatalf("retry prepareGitHubRepositories: %v", err)
-	}
-	assertGitTicketCounts(t, admin, "sesn_git_before_install", 1, 1, 1)
-	assertGitTicketStatus(t, admin, oldHash, gitticket.StatusRotated)
-	_, abandonedHash := deterministicGitHubPreparationTicket(t, 4)
-	assertGitTicketStatus(t, admin, abandonedHash, gitticket.StatusPending)
-	if materializer.cloneNetworkUses != 1 {
-		t.Fatalf("clone network uses = %d; want 1 after replacement activation", materializer.cloneNetworkUses)
-	}
-	if strings.Contains(materializer.persistedState(), oldToken) {
-		t.Fatal("persisted sandbox recovery state retained a raw ticket")
-	}
-}
-
-func TestPrepareGitHubRepositoriesRetryBetweenInstallAndActivationUsesInstalledPending(t *testing.T) {
+func TestGitHubRepositoryConvergerRetryBetweenInstallAndActivationUsesInstalledPending(t *testing.T) {
 	ctx := context.Background()
 	store, admin := newGitHubPreparationTicketStore(t, "sesn_git_before_activate")
-	attemptCreatedAt := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	materializer := &persistedGitConfigMaterializer{admin: admin}
 	firstRotator := &eventingGitTicketRotator{delegate: store, failActivationOnce: true}
-	first := newGitHubPreparationService(firstRotator, materializer, bytes.NewReader(bytes.Repeat([]byte{6}, gitticket.TokenBytes)))
+	first := newGitHubRepositoryConverger(firstRotator, materializer, bytes.NewReader(bytes.Repeat([]byte{6}, gitticket.TokenBytes)))
 
-	if err := first.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_before_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(attemptCreatedAt)); err == nil {
+	if err := first.materialize(ctx, workspace.DefaultID, "sesn_git_before_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err == nil {
 		t.Fatal("first preparation succeeded; want activation-boundary failure")
 	}
 	assertGitTicketCounts(t, admin, "sesn_git_before_activate", 1, 0, 0)
@@ -112,9 +69,9 @@ func TestPrepareGitHubRepositoriesRetryBetweenInstallAndActivationUsesInstalledP
 	}
 
 	freshStore := gitticket.NewPostgreSQLStore(dbconnect.NewClientForTesting(admin))
-	retry := newGitHubPreparationService(freshStore, materializer, errorReader{})
-	if err := retry.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_before_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(attemptCreatedAt)); err != nil {
-		t.Fatalf("retry prepareGitHubRepositories: %v", err)
+	retry := newGitHubRepositoryConverger(freshStore, materializer, errorReader{})
+	if err := retry.materialize(ctx, workspace.DefaultID, "sesn_git_before_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err != nil {
+		t.Fatalf("retry MaterializeGitHubRepositories: %v", err)
 	}
 	assertGitTicketCounts(t, admin, "sesn_git_before_activate", 0, 1, 0)
 	if materializer.cloneNetworkUses != 1 {
@@ -122,14 +79,13 @@ func TestPrepareGitHubRepositoriesRetryBetweenInstallAndActivationUsesInstalledP
 	}
 }
 
-func TestPrepareGitHubRepositoriesRetryAfterActivationContinuesWithoutMinting(t *testing.T) {
+func TestGitHubRepositoryConvergerRetryAfterActivationContinuesWithoutMinting(t *testing.T) {
 	ctx := context.Background()
 	store, admin := newGitHubPreparationTicketStore(t, "sesn_git_after_activate")
-	attemptCreatedAt := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
 	materializer := &persistedGitConfigMaterializer{admin: admin, failCloneOnce: true}
-	first := newGitHubPreparationService(store, materializer, bytes.NewReader(bytes.Repeat([]byte{7}, gitticket.TokenBytes)))
+	first := newGitHubRepositoryConverger(store, materializer, bytes.NewReader(bytes.Repeat([]byte{7}, gitticket.TokenBytes)))
 
-	if err := first.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_after_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(attemptCreatedAt)); err == nil {
+	if err := first.materialize(ctx, workspace.DefaultID, "sesn_git_after_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err == nil {
 		t.Fatal("first preparation succeeded; want post-activation/pre-network failure")
 	}
 	assertGitTicketCounts(t, admin, "sesn_git_after_activate", 0, 1, 0)
@@ -138,9 +94,9 @@ func TestPrepareGitHubRepositoriesRetryAfterActivationContinuesWithoutMinting(t 
 	}
 
 	freshStore := gitticket.NewPostgreSQLStore(dbconnect.NewClientForTesting(admin))
-	retry := newGitHubPreparationService(freshStore, materializer, errorReader{})
-	if err := retry.prepareGitHubRepositories(ctx, workspace.DefaultID, "sesn_git_after_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubPreparationResources(attemptCreatedAt)); err != nil {
-		t.Fatalf("retry prepareGitHubRepositories: %v", err)
+	retry := newGitHubRepositoryConverger(freshStore, materializer, errorReader{})
+	if err := retry.materialize(ctx, workspace.DefaultID, "sesn_git_after_activate", ProviderHandle{SandboxID: "provider_sandbox"}, githubRepositoryResources()); err != nil {
+		t.Fatalf("retry MaterializeGitHubRepositories: %v", err)
 	}
 	assertGitTicketCounts(t, admin, "sesn_git_after_activate", 0, 1, 0)
 	if materializer.installCalls != 1 {
@@ -249,10 +205,6 @@ func (*persistedGitConfigMaterializer) RemoveGitHubRepository(context.Context, s
 	return nil
 }
 
-func (m *persistedGitConfigMaterializer) persistedState() string {
-	return string(m.installedHash)
-}
-
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {
@@ -262,40 +214,52 @@ func (errorReader) Read([]byte) (int, error) {
 func newGitHubPreparationTicketStore(t *testing.T, sessionID string) (*gitticket.PostgreSQLGitTicketStore, *sql.DB) {
 	t.Helper()
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedSandboxSession(t, admin, workspace.DefaultID, sessionID)
+	seedGitHubMaterializationSession(t, admin, workspace.DefaultID, sessionID)
 	return gitticket.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB)), admin
 }
 
-func newGitHubPreparationService(rotator GitTicketRotator, materializer GitHubRepositoryMaterializer, random io.Reader) *Service {
-	return NewService(nil, nil,
-		WithGitHubRepositoryPreparation(rotator, materializer, "git.tetral.test"),
-		WithGitTicketRandomSource(random),
-		WithClock(func() time.Time { return time.Date(2026, 7, 14, 11, 0, 0, 0, time.UTC) }),
-	)
-}
-
-func githubPreparationResources(attemptCreatedAt time.Time) ResourceSetup {
-	return ResourceSetup{
-		PreparationAttemptCreatedAt: attemptCreatedAt,
-		GitHubRepositories: []GitHubRepositoryMount{{
-			ResourceID: "sesrsc_repo",
-			URL:        "https://github.com/tetral-ai/tetral",
-			MountPath:  "/workspace/tetral",
-		}},
+func newGitHubRepositoryConverger(rotator GitTicketRotator, materializer GitHubRepositoryMaterializer, random io.Reader) *GitHubRepositoryConverger {
+	return &GitHubRepositoryConverger{
+		Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test", Random: random,
+		Clock: func() time.Time { return time.Date(2026, 7, 14, 11, 0, 0, 0, time.UTC) },
 	}
 }
 
-func deterministicGitHubPreparationTicket(t *testing.T, fill byte) (string, []byte) {
+func githubRepositoryResources() []GitHubRepositoryMount {
+	return []GitHubRepositoryMount{{
+		ResourceID: "sesrsc_repo",
+		URL:        "https://github.com/tetral-ai/tetral",
+		MountPath:  "/workspace/tetral",
+	}}
+}
+
+func seedGitHubMaterializationSession(t *testing.T, db *sql.DB, ws workspace.ID, sessionID string) {
 	t.Helper()
-	token, err := gitticket.GenerateToken(bytes.NewReader(bytes.Repeat([]byte{fill}, gitticket.TokenBytes)))
-	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
+	const now = "2026-07-14T10:00:00Z"
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO agents (workspace_id, id, name, version, created_at, updated_at)
+		 VALUES ($1, 'agent_git_materialization', 'Git materialization agent', 1, $2, $2)`, string(ws), now); err != nil {
+		t.Fatalf("seed agent: %v", err)
 	}
-	hash, err := gitticket.HashToken(token)
-	if err != nil {
-		t.Fatalf("HashToken: %v", err)
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO agent_versions (workspace_id, id, agent_id, version, config_json, config_hash, created_at)
+		 VALUES ($1, 'agv_git_materialization', 'agent_git_materialization', 1, '{}', 'hash', $2)`, string(ws), now); err != nil {
+		t.Fatalf("seed agent version: %v", err)
 	}
-	return token, hash
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO environments (workspace_id, id, name, config_json, created_at, updated_at)
+		 VALUES ($1, 'env_git_materialization', 'Git materialization environment', '{}', $2, $2)`, string(ws), now); err != nil {
+		t.Fatalf("seed environment: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO sessions (
+			workspace_id, id, type, metadata_json, status, lifecycle_state,
+			agent_id, agent_version, environment_id, vault_ids_json, created_at, updated_at
+		) VALUES ($1, $2, 'session', '{}', 'idle', 'active',
+		          'agent_git_materialization', 1, 'env_git_materialization', '[]', $3, $3)`,
+		string(ws), sessionID, now); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
 }
 
 func assertGitTicketCounts(t *testing.T, admin *sql.DB, sessionID string, pending, live, rotated int) {
@@ -315,16 +279,5 @@ func assertGitTicketCounts(t *testing.T, admin *sql.DB, sessionID string, pendin
 		if got != want {
 			t.Fatalf("%s ticket count = %d; want %d", status, got, want)
 		}
-	}
-}
-
-func assertGitTicketStatus(t *testing.T, admin *sql.DB, hash []byte, want string) {
-	t.Helper()
-	var got string
-	if err := admin.QueryRow(`SELECT status FROM session_git_tickets WHERE token_hash = $1`, hash).Scan(&got); err != nil {
-		t.Fatalf("read git ticket status: %v", err)
-	}
-	if got != want {
-		t.Fatalf("git ticket status = %q; want %q", got, want)
 	}
 }

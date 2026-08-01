@@ -542,7 +542,6 @@ func TestSessionEventsSchemaMatchesDraftLedger(t *testing.T) {
 		"created_at",
 		"updated_at",
 		"processed_at",
-		"preparation_attempt_id",
 	}
 	if !equalStringSlices(columns, wantColumns) {
 		t.Fatalf("session_events columns = %v; want %v", columns, wantColumns)
@@ -580,7 +579,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		"session_messages": {
 			"workspace_id", "session_id", "session_thread_id", "message_id",
 			"sequence", "kind", "data_json", "source_event_id", "last_event_id",
-			"repair_key", "created_at", "updated_at", "model_request_id",
+			"repair_key", "model_request_id", "created_at", "updated_at",
 		},
 		"session_pending_tool_uses": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
@@ -602,9 +601,10 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_runtime_status": {
 			"workspace_id", "session_id", "status", "status_event_id", "idle_since",
+			"running_since", "active_seconds_total",
 			"cleanup_after", "cleanup_enqueued_at", "cleanup_claimed_at",
 			"cleanup_job_id", "binding_id", "binding_generation", "created_at",
-			"updated_at", "running_since", "active_seconds_total",
+			"updated_at",
 		},
 		"session_turn_retries": {
 			"workspace_id", "session_id", "session_thread_id", "provider_attempts",
@@ -633,16 +633,8 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			"helper_recovery_count", "background_task_started", "task_id",
 			"background_operation_kind", "background_operation_state", "background_request_id",
 			"background_task_id", "background_max_output_tokens", "background_write_sequence",
-			"background_cancel_request_id", "background_cancel_input_json", "background_cancel_result_json",
 			"memory_projection_state", "mcp_claim_status", "mcp_claim_owner_request_id",
 			"mcp_claim_lease_expires_at", "created_at", "updated_at",
-		},
-		"session_preparations": {
-			"workspace_id", "session_id", "preparation_attempt_id", "environment_id",
-			"environment_generation", "sandbox_id", "status", "resource_cred_expires_at",
-			"resource_roots_json", "skills_index_json", "resource_helper_recovery_count", "failure_stage", "last_error_kind", "failure_reason",
-			"retryable", "superseded_at", "created_at", "updated_at", "ready_at", "failed_at",
-			"failure_resource_id", "failure_resource_url",
 		},
 		"session_git_tickets": {
 			"workspace_id", "session_id", "ticket_id", "token_hash", "status",
@@ -1476,6 +1468,9 @@ func TestSandboxBindingAndLifecycleOperationSchemaShape(t *testing.T) {
 	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations SET state = 'mystery' WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err == nil {
 		t.Fatal("unknown lifecycle state was accepted")
 	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations SET state = 'waiting_activation' WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err == nil {
+		t.Fatal("materialization-only state was accepted for an activation operation")
+	}
 	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
 		SET state = 'completed', completed_at = '2026-07-31T00:01:00Z'
 		WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err != nil {
@@ -1606,10 +1601,10 @@ func assertSessionMCPManifestsSchemaShapeAndRLS(t *testing.T, db *sql.DB, schema
 		"tools_json",
 		"manifest_etag",
 		"manifest_generation",
-		"created_at",
-		"updated_at",
 		"readiness",
 		"diagnostic",
+		"created_at",
+		"updated_at",
 	}
 	if !equalStringSlices(columns, wantColumns) {
 		t.Fatalf("session_mcp_manifests columns = %v; want %v", columns, wantColumns)
@@ -1637,21 +1632,6 @@ func assertSessionMCPManifestsSchemaShapeAndRLS(t *testing.T, db *sql.DB, schema
 	}
 	if columns := readIndexColumns(t, db, schema, "idx_session_mcp_manifests_session_generation"); !equalStringSlices(columns, []string{"workspace_id", "session_id", "manifest_generation"}) {
 		t.Fatalf("idx_session_mcp_manifests_session_generation columns = %v; want workspace/session/generation", columns)
-	}
-}
-
-func TestSandboxesSchemaEnforcesOneRowPerSession(t *testing.T) {
-	db, schema := newIsolatedPostgreSQLSchemaDB(t)
-	assertTableRLSForced(t, db, schema, "sandboxes")
-	assertPrimaryKeyColumns(t, db, schema, "sandboxes", []string{"id"})
-	if definition := readCheckConstraintDefinition(t, db, schema, "sandboxes", "sandboxes_provider_shape"); !strings.Contains(definition, "provider = 'tetral'::text") {
-		t.Fatalf("sandboxes_provider_shape = %q; want provider fixed to tetral", definition)
-	}
-	if columns := readIndexColumns(t, db, schema, "idx_sandboxes_session_unique"); !equalStringSlices(columns, []string{"workspace_id", "session_id"}) {
-		t.Fatalf("idx_sandboxes_session_unique columns = %v; want workspace_id/session_id", columns)
-	}
-	if predicate := readIndexPredicate(t, db, schema, "idx_sandboxes_session_unique"); predicate != "" {
-		t.Fatalf("idx_sandboxes_session_unique predicate = %q; want full-session uniqueness", predicate)
 	}
 }
 
@@ -2246,8 +2226,6 @@ func expectedVersionOneControlPlaneTables() []string {
 		"sandbox_lifecycle_operations",
 		"sandbox_output_capture_blobs",
 		"sandbox_output_capture_operations",
-		"sandbox_release_idempotency_keys",
-		"sandboxes",
 		"session_background_tasks",
 		"session_bridge_operations",
 		"session_event_idempotency_keys",
@@ -2262,7 +2240,6 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_messages",
 		"session_output_captures",
 		"session_pending_tool_uses",
-		"session_preparations",
 		"session_provider_auth",
 		"session_resource_prefix_gc",
 		"session_resources",

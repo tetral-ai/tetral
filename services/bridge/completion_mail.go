@@ -46,11 +46,10 @@ type storedAgentMailEnvelope struct {
 }
 
 type admittedAgentMailDelivery struct {
-	Envelope             storedAgentMailEnvelope
-	ReceivedEventID      string
-	ReceivedSequence     int64
-	PreparationAttemptID string
-	Terminal             bool
+	Envelope         storedAgentMailEnvelope
+	ReceivedEventID  string
+	ReceivedSequence int64
+	Terminal         bool
 }
 
 func completionDeliveryID(childThreadID string, runtimeWriteID string) string {
@@ -264,13 +263,9 @@ func admitAgentMailDeliveryTx(
 	tx *dbconnect.Tx,
 	targetScope *bridgev1.RuntimeScope,
 	envelope storedAgentMailEnvelope,
-	preparationAttemptID string,
 	binding runtimeBindingForDelivery,
 	now time.Time,
 ) (admittedAgentMailDelivery, error) {
-	if preparationAttemptID == "" {
-		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery has no birth preparation attempt")
-	}
 	threadScope, err := lockThreadMutationTx(ctx, tx, targetScope)
 	if err != nil {
 		return admittedAgentMailDelivery{}, err
@@ -295,19 +290,6 @@ func admitAgentMailDeliveryTx(
 	if exhausted {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail delivery is exhausted")
 	}
-	sealed, err := sealedAgentMailBirthDispositionExistsTx(
-		ctx,
-		tx,
-		targetScope,
-		completionRuntimeInputID(envelope.DeliveryID),
-		preparationAttemptID,
-	)
-	if err != nil {
-		return admittedAgentMailDelivery{}, err
-	}
-	if sealed {
-		return admittedAgentMailDelivery{}, status.Error(codes.Aborted, "agent mail delivery birth is sealed")
-	}
 	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, targetScope, envelope.SourceThreadID)
 	if err != nil {
 		return admittedAgentMailDelivery{}, err
@@ -327,11 +309,10 @@ func admitAgentMailDeliveryTx(
 		receivedEventID     string
 		receivedSequence    int64
 		receivedPayloadJSON string
-		birthPreparationID  string
 		processedAt         sql.NullTime
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT event_id, sequence, payload_json, COALESCE(preparation_attempt_id, ''), processed_at
+		`SELECT event_id, sequence, payload_json, processed_at
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -345,7 +326,7 @@ func admitAgentMailDeliveryTx(
 		targetScope.GetSessionId(),
 		targetScope.GetSessionThreadId(),
 		envelope.DeliveryID,
-	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON, &birthPreparationID, &processedAt)
+	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON, &processedAt)
 	if dbconnect.IsNoRows(err) {
 		if !threadReceivableTx(threadScope) {
 			return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
@@ -365,8 +346,8 @@ func admitAgentMailDeliveryTx(
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, preparation_attempt_id, projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, 'agent.thread_message_received', $6, $7, $8, $9, $6, $10, $10, NULL)`,
+				visibility, session_visible, projection_json, created_at, updated_at, processed_at
+			) VALUES ($1, $2, $3, $4, $5, 'agent.thread_message_received', $6, $7, $8, $6, $9, $9, NULL)`,
 			targetScope.GetWorkspaceId(),
 			targetScope.GetSessionId(),
 			targetScope.GetSessionThreadId(),
@@ -375,7 +356,6 @@ func admitAgentMailDeliveryTx(
 			eventPayloadJSON,
 			visibility,
 			sessionVisible,
-			preparationAttemptID,
 			now,
 		); err != nil {
 			return admittedAgentMailDelivery{}, err
@@ -383,14 +363,12 @@ func admitAgentMailDeliveryTx(
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, targetScope, receivedEventID, visibility, sessionVisible, now); err != nil {
 			return admittedAgentMailDelivery{}, err
 		}
-		birthPreparationID = preparationAttemptID
 		receivedPayloadJSON = eventPayloadJSON
 		processedAt = sql.NullTime{}
 	} else if err != nil {
 		return admittedAgentMailDelivery{}, err
 	}
-	if birthPreparationID == "" ||
-		normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
+	if normalizeJSONForCompare(json.RawMessage(receivedPayloadJSON)) != normalizeJSONForCompare(json.RawMessage(eventPayloadJSON)) {
 		return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery replay conflicts with the admitted source")
 	}
 	var inboxStatus sql.NullString
@@ -417,137 +395,28 @@ func admitAgentMailDeliveryTx(
 	if !terminal && !threadReceivableTx(threadScope) {
 		return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
-	if !terminal && inboxStatus.String == "cancelled" {
-		sealed, err := sealedAgentMailBirthDispositionExistsTx(
-			ctx,
-			tx,
-			targetScope,
-			completionRuntimeInputID(envelope.DeliveryID),
-			birthPreparationID,
-		)
-		if err != nil {
-			return admittedAgentMailDelivery{}, err
-		}
-		if !sealed {
-			return admittedAgentMailDelivery{}, status.Error(codes.AlreadyExists, "agent mail delivery birth conflicts with its cancelled inbox")
-		}
-		if birthPreparationID == preparationAttemptID {
-			return admittedAgentMailDelivery{}, status.Error(codes.Aborted, "agent mail delivery birth is sealed")
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_events
-			    SET preparation_attempt_id = $5,
-			        updated_at = $6
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4
-			    AND processed_at IS NULL`,
-			targetScope.GetWorkspaceId(),
-			targetScope.GetSessionId(),
-			targetScope.GetSessionThreadId(),
-			receivedEventID,
-			preparationAttemptID,
-			now,
-		); err != nil {
-			return admittedAgentMailDelivery{}, err
-		}
-		birthPreparationID = preparationAttemptID
-	}
 	if !terminal {
 		job := RuntimeJob{
-			WorkspaceID:          targetScope.GetWorkspaceId(),
-			SessionID:            targetScope.GetSessionId(),
-			SessionThreadID:      targetScope.GetSessionThreadId(),
-			RuntimeInputID:       completionRuntimeInputID(envelope.DeliveryID),
-			PreparationAttemptID: birthPreparationID,
-			Kind:                 queue.KindRuntimeInput,
-			InputKind:            "agent_mail",
-			EventIDs:             []string{receivedEventID},
-			SequenceFrom:         receivedSequence,
-			SequenceTo:           receivedSequence,
+			WorkspaceID:     targetScope.GetWorkspaceId(),
+			SessionID:       targetScope.GetSessionId(),
+			SessionThreadID: targetScope.GetSessionThreadId(),
+			RuntimeInputID:  completionRuntimeInputID(envelope.DeliveryID),
+			Kind:            queue.KindRuntimeInput,
+			InputKind:       "agent_mail",
+			EventIDs:        []string{receivedEventID},
+			SequenceFrom:    receivedSequence,
+			SequenceTo:      receivedSequence,
 		}
 		if err := upsertRuntimeInboxDeliveryTx(ctx, tx, job, binding, now); err != nil {
 			return admittedAgentMailDelivery{}, err
 		}
 	}
 	return admittedAgentMailDelivery{
-		Envelope:             envelope,
-		ReceivedEventID:      receivedEventID,
-		ReceivedSequence:     receivedSequence,
-		PreparationAttemptID: birthPreparationID,
-		Terminal:             terminal,
+		Envelope:         envelope,
+		ReceivedEventID:  receivedEventID,
+		ReceivedSequence: receivedSequence,
+		Terminal:         terminal,
 	}, nil
-}
-
-func sealedAgentMailBirthDispositionExistsTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	runtimeInputID string,
-	birthPreparationAttemptID string,
-) (bool, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT declaration_digest, receipt_json
-		   FROM session_bridge_operations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND operation = $4
-		    AND source_kind = 'sealed_agent_mail'`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		bridgeOpSettleSealedAgentMail,
-	)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = rows.Close() }()
-	type storedDisposition struct {
-		declarationDigest string
-		receiptJSON       string
-	}
-	stored := make([]storedDisposition, 0)
-	for rows.Next() {
-		var disposition storedDisposition
-		if err := rows.Scan(&disposition.declarationDigest, &disposition.receiptJSON); err != nil {
-			return false, err
-		}
-		stored = append(stored, disposition)
-	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	for _, disposition := range stored {
-		receipt, err := unmarshalDeclarationReceipt(disposition.receiptJSON)
-		if err != nil || receipt.GetSealedAgentMail() == nil {
-			continue
-		}
-		failedPreparationAttemptID := receipt.GetSealedAgentMail().GetFailedPreparationAttemptId()
-		sourceID := stableRuntimeID(
-			"sealed_agent_mail",
-			runtimeInputID,
-			birthPreparationAttemptID,
-			failedPreparationAttemptID,
-		)
-		if validSealedAgentMailReceipt(
-			receipt,
-			RuntimeJob{
-				WorkspaceID:          scope.GetWorkspaceId(),
-				SessionID:            scope.GetSessionId(),
-				SessionThreadID:      scope.GetSessionThreadId(),
-				RuntimeInputID:       runtimeInputID,
-				PreparationAttemptID: birthPreparationAttemptID,
-			},
-			failedPreparationAttemptID,
-			sourceID,
-			disposition.declarationDigest,
-		) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func appendDeclaredCompletionMailTx(
@@ -723,8 +592,8 @@ func appendDeclaredCompletionMailForSourceTx(
 		}, nil
 }
 
-// A current-birth seal suppresses rearming, and an active wake may be reused
-// only when its preparation identity matches the requested delivery birth.
+// Completion mail is durably identified by delivery id. Reconciliation may
+// reuse the same wake only when its immutable envelope identity matches.
 func enqueueCompletionMailWakeTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -734,30 +603,6 @@ func enqueueCompletionMailWakeTx(
 	deliveryID string,
 	now time.Time,
 ) (bool, error) {
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return false, err
-	}
-	if !ok || readiness.PreparationAttemptID == "" {
-		return false, status.Error(codes.FailedPrecondition, "sub-agent completion has no active preparation")
-	}
-	sealed, err := sealedAgentMailBirthDispositionExistsTx(
-		ctx,
-		tx,
-		&bridgev1.RuntimeScope{
-			WorkspaceId:     workspaceID,
-			SessionId:       sessionID,
-			SessionThreadId: targetThreadID,
-		},
-		completionRuntimeInputID(deliveryID),
-		readiness.PreparationAttemptID,
-	)
-	if err != nil {
-		return false, err
-	}
-	if sealed {
-		return false, nil
-	}
 	inserted, err := enqueueAgentMailWakeTx(
 		ctx,
 		tx,
@@ -765,7 +610,6 @@ func enqueueCompletionMailWakeTx(
 		sessionID,
 		targetThreadID,
 		deliveryID,
-		readiness.PreparationAttemptID,
 		now,
 	)
 	if err != nil {
@@ -781,7 +625,6 @@ func enqueueAgentMailWakeTx(
 	sessionID string,
 	targetThreadID string,
 	deliveryID string,
-	preparationAttemptID string,
 	now time.Time,
 ) (bool, error) {
 	request, jobID, err := agentMailWakeEnqueueRequest(
@@ -789,7 +632,6 @@ func enqueueAgentMailWakeTx(
 		sessionID,
 		targetThreadID,
 		deliveryID,
-		preparationAttemptID,
 		now,
 	)
 	if err != nil {
@@ -799,7 +641,7 @@ func enqueueAgentMailWakeTx(
 	if err != nil {
 		return false, err
 	}
-	return validateAgentMailWakeJob(active, jobID, workspaceID, sessionID, targetThreadID, deliveryID, preparationAttemptID)
+	return validateAgentMailWakeJob(active, jobID, workspaceID, sessionID, targetThreadID, deliveryID)
 }
 
 func agentMailWakeEnqueueRequest(
@@ -807,23 +649,18 @@ func agentMailWakeEnqueueRequest(
 	sessionID string,
 	targetThreadID string,
 	deliveryID string,
-	preparationAttemptID string,
 	now time.Time,
 ) (queue.EnqueueRequest, string, error) {
-	if preparationAttemptID == "" {
-		return queue.EnqueueRequest{}, "", status.Error(codes.FailedPrecondition, "agent mail wake has no birth preparation attempt")
-	}
 	runtimeInputID := completionRuntimeInputID(deliveryID)
 	queuePayload, err := json.Marshal(map[string]any{
-		"workspace_id":           workspaceID,
-		"session_id":             sessionID,
-		"session_thread_id":      targetThreadID,
-		"runtime_input_id":       runtimeInputID,
-		"preparation_attempt_id": preparationAttemptID,
-		"event_ids":              []string{},
-		"sequence_from":          0,
-		"sequence_to":            0,
-		"input_kind":             "agent_mail",
+		"workspace_id":      workspaceID,
+		"session_id":        sessionID,
+		"session_thread_id": targetThreadID,
+		"runtime_input_id":  runtimeInputID,
+		"event_ids":         []string{},
+		"sequence_from":     0,
+		"sequence_to":       0,
+		"input_kind":        "agent_mail",
 	})
 	if err != nil {
 		return queue.EnqueueRequest{}, "", err
@@ -850,16 +687,14 @@ func validateAgentMailWakeJob(
 	sessionID string,
 	targetThreadID string,
 	deliveryID string,
-	preparationAttemptID string,
 ) (bool, error) {
 	runtimeInputID := completionRuntimeInputID(deliveryID)
 	var activePayload struct {
-		WorkspaceID          string `json:"workspace_id"`
-		SessionID            string `json:"session_id"`
-		SessionThreadID      string `json:"session_thread_id"`
-		RuntimeInputID       string `json:"runtime_input_id"`
-		PreparationAttemptID string `json:"preparation_attempt_id"`
-		InputKind            string `json:"input_kind"`
+		WorkspaceID     string `json:"workspace_id"`
+		SessionID       string `json:"session_id"`
+		SessionThreadID string `json:"session_thread_id"`
+		RuntimeInputID  string `json:"runtime_input_id"`
+		InputKind       string `json:"input_kind"`
 	}
 	if json.Unmarshal(active.PayloadJSON, &activePayload) != nil ||
 		activePayload.WorkspaceID != workspaceID ||
@@ -868,9 +703,6 @@ func validateAgentMailWakeJob(
 		activePayload.RuntimeInputID != runtimeInputID ||
 		activePayload.InputKind != "agent_mail" {
 		return false, status.Error(codes.AlreadyExists, "agent mail wake conflicts with the durable delivery")
-	}
-	if activePayload.PreparationAttemptID != preparationAttemptID {
-		return false, status.Error(codes.Aborted, "agent mail wake belongs to a prior preparation")
 	}
 	return active.ID == jobID, nil
 }

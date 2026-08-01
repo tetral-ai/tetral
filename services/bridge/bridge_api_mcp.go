@@ -457,7 +457,6 @@ func validStoredMCPMaterializationReceipt(
 		len(receipt.GetPrefixConsumptions()) != 0 ||
 		receipt.GetRequestReschedule() != nil ||
 		len(receipt.GetChildLifecycle()) != 0 ||
-		receipt.GetSealedAgentMail() != nil ||
 		receipt.GetIdleCloseout() != nil ||
 		receipt.CompactedThroughMessageSequence != nil ||
 		len(receipt.GetPendingAttachmentDeltaJson()) != len(attachments) {

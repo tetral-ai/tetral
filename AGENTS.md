@@ -20,7 +20,7 @@ is restated here.
 | `services/auth` | API-key auth at the edge; signed internal principals; `/v1/api_keys`. |
 | `services/api` | Public REST control plane (sessions, agents, environments, vaults, memory, files, skills). |
 | `services/queue` | Durable job queue: lease, transition, wake. |
-| `services/sandbox` | Sandbox preparation and lifecycle; file-resource projection. |
+| `services/sandbox` | Provider-backed Sandbox lifecycle, tool execution, and resource projection. |
 | `services/bridge` | Durable runtime reconciliation, Runtime APIs, settlement, cleanup. |
 | `services/agent-runtime` | Hot in-pod TypeScript Runtime Core (agent loop, tools). |
 | `services/gateway` | Provider lowering + MCP connector. |

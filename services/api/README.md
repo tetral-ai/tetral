@@ -8,7 +8,7 @@ request, writes durable rows, and returns — it executes nothing. Every request
 arrives already authenticated: the edge called `auth`, stripped the raw
 API key, and injected a signed internal principal; this service verifies that
 principal and takes workspace authority from it alone. When admitted work needs
-anything to happen later — preparation, an environment build, cleanup — that
+anything to happen later — Sandbox lifecycle work, an environment build, cleanup — that
 fact leaves this service in exactly one vehicle: a queue job written in the same
 PostgreSQL transaction as the business rows. The HTTP layer lives in
 `internal/httpapi`; each public surface has a domain package behind it
@@ -105,14 +105,13 @@ primary key; there is no reliance on connection-level row filtering.
 
 There is no `deleting` state — delete tombstones synchronously and enqueues its
 cleanup atomically. `lifecycle_state` is one of three distinct durable axes;
-mutations also read the other two: `session_runtime_status.status` (one of
+mutations also read `session_runtime_status.status` (one of
 `idle`, `running`, `rescheduling`, `terminated`, with cleanup tracked by
-separate columns) and `session_preparations.status` (which carries the
-`preparing` phase). A session mutation — `update`, resource add, resource
+separate columns). A session mutation — `update`, resource add, resource
 delete — requires the runtime status to equal `idle` exactly: any non-`idle`
 status (`running`, `rescheduling`, or `terminated`) is rejected, and so is a
-live preparation in flight or a `lifecycle_state` of `archiving`. A non-idle,
-preparing, or archiving target returns `409 invalid_request_error`. Session
+`lifecycle_state` of `archiving`. A non-idle or archiving target returns
+`409 invalid_request_error`. Session
 delete is likewise refused while the runtime status is `running` or
 `rescheduling`.
 
@@ -181,8 +180,8 @@ repository's compatibility registry; this README does not restate that matrix.
 
 | Input `type` | Admission in this stage |
 | --- | --- |
-| `user.message` | Supported. Writes `session_events`; when the session is prepared also `queue_jobs(kind = runtime_input, input_kind = messages)`. Targets `sessions.main_thread_id`. |
-| `user.interrupt` | Supported. When prepared, `input_kind = interrupt_control`. Target resolution below. |
+| `user.message` | Supported. Writes `session_events` and `queue_jobs(kind = runtime_input, input_kind = messages)` in the same transaction. Targets `sessions.main_thread_id`. |
+| `user.interrupt` | Supported. Writes `input_kind = interrupt_control` work in the same transaction. Target resolution below. |
 | `user.tool_confirmation` | Supported only when it resolves a current pending approval row; `input_kind = tool_confirmation`. |
 | `user.custom_tool_result` | `400 invalid_request_error` "custom tools are not supported in this stage". |
 | any other type (includes `user.tool_result`, `user.define_outcome`, `system.message`) | `400 invalid_request_error` "event type must be user.message, user.interrupt, or user.tool_confirmation". |
@@ -259,9 +258,9 @@ metadata lives in Postgres. Types are `file`, `github_repository`, and
 
 | Route | Behavior |
 | --- | --- |
-| `POST /resources` | Add a `file` resource referencing an already-uploaded file plus optional `mount_path`. Unprepared session: materialized by the next preparation. Prepared idle session: writes the row and enqueues preparation/resource-apply in the same transaction (a sleeping sandbox is woken, an environment-stale machine is replaced). Running/preparing/archiving → `409`. A materialization failure settles the preparation attempt `failed` and surfaces asynchronously, never on the POST response. |
+| `POST /resources` | Add a `file` resource referencing an already-uploaded file plus optional `mount_path`. The session must be `idle`. The transaction increments the resource revision; when a current Sandbox handle exists it also enqueues materialization, otherwise the first approved Sandbox tool materializes the latest revision during lazy activation. Non-idle or archiving sessions return `409`. |
 | `POST /resources/{id}` | `github_repository` token rotation only — write-only `{authorization_token}`, encrypted at rest, returned redacted; admitted in any run state. A `file` or `memory_store` resource carries no mutable field → `400`. |
-| `DELETE /resources/{id}` | Tombstone/detach for every type. Unmaterialized: immediate. Materialized: session must be `idle`, row marked deletion-pending, cleanup enqueued in the same transaction; finalized only after the removal ACKs. Running/preparing/archiving → `409`. |
+| `DELETE /resources/{id}` | Tombstone/detach for every type. The session must be `idle`. A resource with no materialized Sandbox handle detaches immediately; otherwise the row becomes deletion-pending and the same transaction advances the resource revision and enqueues materialization. Non-idle or archiving sessions return `409`. |
 
 `memory_store` resources are attached explicitly by ID at session create — never
 silently defaulted and never added through `POST /resources`. A declared `file`
@@ -337,8 +336,9 @@ non-scalar values, and multi-document streams are rejected. The
 
 PostgreSQL is the source of truth for Memory Stores. The store is projected
 **read-only** into the sandbox at `/mnt/memory`; that projection is disposable —
-repaired by re-materialization, never trusted — and both refreshing it and the
-model-facing memory tool live in the **Bridge**, not this service. This service
+repaired by re-materialization, never trusted. Sandbox Service refreshes the
+projection and executes the model-facing memory tool; Bridge records its
+refs-only request and consumes the durable result. This service
 owns the durable rows: `memory_stores`, `memories` (current head per path, no
 content), and `memory_versions` (immutable content, reached from
 `memories.current_version_id`).
@@ -403,16 +403,14 @@ never added through `POST /resources`) are covered above.
 
 - **Contract.** Work leaves this service only as durable facts. The recurring
   pattern is one PostgreSQL transaction containing both the business rows and the
-  `queue_jobs` rows: an admitted `user.message` writes its events and — when the
-  session is prepared — the `runtime_input` job together; an unprepared session's
-  input waits for the ready fanout; an admission that finds the latest
-  preparation attempt failed allocates a fresh attempt and enqueues
-  `session_prepare` (the re-drive); environment admission enqueues
-  `environment_build`; session delete writes the tombstone, the cleanup id, and
-  `session_delete_cleanup` atomically.
-- **Invariant.** Admission, session-ready fanout, and cleanup claim all serialize
-  on the same fence — lock the sessions row, then the runtime-status row — so an
-  input admitted during a preparing-to-ready transition can never be orphaned.
+  `queue_jobs` rows: an admitted `user.message` writes its events and the
+  `runtime_input` job together; environment admission enqueues
+	`environment_build`; Session delete writes the tombstone,
+  cleanup identity, and Sandbox release request atomically.
+- **Invariant.** Runtime input never depends on Sandbox readiness. Session create
+  records the Environment and resource declarations but does not allocate or
+  inspect a provider resource. Lazy activation begins only after an approved
+  Sandbox Tool Use has durable custody.
   The production path is
   `internal/httpapi.SessionHandler -> internal/session.Service ->
   internal/session.PostgreSQLSessionStore -> internal/dbconnect.Client`; the HTTP
@@ -464,8 +462,12 @@ never added through `POST /resources`) are covered above.
 - **Packages.** `config.packages` carries per-manager arrays over a closed
   manager set — `apt`, `cargo`, `gem`, `go`, `npm`, `pip`. `packages` is the
   sole artifact input: a packages change yields a new `artifact_input_hash` and
-  enqueues an `environment_build` job for the provider artifact, and sessions
-  referencing that environment wait through preparation until the build settles.
+  enqueues an `environment_build` job for the provider artifact. A session stores
+  its selected Environment generation; the first approved Sandbox tool waits for
+  that generation's ready provider artifact while lazily activating its Sandbox.
+  That first tool may therefore include provider inspection and activation
+  latency, or return a typed tool failure when the artifact or provider resource
+  cannot be made usable.
 - **Networking.** Networking accepts exactly the Daytona-backed shape —
   `unrestricted`, `blocked`, or `cidr_allow_list` with a comma-separated CIDR
   `network_allow_list`. Domain-name allow-lists are rejected; the backend never
@@ -492,7 +494,7 @@ never added through `POST /resources`) are covered above.
 - This service never calls Runtime Pod, Bridge, Gateway, or the Sandbox Service —
   it holds no gRPC clients to any of them. The queue and the database are its
   only outbound facts. It returns after durable admission, never after execution;
-  preparation and builds are asynchronous by design.
+  Sandbox lifecycle work and Environment builds are asynchronous by design.
 
 ## Testing guide
 

@@ -401,7 +401,12 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 	if err != nil {
 		return commandOperationResult{}, err
 	}
-	var immediate string
+	canonicalInput, inputHash, err := canonicalBackgroundCommandInput(inputJSON)
+	if err != nil {
+		return commandOperationResult{}, status.Error(codes.InvalidArgument, "background cancellation input must be JSON")
+	}
+	receiptID := backgroundCommandReceiptID(requestID)
+	result := commandOperationResult{}
 	now := s.now()
 	err = s.withScopeTx(ctx, scope, "agentruntimebridge.accept_background_cancel", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, scope); err != nil {
@@ -410,51 +415,67 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 		if err := lockRuntimeMutationSessionTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
 			return err
 		}
-		var rowTaskID, state string
-		var resultJSON, cancelRequestID, cancelResult sql.NullString
-		err := tx.QueryRow(ctx, `SELECT background_task_id, background_operation_state, result_json,
-			background_cancel_request_id, background_cancel_result_json
-			FROM session_runtime_tool_results
-			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			  AND tool_use_event_id=$4 AND tool_kind='sandbox_background' FOR UPDATE`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-		).Scan(&rowTaskID, &state, &resultJSON, &cancelRequestID, &cancelResult)
-		if dbconnect.IsNoRows(err) {
-			return status.Error(codes.FailedPrecondition, "background command acceptance is not durable")
+		if err := lockThreadMutationOnlyTx(ctx, tx, scope); err != nil {
+			return err
 		}
+		terminalResult, err := loadBackgroundTaskForCommandAcceptanceTx(ctx, tx, scope, taskID)
 		if err != nil {
 			return err
 		}
-		if rowTaskID != taskID {
-			return status.Error(codes.AlreadyExists, "background cancellation task mismatch")
-		}
-		if cancelRequestID.Valid {
-			if cancelRequestID.String != requestID {
+		var existingKind, existingState, existingRequestID, existingTaskID, existingInputHash, existingInputJSON string
+		var existingResult sql.NullString
+		err = tx.QueryRow(ctx, `SELECT background_operation_kind, background_operation_state,
+			background_request_id, background_task_id, normalized_input_hash, input_json, result_json
+			FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			  AND tool_use_event_id=$4 AND tool_kind='sandbox_background' FOR UPDATE`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID,
+		).Scan(&existingKind, &existingState, &existingRequestID, &existingTaskID, &existingInputHash, &existingInputJSON, &existingResult)
+		if err == nil {
+			if existingKind != "cancel" || existingRequestID != requestID || existingTaskID != taskID ||
+				existingInputHash != inputHash || existingInputJSON != canonicalInput {
 				return status.Error(codes.AlreadyExists, "background cancellation idempotency conflict")
 			}
-			if cancelResult.Valid {
-				immediate = cancelResult.String
+			if existingState == "terminal" && existingResult.Valid {
+				result.ResultJSON = existingResult.String
 			}
 			return nil
 		}
-		if state == "terminal" && resultJSON.Valid {
-			immediate = resultJSON.String
-			return nil
-		}
-		if _, err := tx.Exec(ctx, `UPDATE session_runtime_tool_results
-			SET cancel_requested_at=$5, cancel_state='pending', background_cancel_request_id=$6,
-			    background_cancel_input_json=$7, updated_at=$5
-			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-			now, requestID, inputJSON); err != nil {
+		if !dbconnect.IsNoRows(err) {
 			return err
+		}
+		if err := verifyBackgroundCommandToolUseTx(ctx, tx, scope, toolUseEventID); err != nil {
+			return err
+		}
+		state := "pending"
+		var storedResult any
+		var digest any
+		if terminalResult != "" {
+			state = "terminal"
+			storedResult = terminalResult
+			digest = bridgeRequestHash(terminalResult)
+			result.ResultJSON = terminalResult
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json, result_digest,
+			background_operation_kind, background_operation_state, background_request_id,
+			background_task_id, background_max_output_tokens, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,'sandbox_background',$5,'cancel_command',$6,'committed',$7,$8,
+			'cancel',$9,$10,$11,0,$12,$12)`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID,
+			inputHash, canonicalInput, storedResult, digest, state, requestID, taskID, now); err != nil {
+			return err
+		}
+		if state == "terminal" {
+			return nil
 		}
 		return enqueueBackgroundCommandTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), taskID, requestID, now)
 	})
-	if err != nil || immediate != "" {
-		return commandOperationResult{ResultJSON: immediate}, err
+	if err != nil || result.ResultJSON != "" {
+		return result, err
 	}
-	return s.waitForBackgroundCancelResult(ctx, scope, toolUseEventID)
+	return s.waitForBackgroundResult(ctx, scope, receiptID)
 }
 
 func loadBackgroundTaskForCommandAcceptanceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, taskID string) (string, error) {
@@ -523,14 +544,14 @@ func enqueueBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, workspace
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForBackgroundCommandResult(ctx context.Context, scope *bridgev1.RuntimeScope, toolUseEventID string) (commandOperationResult, error) {
-	return s.waitForBackgroundResult(ctx, scope, toolUseEventID, false)
+	return s.waitForBackgroundResult(ctx, scope, toolUseEventID)
 }
 
-func (s *PostgreSQLBridgeAPIStore) waitForBackgroundCancelResult(ctx context.Context, scope *bridgev1.RuntimeScope, toolUseEventID string) (commandOperationResult, error) {
-	return s.waitForBackgroundResult(ctx, scope, toolUseEventID, true)
+func backgroundCommandReceiptID(requestID string) string {
+	return "background_receipt:" + requestID
 }
 
-func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, toolUseEventID string, cancellation bool) (commandOperationResult, error) {
+func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, receiptID string) (commandOperationResult, error) {
 	ticker := time.NewTicker(runToolResultPollInterval)
 	defer ticker.Stop()
 	for {
@@ -538,22 +559,18 @@ func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, 
 		var terminal bool
 		err := s.withScopeReadOnlyTx(ctx, scope, "agentruntimebridge.await_background_command", func(tx *dbconnect.Tx) error {
 			var operationState string
-			var resultJSON, cancelResult sql.NullString
+			var resultJSON sql.NullString
 			var writeSequence sql.NullInt64
-			err := tx.QueryRow(ctx, `SELECT background_operation_state, result_json,
-				background_cancel_result_json, background_write_sequence
+			err := tx.QueryRow(ctx, `SELECT background_operation_state, result_json, background_write_sequence
 				FROM session_runtime_tool_results
 				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
-				  AND tool_kind='sandbox_background'`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID).Scan(
-				&operationState, &resultJSON, &cancelResult, &writeSequence)
+				  AND tool_kind='sandbox_background'`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID).Scan(
+				&operationState, &resultJSON, &writeSequence)
 			if err != nil {
 				return err
 			}
 			result.WriteSeq = writeSequence.Int64
-			if cancellation && cancelResult.Valid {
-				result.ResultJSON = cancelResult.String
-				terminal = true
-			} else if !cancellation && operationState == "terminal" && resultJSON.Valid {
+			if operationState == "terminal" && resultJSON.Valid {
 				result.ResultJSON = resultJSON.String
 				terminal = true
 			}
@@ -657,71 +674,6 @@ func terminalStatusFromResultJSON(resultJSON string) (string, error) {
 	default:
 		return "", status.Error(codes.InvalidArgument, "task notification result status is invalid")
 	}
-}
-
-func insertRuntimeNotificationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, taskID string, sourceToolUseEventID string, terminalStatus string, resultJSON string, now time.Time) (string, string, error) {
-	notificationJSON, err := runtimeNotificationJSON(taskID, sourceToolUseEventID, terminalStatus, resultJSON)
-	if err != nil {
-		return "", "", err
-	}
-	eventID := id.New("evt_")
-	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
-	if err != nil {
-		return "", "", err
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'runtime_notification', $6, 'internal', false, $6, $7, $7)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		notificationJSON,
-		now,
-	); err != nil {
-		return "", "", err
-	}
-	if err := insertSessionMessageProjectionTx(
-		ctx,
-		tx,
-		scope,
-		eventID,
-		"runtime_notification",
-		notificationJSON,
-		now,
-	); err != nil {
-		return "", "", err
-	}
-	runtimeMessageJSON, err := readRuntimeNotificationMessageTx(ctx, tx, scope, eventID)
-	if err != nil {
-		return "", "", err
-	}
-	return eventID, runtimeMessageJSON, nil
-}
-
-func readRuntimeNotificationMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string) (string, error) {
-	var dataJSON string
-	err := tx.QueryRow(ctx,
-		`SELECT data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND source_event_id = $4
-		    AND kind = 'runtime_notification'
-		  LIMIT 1`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-	).Scan(&dataJSON)
-	if dbconnect.IsNoRows(err) {
-		return "", status.Error(codes.Internal, "runtime notification projection is missing")
-	}
-	return dataJSON, err
 }
 
 func runtimeNotificationJSON(taskID string, sourceToolUseEventID string, terminalStatus string, resultJSON string) (string, error) {

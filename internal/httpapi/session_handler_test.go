@@ -1223,12 +1223,12 @@ func TestSessionResourceLifecycleConflictsUseInvalidRequestError(t *testing.T) {
 		calls     func(*recordingSessionMutationService) int
 	}{
 		{
-			name:   "add resource preparing",
+			name:   "add resource while session is not idle",
 			method: http.MethodPost,
 			path:   "/v1/sessions/sesn_test/resources?beta=true",
 			body:   `{"type":"file","file_id":"file_source"}`,
 			configure: func(service *recordingSessionMutationService) {
-				service.addResourceErr = &session.ConflictError{Message: "session preparation is in progress", InvalidRequest: true}
+				service.addResourceErr = &session.ConflictError{Message: "session must be idle for resource mutation", InvalidRequest: true}
 			},
 			calls: func(service *recordingSessionMutationService) int { return service.addResourceCalls },
 		},

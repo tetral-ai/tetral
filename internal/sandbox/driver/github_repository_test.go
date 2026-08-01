@@ -91,7 +91,7 @@ func TestDaytonaInstalledGitTicketHashRecoversPersistedConfiguration(t *testing.
 	client.process.results = []string{
 		"http.https://git.tetral.test/.extraheader X-Tetral-Git-Ticket: " + testGitTicket + "\n",
 	}
-	executor := &DaytonaHelperExecutor{client: client, preparationCommandTimeout: 45 * time.Second}
+	executor := &DaytonaHelperExecutor{client: client, commandTimeout: 45 * time.Second}
 
 	got, installed, err := executor.InstalledGitTicketHash(context.Background(), "provider_sandbox_123", "git.tetral.test")
 	if err != nil {
@@ -111,7 +111,7 @@ func TestDaytonaInstalledGitTicketHashRecoversPersistedConfiguration(t *testing.
 
 func TestDaytonaGitHubConfigurationAndCloneAreSeparatePhases(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := &DaytonaHelperExecutor{client: client, preparationCommandTimeout: 45 * time.Second}
+	executor := &DaytonaHelperExecutor{client: client, commandTimeout: 45 * time.Second}
 
 	err := executor.InstallGitHubRepositoryConfiguration(context.Background(), sandbox.GitHubRepositoryConfiguration{
 		WorkspaceID:       workspace.DefaultID,
@@ -212,7 +212,7 @@ func TestGitHubRepositoryCloneCommandComparesUnrewrittenOrigin(t *testing.T) {
 
 func TestGitHubRepositoryRemovesDeletedWorkingTree(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	if err := executor.RemoveGitHubRepository(context.Background(), "provider_git_delete", sandbox.GitHubRepositoryMount{MountPath: "/workspace/tetral"}); err != nil {
 		t.Fatalf("RemoveGitHubRepository: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestGitHubRepositoryRemovesDeletedWorkingTree(t *testing.T) {
 func TestGitHubRepositoryPropagatesRemovalFailure(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	client.process.exitCode = 23
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 
 	err := executor.RemoveGitHubRepository(context.Background(), "provider_git_delete", sandbox.GitHubRepositoryMount{MountPath: "/workspace/tetral"})
 	if err == nil {
@@ -401,7 +401,7 @@ func TestDaytonaPrepareGitHubRepositoriesClassifiesCredentialFailure(t *testing.
 			client := newRecordingMemoryProjectionClient()
 			client.process.exitCodes = []int{128}
 			client.process.results = []string{output}
-			executor := &DaytonaHelperExecutor{client: client, preparationCommandTimeout: 45 * time.Second}
+			executor := &DaytonaHelperExecutor{client: client, commandTimeout: 45 * time.Second}
 
 			err := executor.CloneGitHubRepositories(context.Background(), sandbox.GitHubRepositoryPreparation{
 				WorkspaceID:       workspace.DefaultID,
@@ -420,11 +420,11 @@ func TestDaytonaPrepareGitHubRepositoriesClassifiesCredentialFailure(t *testing.
 	}
 }
 
-func TestTPREP6DaytonaPreparationCapturesFirstFailingRepositoryIdentity(t *testing.T) {
+func TestDaytonaGitHubMaterializationCapturesFirstFailingRepositoryIdentity(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	client.process.exitCodes = []int{0, 128}
 	client.process.results = []string{"clone completed", "remote: Repository not found.\nfatal: repository unavailable"}
-	executor := &DaytonaHelperExecutor{client: client, preparationCommandTimeout: 45 * time.Second}
+	executor := &DaytonaHelperExecutor{client: client, commandTimeout: 45 * time.Second}
 
 	err := executor.CloneGitHubRepositories(context.Background(), sandbox.GitHubRepositoryPreparation{
 		WorkspaceID:       workspace.DefaultID,
@@ -446,7 +446,7 @@ func TestTPREP6DaytonaPreparationCapturesFirstFailingRepositoryIdentity(t *testi
 	if !sandbox.IsGitHubRepositoryUnavailable(err) {
 		t.Fatalf("err = %T %v; want github_repository_unavailable", err, err)
 	}
-	var failure *sandbox.GitHubPreparationFailure
+	var failure *sandbox.GitHubMaterializationFailure
 	if !errors.As(err, &failure) || failure.ResourceID != "sesrsc_missing" || failure.ResourceURL != "https://github.com/tetral-ai/missing" {
 		t.Fatalf("failure = %+v; want failing repository identity", failure)
 	}

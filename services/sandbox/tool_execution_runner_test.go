@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 func TestSandboxToolExecutionRunnerFinalizesOnlyPastAttemptBudget(t *testing.T) {
 	job := sandboxExecutionQueueJob()
 	job.AttemptCount = job.MaxAttempts + 1
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 	coordinator := &recordingSandboxExecutionCoordinator{}
 	adapter := &recordingProviderAdapter{}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
@@ -23,7 +24,7 @@ func TestSandboxToolExecutionRunnerFinalizesOnlyPastAttemptBudget(t *testing.T) 
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -43,14 +44,14 @@ func TestSandboxToolExecutionRunnerFinalizesOnlyPastAttemptBudget(t *testing.T) 
 func TestSandboxToolExecutionRunnerExecutesTheLastPermittedAttempt(t *testing.T) {
 	job := sandboxExecutionQueueJob()
 	job.AttemptCount = job.MaxAttempts
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 	coordinator := &recordingSandboxExecutionCoordinator{load: false}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingProviderAdapter{}})
 	if err != nil {
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -67,14 +68,14 @@ func TestSandboxToolExecutionRunnerExecutesTheLastPermittedAttempt(t *testing.T)
 func TestSandboxToolExecutionRunnerSettlesBusinessStateBeforeDeadLetteringInvalidPayload(t *testing.T) {
 	job := sandboxExecutionQueueJob()
 	job.PayloadJson = `{not-json`
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 	coordinator := &recordingSandboxExecutionCoordinator{}
 	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingProviderAdapter{}})
 	if err != nil {
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -91,7 +92,7 @@ func TestSandboxToolExecutionRunnerSettlesBusinessStateBeforeDeadLetteringInvali
 func TestSandboxToolExecutionRunnerFinalizesRetryFromLastPermittedAttempt(t *testing.T) {
 	job := sandboxExecutionQueueJob()
 	job.AttemptCount = job.MaxAttempts
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{job}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
 	coordinator := &recordingSandboxExecutionCoordinator{work: sandboxExecutionTestWork(true), load: true}
 	adapter := &recordingProviderAdapter{inspection: ProviderOutcome[ExecutionReadiness]{
 		EffectBoundary: ProviderProvedNotStarted,
@@ -103,7 +104,7 @@ func TestSandboxToolExecutionRunnerFinalizesRetryFromLastPermittedAttempt(t *tes
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -147,7 +148,7 @@ func TestSandboxToolExecutionRunnerConvergesBeforeExecuting(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
 			coordinator := &recordingSandboxExecutionCoordinator{work: test.work, load: true}
 			adapter := &recordingProviderAdapter{inspection: test.inspection}
 			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
@@ -158,6 +159,7 @@ func TestSandboxToolExecutionRunnerConvergesBeforeExecuting(t *testing.T) {
 				Queue:       queueClient,
 				Coordinator: coordinator,
 				Providers:   registry,
+				Media:       passthroughSandboxMedia{},
 				Config: SandboxToolExecutionRunnerConfig{
 					WorkspaceID:        "ws_execution",
 					LeaseDuration:      2 * time.Minute,
@@ -182,7 +184,7 @@ func TestSandboxToolExecutionRunnerConvergesBeforeExecuting(t *testing.T) {
 }
 
 func TestSandboxToolExecutionRunnerDoesNotResubmitRunningExecution(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
 	work := sandboxExecutionTestWork(true)
 	work.State = "running"
 	coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true}
@@ -192,7 +194,7 @@ func TestSandboxToolExecutionRunnerDoesNotResubmitRunningExecution(t *testing.T)
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -206,8 +208,42 @@ func TestSandboxToolExecutionRunnerDoesNotResubmitRunningExecution(t *testing.T)
 	}
 }
 
+func TestSandboxToolExecutionRunnerRecoversDurableMediaCustodyBeforeUnknownOutcome(t *testing.T) {
+	tests := []struct {
+		name       string
+		recovery   SandboxMediaRecovery
+		settlement SandboxExecutionSettlementKind
+	}{
+		{name: "staged", recovery: SandboxMediaRecovery{Found: true, Ready: true, ResultJSON: `{"status":"success","result":{"attachment_ref":"att_recovered"}}`}, settlement: SandboxExecutionCompleted},
+		{name: "uploading", recovery: SandboxMediaRecovery{Found: true}, settlement: SandboxExecutionFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+			work := sandboxExecutionTestWork(true)
+			work.State = "running"
+			coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true}
+			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingProviderAdapter{}})
+			if err != nil {
+				t.Fatalf("NewProviderRegistry: %v", err)
+			}
+			runner := &SandboxToolExecutionJobRunner{
+				Queue: queueClient, Coordinator: coordinator, Providers: registry,
+				Media:  recoveringSandboxMedia{recovery: test.recovery},
+				Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+			}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if len(coordinator.settlements) != 1 || coordinator.settlements[0].Kind != test.settlement {
+				t.Fatalf("settlements = %#v; want %s", coordinator.settlements, test.settlement)
+			}
+		})
+	}
+}
+
 func TestSandboxToolExecutionRunnerOwnsBackgroundTaskSourceIdentity(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
 	work := sandboxExecutionTestWork(true)
 	coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true, prepare: true, authorize: true}
 	adapter := &recordingProviderAdapter{inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady}, execution: ProviderOutcome[sandboxdriver.ToolExecution]{
@@ -224,7 +260,7 @@ func TestSandboxToolExecutionRunnerOwnsBackgroundTaskSourceIdentity(t *testing.T
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -237,7 +273,7 @@ func TestSandboxToolExecutionRunnerOwnsBackgroundTaskSourceIdentity(t *testing.T
 }
 
 func TestSandboxToolExecutionRunnerObservesRunningExecutionByStoredReference(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
 	work := sandboxExecutionTestWork(true)
 	work.State = "running"
 	encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, sandboxdriver.ForegroundCommandObservation{
@@ -261,7 +297,7 @@ func TestSandboxToolExecutionRunnerObservesRunningExecutionByStoredReference(t *
 		t.Fatalf("NewProviderRegistry: %v", err)
 	}
 	runner := &SandboxToolExecutionJobRunner{
-		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -279,6 +315,7 @@ func TestSandboxToolExecutionRunnerSettlesOnlyDurableProviderOutcomes(t *testing
 	tests := []struct {
 		name            string
 		inspection      ProviderOutcome[ExecutionReadiness]
+		preparation     ProviderOutcome[ToolPreparationResult]
 		execution       ProviderOutcome[sandboxdriver.ToolExecution]
 		wantCoordinator []string
 		wantTransitions []string
@@ -304,6 +341,17 @@ func TestSandboxToolExecutionRunnerSettlesOnlyDurableProviderOutcomes(t *testing
 			wantAdapter:     []string{"inspect"},
 		},
 		{
+			name:       "sandbox disappears before preparation",
+			inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady},
+			preparation: ProviderOutcome[ToolPreparationResult]{
+				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderTerminal,
+				ErrorKind: string(sandbox.ProviderErrorNotFound), SafeMessage: "daytona sandbox not found",
+			},
+			wantCoordinator: []string{"load", "preparing", "activation:needs_creation"},
+			wantTransitions: []string{"ack:qjob_sandbox_execution"},
+			wantAdapter:     []string{"inspect", "prepare"},
+		},
+		{
 			name:       "unknown after authorization",
 			inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady},
 			execution: ProviderOutcome[sandboxdriver.ToolExecution]{
@@ -318,15 +366,15 @@ func TestSandboxToolExecutionRunnerSettlesOnlyDurableProviderOutcomes(t *testing
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
 			coordinator := &recordingSandboxExecutionCoordinator{work: sandboxExecutionTestWork(true), load: true, prepare: true, authorize: true}
-			adapter := &recordingProviderAdapter{inspection: test.inspection, execution: test.execution}
+			adapter := &recordingProviderAdapter{inspection: test.inspection, preparation: test.preparation, execution: test.execution}
 			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
 			if err != nil {
 				t.Fatalf("NewProviderRegistry: %v", err)
 			}
 			runner := &SandboxToolExecutionJobRunner{
-				Queue: queueClient, Coordinator: coordinator, Providers: registry,
+				Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
 				Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
 			}
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -342,6 +390,36 @@ func TestSandboxToolExecutionRunnerSettlesOnlyDurableProviderOutcomes(t *testing
 				t.Fatalf("adapter calls = %v; want %v", adapter.calls, test.wantAdapter)
 			}
 		})
+	}
+}
+
+func TestSandboxToolExecutionRunnerReturnsMediaCustodyFailureAsToolError(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	coordinator := &recordingSandboxExecutionCoordinator{work: sandboxExecutionTestWork(true), load: true, prepare: true, authorize: true}
+	adapter := &recordingProviderAdapter{
+		inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady},
+		execution:  ProviderOutcome[sandboxdriver.ToolExecution]{Value: sandboxdriver.ToolExecution{ResultJSON: `{"status":"success"}`}},
+	}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxToolExecutionJobRunner{
+		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Media:  failingSandboxMedia{err: errors.New("temporary Blob failure")},
+		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(coordinator.calls, []string{"load", "preparing", "running", "settle:failed"}) {
+		t.Fatalf("coordinator calls = %v; want terminal Tool Error settlement", coordinator.calls)
+	}
+	if len(coordinator.settlements) != 1 || coordinator.settlements[0].ErrorKind != "transient_attachment_unavailable" {
+		t.Fatalf("settlements = %#v; want transient attachment Tool Error", coordinator.settlements)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_sandbox_execution"}) {
+		t.Fatalf("queue transitions = %v; want transport closure after business settlement", queueClient.transitions)
 	}
 }
 
@@ -372,6 +450,36 @@ func sandboxExecutionQueueJob() *queuev1.QueueJob {
 		PayloadJson:  `{"session_id":"sesn_execution","session_thread_id":"thr_execution","tool_use_event_id":"evt_execution","workspace_id":"ws_execution"}`,
 		LeaseToken:   "lease_execution", AttemptCount: 1, MaxAttempts: 5,
 	}
+}
+
+type passthroughSandboxMedia struct{}
+
+func (passthroughSandboxMedia) MaterializeResult(_ context.Context, _ SandboxExecutionRef, _ string, _ string, raw string, _ time.Time) (string, error) {
+	return raw, nil
+}
+
+func (passthroughSandboxMedia) RecoverResult(context.Context, SandboxExecutionRef) (SandboxMediaRecovery, error) {
+	return SandboxMediaRecovery{}, nil
+}
+
+type failingSandboxMedia struct{ err error }
+
+func (m failingSandboxMedia) MaterializeResult(context.Context, SandboxExecutionRef, string, string, string, time.Time) (string, error) {
+	return "", m.err
+}
+
+func (failingSandboxMedia) RecoverResult(context.Context, SandboxExecutionRef) (SandboxMediaRecovery, error) {
+	return SandboxMediaRecovery{}, nil
+}
+
+type recoveringSandboxMedia struct{ recovery SandboxMediaRecovery }
+
+func (recoveringSandboxMedia) MaterializeResult(_ context.Context, _ SandboxExecutionRef, _ string, _ string, raw string, _ time.Time) (string, error) {
+	return raw, nil
+}
+
+func (m recoveringSandboxMedia) RecoverResult(context.Context, SandboxExecutionRef) (SandboxMediaRecovery, error) {
+	return m.recovery, nil
 }
 
 type recordingSandboxExecutionCoordinator struct {
@@ -423,6 +531,7 @@ func (c *recordingSandboxExecutionCoordinator) FinalizeInvalidExecution(context.
 
 type recordingProviderAdapter struct {
 	inspection  ProviderOutcome[ExecutionReadiness]
+	preparation ProviderOutcome[ToolPreparationResult]
 	execution   ProviderOutcome[sandboxdriver.ToolExecution]
 	observation ProviderOutcome[sandboxdriver.ToolExecution]
 	calls       []string
@@ -431,6 +540,9 @@ type recordingProviderAdapter struct {
 func (a *recordingProviderAdapter) InspectForExecution(context.Context, string) ProviderOutcome[ExecutionReadiness] {
 	a.calls = append(a.calls, "inspect")
 	return a.inspection
+}
+func (a *recordingProviderAdapter) InspectForRelease(context.Context, string) ProviderOutcome[bool] {
+	return ProviderOutcome[bool]{Value: true}
 }
 func (a *recordingProviderAdapter) ResolveActivation(context.Context, ActivationResolutionRequest) ProviderOutcome[ActivationResolution] {
 	return ProviderOutcome[ActivationResolution]{}
@@ -443,6 +555,9 @@ func (a *recordingProviderAdapter) MaterializeResources(context.Context, Materia
 }
 func (a *recordingProviderAdapter) PrepareTool(context.Context, ToolExecutionRequest) ProviderOutcome[ToolPreparationResult] {
 	a.calls = append(a.calls, "prepare")
+	if a.preparation.Failed() {
+		return a.preparation
+	}
 	return ProviderOutcome[ToolPreparationResult]{Value: ToolPreparationResult{Prepared: recordingPreparedTool{}}}
 }
 func (a *recordingProviderAdapter) ExecuteTool(context.Context, ToolExecutionRequest) ProviderOutcome[sandboxdriver.ToolExecution] {

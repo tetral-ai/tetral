@@ -19,7 +19,6 @@ import {
   ReceiptApplicationDisposition,
   RequestRescheduleDisposition,
   RuntimeDraftKind,
-  SealedAgentMailDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   CommitInputsRequest,
@@ -246,7 +245,6 @@ export class BridgeAPIControlInputCommitter implements RuntimeControlInputCommit
         receipt.idleCloseout === undefined &&
         receipt.compactedThroughMessageSequence === undefined &&
         receipt.childLifecycle.length === 0 &&
-        receipt.sealedAgentMail === undefined &&
         receipt.events.length === input.scope.eventIds.length &&
         receipt.events.every((event, index) =>
           event.sessionThreadId === input.scope.sessionThreadId &&
@@ -2095,23 +2093,6 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
         effectiveAt: stamp.effectiveAt,
       };
     }),
-    ...(receipt.sealedAgentMail === undefined ? {} : { sealedAgentMail: (() => {
-      const stamp = receipt.sealedAgentMail;
-      if (
-        stamp.disposition !== SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH ||
-        stamp.runtimeInputId.length === 0 ||
-        stamp.birthPreparationAttemptId.length === 0 ||
-        stamp.failedPreparationAttemptId.length === 0
-      ) {
-        throw new Error("declaration receipt has an invalid sealed-agent-mail stamp");
-      }
-      return {
-        runtimeInputId: stamp.runtimeInputId,
-        birthPreparationAttemptId: stamp.birthPreparationAttemptId,
-        failedPreparationAttemptId: stamp.failedPreparationAttemptId,
-        disposition: "sealed_for_failed_birth" as const,
-      };
-    })() }),
     events: receipt.events.map((event) => ({
       sessionThreadId: event.sessionThreadId,
       sourceEventId: event.sourceEventId,
@@ -2237,7 +2218,6 @@ export function validateChildLifecycleDeclarationResponse(
       receipt.requestReschedule !== undefined ||
       receipt.idleCloseout !== undefined ||
       receipt.compactedThroughMessageSequence !== undefined ||
-      receipt.sealedAgentMail !== undefined ||
       receipt.childLifecycle.length !== 1 ||
       receipt.childLifecycle[0]?.childThreadId !== receipt.sessionThreadId ||
       receipt.childLifecycle[0]?.effectiveAt !== input.requestedAt ||

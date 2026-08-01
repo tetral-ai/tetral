@@ -23,69 +23,9 @@ func validJobRunnerConfigEnv() configTestEnv {
 		EnvKubernetesNamespace:              "tetral-agent-runtime",
 		EnvAgentRuntimeLabelSelector:        "app.kubernetes.io/name=agent-runtime",
 		EnvRuntimePodServiceTokenPath:       "/var/run/secrets/tetral-internal-grpc/agent-runtime/token",
-		EnvSandboxServiceGRPCAddress:        "sandbox:9090",
-		EnvSandboxServiceTokenPath:          "/var/run/secrets/tetral-internal-grpc/sandbox/token",
 		EnvJobRunnerMCPConnectorGRPCAddress: "gateway.tetral-system.svc.cluster.local:9091",
 		EnvJobRunnerGatewayTokenPath:        "/var/run/secrets/tetral-internal-grpc/gateway/token",
 	}
-}
-
-func TestResourceCredentialRefreshMarginFromEnv(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		margin, err := ResourceCredentialRefreshMarginFromEnv(configTestEnv{})
-		if err != nil {
-			t.Fatalf("ResourceCredentialRefreshMarginFromEnv: %v", err)
-		}
-		if margin != 30*time.Minute {
-			t.Fatalf("margin = %s; want 30m", margin)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		margin, err := ResourceCredentialRefreshMarginFromEnv(configTestEnv{EnvResourceCredRefreshMargin: "45m"})
-		if err != nil {
-			t.Fatalf("ResourceCredentialRefreshMarginFromEnv: %v", err)
-		}
-		if margin != 45*time.Minute {
-			t.Fatalf("margin = %s; want 45m", margin)
-		}
-	})
-
-	t.Run("rejects nonpositive", func(t *testing.T) {
-		_, err := ResourceCredentialRefreshMarginFromEnv(configTestEnv{EnvResourceCredRefreshMargin: "0s"})
-		if err == nil || !strings.Contains(err.Error(), EnvResourceCredRefreshMargin+" must be a positive duration") {
-			t.Fatalf("ResourceCredentialRefreshMarginFromEnv error = %v; want positive duration validation", err)
-		}
-	})
-}
-
-func TestSandboxStatusFreshnessWindowFromEnv(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		window, err := SandboxStatusFreshnessWindowFromEnv(configTestEnv{})
-		if err != nil {
-			t.Fatalf("SandboxStatusFreshnessWindowFromEnv: %v", err)
-		}
-		if window != time.Minute {
-			t.Fatalf("window = %s; want 60s", window)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		window, err := SandboxStatusFreshnessWindowFromEnv(configTestEnv{EnvSandboxStatusFreshnessWindow: "90s"})
-		if err != nil {
-			t.Fatalf("SandboxStatusFreshnessWindowFromEnv: %v", err)
-		}
-		if window != 90*time.Second {
-			t.Fatalf("window = %s; want 90s", window)
-		}
-	})
-
-	t.Run("rejects nonpositive", func(t *testing.T) {
-		_, err := SandboxStatusFreshnessWindowFromEnv(configTestEnv{EnvSandboxStatusFreshnessWindow: "0s"})
-		if err == nil || !strings.Contains(err.Error(), EnvSandboxStatusFreshnessWindow+" must be a positive duration") {
-			t.Fatalf("SandboxStatusFreshnessWindowFromEnv error = %v; want positive duration validation", err)
-		}
-	})
 }
 
 func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
@@ -139,37 +79,6 @@ func TestBridgeAPIConfigRequiresMCPConnectorRoute(t *testing.T) {
 	}
 }
 
-func TestJobRunnerConfigCarriesResourceCredentialRefreshMargin(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		cfg, err := JobRunnerConfigFromEnv(validJobRunnerConfigEnv())
-		if err != nil {
-			t.Fatalf("JobRunnerConfigFromEnv: %v", err)
-		}
-		if cfg.SandboxStatusFreshnessWindow != time.Minute {
-			t.Fatalf("SandboxStatusFreshnessWindow = %s; want 60s", cfg.SandboxStatusFreshnessWindow)
-		}
-		if cfg.ResourceCredentialRefreshMargin != 30*time.Minute {
-			t.Fatalf("ResourceCredentialRefreshMargin = %s; want 30m", cfg.ResourceCredentialRefreshMargin)
-		}
-	})
-
-	t.Run("configured", func(t *testing.T) {
-		env := validJobRunnerConfigEnv()
-		env[EnvResourceCredRefreshMargin] = "15m"
-		env[EnvSandboxStatusFreshnessWindow] = "45s"
-		cfg, err := JobRunnerConfigFromEnv(env)
-		if err != nil {
-			t.Fatalf("JobRunnerConfigFromEnv: %v", err)
-		}
-		if cfg.SandboxStatusFreshnessWindow != 45*time.Second {
-			t.Fatalf("SandboxStatusFreshnessWindow = %s; want 45s", cfg.SandboxStatusFreshnessWindow)
-		}
-		if cfg.ResourceCredentialRefreshMargin != 15*time.Minute {
-			t.Fatalf("ResourceCredentialRefreshMargin = %s; want 15m", cfg.ResourceCredentialRefreshMargin)
-		}
-	})
-}
-
 func TestJobRunnerConfigRequiresDeliveryDependencies(t *testing.T) {
 	for _, missing := range []string{
 		EnvQueueGRPCAddress,
@@ -177,8 +86,6 @@ func TestJobRunnerConfigRequiresDeliveryDependencies(t *testing.T) {
 		EnvKubernetesNamespace,
 		EnvAgentRuntimeLabelSelector,
 		EnvRuntimePodServiceTokenPath,
-		EnvSandboxServiceGRPCAddress,
-		EnvSandboxServiceTokenPath,
 		EnvJobRunnerMCPConnectorGRPCAddress,
 		EnvJobRunnerGatewayTokenPath,
 	} {

@@ -4,15 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
-	"github.com/tetral-ai/tetral/internal/sandbox"
-	"github.com/tetral-ai/tetral/internal/workspace"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
@@ -57,44 +58,23 @@ type cleanupClaimOptions struct {
 }
 
 type sessionDeleteCleanupState struct {
-	WorkspaceID          string
-	SessionID            string
-	DeleteCleanupID      string
-	PreparationAttemptID string
-	SandboxID            string
-	SandboxStatus        string
-	Binding              runtimeBindingForDelivery
-	HasBinding           bool
-	SessionThreadID      string
+	WorkspaceID     string
+	SessionID       string
+	DeleteCleanupID string
+	Binding         runtimeBindingForDelivery
+	HasBinding      bool
+	SessionThreadID string
 }
 
-// prepareSessionDeleteCleanupCommandTx and finalizeSessionDeleteCleanup together
-// implement the closed session_delete_cleanup branch decision table (reason=delete):
-//
-//	sandbox state at claim                        branch
-//	no sandboxes row                              vacuous success
-//	failed row with NULL handle                   name-probe (Get by Name = sandbox_id)
-//	                                               inside ReleaseSandbox; release what
-//	                                               is found, else vacuous
-//	creating | resuming                           retry_later until the reconciler
-//	                                               settles it
-//	live idle binding                             clear hot state via the cleanup
-//	                                               command FIRST, then settle pending
-//	                                               waits + background tasks, then
-//	                                               FINALIZE the binding, then release
-//	any recorded handle                           ReleaseSandbox(reason=delete)
-//
-// reason=delete NEVER short-circuits on cleanup_status or release-candidate
-// grounds (a failed row whose startup cleanup already archived the machine is
-// still provider-DELETED by its recorded handle). Prefix GC becomes eligible only
-// after released | already_released or a vacuous branch.
+// Session deletion clears live Runtime custody before it ensures the durable
+// Sandbox release operation. The release worker, not Bridge, inspects and
+// releases the provider handle. Private Sandbox rows and Blob prefixes become
+// eligible for deletion only after release completes and every Sandbox Queue
+// job for the Session is closed.
 func (s *PostgreSQLRuntimeDeliveryStore) prepareSessionDeleteCleanupCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (RuntimeCommandPlan, error) {
 	state, stale, err := loadSessionDeleteCleanupStateTx(ctx, tx, job, true)
 	if err != nil || stale {
 		return RuntimeCommandPlan{StaleAccepted: stale}, err
-	}
-	if state.SandboxStatus == string(sandbox.StatusCreating) || state.SandboxStatus == string(sandbox.StatusResuming) {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "sandbox_startup_in_progress", message: "sandbox startup must settle before hard-delete cleanup", retryable: true}
 	}
 	if !state.HasBinding {
 		return RuntimeCommandPlan{CleanupTargetGone: true}, nil
@@ -150,19 +130,6 @@ func loadSessionDeleteCleanupStateTx(ctx context.Context, tx *dbconnect.Tx, job 
 	}
 	if lifecycleState != "deleted" || !storedDeleteCleanupID.Valid || storedDeleteCleanupID.String != job.DeleteCleanupID {
 		return state, true, nil
-	}
-	err := tx.QueryRow(ctx,
-		`SELECT sp.preparation_attempt_id, sp.sandbox_id, COALESCE(sb.status, '')
-		   FROM session_preparations sp
-		   LEFT JOIN sandboxes sb
-		     ON sb.workspace_id = sp.workspace_id AND sb.id = sp.sandbox_id
-		  WHERE sp.workspace_id = $1 AND sp.session_id = $2 AND sp.superseded_at IS NULL
-		  ORDER BY sp.created_at DESC, sp.preparation_attempt_id DESC
-		  LIMIT 1`,
-		job.WorkspaceID, job.SessionID,
-	).Scan(&state.PreparationAttemptID, &state.SandboxID, &state.SandboxStatus)
-	if err != nil && !dbconnect.IsNoRows(err) {
-		return state, false, err
 	}
 	binding, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, job.WorkspaceID, job.SessionID)
 	if err != nil {
@@ -362,13 +329,6 @@ func claimCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob
 	if !found || binding.BindingID != statusBindingID.String || binding.BindingGeneration != statusBindingGeneration.Int64 {
 		return cleanupSessionClaim{}, true, nil
 	}
-	sandboxID, err := cleanupSandboxIDTx(ctx, tx, job.WorkspaceID, job.SessionID)
-	if err != nil {
-		return cleanupSessionClaim{}, false, err
-	}
-	if sandboxID == "" {
-		return cleanupSessionClaim{}, false, runtimeDeliveryPrepareError{kind: "cleanup_sandbox_fence_invalid", message: "cleanup sandbox fence is missing", retryable: false}
-	}
 	if options.SetClaimed && !cleanupClaimedAt.Valid {
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_status
@@ -403,7 +363,6 @@ func claimCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob
 		PodIP:              binding.PodIP,
 		PodName:            binding.PodName,
 		Namespace:          binding.Namespace,
-		SandboxID:          sandboxID,
 	}, false, nil
 }
 
@@ -452,25 +411,6 @@ func cleanupHasNewerUnprocessedInputTx(ctx context.Context, tx *dbconnect.Tx, wo
 	return exists, err
 }
 
-func cleanupSandboxIDTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (string, error) {
-	var sandboxID string
-	err := tx.QueryRow(ctx,
-		`SELECT sandbox_id
-		   FROM session_preparations
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND superseded_at IS NULL
-			  ORDER BY created_at DESC, preparation_attempt_id DESC
-		  LIMIT 1`,
-		workspaceID,
-		sessionID,
-	).Scan(&sandboxID)
-	if dbconnect.IsNoRows(err) {
-		return "", nil
-	}
-	return sandboxID, err
-}
-
 func cleanupSessionPayloadJSON(cleanupJobID string) (string, error) {
 	return marshalBridgeJSON(map[string]any{
 		"cleanup_job_id": cleanupJobID,
@@ -478,13 +418,9 @@ func cleanupSessionPayloadJSON(cleanupJobID string) (string, error) {
 	})
 }
 
-// FinalizeRuntimeCleanup fixes the cleanup ordering: Bridge wins the
-// cancelled_by_cleanup settlement for each running background task (and expires
-// pending waits) BEFORE asking Sandbox Service to release the sandbox, and
-// finalizes the binding only AFTER the release RPC succeeds or is idempotently
-// acknowledged. This settle-before-release order is inverted ONLY for
-// reason=delete (finalizeSessionDeleteCleanup), whose release fence is
-// binding-independent, so the delete path finalizes the binding first.
+// FinalizeRuntimeCleanup settles hot Runtime custody and releases only the
+// Runtime binding. Sandbox resources outlive idle cleanup; Session deletion
+// records its own durable Sandbox release operation below.
 func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
 	if s == nil || s.Client == nil {
 		return RuntimeDeliveryResult{
@@ -513,9 +449,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 		if err := expireCleanupPendingWaitsTx(ctx, tx, loaded, now); err != nil {
 			return err
 		}
-		if err := settleCleanupBackgroundTasksTx(ctx, tx, loaded, now); err != nil {
-			return err
-		}
 		claim = loaded
 		return nil
 	})
@@ -524,56 +457,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 	}
 	if claim.CleanupJobID == "" {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
-	}
-	if s.SandboxReleaser == nil {
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    true,
-			ErrorKind:    "sandbox_release_unavailable",
-			ErrorMessage: "sandbox release client is unavailable",
-		}, nil
-	}
-	release, err := s.SandboxReleaser.ReleaseSandbox(ctx, SandboxReleaseRequest{
-		WorkspaceID:         claim.WorkspaceID,
-		SessionID:           claim.SessionID,
-		SandboxID:           claim.SandboxID,
-		BindingID:           claim.BindingID,
-		BindingGeneration:   claim.BindingGeneration,
-		Reason:              "cleanup",
-		IdempotencyKey:      "cleanup_session:" + claim.CleanupJobID,
-		DurableCleanupFence: true,
-	})
-	if err != nil {
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    true,
-			ErrorKind:    "sandbox_release_unavailable",
-			ErrorMessage: "sandbox release call failed",
-		}, nil
-	}
-	switch release.Status {
-	case SandboxReleaseReleased, SandboxReleaseArchived, SandboxReleaseAlreadyReleased:
-	case SandboxReleaseRetryLater:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    true,
-			ErrorKind:    "sandbox_release_retry_later",
-			ErrorMessage: "sandbox release is not complete",
-		}, nil
-	case SandboxReleaseFailed:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    false,
-			ErrorKind:    "sandbox_release_failed",
-			ErrorMessage: "sandbox release failed",
-		}, nil
-	default:
-		return RuntimeDeliveryResult{
-			Status:       RuntimeDeliveryRejected,
-			Retryable:    false,
-			ErrorKind:    "sandbox_release_protocol_error",
-			ErrorMessage: "sandbox release status is invalid",
-		}, nil
 	}
 	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.cleanup_finalize", func(tx *dbconnect.Tx) error {
 		return finalizeCleanupSessionTx(ctx, tx, claim, now)
@@ -591,39 +474,50 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 	}
 	var state sessionDeleteCleanupState
 	var stale bool
+	var releaseComplete bool
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_settle", func(tx *dbconnect.Tx) error {
 		var err error
 		state, stale, err = loadSessionDeleteCleanupStateTx(ctx, tx, job, true)
 		if err != nil || stale {
 			return err
 		}
-		if state.SandboxStatus == string(sandbox.StatusCreating) || state.SandboxStatus == string(sandbox.StatusResuming) {
-			return runtimeDeliveryPrepareError{kind: "sandbox_startup_in_progress", message: "sandbox startup must settle before hard-delete cleanup", retryable: true}
+		if state.HasBinding {
+			var streamPosition int64
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(MAX(latest_stream_position), 0) FROM session_events WHERE workspace_id = $1 AND session_id = $2`,
+				job.WorkspaceID, job.SessionID,
+			).Scan(&streamPosition); err != nil {
+				return err
+			}
+			claim := cleanupSessionClaim{
+				WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, SessionThreadID: state.SessionThreadID,
+				CleanupJobID: job.DeleteCleanupID, IdleStreamPosition: streamPosition,
+				BindingID: state.Binding.BindingID, BindingGeneration: state.Binding.BindingGeneration,
+				PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, PodName: state.Binding.PodName,
+				Namespace: state.Binding.Namespace,
+			}
+			if err := expireCleanupPendingWaitsTx(ctx, tx, claim, now); err != nil {
+				return err
+			}
+			if err := finalizeCleanupSessionTx(ctx, tx, claim, now); err != nil {
+				return err
+			}
 		}
-		if !state.HasBinding {
-			return nil
+		if sessionDeleteCleanupFinalAttempt(job) {
+			releaseComplete, err = sandboxrelease.CompleteTx(ctx, tx, job.WorkspaceID, job.SessionID)
+		} else {
+			_, releaseComplete, err = sandboxrelease.EnsureTx(
+				ctx, tx, job.WorkspaceID, job.SessionID, sandboxrelease.SessionDelete, "", now,
+			)
+			if err == nil {
+				var successors int
+				successors, err = sandboxrelease.EnsureFailedSessionDeleteTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
+				if successors > 0 {
+					releaseComplete = false
+				}
+			}
 		}
-		var streamPosition int64
-		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(MAX(latest_stream_position), 0) FROM session_events WHERE workspace_id = $1 AND session_id = $2`,
-			job.WorkspaceID, job.SessionID,
-		).Scan(&streamPosition); err != nil {
-			return err
-		}
-		claim := cleanupSessionClaim{
-			WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, SessionThreadID: state.SessionThreadID,
-			CleanupJobID: job.DeleteCleanupID, IdleStreamPosition: streamPosition,
-			BindingID: state.Binding.BindingID, BindingGeneration: state.Binding.BindingGeneration,
-			PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, PodName: state.Binding.PodName,
-			Namespace: state.Binding.Namespace, SandboxID: state.SandboxID,
-		}
-		if err := expireCleanupPendingWaitsTx(ctx, tx, claim, now); err != nil {
-			return err
-		}
-		if err := settleCleanupBackgroundTasksTx(ctx, tx, claim, now); err != nil {
-			return err
-		}
-		return finalizeCleanupSessionTx(ctx, tx, claim, now)
+		return err
 	})
 	if err != nil {
 		return runtimeDeliveryResultFromPrepareError(err), nil
@@ -631,46 +525,45 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 	if stale {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
 	}
-	if state.SandboxStatus == "" {
-		return s.finalizeSessionDeleteSandboxCustody(ctx, job, now)
-	}
-	if state.PreparationAttemptID == "" || state.SandboxID == "" {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "delete_cleanup_preparation_fence_invalid", ErrorMessage: "hard-delete cleanup preparation fence is missing"}, nil
-	}
-	if s.SandboxReleaser == nil {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_release_unavailable", ErrorMessage: "sandbox release client is unavailable"}, nil
-	}
-	release, err := s.SandboxReleaser.ReleaseSandbox(ctx, SandboxReleaseRequest{
-		WorkspaceID: state.WorkspaceID, SessionID: state.SessionID, SandboxID: state.SandboxID,
-		PreparationAttemptID: state.PreparationAttemptID, DeleteCleanupID: state.DeleteCleanupID,
-		Reason: "delete", IdempotencyKey: queue.FormatSessionDeleteCleanupDedupeKey(workspace.ID(state.WorkspaceID), state.SessionID, state.DeleteCleanupID),
-	})
-	if err != nil {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_release_unavailable", ErrorMessage: "sandbox release call failed"}, nil
-	}
-	switch release.Status {
-	case SandboxReleaseReleased, SandboxReleaseAlreadyReleased:
-		return s.finalizeSessionDeleteSandboxCustody(ctx, job, now)
-	case SandboxReleaseRetryLater:
+	if !releaseComplete {
+		if sessionDeleteCleanupFinalAttempt(job) {
+			return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "sandbox_release_incomplete", ErrorMessage: "sandbox release is not complete"}, nil
+		}
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_release_retry_later", ErrorMessage: "sandbox release is not complete"}, nil
-	case SandboxReleaseFailed:
-		_ = s.markSessionDeleteCleanupFailure(ctx, job, "sandbox_release_failed", now)
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "sandbox_release_failed", ErrorMessage: "sandbox release failed"}, nil
-	default:
-		_ = s.markSessionDeleteCleanupFailure(ctx, job, "sandbox_release_protocol_error", now)
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: false, ErrorKind: "sandbox_release_protocol_error", ErrorMessage: "sandbox release status is invalid"}, nil
 	}
+	return s.finalizeSessionDeleteSandboxCustody(ctx, job, now)
+}
+
+func sessionDeleteCleanupFinalAttempt(job RuntimeJob) bool {
+	return job.Kind == queue.KindSessionDeleteCleanup && job.MaxAttempts > 0 && job.AttemptCount >= job.MaxAttempts
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx context.Context, job RuntimeJob, now time.Time) (RuntimeDeliveryResult, error) {
 	pending := false
+	releaseIncomplete := false
 	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_sandbox_custody", func(tx *dbconnect.Tx) error {
 		var err error
+		releaseIncomplete, err = hasIncompleteSessionSandboxReleasesTx(ctx, tx, job.WorkspaceID, job.SessionID)
+		if err != nil || releaseIncomplete {
+			return err
+		}
+		pending, err = hasOpenSessionSandboxQueueJobsTx(ctx, tx, job.WorkspaceID, job.SessionID)
+		if err != nil || pending {
+			return err
+		}
 		pending, err = ensureSessionOutputCaptureCleanupTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
 		return err
 	})
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
+	}
+	if releaseIncomplete {
+		return RuntimeDeliveryResult{
+			Status:       RuntimeDeliveryRejected,
+			Retryable:    true,
+			ErrorKind:    "sandbox_release_incomplete",
+			ErrorMessage: "sandbox release is not complete",
+		}, nil
 	}
 	if pending {
 		return RuntimeDeliveryResult{
@@ -680,121 +573,163 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteSandboxCustody(ctx
 			ErrorMessage: "sandbox output capture cleanup is not complete",
 		}, nil
 	}
+	pending, err = s.deleteSessionSandboxAttachments(ctx, job.WorkspaceID, job.SessionID, now)
+	if err != nil {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_attachment_cleanup_failed", ErrorMessage: "sandbox attachment cleanup failed"}, nil
+	}
+	if pending {
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true, ErrorKind: "sandbox_attachment_cleanup_pending", ErrorMessage: "sandbox attachment cleanup is not complete"}, nil
+	}
+	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_sandbox_rows", func(tx *dbconnect.Tx) error {
+		return deleteSessionSandboxRowsTx(ctx, tx, job.WorkspaceID, job.SessionID)
+	})
+	if err != nil {
+		return runtimeDeliveryResultFromPrepareError(err), nil
+	}
 	return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) markSessionDeleteCleanupFailure(ctx context.Context, job RuntimeJob, errorKind string, now time.Time) error {
-	return s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.session_delete_cleanup_failure", func(tx *dbconnect.Tx) error {
-		_, err := tx.Exec(ctx,
-			`UPDATE session_resource_prefix_gc
-			    SET last_error_kind = $3, updated_at = $4
-			  WHERE workspace_id = $1 AND session_id = $2 AND status IN ('pending', 'retryable_failed')`,
-			job.WorkspaceID, job.SessionID, errorKind, now,
+func hasIncompleteSessionSandboxReleasesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (bool, error) {
+	var incomplete bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM sandbox_lifecycle_operations
+			 WHERE workspace_id=$1 AND session_id=$2 AND kind='release'
+			   AND superseded_by_operation_id IS NULL AND state<>'completed'
+		)`,
+		workspaceID, sessionID,
+	).Scan(&incomplete)
+	return incomplete, err
+}
+
+func hasOpenSessionSandboxQueueJobsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (bool, error) {
+	var open bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM queue_jobs
+			 WHERE workspace_id=$1 AND payload_json::jsonb ->> 'session_id'=$2
+			   AND kind IN (
+			       'sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize',
+			       'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture',
+			       'sandbox_output_capture_cleanup', 'sandbox_memory_projection',
+			       'sandbox_background_command', 'sandbox_background_reconcile'
+			   )
+			   AND status IN ('pending','leased')
+		)`,
+		workspaceID, sessionID,
+	).Scan(&open)
+	return open, err
+}
+
+func (s *PostgreSQLRuntimeDeliveryStore) deleteSessionSandboxAttachments(ctx context.Context, workspaceID string, sessionID string, now time.Time) (bool, error) {
+	var rowsToDelete []transientAttachmentGCRow
+	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.session_delete_cleanup_attachment_claim", func(tx *dbconnect.Tx) error {
+		rows, err := tx.Query(ctx,
+			`WITH candidates AS (
+				SELECT attachment.workspace_id, attachment.attachment_ref, attachment.blob_pointer, attachment.status
+				  FROM session_transient_attachments AS attachment
+				  JOIN session_runtime_tool_results AS execution
+				    ON execution.workspace_id=attachment.workspace_id
+				   AND execution.session_id=attachment.session_id
+				   AND execution.session_thread_id=attachment.session_thread_id
+				   AND execution.tool_use_event_id=attachment.source_tool_use_event_id
+				 WHERE attachment.workspace_id=$1 AND attachment.session_id=$2
+				   AND execution.tool_kind='sandbox_tool'
+				   AND attachment.status IN ('uploading','staged','active','deleting')
+				 ORDER BY attachment.storage_sequence
+				 LIMIT 100 FOR UPDATE OF attachment SKIP LOCKED
+			)
+			UPDATE session_transient_attachments AS attachment
+			   SET status='deleting', updated_at=$3
+			  FROM candidates
+			 WHERE attachment.workspace_id=candidates.workspace_id
+			   AND attachment.attachment_ref=candidates.attachment_ref
+			RETURNING attachment.workspace_id, attachment.attachment_ref,
+			          attachment.blob_pointer, candidates.status`,
+			workspaceID, sessionID, now.UTC(),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var row transientAttachmentGCRow
+			if err := rows.Scan(&row.WorkspaceID, &row.AttachmentRef, &row.BlobPointer, &row.PreviousStatus); err != nil {
+				return err
+			}
+			rowsToDelete = append(rowsToDelete, row)
+		}
+		return rows.Err()
 	})
+	if err != nil {
+		return false, err
+	}
+	if len(rowsToDelete) > 0 && s.AttachmentBlobStore == nil {
+		return true, errors.New("sandbox attachment Blob store is unavailable")
+	}
+	for _, row := range rowsToDelete {
+		if err := s.AttachmentBlobStore.Delete(ctx, row.BlobPointer); err != nil {
+			var notFound *blob.NotFoundError
+			if !errors.As(err, &notFound) {
+				return true, err
+			}
+		}
+		if err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.session_delete_cleanup_attachment_deleted", func(tx *dbconnect.Tx) error {
+			_, err := tx.Exec(ctx,
+				`UPDATE session_transient_attachments SET status='deleted', updated_at=$3
+				  WHERE workspace_id=$1 AND attachment_ref=$2 AND status='deleting'`,
+				workspaceID, row.AttachmentRef, now.UTC(),
+			)
+			return err
+		}); err != nil {
+			return true, err
+		}
+	}
+	var remaining bool
+	err = s.Client.WithWorkspaceReadOnlyTx(ctx, workspaceID, "agentruntimebridge.session_delete_cleanup_attachment_remaining", func(tx *dbconnect.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT EXISTS (
+				SELECT 1 FROM session_transient_attachments AS attachment
+				JOIN session_runtime_tool_results AS execution
+				  ON execution.workspace_id=attachment.workspace_id
+				 AND execution.session_id=attachment.session_id
+				 AND execution.session_thread_id=attachment.session_thread_id
+				 AND execution.tool_use_event_id=attachment.source_tool_use_event_id
+				WHERE attachment.workspace_id=$1 AND attachment.session_id=$2
+				  AND execution.tool_kind='sandbox_tool' AND attachment.status<>'deleted'
+			)`, workspaceID, sessionID,
+		).Scan(&remaining)
+	})
+	return remaining, err
+}
+
+func deleteSessionSandboxRowsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
+	statements := []string{
+		`DELETE FROM session_transient_attachments AS attachment USING session_runtime_tool_results AS execution
+		  WHERE attachment.workspace_id=$1 AND attachment.session_id=$2
+		    AND execution.workspace_id=attachment.workspace_id AND execution.session_id=attachment.session_id
+		    AND execution.session_thread_id=attachment.session_thread_id
+		    AND execution.tool_use_event_id=attachment.source_tool_use_event_id
+		    AND execution.tool_kind='sandbox_tool' AND attachment.status='deleted'`,
+		`DELETE FROM session_runtime_tool_results WHERE workspace_id=$1 AND session_id=$2 AND tool_kind IN ('sandbox_tool','sandbox_background')`,
+		`DELETE FROM session_background_tasks WHERE workspace_id=$1 AND session_id=$2`,
+		`DELETE FROM sandbox_output_capture_blobs WHERE workspace_id=$1 AND session_id=$2`,
+		`DELETE FROM sandbox_output_capture_operations WHERE workspace_id=$1 AND session_id=$2`,
+		`DELETE FROM sandbox_lifecycle_operations WHERE workspace_id=$1 AND session_id=$2`,
+		`DELETE FROM session_sandbox_bindings WHERE workspace_id=$1 AND session_id=$2`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(ctx, statement, workspaceID, sessionID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func loadClaimedCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) (cleanupSessionClaim, bool, error) {
 	return claimCleanupSessionTx(ctx, tx, job, now, cleanupClaimOptions{
 		RequireClaimed: true,
 	})
-}
-
-func settleCleanupBackgroundTasksTx(ctx context.Context, tx *dbconnect.Tx, claim cleanupSessionClaim, now time.Time) error {
-	rows, err := tx.Query(ctx,
-		`SELECT session_thread_id, task_id, source_tool_use_event_id
-		   FROM session_background_tasks
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND status = 'running'
-		  ORDER BY created_at ASC, task_id ASC
-		  FOR UPDATE`,
-		claim.WorkspaceID,
-		claim.SessionID,
-		claim.BindingID,
-	)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	type cleanupTask struct {
-		threadID           string
-		taskID             string
-		sourceToolUseEvent string
-	}
-	var tasks []cleanupTask
-	for rows.Next() {
-		var task cleanupTask
-		if err := rows.Scan(&task.threadID, &task.taskID, &task.sourceToolUseEvent); err != nil {
-			return err
-		}
-		tasks = append(tasks, task)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, task := range tasks {
-		scope := &bridgev1.RuntimeScope{
-			WorkspaceId:     claim.WorkspaceID,
-			SessionId:       claim.SessionID,
-			SessionThreadId: task.threadID,
-			Binding: &bridgev1.RuntimeBindingRef{
-				BindingId:         claim.BindingID,
-				BindingGeneration: claim.BindingGeneration,
-				TargetPodUid:      claim.PodUID,
-			},
-		}
-		result, err := tx.Exec(ctx,
-			`UPDATE session_background_tasks
-			    SET status = 'cancelled_by_cleanup',
-			        terminal_at = COALESCE(terminal_at, $6),
-			        updated_at = $6
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND task_id = $4
-			    AND binding_id = $5
-			    AND status = 'running'`,
-			claim.WorkspaceID,
-			claim.SessionID,
-			task.threadID,
-			task.taskID,
-			claim.BindingID,
-			now,
-		)
-		if err != nil {
-			return err
-		}
-		if !rowsAffected(result) {
-			continue
-		}
-		eventID, _, err := insertRuntimeNotificationTx(ctx, tx, scope, task.taskID, task.sourceToolUseEvent, "cancelled_by_cleanup", `{}`, now)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_background_tasks
-			    SET terminal_event_id = COALESCE(terminal_event_id, $6),
-			        updated_at = $7
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND task_id = $4
-			    AND binding_id = $5`,
-			claim.WorkspaceID,
-			claim.SessionID,
-			task.threadID,
-			task.taskID,
-			claim.BindingID,
-			eventID,
-			now,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func expireCleanupPendingWaitsTx(ctx context.Context, tx *dbconnect.Tx, claim cleanupSessionClaim, now time.Time) error {

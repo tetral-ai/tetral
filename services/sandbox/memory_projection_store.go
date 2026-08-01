@@ -57,8 +57,8 @@ func (s *PostgreSQLSandboxMemoryProjectionStore) LoadProjection(ctx context.Cont
 			   FROM session_sandbox_bindings
 			  WHERE workspace_id = $1 AND session_id = $2 AND release_requested_at IS NULL`,
 			job.WorkspaceID, job.SessionID,
-			).Scan(&work.Provider, &work.ProviderResourceID); dbconnect.IsNoRows(err) {
-				work.Provider = sandboxdriver.DaytonaProviderName
+		).Scan(&work.Provider, &work.ProviderResourceID); dbconnect.IsNoRows(err) {
+			work.Provider = sandboxdriver.DaytonaProviderName
 		} else if err != nil {
 			return err
 		}
@@ -175,7 +175,8 @@ func settleMemoryProjectionTx(ctx context.Context, tx *dbconnect.Tx, memoryWrite
 	if !current.Valid || current.String != "pending" {
 		return nil
 	}
-	if state == "refreshed" {
+	switch state {
+	case "refreshed":
 		var payload map[string]any
 		if err := json.Unmarshal([]byte(resultJSON), &payload); err != nil {
 			return err
@@ -186,7 +187,7 @@ func settleMemoryProjectionTx(ctx context.Context, tx *dbconnect.Tx, memoryWrite
 			return err
 		}
 		resultJSON = encoded
-	} else if state == "failed" {
+	case "failed":
 		if strings.TrimSpace(message) == "" {
 			message = "memory projection failed"
 		}

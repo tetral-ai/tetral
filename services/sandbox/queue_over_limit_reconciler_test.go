@@ -44,7 +44,7 @@ func TestSandboxQueueOverLimitReconcilerUsesBoundedCensusAndBusinessFinalizer(t 
 }
 
 func TestPostgreSQLSandboxQueueOverLimitFinalizerCommitsBusinessResultWithDeadLetter(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 31, 16, 30, 0, 0, time.UTC)
@@ -83,7 +83,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerCommitsBusinessResultWithDeadLe
 }
 
 func TestPostgreSQLSandboxExecutionExhaustionPreservesCommittedDependencyHandoff(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
 		SET execution_state = 'waiting_activation'
@@ -102,8 +102,71 @@ func TestPostgreSQLSandboxExecutionExhaustionPreservesCommittedDependencyHandoff
 	assertSandboxExecutionState(t, adminDB, "evt_execution_a", "waiting_activation", 1)
 }
 
+func TestPostgreSQLSandboxExecutionExhaustionHonorsPreProviderFences(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		mutate      string
+		wantKind    string
+		wantMessage string
+	}{
+		{
+			name: "accepted cancellation",
+			mutate: `UPDATE session_runtime_tool_results SET cancel_requested_at=CURRENT_TIMESTAMP
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`,
+			wantKind: "cancelled", wantMessage: "sandbox execution was cancelled",
+		},
+		{
+			name: "session release",
+			mutate: `UPDATE session_sandbox_bindings SET release_requested_at=CURRENT_TIMESTAMP, release_reason='session_delete'
+				WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'`,
+			wantKind: "session_deleted", wantMessage: "sandbox execution is no longer available",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeDB, adminDB := newSandboxServiceTestDB(t)
+			seedSandboxExecutionStoreFixture(t, adminDB)
+			now := time.Now().UTC()
+			seedReadySandboxBinding(t, adminDB, now)
+			if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+				SET execution_state='preparing', preparation_deadline=$1
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`, now.Add(-time.Minute)); err != nil {
+				t.Fatalf("seed expired preparation: %v", err)
+			}
+			if _, err := adminDB.Exec(test.mutate); err != nil {
+				t.Fatalf("seed fence: %v", err)
+			}
+			job := &queuev1.QueueJob{
+				Id: "qjob_execution_fenced", WorkspaceId: "ws_execution_store", Kind: queue.KindSandboxToolExecute,
+				PartitionKey: queue.FormatSandboxExecutionPartitionKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+				DedupeKey:    queue.FormatSandboxToolExecuteDedupeKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a", 1),
+			}
+			coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+			if err := coordinator.FinalizeExhaustedExecution(context.Background(), job); err != nil {
+				t.Fatalf("FinalizeExhaustedExecution: %v", err)
+			}
+			var resultJSON string
+			if err := adminDB.QueryRow(`SELECT result_json FROM session_runtime_tool_results
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(&resultJSON); err != nil {
+				t.Fatalf("read result: %v", err)
+			}
+			var result struct {
+				Error struct {
+					Kind    string `json:"kind"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+				t.Fatalf("decode result: %v", err)
+			}
+			if result.Error.Kind != test.wantKind || result.Error.Message != test.wantMessage {
+				t.Fatalf("result = %s; want %s/%s", resultJSON, test.wantKind, test.wantMessage)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLSandboxQueueOverLimitFinalizerRollsBackWhenQueueObservationChanges(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 31, 17, 0, 0, 0, time.UTC)
@@ -134,7 +197,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerRollsBackWhenQueueObservationCh
 }
 
 func TestPostgreSQLSandboxQueueOverLimitFinalizerAdvancesBackgroundReconcileWithDeadLetter(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	now := time.Now().UTC().Add(time.Minute)
@@ -177,7 +240,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerAdvancesBackgroundReconcileWith
 }
 
 func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesSubmittedBackgroundCommandUnknown(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
 	now := time.Now().UTC().Add(time.Minute)
@@ -229,7 +292,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesSubmittedBackgroundComma
 }
 
 func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesMemoryProjection(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Now().UTC()
 	const (

@@ -186,9 +186,10 @@ Gateway owns all provider lowering and credential injection.
 - Skill guidance is a listing, not an embedding: the segment names each skill
   with its description, immutable version, and projected `/skills/<directory>/SKILL.md`
   path, and the model reads those projected files with ordinary tools; skill
-  bodies are never inlined. The segment is derived from the resolved skill index
-  persisted at preparation and is never re-derived by re-resolving `latest`, so it
-  always describes exactly the packages the sandbox mounted.
+  bodies are never inlined. Cold context derives the resolved skill index from
+  the Session's immutable Agent version and durable skill-version rows; Sandbox
+  materialization uses the same resolver, so prompt paths and mounted packages
+  describe the same pinned versions.
 - Lifecycle: a RequestTurn is born at the `span.model_request_start` ACK; before
   that ACK no request end is owed. After it, every terminal success, provider
   error, cancellation, or repairable failure closes with `WriteRequestEnd`.

@@ -23,34 +23,28 @@ const (
 	EnvProviderRescheduleBudget   = "TETRAL_PROVIDER_RESCHEDULE_BUDGET"
 	EnvCompactionRescheduleBudget = "TETRAL_COMPACTION_RESCHEDULE_BUDGET"
 
-	EnvJobRunnerHTTPAddress                = "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR"
-	EnvQueueGRPCAddress                    = "TETRAL_QUEUE_GRPC_ADDR"
-	EnvJobRunnerLeaseOwner                 = "TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER"
-	EnvJobRunnerLeaseDurationMS            = "TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS"
-	EnvJobRunnerHeartbeatIntervalMS        = "TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS"
-	EnvJobRunnerMaxJobs                    = "TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS"
-	EnvJobRunnerPollIntervalMS             = "TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS"
-	EnvJobRunnerMCPConnectorGRPCAddress    = "TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR"
-	EnvJobRunnerGatewayTokenPath           = "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
-	EnvSandboxServiceGRPCAddress           = "TETRAL_SANDBOX_GRPC_ADDR"
-	EnvSandboxServiceTokenPath             = "TETRAL_BRIDGE_SANDBOX_TOKEN_PATH"    //nolint:gosec // Env-var name, not a token value.
-	EnvResourceCredRefreshMargin           = "TETRAL_RESOURCE_CRED_REFRESH_MARGIN" //nolint:gosec // Env-var name, not a credential value.
-	EnvSandboxStatusFreshnessWindow        = "TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW"
-	EnvDatabaseURL                         = "TETRAL_DATABASE_URL"
-	EnvKubernetesNamespace                 = "TETRAL_KUBERNETES_NAMESPACE"
-	EnvAgentRuntimeLabelSelector           = "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR"
-	EnvAgentRuntimeGRPCPort                = "TETRAL_AGENT_RUNTIME_GRPC_PORT"
-	EnvRuntimePodServiceTokenPath          = "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
-	defaultJobRunnerLeaseDuration          = 30 * time.Second
-	defaultJobRunnerMaxJobs                = 1
-	defaultRuntimeInboxRepairBatch         = 32
-	defaultJobRunnerPollInterval           = time.Second
-	defaultJobRunnerHTTPAddress            = ":8081"
-	defaultAgentRuntimeGRPCPort            = 9090
-	defaultSandboxStatusFreshness          = time.Minute
-	defaultResourceCredentialRefreshMargin = 30 * time.Minute
-	defaultProviderRescheduleBudget        = int64(3)
-	defaultCompactionRescheduleBudget      = int64(2)
+	EnvJobRunnerHTTPAddress             = "TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR"
+	EnvQueueGRPCAddress                 = "TETRAL_QUEUE_GRPC_ADDR"
+	EnvJobRunnerLeaseOwner              = "TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER"
+	EnvJobRunnerLeaseDurationMS         = "TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS"
+	EnvJobRunnerHeartbeatIntervalMS     = "TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS"
+	EnvJobRunnerMaxJobs                 = "TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS"
+	EnvJobRunnerPollIntervalMS          = "TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS"
+	EnvJobRunnerMCPConnectorGRPCAddress = "TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR"
+	EnvJobRunnerGatewayTokenPath        = "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
+	EnvDatabaseURL                      = "TETRAL_DATABASE_URL"
+	EnvKubernetesNamespace              = "TETRAL_KUBERNETES_NAMESPACE"
+	EnvAgentRuntimeLabelSelector        = "TETRAL_AGENT_RUNTIME_LABEL_SELECTOR"
+	EnvAgentRuntimeGRPCPort             = "TETRAL_AGENT_RUNTIME_GRPC_PORT"
+	EnvRuntimePodServiceTokenPath       = "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
+	defaultJobRunnerLeaseDuration       = 30 * time.Second
+	defaultJobRunnerMaxJobs             = 1
+	defaultRuntimeInboxRepairBatch      = 32
+	defaultJobRunnerPollInterval        = time.Second
+	defaultJobRunnerHTTPAddress         = ":8081"
+	defaultAgentRuntimeGRPCPort         = 9090
+	defaultProviderRescheduleBudget     = int64(3)
+	defaultCompactionRescheduleBudget   = int64(2)
 )
 
 type Env interface {
@@ -113,49 +107,23 @@ func RuntimeBindingTokenHMACKeyFromEnv(env Env) ([]byte, error) {
 	return []byte(key), nil
 }
 
-func ResourceCredentialRefreshMarginFromEnv(env Env) (time.Duration, error) {
-	if env == nil {
-		return 0, workload.NewConfigError("environment is required")
-	}
-	raw := strings.TrimSpace(env.Getenv(EnvResourceCredRefreshMargin))
-	if raw == "" {
-		return defaultResourceCredentialRefreshMargin, nil
-	}
-	return parsePositiveDuration(raw, EnvResourceCredRefreshMargin)
-}
-
-func SandboxStatusFreshnessWindowFromEnv(env Env) (time.Duration, error) {
-	if env == nil {
-		return 0, workload.NewConfigError("environment is required")
-	}
-	raw := strings.TrimSpace(env.Getenv(EnvSandboxStatusFreshnessWindow))
-	if raw == "" {
-		return defaultSandboxStatusFreshness, nil
-	}
-	return parsePositiveDuration(raw, EnvSandboxStatusFreshnessWindow)
-}
-
 type JobRunnerConfig struct {
-	HTTPAddress                     string
-	QueueGRPCAddress                string
-	LeaseOwner                      string
-	LeaseDuration                   time.Duration
-	HeartbeatInterval               time.Duration
-	MaxJobs                         int
-	PollInterval                    time.Duration
-	DeploymentEnvironment           string
-	ServiceVersion                  string
-	DatabaseURL                     string
-	KubernetesNamespace             string
-	AgentRuntimeLabelSelector       string
-	AgentRuntimeGRPCPort            int
-	RuntimePodTokenPath             string
-	MCPConnectorGRPCAddress         string
-	GatewayTokenPath                string
-	SandboxServiceGRPCAddress       string
-	SandboxServiceTokenPath         string
-	SandboxStatusFreshnessWindow    time.Duration
-	ResourceCredentialRefreshMargin time.Duration
+	HTTPAddress               string
+	QueueGRPCAddress          string
+	LeaseOwner                string
+	LeaseDuration             time.Duration
+	HeartbeatInterval         time.Duration
+	MaxJobs                   int
+	PollInterval              time.Duration
+	DeploymentEnvironment     string
+	ServiceVersion            string
+	DatabaseURL               string
+	KubernetesNamespace       string
+	AgentRuntimeLabelSelector string
+	AgentRuntimeGRPCPort      int
+	RuntimePodTokenPath       string
+	MCPConnectorGRPCAddress   string
+	GatewayTokenPath          string
 }
 
 func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
@@ -176,16 +144,10 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 		AgentRuntimeLabelSelector: strings.TrimSpace(
 			env.Getenv(EnvAgentRuntimeLabelSelector),
 		),
-		AgentRuntimeGRPCPort:            defaultAgentRuntimeGRPCPort,
-		RuntimePodTokenPath:             strings.TrimSpace(env.Getenv(EnvRuntimePodServiceTokenPath)),
-		MCPConnectorGRPCAddress:         strings.TrimSpace(env.Getenv(EnvJobRunnerMCPConnectorGRPCAddress)),
-		GatewayTokenPath:                strings.TrimSpace(env.Getenv(EnvJobRunnerGatewayTokenPath)),
-		SandboxStatusFreshnessWindow:    defaultSandboxStatusFreshness,
-		ResourceCredentialRefreshMargin: defaultResourceCredentialRefreshMargin,
-		SandboxServiceGRPCAddress: strings.TrimSpace(
-			env.Getenv(EnvSandboxServiceGRPCAddress),
-		),
-		SandboxServiceTokenPath: strings.TrimSpace(env.Getenv(EnvSandboxServiceTokenPath)),
+		AgentRuntimeGRPCPort:    defaultAgentRuntimeGRPCPort,
+		RuntimePodTokenPath:     strings.TrimSpace(env.Getenv(EnvRuntimePodServiceTokenPath)),
+		MCPConnectorGRPCAddress: strings.TrimSpace(env.Getenv(EnvJobRunnerMCPConnectorGRPCAddress)),
+		GatewayTokenPath:        strings.TrimSpace(env.Getenv(EnvJobRunnerGatewayTokenPath)),
 	}
 	if cfg.QueueGRPCAddress == "" {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvQueueGRPCAddress + " is required")
@@ -201,12 +163,6 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	}
 	if cfg.RuntimePodTokenPath == "" {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvRuntimePodServiceTokenPath + " is required")
-	}
-	if cfg.SandboxServiceGRPCAddress == "" {
-		return JobRunnerConfig{}, workload.NewConfigError(EnvSandboxServiceGRPCAddress + " is required")
-	}
-	if cfg.SandboxServiceTokenPath == "" {
-		return JobRunnerConfig{}, workload.NewConfigError(EnvSandboxServiceTokenPath + " is required")
 	}
 	if cfg.MCPConnectorGRPCAddress == "" {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvJobRunnerMCPConnectorGRPCAddress + " is required")
@@ -256,27 +212,7 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 			return JobRunnerConfig{}, err
 		}
 	}
-	if raw := strings.TrimSpace(env.Getenv(EnvResourceCredRefreshMargin)); raw != "" {
-		cfg.ResourceCredentialRefreshMargin, err = parsePositiveDuration(raw, EnvResourceCredRefreshMargin)
-		if err != nil {
-			return JobRunnerConfig{}, err
-		}
-	}
-	if raw := strings.TrimSpace(env.Getenv(EnvSandboxStatusFreshnessWindow)); raw != "" {
-		cfg.SandboxStatusFreshnessWindow, err = parsePositiveDuration(raw, EnvSandboxStatusFreshnessWindow)
-		if err != nil {
-			return JobRunnerConfig{}, err
-		}
-	}
 	return cfg, nil
-}
-
-func parsePositiveDuration(raw string, envName string) (time.Duration, error) {
-	value, err := time.ParseDuration(strings.TrimSpace(raw))
-	if err != nil || value <= 0 {
-		return 0, workload.NewConfigError(fmt.Sprintf("%s must be a positive duration", envName))
-	}
-	return value, nil
 }
 
 func parsePositiveMilliseconds(raw string, envName string) (time.Duration, error) {

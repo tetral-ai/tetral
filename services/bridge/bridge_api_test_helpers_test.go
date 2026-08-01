@@ -15,7 +15,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +23,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -741,43 +739,6 @@ func bridgeAPIFinishIdleRequest(
 	}
 }
 
-func deleteCleanupRuntimeJob(sessionID string, deleteCleanupID string) RuntimeJob {
-	return RuntimeJob{JobID: "qjob_" + sessionID, LeaseToken: "lease_" + sessionID, Kind: queue.KindSessionDeleteCleanup,
-		WorkspaceID: "default", SessionID: sessionID, RuntimeInputID: "session_delete_cleanup:" + deleteCleanupID,
-		CleanupJobID: deleteCleanupID, DeleteCleanupID: deleteCleanupID, CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION}
-}
-
-func finishBridgeDeleteFixtureIdle(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, threadID string, bindingID string, generation int64, podUID string) {
-	t.Helper()
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, generation, podUID)
-	durableTurnID := "evt_running_" + sessionID
-	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
-	if _, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope: scope, DurableTurnId: durableTurnID, StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
-		t.Fatalf("FinishIdle fixture: %v", err)
-	}
-}
-
-func assertDeleteCleanupSettlementCounts(t *testing.T, db *sql.DB, sessionID string, wantBindings int, wantSettledTasks int, wantSettledWaits int) {
-	t.Helper()
-	var bindings, settledTasks, settledWaits int
-	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings WHERE session_id=$1`, sessionID).Scan(&bindings); err != nil {
-		t.Fatalf("count bindings: %v", err)
-	}
-	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_background_tasks WHERE session_id=$1 AND status='cancelled_by_cleanup' AND terminal_event_id IS NOT NULL`, sessionID).Scan(&settledTasks); err != nil {
-		t.Fatalf("count settled tasks: %v", err)
-	}
-	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM session_pending_tool_uses WHERE session_id=$1 AND status='expired' AND result_event_id IS NOT NULL`, sessionID).Scan(&settledWaits); err != nil {
-		t.Fatalf("count settled waits: %v", err)
-	}
-	if bindings != wantBindings || settledTasks != wantSettledTasks || settledWaits != wantSettledWaits {
-		t.Fatalf("bindings/tasks/waits=%d/%d/%d; want %d/%d/%d", bindings, settledTasks, settledWaits, wantBindings, wantSettledTasks, wantSettledWaits)
-	}
-}
-
 func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity")
@@ -851,58 +812,6 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	}
 	if rowCount != 1 || claimStatus.Valid || claimOwner.Valid || claimLease.Valid {
 		t.Fatalf("accepted rows/claims = %d/%+v/%+v/%+v; want one row and all MCP claim fields NULL", rowCount, claimStatus, claimOwner, claimLease)
-	}
-}
-
-func assertBackgroundTaskStillRunningWithoutNotification(t *testing.T, db *sql.DB, sessionID string, taskID string) {
-	t.Helper()
-	var taskStatus string
-	var terminalEventID sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status, terminal_event_id
-		   FROM session_background_tasks
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND task_id = $2`,
-		sessionID,
-		taskID,
-	).Scan(&taskStatus, &terminalEventID); err != nil {
-		t.Fatalf("read background task fence state: %v", err)
-	}
-	var notificationMessages int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_messages
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND kind = 'runtime_notification'`,
-		sessionID,
-	).Scan(&notificationMessages); err != nil {
-		t.Fatalf("read notification count after fenced settlement: %v", err)
-	}
-	if taskStatus != "running" || terminalEventID.Valid || notificationMessages != 0 {
-		t.Fatalf("background task status=%q terminal=%v notifications=%d; want running/no terminal/no notifications",
-			taskStatus, terminalEventID.Valid, notificationMessages)
-	}
-}
-
-func assertNoSessionPrepareJobsForSession(t *testing.T, db *sql.DB, workspaceID string, sessionID string) {
-	t.Helper()
-	var prepareJobs int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND partition_key = $3`,
-		workspaceID,
-		queue.KindSessionPrepare,
-		queue.FormatSessionPartitionKey(workspace.ID(workspaceID), sessionID),
-	).Scan(&prepareJobs); err != nil {
-		t.Fatalf("count session_prepare jobs for %s: %v", sessionID, err)
-	}
-	if prepareJobs != 0 {
-		t.Fatalf("session_prepare jobs for %s = %d; want none", sessionID, prepareJobs)
 	}
 }
 
@@ -1080,17 +989,6 @@ func testJSONPathValue(t *testing.T, raw string, path string) any {
 func bridgeRuntimeUserMessageJSON(t *testing.T, sessionID string, messageID string, text string) string {
 	t.Helper()
 	return bridgeRuntimeMessageJSON(t, sessionID, messageID, text, "user")
-}
-
-func bridgeAcceptedMessageSnapshotJSON(t *testing.T, sessionID string, messageID string, text string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"messages": []json.RawMessage{json.RawMessage(bridgeRuntimeUserMessageJSON(t, sessionID, messageID, text))},
-	})
-	if err != nil {
-		t.Fatalf("marshal accepted message snapshot: %v", err)
-	}
-	return string(raw)
 }
 
 func bridgeAcceptedMessageDeliveryPayload(t *testing.T, runtime *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, eventIDs []string, sequenceFrom int64, sequenceTo int64) string {
@@ -1366,82 +1264,6 @@ func assertRejectedSentInterAgentWriteHasNoDurableSideEffects(t *testing.T, db *
 			eventCount,
 			streamChangeCount,
 			bridgeOperationCount,
-		)
-	}
-}
-
-func assertRejectedReceivedInterAgentCommitHasNoDurableSideEffects(
-	t *testing.T,
-	db *sql.DB,
-	sessionID string,
-	targetThreadID string,
-	runtimeInputID string,
-	deliveryID string,
-) {
-	t.Helper()
-	var eventCount int
-	var messageCount int
-	var streamChangeCount int
-	var bridgeOperationCount int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT
-			(SELECT count(*)
-			   FROM session_events
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1
-			    AND session_thread_id = $2
-			    AND type = 'agent.thread_message_received'
-			    AND payload_json::jsonb ->> 'delivery_id' = $4),
-			(SELECT count(*)
-			   FROM session_messages
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1
-			    AND session_thread_id = $2),
-			(SELECT count(*)
-			   FROM session_event_stream_changes
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1),
-			(SELECT count(*)
-			   FROM session_bridge_operations
-			  WHERE workspace_id = 'default'
-			    AND session_id = $1
-			    AND (idempotency_key = $3 OR runtime_input_id = $3))`,
-		sessionID,
-		targetThreadID,
-		runtimeInputID,
-		deliveryID,
-	).Scan(&eventCount, &messageCount, &streamChangeCount, &bridgeOperationCount); err != nil {
-		t.Fatalf("read malformed received-message durable side effects for %s: %v", runtimeInputID, err)
-	}
-	if eventCount != 0 || messageCount != 0 || streamChangeCount != 0 || bridgeOperationCount != 0 {
-		t.Fatalf(
-			"malformed received-message durable rows for %s = events %d messages %d stream changes %d bridge operations %d; want all zero",
-			runtimeInputID,
-			eventCount,
-			messageCount,
-			streamChangeCount,
-			bridgeOperationCount,
-		)
-	}
-	var inboxStatus string
-	var inboxUpdatedAt string
-	var inboxCommittedAt sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status, updated_at, committed_at
-		   FROM session_runtime_inbox
-		  WHERE workspace_id = 'default'
-		    AND runtime_input_id = $1`,
-		runtimeInputID,
-	).Scan(&inboxStatus, &inboxUpdatedAt, &inboxCommittedAt); err != nil {
-		t.Fatalf("read accepted inbox after malformed received message for %s: %v", runtimeInputID, err)
-	}
-	if inboxStatus != "accepted" || inboxUpdatedAt != "2026-01-01T00:00:00Z" || inboxCommittedAt.Valid {
-		t.Fatalf(
-			"accepted inbox after malformed received message %s = status %q updated_at %q committed_at %v; want unchanged accepted row",
-			runtimeInputID,
-			inboxStatus,
-			inboxUpdatedAt,
-			inboxCommittedAt,
 		)
 	}
 }
@@ -1754,8 +1576,6 @@ func seedBridgeAPIChildFinishIdleFailureFixture(t *testing.T, db *sql.DB, suffix
 	seedBridgeAPIEvent(t, db, "default", sessionID, childThreadID, "evt_bridge_child_created_"+suffix, 1, "session.thread_created",
 		`{"type":"session.thread_created","parent_thread_id":"`+mainThreadID+`","source_tool_use_event_id":"sevt_bridge_child_spawn_`+suffix+`"}`)
 	seedBridgeAPIRuntimeBinding(t, db, "default", sessionID, "bind_bridge_child_finish_idle_"+suffix, 1, "pod_uid_child_finish_idle_"+suffix)
-	seedBridgeAPIPreparationReady(t, db, "default", sessionID, "prep_bridge_child_finish_idle_"+suffix)
-	seedBridgeAPIActiveSandbox(t, db, "default", sessionID, "2026-01-01T00:00:00Z")
 	if _, err := db.ExecContext(context.Background(),
 		`UPDATE sessions
 		    SET status = 'running'
@@ -1804,83 +1624,6 @@ func bridgeAPIChildFinishIdleFailureRequest(suffix string) *bridgev1.FinishIdleR
 				completionMailEnvelope("main", "task_"+"thr_bridge_child_finish_idle_"+suffix, "completed"),
 			),
 		},
-	}
-}
-
-func assertBridgeAPIChildFinishIdleFailedClosed(t *testing.T, db *sql.DB, suffix string) {
-	t.Helper()
-	sessionID := "sesn_bridge_child_finish_idle_" + suffix
-	childThreadID := "thr_bridge_child_finish_idle_" + suffix
-	runtimeWriteID := "rwrite_bridge_child_finish_idle_" + suffix
-	var idleEventCount int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND type IN ('session.thread_status_idle', 'session.status_idle')`, sessionID).Scan(&idleEventCount); err != nil {
-		t.Fatalf("count child idle projections after capture failure: %v", err)
-	}
-	var streamChangeCount int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_event_stream_changes c
-		   JOIN session_events e
-		     ON e.workspace_id = c.workspace_id
-		    AND e.session_id = c.session_id
-		    AND e.event_id = c.event_id
-		  WHERE e.workspace_id = 'default'
-		    AND e.session_id = $1
-		    AND e.runtime_write_id = $2`, sessionID, runtimeWriteID).Scan(&streamChangeCount); err != nil {
-		t.Fatalf("count child idle stream changes after capture failure: %v", err)
-	}
-	var operationCount int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_bridge_operations
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND session_thread_id = $2
-		    AND operation = 'finish_idle'
-		    AND idempotency_key = $3`, sessionID, childThreadID, runtimeWriteID).Scan(&operationCount); err != nil {
-		t.Fatalf("count child finish_idle operations after capture failure: %v", err)
-	}
-	var outputCaptureCount int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_output_captures
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1`, sessionID).Scan(&outputCaptureCount); err != nil {
-		t.Fatalf("count child output captures after capture failure: %v", err)
-	}
-	var childStatus string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status
-		   FROM session_threads
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND id = $2`, sessionID, childThreadID).Scan(&childStatus); err != nil {
-		t.Fatalf("read child status after capture failure: %v", err)
-	}
-	if idleEventCount != 0 || streamChangeCount != 0 || operationCount != 0 || outputCaptureCount != 0 || childStatus != "running" {
-		t.Fatalf("child capture failure state = idleEvents %d streamChanges %d operations %d outputCaptures %d status %q; want 0/0/0/0/running",
-			idleEventCount, streamChangeCount, operationCount, outputCaptureCount, childStatus)
-	}
-	var sessionStatus string
-	var mainThreadStatus string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT s.status, st.status
-		   FROM sessions s
-		   JOIN session_threads st
-		     ON st.workspace_id = s.workspace_id
-		    AND st.session_id = s.id
-		    AND st.id = s.main_thread_id
-		  WHERE s.workspace_id = 'default'
-		    AND s.id = $1`, sessionID).Scan(&sessionStatus, &mainThreadStatus); err != nil {
-		t.Fatalf("read session state after child capture failure: %v", err)
-	}
-	if sessionStatus != "running" || mainThreadStatus != "running" {
-		t.Fatalf("session/main status after child capture failure = %q/%q; want running/running", sessionStatus, mainThreadStatus)
 	}
 }
 
@@ -1981,6 +1724,36 @@ func seedBridgeAPIRuntimeBinding(t *testing.T, db *sql.DB, workspaceID string, s
 	}
 }
 
+func seedRuntimePodLostStatusFence(t *testing.T, db *sql.DB, sessionID string, bindingID string, generation int64) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_status (
+			workspace_id, session_id, status, binding_id, binding_generation, created_at, updated_at
+		) VALUES ('default', $1, 'running', $2, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		sessionID, bindingID, generation); err != nil {
+		t.Fatalf("seed runtime pod-loss status: %v", err)
+	}
+}
+
+func runtimePodLostBinding(sessionID string, bindingID string, generation int64) runtimeBindingForDelivery {
+	return runtimeBindingForDelivery{
+		BindingID:         bindingID,
+		BindingGeneration: generation,
+		Namespace:         "tetral-agent-runtime",
+		PodName:           "runtime-pod-0",
+		PodUID:            "pod_uid_" + sessionID,
+		PodIP:             "10.0.0.10",
+	}
+}
+
+func assertRuntimePodLostRetryableError(t *testing.T, err error, kind string) {
+	t.Helper()
+	var prepareErr runtimeDeliveryPrepareError
+	if !errors.As(err, &prepareErr) || prepareErr.kind != kind || !prepareErr.retryable {
+		t.Fatalf("repair error = %#v; want retryable %q", err, kind)
+	}
+}
+
 func seedBridgeAPIRuntimeInput(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, bindingID string, podUID string, eventID string) {
 	t.Helper()
 	seedBridgeAPIEvent(t, db, workspaceID, sessionID, threadID, eventID, 1, "user.message", `{"content":[{"type":"text","text":"hello"}]}`)
@@ -2010,27 +1783,12 @@ func seedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, ses
 
 func seedBridgeAPIEvent(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, eventID string, sequence int64, eventType string, payloadJSON string) {
 	t.Helper()
-	var preparationAttemptID sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT (
-		    SELECT preparation_attempt_id
-		      FROM session_preparations
-		     WHERE workspace_id = $1
-		       AND session_id = $2
-		     ORDER BY created_at DESC, preparation_attempt_id DESC
-		     LIMIT 1
-		)`,
-		workspaceID,
-		sessionID,
-	).Scan(&preparationAttemptID); err != nil {
-		t.Fatalf("read bridge api event birth: %v", err)
-	}
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			preparation_attempt_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID, sessionID, threadID, eventID, sequence, eventType, payloadJSON, preparationAttemptID); err != nil {
+			workspace_id, session_id, session_thread_id, event_id, sequence, type,
+			payload_json, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		workspaceID, sessionID, threadID, eventID, sequence, eventType, payloadJSON); err != nil {
 		t.Fatalf("seed bridge api event: %v", err)
 	}
 }
@@ -2077,7 +1835,7 @@ func seedBridgeAPIBackgroundTask(t *testing.T, db *sql.DB, workspaceID string, s
 			workspace_id, session_id, session_thread_id, task_id, source_tool_use_event_id,
 			binding_id, sandbox_id, provider_session_id, provider_command_id,
 			provider_command_metadata_json, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'provider_session_notify', 'provider_command_notify', '{}', 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, 'provider_session_notify', 'provider_command_notify', '{}', 'running', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID, sessionID, threadID, taskID, sourceToolUseEventID, bindingID, "sandbox_"+sessionID); err != nil {
 		t.Fatalf("seed background task: %v", err)
 	}
@@ -2206,25 +1964,6 @@ func seedBridgeAPIWritableMemoryStore(t *testing.T, db *sql.DB, workspaceID stri
 	}
 }
 
-func seedBridgeAPIMemoryStoreBinding(t *testing.T, db *sql.DB, workspaceID string, sessionID string, storeID string, access string, mountPath string) {
-	t.Helper()
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
-	resourceID := "res_" + strings.TrimPrefix(storeID, "memstore_") + "_" + strings.ReplaceAll(access, "_", "") + "_" + strings.Trim(strings.ReplaceAll(mountPath, "/", "_"), "_")
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_resources (workspace_id, session_id, resource_id, type, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'memory_store', $4, $4)`,
-		workspaceID, sessionID, resourceID, now); err != nil {
-		t.Fatalf("seed extra memory session resource: %v", err)
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_memory_store_resources (
-			workspace_id, session_id, resource_id, memory_store_id, access, name, mount_path
-		) VALUES ($1, $2, $3, $4, $5, 'memory', $6)`,
-		workspaceID, sessionID, resourceID, storeID, access, mountPath); err != nil {
-		t.Fatalf("seed extra memory resource binding: %v", err)
-	}
-}
-
 func seedBridgeAPIDetachedMemoryStoreBinding(t *testing.T, db *sql.DB, workspaceID string, sessionID string, storeID string, access string, mountPath string) {
 	t.Helper()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
@@ -2248,21 +1987,6 @@ func seedBridgeAPIDetachedMemoryStoreBinding(t *testing.T, db *sql.DB, workspace
 		) VALUES ($1, $2, $3, $4, $5, 'memory', $6)`,
 		workspaceID, sessionID, resourceID, storeID, access, mountPath); err != nil {
 		t.Fatalf("seed detached memory resource binding: %v", err)
-	}
-}
-
-func seedBridgeAPIFileSessionResource(t *testing.T, db *sql.DB, workspaceID string, sessionID string, resourceID string) {
-	t.Helper()
-	now := "2026-01-01T00:00:00Z"
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_resources (workspace_id, session_id, resource_id, type, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'file', $4, $4)`,
-		workspaceID,
-		sessionID,
-		resourceID,
-		now,
-	); err != nil {
-		t.Fatalf("seed file session resource: %v", err)
 	}
 }
 
@@ -2399,149 +2123,6 @@ func assertNoBridgeAPIRuntimeToolResult(t *testing.T, db *sql.DB, sessionID stri
 	}
 }
 
-func seedBridgeAPIPreparationReady(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string) {
-	t.Helper()
-	environmentID := "env_" + sessionID
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id, environment_generation,
-			sandbox_id, status, created_at, updated_at, ready_at
-		) VALUES ($1, $2, $3, $4, 1, $5, 'ready', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID, sessionID, preparationID, environmentID, "sandbox_"+sessionID); err != nil {
-		t.Fatalf("seed ready preparation: %v", err)
-	}
-}
-
-func seedBridgeAPIPreparationFailed(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string, failureReason string) {
-	t.Helper()
-	environmentID := "env_" + sessionID
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id, environment_generation,
-			sandbox_id, status, failure_stage, last_error_kind, failure_reason, retryable,
-			created_at, updated_at, failed_at
-		) VALUES ($1, $2, $3, $4, 1, $5, 'failed', 'resource_preparation', $6, $6, false,
-			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID, sessionID, preparationID, environmentID, "sandbox_"+sessionID, failureReason); err != nil {
-		t.Fatalf("seed failed preparation: %v", err)
-	}
-}
-
-func seedBridgeAPIResourceCredentialExpiresAt(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string, expiresAt string) {
-	t.Helper()
-	result, err := db.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET resource_cred_expires_at = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		workspaceID, sessionID, preparationID, expiresAt,
-	)
-	if err != nil {
-		t.Fatalf("seed resource credential expiry: %v", err)
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		t.Fatalf("seed resource credential expiry affected %d rows; want 1", affected)
-	}
-}
-
-func seedBridgeAPIResourceRootsJSON(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string, rootsJSON string) {
-	t.Helper()
-	result, err := db.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET resource_roots_json = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		workspaceID, sessionID, preparationID, rootsJSON,
-	)
-	if err != nil {
-		t.Fatalf("seed resource roots json: %v", err)
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		t.Fatalf("seed resource roots json affected %d rows; want 1", affected)
-	}
-}
-
-func seedBridgeAPIActiveSandbox(t *testing.T, db *sql.DB, workspaceID string, sessionID string, refreshedAt string) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO sandboxes (
-			workspace_id, id, session_id, status, provider, provider_sandbox_id,
-			machine_was_usable, created_at, updated_at, status_refreshed_at
-		) VALUES ($1, $2, $3, 'active', 'tetral', $4, TRUE, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', $5)`,
-		workspaceID, "sandbox_"+sessionID, sessionID, "provider_"+sessionID, refreshedAt); err != nil {
-		t.Fatalf("seed active sandbox: %v", err)
-	}
-}
-
-func setBridgeAPISandboxStatus(t *testing.T, db *sql.DB, workspaceID string, sessionID string, status string) {
-	t.Helper()
-	result, err := db.ExecContext(context.Background(),
-		`UPDATE sandboxes
-		    SET status = $3
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		workspaceID,
-		sessionID,
-		status,
-	)
-	if err != nil {
-		t.Fatalf("set sandbox status %s: %v", status, err)
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		t.Fatalf("set sandbox status %s affected %d rows; want 1", status, affected)
-	}
-}
-
-type beforePutBlobStore struct {
-	inner     blob.BlobStore
-	beforePut func(key string)
-}
-
-type failDeleteBlobStore struct {
-	inner     blob.BlobStore
-	mu        sync.Mutex
-	remaining int
-}
-
-func (s *failDeleteBlobStore) allowDeletes() {
-	s.mu.Lock()
-	s.remaining = 0
-	s.mu.Unlock()
-}
-
-func (s *failDeleteBlobStore) Put(ctx context.Context, key string, content io.Reader, size int64) error {
-	return s.inner.Put(ctx, key, content, size)
-}
-
-func (s *failDeleteBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	return s.inner.Get(ctx, key)
-}
-
-func (s *failDeleteBlobStore) HeadObject(ctx context.Context, key string) (blob.ObjectMetadata, error) {
-	return s.inner.HeadObject(ctx, key)
-}
-
-func (s *failDeleteBlobStore) CopyObject(ctx context.Context, sourceKey string, destinationKey string) error {
-	return s.inner.CopyObject(ctx, sourceKey, destinationKey)
-}
-
-func (s *failDeleteBlobStore) Delete(ctx context.Context, key string) error {
-	s.mu.Lock()
-	if s.remaining > 0 {
-		s.remaining--
-		s.mu.Unlock()
-		return errors.New("injected loser delete failure")
-	}
-	s.mu.Unlock()
-	return s.inner.Delete(ctx, key)
-}
-
-func (s *failDeleteBlobStore) DeletePrefix(ctx context.Context, prefix string) error {
-	return s.inner.DeletePrefix(ctx, prefix)
-}
-
 type countingGetBlobStore struct {
 	inner    blob.BlobStore
 	getCalls int
@@ -2570,65 +2151,6 @@ func (s *countingGetBlobStore) Delete(ctx context.Context, key string) error {
 
 func (s *countingGetBlobStore) DeletePrefix(ctx context.Context, prefix string) error {
 	return s.inner.DeletePrefix(ctx, prefix)
-}
-
-func (s *beforePutBlobStore) Put(ctx context.Context, key string, content io.Reader, size int64) error {
-	if s.beforePut != nil {
-		s.beforePut(key)
-	}
-	return s.inner.Put(ctx, key, content, size)
-}
-
-func (s *beforePutBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	return s.inner.Get(ctx, key)
-}
-
-func (s *beforePutBlobStore) HeadObject(ctx context.Context, key string) (blob.ObjectMetadata, error) {
-	return s.inner.HeadObject(ctx, key)
-}
-
-func (s *beforePutBlobStore) CopyObject(ctx context.Context, sourceKey string, destinationKey string) error {
-	return s.inner.CopyObject(ctx, sourceKey, destinationKey)
-}
-
-func (s *beforePutBlobStore) Delete(ctx context.Context, key string) error {
-	return s.inner.Delete(ctx, key)
-}
-
-func (s *beforePutBlobStore) DeletePrefix(ctx context.Context, prefix string) error {
-	return s.inner.DeletePrefix(ctx, prefix)
-}
-
-func waitForSignal(t *testing.T, ch <-chan struct{}, description string) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("timed out waiting for %s", description)
-	}
-}
-
-type recordingSandboxReleaseClient struct {
-	requests      []SandboxReleaseRequest
-	result        SandboxReleaseResult
-	err           error
-	beforeRelease func(SandboxReleaseRequest) error
-}
-
-func (c *recordingSandboxReleaseClient) ReleaseSandbox(_ context.Context, request SandboxReleaseRequest) (SandboxReleaseResult, error) {
-	c.requests = append(c.requests, request)
-	if c.beforeRelease != nil {
-		if err := c.beforeRelease(request); err != nil {
-			return SandboxReleaseResult{}, err
-		}
-	}
-	if c.err != nil {
-		return SandboxReleaseResult{}, c.err
-	}
-	if c.result.Status == "" {
-		return SandboxReleaseResult{Status: SandboxReleaseReleased, SandboxStatus: "released"}, nil
-	}
-	return c.result, nil
 }
 
 type recordingRuntimeTargetResolver struct {
@@ -2689,15 +2211,14 @@ func assertRuntimeInputRepairQueueJob(t *testing.T, db *sql.DB, workspaceID stri
 		t.Fatalf("runtime input repair queue state = %s priority %d; want pending priority %d", statusValue, priorityValue, priority)
 	}
 	var parsed struct {
-		WorkspaceID          string   `json:"workspace_id"`
-		SessionID            string   `json:"session_id"`
-		SessionThreadID      string   `json:"session_thread_id"`
-		RuntimeInputID       string   `json:"runtime_input_id"`
-		EventIDs             []string `json:"event_ids"`
-		SequenceFrom         int64    `json:"sequence_from"`
-		SequenceTo           int64    `json:"sequence_to"`
-		InputKind            string   `json:"input_kind"`
-		PreparationAttemptID string   `json:"preparation_attempt_id"`
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+		InputKind       string   `json:"input_kind"`
 	}
 	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
 		t.Fatalf("parse runtime input repair payload: %v", err)
@@ -2709,7 +2230,6 @@ func assertRuntimeInputRepairQueueJob(t *testing.T, db *sql.DB, workspaceID stri
 		parsed.SequenceFrom != sequenceFrom ||
 		parsed.SequenceTo != sequenceTo ||
 		parsed.InputKind != inputKind ||
-		parsed.PreparationAttemptID == "" ||
 		len(parsed.EventIDs) != len(eventIDs) {
 		t.Fatalf("runtime input repair payload = %s; want canonical runtime input identity", payload)
 	}
@@ -2877,39 +2397,6 @@ func assertMemoryPathConflictResult(t *testing.T, raw string, wantConflicts []me
 	}
 }
 
-func assertMemoryProjectionRefreshed(t *testing.T, raw string, want bool) {
-	t.Helper()
-	var payload struct {
-		ProjectionRefreshed bool `json:"projection_refreshed"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("result JSON %q: %v", raw, err)
-	}
-	if payload.ProjectionRefreshed != want {
-		t.Fatalf("projection_refreshed = %v; want %v in %s", payload.ProjectionRefreshed, want, raw)
-	}
-}
-
-func assertRuntimeToolErrorCode(t *testing.T, raw string, want string) {
-	t.Helper()
-	assertRuntimeToolErrorCodeWithRetryable(t, raw, want, true)
-}
-
-func assertRuntimeToolErrorCodeWithRetryable(t *testing.T, raw string, want string, retryable bool) {
-	t.Helper()
-	var payload struct {
-		Status    string `json:"status"`
-		ErrorCode string `json:"error_code"`
-		Retryable bool   `json:"retryable"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		t.Fatalf("result JSON %q: %v", raw, err)
-	}
-	if payload.Status != "runtime_error" || payload.ErrorCode != want || payload.Retryable != retryable {
-		t.Fatalf("tool result = status %q error %q retryable %v; want runtime_error/%s retryable=%v in %s", payload.Status, payload.ErrorCode, payload.Retryable, want, retryable, raw)
-	}
-}
-
 func assertToolResultRuntimeMessage(t *testing.T, raw string, wantCallID string, wantName string, wantToolUseEventID string, wantState string, wantOutput string) {
 	t.Helper()
 	var message struct {
@@ -2965,47 +2452,6 @@ func assertNoRuntimeToolResult(t *testing.T, db *sql.DB, sessionID string, toolU
 	}
 	if count != 0 {
 		t.Fatalf("runtime tool result count for %s/%s = %d; want none", sessionID, toolUseEventID, count)
-	}
-}
-
-func assertStoredMemoryResultStatus(t *testing.T, db *sql.DB, sessionID string, toolUseEventID string, want string) {
-	t.Helper()
-	assertMemoryResultStatus(t, storedMemoryResultJSON(t, db, sessionID, toolUseEventID), want)
-}
-
-func storedMemoryResultJSON(t *testing.T, db *sql.DB, sessionID string, toolUseEventID string) string {
-	t.Helper()
-	var resultJSON string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT result_json
-		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND tool_use_event_id = $2`,
-		sessionID,
-		toolUseEventID,
-	).Scan(&resultJSON); err != nil {
-		t.Fatalf("read stored memory result: %v", err)
-	}
-	return resultJSON
-}
-
-func assertMemoryProjectionState(t *testing.T, db *sql.DB, sessionID string, toolUseEventID string, want string) {
-	t.Helper()
-	var state sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT memory_projection_state
-		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND tool_use_event_id = $2`,
-		sessionID,
-		toolUseEventID,
-	).Scan(&state); err != nil {
-		t.Fatalf("read memory projection state: %v", err)
-	}
-	if !state.Valid || state.String != want {
-		t.Fatalf("memory projection state = %v; want %q", state, want)
 	}
 }
 
@@ -3105,175 +2551,6 @@ func assertMemoryCurrentPathContentAndOperation(t *testing.T, db *sql.DB, storeI
 	}
 	if pathValue != wantPath || content != wantContent || operation != wantOperation {
 		t.Fatalf("memory %s path/content/operation = %q/%q/%q; want %q/%q/%q", memoryID, pathValue, content, operation, wantPath, wantContent, wantOperation)
-	}
-}
-
-func equalStringSlices(got []string, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for index := range got {
-		if got[index] != want[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func assertBridgeResourceStillAttached(t *testing.T, db *sql.DB, sessionID string, resourceID string) {
-	t.Helper()
-	var detachedAt sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT detached_at
-		   FROM session_resources
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1
-		    AND resource_id = $2`,
-		sessionID,
-		resourceID,
-	).Scan(&detachedAt); err != nil {
-		t.Fatalf("read detached resource: %v", err)
-	}
-	if detachedAt.Valid {
-		t.Fatalf("resource %s detached_at = %v; want ordinary idle cleanup to keep session resource attached", resourceID, detachedAt)
-	}
-}
-
-func assertBridgeResourcePrefixGCMarkerAbsent(t *testing.T, db *sql.DB, sessionID string) {
-	t.Helper()
-	var count int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_resource_prefix_gc
-		  WHERE workspace_id = 'default'
-		    AND session_id = $1`,
-		sessionID,
-	).Scan(&count); err != nil {
-		t.Fatalf("read resource prefix gc marker: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("resource prefix gc marker count after ordinary idle cleanup = %d; want none", count)
-	}
-}
-
-func assertSessionPrepareRequeued(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string) {
-	t.Helper()
-	assertSessionPrepareRequeuedWithCredentialExpiry(t, db, workspaceID, sessionID, preparationID, "")
-}
-
-func assertSessionPrepareRequeuedForCredentialRotation(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string) {
-	t.Helper()
-	assertSessionPrepareRequeuedWithCredentialExpiry(t, db, workspaceID, sessionID, preparationID, "")
-}
-
-func assertSessionPrepareRequeuedPreservingCredential(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string, wantExpiresAt string) {
-	t.Helper()
-	assertSessionPrepareRequeuedWithCredentialExpiry(t, db, workspaceID, sessionID, preparationID, wantExpiresAt)
-}
-
-func assertSessionPrepareRequeuedWithCredentialExpiry(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string, wantExpiresAt string) {
-	t.Helper()
-	var latestPreparationID string
-	var status string
-	var readyAt sql.NullString
-	var resourceCredExpiresAt sql.NullString
-	var resourceRootsJSON sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT preparation_attempt_id, status, ready_at, resource_cred_expires_at, resource_roots_json
-			   FROM session_preparations
-			  WHERE workspace_id = $1 AND session_id = $2 AND superseded_at IS NULL
-			  ORDER BY created_at DESC, preparation_attempt_id DESC
-			  LIMIT 1`,
-		workspaceID, sessionID,
-	).Scan(&latestPreparationID, &status, &readyAt, &resourceCredExpiresAt, &resourceRootsJSON); err != nil {
-		t.Fatalf("read preparation after stale requeue: %v", err)
-	}
-	if latestPreparationID == preparationID {
-		t.Fatalf("latest preparation attempt = %q; want fresh attempt superseding %q", latestPreparationID, preparationID)
-	}
-	var supersededAt sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT superseded_at
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		workspaceID,
-		sessionID,
-		preparationID,
-	).Scan(&supersededAt); err != nil {
-		t.Fatalf("read superseded preparation: %v", err)
-	}
-	if !supersededAt.Valid || supersededAt.String == "" {
-		t.Fatalf("old preparation superseded_at = %v; want non-null", supersededAt)
-	}
-	if status != "pending" || readyAt.Valid || resourceRootsJSON.Valid {
-		t.Fatalf("preparation status=%q ready_at=%v resource_cred_expires_at=%v resource_roots_json=%v; want pending without ready metadata", status, readyAt, resourceCredExpiresAt, resourceRootsJSON)
-	}
-	if wantExpiresAt == "" {
-		if resourceCredExpiresAt.Valid {
-			t.Fatalf("resource_cred_expires_at = %v; want NULL after requeue", resourceCredExpiresAt)
-		}
-	} else if !resourceCredExpiresAt.Valid || resourceCredExpiresAt.String != wantExpiresAt {
-		t.Fatalf("resource_cred_expires_at = %v; want preserved credential expiry %q", resourceCredExpiresAt, wantExpiresAt)
-	}
-	var payload string
-	var queueStatus string
-	var maxAttempts int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT payload_json, status, max_attempts
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND dedupe_key = $3
-		    AND status = 'pending'`,
-		workspaceID,
-		queue.KindSessionPrepare,
-		queue.FormatSessionPrepareDedupeKey(workspace.ID(workspaceID), sessionID, latestPreparationID),
-	).Scan(&payload, &queueStatus, &maxAttempts); err != nil {
-		t.Fatalf("read requeued session_prepare job: %v", err)
-	}
-	if queueStatus != "pending" || !strings.Contains(payload, latestPreparationID) || !strings.Contains(payload, sessionID) {
-		t.Fatalf("session_prepare job status=%q payload=%s; want pending payload for preparation", queueStatus, payload)
-	}
-	if strings.Contains(payload, "rotate_resource_credential") {
-		t.Fatalf("session_prepare payload contains forbidden rotate control field: %s", payload)
-	}
-	if maxAttempts != queue.DefaultMaxAttempts {
-		t.Fatalf("session_prepare max_attempts = %d; want preserved fixed budget %d", maxAttempts, queue.DefaultMaxAttempts)
-	}
-}
-
-func assertSessionPreparationReady(t *testing.T, db *sql.DB, workspaceID string, sessionID string, preparationID string) {
-	t.Helper()
-	var status string
-	var readyAt sql.NullString
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status, ready_at
-		   FROM session_preparations
-		  WHERE workspace_id = $1 AND session_id = $2 AND preparation_attempt_id = $3`,
-		workspaceID, sessionID, preparationID,
-	).Scan(&status, &readyAt); err != nil {
-		t.Fatalf("read preparation ready state: %v", err)
-	}
-	if status != "ready" || !readyAt.Valid {
-		t.Fatalf("preparation status=%q ready_at=%v; want ready with ready_at", status, readyAt)
-	}
-	var prepareJobs int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND dedupe_key = $3`,
-		workspaceID,
-		queue.KindSessionPrepare,
-		queue.FormatSessionPrepareDedupeKey(workspace.ID(workspaceID), sessionID, preparationID),
-	).Scan(&prepareJobs); err != nil {
-		t.Fatalf("count session_prepare jobs: %v", err)
-	}
-	if prepareJobs != 0 {
-		t.Fatalf("session_prepare jobs = %d; want none", prepareJobs)
 	}
 }
 

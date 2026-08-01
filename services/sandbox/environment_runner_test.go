@@ -9,17 +9,19 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/sandbox"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 func TestEnvironmentBuildRunnerMarksReadyEnqueuesFanoutAndAcks(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{environmentBuildQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentBuildQueueJob()}}
 	store := &recordingEnvironmentBuildStore{
 		input: EnvironmentArtifactBuildInput{
 			WorkspaceID:        workspace.ID("ws_env"),
 			EnvironmentID:      "env_build",
 			Generation:         7,
+			Provider:           sandboxdriver.DaytonaProviderName,
 			ArtifactInputHash:  "hash_packages",
 			NormalizedPackages: sandbox.PackageSetup{"pip": []string{"pandas==2.2.0"}},
 		},
@@ -27,11 +29,11 @@ func TestEnvironmentBuildRunnerMarksReadyEnqueuesFanoutAndAcks(t *testing.T) {
 	}
 	builder := &recordingArtifactBuilder{result: sandbox.BuildArtifactResult{ProviderArtifactRef: "snapshot_ref"}}
 	runner := &EnvironmentBuildJobRunner{
-		Queue:   queueClient,
-		Store:   store,
-		Builder: builder,
-		Config:  EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-		Clock:   fixedEnvironmentRunnerClock,
+		Queue:     queueClient,
+		Store:     store,
+		Providers: artifactProviderRegistry(t, builder),
+		Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Clock:     fixedEnvironmentRunnerClock,
 	}
 
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -64,6 +66,16 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 			wantTransition:  "retry:qjob_env_build:unavailable",
 		},
 		{
+			name: "explicit create rejection rearms authorization",
+			job:  environmentBuildQueueJob(),
+			err: sandboxdriver.MarkProviderOperationNotSubmitted(&sandbox.ProviderError{
+				Provider: "daytona", Stage: sandbox.StageBuildArtifact, Kind: sandbox.ProviderErrorUnavailable,
+				Retryable: true, SafeMessage: "temporarily unavailable",
+			}),
+			wantStoreSuffix: "retryable:unavailable:rearm-create",
+			wantTransition:  "retry:qjob_env_build:unavailable",
+		},
+		{
 			name: "retryable exhausted",
 			job: func() *queuev1.QueueJob {
 				job := environmentBuildQueueJob()
@@ -84,14 +96,15 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{tc.job}}
-			store := &recordingEnvironmentBuildStore{input: EnvironmentArtifactBuildInput{WorkspaceID: workspace.ID("ws_env"), EnvironmentID: "env_build", Generation: 7}, claimed: true}
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{tc.job}}
+			store := &recordingEnvironmentBuildStore{input: EnvironmentArtifactBuildInput{WorkspaceID: workspace.ID("ws_env"), EnvironmentID: "env_build", Generation: 7, Provider: sandboxdriver.DaytonaProviderName}, claimed: true}
+			builder := &recordingArtifactBuilder{err: tc.err}
 			runner := &EnvironmentBuildJobRunner{
-				Queue:   queueClient,
-				Store:   store,
-				Builder: &recordingArtifactBuilder{err: tc.err},
-				Config:  EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-				Clock:   fixedEnvironmentRunnerClock,
+				Queue:     queueClient,
+				Store:     store,
+				Providers: artifactProviderRegistry(t, builder),
+				Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+				Clock:     fixedEnvironmentRunnerClock,
 			}
 
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -117,20 +130,20 @@ func TestEnvironmentBuildRunnerLeaseLossCancelsBuildWithoutDurableOutcome(t *tes
 		{name: "transport error", err: errors.New("queue unavailable")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{
+			queueClient := &recordingSandboxQueue{
 				leased:        []*queuev1.QueueJob{environmentBuildQueueJob()},
 				heartbeatLost: tc.lost,
 				heartbeatErr:  tc.err,
 			}
 			store := &recordingEnvironmentBuildStore{
-				input:   EnvironmentArtifactBuildInput{WorkspaceID: workspace.ID("ws_env"), EnvironmentID: "env_build", Generation: 7},
+				input:   EnvironmentArtifactBuildInput{WorkspaceID: workspace.ID("ws_env"), EnvironmentID: "env_build", Generation: 7, Provider: sandboxdriver.DaytonaProviderName},
 				claimed: true,
 			}
 			builder := &recordingArtifactBuilder{block: make(chan struct{}), cancelled: make(chan struct{})}
 			runner := &EnvironmentBuildJobRunner{
-				Queue:   queueClient,
-				Store:   store,
-				Builder: builder,
+				Queue:     queueClient,
+				Store:     store,
+				Providers: artifactProviderRegistry(t, builder),
 				Config: EnvironmentRunnerConfig{
 					WorkspaceID:       "ws_env",
 					LeaseDuration:     100 * time.Millisecond,
@@ -158,7 +171,7 @@ func TestEnvironmentBuildRunnerLeaseLossCancelsBuildWithoutDurableOutcome(t *tes
 }
 
 func TestEnvironmentReadyFanoutRunnerAcksAfterDurableFanout(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{environmentReadyFanoutQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentReadyFanoutQueueJob()}}
 	store := &recordingEnvironmentFanoutStore{advanced: 2}
 	runner := &EnvironmentReadyFanoutJobRunner{
 		Queue:  queueClient,
@@ -179,7 +192,7 @@ func TestEnvironmentReadyFanoutRunnerAcksAfterDurableFanout(t *testing.T) {
 }
 
 func TestEnvironmentReadyFanoutRunnerRetriesStoreError(t *testing.T) {
-	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{environmentReadyFanoutQueueJob()}}
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentReadyFanoutQueueJob()}}
 	runner := &EnvironmentReadyFanoutJobRunner{
 		Queue:  queueClient,
 		Store:  &recordingEnvironmentFanoutStore{err: errors.New("database unavailable")},
@@ -195,35 +208,25 @@ func TestEnvironmentReadyFanoutRunnerRetriesStoreError(t *testing.T) {
 	}
 }
 
-func TestEnvironmentFailedFanoutRunnerSettlesQueueFromStoreOutcome(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		storeErr       error
-		wantTransition string
-	}{
-		{name: "ack after durable fanout", wantTransition: "ack:qjob_env_failed_fanout"},
-		{name: "retry store failure", storeErr: errors.New("database unavailable"), wantTransition: "retry:qjob_env_failed_fanout:environment_failed_fanout_error"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{environmentFailedFanoutQueueJob()}}
-			store := &recordingEnvironmentFailedFanoutStore{err: tc.storeErr}
-			runner := &EnvironmentFailedFanoutJobRunner{
-				Queue:  queueClient,
-				Store:  store,
-				Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
-				Clock:  fixedEnvironmentRunnerClock,
-			}
-
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			if !reflect.DeepEqual(queueClient.transitions, []string{tc.wantTransition}) {
-				t.Fatalf("transitions = %v; want %s", queueClient.transitions, tc.wantTransition)
-			}
-			if !reflect.DeepEqual(store.calls, []string{"fanout:env_build:7"}) {
-				t.Fatalf("fanout calls = %v; want failed-environment fanout", store.calls)
-			}
-		})
+func TestEnvironmentReadyFanoutRunnerFinalizesWaitingActivationsAtExhaustion(t *testing.T) {
+	job := environmentReadyFanoutQueueJob()
+	job.AttemptCount = 3
+	job.MaxAttempts = 3
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+	store := &recordingEnvironmentFanoutStore{err: errors.New("database unavailable")}
+	runner := &EnvironmentReadyFanoutJobRunner{
+		Queue: queueClient, Store: store,
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"fanout:env_build:7", "finalize:env_build:7"}) {
+		t.Fatalf("store calls = %v; want fanout then dependency finalization", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_fanout:environment_ready_fanout_attempts_exhausted"}) {
+		t.Fatalf("transitions = %v; want named dead letter", queueClient.transitions)
 	}
 }
 
@@ -237,7 +240,7 @@ func TestEnvironmentReadyFanoutRunnerLeaseLossCancelsFanoutWithoutQueueTransitio
 		{name: "transport error", err: errors.New("queue unavailable")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			queueClient := &recordingSessionPrepareQueue{
+			queueClient := &recordingSandboxQueue{
 				leased:        []*queuev1.QueueJob{environmentReadyFanoutQueueJob()},
 				heartbeatLost: tc.lost,
 				heartbeatErr:  tc.err,
@@ -274,11 +277,12 @@ func TestEnvironmentReadyFanoutRunnerLeaseLossCancelsFanoutWithoutQueueTransitio
 
 func environmentBuildQueueJob() *queuev1.QueueJob {
 	return &queuev1.QueueJob{
-		Id:          "qjob_env_build",
-		WorkspaceId: "ws_env",
-		Kind:        "environment_build",
-		LeaseToken:  "lease_env_build",
-		PayloadJson: `{"workspace_id":"ws_env","environment_id":"env_build","generation":"7"}`,
+		Id:           "qjob_env_build",
+		WorkspaceId:  "ws_env",
+		Kind:         "environment_build",
+		LeaseToken:   "lease_env_build",
+		AttemptCount: 1,
+		PayloadJson:  `{"workspace_id":"ws_env","environment_id":"env_build","generation":"7"}`,
 	}
 }
 
@@ -292,24 +296,39 @@ func environmentReadyFanoutQueueJob() *queuev1.QueueJob {
 	}
 }
 
-func environmentFailedFanoutQueueJob() *queuev1.QueueJob {
-	return &queuev1.QueueJob{
-		Id:          "qjob_env_failed_fanout",
-		WorkspaceId: "ws_env",
-		Kind:        "environment_failed_fanout",
-		LeaseToken:  "lease_env_failed_fanout",
-		PayloadJson: `{"workspace_id":"ws_env","environment_id":"env_build","generation":"7"}`,
-	}
-}
-
 func fixedEnvironmentRunnerClock() time.Time {
 	return time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
+}
+
+func artifactProviderRegistry(t *testing.T, builder EnvironmentArtifactAdapter) *ProviderRegistry {
+	t.Helper()
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: &recordingEnvironmentProviderAdapter{builder: builder},
+	})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	return registry
+}
+
+type recordingEnvironmentProviderAdapter struct {
+	recordingProviderAdapter
+	builder EnvironmentArtifactAdapter
+}
+
+func (a *recordingEnvironmentProviderAdapter) EnvironmentArtifactAdapter() EnvironmentArtifactAdapter {
+	return a.builder
 }
 
 type recordingEnvironmentBuildStore struct {
 	input   EnvironmentArtifactBuildInput
 	claimed bool
 	calls   []string
+}
+
+func (s *recordingEnvironmentBuildStore) AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error) {
+	s.calls = append(s.calls, "authorize-create")
+	return true, nil
 }
 
 func (s *recordingEnvironmentBuildStore) ClaimEnvironmentBuild(context.Context, EnvironmentBuildJob, time.Time) (EnvironmentArtifactBuildInput, bool, error) {
@@ -322,8 +341,12 @@ func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildReady(_ context.Con
 	return nil
 }
 
-func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildRetryableFailure(_ context.Context, _ EnvironmentBuildJob, failure EnvironmentArtifactFailure, _ time.Time) error {
-	s.calls = append(s.calls, "retryable:"+failure.LastErrorKind)
+func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildRetryableFailure(_ context.Context, _ EnvironmentBuildJob, failure EnvironmentArtifactFailure, rearmCreate bool, _ time.Time) error {
+	call := "retryable:" + failure.LastErrorKind
+	if rearmCreate {
+		call += ":rearm-create"
+	}
+	s.calls = append(s.calls, call)
 	return nil
 }
 
@@ -355,6 +378,18 @@ func (b *recordingArtifactBuilder) BuildArtifact(ctx context.Context, request sa
 	return b.result, b.err
 }
 
+func (b *recordingArtifactBuilder) BuildEnvironmentArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) ProviderOutcome[sandbox.BuildArtifactResult] {
+	result, err := b.BuildArtifact(ctx, request)
+	if err == nil {
+		return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}
+	}
+	boundary := ProviderSubmitted
+	if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
+		boundary = ProviderProvedNotStarted
+	}
+	return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary)
+}
+
 type recordingEnvironmentFanoutStore struct {
 	advanced  int
 	err       error
@@ -363,14 +398,9 @@ type recordingEnvironmentFanoutStore struct {
 	cancelled chan struct{}
 }
 
-type recordingEnvironmentFailedFanoutStore struct {
-	err   error
-	calls []string
-}
-
-func (s *recordingEnvironmentFailedFanoutStore) FanoutFailedEnvironment(_ context.Context, job EnvironmentFailedFanoutJob, _ time.Time) (int, error) {
-	s.calls = append(s.calls, "fanout:"+job.EnvironmentID+":"+strconvInt64(job.Generation))
-	return 1, s.err
+func (s *recordingEnvironmentFanoutStore) FinalizeReadyEnvironmentFanout(_ context.Context, job EnvironmentReadyFanoutJob, _ time.Time) error {
+	s.calls = append(s.calls, "finalize:"+job.EnvironmentID+":"+strconvInt64(job.Generation))
+	return nil
 }
 
 func (s *recordingEnvironmentFanoutStore) FanoutReadyEnvironment(ctx context.Context, job EnvironmentReadyFanoutJob, _ time.Time) (int, error) {

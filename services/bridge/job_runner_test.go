@@ -55,7 +55,7 @@ func TestDecodeRuntimeInputJobAcceptsEventlessAgentMail(t *testing.T) {
 		WorkspaceId: "ws_bridge",
 		Kind:        "runtime_input",
 		LeaseToken:  "qlt_agent_mail",
-		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_agent_mail","session_thread_id":"thr_agent_mail_main","runtime_input_id":"agent_mail:delivery_1","preparation_attempt_id":"prep_agent_mail","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`,
+		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_agent_mail","session_thread_id":"thr_agent_mail_main","runtime_input_id":"agent_mail:delivery_1","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"agent_mail"}`,
 	})
 	if err != nil {
 		t.Fatalf("DecodeRuntimeJob agent_mail: %v", err)
@@ -558,43 +558,6 @@ func TestJobRunnerCancelsPendingMessagesBeforeInterruptDelivery(t *testing.T) {
 	}
 }
 
-func TestJobRunnerFencedPreparationFailureInterruptStillCancelsSiblingMessages(t *testing.T) {
-	job := runtimeInterruptQueueJob()
-	steps := []string{}
-	queueClient := &recordingQueueClient{
-		leased: []*queuev1.QueueJob{job},
-		steps:  &steps,
-	}
-	deliverer := &recordingDeliverer{
-		result:        RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
-		sealedAttempt: "prep_failed",
-		steps:         &steps,
-	}
-	runner := &JobRunner{
-		Queue:      queueClient,
-		Workspaces: staticWorkspaceLister{"ws_bridge"},
-		Deliverer:  deliverer,
-	}
-
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if len(deliverer.jobs) != 1 || deliverer.jobs[0].SealedPreparationAttemptID != "prep_failed" {
-		t.Fatalf("delivered jobs = %+v; want fenced settlement interrupt", deliverer.jobs)
-	}
-	if !reflect.DeepEqual(queueClient.transitions, []string{"cancel:sesn_1:thr_1:9", "ack:qjob_interrupt"}) {
-		t.Fatalf("queue transitions = %v; want unconditional sibling-message cancellation before settle-only ack", queueClient.transitions)
-	}
-	if !reflect.DeepEqual(steps, []string{
-		"cancel",
-		"replay:qjob_interrupt",
-		"deliver:qjob_interrupt",
-		"ack:qjob_interrupt",
-	}) {
-		t.Fatalf("steps = %v; want cancel before replay, delivery, settlement, and ack", steps)
-	}
-}
-
 func TestJobRunnerInterruptReplayStillCancelsSiblingMessagesFirst(t *testing.T) {
 	steps := []string{}
 	queueClient := &recordingQueueClient{
@@ -647,7 +610,8 @@ func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.
 		},
 		{
 			Id: "qjob_delete_cleanup", WorkspaceId: "ws_bridge", Kind: "session_delete_cleanup", LeaseToken: "lease_delete_cleanup",
-			PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","delete_cleanup_id":"delcln_1"}`,
+			PayloadJson:  `{"workspace_id":"ws_bridge","session_id":"sesn_1","delete_cleanup_id":"delcln_1"}`,
+			AttemptCount: 2, MaxAttempts: 5,
 		},
 	}}
 	deliverer := &recordingDeliverer{result: RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}}
@@ -670,7 +634,8 @@ func TestJobRunnerHandlesRuntimeConfigAndCleanupAsSeparateQueueKinds(t *testing.
 		deliverer.jobs[1].CleanupJobID != "cleanup_1" {
 		t.Fatalf("cleanup job = %#v", deliverer.jobs[1])
 	}
-	if deliverer.jobs[2].Kind != "session_delete_cleanup" || deliverer.jobs[2].DeleteCleanupID != "delcln_1" || deliverer.jobs[2].RuntimeInputID != "session_delete_cleanup:delcln_1" {
+	if deliverer.jobs[2].Kind != "session_delete_cleanup" || deliverer.jobs[2].DeleteCleanupID != "delcln_1" || deliverer.jobs[2].RuntimeInputID != "session_delete_cleanup:delcln_1" ||
+		deliverer.jobs[2].AttemptCount != 2 || deliverer.jobs[2].MaxAttempts != 5 {
 		t.Fatalf("delete cleanup job = %#v", deliverer.jobs[2])
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_config", "ack:qjob_cleanup", "ack:qjob_delete_cleanup"}) {
@@ -1203,7 +1168,7 @@ func runtimeInputQueueJob() *queuev1.QueueJob {
 		WorkspaceId: "ws_bridge",
 		Kind:        "runtime_input",
 		LeaseToken:  "lease_1",
-		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_1","event_ids":["evt_1"],"sequence_from":1,"sequence_to":1,"input_kind":"messages","preparation_attempt_id":"prep_1"}`,
+		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_1","event_ids":["evt_1"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
 	}
 }
 
@@ -1213,7 +1178,7 @@ func runtimeInterruptQueueJob() *queuev1.QueueJob {
 		WorkspaceId: "ws_bridge",
 		Kind:        "runtime_input",
 		LeaseToken:  "lease_interrupt",
-		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_interrupt","event_ids":["evt_interrupt"],"sequence_from":9,"sequence_to":9,"input_kind":"interrupt_control","preparation_attempt_id":"prep_1"}`,
+		PayloadJson: `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_interrupt","event_ids":["evt_interrupt"],"sequence_from":9,"sequence_to":9,"input_kind":"interrupt_control"}`,
 	}
 }
 

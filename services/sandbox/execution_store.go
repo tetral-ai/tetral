@@ -241,12 +241,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 			return errSandboxExecutionReinspection
 		}
 		if binding.ReleaseRequested() {
-			errorKind := "sandbox_released"
-			if binding.ReleaseReason == "session_delete" {
-				errorKind = "session_deleted"
-			}
 			return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, SandboxExecutionSettlement{
-				Kind: SandboxExecutionFailed, ErrorKind: errorKind, SafeMessage: "sandbox execution is no longer available",
+				Kind: SandboxExecutionFailed, ErrorKind: "session_deleted", SafeMessage: "sandbox execution is no longer available",
 			}, now)
 		}
 		if binding.Provider != sandboxdriver.DaytonaProviderName {
@@ -375,13 +371,16 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 			    SET execution_state = 'waiting_activation',
 			        waiting_activation_operation_id = $6,
 			        waiting_materialization_operation_id = NULL,
+			        authorized_binding_revision = NULL,
+			        authorized_provider_resource_id = NULL,
+			        preparation_deadline = NULL,
 			        updated_at = $7
 			  WHERE workspace_id = $1
 			    AND session_id = $2
 			    AND session_thread_id = $3
 			    AND tool_use_event_id = $4
 			    AND execution_attempt_generation = $5
-			    AND execution_state = 'pending'`,
+			    AND execution_state IN ('pending', 'preparing')`,
 			work.Ref.WorkspaceID, work.Ref.SessionID, work.Ref.SessionThreadID,
 			work.Ref.ToolUseEventID, work.AttemptGeneration, operationID, now,
 		)
@@ -419,12 +418,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 			return errSandboxExecutionReinspection
 		}
 		if binding.ReleaseRequested() {
-			errorKind := "sandbox_released"
-			if binding.ReleaseReason == "session_delete" {
-				errorKind = "session_deleted"
-			}
 			return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, SandboxExecutionSettlement{
-				Kind: SandboxExecutionFailed, ErrorKind: errorKind, SafeMessage: "sandbox execution is no longer available",
+				Kind: SandboxExecutionFailed, ErrorKind: "session_deleted", SafeMessage: "sandbox execution is no longer available",
 			}, now)
 		}
 		var resourceRevision int64
@@ -454,7 +449,7 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 		}
 		if err == nil && (operationRevision != binding.BindingRevision ||
 			operationEnvironmentGeneration != binding.EnvironmentGeneration ||
-			operationResourceRevision != resourceRevision || operationHandle != binding.ProviderResourceID) {
+			operationResourceRevision > resourceRevision || operationHandle != binding.ProviderResourceID) {
 			return errSandboxExecutionReinspection
 		}
 		if dbconnect.IsNoRows(err) {
@@ -643,12 +638,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) transitionExecutionAuthorization
 			}, databaseNow)
 		}
 		if exists && binding.ReleaseRequested() {
-			errorKind := "sandbox_released"
-			if binding.ReleaseReason == "session_delete" {
-				errorKind = "session_deleted"
-			}
 			return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, SandboxExecutionSettlement{
-				Kind: SandboxExecutionFailed, ErrorKind: errorKind, SafeMessage: "sandbox execution is no longer available",
+				Kind: SandboxExecutionFailed, ErrorKind: "session_deleted", SafeMessage: "sandbox execution is no longer available",
 			}, databaseNow)
 		}
 		if state == "preparing" && (!storedPreparationDeadline.Valid || !databaseNow.Before(storedPreparationDeadline.Time)) {
@@ -750,8 +741,39 @@ func (c *PostgreSQLSandboxExecutionCoordinator) SettleExecution(ctx context.Cont
 		settlement.ResourceRootsJSON = work.Binding.ResourceRootsJSON
 	}
 	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.settle", func(tx *dbconnect.Tx) error {
+		if err := lockSession(ctx, tx, work.Ref); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
+			return err
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
+			return err
+		}
 		return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, settlement, c.now())
 	})
+}
+
+func lockSandboxLifecycleOperationsForSession(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
+	rows, err := tx.Query(ctx,
+		`SELECT operation_id
+		   FROM sandbox_lifecycle_operations
+		  WHERE workspace_id = $1 AND session_id = $2
+		  ORDER BY operation_id
+		  FOR UPDATE`,
+		workspaceID, sessionID,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var operationID string
+		if err := rows.Scan(&operationID); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (c *PostgreSQLSandboxExecutionCoordinator) FinalizeExhaustedExecution(ctx context.Context, job *queuev1.QueueJob) error {
@@ -803,11 +825,18 @@ func decodeSandboxExecutionQueueTransportIdentity(jobID string, workspaceID stri
 }
 
 func finalizeExhaustedSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, job SandboxExecutionJob, now time.Time) error {
+	if err := lockSession(ctx, tx, job.Ref); err != nil {
+		return err
+	}
+	binding, bindingExists, err := lockSandboxBinding(ctx, tx, job.Ref.WorkspaceID, job.Ref.SessionID)
+	if err != nil {
+		return err
+	}
 	var state string
-	var deadline sql.NullTime
+	var deadline, cancelRequestedAt sql.NullTime
 	var commandReference sql.NullString
-	err := tx.QueryRow(ctx,
-		`SELECT execution_state, preparation_deadline, provider_command_reference_json
+	err = tx.QueryRow(ctx,
+		`SELECT execution_state, preparation_deadline, provider_command_reference_json, cancel_requested_at
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1 AND session_id = $2
 		    AND session_thread_id = $3 AND tool_use_event_id = $4
@@ -815,7 +844,7 @@ func finalizeExhaustedSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, 
 		  FOR UPDATE`,
 		job.Ref.WorkspaceID, job.Ref.SessionID, job.Ref.SessionThreadID,
 		job.Ref.ToolUseEventID, job.AttemptGeneration,
-	).Scan(&state, &deadline, &commandReference)
+	).Scan(&state, &deadline, &commandReference, &cancelRequestedAt)
 	if dbconnect.IsNoRows(err) {
 		return nil
 	}
@@ -831,6 +860,13 @@ func finalizeExhaustedSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, 
 	settlement := SandboxExecutionSettlement{
 		Kind: SandboxExecutionFailed, ErrorKind: "sandbox_execution_unavailable",
 		SafeMessage: "sandbox execution could not be started",
+	}
+	if state != "running" && cancelRequestedAt.Valid {
+		settlement.ErrorKind = "cancelled"
+		settlement.SafeMessage = "sandbox execution was cancelled"
+	} else if state != "running" && bindingExists && binding.ReleaseRequested() {
+		settlement.ErrorKind = "session_deleted"
+		settlement.SafeMessage = "sandbox execution is no longer available"
 	}
 	if state == "running" {
 		settlement.Kind = SandboxExecutionUnknownOutcome
@@ -941,7 +977,7 @@ func settleSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, ref Sandbox
 			return err
 		}
 	}
-	return nil
+	return enqueueReadySandboxReleasesTx(ctx, tx, ref.WorkspaceID, ref.SessionID, now)
 }
 
 func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, ref SandboxExecutionRef, settlement SandboxExecutionSettlement, now time.Time) error {

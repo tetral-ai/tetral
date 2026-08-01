@@ -73,13 +73,6 @@ spec:
         - protocol: TCP
           port: 9091
     - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: sandbox
-      ports:
-        - protocol: TCP
-          port: 9090
-    - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: tetral-agent-runtime

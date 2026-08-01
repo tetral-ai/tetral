@@ -295,7 +295,7 @@ describe("Runtime Pod command entrypoint", () => {
     expect(() => runtimeToolPolicyFromPatchPayload(undefined)).toThrow("runtime installed builtin family is malformed");
   });
 
-  test("runtime config patch payload carries the preparation-resolved skill index", () => {
+  test("runtime config patch payload carries the durable resolved skill index", () => {
     const policy = runtimeToolPolicyFromPatchPayload(JSON.stringify({
       runtime_config: {
         installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],

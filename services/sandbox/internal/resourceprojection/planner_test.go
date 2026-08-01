@@ -493,7 +493,6 @@ func TestReservedPathMatrix(t *testing.T) {
 		{mountPath: "/mnt/tetral/r2/file.txt", offender: "/mnt/tetral/r2"},
 		{mountPath: "/tmp/tetral-runtime/secret", offender: "/tmp/tetral-runtime"},
 		{mountPath: "/dev/shm/tetral-runtime/secret", offender: "/dev/shm/tetral-runtime"},
-		{mountPath: "/tmp/tetral/session-prepare/file", offender: "/tmp/tetral/session-prepare"},
 		{mountPath: "/mnt/memory/project/file", offender: "/mnt/memory"},
 		{mountPath: "/skills/generated", offender: "/skills"},
 		{mountPath: "/mnt/session/outputs/out.txt", offender: "/mnt/session/outputs"},

@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/sandbox/driver"
@@ -23,18 +26,24 @@ func TestDaytonaPreparationTimeoutKillsDelayedRemoteMutation(t *testing.T) {
 		}
 	}
 	cfg := driver.Config{
-		DaytonaAPIURL:             os.Getenv(EnvDaytonaAPIURL),
-		DaytonaTarget:             os.Getenv(EnvDaytonaTarget),
-		DaytonaAPIKey:             os.Getenv(EnvDaytonaAPIKey),
-		PreparationCommandTimeout: time.Second,
+		DaytonaAPIURL:  os.Getenv(EnvDaytonaAPIURL),
+		DaytonaTarget:  os.Getenv(EnvDaytonaTarget),
+		DaytonaAPIKey:  os.Getenv(EnvDaytonaAPIKey),
+		CommandTimeout: time.Second,
 	}
-	provider, err := driver.NewDaytonaLifecycleProvider(cfg)
+	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
+		APIKey: cfg.DaytonaAPIKey, APIUrl: cfg.DaytonaAPIURL, Target: cfg.DaytonaTarget,
+	})
 	if err != nil {
-		t.Fatalf("NewDaytonaLifecycleProvider: %v", err)
+		t.Fatalf("create Daytona SDK client: %v", err)
 	}
-	executor, err := driver.NewDaytonaHelperExecutor(cfg)
+	provider, err := driver.NewDaytonaLifecycleProviderForSDKClient(client, cfg)
 	if err != nil {
-		t.Fatalf("NewDaytonaHelperExecutor: %v", err)
+		t.Fatalf("NewDaytonaLifecycleProviderForSDKClient: %v", err)
+	}
+	executor, err := driver.NewDaytonaHelperExecutorForSDKClient(client, cfg.CommandTimeout)
+	if err != nil {
+		t.Fatalf("NewDaytonaHelperExecutorForSDKClient: %v", err)
 	}
 	sandboxID := "timeout-" + strings.ToLower(id.New("sbx_"))
 	handle, err := provider.CreateSandbox(context.Background(), sandbox.CreateSandboxRequest{Setup: sandbox.SandboxSetup{
@@ -46,18 +55,18 @@ func TestDaytonaPreparationTimeoutKillsDelayedRemoteMutation(t *testing.T) {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
 	defer func() {
-		if releaseErr := provider.ReleaseSandbox(context.Background(), handle, sandbox.ReleaseReasonDelete); releaseErr != nil {
+		if releaseErr := provider.ReleaseSandbox(context.Background(), handle); releaseErr != nil {
 			t.Errorf("delete behavioral sandbox: %v", releaseErr)
 		}
 	}()
-	target := driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}
+	target := driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}
 	marker := "/tmp/tetral-timeout-marker-" + sandboxID
 	delayed := fmt.Sprintf("rm -f -- %q; sleep 2; printf late > %q", marker, marker)
-	if err := executor.RunPreparationCommand(context.Background(), target, delayed, nil, time.Second); err == nil {
+	if err := executor.RunDaytonaCommand(context.Background(), target, delayed, nil, time.Second); err == nil {
 		t.Fatal("delayed command succeeded; want Daytona server-side timeout")
 	}
 	time.Sleep(3 * time.Second)
-	if err := executor.RunPreparationCommand(context.Background(), target, fmt.Sprintf("test ! -e %q", marker), nil, time.Second); err != nil {
+	if err := executor.RunDaytonaCommand(context.Background(), target, fmt.Sprintf("test ! -e %q", marker), nil, time.Second); err != nil {
 		t.Fatalf("delayed marker exists after timeout plus kill grace: %v", err)
 	}
 }

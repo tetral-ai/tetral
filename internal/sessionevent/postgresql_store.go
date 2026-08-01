@@ -11,7 +11,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
-	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
@@ -26,7 +25,6 @@ type PostgreSQLSessionEventStore struct {
 	fileAttachmentValidator FileAttachmentValidator
 	beforeIdempotencyInsert func() error
 	beforeQueueJobInsert    func() error
-	afterPreparationInsert  func() error
 }
 
 type PostgreSQLStoreOption func(*PostgreSQLSessionEventStore)
@@ -47,8 +45,8 @@ func NewPostgreSQLStore(client *dbconnect.Client, options ...PostgreSQLStoreOpti
 
 // AppendClientEvents serializes public event admission on the session row and
 // the runtime-status row. It numbers new events from MAX(sequence), stores
-// them as unprocessed public input, and, when the session is prepared, admits
-// matching runtime_input queue jobs in the same PostgreSQL transaction.
+// them as unprocessed public input, and admits matching runtime_input queue
+// jobs in the same PostgreSQL transaction.
 //
 // The append path never scans, locks, or JSON-decodes stored session_events
 // rows; the only session_events read is the bounded MAX(sequence) aggregate.
@@ -108,13 +106,6 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			if err != nil {
 				return err
 			}
-			preparation, err := loadLatestSessionPreparationAdmission(ctx, tx, workspaceID, sessionID)
-			if err != nil {
-				return err
-			}
-			if hasPreparedRuntimeInputEvents(events) && !preparation.found {
-				return errors.New("sessionevent: session preparation invariant missing")
-			}
 			if err := rejectMessageWhileApprovalPending(ctx, tx, workspaceID, sessionID, runtimeStatus, events, settings.now); err != nil {
 				return err
 			}
@@ -142,15 +133,11 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 						return err
 					}
 					sessionVisible := publicEventSessionVisible(event.eventType, sessionThreadID, admission.mainThreadID)
-					preparationAttemptID := ""
-					if runtimeInputKindForEventType(event.eventType) != "" {
-						preparationAttemptID = preparation.preparationAttemptID
-					}
 					if _, err := tx.Exec(ctx,
 						`INSERT INTO session_events (
 								workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-								visibility, session_visible, preparation_attempt_id, created_at, updated_at, processed_at
-							) VALUES ($1, $2, $3, $4, $5, $6, $7, 'public', $8, NULLIF($9, ''), $10, $10, NULL)`,
+								visibility, session_visible, created_at, updated_at, processed_at
+							) VALUES ($1, $2, $3, $4, $5, $6, $7, 'public', $8, $9, $9, NULL)`,
 						string(workspaceID),
 						sessionID,
 						nullableString(sessionThreadID),
@@ -159,7 +146,6 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 						event.eventType,
 						string(event.payload),
 						sessionVisible,
-						preparationAttemptID,
 						settings.now,
 					); err != nil {
 						return err
@@ -168,15 +154,14 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 						return err
 					}
 					appended = append(appended, &Event{
-						ID:                   eventID,
-						WorkspaceID:          workspaceID,
-						SessionID:            sessionID,
-						ThreadID:             sessionThreadID,
-						Sequence:             nextSequence,
-						Type:                 event.eventType,
-						Payload:              cloneRawMessage(event.payload),
-						PreparationAttemptID: preparationAttemptID,
-						CreatedAt:            settings.now,
+						ID:          eventID,
+						WorkspaceID: workspaceID,
+						SessionID:   sessionID,
+						ThreadID:    sessionThreadID,
+						Sequence:    nextSequence,
+						Type:        event.eventType,
+						Payload:     cloneRawMessage(event.payload),
+						CreatedAt:   settings.now,
 					})
 				}
 			}
@@ -202,18 +187,8 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			); err != nil {
 				return err
 			}
-			if preparation.ready() {
-				if err := s.enqueueRuntimeInputJobs(ctx, tx, workspaceID, sessionID, appended, settings.now); err != nil {
-					return err
-				}
-			} else if preparation.failed() && hasRuntimeInputSegments(appended) {
-				freshPreparationAttemptID, err := createFreshPreparationAttemptForNewInput(ctx, tx, workspaceID, sessionID, preparation, settings.now, s.afterPreparationInsert, s.beforeQueueJobInsert)
-				if err != nil {
-					return err
-				}
-				if err := stampRuntimeInputEventBirthTx(ctx, tx, workspaceID, sessionID, appended, freshPreparationAttemptID); err != nil {
-					return err
-				}
+			if err := s.enqueueRuntimeInputJobs(ctx, tx, workspaceID, sessionID, appended, settings.now); err != nil {
+				return err
 			}
 			if !runtimeStatus.cleanupClaimed {
 				if err := clearStaleCleanupMarkers(ctx, tx, workspaceID, sessionID, settings.now); err != nil {
@@ -279,10 +254,6 @@ func (s *PostgreSQLSessionEventStore) enqueueRuntimeInputJobs(ctx context.Contex
 		if len(segment.events) == 0 {
 			continue
 		}
-		preparationAttemptID := segment.events[0].PreparationAttemptID
-		if preparationAttemptID == "" {
-			return errors.New("sessionevent: runtime input birth preparation attempt is required")
-		}
 		for offset := 0; offset < len(segment.events); offset += queue.MaxRuntimeInputEventRefsPerJob {
 			end := min(offset+queue.MaxRuntimeInputEventRefsPerJob, len(segment.events))
 			chunk := segment.events[offset:end]
@@ -292,15 +263,14 @@ func (s *PostgreSQLSessionEventStore) enqueueRuntimeInputJobs(ctx context.Contex
 				eventIDs = append(eventIDs, event.ID)
 			}
 			payload := runtimeInputQueuePayload{
-				WorkspaceID:          string(workspaceID),
-				SessionID:            sessionID,
-				SessionThreadID:      chunk[0].ThreadID,
-				RuntimeInputID:       runtimeInputID,
-				EventIDs:             eventIDs,
-				SequenceFrom:         chunk[0].Sequence,
-				SequenceTo:           chunk[len(chunk)-1].Sequence,
-				InputKind:            segment.inputKind,
-				PreparationAttemptID: preparationAttemptID,
+				WorkspaceID:     string(workspaceID),
+				SessionID:       sessionID,
+				SessionThreadID: chunk[0].ThreadID,
+				RuntimeInputID:  runtimeInputID,
+				EventIDs:        eventIDs,
+				SequenceFrom:    chunk[0].Sequence,
+				SequenceTo:      chunk[len(chunk)-1].Sequence,
+				InputKind:       segment.inputKind,
 			}
 			payloadJSON, err := json.Marshal(payload)
 			if err != nil {
@@ -505,15 +475,14 @@ func resolvePendingToolConfirmationTarget(ctx context.Context, tx *dbconnect.Tx,
 }
 
 type runtimeInputQueuePayload struct {
-	WorkspaceID          string   `json:"workspace_id"`
-	SessionID            string   `json:"session_id"`
-	SessionThreadID      string   `json:"session_thread_id"`
-	RuntimeInputID       string   `json:"runtime_input_id"`
-	EventIDs             []string `json:"event_ids"`
-	SequenceFrom         int64    `json:"sequence_from"`
-	SequenceTo           int64    `json:"sequence_to"`
-	InputKind            string   `json:"input_kind"`
-	PreparationAttemptID string   `json:"preparation_attempt_id"`
+	WorkspaceID     string   `json:"workspace_id"`
+	SessionID       string   `json:"session_id"`
+	SessionThreadID string   `json:"session_thread_id"`
+	RuntimeInputID  string   `json:"runtime_input_id"`
+	EventIDs        []string `json:"event_ids"`
+	SequenceFrom    int64    `json:"sequence_from"`
+	SequenceTo      int64    `json:"sequence_to"`
+	InputKind       string   `json:"input_kind"`
 }
 
 type runtimeInputSegment struct {
@@ -534,32 +503,13 @@ func runtimeInputSegments(events []*Event) []runtimeInputSegment {
 		last := len(segments) - 1
 		if last < 0 ||
 			segments[last].inputKind != inputKind ||
-			segments[last].events[0].ThreadID != event.ThreadID ||
-			segments[last].events[0].PreparationAttemptID != event.PreparationAttemptID {
+			segments[last].events[0].ThreadID != event.ThreadID {
 			segments = append(segments, runtimeInputSegment{inputKind: inputKind})
 			last = len(segments) - 1
 		}
 		segments[last].events = append(segments[last].events, event)
 	}
 	return segments
-}
-
-func hasRuntimeInputSegments(events []*Event) bool {
-	for _, event := range events {
-		if event != nil && runtimeInputKindForEventType(event.Type) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func hasPreparedRuntimeInputEvents(events []preparedEvent) bool {
-	for _, event := range events {
-		if runtimeInputKindForEventType(event.eventType) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func runtimeInputKindForEventType(eventType string) string {
@@ -904,232 +854,6 @@ func lockSessionRuntimeStatus(ctx context.Context, tx *dbconnect.Tx, workspaceID
 	}
 	state.cleanupClaimed = cleanupClaimedAt.Valid
 	return state, nil
-}
-
-type sessionPreparationAdmissionState struct {
-	found                 bool
-	preparationAttemptID  string
-	environmentID         string
-	environmentGeneration int64
-	sandboxID             string
-	status                string
-}
-
-func (s sessionPreparationAdmissionState) ready() bool {
-	return s.found && s.status == "ready"
-}
-
-func (s sessionPreparationAdmissionState) failed() bool {
-	return s.found && s.status == "failed"
-}
-
-func loadLatestSessionPreparationAdmission(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string) (sessionPreparationAdmissionState, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT preparation_attempt_id, environment_id, environment_generation, sandbox_id, status
-		   FROM session_preparations
-		  WHERE workspace_id = $1 AND session_id = $2
-		  ORDER BY created_at DESC, preparation_attempt_id DESC
-		  LIMIT 1
-		  FOR UPDATE`,
-		string(workspaceID),
-		sessionID,
-	)
-	var state sessionPreparationAdmissionState
-	if err := row.Scan(
-		&state.preparationAttemptID,
-		&state.environmentID,
-		&state.environmentGeneration,
-		&state.sandboxID,
-		&state.status,
-	); dbconnect.IsNoRows(err) {
-		return sessionPreparationAdmissionState{}, nil
-	} else if err != nil {
-		return sessionPreparationAdmissionState{}, err
-	}
-	state.found = true
-	return state, nil
-}
-
-func createFreshPreparationAttemptForNewInput(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID workspace.ID,
-	sessionID string,
-	failed sessionPreparationAdmissionState,
-	now time.Time,
-	afterPreparationInsert func() error,
-	beforeQueueJobInsert func() error,
-) (string, error) {
-	if failed.environmentID == "" || failed.environmentGeneration <= 0 || failed.sandboxID == "" {
-		return "", errors.New("sessionevent: failed preparation invariant missing")
-	}
-	artifact, err := loadCurrentEnvironmentArtifactForPreparationAdmission(ctx, tx, workspaceID, failed.environmentID)
-	if err != nil {
-		return "", err
-	}
-	status := ""
-	enqueuePrepare := false
-	switch artifact.status {
-	case "ready":
-		status = "pending"
-		enqueuePrepare = true
-	case "pending", "building":
-		status = "waiting_environment"
-	case "failed":
-		return "", &ValidationError{Message: "environment artifact is failed"}
-	default:
-		return "", &ValidationError{Message: "environment artifact status is invalid"}
-	}
-	preparationAttemptID := id.New("prep_")
-	freshAttemptTime, err := nextSessionPreparationCreatedAt(ctx, tx, workspaceID, sessionID, now)
-	if err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
-		string(workspaceID),
-		sessionID,
-		preparationAttemptID,
-		failed.environmentID,
-		artifact.generation,
-		failed.sandboxID,
-		status,
-		freshAttemptTime,
-	); err != nil {
-		return "", err
-	}
-	if afterPreparationInsert != nil {
-		if err := afterPreparationInsert(); err != nil {
-			return "", err
-		}
-	}
-	if !enqueuePrepare {
-		return preparationAttemptID, nil
-	}
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":           string(workspaceID),
-		"session_id":             sessionID,
-		"preparation_attempt_id": preparationAttemptID,
-	})
-	if err != nil {
-		return "", err
-	}
-	if beforeQueueJobInsert != nil {
-		if err := beforeQueueJobInsert(); err != nil {
-			return "", err
-		}
-	}
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		WorkspaceID:    workspaceID,
-		Kind:           queue.KindSessionPrepare,
-		PartitionKey:   queue.FormatSessionPartitionKey(workspaceID, sessionID),
-		DedupeKey:      queue.FormatSessionPrepareDedupeKey(workspaceID, sessionID, preparationAttemptID),
-		PayloadVersion: 1,
-		PayloadJSON:    payload,
-		Now:            now,
-	})
-	return preparationAttemptID, err
-}
-
-func stampRuntimeInputEventBirthTx(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, events []*Event, preparationAttemptID string) error {
-	if preparationAttemptID == "" {
-		return errors.New("sessionevent: fresh runtime input birth preparation attempt is required")
-	}
-	for _, event := range events {
-		if event == nil || runtimeInputKindForEventType(event.Type) == "" {
-			continue
-		}
-		result, err := tx.Exec(ctx,
-			`UPDATE session_events
-			    SET preparation_attempt_id = $4
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND event_id = $3`,
-			string(workspaceID),
-			sessionID,
-			event.ID,
-			preparationAttemptID,
-		)
-		if err != nil {
-			return err
-		}
-		if affected, _ := result.RowsAffected(); affected != 1 {
-			return errors.New("sessionevent: admitted runtime input event disappeared before birth stamp")
-		}
-		event.PreparationAttemptID = preparationAttemptID
-	}
-	return nil
-}
-
-func nextSessionPreparationCreatedAt(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, requested time.Time) (time.Time, error) {
-	var latest sql.NullTime
-	if err := tx.QueryRow(ctx,
-		`SELECT MAX(created_at)
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		string(workspaceID),
-		sessionID,
-	).Scan(&latest); err != nil {
-		return time.Time{}, err
-	}
-	next := requested.UTC()
-	if latest.Valid && !next.After(latest.Time.UTC()) {
-		next = latest.Time.UTC().Add(time.Microsecond)
-	}
-	return next, nil
-}
-
-type preparationEnvironmentArtifactAdmission struct {
-	generation int64
-	status     string
-}
-
-func loadCurrentEnvironmentArtifactForPreparationAdmission(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID workspace.ID,
-	environmentID string,
-) (preparationEnvironmentArtifactAdmission, error) {
-	var artifact preparationEnvironmentArtifactAdmission
-	err := tx.QueryRow(ctx,
-		`SELECT current_generation
-		   FROM environments
-		  WHERE workspace_id = $1
-		    AND id = $2
-		    AND archived_at IS NULL
-		  FOR SHARE`,
-		string(workspaceID),
-		environmentID,
-	).Scan(&artifact.generation)
-	if dbconnect.IsNoRows(err) {
-		return preparationEnvironmentArtifactAdmission{}, &ValidationError{Message: "environment is unavailable for preparation"}
-	}
-	if err != nil {
-		return preparationEnvironmentArtifactAdmission{}, err
-	}
-	if artifact.generation <= 0 {
-		return preparationEnvironmentArtifactAdmission{}, &ValidationError{Message: "environment generation is invalid"}
-	}
-	if err := tx.QueryRow(ctx,
-		`SELECT status
-		   FROM environment_artifacts
-		  WHERE workspace_id = $1
-		    AND environment_id = $2
-		    AND generation = $3
-		  FOR SHARE`,
-		string(workspaceID),
-		environmentID,
-		artifact.generation,
-	).Scan(&artifact.status); dbconnect.IsNoRows(err) {
-		return preparationEnvironmentArtifactAdmission{}, &ValidationError{Message: "environment artifact is unavailable for preparation"}
-	} else if err != nil {
-		return preparationEnvironmentArtifactAdmission{}, err
-	}
-	return artifact, nil
 }
 
 func clearStaleCleanupMarkers(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, now time.Time) error {

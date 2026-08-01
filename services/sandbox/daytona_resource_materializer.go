@@ -7,8 +7,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
 
-type sessionResourceProjection interface {
-	PrepareSessionResources(context.Context, sandbox.SandboxSetup, sandbox.ProviderHandle) (sandbox.ResourceSetup, error)
+type daytonaFileResourceMaterialization interface {
+	MaterializeFileResources(context.Context, sandbox.SandboxSetup, sandbox.ProviderHandle) (sandbox.ResourceSetup, error)
 }
 
 type memoryResourceMaterialization interface {
@@ -24,7 +24,7 @@ type gitHubResourceMaterialization interface {
 // for one immutable Session resource revision before the binding can authorize
 // tool execution.
 type DaytonaResourceMaterializer struct {
-	Projection sessionResourceProjection
+	Projection daytonaFileResourceMaterialization
 	Memory     memoryResourceMaterialization
 	GitHub     gitHubResourceMaterialization
 }
@@ -39,7 +39,7 @@ func (m *DaytonaResourceMaterializer) MaterializeResources(ctx context.Context, 
 	if err := m.GitHub.RemoveDeletedGitHubRepositories(ctx, setup, handle); err != nil {
 		return sandbox.ResourceSetup{}, err
 	}
-	resources, err := m.Projection.PrepareSessionResources(ctx, setup, handle)
+	resources, err := m.Projection.MaterializeFileResources(ctx, setup, handle)
 	if err != nil {
 		return sandbox.ResourceSetup{}, err
 	}

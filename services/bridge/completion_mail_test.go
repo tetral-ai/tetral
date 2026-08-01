@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -47,7 +45,7 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 		bridgeCompletionMailDraftForTest(request.GetScope(), request.GetDurableTurnId(), wantEnvelope),
 	}
 
-	response, err := store.FinishIdle(context.Background(), request)
+	response, err := finishIdleWithStagedCaptureForTest(t, admin, store, request)
 	if err != nil {
 		t.Fatalf("FinishIdle: %v", err)
 	}
@@ -107,7 +105,7 @@ func TestPostgreSQLBridgeAPIStoreChildFinishIdleRearmsPendingCompletionMail(t *t
 			request := bridgeAPIChildFinishIdleFailureRequest(suffix)
 			request.StopReasonJson = test.stopReason
 			request.Drafts = nil
-			if _, err := store.FinishIdle(context.Background(), request); err != nil {
+			if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err != nil {
 				t.Fatalf("FinishIdle %s: %v", test.name, err)
 			}
 			assertActiveCompletionWake(t, admin, sessionID, deliveryID, true)
@@ -143,8 +141,6 @@ func TestPostgreSQLBridgeAPIStoreMainFinishIdleDrainsCompletionMailAcrossBounded
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_main_finish_idle_mail_pages")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
 			workspace_id, session_id, status, running_since, active_seconds_total,
@@ -182,7 +178,7 @@ func TestPostgreSQLBridgeAPIStoreMainFinishIdleDrainsCompletionMailAcrossBounded
 		StopReasonJson: `{"type":"end_turn"}`,
 	}
 	seedBridgeAPIOpenDurableTurn(t, admin, first.GetScope(), first.GetDurableTurnId())
-	if _, err := store.FinishIdle(context.Background(), first); err != nil {
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, first); err != nil {
 		t.Fatalf("FinishIdle first page: %v", err)
 	}
 	for index, deliveryID := range deliveries {
@@ -228,7 +224,7 @@ func TestPostgreSQLBridgeAPIStoreMainFinishIdleDrainsCompletionMailAcrossBounded
 	second := proto.Clone(first).(*bridgev1.FinishIdleRequest)
 	second.DurableTurnId = "evt_main_finish_idle_mail_page_2_running"
 	seedBridgeAPIOpenDurableTurn(t, admin, second.GetScope(), second.GetDurableTurnId())
-	if _, err := store.FinishIdle(context.Background(), second); err != nil {
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, second); err != nil {
 		t.Fatalf("FinishIdle tail page: %v", err)
 	}
 	assertActiveCompletionWake(t, admin, sessionID, deliveries[MailFetchMaxEnvelopes], true)
@@ -243,7 +239,7 @@ func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t 
 	first := bridgeAPIChildFinishIdleFailureRequest(suffix)
 	first.StopReasonJson = `{"type":"requires_action","event_ids":["evt_pending"]}`
 	first.Drafts = nil
-	if _, err := store.FinishIdle(context.Background(), first); err != nil {
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, first); err != nil {
 		t.Fatalf("FinishIdle requires_action: %v", err)
 	}
 	mailCount, jobCount, _ := completionMailRows(t, admin, completionTestSessionID(suffix))
@@ -271,77 +267,13 @@ func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t 
 			completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "completed after action"),
 		),
 	}
-	if _, err := store.FinishIdle(context.Background(), second); err != nil {
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, second); err != nil {
 		t.Fatalf("FinishIdle next clean turn: %v", err)
 	}
 	mailCount, jobCount, envelope := completionMailRows(t, admin, completionTestSessionID(suffix))
 	wantEnvelope := completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "completed after action")
 	if mailCount != 1 || jobCount != 1 || envelope != wantEnvelope {
 		t.Fatalf("next-turn completion rows = mail %d job %d envelope %q; want 1/1/%q", mailCount, jobCount, envelope, wantEnvelope)
-	}
-}
-
-func TestPostgreSQLCompletionMailRollsBackWithSettlementAndRetriesExactlyOnce(t *testing.T) {
-	const suffix = "atomic_retry"
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPIChildFinishIdleFailureFixture(t, admin, suffix)
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET superseded_at='2026-01-01T00:00:30Z'
-		  WHERE workspace_id='default' AND session_id=$1`,
-		completionTestSessionID(suffix),
-	); err != nil {
-		t.Fatalf("hide active preparation: %v", err)
-	}
-	store := completionMailTestStore(t, runtime)
-	request := bridgeAPIChildFinishIdleFailureRequest(suffix)
-
-	if _, err := store.FinishIdle(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("FinishIdle without active preparation err = %v; want FailedPrecondition", err)
-	}
-	mailCount, jobCount, _ := completionMailRows(t, admin, completionTestSessionID(suffix))
-	var idleCount, operationCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events
-		  WHERE workspace_id='default' AND session_id=$1 AND type='session.thread_status_idle'`,
-		completionTestSessionID(suffix),
-	).Scan(&idleCount); err != nil {
-		t.Fatalf("count rolled-back idle events: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_bridge_operations
-		  WHERE workspace_id='default' AND session_id=$1 AND operation='finish_idle'`,
-		completionTestSessionID(suffix),
-	).Scan(&operationCount); err != nil {
-		t.Fatalf("count rolled-back finish operations: %v", err)
-	}
-	if mailCount != 0 || jobCount != 0 || idleCount != 0 || operationCount != 0 {
-		t.Fatalf("rolled-back settlement rows = mail %d job %d idle %d operation %d; want all zero", mailCount, jobCount, idleCount, operationCount)
-	}
-
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET superseded_at=NULL
-		  WHERE workspace_id='default' AND session_id=$1`,
-		completionTestSessionID(suffix),
-	); err != nil {
-		t.Fatalf("restore active preparation: %v", err)
-	}
-	first, err := store.FinishIdle(context.Background(), request)
-	if err != nil {
-		t.Fatalf("FinishIdle retry: %v", err)
-	}
-	replay, err := store.FinishIdle(context.Background(), request)
-	if err != nil {
-		t.Fatalf("FinishIdle replay: %v", err)
-	}
-	if first.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("retry/replay ACKs = %s/%s; want committed/duplicate", first.GetAck().GetStatus(), replay.GetAck().GetStatus())
-	}
-	mailCount, jobCount, _ = completionMailRows(t, admin, completionTestSessionID(suffix))
-	if mailCount != 1 || jobCount != 1 {
-		t.Fatalf("retried settlement rows = mail %d job %d; want 1/1", mailCount, jobCount)
 	}
 }
 
@@ -356,8 +288,6 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_completion_reviewer_idle", 1, "pod_completion_reviewer_idle")
-		seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_completion_reviewer_idle")
-		seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 		if _, err := admin.ExecContext(context.Background(),
 			`UPDATE sessions SET status='running' WHERE workspace_id='default' AND id=$1`,
 			sessionID,
@@ -379,7 +309,7 @@ func TestPostgreSQLCompletionMailNeverLeavesApprovalReviewerThreads(t *testing.T
 			StopReasonJson: `{"type":"end_turn"}`,
 		}
 		seedBridgeAPIOpenDurableTurn(t, admin, scope, request.GetDurableTurnId())
-		if _, err := store.FinishIdle(context.Background(), request); err != nil {
+		if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err != nil {
 			t.Fatalf("FinishIdle reviewer: %v", err)
 		}
 		mailCount, jobCount, _ := completionMailRows(t, admin, sessionID)
@@ -462,7 +392,6 @@ func completionMailTestStore(t *testing.T, runtime *sql.DB) *PostgreSQLBridgeAPI
 	t.Helper()
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
 	return store
 }
 

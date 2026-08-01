@@ -20,15 +20,26 @@ import (
 )
 
 type PostgreSQLSessionStore struct {
-	client          *dbconnect.Client
-	pageTokenSecret []byte
+	client                      *dbconnect.Client
+	pageTokenSecret             []byte
+	sessionDeleteSandboxRelease SessionDeleteSandboxReleaseFunc
 }
 
 type StoreOption func(*PostgreSQLSessionStore)
 
+// SessionDeleteSandboxReleaseFunc records the Sandbox release fence and its
+// durable provider job inside the Session deletion transaction.
+type SessionDeleteSandboxReleaseFunc func(context.Context, *dbconnect.Tx, workspace.ID, string, time.Time) error
+
 func WithPageTokenSecret(secret []byte) StoreOption {
 	return func(s *PostgreSQLSessionStore) {
 		s.pageTokenSecret = append([]byte(nil), secret...)
+	}
+}
+
+func WithSessionDeleteSandboxRelease(release SessionDeleteSandboxReleaseFunc) StoreOption {
+	return func(s *PostgreSQLSessionStore) {
+		s.sessionDeleteSandboxRelease = release
 	}
 }
 
@@ -534,128 +545,6 @@ func (t *postgresqlTransaction) CreatePrimaryThread(ctx context.Context, thread 
 		"source_tool_use_event_id": nil,
 	}
 	return t.appendPublicProcessedSessionEvent(ctx, thread.SessionID, thread.ID, "session.thread_created", payload, thread.CreatedAt)
-}
-
-func (t *postgresqlTransaction) CreateSessionPreparation(ctx context.Context, preparation SessionPreparationAdmission) error {
-	if preparation.SessionID == "" {
-		return &ValidationError{Message: "session_id is required"}
-	}
-	if preparation.EnvironmentID == "" {
-		return &ValidationError{Message: "environment_id is required"}
-	}
-	if preparation.PreparationAttemptID == "" {
-		return &ValidationError{Message: "preparation_attempt_id is required"}
-	}
-	if preparation.SandboxID == "" {
-		return &ValidationError{Message: "sandbox_id is required"}
-	}
-	now := preparation.CreatedAt
-	if now.IsZero() {
-		now = storage.Now()
-	}
-	now = now.UTC()
-	artifact, err := t.loadCurrentEnvironmentArtifactForPreparation(ctx, preparation.EnvironmentID)
-	if err != nil {
-		return err
-	}
-	var status string
-	enqueuePrepare := false
-	switch artifact.status {
-	case "ready":
-		status = "pending"
-		enqueuePrepare = true
-	case "pending", "building", "":
-		status = "waiting_environment"
-	case "failed":
-		return &ValidationError{Message: "environment artifact is failed"}
-	default:
-		return &ValidationError{Message: "environment artifact status is invalid"}
-	}
-	if _, err := t.tx.Exec(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
-		string(t.workspaceID),
-		preparation.SessionID,
-		preparation.PreparationAttemptID,
-		preparation.EnvironmentID,
-		artifact.generation,
-		preparation.SandboxID,
-		status,
-		now,
-	); err != nil {
-		return mapPostgreSQLSessionError(err)
-	}
-	if !enqueuePrepare {
-		return nil
-	}
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":           string(t.workspaceID),
-		"session_id":             preparation.SessionID,
-		"preparation_attempt_id": preparation.PreparationAttemptID,
-	})
-	if err != nil {
-		return err
-	}
-	return t.enqueueCanonicalSessionPrepare(ctx, preparation.SessionID, preparation.PreparationAttemptID, payload, now)
-}
-
-type preparationEnvironmentArtifact struct {
-	generation int64
-	status     string
-}
-
-func (t *postgresqlTransaction) loadCurrentEnvironmentArtifactForPreparation(ctx context.Context, environmentID string) (preparationEnvironmentArtifact, error) {
-	var artifact preparationEnvironmentArtifact
-	err := t.tx.QueryRowScanner(ctx,
-		`SELECT e.current_generation
-		   FROM environments e
-		  WHERE e.workspace_id = $1
-		    AND e.id = $2
-		    AND e.archived_at IS NULL
-		  FOR SHARE`,
-		string(t.workspaceID),
-		environmentID,
-	).Scan(&artifact.generation)
-	if dbconnect.IsNoRows(err) {
-		return preparationEnvironmentArtifact{}, &ValidationError{Message: "environment is unavailable for preparation"}
-	}
-	if err != nil {
-		return preparationEnvironmentArtifact{}, err
-	}
-	if artifact.generation <= 0 {
-		return preparationEnvironmentArtifact{}, &ValidationError{Message: "environment generation is invalid"}
-	}
-	if err := t.tx.QueryRowScanner(ctx,
-		`SELECT status
-		   FROM environment_artifacts
-		  WHERE workspace_id = $1
-		    AND environment_id = $2
-		    AND generation = $3
-		  FOR SHARE`,
-		string(t.workspaceID),
-		environmentID,
-		artifact.generation,
-	).Scan(&artifact.status); dbconnect.IsNoRows(err) {
-		return preparationEnvironmentArtifact{}, &ValidationError{Message: "environment artifact is unavailable for preparation"}
-	} else if err != nil {
-		return preparationEnvironmentArtifact{}, err
-	}
-	return artifact, nil
-}
-
-func (t *postgresqlTransaction) enqueueCanonicalSessionPrepare(ctx context.Context, sessionID string, preparationAttemptID string, payload json.RawMessage, now time.Time) error {
-	_, err := queue.EnqueueTx(ctx, t.tx, queue.EnqueueRequest{
-		WorkspaceID:    t.workspaceID,
-		Kind:           queue.KindSessionPrepare,
-		PartitionKey:   queue.FormatSessionPartitionKey(t.workspaceID, sessionID),
-		DedupeKey:      queue.FormatSessionPrepareDedupeKey(t.workspaceID, sessionID, preparationAttemptID),
-		PayloadVersion: 1,
-		PayloadJSON:    payload,
-		Now:            now,
-	})
-	return err
 }
 
 func (t *postgresqlTransaction) GetSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -1317,6 +1206,18 @@ func (t *postgresqlTransaction) DeleteSession(ctx context.Context, sessionID str
 	}
 	deleteCleanupID := id.New("delcln_")
 	timestamp := storage.Now()
+	if t.store.sessionDeleteSandboxRelease == nil {
+		return errors.New("session: delete sandbox release recorder is unavailable")
+	}
+	rawTx, err := t.rawDBTx()
+	if err != nil {
+		return err
+	}
+	// Deletion commits its Sandbox release fence before cleanup can be leased;
+	// a later cleanup pass may join this operation but cannot be its producer.
+	if err := t.store.sessionDeleteSandboxRelease(ctx, rawTx, t.workspaceID, sessionID, timestamp); err != nil {
+		return err
+	}
 	if err := t.appendSessionDeletedEvent(ctx, sessionID, timestamp); err != nil {
 		return err
 	}
@@ -2809,12 +2710,6 @@ func nullableEmptyString(value string) any {
 // nullableNullTime hands a nullable durable timestamp to the driver as either a
 // time value or SQL NULL, without a string detour that would carry the process
 // timezone into the column.
-func nullableNullTime(value sql.NullTime) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.Time.UTC()
-}
 
 func nonNilMetadata(metadata map[string]string) map[string]string {
 	out := map[string]string{}

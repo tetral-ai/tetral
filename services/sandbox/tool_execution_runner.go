@@ -102,10 +102,22 @@ type SandboxExecutionCoordinator interface {
 	FinalizeExhaustedExecution(context.Context, *queuev1.QueueJob) error
 }
 
+type SandboxMediaMaterializer interface {
+	MaterializeResult(context.Context, SandboxExecutionRef, string, string, string, time.Time) (string, error)
+	RecoverResult(context.Context, SandboxExecutionRef) (SandboxMediaRecovery, error)
+}
+
+type SandboxMediaRecovery struct {
+	Found      bool
+	Ready      bool
+	ResultJSON string
+}
+
 type SandboxToolExecutionJobRunner struct {
-	Queue       SessionPrepareQueueClient
+	Queue       SandboxQueueClient
 	Coordinator SandboxExecutionCoordinator
 	Providers   *ProviderRegistry
+	Media       SandboxMediaMaterializer
 	Config      SandboxToolExecutionRunnerConfig
 	Clock       func() time.Time
 }
@@ -132,8 +144,8 @@ func (r *SandboxToolExecutionJobRunner) RunOnceWithActivity(ctx context.Context)
 	if r.Coordinator == nil {
 		return false, errors.New("sandbox execution coordinator is required")
 	}
-	if r.Providers == nil {
-		return false, errors.New("sandbox provider registry is required")
+	if r.Providers == nil || r.Media == nil {
+		return false, errors.New("sandbox provider registry and media materializer are required")
 	}
 	cfg, err := normalizeSandboxToolExecutionRunnerConfig(r.Config)
 	if err != nil {
@@ -223,6 +235,21 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 	}
 	if work.State == "running" {
 		if work.ProviderCommandReference == "" {
+			recovery, err := r.Media.RecoverResult(ctx, work.Ref)
+			if err != nil {
+				return newSandboxExecutionRetry("sandbox_media_recovery_error", "sandbox media custody could not be inspected")
+			}
+			if recovery.Found {
+				if recovery.Ready {
+					return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+						Kind: SandboxExecutionCompleted, ResultJSON: recovery.ResultJSON,
+					})
+				}
+				return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+					Kind: SandboxExecutionFailed, ErrorKind: "transient_attachment_unavailable",
+					SafeMessage: "sandbox media attachment handoff failed",
+				})
+			}
 			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
 				Kind:      SandboxExecutionUnknownOutcome,
 				ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
@@ -286,6 +313,10 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 	})
 	cancelPreparation()
 	if preparation.Failed() {
+		if preparation.EffectBoundary == ProviderProvedNotStarted &&
+			preparation.ErrorKind == string(sandbox.ProviderErrorNotFound) {
+			return sandboxExecutionDependencyResult(r.Coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation))
+		}
 		if preparation.EffectBoundary == ProviderProvedNotStarted && preparation.Disposition == ProviderRetryable {
 			return newSandboxExecutionRetry(valueOrDefault(preparation.ErrorKind, "sandbox_tool_preparation_retryable"), "sandbox tool preparation will be retried")
 		}
@@ -294,9 +325,7 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		})
 	}
 	if preparation.Value.ImmediateResult != nil {
-		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
-			Kind: SandboxExecutionCompleted, ResultJSON: preparation.Value.ImmediateResult.ResultJSON,
-		})
+		return r.settleCompletedExecution(ctx, work, preparation.Value.ImmediateResult.ResultJSON, nil, "")
 	}
 	authorized, err := r.Coordinator.AuthorizeRunning(ctx, work)
 	if err != nil {
@@ -346,10 +375,7 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		owned.SourceToolUseEventID = work.Ref.ToolUseEventID
 		backgroundTask = &owned
 	}
-	return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
-		Kind: SandboxExecutionCompleted, ResultJSON: outcome.Value.ResultJSON,
-		BackgroundTask: backgroundTask,
-	})
+	return r.settleCompletedExecution(ctx, work, outcome.Value.ResultJSON, backgroundTask, "")
 }
 
 type sandboxToolObservationReference struct {
@@ -410,10 +436,7 @@ func (r *SandboxToolExecutionJobRunner) observeRunningExecution(ctx context.Cont
 			})
 		}
 		if outcome.Value.ForegroundObservation == nil {
-			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
-				Kind: SandboxExecutionCompleted, ResultJSON: outcome.Value.ResultJSON,
-				ProviderCommandReference: work.ProviderCommandReference,
-			})
+			return r.settleCompletedExecution(ctx, work, outcome.Value.ResultJSON, nil, work.ProviderCommandReference)
 		}
 		encodedReference, err := encodeSandboxToolObservationReference(reference.Provider, *outcome.Value.ForegroundObservation)
 		if err != nil {
@@ -431,6 +454,20 @@ func (r *SandboxToolExecutionJobRunner) observeRunningExecution(ctx context.Cont
 		}
 		work.ProviderCommandReference = encodedReference
 	}
+}
+
+func (r *SandboxToolExecutionJobRunner) settleCompletedExecution(ctx context.Context, work SandboxExecutionWork, resultJSON string, backgroundTask *sandboxdriver.BackgroundTask, providerCommandReference string) error {
+	materialized, err := r.Media.MaterializeResult(ctx, work.Ref, work.Invocation.ToolName, work.Invocation.InputJSON, resultJSON, r.now())
+	if err != nil {
+		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+			Kind: SandboxExecutionFailed, ErrorKind: "transient_attachment_unavailable",
+			SafeMessage: "sandbox media attachment handoff failed", ProviderCommandReference: providerCommandReference,
+		})
+	}
+	return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+		Kind: SandboxExecutionCompleted, ResultJSON: materialized,
+		BackgroundTask: backgroundTask, ProviderCommandReference: providerCommandReference,
+	})
 }
 
 func sandboxExecutionDependencyResult(err error) error {

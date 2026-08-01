@@ -77,8 +77,13 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if _, err := lockThreadMutationTx(ctx, tx, request.GetScope()); err != nil {
+		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
+		}
+		switch threadScope.status {
+		case "terminated", "failed", "archived", "closed_for_runtime":
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime thread is already terminal"))
 		}
 		openTurn, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
 		if err != nil {

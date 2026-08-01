@@ -681,8 +681,6 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_child_status", "thr_bridge_child_status_parent")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_status", "bind_bridge_child_status", 1, "pod_uid_child_status")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_child_status", "prep_bridge_child_status")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_child_status", "2026-01-01T00:00:00Z")
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE sessions
 		    SET status = 'running'
@@ -713,7 +711,6 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	clockNow := time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC)
 	store.Clock = func() time.Time { return clockNow }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
 	parentScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_parent", "bind_bridge_child_status", 1, "pod_uid_child_status")
 	childScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_worker", "bind_bridge_child_status", 1, "pod_uid_child_status")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_status", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", 1, "agent.tool_use", `{}`)
@@ -785,7 +782,7 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		DurableTurnId:  running.GetEventId(),
 		StopReasonJson: `{"type":"end_turn"}`,
 	}
-	finishIdleResponse, err := store.FinishIdle(context.Background(), finishIdleRequest)
+	finishIdleResponse, err := finishIdleWithStagedCaptureForTest(t, admin, store, finishIdleRequest)
 	if err != nil {
 		t.Fatalf("FinishIdle child: %v", err)
 	}
@@ -1046,11 +1043,8 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, childID, grandchildID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_close_tree")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 6, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
 	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_close_tree_command")
 	response, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
 		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),

@@ -3,7 +3,6 @@ package agentruntimebridge
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -21,8 +20,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_pod_loss", "prep_bridge_pod_loss")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_pod_loss", "2026-01-01T00:04:00Z")
 	seedRuntimePodLostStatusFence(t, admin, "sesn_bridge_pod_loss", "bind_bridge_pod_loss_old", 7)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
@@ -94,7 +91,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		"tool-call-pod-loss-closed",
 		"Read",
 	)
-	seedBridgeAPIBackgroundTask(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "bind_bridge_pod_loss_old", "task_pod_loss_running", "evt_pod_loss_bg_tool")
 
 	oldBound := enginekubernetes.BoundRuntimePod{
 		Namespace: "tetral-agent-runtime",
@@ -120,58 +116,20 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot { return snapshot },
 		Clock:    store.Clock,
 	}
-	releaser := &recordingSandboxReleaseClient{
-		result: SandboxReleaseResult{Status: SandboxReleaseReleased, SandboxStatus: "released"},
-		beforeRelease: func(request SandboxReleaseRequest) error {
-			var status string
-			var bindingCount int
-			var runtimeStatus string
-			var exhaustedErrorCount, exhaustedIdleCount int
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT status FROM session_background_tasks
-				  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_pod_loss' AND task_id = 'task_pod_loss_running'`).Scan(&status); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_runtime_bindings
-				  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_pod_loss' AND binding_id = 'bind_bridge_pod_loss_old'`).Scan(&bindingCount); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT status FROM session_runtime_status
-				  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_pod_loss'`).Scan(&runtimeStatus); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT
-				   count(*) FILTER (WHERE type = 'session.error' AND payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'),
-				   count(*) FILTER (WHERE type = 'session.status_idle' AND payload_json::jsonb #>> '{stop_reason,type}' = 'retries_exhausted')
-				 FROM session_events
-				 WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_pod_loss'`).Scan(&exhaustedErrorCount, &exhaustedIdleCount); err != nil {
-				return err
-			}
-			if status != "cancelled_by_cleanup" || bindingCount != 1 || runtimeStatus != "idle" || exhaustedErrorCount != 1 || exhaustedIdleCount != 1 {
-				return fmt.Errorf("release ordering observed task=%s binding_count=%d runtime=%s exhausted_error=%d exhausted_idle=%d", status, bindingCount, runtimeStatus, exhaustedErrorCount, exhaustedIdleCount)
-			}
-			return nil
-		},
-	}
-	store.SandboxReleaser = releaser
 	plan, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-		JobID:                "qjob_pod_loss_later",
-		LeaseToken:           "lease_pod_loss_later",
-		Kind:                 queue.KindRuntimeInput,
-		WorkspaceID:          "default",
-		SessionID:            "sesn_bridge_pod_loss",
-		PreparationAttemptID: "prep_bridge_pod_loss",
-		SessionThreadID:      "thr_bridge_pod_loss",
-		RuntimeInputID:       "rin_pod_loss_later",
-		EventIDs:             []string{"evt_pod_loss_later"},
-		SequenceFrom:         3,
-		SequenceTo:           3,
-		InputKind:            "messages",
-		CommandKind:          agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-		PayloadJSON:          `{"workspace_id":"default","session_id":"sesn_bridge_pod_loss","session_thread_id":"thr_bridge_pod_loss","runtime_input_id":"rin_pod_loss_later","event_ids":["evt_pod_loss_later"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
+		JobID:           "qjob_pod_loss_later",
+		LeaseToken:      "lease_pod_loss_later",
+		Kind:            queue.KindRuntimeInput,
+		WorkspaceID:     "default",
+		SessionID:       "sesn_bridge_pod_loss",
+		SessionThreadID: "thr_bridge_pod_loss",
+		RuntimeInputID:  "rin_pod_loss_later",
+		EventIDs:        []string{"evt_pod_loss_later"},
+		SequenceFrom:    3,
+		SequenceTo:      3,
+		InputKind:       "messages",
+		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
+		PayloadJSON:     `{"workspace_id":"default","session_id":"sesn_bridge_pod_loss","session_thread_id":"thr_bridge_pod_loss","runtime_input_id":"rin_pod_loss_later","event_ids":["evt_pod_loss_later"],"sequence_from":3,"sequence_to":3,"input_kind":"messages"}`,
 	})
 	if err != nil {
 		t.Fatalf("PrepareRuntimeCommand after pod loss: %v", err)
@@ -248,36 +206,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		!strings.Contains(messageData, `"status":"error"`) ||
 		!strings.Contains(messageData, `"message":"Tool result unavailable because the runtime pod was lost."`) {
 		t.Fatalf("pod-loss terminal tool messages = %d/%s; want one repaired durable message", messageCount, messageData)
-	}
-	var taskStatus string
-	var taskTerminalEventID sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status, terminal_event_id
-		   FROM session_background_tasks
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_pod_loss'
-		    AND task_id = 'task_pod_loss_running'`).Scan(&taskStatus, &taskTerminalEventID); err != nil {
-		t.Fatalf("read pod-loss background task: %v", err)
-	}
-	if taskStatus != "cancelled_by_cleanup" || !taskTerminalEventID.Valid {
-		t.Fatalf("pod-loss background task status/event = %q/%v; want cancelled_by_cleanup with terminal event", taskStatus, taskTerminalEventID)
-	}
-	var taskNotificationPayload string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT payload_json
-		   FROM session_events
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_pod_loss'
-		    AND event_id = $1
-		    AND type = 'runtime_notification'`,
-		taskTerminalEventID.String).Scan(&taskNotificationPayload); err != nil {
-		t.Fatalf("read pod-loss task notification: %v", err)
-	}
-	if !strings.Contains(taskNotificationPayload, `"task_id":"task_pod_loss_running"`) || !strings.Contains(taskNotificationPayload, `"status":"cancelled"`) {
-		t.Fatalf("pod-loss task notification payload = %s; want cleanup-cancelled task notification", taskNotificationPayload)
-	}
-	if len(releaser.requests) != 1 || releaser.requests[0].Reason != "runtime_pod_lost" || releaser.requests[0].BindingID != "bind_bridge_pod_loss_old" {
-		t.Fatalf("pod-loss sandbox release requests = %+v; want one old-binding release", releaser.requests)
 	}
 	var boundPodUID string
 	if err := admin.QueryRowContext(context.Background(),

@@ -41,7 +41,7 @@ type SandboxOutputCaptureCleanupStore interface {
 }
 
 type SandboxOutputCaptureCleanupRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxOutputCaptureCleanupStore
 	BlobStore blob.BlobStore
 	Config    SandboxOutputCaptureRunnerConfig

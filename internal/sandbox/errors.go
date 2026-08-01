@@ -143,23 +143,6 @@ func ValidateProviderHandle(handle ProviderHandle) error {
 	return ValidateProviderMetadata(handle.Metadata)
 }
 
-func ValidateProviderStatus(status ProviderStatus) error {
-	switch status.Availability {
-	case ProviderAvailable, ProviderMissing, ProviderUnavailable, ProviderUnknown:
-	default:
-		return &ValidationError{Message: "provider status availability is invalid"}
-	}
-	if status.SandboxStatus != "" {
-		if err := validateStatus(status.SandboxStatus); err != nil {
-			return err
-		}
-	}
-	if err := ValidateProviderMetadata(status.Metadata); err != nil {
-		return err
-	}
-	return ValidateProviderSafeMessage(status.SafeMessage)
-}
-
 func ValidateProviderSafeMessage(message string) error {
 	if valueContainsCredentialURL(message) ||
 		containsSensitiveMetadataValue(message) ||

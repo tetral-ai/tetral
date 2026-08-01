@@ -22,7 +22,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
-	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 const testSessionEventIdempotencyKey = "idem_sessionevent_test"
@@ -695,7 +694,7 @@ func TestAppendClientEventsFailsClosedWhenSessionMainThreadMissing(t *testing.T)
 	ctx := context.Background()
 	sessionID := "sesn_event_missing_main_thread"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	if _, err := admin.ExecContext(ctx,
 		`UPDATE sessions
 		    SET main_thread_id = NULL
@@ -725,12 +724,12 @@ func TestAppendClientEventsFailsClosedWhenSessionMainThreadMissing(t *testing.T)
 	}
 }
 
-func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomicallyWhenPrepared(t *testing.T) {
+func TestAppendClientEventsWritesIdempotencyAndRuntimeInputQueueJobsAtomically(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()
 	sessionID := "sesn_event_idempotency_new"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 
 	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, AppendRequest{
@@ -768,7 +767,7 @@ func TestAppendClientEventsSessionInterruptFansOutToPublicThreads(t *testing.T) 
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, publicChildID, "subagent", "public", false)
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, "thread_interrupt_archived", "subagent", "public", true)
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, "thread_interrupt_reviewer", "approval_reviewer", "internal", false)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 
 	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_fanout", AppendRequest{
@@ -906,7 +905,7 @@ func TestAppendClientEventsExplicitUserInterruptTargetsPublicThread(t *testing.T
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, publicChildID, "subagent", "public", false)
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, "thread_interrupt_targeted_other", "subagent", "public", false)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 
 	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, "idem_interrupt_targeted", AppendRequest{
@@ -969,7 +968,7 @@ func TestAppendClientEventsRejectsInvalidExplicitInterruptTargetWithoutRows(t *t
 			ctx := context.Background()
 			sessionID := "sesn_event_interrupt_invalid_" + tc.name
 			seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-			seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+			seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 			if tc.seedTarget != nil {
 				tc.seedTarget(t, admin, sessionID, tc.targetID)
 			}
@@ -1001,7 +1000,7 @@ func TestAppendClientEventsToolConfirmationResolvesPendingApprovalAndQueuesRunti
 	sessionID := "sesn_event_tool_confirmation"
 	toolUseEventID := "sevt_tool_use_confirmation"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, toolUseEventID, time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
 	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time {
 		return time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
@@ -1065,7 +1064,7 @@ func TestAppendClientEventsRejectsExpiredOrNonPendingToolConfirmationWithoutRows
 			runtime, admin := newSessionEventStoreTestDB(t)
 			ctx := context.Background()
 			seedSessionEventSession(t, admin, workspace.DefaultID, testCase.sessionID)
-			seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, testCase.sessionID)
+			seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, testCase.sessionID)
 			seedSessionEventPendingApproval(t, admin, workspace.DefaultID, testCase.sessionID, testCase.toolUseID, testCase.expiresAt)
 			if testCase.status != "pending" {
 				if _, err := admin.ExecContext(ctx,
@@ -1115,7 +1114,7 @@ func TestAppendClientEventsRejectsMessageWhileApprovalPendingWithoutRows(t *test
 	sessionID := "sesn_event_pending_approval_blocks_message"
 	toolUseEventID := "sevt_tool_use_blocks_message"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, toolUseEventID, time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
 	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time {
 		return time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
@@ -1143,7 +1142,7 @@ func TestAppendClientEventsAdmitsMessageWhileRunningWithApprovalPending(t *testi
 	ctx := context.Background()
 	sessionID := "sesn_event_running_with_pending_approval"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, "sevt_running_pending_approval", time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
 	if _, err := admin.ExecContext(ctx,
 		`UPDATE session_runtime_status SET status = 'running', idle_since = NULL
@@ -1169,7 +1168,7 @@ func TestAppendClientEventsReplaysSameCanonicalRequestWithoutDuplicatingQueueJob
 	ctx := context.Background()
 	sessionID := "sesn_event_idempotency_replay"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 	firstBody := []byte(`{"events":[{"type":"user.message","content":[{"type":"text","text":"hello"}]}]}`)
 	replayBody := []byte(`{
@@ -1217,7 +1216,7 @@ func TestAppendClientEventsReplaysUserInterruptWithoutDuplicatingQueueJob(t *tes
 	ctx := context.Background()
 	sessionID := "sesn_event_interrupt_replay"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 	firstRequest, err := DecodeAppendRequest([]byte(`{"events":[{"type":"user.interrupt"}]}`))
 	if err != nil {
@@ -1263,7 +1262,7 @@ func TestAppendClientEventsIdempotencyHashUsesSessionInterruptSelectorBeforeFano
 	ctx := context.Background()
 	sessionID := "sesn_event_interrupt_target_hash"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventThread(t, admin, workspace.DefaultID, sessionID, "thread_interrupt_hash_child_1", "subagent", "public", false)
 	service := newSessionEventServiceForTest(runtime)
 	request, err := DecodeAppendRequest([]byte(`{"events":[{"type":"user.interrupt"}]}`))
@@ -1300,7 +1299,7 @@ func TestAppendClientEventsRejectsSameKeyDifferentRequestWithoutAppendOrQueueJob
 	ctx := context.Background()
 	sessionID := "sesn_event_idempotency_conflict"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	service := newSessionEventServiceForTest(runtime)
 
 	if _, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("first")); err != nil {
@@ -1327,7 +1326,7 @@ func TestAppendClientEventsRollsBackWhenIdempotencyWriteFails(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "sesn_event_idempotency_rollback"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	store.beforeIdempotencyInsert = func() error { return errors.New("injected idempotency write failure") }
 	service := NewService(store)
@@ -1349,7 +1348,7 @@ func TestAppendClientEventsRollsBackWhenQueueJobWriteFails(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "sesn_event_queue_failure"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPreparedRuntime(t, admin, workspace.DefaultID, sessionID)
+	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
 	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	store.beforeQueueJobInsert = func() error { return errors.New("injected queue write failure") }
 	service := NewService(store)
@@ -1363,25 +1362,6 @@ func TestAppendClientEventsRollsBackWhenQueueJobWriteFails(t *testing.T) {
 	assertSessionEventIdempotencyRowCount(t, admin, sessionID, 0)
 	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 0 {
 		t.Fatalf("queue jobs = %d; want rollback", got)
-	}
-}
-
-func TestAppendClientEventsUnpreparedSessionStoresEventsWithoutQueueJob(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	sessionID := "sesn_event_unprepared"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventRuntimeStatus(t, admin, workspace.DefaultID, sessionID)
-	service := NewService(NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime)))
-
-	if _, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("wait")); err != nil {
-		t.Fatalf("AppendClientEvents: %v", err)
-	}
-	if got := len(readSessionEventLedgerRows(t, admin, sessionID)); got != 1 {
-		t.Fatalf("ledger rows = %d; want admitted event", got)
-	}
-	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 0 {
-		t.Fatalf("queue jobs = %d; want no runtime_input until preparation is ready", got)
 	}
 }
 
@@ -1412,387 +1392,6 @@ func TestAppendClientEventsRequiresRuntimeStatusFence(t *testing.T) {
 	}
 	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 0 {
 		t.Fatalf("queue jobs = %d; want none without runtime status fence", got)
-	}
-}
-
-func TestAppendClientEventsAfterFailedPreparationAllocatesCausallyLaterFreshAttempt(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	now := time.Date(2025, 12, 31, 23, 59, 59, 500_000_000, time.UTC)
-	sessionID := "sesn_event_failed_prep_new_input"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time { return now }))
-
-	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-	if err != nil {
-		t.Fatalf("AppendClientEvents: %v", err)
-	}
-	if len(result.Data) != 1 {
-		t.Fatalf("result events = %d; want 1", len(result.Data))
-	}
-	preparations := readSessionEventPreparations(t, admin, sessionID)
-	if len(preparations) != 2 {
-		t.Fatalf("preparations = %#v; want failed attempt plus fresh pending attempt", preparations)
-	}
-	failed := preparations[0]
-	fresh := preparations[1]
-	if failed.status != "failed" || failed.preparationAttemptID != "prep_failed_"+sessionID || failed.failureReason.String != "github_credential_required" {
-		t.Fatalf("failed preparation = %#v; want original failed attempt preserved", failed)
-	}
-	if fresh.status != "pending" || !strings.HasPrefix(fresh.preparationAttemptID, "prep_") || fresh.preparationAttemptID == failed.preparationAttemptID {
-		t.Fatalf("fresh preparation = %#v; want new pending prep_ attempt", fresh)
-	}
-	failedCreatedAt, err := time.Parse(time.RFC3339Nano, failed.createdAt)
-	if err != nil {
-		t.Fatalf("parse failed preparation created_at: %v", err)
-	}
-	freshCreatedAt, err := time.Parse(time.RFC3339Nano, fresh.createdAt)
-	if err != nil {
-		t.Fatalf("parse fresh preparation created_at: %v", err)
-	}
-	if !freshCreatedAt.After(failedCreatedAt) {
-		t.Fatalf("fresh preparation created_at = %s; want after failed attempt %s despite older admission clock", fresh.createdAt, failed.createdAt)
-	}
-	if fresh.environmentID != failed.environmentID || fresh.environmentGeneration != failed.environmentGeneration || fresh.sandboxID != failed.sandboxID {
-		t.Fatalf("fresh preparation identity = %#v; want env/generation/sandbox copied from failed %#v", fresh, failed)
-	}
-	if fresh.failureStage.Valid || fresh.lastErrorKind.Valid || fresh.failureReason.Valid || fresh.retryable.Valid || fresh.failedAt.Valid || fresh.readyAt.Valid {
-		t.Fatalf("fresh preparation carries terminal fields: %#v", fresh)
-	}
-	var eventBirth string
-	if err := admin.QueryRowContext(ctx,
-		`SELECT preparation_attempt_id
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND event_id = $3`,
-		string(workspace.DefaultID),
-		sessionID,
-		result.Data[0].ID,
-	).Scan(&eventBirth); err != nil {
-		t.Fatalf("read admitted event birth: %v", err)
-	}
-	if eventBirth != fresh.preparationAttemptID {
-		t.Fatalf("admitted event birth = %q; want fresh attempt %q", eventBirth, fresh.preparationAttemptID)
-	}
-	jobs := readSessionEventQueueJobs(t, admin, sessionID)
-	if len(jobs) != 1 {
-		t.Fatalf("queue jobs = %#v; want session_prepare only while fresh preparation is pending", jobs)
-	}
-	assertSessionPrepareQueueJob(t, findSessionEventQueueJob(t, jobs, queue.KindSessionPrepare), sessionID, fresh.preparationAttemptID)
-	for _, job := range jobs {
-		if job.kind == queue.KindRuntimeInput {
-			t.Fatalf("runtime_input queued while preparation is pending: %#v", job)
-		}
-	}
-}
-
-func TestAppendClientEventsUsesChronologicallyLatestPreparationForBirthAttempt(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	sessionID := "sesn_event_fractional_prep_order"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	const successorAttemptID = "prep_fractional_successor"
-	if _, err := admin.ExecContext(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, created_at, updated_at, ready_at
-		) VALUES ($1, $2, $3, $4, 1, $5, 'ready',
-		          '2026-01-01T00:00:00.1Z', '2026-01-01T00:00:00.1Z', '2026-01-01T00:00:00.1Z')`,
-		string(workspace.DefaultID),
-		sessionID,
-		successorAttemptID,
-		"env_"+sessionID,
-		"sbox_"+sessionID,
-	); err != nil {
-		t.Fatalf("seed fractional ready successor: %v", err)
-	}
-	service := newSessionEventServiceForTest(runtime)
-
-	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("continue under successor"))
-	if err != nil {
-		t.Fatalf("AppendClientEvents: %v", err)
-	}
-	if len(result.Data) != 1 {
-		t.Fatalf("result events = %d; want 1", len(result.Data))
-	}
-	preparations := readSessionEventPreparations(t, admin, sessionID)
-	if len(preparations) != 2 {
-		t.Fatalf("preparations = %#v; want existing failed and ready attempts only", preparations)
-	}
-	jobs := readSessionEventQueueJobs(t, admin, sessionID)
-	job := findRuntimeInputQueueJob(t, jobs, "messages")
-	var payload runtimeInputQueuePayload
-	if err := json.Unmarshal([]byte(job.payloadJSON), &payload); err != nil {
-		t.Fatalf("decode runtime_input payload: %v", err)
-	}
-	if payload.PreparationAttemptID != successorAttemptID {
-		t.Fatalf("runtime_input birth attempt = %q; want chronological successor %q", payload.PreparationAttemptID, successorAttemptID)
-	}
-}
-
-func TestAppendClientEventsAfterFailedPreparationUsesCurrentEnvironmentStatus(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
-	sessionID := "sesn_event_failed_prep_current_environment"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	setSessionEventEnvironmentArtifact(t, admin, workspace.DefaultID, "env_"+sessionID, 2, "building")
-	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time { return now }))
-
-	result, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-	if err != nil {
-		t.Fatalf("AppendClientEvents: %v", err)
-	}
-	if len(result.Data) != 1 {
-		t.Fatalf("result events = %d; want 1", len(result.Data))
-	}
-	preparations := readSessionEventPreparations(t, admin, sessionID)
-	if len(preparations) != 2 {
-		t.Fatalf("preparations = %#v; want failed attempt plus fresh waiting attempt", preparations)
-	}
-	fresh := preparations[1]
-	if fresh.status != "waiting_environment" || fresh.environmentGeneration != 2 {
-		t.Fatalf("fresh preparation = %#v; want generation 2 waiting_environment", fresh)
-	}
-	if jobs := readSessionEventQueueJobs(t, admin, sessionID); len(jobs) != 0 {
-		t.Fatalf("queue jobs = %#v; want none until environment-ready fanout", jobs)
-	}
-}
-
-func TestFailedEnvironmentTerminalWaitsForConcurrentWaitingPreparationAdmission(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	sessionID := "sesn_event_environment_admission_first"
-	environmentID := "env_" + sessionID
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	setSessionEventEnvironmentArtifact(t, admin, workspace.DefaultID, environmentID, 2, "building")
-
-	admissionReached := make(chan struct{})
-	releaseAdmission := make(chan struct{})
-	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	store.afterPreparationInsert = func() error {
-		close(admissionReached)
-		<-releaseAdmission
-		return nil
-	}
-	service := NewService(store, WithClock(func() time.Time {
-		return time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
-	}))
-	admissionDone := make(chan error, 1)
-	go func() {
-		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-		admissionDone <- err
-	}()
-	select {
-	case <-admissionReached:
-	case <-time.After(time.Second):
-		t.Fatal("admission did not insert its waiting_environment attempt")
-	}
-
-	terminalDone := make(chan error, 1)
-	artifactStore := tetralsandbox.NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
-	go func() {
-		terminalDone <- artifactStore.MarkEnvironmentBuildTerminalFailure(ctx,
-			tetralsandbox.EnvironmentBuildJob{WorkspaceID: string(workspace.DefaultID), EnvironmentID: environmentID, Generation: 2},
-			tetralsandbox.EnvironmentArtifactFailure{Stage: "build_artifact", LastErrorKind: "config_invalid", Reason: "bad packages"},
-			time.Date(2026, 6, 9, 10, 1, 0, 0, time.UTC),
-		)
-	}()
-	select {
-	case err := <-terminalDone:
-		t.Fatalf("terminal failure escaped the admission-held artifact lock: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	close(releaseAdmission)
-	if err := <-admissionDone; err != nil {
-		t.Fatalf("AppendClientEvents: %v", err)
-	}
-	if err := <-terminalDone; err != nil {
-		t.Fatalf("MarkEnvironmentBuildTerminalFailure: %v", err)
-	}
-	preparations := readSessionEventPreparations(t, admin, sessionID)
-	if len(preparations) != 2 || preparations[1].status != "failed" {
-		t.Fatalf("preparations = %#v; want the admitted waiting attempt terminally failed", preparations)
-	}
-	var fanoutJobs int
-	if err := admin.QueryRowContext(ctx,
-		`SELECT count(*)
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND partition_key = $3`,
-		string(workspace.DefaultID),
-		queue.KindEnvironmentFailedFanout,
-		queue.FormatEnvironmentPartitionKey(workspace.DefaultID, environmentID),
-	).Scan(&fanoutJobs); err != nil {
-		t.Fatalf("count environment_failed_fanout jobs: %v", err)
-	}
-	if fanoutJobs != 1 {
-		t.Fatalf("environment_failed_fanout jobs = %d; want 1", fanoutJobs)
-	}
-}
-
-func TestFailedEnvironmentCommittedBeforeAdmissionRejectsWithoutWaitingPreparation(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	sessionID := "sesn_event_environment_terminal_first"
-	environmentID := "env_" + sessionID
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	setSessionEventEnvironmentArtifact(t, admin, workspace.DefaultID, environmentID, 2, "building")
-
-	terminalTx, err := admin.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin terminal transaction: %v", err)
-	}
-	defer func() { _ = terminalTx.Rollback() }()
-	if _, err := terminalTx.ExecContext(ctx,
-		`UPDATE environment_artifacts
-		    SET status = 'failed', updated_at = '2026-06-09T10:01:00Z'
-		  WHERE workspace_id = $1 AND environment_id = $2 AND generation = 2`,
-		string(workspace.DefaultID), environmentID,
-	); err != nil {
-		t.Fatalf("stage terminal artifact update: %v", err)
-	}
-
-	service := newSessionEventServiceForTest(runtime)
-	admissionDone := make(chan error, 1)
-	go func() {
-		_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-		admissionDone <- err
-	}()
-	select {
-	case err := <-admissionDone:
-		t.Fatalf("admission escaped the terminal-held artifact lock: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	if err := terminalTx.Commit(); err != nil {
-		t.Fatalf("commit terminal artifact update: %v", err)
-	}
-	err = <-admissionDone
-	var validation *ValidationError
-	if !errors.As(err, &validation) || validation.Message != "environment artifact is failed" {
-		t.Fatalf("AppendClientEvents err = %T %v; want failed environment rejection after terminal commit", err, err)
-	}
-	if preparations := readSessionEventPreparations(t, admin, sessionID); len(preparations) != 1 {
-		t.Fatalf("preparations = %#v; want no admitted successor after terminal commit", preparations)
-	}
-	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 0 {
-		t.Fatalf("events = %#v; want admission rollback", events)
-	}
-}
-
-func TestAppendClientEventsAfterFailedPreparationRejectsFailedCurrentEnvironment(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
-	sessionID := "sesn_event_failed_prep_failed_environment"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	setSessionEventEnvironmentArtifact(t, admin, workspace.DefaultID, "env_"+sessionID, 2, "failed")
-	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time { return now }))
-
-	_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-	var validation *ValidationError
-	if !errors.As(err, &validation) || validation.Message != "environment artifact is failed" {
-		t.Fatalf("AppendClientEvents err = %T %v; want failed environment validation", err, err)
-	}
-	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 0 {
-		t.Fatalf("events = %#v; want admission rollback", events)
-	}
-	if preparations := readSessionEventPreparations(t, admin, sessionID); len(preparations) != 1 || preparations[0].status != "failed" {
-		t.Fatalf("preparations = %#v; want original failed attempt only", preparations)
-	}
-	if jobs := readSessionEventQueueJobs(t, admin, sessionID); len(jobs) != 0 {
-		t.Fatalf("queue jobs = %#v; want none", jobs)
-	}
-}
-
-func TestAppendClientEventsAfterFailedPreparationRejectsMissingCurrentEnvironmentArtifact(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	sessionID := "sesn_event_failed_prep_missing_environment_artifact"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	if _, err := admin.ExecContext(ctx,
-		`DELETE FROM environment_artifacts
-		  WHERE workspace_id = $1 AND environment_id = $2 AND generation = 1`,
-		string(workspace.DefaultID),
-		"env_"+sessionID,
-	); err != nil {
-		t.Fatalf("delete current environment artifact: %v", err)
-	}
-	service := newSessionEventServiceForTest(runtime)
-
-	_, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-	var validation *ValidationError
-	if !errors.As(err, &validation) || validation.Message != "environment artifact is unavailable for preparation" {
-		t.Fatalf("AppendClientEvents err = %T %v; want missing artifact validation", err, err)
-	}
-	if events := readSessionEventLedgerRows(t, admin, sessionID); len(events) != 0 {
-		t.Fatalf("events = %#v; want admission rollback", events)
-	}
-	if preparations := readSessionEventPreparations(t, admin, sessionID); len(preparations) != 1 || preparations[0].status != "failed" {
-		t.Fatalf("preparations = %#v; want original failed attempt only", preparations)
-	}
-}
-
-func TestAppendClientEventsFailedPreparationReplayDoesNotAllocateAnotherAttempt(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	now := time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
-	sessionID := "sesn_event_failed_prep_replay"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time { return now }))
-
-	first, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-	if err != nil {
-		t.Fatalf("AppendClientEvents first: %v", err)
-	}
-	replay, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("credential restored"))
-	if err != nil {
-		t.Fatalf("AppendClientEvents replay: %v", err)
-	}
-	if len(first.Data) != 1 || len(replay.Data) != 1 || replay.Data[0].ID != first.Data[0].ID {
-		t.Fatalf("replay events = %#v; want original event %s", replay.Data, first.Data[0].ID)
-	}
-	if got := len(readSessionEventPreparations(t, admin, sessionID)); got != 2 {
-		t.Fatalf("preparations = %d; want no extra attempt on replay", got)
-	}
-	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 1 {
-		t.Fatalf("queue jobs = %d; want original session_prepare only", got)
-	}
-}
-
-func TestAppendClientEventsFailedPreparationRecoveryRollsBackWhenPrepareQueueFails(t *testing.T) {
-	runtime, admin := newSessionEventStoreTestDB(t)
-	ctx := context.Background()
-	sessionID := "sesn_event_failed_prep_queue_rollback"
-	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventFailedPreparation(t, admin, workspace.DefaultID, sessionID, "github_credential_required")
-	store := NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
-	store.beforeQueueJobInsert = func() error { return errors.New("injected session_prepare queue write failure") }
-	service := NewService(store)
-
-	if _, err := service.AppendClientEvents(ctx, workspace.DefaultID, sessionID, testSessionEventIdempotencyKey, messageAppendRequest("rollback")); err == nil {
-		t.Fatal("AppendClientEvents succeeded despite injected session_prepare queue failure")
-	}
-	if got := len(readSessionEventLedgerRows(t, admin, sessionID)); got != 0 {
-		t.Fatalf("ledger rows = %d; want rollback", got)
-	}
-	assertSessionEventIdempotencyRowCount(t, admin, sessionID, 0)
-	if got := len(readSessionEventPreparations(t, admin, sessionID)); got != 1 {
-		t.Fatalf("preparations = %d; want only original failed attempt after rollback", got)
-	}
-	if got := len(readSessionEventQueueJobs(t, admin, sessionID)); got != 0 {
-		t.Fatalf("queue jobs = %d; want rollback", got)
 	}
 }
 
@@ -2085,48 +1684,6 @@ func findRuntimeInputQueueJob(t *testing.T, jobs []sessionEventQueueJobRow, inpu
 	return sessionEventQueueJobRow{}
 }
 
-func findSessionEventQueueJob(t *testing.T, jobs []sessionEventQueueJobRow, kind string) sessionEventQueueJobRow {
-	t.Helper()
-	for _, job := range jobs {
-		if job.kind == kind {
-			return job
-		}
-	}
-	t.Fatalf("queue jobs = %#v; missing kind %s", jobs, kind)
-	return sessionEventQueueJobRow{}
-}
-
-func assertSessionPrepareQueueJob(t *testing.T, job sessionEventQueueJobRow, sessionID string, preparationAttemptID string) {
-	t.Helper()
-	if !strings.HasPrefix(job.id, queue.JobIDPrefix) {
-		t.Fatalf("queue job id = %q; want %s prefix", job.id, queue.JobIDPrefix)
-	}
-	if job.kind != queue.KindSessionPrepare || job.status != "pending" || job.payloadVersion != 1 {
-		t.Fatalf("queue job control fields = %#v; want pending session_prepare payload v1", job)
-	}
-	if job.partitionKey != queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID) {
-		t.Fatalf("partition key = %q; want session partition", job.partitionKey)
-	}
-	wantDedupe := queue.FormatSessionPrepareDedupeKey(workspace.DefaultID, sessionID, preparationAttemptID)
-	if job.dedupeKey != wantDedupe {
-		t.Fatalf("dedupe key = %q; want %q", job.dedupeKey, wantDedupe)
-	}
-	if job.priority != 0 || job.attemptCount != 0 || job.maxAttempts != 0 {
-		t.Fatalf("queue fields = priority %d attempts %d/%d; want 0 and 0/0 with Queue-owned default resolution", job.priority, job.attemptCount, job.maxAttempts)
-	}
-	var payload struct {
-		WorkspaceID          string `json:"workspace_id"`
-		SessionID            string `json:"session_id"`
-		PreparationAttemptID string `json:"preparation_attempt_id"`
-	}
-	if err := json.Unmarshal([]byte(job.payloadJSON), &payload); err != nil {
-		t.Fatalf("decode session_prepare payload: %v", err)
-	}
-	if payload.WorkspaceID != string(workspace.DefaultID) || payload.SessionID != sessionID || payload.PreparationAttemptID != preparationAttemptID {
-		t.Fatalf("session_prepare payload = %#v; want fresh preparation attempt", payload)
-	}
-}
-
 func equalSessionEventStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -2282,19 +1839,6 @@ func seedSessionEventSession(t *testing.T, db *sql.DB, workspaceID workspace.ID,
 		string(workspaceID), sessionID); err != nil {
 		t.Fatalf("seed runtime status: %v", err)
 	}
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id, environment_generation,
-			sandbox_id, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 1, $5, 'pending', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		string(workspaceID),
-		sessionID,
-		"prep_base_"+sessionID,
-		environmentID,
-		"sbox_"+sessionID,
-	); err != nil {
-		t.Fatalf("seed baseline preparation: %v", err)
-	}
 }
 
 func seedSessionEventWorkspace(t *testing.T, db *sql.DB, workspaceID workspace.ID) {
@@ -2418,157 +1962,9 @@ func seedSessionEventRuntimeStatus(t *testing.T, db *sql.DB, workspaceID workspa
 	}
 }
 
-func seedSessionEventPreparedRuntime(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) {
+func seedSessionEventRunnableRuntime(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) {
 	t.Helper()
 	seedSessionEventRuntimeStatus(t, db, workspaceID, sessionID)
-	if _, err := db.ExecContext(context.Background(),
-		`DELETE FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		string(workspaceID),
-		sessionID,
-		"prep_base_"+sessionID,
-	); err != nil {
-		t.Fatalf("remove baseline preparation: %v", err)
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id, environment_generation,
-			sandbox_id, status, created_at, updated_at, ready_at
-		) VALUES ($1, $2, $3, $4, 1, $5, 'ready', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		string(workspaceID),
-		sessionID,
-		"prep_"+sessionID,
-		"env_"+sessionID,
-		"sbox_"+sessionID,
-	); err != nil {
-		t.Fatalf("seed preparation: %v", err)
-	}
-}
-
-func seedSessionEventFailedPreparation(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, failureReason string) {
-	t.Helper()
-	seedSessionEventRuntimeStatus(t, db, workspaceID, sessionID)
-	setSessionEventEnvironmentArtifact(t, db, workspaceID, "env_"+sessionID, 1, "ready")
-	if _, err := db.ExecContext(context.Background(),
-		`DELETE FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3`,
-		string(workspaceID),
-		sessionID,
-		"prep_base_"+sessionID,
-	); err != nil {
-		t.Fatalf("remove baseline preparation: %v", err)
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id, environment_generation,
-			sandbox_id, status, failure_stage, last_error_kind, failure_reason, retryable, created_at, updated_at, failed_at
-		) VALUES ($1, $2, $3, $4, 1, $5, 'failed', 'github_repository_clone', 'credential_required', $6, FALSE,
-		          '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		string(workspaceID),
-		sessionID,
-		"prep_failed_"+sessionID,
-		"env_"+sessionID,
-		"sbox_"+sessionID,
-		failureReason,
-	); err != nil {
-		t.Fatalf("seed failed preparation: %v", err)
-	}
-}
-
-func setSessionEventEnvironmentArtifact(t *testing.T, db *sql.DB, workspaceID workspace.ID, environmentID string, generation int64, status string) {
-	t.Helper()
-	if _, err := db.ExecContext(context.Background(),
-		`UPDATE environments
-		    SET current_generation = $3,
-		        updated_at = '2026-01-01T00:00:00Z'
-		  WHERE workspace_id = $1
-		    AND id = $2`,
-		string(workspaceID),
-		environmentID,
-		generation,
-	); err != nil {
-		t.Fatalf("update environment generation: %v", err)
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO environment_artifacts (
-			workspace_id, environment_id, generation, status, provider,
-			provider_artifact_ref, normalized_config_hash, artifact_input_hash,
-			runtime_network_policy_json, packages_json, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'tetral', $5, 'hash-config', 'hash-artifact',
-		          '{"type":"unrestricted"}', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
-		ON CONFLICT (workspace_id, environment_id, generation) DO UPDATE SET
-			status = EXCLUDED.status,
-			provider_artifact_ref = EXCLUDED.provider_artifact_ref,
-			updated_at = EXCLUDED.updated_at`,
-		string(workspaceID),
-		environmentID,
-		generation,
-		status,
-		"artifact-"+environmentID,
-	); err != nil {
-		t.Fatalf("upsert environment artifact: %v", err)
-	}
-}
-
-type sessionEventPreparationRow struct {
-	preparationAttemptID  string
-	environmentID         string
-	environmentGeneration int64
-	sandboxID             string
-	status                string
-	failureStage          sql.NullString
-	lastErrorKind         sql.NullString
-	failureReason         sql.NullString
-	retryable             sql.NullBool
-	readyAt               sql.NullString
-	failedAt              sql.NullString
-	createdAt             string
-}
-
-func readSessionEventPreparations(t *testing.T, db *sql.DB, sessionID string) []sessionEventPreparationRow {
-	t.Helper()
-	rows, err := db.QueryContext(context.Background(),
-		`SELECT preparation_attempt_id, environment_id, environment_generation, sandbox_id, status,
-		        failure_stage, last_error_kind, failure_reason, retryable, ready_at, failed_at, created_at
-		   FROM session_preparations
-		  WHERE workspace_id = $1 AND session_id = $2
-		  ORDER BY created_at, preparation_attempt_id`,
-		string(workspace.DefaultID),
-		sessionID,
-	)
-	if err != nil {
-		t.Fatalf("query session preparations: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var got []sessionEventPreparationRow
-	for rows.Next() {
-		var row sessionEventPreparationRow
-		if err := rows.Scan(
-			&row.preparationAttemptID,
-			&row.environmentID,
-			&row.environmentGeneration,
-			&row.sandboxID,
-			&row.status,
-			&row.failureStage,
-			&row.lastErrorKind,
-			&row.failureReason,
-			&row.retryable,
-			&row.readyAt,
-			&row.failedAt,
-			&row.createdAt,
-		); err != nil {
-			t.Fatalf("scan session preparation: %v", err)
-		}
-		got = append(got, row)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("session preparations: %v", err)
-	}
-	return got
 }
 
 func seedSessionEventPendingApproval(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, toolUseEventID string, expiresAt time.Time) {

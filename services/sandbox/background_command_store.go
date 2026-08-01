@@ -119,23 +119,12 @@ func (s *PostgreSQLSandboxBackgroundCommandStore) MarkCommandSubmitted(ctx conte
 		if err := lockBackgroundSessionTx(ctx, tx, work.Task.WorkspaceID, work.Task.SessionID); err != nil {
 			return err
 		}
-		var result sql.Result
-		var err error
-		if work.Kind == SandboxBackgroundOperationCancel {
-			result, err = tx.Exec(ctx, `UPDATE session_runtime_tool_results
-				SET cancel_state='submitted', cancel_submitted_at=$6, updated_at=$6
-				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-				  AND tool_use_event_id=$4 AND background_cancel_request_id=$5 AND cancel_state='pending'`,
-				work.Task.WorkspaceID, work.Task.SessionID, work.Task.SessionThreadID,
-				work.ToolUseEventID, work.RequestID, now.UTC())
-		} else {
-			result, err = tx.Exec(ctx, `UPDATE session_runtime_tool_results
-				SET background_operation_state='submitted', updated_at=$6
-				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-				  AND tool_use_event_id=$4 AND background_request_id=$5 AND background_operation_state='pending'`,
-				work.Task.WorkspaceID, work.Task.SessionID, work.Task.SessionThreadID,
-				work.ToolUseEventID, work.RequestID, now.UTC())
-		}
+		result, err := tx.Exec(ctx, `UPDATE session_runtime_tool_results
+			SET background_operation_state='submitted', updated_at=$6
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+			  AND tool_use_event_id=$4 AND background_request_id=$5 AND background_operation_state='pending'`,
+			work.Task.WorkspaceID, work.Task.SessionID, work.Task.SessionThreadID,
+			work.ToolUseEventID, work.RequestID, now.UTC())
 		if err != nil {
 			return err
 		}
@@ -262,6 +251,50 @@ func finalizeExhaustedBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx,
 	if err != nil || !current {
 		return err
 	}
+	if work.Kind == SandboxBackgroundOperationCancel && work.Task.ReleaseOperationID != "" && work.State == SandboxBackgroundOperationPending {
+		var nextGeneration int64
+		if err := tx.QueryRow(ctx,
+			`UPDATE session_background_tasks
+			    SET reconcile_generation=reconcile_generation+1, updated_at=$4
+			  WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3
+			    AND status='running' AND release_operation_id=$5
+			  RETURNING reconcile_generation`,
+			identity.WorkspaceID, identity.SessionID, identity.TaskID, now, work.Task.ReleaseOperationID,
+		).Scan(&nextGeneration); dbconnect.IsNoRows(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		nextRequestID := releaseBackgroundCancelRequestID(work.Task.ReleaseOperationID, identity.TaskID, nextGeneration)
+		exhausted := normalizeSandboxProviderResult(backgroundTaskFailure("sandbox_background_unavailable", "sandbox background command is unavailable").ResultJSON)
+		digest := sha256.Sum256([]byte(exhausted))
+		if _, err := tx.Exec(ctx, `UPDATE session_runtime_tool_results
+				SET background_operation_state='terminal', result_json=$6, result_digest=$7, updated_at=$8
+				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+				  AND tool_use_event_id=$4 AND background_request_id=$5 AND background_operation_state='pending'`,
+			identity.WorkspaceID, identity.SessionID, work.Task.SessionThreadID, work.ToolUseEventID,
+			identity.RequestID, exhausted, hex.EncodeToString(digest[:]), now); err != nil {
+			return err
+		}
+		inputDigest := sha256.Sum256([]byte(work.InputJSON))
+		if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_tool_results (
+				workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+				normalized_input_hash, tool_name, input_json, ack_status,
+				background_operation_kind, background_operation_state, background_request_id,
+				background_task_id, background_max_output_tokens, created_at, updated_at
+			) VALUES ($1,$2,$3,$4,'sandbox_background',$5,'cancel_command',$6,'committed',
+				'cancel','pending',$7,$8,0,$9,$9)`, identity.WorkspaceID, identity.SessionID,
+			work.Task.SessionThreadID, backgroundOperationReceiptID(nextRequestID),
+			hex.EncodeToString(inputDigest[:]), work.InputJSON, nextRequestID, identity.TaskID, now); err != nil {
+			return err
+		}
+		request, err := releaseBackgroundCancelEnqueueRequest(identity.WorkspaceID, identity.SessionID, identity.TaskID, nextRequestID, now)
+		if err != nil {
+			return err
+		}
+		_, err = queue.EnqueueBatchTx(ctx, tx, []queue.EnqueueRequest{request})
+		return err
+	}
 	disposition := "failed"
 	result := backgroundTaskFailure("sandbox_background_unavailable", "sandbox background command is unavailable")
 	result.TerminalStatus = ""
@@ -279,18 +312,16 @@ func finalizeExhaustedBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx,
 func loadBackgroundCommandForUpdateTx(ctx context.Context, tx *dbconnect.Tx, job SandboxBackgroundCommandJob, now time.Time) (SandboxBackgroundOperationWork, bool, error) {
 	var threadID, toolUseEventID, operationKind, operationState, backgroundRequestID, taskID, inputJSON string
 	var maxOutputTokens int
-	var cancelRequestID, cancelState, cancelInputJSON sql.NullString
 	err := tx.QueryRow(ctx, `SELECT session_thread_id, tool_use_event_id,
 		background_operation_kind, background_operation_state, background_request_id,
-		background_task_id, input_json, background_max_output_tokens,
-		background_cancel_request_id, cancel_state, background_cancel_input_json
+		background_task_id, input_json, background_max_output_tokens
 		FROM session_runtime_tool_results
 		WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_background'
 		  AND background_task_id=$3
-		  AND (background_request_id=$4 OR background_cancel_request_id=$4)
+		  AND background_request_id=$4
 		FOR UPDATE`, job.WorkspaceID, job.SessionID, job.TaskID, job.RequestID).Scan(
 		&threadID, &toolUseEventID, &operationKind, &operationState, &backgroundRequestID,
-		&taskID, &inputJSON, &maxOutputTokens, &cancelRequestID, &cancelState, &cancelInputJSON,
+		&taskID, &inputJSON, &maxOutputTokens,
 	)
 	if dbconnect.IsNoRows(err) {
 		return SandboxBackgroundOperationWork{}, false, nil
@@ -309,35 +340,24 @@ func loadBackgroundCommandForUpdateTx(ctx context.Context, tx *dbconnect.Tx, job
 			return SandboxBackgroundOperationWork{}, false, err
 		}
 		digestBytes := sha256.Sum256([]byte(terminalResult))
-		if cancelRequestID.Valid && cancelRequestID.String == job.RequestID {
-			_, err = tx.Exec(ctx, `UPDATE session_runtime_tool_results
-				SET cancel_state='terminal', cancel_submitted_at=COALESCE(cancel_submitted_at,updated_at),
-				    background_cancel_result_json=$5, updated_at=$6
-				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
-				job.WorkspaceID, job.SessionID, threadID, toolUseEventID, terminalResult, now)
-			return SandboxBackgroundOperationWork{}, false, err
-		}
 		_, err = tx.Exec(ctx, `UPDATE session_runtime_tool_results
 			SET background_operation_state='terminal', result_json=$5, result_digest=$6, updated_at=$7
 			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
 			job.WorkspaceID, job.SessionID, threadID, toolUseEventID, terminalResult, hex.EncodeToString(digestBytes[:]), now)
 		return SandboxBackgroundOperationWork{}, false, err
 	}
-	kind := SandboxBackgroundOperationKind(operationKind)
-	state := operationState
-	if cancelRequestID.Valid && cancelRequestID.String == job.RequestID {
-		kind = SandboxBackgroundOperationCancel
-		state = cancelState.String
-		inputJSON = cancelInputJSON.String
-	}
 	work := SandboxBackgroundOperationWork{
 		Task: task, RequestID: job.RequestID, ToolUseEventID: toolUseEventID,
-		Kind: kind, State: state, InputJSON: inputJSON, MaxOutputTokens: maxOutputTokens,
+		Kind: SandboxBackgroundOperationKind(operationKind), State: operationState,
+		InputJSON: inputJSON, MaxOutputTokens: maxOutputTokens,
 	}
 	return work, true, nil
 }
 
 func settleBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, work SandboxBackgroundOperationWork, disposition string, result sandboxdriver.CommandResult, now time.Time) error {
+	if work.Kind == SandboxBackgroundOperationCancel && work.Task.ReleaseOperationID != "" && disposition != "completed" {
+		result.TerminalStatus = "unknown_outcome"
+	}
 	if disposition == "completed" && result.TerminalStatus != "" {
 		if err := settleBackgroundTaskResultTx(ctx, tx, work.Task, result, now); err != nil {
 			return err
@@ -348,16 +368,10 @@ func settleBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, work Sandb
 			return err
 		}
 		result.ResultJSON = winning
-	}
-	if work.Kind == SandboxBackgroundOperationCancel {
-		_, err := tx.Exec(ctx, `UPDATE session_runtime_tool_results
-			SET cancel_state='terminal', cancel_submitted_at=COALESCE(cancel_submitted_at,$6),
-			    background_cancel_result_json=$7, updated_at=$6
-			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
-			  AND tool_use_event_id=$4 AND background_cancel_request_id=$5
-			  AND cancel_state IN ('pending','submitted')`, work.Task.WorkspaceID, work.Task.SessionID,
-			work.Task.SessionThreadID, work.ToolUseEventID, work.RequestID, now, result.ResultJSON)
-		return err
+	} else if work.Kind == SandboxBackgroundOperationCancel && work.Task.ReleaseOperationID != "" && result.TerminalStatus != "" {
+		if err := settleBackgroundTaskResultTx(ctx, tx, work.Task, result, now); err != nil {
+			return err
+		}
 	}
 	digestBytes := sha256.Sum256([]byte(result.ResultJSON))
 	_, err := tx.Exec(ctx, `UPDATE session_runtime_tool_results
@@ -370,6 +384,10 @@ func settleBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, work Sandb
 	return err
 }
 
+func backgroundOperationReceiptID(requestID string) string {
+	return "background_receipt:" + requestID
+}
+
 func (s *PostgreSQLSandboxBackgroundCommandStore) withWorkspaceTx(ctx context.Context, workspaceID string, operation string, fn func(*dbconnect.Tx) error) error {
 	if s == nil || s.client == nil {
 		return errors.New("sandbox background store database is required")
@@ -380,14 +398,15 @@ func (s *PostgreSQLSandboxBackgroundCommandStore) withWorkspaceTx(ctx context.Co
 func loadBackgroundTaskForUpdateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, taskID string) (SandboxBackgroundTaskWork, bool, error) {
 	var work SandboxBackgroundTaskWork
 	var sourceToolUseEventID, providerResourceID, providerCommandID, providerMetadataJSON, resourceRootsJSON string
+	var releaseOperationID sql.NullString
 	var status string
 	err := tx.QueryRow(ctx, `SELECT session_thread_id, source_tool_use_event_id, provider, binding_revision,
 		provider_session_id, provider_command_id, provider_command_metadata_json, resource_roots_json,
-		status, reconcile_generation
+		status, reconcile_generation, release_operation_id
 		FROM session_background_tasks WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3 FOR UPDATE`,
 		workspaceID, sessionID, taskID,
 	).Scan(&work.SessionThreadID, &sourceToolUseEventID, &work.Provider, &work.Reference.Target.BindingGeneration,
-		&providerResourceID, &providerCommandID, &providerMetadataJSON, &resourceRootsJSON, &status, &work.ReconcileGeneration)
+		&providerResourceID, &providerCommandID, &providerMetadataJSON, &resourceRootsJSON, &status, &work.ReconcileGeneration, &releaseOperationID)
 	if dbconnect.IsNoRows(err) {
 		return SandboxBackgroundTaskWork{}, false, nil
 	}
@@ -397,6 +416,7 @@ func loadBackgroundTaskForUpdateTx(ctx context.Context, tx *dbconnect.Tx, worksp
 	work.WorkspaceID = workspaceID
 	work.SessionID = sessionID
 	work.TaskID = taskID
+	work.ReleaseOperationID = releaseOperationID.String
 	work.Reference = sandboxdriver.CommandReference{
 		Target: sandboxdriver.ToolTarget{
 			WorkspaceID: workspaceID, SessionID: sessionID, SessionThreadID: work.SessionThreadID,
@@ -447,8 +467,10 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 	if err != nil {
 		return err
 	}
-	_, err = queue.EnqueueTx(ctx, tx, request)
-	return err
+	if _, err = queue.EnqueueTx(ctx, tx, request); err != nil {
+		return err
+	}
+	return enqueueReadySandboxReleasesTx(ctx, tx, work.WorkspaceID, work.SessionID, now)
 }
 
 func enqueueBackgroundReconcileTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, taskID string, generation int64, now time.Time, availableAt time.Time) error {

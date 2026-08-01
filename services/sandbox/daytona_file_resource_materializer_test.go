@@ -23,7 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/services/sandbox/internal/resourceprojection"
 )
 
-func TestResourceProjectionPreparerCopiesMintsRunsCommandAndReturnsMetadata(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCopiesMintsRunsCommandAndReturnsMetadata(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
@@ -39,12 +39,12 @@ func TestResourceProjectionPreparerCopiesMintsRunsCommandAndReturnsMetadata(t *t
 		ExpiresAt: expiresAt,
 		Prefix:    "workspaces/ws_test/sessions/sesn_test/resources/",
 	}}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 
-	prepared, err := preparer.PrepareSessionResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if len(prepared.Files) != 0 {
 		t.Fatalf("prepared files = %+v; want raw file mounts consumed by bind projection", prepared.Files)
@@ -112,7 +112,7 @@ func TestResourceProjectionPreparerCopiesMintsRunsCommandAndReturnsMetadata(t *t
 	}
 }
 
-func TestResourceProjectionPreparerBatchesTwentyFilesUnderOneMountAndCredential(t *testing.T) {
+func TestDaytonaFileResourceMaterializerBatchesTwentyFilesUnderOneMountAndCredential(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	files := make([]sandbox.FileMount, 0, 20)
@@ -143,8 +143,8 @@ func TestResourceProjectionPreparerBatchesTwentyFilesUnderOneMountAndCredential(
 		ExpiresAt: expiresAt,
 		Prefix:    "workspaces/ws_test/sessions/sesn_test/resources/",
 	}}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_test",
@@ -152,9 +152,9 @@ func TestResourceProjectionPreparerBatchesTwentyFilesUnderOneMountAndCredential(
 		Resources:   sandbox.ResourceSetup{Files: files},
 	}
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if len(prepared.Files) != 0 {
 		t.Fatalf("prepared files = %+v; want raw file mounts consumed", prepared.Files)
@@ -190,7 +190,7 @@ func TestResourceProjectionPreparerBatchesTwentyFilesUnderOneMountAndCredential(
 	}
 }
 
-func TestResourceProjectionPreparerCredentialMintRejectionStopsBeforeMountAndDeletesSessionCopies(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCredentialMintRejectionStopsBeforeMountAndDeletesSessionCopies(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
@@ -198,12 +198,12 @@ func TestResourceProjectionPreparerCredentialMintRejectionStopsBeforeMountAndDel
 	}
 	mintErr := errors.New("r2 rejected requested ttl")
 	minter := &recordingResourceCredentialMinter{err: mintErr}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 
-	_, err := preparer.PrepareSessionResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if !errors.Is(err, mintErr) {
-		t.Fatalf("PrepareSessionResources err = %v; want mint rejection", err)
+		t.Fatalf("MaterializeFileResources err = %v; want mint rejection", err)
 	}
 	if len(minter.requests) != 1 || minter.requests[0].TTL != 24*time.Hour {
 		t.Fatalf("mint requests = %+v; want one unclamped default TTL mint", minter.requests)
@@ -214,24 +214,24 @@ func TestResourceProjectionPreparerCredentialMintRejectionStopsBeforeMountAndDel
 	assertBlobAbsent(t, blobStore, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file")
 }
 
-func TestResourceProjectionPreparerCreatesArbitraryAbsoluteParentAsRuntimeUser(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCreatesArbitraryAbsoluteParentAsRuntimeUser(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
 	}}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.Files[0].MountPath = "/uploads/receipt.pdf"
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if got, want := prepared.ResourceRootsJSON, `[{"path":"/uploads/receipt.pdf","mode":"read"}]`; got != want {
 		t.Fatalf("ResourceRootsJSON = %s; want %s", got, want)
@@ -263,7 +263,7 @@ func TestResourceProjectionPreparerCreatesArbitraryAbsoluteParentAsRuntimeUser(t
 	}
 }
 
-func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
+func TestDaytonaFileResourceMaterializerMaterializesSkillPackages(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	skillZip := buildSkillPackageZip(t, "finance")
@@ -274,8 +274,8 @@ func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
 	}
 	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_skill",
@@ -290,9 +290,9 @@ func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
 		}}},
 	}
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceRootsJSON != "[]" || prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
 		t.Fatalf("prepared roots=%q expires=%v; want bounded materialization receipt", prepared.ResourceRootsJSON, prepared.ResourceCredExpiresAt)
@@ -320,24 +320,24 @@ func TestResourceProjectionPreparerMaterializesSkillPackages(t *testing.T) {
 	}
 }
 
-func TestResourceProjectionPreparerMintsBoundedReceiptWithoutFileResources(t *testing.T) {
+func TestDaytonaFileResourceMaterializerMintsBoundedReceiptWithoutFileResources(t *testing.T) {
 	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		ExpiresAt: expiresAt,
 	}}
-	preparer := newTestResourceProjectionPreparer(
+	preparer := newTestDaytonaFileResourceMaterializer(
 		t,
 		blob.NewFakeBlobStore(),
 		minter,
-		&recordingPreparationCommandRunner{},
+		&recordingDaytonaCommandRunner{},
 	)
 
-	prepared, err := preparer.PrepareSessionResources(context.Background(), sandbox.SandboxSetup{
+	prepared, err := preparer.MaterializeFileResources(context.Background(), sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_no_resources",
 	}, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
 		t.Fatalf("resource credential expiry = %v; want %s", prepared.ResourceCredExpiresAt, expiresAt)
@@ -347,7 +347,7 @@ func TestResourceProjectionPreparerMintsBoundedReceiptWithoutFileResources(t *te
 	}
 }
 
-func TestResourceProjectionPreparerRejectsSkillPackageHashMismatchBeforeCommand(t *testing.T) {
+func TestDaytonaFileResourceMaterializerRejectsSkillPackageHashMismatchBeforeCommand(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	skillZip := buildSkillPackageZip(t, "finance")
@@ -355,8 +355,8 @@ func TestResourceProjectionPreparerRejectsSkillPackageHashMismatchBeforeCommand(
 	if err := blobStore.Put(ctx, skillBlobKey, bytes.NewReader(skillZip), int64(len(skillZip))); err != nil {
 		t.Fatalf("put skill package: %v", err)
 	}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_skill_hash",
@@ -371,20 +371,20 @@ func TestResourceProjectionPreparerRejectsSkillPackageHashMismatchBeforeCommand(
 		}}},
 	}
 
-	_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil || !strings.Contains(err.Error(), "skill_package_sha256_mismatch") {
-		t.Fatalf("PrepareSessionResources err = %v; want skill package sha mismatch", err)
+		t.Fatalf("MaterializeFileResources err = %v; want skill package sha mismatch", err)
 	}
 	if len(runner.uploads) != 0 || len(runner.calls) != 0 {
 		t.Fatalf("runner uploads=%d commands=%d; want fail-before-command", len(runner.uploads), len(runner.calls))
 	}
 }
 
-func TestResourceProjectionPreparerRejectsDuplicateSkillDirectoriesBeforeWrites(t *testing.T) {
+func TestDaytonaFileResourceMaterializerRejectsDuplicateSkillDirectoriesBeforeWrites(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_skill_duplicate",
@@ -394,16 +394,16 @@ func TestResourceProjectionPreparerRejectsDuplicateSkillDirectoriesBeforeWrites(
 		}},
 	}
 
-	_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil || !strings.Contains(err.Error(), "duplicate_skill_directory") {
-		t.Fatalf("PrepareSessionResources err = %v; want duplicate skill directory", err)
+		t.Fatalf("MaterializeFileResources err = %v; want duplicate skill directory", err)
 	}
 	if len(runner.uploads) != 0 || len(runner.calls) != 0 {
 		t.Fatalf("runner uploads=%d commands=%d; want fail-before-write", len(runner.uploads), len(runner.calls))
 	}
 }
 
-func TestResourceProjectionPreparerCommandFailureCleansMaterializedSkills(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCommandFailureCleansMaterializedSkills(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
@@ -414,12 +414,12 @@ func TestResourceProjectionPreparerCommandFailureCleansMaterializedSkills(t *tes
 	if err := blobStore.Put(ctx, skillBlobKey, bytes.NewReader(skillZip), int64(len(skillZip))); err != nil {
 		t.Fatalf("put skill package: %v", err)
 	}
-	runner := &recordingPreparationCommandRunner{errs: []error{nil, errors.New("mount failed"), nil}}
+	runner := &recordingDaytonaCommandRunner{errs: []error{nil, errors.New("mount failed"), nil}}
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
 	}}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.Skills = []sandbox.SkillMount{{
 		SkillID:        "skill_finance",
@@ -431,9 +431,9 @@ func TestResourceProjectionPreparerCommandFailureCleansMaterializedSkills(t *tes
 		SHA256:         sha256Hex(skillZip),
 	}}
 
-	_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil || !strings.Contains(err.Error(), "mount failed") {
-		t.Fatalf("PrepareSessionResources err = %v; want mount failure", err)
+		t.Fatalf("MaterializeFileResources err = %v; want mount failure", err)
 	}
 	if len(runner.calls) != 3 {
 		t.Fatalf("runner calls = %d; want skill materialization, file projection, skill cleanup", len(runner.calls))
@@ -446,25 +446,25 @@ func TestResourceProjectionPreparerCommandFailureCleansMaterializedSkills(t *tes
 	}
 }
 
-func TestResourceProjectionPreparerLiveRotationWithoutCarriedExpiryTearsDownBeforeRemount(t *testing.T) {
+func TestDaytonaFileResourceMaterializerLiveRotationWithoutCarriedExpiryTearsDownBeforeRemount(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
 	newExpiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  newExpiresAt,
 	}}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.ResourceCredExpiresAt = nil
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(newExpiresAt) {
 		t.Fatalf("ResourceCredExpiresAt = %v; want live-rotation minted expiry %s", prepared.ResourceCredExpiresAt, newExpiresAt)
@@ -482,25 +482,25 @@ func TestResourceProjectionPreparerLiveRotationWithoutCarriedExpiryTearsDownBefo
 	}
 }
 
-func TestResourceProjectionPreparerMintsByRecreatingMountWithoutCarriedExpiry(t *testing.T) {
+func TestDaytonaFileResourceMaterializerMintsByRecreatingMountWithoutCarriedExpiry(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
 	expiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  expiresAt,
 	}}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.ResourceCredExpiresAt = nil
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
 		t.Fatalf("ResourceCredExpiresAt = %v; want minted expiry %s", prepared.ResourceCredExpiresAt, expiresAt)
@@ -514,16 +514,16 @@ func TestResourceProjectionPreparerMintsByRecreatingMountWithoutCarriedExpiry(t 
 	assertResourceProjectionCommandRemountsBeforeFreshMount(t, runner.calls[0].command)
 }
 
-func TestResourceProjectionPreparerCarriesExpiringExpiryWhenMountAlive(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCarriesExpiringExpiryWhenMountAlive(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
 	oldExpiresAt := time.Date(2026, 7, 1, 11, 40, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{}
-	preparer, err := NewResourceProjectionPreparer(ResourceProjectionPreparerConfig{
+	preparer, err := NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
 		Blob:                    blobStore,
 		CredentialMinter:        minter,
 		CommandRunner:           runner,
@@ -537,14 +537,14 @@ func TestResourceProjectionPreparerCarriesExpiringExpiryWhenMountAlive(t *testin
 		Clock:                   func() time.Time { return time.Date(2026, 7, 1, 11, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
-		t.Fatalf("NewResourceProjectionPreparer: %v", err)
+		t.Fatalf("NewDaytonaFileResourceMaterializer: %v", err)
 	}
 	setup := testResourceProjectionSetup()
 	setup.Resources.ResourceCredExpiresAt = &oldExpiresAt
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(oldExpiresAt) {
 		t.Fatalf("ResourceCredExpiresAt = %v; want carried expiring expiry %s", prepared.ResourceCredExpiresAt, oldExpiresAt)
@@ -563,22 +563,22 @@ func TestResourceProjectionPreparerCarriesExpiringExpiryWhenMountAlive(t *testin
 	}
 }
 
-func TestResourceProjectionPreparerDoesNotMintForIncrementalAddWhenMountAlive(t *testing.T) {
+func TestDaytonaFileResourceMaterializerDoesNotMintForIncrementalAddWhenMountAlive(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
 	oldExpiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.ResourceCredExpiresAt = &oldExpiresAt
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(oldExpiresAt) {
 		t.Fatalf("ResourceCredExpiresAt = %v; want carried expiry %s", prepared.ResourceCredExpiresAt, oldExpiresAt)
@@ -616,7 +616,7 @@ func TestResourceProjectionPreparerDoesNotMintForIncrementalAddWhenMountAlive(t 
 	assertResourceProjectionCommandRejectsSymlinkTargetBeforeTouch(t, call.command)
 }
 
-func TestResourceProjectionPreparerIncrementalAddCompensatesOnlyThisAttempt(t *testing.T) {
+func TestDaytonaFileResourceMaterializerIncrementalAddCompensatesOnlyThisAttempt(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_new", bytes.NewReader([]byte("new")), int64(len("new"))); err != nil {
@@ -626,9 +626,9 @@ func TestResourceProjectionPreparerIncrementalAddCompensatesOnlyThisAttempt(t *t
 		t.Fatalf("put existing session copy: %v", err)
 	}
 	oldExpiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{errs: []error{nil, errors.New("bind failed")}}
+	runner := &recordingDaytonaCommandRunner{errs: []error{nil, errors.New("bind failed")}}
 	minter := &recordingResourceCredentialMinter{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_test",
@@ -658,11 +658,11 @@ func TestResourceProjectionPreparerIncrementalAddCompensatesOnlyThisAttempt(t *t
 	}
 
 	err := func() error {
-		_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+		_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 		return err
 	}()
 	if err == nil {
-		t.Fatal("PrepareSessionResources succeeded; want bind failure")
+		t.Fatal("MaterializeFileResources succeeded; want bind failure")
 	}
 	if len(minter.requests) != 0 {
 		t.Fatalf("credential mint requests = %+v; want no mint while live mount is reused", minter.requests)
@@ -705,7 +705,7 @@ func TestResourceProjectionPreparerIncrementalAddCompensatesOnlyThisAttempt(t *t
 	}
 }
 
-func TestResourceProjectionPreparerDeleteThenAddAtSamePathCopiesAndRebindsReplacement(t *testing.T) {
+func TestDaytonaFileResourceMaterializerDeleteThenAddAtSamePathCopiesAndRebindsReplacement(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_replacement", bytes.NewReader([]byte("replacement")), int64(len("replacement"))); err != nil {
@@ -715,8 +715,8 @@ func TestResourceProjectionPreparerDeleteThenAddAtSamePathCopiesAndRebindsReplac
 		t.Fatalf("put deleted session copy: %v", err)
 	}
 	oldExpiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
 	const sharedPath = "/mnt/session/uploads/shared.txt"
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
@@ -734,8 +734,8 @@ func TestResourceProjectionPreparerDeleteThenAddAtSamePathCopiesAndRebindsReplac
 		},
 	}
 
-	if _, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); err != nil {
-		t.Fatalf("PrepareSessionResources replacement: %v", err)
+	if _, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); err != nil {
+		t.Fatalf("MaterializeFileResources replacement: %v", err)
 	}
 	assertBlobBytes(t, blobStore, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_replacement/file", "replacement")
 	if blobStore.Has("workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file") {
@@ -755,7 +755,7 @@ func TestResourceProjectionPreparerDeleteThenAddAtSamePathCopiesAndRebindsReplac
 	}
 }
 
-func TestResourceProjectionPreparerIncrementalAddBindsExistingSessionCopy(t *testing.T) {
+func TestDaytonaFileResourceMaterializerIncrementalAddBindsExistingSessionCopy(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_new", bytes.NewReader([]byte("new")), int64(len("new"))); err != nil {
@@ -768,9 +768,9 @@ func TestResourceProjectionPreparerIncrementalAddBindsExistingSessionCopy(t *tes
 		t.Fatalf("put existing session copy: %v", err)
 	}
 	oldExpiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_test",
@@ -799,9 +799,9 @@ func TestResourceProjectionPreparerIncrementalAddBindsExistingSessionCopy(t *tes
 		},
 	}
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(oldExpiresAt) {
 		t.Fatalf("ResourceCredExpiresAt = %v; want carried expiry %s", prepared.ResourceCredExpiresAt, oldExpiresAt)
@@ -836,7 +836,7 @@ func TestResourceProjectionPreparerIncrementalAddBindsExistingSessionCopy(t *tes
 	assertBlobBytes(t, blobStore, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_new/file", "new")
 }
 
-func TestResourceProjectionPreparerForcesRemountWhenMountProbeFails(t *testing.T) {
+func TestDaytonaFileResourceMaterializerForcesRemountWhenMountProbeFails(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
@@ -844,18 +844,18 @@ func TestResourceProjectionPreparerForcesRemountWhenMountProbeFails(t *testing.T
 	}
 	oldExpiresAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	newExpiresAt := time.Date(2026, 7, 1, 13, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{errs: []error{errors.New("stale mount probe"), nil}}
+	runner := &recordingDaytonaCommandRunner{errs: []error{errors.New("stale mount probe"), nil}}
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  newExpiresAt,
 	}}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.ResourceCredExpiresAt = &oldExpiresAt
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(newExpiresAt) {
 		t.Fatalf("ResourceCredExpiresAt = %v; want freshly minted expiry %s", prepared.ResourceCredExpiresAt, newExpiresAt)
@@ -877,82 +877,7 @@ func TestResourceProjectionPreparerForcesRemountWhenMountProbeFails(t *testing.T
 	}
 }
 
-func TestResourceProjectionPreparerLocalCopyFallbackStagesBytesWithoutMintOrMount(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
-		t.Fatalf("put canonical: %v", err)
-	}
-	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
-	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparerWithLevel(t, blobStore, minter, runner, ResourceProjectionLevelLocalCopy)
-
-	prepared, err := preparer.PrepareSessionResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
-	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
-	}
-	if len(prepared.Files) != 0 || len(prepared.DeletedFiles) != 0 {
-		t.Fatalf("prepared files=%+v deleted=%+v; want raw file mounts consumed", prepared.Files, prepared.DeletedFiles)
-	}
-	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
-		t.Fatalf("ResourceCredExpiresAt = %v; want bounded materialization receipt", prepared.ResourceCredExpiresAt)
-	}
-	if len(minter.requests) != 1 {
-		t.Fatalf("credential mint requests = %d; want one receipt credential not injected into local_copy", len(minter.requests))
-	}
-	if got, want := prepared.ResourceRootsJSON, `[{"path":"/mnt/session/uploads/file_session","mode":"read"}]`; got != want {
-		t.Fatalf("ResourceRootsJSON = %s; want %s", got, want)
-	}
-	if len(runner.uploads) != 1 {
-		t.Fatalf("staged uploads = %+v; want one local copy upload", runner.uploads)
-	}
-	if runner.uploads[0].target.ProviderSandboxID != "provider_sandbox" ||
-		!strings.HasPrefix(runner.uploads[0].remotePath, "/tmp/tetral-runtime/resource-projection/") ||
-		runner.uploads[0].body != "canonical" {
-		t.Fatalf("staged upload = %+v; want provider target, resource-projection path, canonical bytes", runner.uploads[0])
-	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("runner calls = %d; want one install/verify command", len(runner.calls))
-	}
-	call := runner.calls[0]
-	if len(call.env) != 0 {
-		t.Fatalf("local_copy env = %+v; want no secret-bearing env", call.env)
-	}
-	for _, forbidden := range []string{
-		"RCLONE_CONFIG",
-		"RCLONE_CONFIG_R2_ACCESS_KEY_ID",
-		"setsid sudo rclone",
-		"sudo mount --bind",
-		"mount -o remount,bind,ro",
-		"canonical",
-	} {
-		if strings.Contains(call.command, forbidden) {
-			t.Fatalf("local_copy command contains forbidden fragment %q in:\n%s", forbidden, call.command)
-		}
-	}
-	for _, fragment := range []string{
-		"if [ -e '/mnt/session/uploads' ]; then",
-		"sudo -u '" + driver.RuntimeUser + "' test -w '/mnt/session/uploads'",
-		"sudo -u '" + driver.RuntimeUser + "' test -x '/mnt/session/uploads'",
-		"sudo install -d -m 0755 -o '" + driver.RuntimeUser + "' -g '" + driver.RuntimeUser + "' -- '/mnt/session/uploads'",
-		"if [ -L '/mnt/session/uploads/file_session' ]; then sudo -u '" + driver.RuntimeUser + "' rm -f -- '/mnt/session/uploads/file_session'; fi",
-		"if [ -e '/mnt/session/uploads/file_session' ] && [ ! -f '/mnt/session/uploads/file_session' ]; then echo 'resource projection target is not a regular file' >&2; false; fi",
-		"sudo install -m 0444 -o '" + driver.RuntimeUser + "' -g '" + driver.RuntimeUser + "' -- '" + runner.uploads[0].remotePath + "' '/mnt/session/uploads/file_session'",
-		"sudo -u '" + driver.RuntimeUser + "' test ! -L '/mnt/session/uploads/file_session'",
-		"sudo -u '" + driver.RuntimeUser + "' test -f '/mnt/session/uploads/file_session'",
-		"sudo -u '" + driver.RuntimeUser + "' head -c 1 -- '/mnt/session/uploads/file_session'",
-		"if sudo -u '" + driver.RuntimeUser + "' sh -c 'exec 9>\"$1\"' _ '/mnt/session/uploads/file_session' 2>/dev/null; then false; fi",
-		"sudo -u '" + driver.RuntimeUser + "' sh -c 'tmp=$(mktemp \"$1/.tetral-resource-verify.XXXXXX\") && rm -f \"$tmp\"' _ '/mnt/session/uploads'",
-		"sudo rm -rf -- '/tmp/tetral-runtime/resource-projection/",
-	} {
-		if !strings.Contains(call.command, fragment) {
-			t.Fatalf("local_copy command missing fragment %q in:\n%s", fragment, call.command)
-		}
-	}
-}
-
-func TestResourceProjectionPreparerCleansDeletedFileBeforeActiveProjection(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCleansDeletedFileBeforeActiveProjection(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
@@ -972,8 +897,8 @@ func TestResourceProjectionPreparerCleansDeletedFileBeforeActiveProjection(t *te
 		Prefix:    "workspaces/ws_test/sessions/sesn_test/resources/",
 	}}
 	events := []string{}
-	runner := &recordingPreparationCommandRunner{eventsRef: &events}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{eventsRef: &events}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.DeletedFiles = []sandbox.FileMount{{
 		ResourceID:    "sesrsc_deleted",
@@ -981,11 +906,9 @@ func TestResourceProjectionPreparerCleansDeletedFileBeforeActiveProjection(t *te
 		MountPath:     "/mnt/session/uploads/file_session",
 		ReadOnly:      true,
 	}}
-	setup.ResourceCleanup = &recordingResourceCleanupCoordinator{eventsRef: &events, pending: true}
-
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if len(prepared.DeletedFiles) != 0 || len(prepared.Files) != 0 {
 		t.Fatalf("prepared files=%+v deleted=%+v; want cleanup and active raw inputs consumed", prepared.Files, prepared.DeletedFiles)
@@ -1019,12 +942,12 @@ func TestResourceProjectionPreparerCleansDeletedFileBeforeActiveProjection(t *te
 	if !strings.Contains(activeMount.command, "setsid sudo rclone --config \"$RCLONE_CONFIG\" mount") {
 		t.Fatalf("active mount command missing rclone mount:\n%s", activeMount.command)
 	}
-	if want := []string{"file-remove", "resource-detach", "file-materialize"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("events = %v; want removal ACK, durable detach, then ordinary successor bind %v", events, want)
+	if want := []string{"file-remove", "file-materialize"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v; want removal before ordinary successor bind %v", events, want)
 	}
 }
 
-func TestResourceProjectionPreparerCommandFailurePreservesDeletedFileAndSessionCopy(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCommandFailurePreservesDeletedFileAndSessionCopy(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	const sessionKey = "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file"
@@ -1032,15 +955,13 @@ func TestResourceProjectionPreparerCommandFailurePreservesDeletedFileAndSessionC
 		t.Fatalf("put deleted session copy: %v", err)
 	}
 	wantErr := errors.New("injected filesystem removal failure")
-	runner := &recordingPreparationCommandRunner{err: wantErr}
+	runner := &recordingDaytonaCommandRunner{err: wantErr}
 	events := []string{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
 	setup := deletedFileOnlySetup()
-	setup.ResourceCleanup = &recordingResourceCleanupCoordinator{eventsRef: &events, pending: true}
-
-	_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("PrepareSessionResources error = %v; want command failure", err)
+		t.Fatalf("MaterializeFileResources error = %v; want command failure", err)
 	}
 	if !blobStore.Has(sessionKey) {
 		t.Fatal("command failure deleted the session copy")
@@ -1053,89 +974,7 @@ func TestResourceProjectionPreparerCommandFailurePreservesDeletedFileAndSessionC
 	}
 }
 
-func TestResourceProjectionPreparerBlobFailureRetriesBetweenRemovalAndDetach(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	const sessionKey = "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file"
-	if err := blobStore.Put(ctx, sessionKey, bytes.NewReader([]byte("old")), int64(len("old"))); err != nil {
-		t.Fatalf("put deleted session copy: %v", err)
-	}
-	wantErr := errors.New("injected Blob delete failure")
-	blobStore.SetDeleteHook(func(context.Context, string) error { return wantErr })
-	runner := &recordingPreparationCommandRunner{}
-	events := []string{}
-	cleanup := &recordingResourceCleanupCoordinator{eventsRef: &events, pending: true}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
-	setup := deletedFileOnlySetup()
-	setup.ResourceCleanup = cleanup
-
-	if _, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); !errors.Is(err, wantErr) {
-		t.Fatalf("first PrepareSessionResources error = %v; want Blob failure", err)
-	}
-	if !blobStore.Has(sessionKey) || len(events) != 0 {
-		t.Fatalf("Blob failure state: copy_present=%v events=%v; want pending without detach", blobStore.Has(sessionKey), events)
-	}
-
-	blobStore.SetDeleteHook(nil)
-	if _, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); err != nil {
-		t.Fatalf("retry PrepareSessionResources: %v", err)
-	}
-	if blobStore.Has(sessionKey) {
-		t.Fatal("successful retry preserved deleted session copy")
-	}
-	if got := blobStore.Deletes(); !reflect.DeepEqual(got, []string{sessionKey, sessionKey}) {
-		t.Fatalf("Blob Delete calls = %v; want failed call then retry", got)
-	}
-	if want := []string{"resource-detach"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("cleanup events = %v; want %v", events, want)
-	}
-	if got := countPreparationCommandsContaining(runner.calls, "/workspace/deleted.txt"); got != 2 {
-		t.Fatalf("filesystem removal calls = %d; want idempotent replay", got)
-	}
-	if len(runner.calls) != 3 || !strings.Contains(runner.calls[2].command, "mountpoint -q '"+resourceprojection.RcloneStagingRoot+"'") {
-		t.Fatalf("preparation commands = %d; want two target removals then staging unmount", len(runner.calls))
-	}
-}
-
-func TestResourceProjectionPreparerDetachFailureRetriesAfterBlobDeletion(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	const sessionKey = "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file"
-	if err := blobStore.Put(ctx, sessionKey, bytes.NewReader([]byte("old")), int64(len("old"))); err != nil {
-		t.Fatalf("put deleted session copy: %v", err)
-	}
-	wantErr := errors.New("injected detach commit failure")
-	runner := &recordingPreparationCommandRunner{}
-	cleanup := &detachAfterRemovalFailureCoordinator{err: wantErr}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
-	setup := deletedFileOnlySetup()
-	setup.ResourceCleanup = cleanup
-
-	if _, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); !errors.Is(err, wantErr) {
-		t.Fatalf("first PrepareSessionResources error = %v; want detach failure", err)
-	}
-	if blobStore.Has(sessionKey) || cleanup.detached {
-		t.Fatalf("detach-boundary state: copy_present=%v detached=%v; want copy gone and detach pending", blobStore.Has(sessionKey), cleanup.detached)
-	}
-
-	if _, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); err != nil {
-		t.Fatalf("retry PrepareSessionResources: %v", err)
-	}
-	if !cleanup.detached {
-		t.Fatal("retry did not commit durable detach")
-	}
-	if got := countPreparationCommandsContaining(runner.calls, "/workspace/deleted.txt"); got != 2 {
-		t.Fatalf("filesystem removal calls = %d; want idempotent replay before detach", got)
-	}
-	if len(runner.calls) != 3 || !strings.Contains(runner.calls[2].command, "mountpoint -q '"+resourceprojection.RcloneStagingRoot+"'") {
-		t.Fatalf("preparation commands = %d; want two target removals then staging unmount", len(runner.calls))
-	}
-	if got := blobStore.Deletes(); !reflect.DeepEqual(got, []string{sessionKey, sessionKey}) {
-		t.Fatalf("Blob Delete calls = %v; want delete then not-found replay", got)
-	}
-}
-
-func TestResourceProjectionPreparerDeletingNonLastFilePreservesStagingAndCredentialExpiry(t *testing.T) {
+func TestDaytonaFileResourceMaterializerDeletingNonLastFilePreservesStagingAndCredentialExpiry(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_active", bytes.NewReader([]byte("active")), int64(len("active"))); err != nil {
@@ -1148,9 +987,9 @@ func TestResourceProjectionPreparerDeletingNonLastFilePreservesStagingAndCredent
 		t.Fatalf("put deleted session copy: %v", err)
 	}
 	expiresAt := time.Date(2026, 7, 1, 18, 0, 0, 0, time.UTC)
-	runner := &recordingPreparationCommandRunner{}
+	runner := &recordingDaytonaCommandRunner{}
 	minter := &recordingResourceCredentialMinter{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_test",
@@ -1165,9 +1004,9 @@ func TestResourceProjectionPreparerDeletingNonLastFilePreservesStagingAndCredent
 		},
 	}
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
 		t.Fatalf("resource credential expiry = %v; want preserved %s", prepared.ResourceCredExpiresAt, expiresAt)
@@ -1197,28 +1036,7 @@ func deletedFileOnlySetup() sandbox.SandboxSetup {
 	}
 }
 
-type detachAfterRemovalFailureCoordinator struct {
-	err      error
-	detached bool
-}
-
-func (c *detachAfterRemovalFailureCoordinator) CleanupSessionResource(ctx context.Context, _ string, remove func(context.Context) error) error {
-	if c.detached {
-		return nil
-	}
-	if err := remove(ctx); err != nil {
-		return err
-	}
-	if c.err != nil {
-		err := c.err
-		c.err = nil
-		return err
-	}
-	c.detached = true
-	return nil
-}
-
-func TestResourceProjectionPreparerCleansDeletedLastFileAndUnmountsStaging(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCleansDeletedLastFileAndUnmountsStaging(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	const sessionKey = "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file"
@@ -1232,8 +1050,8 @@ func TestResourceProjectionPreparerCleansDeletedLastFileAndUnmountsStaging(t *te
 	})
 	expiresAt := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
-	runner := &recordingPreparationCommandRunner{eventsRef: &events}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{eventsRef: &events}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	oldExpiresAt := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
@@ -1244,12 +1062,11 @@ func TestResourceProjectionPreparerCleansDeletedLastFileAndUnmountsStaging(t *te
 			MountPath:     "/workspace/deleted.csv",
 			ReadOnly:      true,
 		}}, ResourceCredExpiresAt: &oldExpiresAt},
-		ResourceCleanup: &recordingResourceCleanupCoordinator{eventsRef: &events, pending: true},
 	}
 
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err != nil {
-		t.Fatalf("PrepareSessionResources: %v", err)
+		t.Fatalf("MaterializeFileResources: %v", err)
 	}
 	if prepared.ResourceRootsJSON != "[]" || prepared.ResourceCredExpiresAt == nil || !prepared.ResourceCredExpiresAt.Equal(expiresAt) {
 		t.Fatalf("prepared metadata roots=%q expires=%v; want empty roots with bounded materialization receipt", prepared.ResourceRootsJSON, prepared.ResourceCredExpiresAt)
@@ -1274,158 +1091,19 @@ func TestResourceProjectionPreparerCleansDeletedLastFileAndUnmountsStaging(t *te
 	if strings.Contains(stagingCleanup.command, "/workspace/deleted.csv") {
 		t.Fatalf("post-detach staging command repeated deleted target removal:\n%s", stagingCleanup.command)
 	}
-	if want := []string{"file-remove", "blob-delete", "resource-detach", "staging-unmount"}; !reflect.DeepEqual(events, want) {
+	if want := []string{"file-remove", "blob-delete", "staging-unmount"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("last-file cleanup events = %v; want %v", events, want)
 	}
 }
 
-func TestResourceProjectionPreparerRetriesStagingUnmountAfterDetachWithoutDeletedRow(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	const sessionKey = "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file"
-	if err := blobStore.Put(ctx, sessionKey, bytes.NewReader([]byte("old")), int64(len("old"))); err != nil {
-		t.Fatalf("put deleted session copy: %v", err)
-	}
-	events := []string{}
-	blobStore.SetDeleteHook(func(context.Context, string) error {
-		events = append(events, "blob-delete")
-		return nil
-	})
-	wantErr := errors.New("injected staging unmount failure after detach")
-	runner := &recordingPreparationCommandRunner{eventsRef: &events, errs: []error{nil, wantErr}}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
-	setup := deletedFileOnlySetup()
-	setup.ResourceCleanup = &recordingResourceCleanupCoordinator{eventsRef: &events, pending: true}
-
-	if _, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); !errors.Is(err, wantErr) {
-		t.Fatalf("first PrepareSessionResources error = %v; want post-detach staging failure", err)
-	}
-	if blobStore.Has(sessionKey) {
-		t.Fatal("post-detach staging failure preserved deleted session copy")
-	}
-	if want := []string{"file-remove", "blob-delete", "resource-detach", "staging-unmount"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("first-attempt events = %v; want %v", events, want)
-	}
-
-	retrySetup := setup
-	retrySetup.Resources.DeletedFiles = nil
-	retrySetup.ResourceCleanup = nil
-	prepared, err := preparer.PrepareSessionResources(ctx, retrySetup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
-	if err != nil {
-		t.Fatalf("retry without deleted row: %v", err)
-	}
-	if prepared.ResourceCredExpiresAt == nil {
-		t.Fatal("retry materialization did not produce a bounded credential receipt")
-	}
-	if want := []string{"file-remove", "blob-delete", "resource-detach", "staging-unmount", "staging-unmount"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("retry events = %v; want %v", events, want)
-	}
-	if got := blobStore.Deletes(); !reflect.DeepEqual(got, []string{sessionKey}) {
-		t.Fatalf("Blob Delete calls = %v; want no replay after durable detach", got)
-	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("runner calls = %d; want target cleanup, failed staging, successful staging retry", len(runner.calls))
-	}
-}
-
-func TestResourceProjectionPreparerGCDeletesSessionPrefix(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	for key, value := range map[string]string{
-		"files/ws_test/obj_file": "canonical",
-		"workspaces/ws_test/sessions/sesn_test/resources/sesrsc_a/file":      "copy-a",
-		"workspaces/ws_test/sessions/sesn_test/resources/sesrsc_b/file":      "copy-b",
-		"workspaces/ws_test/sessions/sesn_test/other/session-artifact":       "sibling",
-		"workspaces/ws_test/sessions/sesn_other/resources/sesrsc_other/file": "other-session",
-	} {
-		if err := blobStore.Put(ctx, key, bytes.NewReader([]byte(value)), int64(len(value))); err != nil {
-			t.Fatalf("put %s: %v", key, err)
-		}
-	}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, &recordingPreparationCommandRunner{})
-
-	if err := preparer.DeleteSessionResourceCopiesForGC(ctx, sandbox.SandboxSetup{WorkspaceID: workspace.ID("ws_test"), SessionID: "sesn_test", SandboxID: "sandbox_test"}); err != nil {
-		t.Fatalf("DeleteSessionResourceCopiesForGC: %v", err)
-	}
-	for _, key := range []string{
-		"workspaces/ws_test/sessions/sesn_test/resources/sesrsc_a/file",
-		"workspaces/ws_test/sessions/sesn_test/resources/sesrsc_b/file",
-		"workspaces/ws_test/sessions/sesn_test/other/session-artifact",
-	} {
-		if _, ok := blobStore.Bytes(key); ok {
-			t.Fatalf("%s still exists; want session resource copy deleted", key)
-		}
-	}
-	for key, want := range map[string]string{
-		"files/ws_test/obj_file": "canonical",
-		"workspaces/ws_test/sessions/sesn_other/resources/sesrsc_other/file": "other-session",
-	} {
-		assertBlobBytes(t, blobStore, key, want)
-	}
-}
-
-func TestResourceProjectionPreparerCompensatesFileProjectionMountsWithoutDeletingSessionCopy(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	for key, value := range map[string]string{
-		"files/ws_test/obj_file": "canonical",
-		"workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file": "session-copy",
-	} {
-		if err := blobStore.Put(ctx, key, bytes.NewReader([]byte(value)), int64(len(value))); err != nil {
-			t.Fatalf("put %s: %v", key, err)
-		}
-	}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
-
-	if err := preparer.CompensateSessionResourcePreparation(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); err != nil {
-		t.Fatalf("CompensateSessionResourcePreparation: %v", err)
-	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("runner calls = %d; want one compensation command", len(runner.calls))
-	}
-	command := runner.calls[0].command
-	for _, fragment := range []string{
-		"if findmnt -rn --mountpoint '/mnt/session/uploads/file_session' >/dev/null 2>&1; then sudo umount -l -- '/mnt/session/uploads/file_session'; fi",
-		"sudo -u '" + driver.RuntimeUser + "' rm -f -- '/mnt/session/uploads/file_session' >/dev/null 2>&1 || true",
-		"if mountpoint -q \"$STAGING\"; then sudo umount -l -- \"$STAGING\"; fi",
-		"sudo rm -rf -- '/tmp/tetral-runtime/resource-projection/",
-	} {
-		if !strings.Contains(command, fragment) {
-			t.Fatalf("compensation command missing fragment %q in:\n%s", fragment, command)
-		}
-	}
-	assertBlobBytes(t, blobStore, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file", "session-copy")
-	assertBlobBytes(t, blobStore, "files/ws_test/obj_file", "canonical")
-}
-
-func TestResourceProjectionPreparerCompensationPreservesSessionCopyWhenCanonicalMissing(t *testing.T) {
-	ctx := context.Background()
-	blobStore := blob.NewFakeBlobStore()
-	if err := blobStore.Put(ctx, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file", bytes.NewReader([]byte("session-copy")), int64(len("session-copy"))); err != nil {
-		t.Fatalf("put session copy: %v", err)
-	}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
-
-	if err := preparer.CompensateSessionResourcePreparation(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"}); err != nil {
-		t.Fatalf("CompensateSessionResourcePreparation: %v", err)
-	}
-
-	assertBlobBytes(t, blobStore, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file", "session-copy")
-	if _, ok := blobStore.Bytes("files/ws_test/obj_file"); ok {
-		t.Fatal("canonical object unexpectedly exists")
-	}
-}
-
-func TestResourceProjectionPreparerRejectsGitHubOnlyPreflightBeforeDeletedCleanup(t *testing.T) {
+func TestDaytonaFileResourceMaterializerRejectsGitHubOnlyPreflightBeforeDeletedCleanup(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_deleted/file", bytes.NewReader([]byte("old")), int64(len("old"))); err != nil {
 		t.Fatalf("put deleted session copy: %v", err)
 	}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_test",
@@ -1443,9 +1121,9 @@ func TestResourceProjectionPreparerRejectsGitHubOnlyPreflightBeforeDeletedCleanu
 		},
 	}
 
-	_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil {
-		t.Fatal("PrepareSessionResources succeeded; want GitHub preflight failure")
+		t.Fatal("MaterializeFileResources succeeded; want GitHub preflight failure")
 	}
 	var kinded interface{ PreparationFailureKind() string }
 	if !errors.As(err, &kinded) || kinded.PreparationFailureKind() != "duplicate_github_mount_path" {
@@ -1459,15 +1137,15 @@ func TestResourceProjectionPreparerRejectsGitHubOnlyPreflightBeforeDeletedCleanu
 	}
 }
 
-func TestResourceProjectionPreparerRejectsGitHubDefaultPathBeforeCopy(t *testing.T) {
+func TestDaytonaFileResourceMaterializerRejectsGitHubDefaultPathBeforeCopy(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
 	minter := &recordingResourceCredentialMinter{}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, minter, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
 	setup := testResourceProjectionSetup()
 	setup.Resources.Files[0].MountPath = "/workspace/tetral/data.txt"
 	setup.Resources.GitHubRepositories = []sandbox.GitHubRepositoryMount{{
@@ -1475,9 +1153,9 @@ func TestResourceProjectionPreparerRejectsGitHubDefaultPathBeforeCopy(t *testing
 		URL:        "https://github.com/tetral-ai/tetral.git",
 	}}
 
-	_, err := preparer.PrepareSessionResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil {
-		t.Fatal("PrepareSessionResources succeeded; want github mount path conflict")
+		t.Fatal("MaterializeFileResources succeeded; want github mount path conflict")
 	}
 	var kinded interface{ PreparationFailureKind() string }
 	if !errors.As(err, &kinded) || kinded.PreparationFailureKind() != "github_mount_path_conflict" {
@@ -1491,13 +1169,13 @@ func TestResourceProjectionPreparerRejectsGitHubDefaultPathBeforeCopy(t *testing
 	}
 }
 
-func TestResourceProjectionPreparerCanonicalMissingReturnsFailureKind(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCanonicalMissingReturnsFailureKind(t *testing.T) {
 	blobStore := blob.NewFakeBlobStore()
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{}, &recordingPreparationCommandRunner{})
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, &recordingDaytonaCommandRunner{})
 
-	_, err := preparer.PrepareSessionResources(context.Background(), testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(context.Background(), testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil {
-		t.Fatal("PrepareSessionResources succeeded; want canonical_missing")
+		t.Fatal("MaterializeFileResources succeeded; want canonical_missing")
 	}
 	var kinded interface{ PreparationFailureKind() string }
 	if !errors.As(err, &kinded) {
@@ -1508,21 +1186,21 @@ func TestResourceProjectionPreparerCanonicalMissingReturnsFailureKind(t *testing
 	}
 }
 
-func TestResourceProjectionPreparerCommandFailureDeletesSessionCopies(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCommandFailureDeletesSessionCopies(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put canonical: %v", err)
 	}
-	runner := &recordingPreparationCommandRunner{err: errors.New("mount failed")}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
+	runner := &recordingDaytonaCommandRunner{err: errors.New("mount failed")}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
 	}}, runner)
 
-	_, err := preparer.PrepareSessionResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil {
-		t.Fatal("PrepareSessionResources succeeded; want command failure")
+		t.Fatal("MaterializeFileResources succeeded; want command failure")
 	}
 	if blobStore.Has("workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file") {
 		t.Fatal("session copy survived command failure; want cleanup")
@@ -1533,7 +1211,7 @@ func TestResourceProjectionPreparerCommandFailureDeletesSessionCopies(t *testing
 	}
 }
 
-func TestResourceProjectionPreparerCommandFailurePreservesExistingSessionCopies(t *testing.T) {
+func TestDaytonaFileResourceMaterializerCommandFailurePreservesExistingSessionCopies(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()
 	if err := blobStore.Put(ctx, "files/ws_test/obj_file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
@@ -1542,15 +1220,15 @@ func TestResourceProjectionPreparerCommandFailurePreservesExistingSessionCopies(
 	if err := blobStore.Put(ctx, "workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file", bytes.NewReader([]byte("canonical")), int64(len("canonical"))); err != nil {
 		t.Fatalf("put existing session copy: %v", err)
 	}
-	runner := &recordingPreparationCommandRunner{err: errors.New("mount failed")}
-	preparer := newTestResourceProjectionPreparer(t, blobStore, &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
+	runner := &recordingDaytonaCommandRunner{err: errors.New("mount failed")}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{
 		Credential: resourceprojection.Credential{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"},
 		ExpiresAt:  time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
 	}}, runner)
 
-	_, err := preparer.PrepareSessionResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	_, err := preparer.MaterializeFileResources(ctx, testResourceProjectionSetup(), sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
 	if err == nil {
-		t.Fatal("PrepareSessionResources succeeded; want command failure")
+		t.Fatal("MaterializeFileResources succeeded; want command failure")
 	}
 	if !blobStore.Has("workspaces/ws_test/sessions/sesn_test/resources/sesrsc_file/file") {
 		t.Fatal("existing session copy was deleted by command failure; want session copy to survive")
@@ -1561,12 +1239,12 @@ func TestResourceProjectionPreparerCommandFailurePreservesExistingSessionCopies(
 	}
 }
 
-func TestResourceProjectionPreparerValidatesMemoryMountsWithoutR2Work(t *testing.T) {
+func TestDaytonaFileResourceMaterializerValidatesMemoryMountsWithoutR2Work(t *testing.T) {
 	minter := &recordingResourceCredentialMinter{}
-	runner := &recordingPreparationCommandRunner{}
-	preparer := newTestResourceProjectionPreparer(t, blob.NewFakeBlobStore(), minter, runner)
+	runner := &recordingDaytonaCommandRunner{}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blob.NewFakeBlobStore(), minter, runner)
 
-	_, err := preparer.PrepareSessionResources(context.Background(), sandbox.SandboxSetup{
+	_, err := preparer.MaterializeFileResources(context.Background(), sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
 		SessionID:   "sesn_test",
 		Resources: sandbox.ResourceSetup{MemoryStores: []sandbox.MemoryStoreMount{{
@@ -1576,7 +1254,7 @@ func TestResourceProjectionPreparerValidatesMemoryMountsWithoutR2Work(t *testing
 		}}},
 	}, sandbox.ProviderHandle{})
 	if err == nil {
-		t.Fatal("PrepareSessionResources accepted memory root mount path")
+		t.Fatal("MaterializeFileResources accepted memory root mount path")
 	}
 	var kinded interface{ PreparationFailureKind() string }
 	if !errors.As(err, &kinded) {
@@ -1641,14 +1319,9 @@ func sha256Hex(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func newTestResourceProjectionPreparer(t *testing.T, store blob.BlobStore, minter resourceCredentialMinter, runner driver.PreparationCommandRunner) *ResourceProjectionPreparer {
+func newTestDaytonaFileResourceMaterializer(t *testing.T, store blob.BlobStore, minter resourceCredentialMinter, runner driver.DaytonaCommandRunner) *DaytonaFileResourceMaterializer {
 	t.Helper()
-	return newTestResourceProjectionPreparerWithLevel(t, store, minter, runner, "")
-}
-
-func newTestResourceProjectionPreparerWithLevel(t *testing.T, store blob.BlobStore, minter resourceCredentialMinter, runner driver.PreparationCommandRunner, level ResourceProjectionLevel) *ResourceProjectionPreparer {
-	t.Helper()
-	preparer, err := NewResourceProjectionPreparer(ResourceProjectionPreparerConfig{
+	materializer, err := NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
 		Blob:                  store,
 		CredentialMinter:      minter,
 		CommandRunner:         runner,
@@ -1658,13 +1331,12 @@ func newTestResourceProjectionPreparerWithLevel(t *testing.T, store blob.BlobSto
 		CommandTimeout:        45 * time.Second,
 		RcloneVFSCacheMaxSize: "2G",
 		RcloneVFSMinFree:      "1G",
-		ProjectionLevel:       level,
 		Clock:                 func() time.Time { return time.Date(2026, 7, 1, 11, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
-		t.Fatalf("NewResourceProjectionPreparer: %v", err)
+		t.Fatalf("NewDaytonaFileResourceMaterializer: %v", err)
 	}
-	return preparer
+	return materializer
 }
 
 func testResourceProjectionSetup() sandbox.SandboxSetup {
@@ -1751,39 +1423,29 @@ func (m *recordingResourceCredentialMinter) Mint(_ context.Context, request reso
 	return m.result, m.err
 }
 
-type preparationCommandCall struct {
-	target  driver.PreparationCommandTarget
+type daytonaCommandCall struct {
+	target  driver.DaytonaCommandTarget
 	command string
 	env     map[string]string
 	timeout time.Duration
 }
 
-func countPreparationCommandsContaining(calls []preparationCommandCall, fragment string) int {
-	count := 0
-	for _, call := range calls {
-		if strings.Contains(call.command, fragment) {
-			count++
-		}
-	}
-	return count
-}
-
-type preparationFileUpload struct {
-	target     driver.PreparationCommandTarget
+type daytonaFileUpload struct {
+	target     driver.DaytonaCommandTarget
 	remotePath string
 	body       string
 }
 
-type recordingPreparationCommandRunner struct {
+type recordingDaytonaCommandRunner struct {
 	err       error
 	errs      []error
 	stageErr  error
-	calls     []preparationCommandCall
-	uploads   []preparationFileUpload
+	calls     []daytonaCommandCall
+	uploads   []daytonaFileUpload
 	eventsRef *[]string
 }
 
-func (r *recordingPreparationCommandRunner) RunPreparationCommand(_ context.Context, target driver.PreparationCommandTarget, command string, env map[string]string, timeout time.Duration) error {
+func (r *recordingDaytonaCommandRunner) RunDaytonaCommand(_ context.Context, target driver.DaytonaCommandTarget, command string, env map[string]string, timeout time.Duration) error {
 	if r.eventsRef != nil {
 		event := "file-materialize"
 		if strings.Contains(command, "mountpoint -q '"+resourceprojection.RcloneStagingRoot+"'") && !strings.Contains(command, "findmnt -rn --mountpoint") {
@@ -1797,7 +1459,7 @@ func (r *recordingPreparationCommandRunner) RunPreparationCommand(_ context.Cont
 	for key, value := range env {
 		envCopy[key] = value
 	}
-	r.calls = append(r.calls, preparationCommandCall{target: target, command: command, env: envCopy, timeout: timeout})
+	r.calls = append(r.calls, daytonaCommandCall{target: target, command: command, env: envCopy, timeout: timeout})
 	if len(r.errs) > 0 {
 		err := r.errs[0]
 		r.errs = r.errs[1:]
@@ -1806,40 +1468,15 @@ func (r *recordingPreparationCommandRunner) RunPreparationCommand(_ context.Cont
 	return r.err
 }
 
-type recordingResourceCleanupCoordinator struct {
-	eventsRef *[]string
-	pending   bool
-	err       error
-}
-
-func (c *recordingResourceCleanupCoordinator) CleanupSessionResource(ctx context.Context, _ string, remove func(context.Context) error) error {
-	if c.err != nil {
-		return c.err
-	}
-	if !c.pending {
-		return nil
-	}
-	if err := remove(ctx); err != nil {
-		return err
-	}
-	if c.eventsRef != nil {
-		*c.eventsRef = append(*c.eventsRef, "resource-detach")
-	}
-	return nil
-}
-
-func (r *recordingPreparationCommandRunner) StagePreparationFile(_ context.Context, target driver.PreparationCommandTarget, remotePath string, content io.Reader) error {
+func (r *recordingDaytonaCommandRunner) StageDaytonaFile(_ context.Context, target driver.DaytonaCommandTarget, remotePath string, content io.Reader) error {
 	body, err := io.ReadAll(content)
 	if err != nil {
 		return err
 	}
-	r.uploads = append(r.uploads, preparationFileUpload{target: target, remotePath: remotePath, body: string(body)})
+	r.uploads = append(r.uploads, daytonaFileUpload{target: target, remotePath: remotePath, body: string(body)})
 	return r.stageErr
 }
 
-// Daytona executes preparation commands as the runtime user; every operation
-// on the root-owned /skills tree must be sudo'd or the whole materialization
-// dies at its first chown.
 func TestSkillMaterializationCommandRunsPrivilegedStepsUnderSudo(t *testing.T) {
 	command := skillMaterializationCommand([]sandbox.SkillMount{{
 		SkillID:        "skill_test",
@@ -1875,25 +1512,25 @@ func TestSkillMaterializationCommandRunsPrivilegedStepsUnderSudo(t *testing.T) {
 
 // The preparation runner never surfaces command output, so the caller-side
 // label is what names a failed command in the dead-letter row.
-func TestLabelPreparationCommandErrorNamesCommandInSafeMessage(t *testing.T) {
-	labeled := labelPreparationCommandError(&sandbox.ProviderError{
+func TestLabelDaytonaCommandErrorNamesCommandInSafeMessage(t *testing.T) {
+	labeled := labelDaytonaCommandError(&sandbox.ProviderError{
 		Provider:    "daytona",
 		Stage:       sandbox.StageMountResources,
 		Kind:        sandbox.ProviderErrorUnknown,
 		Retryable:   true,
-		SafeMessage: "daytona preparation command failed",
+		SafeMessage: "daytona daytona command failed",
 	}, "skill_materialization")
 	var providerErr *sandbox.ProviderError
 	if !errors.As(labeled, &providerErr) {
 		t.Fatalf("labeled error lost its provider classification: %v", labeled)
 	}
-	if providerErr.SafeMessage != "skill_materialization: daytona preparation command failed" {
+	if providerErr.SafeMessage != "skill_materialization: daytona daytona command failed" {
 		t.Fatalf("safe message = %q; want label prefix", providerErr.SafeMessage)
 	}
 	if !providerErr.Retryable || providerErr.Stage != sandbox.StageMountResources {
 		t.Fatalf("labeling changed classification: %+v", providerErr)
 	}
-	plain := labelPreparationCommandError(errors.New("opaque"), "mount_bind_verify")
+	plain := labelDaytonaCommandError(errors.New("opaque"), "mount_bind_verify")
 	if plain.Error() != "mount_bind_verify: opaque" {
 		t.Fatalf("plain error label = %q", plain.Error())
 	}

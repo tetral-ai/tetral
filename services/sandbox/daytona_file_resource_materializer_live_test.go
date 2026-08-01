@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/sandbox/driver"
@@ -63,9 +66,9 @@ func TestLiveResourceProjectionFUSEBindSmoke(t *testing.T) {
 	preparer := newLiveFUSEBindPreparer(t, blobStore, minter, runner, live)
 
 	start := time.Now()
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, handle)
+	prepared, err := preparer.MaterializeFileResources(ctx, setup, handle)
 	if err != nil {
-		t.Fatalf("PrepareSessionResources initial: %v", err)
+		t.Fatalf("MaterializeFileResources initial: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 45*time.Second {
 		t.Fatalf("initial prepare took %s; want daemonized rclone path to return without childreap stall", elapsed)
@@ -81,9 +84,9 @@ func TestLiveResourceProjectionFUSEBindSmoke(t *testing.T) {
 	assertLiveProjectionReady(ctx, t, runner, handle, setup.Resources.Files, workspaceID, sessionID, live.bucket)
 	snapshotLiveBindMountIDs(ctx, t, runner, handle, setup.Resources.Files)
 
-	_, err = preparer.PrepareSessionResources(ctx, setup, handle)
+	_, err = preparer.MaterializeFileResources(ctx, setup, handle)
 	if err != nil {
-		t.Fatalf("PrepareSessionResources idempotent replay: %v", err)
+		t.Fatalf("MaterializeFileResources idempotent replay: %v", err)
 	}
 	if minter.Count() != 1 {
 		t.Fatalf("mint count after idempotent replay = %d; want still 1", minter.Count())
@@ -93,9 +96,9 @@ func TestLiveResourceProjectionFUSEBindSmoke(t *testing.T) {
 
 	putLiveCanonical(ctx, t, blobStore, workspaceID, "obj_idle_add", []byte("idle add bytes\n"))
 	setup.Resources.Files = append(setup.Resources.Files, liveFile("sesrsc_idle_add", "file_idle_add", "obj_idle_add", "/workspace/live/idle-add.txt"))
-	prepared, err = preparer.PrepareSessionResources(ctx, setup, handle)
+	prepared, err = preparer.MaterializeFileResources(ctx, setup, handle)
 	if err != nil {
-		t.Fatalf("PrepareSessionResources add-at-idle: %v", err)
+		t.Fatalf("MaterializeFileResources add-at-idle: %v", err)
 	}
 	if minter.Count() != 1 {
 		t.Fatalf("mint count after add-at-idle = %d; want no re-mint while mount is alive", minter.Count())
@@ -106,59 +109,6 @@ func TestLiveResourceProjectionFUSEBindSmoke(t *testing.T) {
 
 	assertLiveCredentialBoundary(ctx, t, runner, blobStore, handle, workspaceID, sessionID, live.bucket)
 	_ = provider
-}
-
-func TestLiveResourceProjectionLocalCopyFallbackSmoke(t *testing.T) {
-	live := loadLiveResourceProjectionEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	blobStore := newLiveBlobStore(ctx, t, live)
-	workspaceID, sessionID, sandboxID := liveResourceProjectionIDs(t)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cleanupCancel()
-		_ = blobStore.DeletePrefix(cleanupCtx, resourceprojection.SessionPrefix(workspaceID, sessionID))
-		_ = blobStore.DeletePrefix(cleanupCtx, "files/"+workspaceID+"/")
-	})
-
-	setup := sandbox.SandboxSetup{
-		WorkspaceID:         workspace.ID(workspaceID),
-		SessionID:           sessionID,
-		SandboxID:           sandboxID,
-		EnvironmentID:       "env-resource-projection-live",
-		ProviderArtifactRef: live.artifactRef,
-		Network:             sandbox.NetworkSetup{Type: "unrestricted"},
-		Resources: sandbox.ResourceSetup{Files: []sandbox.FileMount{
-			liveFile("sesrsc_local_copy", "file_local_copy", "obj_local_copy", "/workspace/live/local-copy.txt"),
-		}},
-	}
-	putLiveCanonical(ctx, t, blobStore, workspaceID, "obj_local_copy", []byte("local copy bytes\n"))
-
-	_, runner, handle := createLiveDaytonaSandbox(ctx, t, live, setup)
-	preparer, err := NewResourceProjectionPreparer(ResourceProjectionPreparerConfig{
-		Blob:                    blobStore,
-		CommandRunner:           runner,
-		Bucket:                  live.bucket,
-		AccountID:               live.r2AccountID,
-		CredentialTTL:           time.Hour,
-		CredentialRefreshMargin: 10 * time.Minute,
-		CommandTimeout:          2 * time.Minute,
-		RcloneVFSCacheMaxSize:   "64M",
-		RcloneVFSMinFree:        "16M",
-		ProjectionLevel:         ResourceProjectionLevelLocalCopy,
-	})
-	if err != nil {
-		t.Fatalf("NewResourceProjectionPreparer local_copy: %v", err)
-	}
-	prepared, err := preparer.PrepareSessionResources(ctx, setup, handle)
-	if err != nil {
-		t.Fatalf("PrepareSessionResources local_copy: %v", err)
-	}
-	if prepared.ResourceCredExpiresAt != nil {
-		t.Fatalf("ResourceCredExpiresAt = %v; want nil for local_copy fallback", prepared.ResourceCredExpiresAt)
-	}
-	assertLiveProjectionReady(ctx, t, runner, handle, setup.Resources.Files, workspaceID, sessionID, live.bucket)
 }
 
 func TestLiveResourceProjectionSmallCacheReadsOversizedResourceAndKeepsOutputsWritable(t *testing.T) {
@@ -190,7 +140,7 @@ func TestLiveResourceProjectionSmallCacheReadsOversizedResourceAndKeepsOutputsWr
 
 	_, runner, handle := createLiveDaytonaSandbox(ctx, t, live, setup)
 	minter := newLiveCountingCredentialMinter(t, live)
-	preparer, err := NewResourceProjectionPreparer(ResourceProjectionPreparerConfig{
+	preparer, err := NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
 		Blob:                    blobStore,
 		CredentialMinter:        minter,
 		CommandRunner:           runner,
@@ -203,10 +153,10 @@ func TestLiveResourceProjectionSmallCacheReadsOversizedResourceAndKeepsOutputsWr
 		RcloneVFSMinFree:        "1M",
 	})
 	if err != nil {
-		t.Fatalf("NewResourceProjectionPreparer: %v", err)
+		t.Fatalf("NewDaytonaFileResourceMaterializer: %v", err)
 	}
-	if _, err := preparer.PrepareSessionResources(ctx, setup, handle); err != nil {
-		t.Fatalf("PrepareSessionResources small-cache oversized resource: %v", err)
+	if _, err := preparer.MaterializeFileResources(ctx, setup, handle); err != nil {
+		t.Fatalf("MaterializeFileResources small-cache oversized resource: %v", err)
 	}
 	command := strings.Join([]string{
 		"set -eu",
@@ -215,7 +165,7 @@ func TestLiveResourceProjectionSmallCacheReadsOversizedResourceAndKeepsOutputsWr
 		"sudo -u " + shellQuote(driver.RuntimeUser) + " sh -c 'printf output-after-oversized-read > /mnt/session/outputs/resource-projection-cache.txt'",
 		"sudo -u " + shellQuote(driver.RuntimeUser) + " grep -q output-after-oversized-read /mnt/session/outputs/resource-projection-cache.txt",
 	}, "\n") + "\n"
-	if err := runner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, command, nil, 3*time.Minute); err != nil {
+	if err := runner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, command, nil, 2*time.Minute); err != nil {
 		t.Fatalf("small-cache oversized read/output verification command: %v", err)
 	}
 }
@@ -332,10 +282,10 @@ func loadLiveResourceProjectionEnv(t *testing.T) liveResourceProjectionEnv {
 	}
 	return liveResourceProjectionEnv{
 		daytona: driver.Config{
-			DaytonaAPIURL:             os.Getenv(EnvDaytonaAPIURL),
-			DaytonaTarget:             os.Getenv(EnvDaytonaTarget),
-			DaytonaAPIKey:             os.Getenv(EnvDaytonaAPIKey),
-			PreparationCommandTimeout: 2 * time.Minute,
+			DaytonaAPIURL:  os.Getenv(EnvDaytonaAPIURL),
+			DaytonaTarget:  os.Getenv(EnvDaytonaTarget),
+			DaytonaAPIKey:  os.Getenv(EnvDaytonaAPIKey),
+			CommandTimeout: 2 * time.Minute,
 		},
 		blobConfig:       blobConfig,
 		bucket:           blobConfig.Bucket,
@@ -398,9 +348,9 @@ func (m *liveCountingCredentialMinter) Count() int {
 	return len(m.requests)
 }
 
-func newLiveFUSEBindPreparer(t *testing.T, blobStore blob.BlobStore, minter resourceCredentialMinter, runner driver.PreparationCommandRunner, live liveResourceProjectionEnv) *ResourceProjectionPreparer {
+func newLiveFUSEBindPreparer(t *testing.T, blobStore blob.BlobStore, minter resourceCredentialMinter, runner driver.DaytonaCommandRunner, live liveResourceProjectionEnv) *DaytonaFileResourceMaterializer {
 	t.Helper()
-	preparer, err := NewResourceProjectionPreparer(ResourceProjectionPreparerConfig{
+	preparer, err := NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
 		Blob:                    blobStore,
 		CredentialMinter:        minter,
 		CommandRunner:           runner,
@@ -413,20 +363,26 @@ func newLiveFUSEBindPreparer(t *testing.T, blobStore blob.BlobStore, minter reso
 		RcloneVFSMinFree:        "16M",
 	})
 	if err != nil {
-		t.Fatalf("NewResourceProjectionPreparer: %v", err)
+		t.Fatalf("NewDaytonaFileResourceMaterializer: %v", err)
 	}
 	return preparer
 }
 
 func createLiveDaytonaSandbox(ctx context.Context, t *testing.T, live liveResourceProjectionEnv, setup sandbox.SandboxSetup) (*driver.DaytonaLifecycleProvider, *driver.DaytonaHelperExecutor, sandbox.ProviderHandle) {
 	t.Helper()
-	provider, err := driver.NewDaytonaLifecycleProvider(live.daytona)
+	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
+		APIKey: live.daytona.DaytonaAPIKey, APIUrl: live.daytona.DaytonaAPIURL, Target: live.daytona.DaytonaTarget,
+	})
 	if err != nil {
-		t.Fatalf("NewDaytonaLifecycleProvider: %v", err)
+		t.Fatalf("create Daytona SDK client: %v", err)
 	}
-	runner, err := driver.NewDaytonaHelperExecutor(live.daytona)
+	provider, err := driver.NewDaytonaLifecycleProviderForSDKClient(client, live.daytona)
 	if err != nil {
-		t.Fatalf("NewDaytonaHelperExecutor: %v", err)
+		t.Fatalf("NewDaytonaLifecycleProviderForSDKClient: %v", err)
+	}
+	runner, err := driver.NewDaytonaHelperExecutorForSDKClient(client, live.daytona.CommandTimeout)
+	if err != nil {
+		t.Fatalf("NewDaytonaHelperExecutorForSDKClient: %v", err)
 	}
 	handle, err := provider.CreateSandbox(ctx, sandbox.CreateSandboxRequest{Setup: setup})
 	if err != nil {
@@ -435,7 +391,7 @@ func createLiveDaytonaSandbox(ctx context.Context, t *testing.T, live liveResour
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cleanupCancel()
-		_ = provider.ReleaseSandbox(cleanupCtx, handle, sandbox.ReleaseReasonDelete)
+		_ = provider.ReleaseSandbox(cleanupCtx, handle)
 	})
 	if err := provider.CheckBaseTemplateHealth(ctx, handle); err != nil {
 		t.Fatalf("CheckBaseTemplateHealth: %v", err)
@@ -550,7 +506,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func assertLiveProjectionReady(ctx context.Context, t *testing.T, runner driver.PreparationCommandRunner, handle sandbox.ProviderHandle, files []sandbox.FileMount, workspaceID string, sessionID string, bucket string) {
+func assertLiveProjectionReady(ctx context.Context, t *testing.T, runner driver.DaytonaCommandRunner, handle sandbox.ProviderHandle, files []sandbox.FileMount, workspaceID string, sessionID string, bucket string) {
 	t.Helper()
 	var b strings.Builder
 	b.WriteString("set -eu\n")
@@ -581,12 +537,12 @@ func assertLiveProjectionReady(ctx context.Context, t *testing.T, runner driver.
 	if hasMmap {
 		b.WriteString(liveMmapReadCommand("/workspace/live/mmap.bin", "mmap-read-block"))
 	}
-	if err := runner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, b.String(), nil, 2*time.Minute); err != nil {
+	if err := runner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, b.String(), nil, 2*time.Minute); err != nil {
 		t.Fatalf("live projection verification command: %v", err)
 	}
 }
 
-func snapshotLiveBindMountIDs(ctx context.Context, t *testing.T, runner driver.PreparationCommandRunner, handle sandbox.ProviderHandle, files []sandbox.FileMount) {
+func snapshotLiveBindMountIDs(ctx context.Context, t *testing.T, runner driver.DaytonaCommandRunner, handle sandbox.ProviderHandle, files []sandbox.FileMount) {
 	t.Helper()
 	const snapshotPath = "/tmp/tetral-runtime/resource-projection-replay.mount-ids"
 	var b strings.Builder
@@ -602,12 +558,12 @@ func snapshotLiveBindMountIDs(ctx context.Context, t *testing.T, runner driver.P
 		b.WriteString("[ " + shellQuote(sourcePath) + " -ef " + shellQuote(mountPath) + " ]\n")
 		b.WriteString("findmnt -rn --mountpoint " + shellQuote(mountPath) + " --output ID >> \"$SNAPSHOT\"\n")
 	}
-	if err := runner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, b.String(), nil, 2*time.Minute); err != nil {
+	if err := runner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, b.String(), nil, 2*time.Minute); err != nil {
 		t.Fatalf("snapshot live bind mount IDs: %v", err)
 	}
 }
 
-func assertLiveBindMountIDsUnchanged(ctx context.Context, t *testing.T, runner driver.PreparationCommandRunner, handle sandbox.ProviderHandle, files []sandbox.FileMount) {
+func assertLiveBindMountIDsUnchanged(ctx context.Context, t *testing.T, runner driver.DaytonaCommandRunner, handle sandbox.ProviderHandle, files []sandbox.FileMount) {
 	t.Helper()
 	const snapshotPath = "/tmp/tetral-runtime/resource-projection-replay.mount-ids"
 	const currentPath = "/tmp/tetral-runtime/resource-projection-replay.current-mount-ids"
@@ -625,7 +581,7 @@ func assertLiveBindMountIDsUnchanged(ctx context.Context, t *testing.T, runner d
 	}
 	b.WriteString("cmp -s \"$SNAPSHOT\" \"$CURRENT\" || { echo 'resource projection replay recreated a correct bind mount' >&2; false; }\n")
 	b.WriteString("rm -f -- \"$SNAPSHOT\" \"$CURRENT\"\n")
-	if err := runner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, b.String(), nil, 2*time.Minute); err != nil {
+	if err := runner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, b.String(), nil, 2*time.Minute); err != nil {
 		t.Fatalf("bind mount IDs changed across idempotent replay: %v", err)
 	}
 }
@@ -656,7 +612,7 @@ func liveMmapReadCommand(path string, want string) string {
 		"PY\n"
 }
 
-func assertLiveCredentialBoundary(ctx context.Context, t *testing.T, runner driver.PreparationCommandRunner, store blob.BlobStore, handle sandbox.ProviderHandle, workspaceID string, sessionID string, bucket string) {
+func assertLiveCredentialBoundary(ctx context.Context, t *testing.T, runner driver.DaytonaCommandRunner, store blob.BlobStore, handle sandbox.ProviderHandle, workspaceID string, sessionID string, bucket string) {
 	t.Helper()
 	sessionKey := resourceprojection.SessionResourceKey(workspaceID, sessionID, "sesrsc_default")
 	command := strings.Join([]string{
@@ -670,7 +626,7 @@ func assertLiveCredentialBoundary(ctx context.Context, t *testing.T, runner driv
 		"sync || true",
 		"sleep 3",
 	}, "\n") + "\n"
-	if err := runner.RunPreparationCommand(ctx, driver.PreparationCommandTarget{ProviderSandboxID: handle.SandboxID}, command, nil, 2*time.Minute); err != nil {
+	if err := runner.RunDaytonaCommand(ctx, driver.DaytonaCommandTarget{ProviderSandboxID: handle.SandboxID}, command, nil, 2*time.Minute); err != nil {
 		t.Fatalf("credential-boundary remount/write command: %v", err)
 	}
 	reader, err := store.Get(ctx, sessionKey)

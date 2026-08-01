@@ -435,39 +435,6 @@ export function childLifecycleDispositionToJSON(object: ChildLifecycleDispositio
   }
 }
 
-export enum SealedAgentMailDisposition {
-  SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED = 0,
-  SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH = 1,
-  UNRECOGNIZED = -1,
-}
-
-export function sealedAgentMailDispositionFromJSON(object: any): SealedAgentMailDisposition {
-  switch (object) {
-    case 0:
-    case "SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED":
-      return SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED;
-    case 1:
-    case "SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH":
-      return SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH;
-    case -1:
-    case "UNRECOGNIZED":
-    default:
-      return SealedAgentMailDisposition.UNRECOGNIZED;
-  }
-}
-
-export function sealedAgentMailDispositionToJSON(object: SealedAgentMailDisposition): string {
-  switch (object) {
-    case SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED:
-      return "SEALED_AGENT_MAIL_DISPOSITION_UNSPECIFIED";
-    case SealedAgentMailDisposition.SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH:
-      return "SEALED_AGENT_MAIL_DISPOSITION_SEALED_FOR_FAILED_BIRTH";
-    case SealedAgentMailDisposition.UNRECOGNIZED:
-    default:
-      return "UNRECOGNIZED";
-  }
-}
-
 export enum FileAttachmentRejectionReason {
   FILE_ATTACHMENT_REJECTION_REASON_UNSPECIFIED = 0,
   FILE_ATTACHMENT_REJECTION_REASON_DELETED = 1,
@@ -575,13 +542,6 @@ export interface ChildLifecycleStamp {
   effectiveAt: string;
 }
 
-export interface SealedAgentMailStamp {
-  runtimeInputId: string;
-  birthPreparationAttemptId: string;
-  failedPreparationAttemptId: string;
-  disposition: SealedAgentMailDisposition;
-}
-
 export interface IdleCloseoutStamp {
   durableTurnId: string;
   idleEventId: string;
@@ -602,7 +562,6 @@ export interface DeclarationReceipt {
   declarationDigest: string;
   requestReschedule: RequestRescheduleStamp | undefined;
   childLifecycle: ChildLifecycleStamp[];
-  sealedAgentMail: SealedAgentMailStamp | undefined;
   idleCloseout: IdleCloseoutStamp | undefined;
   compactedThroughMessageSequence?: number | undefined;
 }
@@ -1033,6 +992,15 @@ export interface AcceptSandboxExecutionRequest {
 
 export interface AcceptSandboxExecutionResponse {
   ack: BridgeWriteAck | undefined;
+}
+
+export interface AwaitSandboxExecutionRequest {
+  scope: RuntimeScope | undefined;
+  toolUseEventId: string;
+  normalizedInputHash: string;
+  toolName: string;
+  inputJson: string;
+  modelToolCallId: string;
 }
 
 export interface AwaitSandboxExecutionResponse {
@@ -2416,126 +2384,6 @@ export const ChildLifecycleStamp: MessageFns<ChildLifecycleStamp> = {
   },
 };
 
-function createBaseSealedAgentMailStamp(): SealedAgentMailStamp {
-  return { runtimeInputId: "", birthPreparationAttemptId: "", failedPreparationAttemptId: "", disposition: 0 };
-}
-
-export const SealedAgentMailStamp: MessageFns<SealedAgentMailStamp> = {
-  encode(message: SealedAgentMailStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.runtimeInputId !== "") {
-      writer.uint32(10).string(message.runtimeInputId);
-    }
-    if (message.birthPreparationAttemptId !== "") {
-      writer.uint32(18).string(message.birthPreparationAttemptId);
-    }
-    if (message.failedPreparationAttemptId !== "") {
-      writer.uint32(26).string(message.failedPreparationAttemptId);
-    }
-    if (message.disposition !== 0) {
-      writer.uint32(32).int32(message.disposition);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): SealedAgentMailStamp {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseSealedAgentMailStamp();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.runtimeInputId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.birthPreparationAttemptId = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.failedPreparationAttemptId = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.disposition = reader.int32() as any;
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): SealedAgentMailStamp {
-    return {
-      runtimeInputId: isSet(object.runtimeInputId)
-        ? globalThis.String(object.runtimeInputId)
-        : isSet(object.runtime_input_id)
-        ? globalThis.String(object.runtime_input_id)
-        : "",
-      birthPreparationAttemptId: isSet(object.birthPreparationAttemptId)
-        ? globalThis.String(object.birthPreparationAttemptId)
-        : isSet(object.birth_preparation_attempt_id)
-        ? globalThis.String(object.birth_preparation_attempt_id)
-        : "",
-      failedPreparationAttemptId: isSet(object.failedPreparationAttemptId)
-        ? globalThis.String(object.failedPreparationAttemptId)
-        : isSet(object.failed_preparation_attempt_id)
-        ? globalThis.String(object.failed_preparation_attempt_id)
-        : "",
-      disposition: isSet(object.disposition) ? sealedAgentMailDispositionFromJSON(object.disposition) : 0,
-    };
-  },
-
-  toJSON(message: SealedAgentMailStamp): unknown {
-    const obj: any = {};
-    if (message.runtimeInputId !== "") {
-      obj.runtimeInputId = message.runtimeInputId;
-    }
-    if (message.birthPreparationAttemptId !== "") {
-      obj.birthPreparationAttemptId = message.birthPreparationAttemptId;
-    }
-    if (message.failedPreparationAttemptId !== "") {
-      obj.failedPreparationAttemptId = message.failedPreparationAttemptId;
-    }
-    if (message.disposition !== 0) {
-      obj.disposition = sealedAgentMailDispositionToJSON(message.disposition);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<SealedAgentMailStamp>, I>>(base?: I): SealedAgentMailStamp {
-    return SealedAgentMailStamp.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<SealedAgentMailStamp>, I>>(object: I): SealedAgentMailStamp {
-    const message = createBaseSealedAgentMailStamp();
-    message.runtimeInputId = object.runtimeInputId ?? "";
-    message.birthPreparationAttemptId = object.birthPreparationAttemptId ?? "";
-    message.failedPreparationAttemptId = object.failedPreparationAttemptId ?? "";
-    message.disposition = object.disposition ?? 0;
-    return message;
-  },
-};
-
 function createBaseIdleCloseoutStamp(): IdleCloseoutStamp {
   return { durableTurnId: "", idleEventId: "", idleEventSequence: 0, committedIdleAt: "" };
 }
@@ -2674,7 +2522,6 @@ function createBaseDeclarationReceipt(): DeclarationReceipt {
     declarationDigest: "",
     requestReschedule: undefined,
     childLifecycle: [],
-    sealedAgentMail: undefined,
     idleCloseout: undefined,
     compactedThroughMessageSequence: undefined,
   };
@@ -2717,9 +2564,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     }
     for (const v of message.childLifecycle) {
       ChildLifecycleStamp.encode(v!, writer.uint32(98).fork()).join();
-    }
-    if (message.sealedAgentMail !== undefined) {
-      SealedAgentMailStamp.encode(message.sealedAgentMail, writer.uint32(106).fork()).join();
     }
     if (message.idleCloseout !== undefined) {
       IdleCloseoutStamp.encode(message.idleCloseout, writer.uint32(114).fork()).join();
@@ -2833,14 +2677,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
           message.childLifecycle.push(ChildLifecycleStamp.decode(reader, reader.uint32()));
           continue;
         }
-        case 13: {
-          if (tag !== 106) {
-            break;
-          }
-
-          message.sealedAgentMail = SealedAgentMailStamp.decode(reader, reader.uint32());
-          continue;
-        }
         case 14: {
           if (tag !== 114) {
             break;
@@ -2924,11 +2760,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
         : globalThis.Array.isArray(object?.child_lifecycle)
         ? object.child_lifecycle.map((e: any) => ChildLifecycleStamp.fromJSON(e))
         : [],
-      sealedAgentMail: isSet(object.sealedAgentMail)
-        ? SealedAgentMailStamp.fromJSON(object.sealedAgentMail)
-        : isSet(object.sealed_agent_mail)
-        ? SealedAgentMailStamp.fromJSON(object.sealed_agent_mail)
-        : undefined,
       idleCloseout: isSet(object.idleCloseout)
         ? IdleCloseoutStamp.fromJSON(object.idleCloseout)
         : isSet(object.idle_closeout)
@@ -2980,9 +2811,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     if (message.childLifecycle?.length) {
       obj.childLifecycle = message.childLifecycle.map((e) => ChildLifecycleStamp.toJSON(e));
     }
-    if (message.sealedAgentMail !== undefined) {
-      obj.sealedAgentMail = SealedAgentMailStamp.toJSON(message.sealedAgentMail);
-    }
     if (message.idleCloseout !== undefined) {
       obj.idleCloseout = IdleCloseoutStamp.toJSON(message.idleCloseout);
     }
@@ -3011,9 +2839,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
       ? RequestRescheduleStamp.fromPartial(object.requestReschedule)
       : undefined;
     message.childLifecycle = object.childLifecycle?.map((e) => ChildLifecycleStamp.fromPartial(e)) || [];
-    message.sealedAgentMail = (object.sealedAgentMail !== undefined && object.sealedAgentMail !== null)
-      ? SealedAgentMailStamp.fromPartial(object.sealedAgentMail)
-      : undefined;
     message.idleCloseout = (object.idleCloseout !== undefined && object.idleCloseout !== null)
       ? IdleCloseoutStamp.fromPartial(object.idleCloseout)
       : undefined;
@@ -10528,6 +10353,175 @@ export const AcceptSandboxExecutionResponse: MessageFns<AcceptSandboxExecutionRe
   },
 };
 
+function createBaseAwaitSandboxExecutionRequest(): AwaitSandboxExecutionRequest {
+  return {
+    scope: undefined,
+    toolUseEventId: "",
+    normalizedInputHash: "",
+    toolName: "",
+    inputJson: "",
+    modelToolCallId: "",
+  };
+}
+
+export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionRequest> = {
+  encode(message: AwaitSandboxExecutionRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.toolUseEventId !== "") {
+      writer.uint32(18).string(message.toolUseEventId);
+    }
+    if (message.normalizedInputHash !== "") {
+      writer.uint32(26).string(message.normalizedInputHash);
+    }
+    if (message.toolName !== "") {
+      writer.uint32(34).string(message.toolName);
+    }
+    if (message.inputJson !== "") {
+      writer.uint32(42).string(message.inputJson);
+    }
+    if (message.modelToolCallId !== "") {
+      writer.uint32(58).string(message.modelToolCallId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AwaitSandboxExecutionRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAwaitSandboxExecutionRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.normalizedInputHash = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.toolName = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.inputJson = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.modelToolCallId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AwaitSandboxExecutionRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      normalizedInputHash: isSet(object.normalizedInputHash)
+        ? globalThis.String(object.normalizedInputHash)
+        : isSet(object.normalized_input_hash)
+        ? globalThis.String(object.normalized_input_hash)
+        : "",
+      toolName: isSet(object.toolName)
+        ? globalThis.String(object.toolName)
+        : isSet(object.tool_name)
+        ? globalThis.String(object.tool_name)
+        : "",
+      inputJson: isSet(object.inputJson)
+        ? globalThis.String(object.inputJson)
+        : isSet(object.input_json)
+        ? globalThis.String(object.input_json)
+        : "",
+      modelToolCallId: isSet(object.modelToolCallId)
+        ? globalThis.String(object.modelToolCallId)
+        : isSet(object.model_tool_call_id)
+        ? globalThis.String(object.model_tool_call_id)
+        : "",
+    };
+  },
+
+  toJSON(message: AwaitSandboxExecutionRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.normalizedInputHash !== "") {
+      obj.normalizedInputHash = message.normalizedInputHash;
+    }
+    if (message.toolName !== "") {
+      obj.toolName = message.toolName;
+    }
+    if (message.inputJson !== "") {
+      obj.inputJson = message.inputJson;
+    }
+    if (message.modelToolCallId !== "") {
+      obj.modelToolCallId = message.modelToolCallId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AwaitSandboxExecutionRequest>, I>>(base?: I): AwaitSandboxExecutionRequest {
+    return AwaitSandboxExecutionRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AwaitSandboxExecutionRequest>, I>>(object: I): AwaitSandboxExecutionRequest {
+    const message = createBaseAwaitSandboxExecutionRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.normalizedInputHash = object.normalizedInputHash ?? "";
+    message.toolName = object.toolName ?? "";
+    message.inputJson = object.inputJson ?? "";
+    message.modelToolCallId = object.modelToolCallId ?? "";
+    return message;
+  },
+};
+
 function createBaseAwaitSandboxExecutionResponse(): AwaitSandboxExecutionResponse {
   return { resultJson: "", backgroundTaskStarted: false, taskId: "" };
 }
@@ -11682,9 +11676,9 @@ export const AgentRuntimeBridgeServiceService = {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitSandboxExecution" as const,
     requestStream: false as const,
     responseStream: false as const,
-    requestSerialize: (value: AcceptSandboxExecutionRequest): Buffer =>
-      Buffer.from(AcceptSandboxExecutionRequest.encode(value).finish()),
-    requestDeserialize: (value: Buffer): AcceptSandboxExecutionRequest => AcceptSandboxExecutionRequest.decode(value),
+    requestSerialize: (value: AwaitSandboxExecutionRequest): Buffer =>
+      Buffer.from(AwaitSandboxExecutionRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AwaitSandboxExecutionRequest => AwaitSandboxExecutionRequest.decode(value),
     responseSerialize: (value: AwaitSandboxExecutionResponse): Buffer =>
       Buffer.from(AwaitSandboxExecutionResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer): AwaitSandboxExecutionResponse => AwaitSandboxExecutionResponse.decode(value),
@@ -11847,7 +11841,7 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   markChildThreadClosed: handleUnaryCall<MarkChildThreadClosedRequest, MarkChildThreadClosedResponse>;
   markChildThreadActive: handleUnaryCall<MarkChildThreadActiveRequest, MarkChildThreadActiveResponse>;
   acceptSandboxExecution: handleUnaryCall<AcceptSandboxExecutionRequest, AcceptSandboxExecutionResponse>;
-  awaitSandboxExecution: handleUnaryCall<AcceptSandboxExecutionRequest, AwaitSandboxExecutionResponse>;
+  awaitSandboxExecution: handleUnaryCall<AwaitSandboxExecutionRequest, AwaitSandboxExecutionResponse>;
   readCommandResult: handleUnaryCall<ReadCommandResultRequest, ReadCommandResultResponse>;
   sendCommandInput: handleUnaryCall<SendCommandInputRequest, SendCommandInputResponse>;
   cancelCommand: handleUnaryCall<CancelCommandRequest, CancelCommandResponse>;
@@ -12077,16 +12071,16 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     callback: (error: ServiceError | null, response: AcceptSandboxExecutionResponse) => void,
   ): ClientUnaryCall;
   awaitSandboxExecution(
-    request: AcceptSandboxExecutionRequest,
+    request: AwaitSandboxExecutionRequest,
     callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,
   ): ClientUnaryCall;
   awaitSandboxExecution(
-    request: AcceptSandboxExecutionRequest,
+    request: AwaitSandboxExecutionRequest,
     metadata: Metadata,
     callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,
   ): ClientUnaryCall;
   awaitSandboxExecution(
-    request: AcceptSandboxExecutionRequest,
+    request: AwaitSandboxExecutionRequest,
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: AwaitSandboxExecutionResponse) => void,

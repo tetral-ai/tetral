@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tetral-ai/tetral/internal/agent"
 	"github.com/tetral-ai/tetral/internal/auth"
@@ -25,11 +26,13 @@ import (
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/httpapi"
 	"github.com/tetral-ai/tetral/internal/memory"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/sessionevent"
 	"github.com/tetral-ai/tetral/internal/skill"
 	"github.com/tetral-ai/tetral/internal/vault"
 	"github.com/tetral-ai/tetral/internal/workload"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 const (
@@ -238,6 +241,10 @@ func BuildRouter(ctx context.Context, cfg RouterConfig) (http.Handler, error) {
 	sessionStore := session.NewPostgreSQLSessionStore(
 		cfg.RuntimeClient,
 		session.WithPageTokenSecret(eventPageTokenSecret),
+		session.WithSessionDeleteSandboxRelease(func(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, now time.Time) error {
+			_, _, err := sandboxrelease.EnsureTx(ctx, tx, string(workspaceID), sessionID, sandboxrelease.SessionDelete, "", now)
+			return err
+		}),
 	)
 	environmentService := environment.NewService(environmentStore)
 	vaultService := vault.NewService(vaultStore, credentialStore)

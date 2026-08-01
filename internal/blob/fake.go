@@ -29,6 +29,11 @@ type FakeBlobStore struct {
 	// no-op.
 	putHook func(ctx context.Context, key string) error
 
+	// headHook fires inside HeadObject before metadata is returned. Tests use
+	// it to distinguish transient provider failures from missing objects.
+	// nil means no-op.
+	headHook func(ctx context.Context, key string) error
+
 	// deleteHook fires inside Delete before the in-memory entry is
 	// removed. Tests use it to inject a delete failure shaped like a
 	// real provider error so the secret-safe error path can be
@@ -130,6 +135,11 @@ func (f *FakeBlobStore) HeadObject(ctx context.Context, key string) (ObjectMetad
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.headHook != nil {
+		if err := f.headHook(ctx, key); err != nil {
+			return ObjectMetadata{}, err
+		}
+	}
 	stored, ok := f.objects[key]
 	if !ok {
 		return ObjectMetadata{}, &NotFoundError{Key: key}
@@ -139,7 +149,7 @@ func (f *FakeBlobStore) HeadObject(ctx context.Context, key string) (ObjectMetad
 
 // CopyObject copies an existing key to a new key with create-only
 // semantics. It mirrors the S3-compatible provider-side copy contract
-// used by mount preparation tests without exposing bytes to callers.
+// used by resource-materialization tests without exposing bytes to callers.
 func (f *FakeBlobStore) CopyObject(ctx context.Context, sourceKey string, destinationKey string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -260,6 +270,13 @@ func (f *FakeBlobStore) SetPutHook(hook func(ctx context.Context, key string) er
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.putHook = hook
+}
+
+// SetHeadHook installs a hook fired inside HeadObject before object lookup.
+func (f *FakeBlobStore) SetHeadHook(hook func(ctx context.Context, key string) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.headHook = hook
 }
 
 // SetDeleteHook installs a hook fired inside Delete before the

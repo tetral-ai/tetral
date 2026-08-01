@@ -76,10 +76,6 @@ type RuntimeDeliveryFinalizationReplayer interface {
 	ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error)
 }
 
-type RuntimeInputSealResolver interface {
-	ResolveRuntimeInputSeal(context.Context, RuntimeJob) (string, error)
-}
-
 type RuntimeInboxRepairer interface {
 	RepairRuntimeInbox(context.Context, string, int) (int, error)
 }
@@ -96,29 +92,27 @@ type JobRunner struct {
 }
 
 type RuntimeJob struct {
-	JobID                      string
-	LeaseToken                 string
-	Kind                       string
-	WorkspaceID                string
-	SessionID                  string
-	SessionThreadID            string
-	RuntimeInputID             string
-	ConfigGeneration           string
-	MCPServerName              string
-	MCPManifestGeneration      string
-	CleanupJobID               string
-	DeleteCleanupID            string
-	PreparationAttemptID       string
-	SealedPreparationAttemptID string
-	EventIDs                   []string
-	SequenceFrom               int64
-	SequenceTo                 int64
-	InputKind                  string
-	RejectionReasonCode        string
-	CommandKind                agentruntimev1.RuntimeCommandKind
-	PayloadJSON                string
-	AttemptCount               int32
-	MaxAttempts                int32
+	JobID                 string
+	LeaseToken            string
+	Kind                  string
+	WorkspaceID           string
+	SessionID             string
+	SessionThreadID       string
+	RuntimeInputID        string
+	ConfigGeneration      string
+	MCPServerName         string
+	MCPManifestGeneration string
+	CleanupJobID          string
+	DeleteCleanupID       string
+	EventIDs              []string
+	SequenceFrom          int64
+	SequenceTo            int64
+	InputKind             string
+	RejectionReasonCode   string
+	CommandKind           agentruntimev1.RuntimeCommandKind
+	PayloadJSON           string
+	AttemptCount          int32
+	MaxAttempts           int32
 }
 
 type RuntimeDeliveryStatus string
@@ -257,22 +251,6 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}
 	}
 	if job.Kind == queue.KindRuntimeInput {
-		resolver, ok := r.Deliverer.(RuntimeInputSealResolver)
-		if !ok {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
-			return errors.New("bridge runtime input seal resolver is required")
-		}
-		sealedAttemptID, err := resolver.ResolveRuntimeInputSeal(workCtx, job)
-		if err != nil {
-			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-				return heartbeatErr
-			}
-			return err
-		}
-		job.SealedPreparationAttemptID = sealedAttemptID
-
 		replayer, ok := r.Deliverer.(RuntimeDeliveryFinalizationReplayer)
 		if !ok {
 			if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
@@ -667,6 +645,7 @@ func decodeSessionDeleteCleanupJob(queueJob *queuev1.QueueJob) (RuntimeJob, erro
 		WorkspaceID: payload.WorkspaceID, SessionID: payload.SessionID,
 		RuntimeInputID: "session_delete_cleanup:" + payload.DeleteCleanupID,
 		CleanupJobID:   payload.DeleteCleanupID, DeleteCleanupID: payload.DeleteCleanupID,
+		AttemptCount: queueJob.GetAttemptCount(), MaxAttempts: queueJob.GetMaxAttempts(),
 		CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
 		PayloadJSON: queueJob.GetPayloadJson(),
 	}, nil

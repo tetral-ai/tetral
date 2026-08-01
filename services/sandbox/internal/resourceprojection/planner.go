@@ -1,5 +1,5 @@
-// Package resourceprojection plans read-only file-resource projection for
-// sandbox session preparation.
+// Package resourceprojection plans Daytona read-only file materialization from
+// durable Session resource declarations.
 //
 // OWNS:
 //   - The R2 key scheme: SessionPrefix, SessionResourcesPrefix,
@@ -9,7 +9,7 @@
 //     verify (ActionType).
 //   - The read-only R2 credential mint (prefix-scoped, TTL-bounded).
 //   - Command generation for mount/bind/verify plus the teardown, live-rotation,
-//     deleted-file cleanup, and local-copy variants.
+//     and deleted-file cleanup.
 //
 // STATE MACHINE (per session-copy object, written by CopyExecutor.CopyIfNeeded
 // in copy.go):
@@ -39,9 +39,8 @@
 //     deleted.
 //
 // UPDATE-WITH: copy.go, credential.go, mount.go, verify.go, rotation.go,
-// teardown.go, services/sandbox/resource_projection_preparer.go
-// (orchestrator), services/bridge/bridge_api_tools.go (readiness
-// gate), internal/blob/blob.go (the CopyObject/HeadObject boundary).
+// teardown.go, services/sandbox/daytona_file_resource_materializer.go, and
+// internal/blob/blob.go (the CopyObject/HeadObject boundary).
 package resourceprojection
 
 import (
@@ -609,7 +608,6 @@ func rejectReservedGitHubPath(resourceID string, mountPath string) error {
 // may not overlap, because each already backs a distinct part of the sandbox:
 //   - /mnt/tetral/r2: the rclone staging mount for projected session copies.
 //   - /tmp/tetral-runtime, /dev/shm/tetral-runtime: the helper runtime roots.
-//   - /tmp/tetral/session-prepare: preparation scratch.
 //   - /mnt/memory: the memory-store projection target.
 //   - /skills: the skill-bundle projection target.
 //   - /mnt/session/outputs: output capture; a read-only file here would shadow it.
@@ -625,7 +623,6 @@ func reservedSubtrees() []string {
 		stagingMountRoot,
 		"/tmp/tetral-runtime",
 		"/dev/shm/tetral-runtime",
-		"/tmp/tetral/session-prepare",
 		"/mnt/memory",
 		"/skills",
 		"/mnt/session/outputs",

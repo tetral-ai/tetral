@@ -14,6 +14,3 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-    - name: grpc
-      port: 9090
-      targetPort: grpc

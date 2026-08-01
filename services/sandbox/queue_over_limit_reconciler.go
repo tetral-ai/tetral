@@ -120,7 +120,21 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 		}
 		errorKind = "sandbox_execution_attempts_exhausted"
 		errorMessage = "sandbox execution attempt budget exhausted"
-	case queue.KindSandboxActivate, queue.KindSandboxMaterialize:
+	case queue.KindSandboxToolCancel:
+		job, err := decodeSandboxToolCancelQueueTransportIdentity(&queuev1.QueueJob{
+			Id: candidate.JobID, WorkspaceId: candidate.WorkspaceID.String(), Kind: candidate.Kind,
+			PartitionKey: candidate.PartitionKey, DedupeKey: candidate.DedupeKey,
+			LeaseToken: "over-limit-finalizer",
+		})
+		if err != nil {
+			return false, err
+		}
+		finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
+			return finalizeToolCancellationTx(ctx, tx, job, now)
+		}
+		errorKind = "sandbox_tool_cancel_attempts_exhausted"
+		errorMessage = "sandbox tool cancellation attempt budget exhausted"
+	case queue.KindSandboxActivate, queue.KindSandboxMaterialize, queue.KindSandboxRelease:
 		finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
 			job, found, err := lookupSandboxLifecycleJobByQueueIdentity(
 				ctx, tx, candidate.WorkspaceID.String(), candidate.JobID, candidate.Kind,
@@ -131,12 +145,16 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 			}
 			return finalizeExhaustedSandboxLifecycleTx(ctx, tx, job, candidate.Kind, "", "", now)
 		}
-		if candidate.Kind == queue.KindSandboxActivate {
+		switch candidate.Kind {
+		case queue.KindSandboxActivate:
 			errorKind = "sandbox_activation_attempts_exhausted"
 			errorMessage = "sandbox activation attempt budget exhausted"
-		} else {
+		case queue.KindSandboxMaterialize:
 			errorKind = "sandbox_materialization_attempts_exhausted"
 			errorMessage = "sandbox materialization attempt budget exhausted"
+		case queue.KindSandboxRelease:
+			errorKind = "sandbox_release_attempts_exhausted"
+			errorMessage = "sandbox release attempt budget exhausted"
 		}
 	case queue.KindSandboxBackgroundReconcile, queue.KindSandboxBackgroundCommand:
 		identity, err := decodeBackgroundQueueIdentity(
@@ -145,13 +163,14 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 		if err != nil {
 			return false, err
 		}
-		if candidate.Kind == queue.KindSandboxBackgroundReconcile {
+		switch candidate.Kind {
+		case queue.KindSandboxBackgroundReconcile:
 			finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
 				return finalizeExhaustedBackgroundReconcileTx(ctx, tx, identity, now)
 			}
 			errorKind = "sandbox_background_reconcile_attempts_exhausted"
 			errorMessage = "sandbox background reconcile attempt budget exhausted"
-		} else {
+		case queue.KindSandboxBackgroundCommand:
 			finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
 				return finalizeExhaustedBackgroundCommandTx(ctx, tx, identity, now)
 			}

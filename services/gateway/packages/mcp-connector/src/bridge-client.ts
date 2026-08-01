@@ -488,7 +488,6 @@ function validMcpMaterializationReceipt(
     receipt.prefixConsumptions.length !== 0 ||
     receipt.requestReschedule !== undefined ||
     receipt.childLifecycle.length !== 0 ||
-    receipt.sealedAgentMail !== undefined ||
     receipt.idleCloseout !== undefined ||
     receipt.compactedThroughMessageSequence !== undefined
   ) {

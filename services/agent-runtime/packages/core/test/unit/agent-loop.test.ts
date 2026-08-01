@@ -10161,6 +10161,124 @@ Previous anchored summary.
     expect(requests).toHaveLength(1);
   });
 
+  test("cold unresolved approval does not strand an accepted Sandbox execution", async () => {
+    const session = new Session("sesn_1");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_cold_mixed_recovery"));
+    const approvalInput = { file_path: "src/approval.ts", content: "wait" };
+    const sandboxInput = { file_path: "src/accepted.ts", content: "done" };
+    const pendingMessage = DurableRuntimeMessageSchema.parse({
+      id: "assistant-cold-mixed",
+      sessionId: "sesn_1",
+      owningEventId: "sevt_approval",
+      eventSequence: 2,
+      role: "assistant",
+      origin: "agent",
+      sequence: 1,
+      status: "completed",
+      createdAt,
+      parts: [
+        {
+          id: "assistant-cold-mixed-approval",
+          sessionId: "sesn_1",
+          messageId: "assistant-cold-mixed",
+          sequence: 0,
+          type: "tool",
+          toolCallId: "tool-approval",
+          toolName: "Write",
+          toolUseEventId: "sevt_approval",
+          toolEvent: { kind: "tool" },
+          state: { status: "running", input: { value: approvalInput, preview: JSON.stringify(approvalInput), truncated: false } },
+          startedAt: createdAt,
+          createdAt,
+        },
+        {
+          id: "assistant-cold-mixed-sandbox",
+          sessionId: "sesn_1",
+          messageId: "assistant-cold-mixed",
+          sequence: 1,
+          type: "tool",
+          toolCallId: "tool-sandbox",
+          toolName: "Write",
+          toolUseEventId: "sevt_sandbox",
+          toolEvent: { kind: "tool" },
+          state: { status: "running", input: { value: sandboxInput, preview: JSON.stringify(sandboxInput), truncated: false } },
+          startedAt: createdAt,
+          createdAt,
+        },
+      ],
+    });
+    const loadedMessages = [userMessage("user-cold-mixed", 0, "hello"), pendingMessage];
+    const pendingToolUses = [{
+      toolUseEventId: "sevt_approval",
+      modelRequestId: "mrq_cold_mixed",
+      modelToolCallId: "tool-approval",
+      toolName: "Write",
+      kind: "approval" as const,
+      input: approvalInput,
+      status: "pending" as const,
+      expiresAt: "2026-06-14T00:30:00.000Z",
+    }];
+    const pendingSandboxExecutions = [{
+      toolUseEventId: "sevt_sandbox",
+      modelRequestId: "mrq_cold_mixed",
+      modelToolCallId: "tool-sandbox",
+      toolName: "Write",
+      input: sandboxInput,
+      executionState: "running" as const,
+    }];
+    const appended: SessionEvent[] = [];
+    const writer = writerFrom(
+      (envelope) => {
+        appended.push(envelope.event);
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+      },
+      undefined,
+      [{ sessionThreadId: session.identity.sessionThreadId, message: pendingMessage }],
+    );
+    const coldCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" }, permissionPolicy: "always_ask" });
+    const sandboxCatalog = {
+      ...coldCatalog,
+      entries: coldCatalog.entries.map((entry) => ({
+        ...entry,
+        route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+      })),
+    };
+    const waits: string[] = [];
+    const layer = runtimeAgentLoopLayer(new QueuedContextLoader([], []), {
+      writer,
+      providerCallRuntime: { systemInstructions: "cold mixed recovery", toolCatalog: sandboxCatalog },
+      acceptSandboxExecution: () => {
+        throw new Error("accepted Sandbox execution must not be accepted again");
+      },
+      awaitSandboxExecution: (request) => {
+        waits.push(request.toolUseEventId);
+        return { type: "completed", output: { text: "recovered", truncated: false } };
+      },
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        session.state.contextManager.replaceMessages(loadedMessages);
+        session.state.markPersistentContextLoaded();
+        agentLoop.seedRuntimeModel(session);
+        expect(yield* agentLoop.installLoadedPendingToolUses(session, pendingToolUses, loadedMessages)).toEqual({ ok: true });
+        expect(yield* agentLoop.installLoadedSandboxExecutions(session, pendingSandboxExecutions, loadedMessages)).toEqual({ ok: true });
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(waits).toEqual(["sevt_sandbox"]);
+    expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
+    expect(session.state.pendingApprovalToolJobs()).toHaveLength(1);
+    expect(appended.some((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_sandbox")).toBe(true);
+    expect(appended.at(-1)).toEqual({
+      type: "session.status_idle",
+      stop_reason: { type: "requires_action", event_ids: ["sevt_approval"] },
+    });
+  });
+
   test("LoadContext pendingToolUses applies recorded deny decisions without re-waiting or executing the tool", async () => {
     const session = new Session("sesn_1");
     session.state.enqueueAcceptedInput(acceptedInput("rin_cold_deny_restore"));

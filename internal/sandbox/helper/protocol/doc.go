@@ -2,9 +2,9 @@
 // types the sandbox helper exchanges with its callers.
 //
 // This is the one type set that crosses process boundaries: the helper
-// produces these values, the Bridge driver consumes payloads and result
-// envelopes, and Sandbox Service consumes the health envelope during
-// preparation. Everything under internal/sandbox/helper/internal is private to
+// produces these values, and Sandbox Service consumes tool, capture, and health
+// envelopes while executing provider-owned work. Everything under
+// internal/sandbox/helper/internal is private to
 // the helper tree; only this package is importable from outside it.
 //
 // OWNS:

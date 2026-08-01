@@ -38,7 +38,7 @@ const testAPIKey = "test-api-key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 // (a) the historical Agent read returns the stored skills[] bytes
 // unchanged, and (b) a NEW Agent referencing the deleted Skill is
 // rejected with 400 invalid_request_error. The test does NOT assert
-// runtime materialization; that belongs to session preparation.
+// Sandbox materialization; that belongs to the lazy tool-execution path.
 func TestSkillUploadAgentReferenceLifecycleEndToEnd(t *testing.T) {
 	runtimeDB := storagetest.NewPostgreSQLDB(t)
 	apiKeyStore := auth.NewAPIKeyStore(runtimeDB)

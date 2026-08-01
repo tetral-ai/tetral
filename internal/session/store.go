@@ -27,7 +27,6 @@ type Transaction interface {
 
 	CreateSession(ctx context.Context, sess *Session) error
 	CreatePrimaryThread(ctx context.Context, thread *Thread) error
-	CreateSessionPreparation(ctx context.Context, preparation SessionPreparationAdmission) error
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
 	LockSession(ctx context.Context, sessionID string) (*Session, error)
 	LockSessionForDelete(ctx context.Context, sessionID string) (*Session, error)
@@ -154,12 +153,4 @@ type ProviderCredentialForAdmission struct {
 	AccessMode string
 	Archived   bool
 	Revoked    bool
-}
-
-type SessionPreparationAdmission struct {
-	SessionID            string
-	EnvironmentID        string
-	PreparationAttemptID string
-	SandboxID            string
-	CreatedAt            time.Time
 }

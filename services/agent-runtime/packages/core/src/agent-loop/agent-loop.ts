@@ -3823,7 +3823,10 @@ function resumeRecoveredToolJobsEffect(
     const unresolved = pendingJobs.filter((pending) =>
       !isPendingSandboxExecution(pending) && session.state.toolConfirmation(pending.toolUseEventId) === undefined
     );
-    if (unresolved.length > 0) {
+    const actionableJobs = unresolved.length > 0
+      ? pendingJobs.filter(isPendingSandboxExecution)
+      : pendingJobs;
+    if (actionableJobs.length === 0) {
       return { type: "waiting_external" as const, blockingEventIds: unresolved.map((pending) => pending.toolUseEventId) };
     }
     const runningAppend = yield* Effect.promise(() => durableOperations.run(
@@ -3832,7 +3835,7 @@ function resumeRecoveredToolJobsEffect(
         session,
         custody,
         "pending_tool",
-        pendingJobs[0]!.toolUseEventId,
+        actionableJobs[0]!.toolUseEventId,
       ),
     ));
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
@@ -3843,14 +3846,14 @@ function resumeRecoveredToolJobsEffect(
     }
 
     const allowedJobs: RuntimeRecoveredToolJobState[] = [];
-    for (const pending of pendingJobs) {
+    for (const pending of actionableJobs) {
       if (isPendingSandboxExecution(pending)) {
         allowedJobs.push(pending);
         continue;
       }
       const confirmation = session.state.toolConfirmation(pending.toolUseEventId);
       if (confirmation === undefined) {
-        return pendingApprovalResumeFailed(pendingApprovalResumeFailure(session.sessionId, pending.source, "missing approval confirmation"));
+        continue;
       }
       if (confirmation.decision === "deny") {
         if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
@@ -3878,6 +3881,13 @@ function resumeRecoveredToolJobsEffect(
         continue;
       }
       allowedJobs.push(pending);
+    }
+
+    if (allowedJobs.length === 0) {
+      if (unresolved.length > 0) {
+        return { type: "waiting_external" as const, blockingEventIds: unresolved.map((pending) => pending.toolUseEventId) };
+      }
+      return { type: "resumed" as const };
     }
 
     const scheduler = new ToolScheduler();
@@ -3961,6 +3971,9 @@ function resumeRecoveredToolJobsEffect(
         }
       }
 
+      if (unresolved.length > 0) {
+        return { type: "waiting_external" as const, blockingEventIds: unresolved.map((pending) => pending.toolUseEventId) };
+      }
       return { type: "resumed" as const };
     }).pipe(Effect.ensuring(
       Scope.close(batchScope, Exit.void).pipe(

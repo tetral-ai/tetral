@@ -12,9 +12,9 @@ import (
 )
 
 // Memory projection subsystem — MaterializeMemoryProjections renders the durable
-// memory head into the sandbox /mnt/memory tree at prepare time.
+// memory head into the sandbox /mnt/memory tree during resource convergence.
 //
-// OWNS: the /mnt/memory projection layout and its prepare-time (re)materialization
+// OWNS: the /mnt/memory projection layout and its activation-time (re)materialization
 // and deleted-store removal. It reads durable truth through MemorySnapshotReader
 // and writes the sandbox through MemoryStoreMaterializer (driver side).
 //
@@ -23,8 +23,9 @@ import (
 //     truth: bytes flow durable -> sandbox only and are never read back. A lost or
 //     corrupted projection is repaired by full re-materialization, never trusted as
 //     a source of truth. The paths are a read-only projection of the CURRENT memory
-//     head; the live post-mutation refresh (driven by Bridge after a RunMemory
-//     commit) touches only the current session's bound sandbox projection.
+//     head; the live post-mutation refresh (driven by Sandbox Service from the
+//     durable memory-projection queue) touches only the current session's bound
+//     sandbox projection.
 //   - Every attached store is materialized regardless of access mode — read_write
 //     and read_only alike (the loop here applies no access filter). Access governs
 //     only whether the mutation path (resolveWritableMemoryStoreTx) selects a store
@@ -44,7 +45,7 @@ import (
 //   - Prefix-freeness (no active path is a prefix of another) is required because a
 //     filesystem cannot represent /a and /a/b both as active. The durable model
 //     permits such overlaps, so it is enforced at THREE sites: memory tool
-//     create/rename, the public Memory API, and this prepare-time snapshot scan
+//     create/rename, the public Memory API, and this materialization snapshot scan
 //     (validatePrefixFreeMemorySnapshot). The two SQL sites use an exact
 //     left(path,len)=..||'/' predicate rather than LIKE, because a path may legally
 //     contain % and _. The scan here checks each path's ancestor prefixes against a
@@ -89,7 +90,6 @@ type MemoryProjectionMaterializationRequest struct {
 	ProviderSandboxID string
 	Resources         ResourceSetup
 	MutationLocker    MemoryStoreMutationLocker
-	ResourceCleanup   SessionResourceCleanupCoordinator
 }
 
 func MaterializeMemoryProjections(ctx context.Context, reader MemorySnapshotReader, materializer MemoryStoreMaterializer, request MemoryProjectionMaterializationRequest) error {
@@ -125,13 +125,7 @@ func MaterializeMemoryProjections(ctx context.Context, reader MemorySnapshotRead
 			remove := func(ctx context.Context) error {
 				return materializer.RemoveMemoryStore(ctx, request.ProviderSandboxID, mount)
 			}
-			if request.ResourceCleanup == nil {
-				if err := remove(ctx); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := request.ResourceCleanup.CleanupSessionResource(ctx, mount.ResourceID, remove); err != nil {
+			if err := remove(ctx); err != nil {
 				return err
 			}
 		}

@@ -25,7 +25,7 @@ type BridgeAPIStore interface {
 	MarkChildThreadClosed(context.Context, *bridgev1.MarkChildThreadClosedRequest) (*bridgev1.MarkChildThreadClosedResponse, error)
 	MarkChildThreadActive(context.Context, *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error)
-	AwaitSandboxExecution(context.Context, *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error)
+	AwaitSandboxExecution(context.Context, *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error)
 	ReadCommandResult(context.Context, *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error)
 	SendCommandInput(context.Context, *bridgev1.SendCommandInputRequest) (*bridgev1.SendCommandInputResponse, error)
 	CancelCommand(context.Context, *bridgev1.CancelCommandRequest) (*bridgev1.CancelCommandResponse, error)
@@ -208,7 +208,7 @@ func (s BridgeAPIServer) AcceptSandboxExecution(ctx context.Context, request *br
 	return store.AcceptSandboxExecution(ctx, request)
 }
 
-func (s BridgeAPIServer) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
+func (s BridgeAPIServer) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
 	store, err := s.requireStore()
 	if err != nil {
 		return nil, err

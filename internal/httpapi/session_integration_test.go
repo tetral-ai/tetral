@@ -23,6 +23,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 const (
@@ -55,6 +56,10 @@ func newSessionIntegrationEnv(t *testing.T) *sessionIntegrationEnv {
 	sessionStore := session.NewPostgreSQLSessionStore(
 		runtimeClient,
 		session.WithPageTokenSecret([]byte("session-integration-secret-12345")),
+		session.WithSessionDeleteSandboxRelease(func(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, now time.Time) error {
+			_, _, err := tetralsandbox.EnsureSandboxReleaseTx(ctx, tx, string(workspaceID), sessionID, tetralsandbox.SandboxReleaseSessionDelete, "", now)
+			return err
+		}),
 	)
 	fileStore := files.NewPostgreSQLStore(runtimeClient, blob.NewFakeBlobStore())
 	service := session.NewService(
@@ -297,11 +302,11 @@ func TestSessionIntegrationReadUpdateArchiveDeleteAndResourcePolicies(t *testing
 	}
 }
 
-func TestSessionIntegrationAdmittedPreparationRemainsPublicBeforeSandboxReadiness(t *testing.T) {
+func TestSessionIntegrationAdmittedSessionRemainsPublicBeforeSandboxUse(t *testing.T) {
 	env := newSessionIntegrationEnv(t)
 	if _, err := env.admin.ExecContext(context.Background(),
 		`UPDATE environment_artifacts
-		    SET status = 'building', provider_artifact_ref = NULL
+		    SET status = 'pending', provider_artifact_ref = NULL
 		  WHERE workspace_id = $1 AND environment_id = $2 AND generation = 1`,
 		string(workspace.DefaultID), sessionIntegrationEnvironment); err != nil {
 		t.Fatalf("make environment artifact unready: %v", err)
@@ -315,11 +320,8 @@ func TestSessionIntegrationAdmittedPreparationRemainsPublicBeforeSandboxReadines
 	}`)
 	fileResource := findSessionIntegrationResource(t, created.Resources, string(session.ResourceTypeFile))
 
-	if got := loadSessionIntegrationPreparationStatus(t, env.admin, workspace.DefaultID, created.ID); got != "waiting_environment" {
-		t.Fatalf("session preparation status = %q; want waiting_environment before environment artifact readiness", got)
-	}
-	if got := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM sandboxes WHERE workspace_id = $1`, workspace.DefaultID); got != 0 {
-		t.Fatalf("sandbox rows after public admission = %d; want Sandbox Service to own later creation", got)
+	if got := countSessionIntegrationRows(t, env.admin, `SELECT count(*) FROM session_sandbox_bindings WHERE workspace_id = $1`, workspace.DefaultID); got != 0 {
+		t.Fatalf("sandbox bindings after public admission = %d; want lazy binding on first Sandbox tool", got)
 	}
 
 	assertHTTPStatus(t, env.request(http.MethodGet, "/v1/sessions/"+created.ID+"?beta=true", ""), http.StatusOK)
@@ -704,20 +706,6 @@ func loadSessionIntegrationFileRow(t *testing.T, db *sql.DB, workspaceID workspa
 	return row
 }
 
-func loadSessionIntegrationPreparationStatus(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) string {
-	t.Helper()
-	var status string
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT status
-		   FROM session_preparations
-		  WHERE workspace_id = $1 AND session_id = $2`,
-		string(workspaceID), sessionID,
-	).Scan(&status); err != nil {
-		t.Fatalf("load session preparation %s: %v", sessionID, err)
-	}
-	return status
-}
-
 func loadSessionIntegrationUpdatedAt(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string) time.Time {
 	t.Helper()
 	var raw string
@@ -855,7 +843,7 @@ func seedSessionIntegrationReferences(t *testing.T, db *sql.DB, workspaceID work
 			normalized_config_hash, artifact_input_hash, runtime_network_policy_json, packages_json,
 			created_at, updated_at
 		) VALUES (
-			$1, $2, 1, 'ready', 'tetral', 'artifact_http_session',
+			$1, $2, 1, 'ready', 'daytona', 'artifact_http_session',
 			'hash-http-session-config', 'hash-http-session-artifact', '{"type":"unrestricted"}', '{}',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)

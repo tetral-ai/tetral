@@ -30,7 +30,7 @@ func TestPostgreSQLRuntimePodLossInterruptFenceMatrix(t *testing.T) {
 					}
 				}
 				bindingID := "bind_pod_loss_interrupt_" + suffix
-				binding := runtimePodLostReleaseFenceBinding(sessionID, bindingID, 1)
+				binding := runtimePodLostBinding(sessionID, bindingID, 1)
 				seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
 				runtimeStatus := "running"
 				if role == "child" {

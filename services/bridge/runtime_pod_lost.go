@@ -2,9 +2,7 @@ package agentruntimebridge
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"strconv"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -15,7 +13,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// This file owns durable repair and release fencing after a Runtime Pod is proven lost.
+// This file owns durable repair after a Runtime Pod is proven lost. Runtime
+// custody is disposable; losing it never releases the Session's Sandbox.
 
 type runtimeOpenRequestStart struct {
 	SessionThreadID string
@@ -32,9 +31,6 @@ type runtimeOrphanToolUse struct {
 }
 
 func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, workspaceID, sessionID); err != nil {
-		return 0, err
-	}
 	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID)
 	if err != nil {
 		return 0, err
@@ -67,11 +63,6 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 		return 0, err
 	}
 	repaired += deliveryRepaired
-	taskRepaired, err := settleRuntimePodLostBackgroundTasksTx(ctx, tx, workspaceID, sessionID, binding, now)
-	if err != nil {
-		return 0, err
-	}
-	repaired += taskRepaired
 	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, binding, now)
 	if err != nil {
 		return 0, err
@@ -386,9 +377,7 @@ func insertRuntimePodLostSettlementEventTx(
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Context, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) error {
-	var sandboxID string
-	claimID := runtimePodLostClaimID(binding)
-	if err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
+	return s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
 		current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, workspaceID, sessionID)
 		if err != nil {
 			return err
@@ -396,270 +385,38 @@ func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Co
 		if !found || current.BindingID != binding.BindingID || current.BindingGeneration != binding.BindingGeneration {
 			return runtimePodLostStaleFenceError("runtime pod-loss repair binding fence is stale")
 		}
-		freshClaim, err := verifyRuntimePodLostReleaseClaimAvailableTx(ctx, tx, workspaceID, sessionID, binding, claimID)
-		if err != nil {
-			return err
-		}
 		if _, err := repairLostRuntimeBindingTx(ctx, tx, workspaceID, sessionID, binding, now); err != nil {
 			return err
 		}
-		if freshClaim {
-			if _, err := rearmPendingCompletionMailForSessionTx(ctx, tx, workspaceID, sessionID, now); err != nil {
-				return err
-			}
-		}
-		if err := claimRuntimePodLostReleaseTx(ctx, tx, workspaceID, sessionID, binding, claimID, now); err != nil {
+		if _, err := rearmPendingCompletionMailForSessionTx(ctx, tx, workspaceID, sessionID, now); err != nil {
 			return err
 		}
-		sandboxID, err = cleanupSandboxIDTx(ctx, tx, workspaceID, sessionID)
-		return err
-	}); err != nil {
-		return err
-	}
-	if sandboxID == "" {
-		return runtimeDeliveryPrepareError{kind: "sandbox_release_unavailable", message: "sandbox release fence is unavailable during runtime pod loss repair", retryable: true}
-	}
-	if s.SandboxReleaser == nil {
-		return runtimeDeliveryPrepareError{kind: "sandbox_release_unavailable", message: "sandbox release client is unavailable during runtime pod loss repair", retryable: true}
-	}
-	release, err := s.SandboxReleaser.ReleaseSandbox(ctx, SandboxReleaseRequest{
-		WorkspaceID:         workspaceID,
-		SessionID:           sessionID,
-		SandboxID:           sandboxID,
-		BindingID:           binding.BindingID,
-		BindingGeneration:   binding.BindingGeneration,
-		Reason:              "runtime_pod_lost",
-		IdempotencyKey:      claimID,
-		DurableCleanupFence: true,
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM session_runtime_bindings
+			  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+			workspaceID, sessionID, binding.BindingID, binding.BindingGeneration,
+		); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE session_runtime_status
+			    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
+			        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$5
+			  WHERE workspace_id=$1 AND session_id=$2 AND binding_id=$3 AND binding_generation=$4`,
+			workspaceID, sessionID, binding.BindingID, binding.BindingGeneration, now,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(result) {
+			return runtimePodLostStaleFenceError("runtime pod-loss binding finalization fence is stale")
+		}
+		return nil
 	})
-	if err != nil {
-		return runtimeDeliveryPrepareError{kind: "sandbox_release_unavailable", message: "sandbox release call failed during runtime pod loss repair", retryable: true}
-	}
-	switch release.Status {
-	case SandboxReleaseReleased, SandboxReleaseArchived, SandboxReleaseAlreadyReleased:
-	case SandboxReleaseRetryLater:
-		return runtimeDeliveryPrepareError{kind: "sandbox_release_retry_later", message: "sandbox release is not complete during runtime pod loss repair", retryable: true}
-	case SandboxReleaseFailed:
-		return runtimeDeliveryPrepareError{kind: "sandbox_release_failed", message: "sandbox release failed during runtime pod loss repair", retryable: false}
-	default:
-		return runtimeDeliveryPrepareError{kind: "sandbox_release_protocol_error", message: "sandbox release status is invalid during runtime pod loss repair", retryable: false}
-	}
-	return s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.finalize_lost_runtime_binding", func(tx *dbconnect.Tx) error {
-		return finalizeRuntimePodLostReleaseTx(ctx, tx, workspaceID, sessionID, binding, claimID, now)
-	})
-}
-
-func runtimePodLostClaimID(binding runtimeBindingForDelivery) string {
-	return "runtime_pod_lost:" + binding.BindingID + ":" + strconv.FormatInt(binding.BindingGeneration, 10)
 }
 
 func runtimePodLostStaleFenceError(message string) runtimeDeliveryPrepareError {
 	return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_claim_stale", message: message, retryable: true}
-}
-
-func verifyRuntimePodLostReleaseClaimAvailableTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	binding runtimeBindingForDelivery,
-	claimID string,
-) (bool, error) {
-	var cleanupJobID, cleanupClaimedAt sql.NullString
-	if err := tx.QueryRow(ctx,
-		`SELECT cleanup_job_id, cleanup_claimed_at
-		   FROM session_runtime_status
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-		binding.BindingID,
-		binding.BindingGeneration,
-	).Scan(&cleanupJobID, &cleanupClaimedAt); dbconnect.IsNoRows(err) {
-		return false, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
-	} else if err != nil {
-		return false, err
-	}
-	if !cleanupJobID.Valid && !cleanupClaimedAt.Valid {
-		return true, nil
-	}
-	if cleanupJobID.Valid && cleanupJobID.String == claimID && cleanupClaimedAt.Valid {
-		return false, nil
-	}
-	return false, runtimePodLostStaleFenceError("runtime pod-loss cleanup claim is stale")
-}
-
-func claimRuntimePodLostReleaseTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, claimID string, now time.Time) error {
-	formattedNow := now
-	result, err := tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET cleanup_job_id = $5,
-		        cleanup_claimed_at = COALESCE(cleanup_claimed_at, $6),
-		        updated_at = $6
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4
-		    AND (
-		         (cleanup_job_id IS NULL AND cleanup_claimed_at IS NULL)
-		      OR (cleanup_job_id = $5 AND cleanup_claimed_at IS NOT NULL)
-		    )`,
-		workspaceID,
-		sessionID,
-		binding.BindingID,
-		binding.BindingGeneration,
-		claimID,
-		formattedNow,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return runtimePodLostStaleFenceError("runtime pod-loss cleanup claim is stale")
-	}
-	return nil
-}
-
-func finalizeRuntimePodLostReleaseTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, claimID string, now time.Time) error {
-	result, err := tx.Exec(ctx,
-		`DELETE FROM session_runtime_bindings
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND binding_generation = $4`,
-		workspaceID,
-		sessionID,
-		binding.BindingID,
-		binding.BindingGeneration,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_finalize_stale", message: "runtime pod-loss binding finalization fence is stale", retryable: true}
-	}
-	result, err = tx.Exec(ctx,
-		`UPDATE session_runtime_status
-		    SET cleanup_after = NULL,
-		        cleanup_enqueued_at = NULL,
-		        cleanup_claimed_at = NULL,
-		        cleanup_job_id = NULL,
-		        binding_id = NULL,
-		        binding_generation = NULL,
-		        updated_at = $6
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND cleanup_job_id = $3
-		    AND cleanup_claimed_at IS NOT NULL
-		    AND binding_id = $4
-		    AND binding_generation = $5`,
-		workspaceID,
-		sessionID,
-		claimID,
-		binding.BindingID,
-		binding.BindingGeneration,
-		now,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_finalize_stale", message: "runtime pod-loss cleanup claim finalization fence is stale", retryable: true}
-	}
-	return nil
-}
-
-type runtimePodLostBackgroundTask struct {
-	ThreadID           string
-	TaskID             string
-	SourceToolUseEvent string
-}
-
-func settleRuntimePodLostBackgroundTasksTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT session_thread_id, task_id, source_tool_use_event_id
-		   FROM session_background_tasks
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND binding_id = $3
-		    AND status = 'running'
-		  ORDER BY created_at ASC, task_id ASC
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-		binding.BindingID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = rows.Close() }()
-	tasks := make([]runtimePodLostBackgroundTask, 0)
-	for rows.Next() {
-		var task runtimePodLostBackgroundTask
-		if err := rows.Scan(&task.ThreadID, &task.TaskID, &task.SourceToolUseEvent); err != nil {
-			return 0, err
-		}
-		tasks = append(tasks, task)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	repaired := 0
-	for _, task := range tasks {
-		result, err := tx.Exec(ctx,
-			`UPDATE session_background_tasks
-			    SET status = 'cancelled_by_cleanup',
-			        terminal_at = COALESCE(terminal_at, $6),
-			        updated_at = $6
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND task_id = $4
-			    AND binding_id = $5
-			    AND status = 'running'`,
-			workspaceID,
-			sessionID,
-			task.ThreadID,
-			task.TaskID,
-			binding.BindingID,
-			now,
-		)
-		if err != nil {
-			return 0, err
-		}
-		if !rowsAffected(result) {
-			continue
-		}
-		scope := runtimePodLostRepairScope(workspaceID, sessionID, task.ThreadID, binding, "background:"+task.TaskID)
-		eventID, _, err := insertRuntimeNotificationTx(ctx, tx, scope, task.TaskID, task.SourceToolUseEvent, "cancelled_by_cleanup", `{}`, now)
-		if err != nil {
-			return 0, err
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE session_background_tasks
-			    SET terminal_event_id = COALESCE(terminal_event_id, $6),
-			        updated_at = $7
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND task_id = $4
-			    AND binding_id = $5`,
-			workspaceID,
-			sessionID,
-			task.ThreadID,
-			task.TaskID,
-			binding.BindingID,
-			eventID,
-			now,
-		); err != nil {
-			return 0, err
-		}
-		repaired++
-	}
-	return repaired, nil
 }
 
 func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimeOpenRequestStart, error) {

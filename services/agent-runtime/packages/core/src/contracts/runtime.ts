@@ -535,13 +535,6 @@ export interface RuntimeChildLifecycleStamp {
   readonly effectiveAt: string;
 }
 
-export interface RuntimeSealedAgentMailStamp {
-  readonly runtimeInputId: string;
-  readonly birthPreparationAttemptId: string;
-  readonly failedPreparationAttemptId: string;
-  readonly disposition: "sealed_for_failed_birth";
-}
-
 export interface RuntimeDeclarationReceipt {
   readonly sessionThreadId: string;
   readonly operationKind: string;
@@ -557,7 +550,6 @@ export interface RuntimeDeclarationReceipt {
   readonly idleCloseout?: RuntimeIdleCloseoutStamp | undefined;
   readonly compactedThroughMessageSequence?: number | undefined;
   readonly childLifecycle: readonly RuntimeChildLifecycleStamp[];
-  readonly sealedAgentMail?: RuntimeSealedAgentMailStamp | undefined;
 }
 
 // Boundary contract for persisted runtime parts, not a backend table definition.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -49,6 +50,21 @@ type SandboxMaterializationWork struct {
 	Setup                       sandbox.SandboxSetup
 }
 
+type SandboxReleaseReason = sandboxrelease.Reason
+
+const (
+	SandboxReleaseSessionDelete  = sandboxrelease.SessionDelete
+	SandboxReleaseReplacedHandle = sandboxrelease.ReplacedHandle
+)
+
+type SandboxReleaseWork struct {
+	Job         SandboxLifecycleJob
+	Provider    string
+	Handle      sandbox.ProviderHandle
+	Reason      SandboxReleaseReason
+	ObserveOnly bool
+}
+
 type SandboxLifecycleStore interface {
 	ClaimActivation(context.Context, SandboxLifecycleJob, time.Time) (SandboxActivationWork, bool, error)
 	ReplaceMissingActivation(context.Context, SandboxActivationWork, time.Time) (SandboxActivationWork, bool, error)
@@ -59,6 +75,13 @@ type SandboxLifecycleStore interface {
 	WaitMaterializationForActivation(context.Context, SandboxMaterializationWork, ExecutionReadiness, time.Time) error
 	CompleteMaterialization(context.Context, SandboxMaterializationWork, MaterializationResult, time.Time) error
 	FailMaterialization(context.Context, SandboxMaterializationWork, ProviderEffectBoundary, ProviderDisposition, string, string, time.Time) error
+	ClaimRelease(context.Context, SandboxLifecycleJob, time.Time) (SandboxReleaseWork, bool, error)
+	ParkBlockedRelease(context.Context, SandboxLifecycleJob, time.Time) (bool, error)
+	AuthorizeRelease(context.Context, SandboxReleaseWork, time.Time) (bool, error)
+	RearmRelease(context.Context, SandboxReleaseWork, time.Time) error
+	CompleteRelease(context.Context, SandboxReleaseWork, time.Time) error
+	ObserveUnknownRelease(context.Context, SandboxReleaseWork, string, time.Time) error
+	FailRelease(context.Context, SandboxReleaseWork, ProviderEffectBoundary, ProviderDisposition, string, string, time.Time) error
 	FinalizeInvalidLifecycle(context.Context, *queuev1.QueueJob, string, time.Time) error
 	FinalizeExhaustedLifecycle(context.Context, *queuev1.QueueJob, string, time.Time) error
 }
@@ -72,7 +95,7 @@ type SandboxLifecycleRunnerConfig struct {
 }
 
 type SandboxActivationJobRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxLifecycleStore
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
@@ -156,7 +179,8 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 }
 
 func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLifecycleJob, work SandboxActivationWork, adapter ProviderAdapter) error {
-	if work.Kind == ActivationCreate || work.Kind == ActivationReplace {
+	switch work.Kind {
+	case ActivationCreate, ActivationReplace:
 		resolution := adapter.ResolveActivation(ctx, ActivationResolutionRequest{StableName: work.StableName, Labels: work.Labels})
 		if resolution.Failed() {
 			return r.handleActivationFailure(ctx, job, work, resolution.EffectBoundary, resolution.Disposition, resolution.ErrorKind, resolution.SafeMessage)
@@ -179,12 +203,12 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 			return r.confirmActivationReady(ctx, job, work, adapter, outcome.Value)
 		}
 		if !work.MayCreate {
-			return r.fail(ctx, job, work, ProviderOutcomeUnknown, ProviderTerminal, "activation_outcome_unknown", "sandbox creation outcome could not be reconciled")
+			return r.retry(ctx, job, "activation_observation_not_visible")
 		}
 		if job.AttemptCount > sandboxActivationSubmissionMaxAttempts {
 			return r.fail(ctx, job, work, ProviderProvedNotStarted, ProviderTerminal, "sandbox_activation_attempts_exhausted", "sandbox activation could not be completed")
 		}
-	} else if work.Kind == ActivationStart {
+	case ActivationStart:
 		inspection := adapter.InspectForExecution(ctx, work.CurrentHandle.SandboxID)
 		if inspection.Failed() {
 			return r.handleActivationFailure(ctx, job, work, inspection.EffectBoundary, inspection.Disposition, inspection.ErrorKind, inspection.SafeMessage)
@@ -286,7 +310,7 @@ func (r *SandboxActivationJobRunner) now() time.Time {
 }
 
 type SandboxMaterializationJobRunner struct {
-	Queue     SessionPrepareQueueClient
+	Queue     SandboxQueueClient
 	Store     SandboxLifecycleStore
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
@@ -432,6 +456,192 @@ func (r *SandboxMaterializationJobRunner) ack(ctx context.Context, job SandboxLi
 }
 
 func (r *SandboxMaterializationJobRunner) now() time.Time {
+	if r != nil && r.Clock != nil {
+		return r.Clock().UTC()
+	}
+	return storage.Now()
+}
+
+type SandboxReleaseJobRunner struct {
+	Queue     SandboxQueueClient
+	Store     SandboxLifecycleStore
+	Providers *ProviderRegistry
+	Config    SandboxLifecycleRunnerConfig
+	Clock     func() time.Time
+}
+
+func (r *SandboxReleaseJobRunner) RunOnce(ctx context.Context) error {
+	_, err := r.RunOnceWithActivity(ctx)
+	return err
+}
+
+func (r *SandboxReleaseJobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
+	if r == nil || r.Queue == nil || r.Store == nil || r.Providers == nil {
+		return false, errors.New("sandbox release runner dependencies are required")
+	}
+	cfg, err := normalizeSandboxLifecycleRunnerConfig(r.Config)
+	if err != nil {
+		return false, err
+	}
+	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
+		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxRelease},
+		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, queueJob := range lease.GetJobs() {
+		if err := r.processJob(ctx, queueJob, cfg); err != nil {
+			return len(lease.GetJobs()) > 0, err
+		}
+	}
+	return len(lease.GetJobs()) > 0, nil
+}
+
+func (r *SandboxReleaseJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxLifecycleRunnerConfig) error {
+	if queueJob.GetMaxAttempts() <= 0 {
+		if err := r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxRelease, r.now()); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: "sandbox_queue_integrity_error", ErrorMessage: "sandbox release job has no attempt budget",
+		}))
+	}
+	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
+		if err := r.Store.FinalizeExhaustedLifecycle(ctx, queueJob, queue.KindSandboxRelease, r.now()); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: "sandbox_release_attempts_exhausted", ErrorMessage: "sandbox release attempt budget exhausted",
+		}))
+	}
+	job, err := DecodeSandboxLifecycleJob(queueJob, queue.KindSandboxRelease)
+	if err != nil {
+		if err := r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxRelease, r.now()); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: "invalid_sandbox_release_payload", ErrorMessage: "sandbox release queue payload is invalid",
+		}))
+	}
+	work, current, err := r.Store.ClaimRelease(ctx, job, r.now())
+	if err != nil {
+		if errors.Is(err, errSandboxReleaseBlocked) {
+			parked, parkErr := r.Store.ParkBlockedRelease(ctx, job, r.now())
+			if parkErr != nil {
+				return parkErr
+			}
+			if parked {
+				return nil
+			}
+			work, current, err = r.Store.ClaimRelease(ctx, job, r.now())
+			if err != nil {
+				return err
+			}
+		} else {
+			return r.retry(ctx, job, "sandbox_release_store_error")
+		}
+	}
+	if !current {
+		return r.ack(ctx, job)
+	}
+	adapter, ok := r.Providers.Resolve(work.Provider)
+	if !ok {
+		return r.fail(ctx, job, work, ProviderProvedNotStarted, ProviderTerminal, "provider_not_registered", "sandbox provider is not registered")
+	}
+	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	err = r.release(workCtx, job, work, adapter)
+	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+		return heartbeatErr
+	}
+	return err
+}
+
+func (r *SandboxReleaseJobRunner) release(ctx context.Context, job SandboxLifecycleJob, work SandboxReleaseWork, adapter ProviderAdapter) error {
+	inspection := adapter.InspectForRelease(ctx, work.Handle.SandboxID)
+	if inspection.Failed() {
+		if inspection.EffectBoundary == ProviderProvedNotStarted && inspection.Disposition == ProviderRetryable {
+			return r.retryProvedNotStarted(ctx, job, work, valueOrDefault(inspection.ErrorKind, "sandbox_release_inspection_failed"))
+		}
+		return r.fail(ctx, job, work, inspection.EffectBoundary, inspection.Disposition, valueOrDefault(inspection.ErrorKind, "sandbox_release_inspection_failed"), inspection.SafeMessage)
+	}
+	if !inspection.Value {
+		if err := r.Store.CompleteRelease(ctx, work, r.now()); err != nil {
+			return r.retry(ctx, job, "sandbox_release_store_error")
+		}
+		return r.ack(ctx, job)
+	}
+	if work.ObserveOnly {
+		return r.retry(ctx, job, "sandbox_release_outcome_unknown")
+	}
+	authorized, err := r.Store.AuthorizeRelease(ctx, work, r.now())
+	if err != nil {
+		return r.retry(ctx, job, "sandbox_release_store_error")
+	}
+	if !authorized {
+		return r.ack(ctx, job)
+	}
+	outcome := adapter.Release(ctx, ReleaseRequest{Handle: work.Handle})
+	if outcome.Failed() {
+		if outcome.EffectBoundary == ProviderProvedNotStarted && outcome.Disposition == ProviderRetryable {
+			return r.retryProvedNotStarted(ctx, job, work, valueOrDefault(outcome.ErrorKind, "sandbox_release_failed"))
+		}
+		if outcome.EffectBoundary == ProviderSubmitted || outcome.EffectBoundary == ProviderOutcomeUnknown {
+			kind := valueOrDefault(outcome.ErrorKind, "sandbox_release_outcome_unknown")
+			if err := r.Store.ObserveUnknownRelease(ctx, work, kind, r.now()); err != nil {
+				return err
+			}
+			return r.retry(ctx, job, kind)
+		}
+		return r.fail(ctx, job, work, outcome.EffectBoundary, outcome.Disposition, valueOrDefault(outcome.ErrorKind, "sandbox_release_failed"), outcome.SafeMessage)
+	}
+	if err := r.Store.CompleteRelease(ctx, work, r.now()); err != nil {
+		return r.retry(ctx, job, "sandbox_release_store_error")
+	}
+	return r.ack(ctx, job)
+}
+
+func (r *SandboxReleaseJobRunner) retryProvedNotStarted(ctx context.Context, job SandboxLifecycleJob, work SandboxReleaseWork, kind string) error {
+	if err := r.Store.RearmRelease(ctx, work, r.now()); err != nil {
+		return err
+	}
+	return r.retry(ctx, job, kind)
+}
+
+func (r *SandboxReleaseJobRunner) retry(ctx context.Context, job SandboxLifecycleJob, kind string) error {
+	if job.AttemptCount >= job.MaxAttempts {
+		if err := r.Store.FinalizeExhaustedLifecycle(ctx, job.QueueJob, queue.KindSandboxRelease, r.now()); err != nil {
+			return err
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+			ErrorKind: "sandbox_release_attempts_exhausted", ErrorMessage: "sandbox release attempt budget exhausted",
+		}))
+	}
+	return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+		ErrorKind: kind, ErrorMessage: "sandbox release will be retried",
+	}))
+}
+
+func (r *SandboxReleaseJobRunner) fail(ctx context.Context, job SandboxLifecycleJob, work SandboxReleaseWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string) error {
+	if err := r.Store.FailRelease(ctx, work, boundary, disposition, kind, message, r.now()); err != nil {
+		return err
+	}
+	return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
+		ErrorKind: kind, ErrorMessage: "sandbox release failed",
+	}))
+}
+
+func (r *SandboxReleaseJobRunner) ack(ctx context.Context, job SandboxLifecycleJob) error {
+	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
+}
+
+func (r *SandboxReleaseJobRunner) now() time.Time {
 	if r != nil && r.Clock != nil {
 		return r.Clock().UTC()
 	}

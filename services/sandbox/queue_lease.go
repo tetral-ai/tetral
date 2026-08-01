@@ -12,7 +12,7 @@ var errQueueLeaseLost = errors.New("sandbox queue lease lost")
 
 func startQueueLeaseGuard(
 	ctx context.Context,
-	client SessionPrepareQueueClient,
+	client SandboxQueueClient,
 	workspaceID string,
 	jobID string,
 	leaseToken string,

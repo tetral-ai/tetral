@@ -11,7 +11,7 @@ import (
 )
 
 func TestPostgreSQLSandboxOutputCaptureStoreClosesBlobStageBeforePublishingResult(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 17, 0, 0, 0, time.UTC)
 	if _, err := adminDB.Exec(`INSERT INTO sandbox_output_capture_operations (
@@ -58,7 +58,7 @@ func TestPostgreSQLSandboxOutputCaptureStoreClosesBlobStageBeforePublishingResul
 }
 
 func TestPostgreSQLSandboxOutputCaptureStoreReadsAndFencesCurrentBinding(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 17, 30, 0, 0, time.UTC)
 	seedReadySandboxBinding(t, adminDB, now)
@@ -76,7 +76,7 @@ func TestPostgreSQLSandboxOutputCaptureStoreReadsAndFencesCurrentBinding(t *test
 		t.Fatalf("LoadCapture = current %t work %#v err %v; want current binding revision 1", current, work, err)
 	}
 	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings
-		SET release_requested_at=$1, release_reason='explicit_release', updated_at=$1
+		SET release_requested_at=$1, release_reason='session_delete', updated_at=$1
 		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'`, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("fence binding: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestPostgreSQLSandboxOutputCaptureStoreReadsAndFencesCurrentBinding(t *test
 }
 
 func TestPostgreSQLSandboxOutputCaptureStoreSweepsAndCleansExpiredBlobCustody(t *testing.T) {
-	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 18, 0, 0, 0, time.UTC)
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
