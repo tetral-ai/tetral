@@ -7,7 +7,6 @@ import (
 	"errors"
 	"reflect"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -642,28 +641,6 @@ func TestPostgreSQLStoreRejectsNonCanonicalQueueShape(t *testing.T) {
 	ws := workspace.ID("ws_queue_shape")
 	now := time.Date(2026, 7, 1, 13, 45, 0, 0, time.UTC)
 	_, err := store.Enqueue(context.Background(), EnqueueRequest{
-		ID:           "qjob_missing_birth",
-		WorkspaceID:  ws,
-		Kind:         KindRuntimeInput,
-		PartitionKey: FormatSessionPartitionKey(ws, "sesn_shape"),
-		DedupeKey:    FormatRuntimeInputDedupeKey(ws, "sesn_shape", "input_missing_birth"),
-		PayloadJSON: queuePayload(t, map[string]any{
-			"workspace_id":      string(ws),
-			"session_id":        "sesn_shape",
-			"session_thread_id": "thrd_shape",
-			"runtime_input_id":  "input_missing_birth",
-			"event_ids":         []string{"ev_missing_birth"},
-			"sequence_from":     1,
-			"sequence_to":       1,
-			"input_kind":        "messages",
-		}),
-		Now: now,
-	})
-	if !IsValidationError(err) || !strings.Contains(err.Error(), "preparation_attempt_id") {
-		t.Fatalf("missing birth preparation attempt err = %v; want preparation_attempt_id validation error", err)
-	}
-
-	_, err = store.Enqueue(context.Background(), EnqueueRequest{
 		ID:           "qjob_bad_shape",
 		WorkspaceID:  ws,
 		Kind:         KindRuntimeInput,
@@ -774,13 +751,12 @@ func TestPostgreSQLStoreAcceptsTaskNotificationRuntimeInputWithoutPublicEventFen
 		PartitionKey: FormatSessionPartitionKey(ws, "sesn_task_notify"),
 		DedupeKey:    FormatRuntimeInputDedupeKey(ws, "sesn_task_notify", runtimeInputID),
 		PayloadJSON: queuePayload(t, map[string]any{
-			"workspace_id":           string(ws),
-			"session_id":             "sesn_task_notify",
-			"session_thread_id":      "thrd_task_notify",
-			"runtime_input_id":       runtimeInputID,
-			"event_ids":              []string{},
-			"input_kind":             "task_notification",
-			"preparation_attempt_id": "prep_sesn_task_notify",
+			"workspace_id":      string(ws),
+			"session_id":        "sesn_task_notify",
+			"session_thread_id": "thrd_task_notify",
+			"runtime_input_id":  runtimeInputID,
+			"event_ids":         []string{},
+			"input_kind":        "task_notification",
 		}),
 		Now: now,
 	})
@@ -1696,15 +1672,14 @@ func mustEnqueue(t testing.TB, store *PostgreSQLQueueStore, request EnqueueReque
 func runtimeInputPayload(t testing.TB, ws workspace.ID, sessionID string, threadID string, runtimeInputID string, inputKind string, sequenceFrom int64, sequenceTo int64) []byte {
 	t.Helper()
 	return queuePayload(t, map[string]any{
-		"workspace_id":           string(ws),
-		"session_id":             sessionID,
-		"session_thread_id":      threadID,
-		"runtime_input_id":       runtimeInputID,
-		"event_ids":              []string{"ev_" + runtimeInputID},
-		"sequence_from":          sequenceFrom,
-		"sequence_to":            sequenceTo,
-		"input_kind":             inputKind,
-		"preparation_attempt_id": "prep_" + sessionID,
+		"workspace_id":      string(ws),
+		"session_id":        sessionID,
+		"session_thread_id": threadID,
+		"runtime_input_id":  runtimeInputID,
+		"event_ids":         []string{"ev_" + runtimeInputID},
+		"sequence_from":     sequenceFrom,
+		"sequence_to":       sequenceTo,
+		"input_kind":        inputKind,
 	})
 }
 

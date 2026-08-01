@@ -56,8 +56,34 @@ type ToolInvocation struct {
 }
 
 type ToolExecution struct {
-	ResultJSON     string
-	BackgroundTask *BackgroundTask
+	ResultJSON            string
+	BackgroundTask        *BackgroundTask
+	ForegroundObservation *ForegroundCommandObservation
+}
+
+// ForegroundCommandObservation is the durable continuation for a foreground
+// helper command that detached before reaching a terminal state. It contains
+// only provider recovery identity and bounded output-aggregation state; it
+// never authorizes submitting the original command again.
+type ForegroundCommandObservation struct {
+	Reference CommandReference                 `json:"reference"`
+	Stdout    ForegroundStreamObservationState `json:"stdout"`
+	Stderr    ForegroundStreamObservationState `json:"stderr"`
+	Limits    ForegroundObservationLimits      `json:"limits"`
+}
+
+type ForegroundObservationLimits struct {
+	VisibleBytes int `json:"visible_bytes"`
+	VisibleLines int `json:"visible_lines"`
+}
+
+type ForegroundStreamObservationState struct {
+	Head          []byte `json:"head,omitempty"`
+	Tail          []byte `json:"tail,omitempty"`
+	CapturedBytes int64  `json:"captured_bytes"`
+	TotalBytes    int64  `json:"total_bytes"`
+	TotalLines    int64  `json:"total_lines"`
+	Truncated     bool   `json:"truncated"`
 }
 
 // PreparedToolExecution is the opaque, repeatable Daytona payload-staging

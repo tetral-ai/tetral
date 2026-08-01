@@ -30,8 +30,6 @@ const (
 	EnvJobRunnerHeartbeatIntervalMS        = "TETRAL_BRIDGE_JOB_RUNNER_HEARTBEAT_INTERVAL_MS"
 	EnvJobRunnerMaxJobs                    = "TETRAL_BRIDGE_JOB_RUNNER_MAX_JOBS"
 	EnvJobRunnerPollIntervalMS             = "TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS"
-	EnvJobRunnerBridgeAPIGRPCAddress       = "TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_GRPC_ADDR"
-	EnvJobRunnerBridgeAPITokenPath         = "TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
 	EnvJobRunnerMCPConnectorGRPCAddress    = "TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR"
 	EnvJobRunnerGatewayTokenPath           = "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
 	EnvSandboxServiceGRPCAddress           = "TETRAL_SANDBOX_GRPC_ADDR"
@@ -53,7 +51,6 @@ const (
 	defaultRuntimeInboxRepairBatch         = 32
 	defaultJobRunnerPollInterval           = time.Second
 	defaultJobRunnerHTTPAddress            = ":8081"
-	defaultJobRunnerBridgeAPIAddr          = "127.0.0.1:9090"
 	defaultAgentRuntimeGRPCPort            = 9090
 	defaultSandboxStatusFreshness          = time.Minute
 	defaultResourceCredentialRefreshMargin = 30 * time.Minute
@@ -190,7 +187,6 @@ func MemoryProjectionPushTimeoutFromEnv(env Env) (time.Duration, error) {
 type JobRunnerConfig struct {
 	HTTPAddress                     string
 	QueueGRPCAddress                string
-	BridgeAPIGRPCAddress            string
 	LeaseOwner                      string
 	LeaseDuration                   time.Duration
 	HeartbeatInterval               time.Duration
@@ -203,7 +199,6 @@ type JobRunnerConfig struct {
 	AgentRuntimeLabelSelector       string
 	AgentRuntimeGRPCPort            int
 	RuntimePodTokenPath             string
-	BridgeAPITokenPath              string
 	MCPConnectorGRPCAddress         string
 	GatewayTokenPath                string
 	SandboxServiceGRPCAddress       string
@@ -219,7 +214,6 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	cfg := JobRunnerConfig{
 		HTTPAddress:           valueOrDefault(env.Getenv(EnvJobRunnerHTTPAddress), defaultJobRunnerHTTPAddress),
 		QueueGRPCAddress:      strings.TrimSpace(env.Getenv(EnvQueueGRPCAddress)),
-		BridgeAPIGRPCAddress:  valueOrDefault(strings.TrimSpace(env.Getenv(EnvJobRunnerBridgeAPIGRPCAddress)), defaultJobRunnerBridgeAPIAddr),
 		LeaseOwner:            valueOrDefault(env.Getenv(EnvJobRunnerLeaseOwner), ServiceNameJobRunner),
 		LeaseDuration:         defaultJobRunnerLeaseDuration,
 		MaxJobs:               defaultJobRunnerMaxJobs,
@@ -233,7 +227,6 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 		),
 		AgentRuntimeGRPCPort:            defaultAgentRuntimeGRPCPort,
 		RuntimePodTokenPath:             strings.TrimSpace(env.Getenv(EnvRuntimePodServiceTokenPath)),
-		BridgeAPITokenPath:              strings.TrimSpace(env.Getenv(EnvJobRunnerBridgeAPITokenPath)),
 		MCPConnectorGRPCAddress:         strings.TrimSpace(env.Getenv(EnvJobRunnerMCPConnectorGRPCAddress)),
 		GatewayTokenPath:                strings.TrimSpace(env.Getenv(EnvJobRunnerGatewayTokenPath)),
 		SandboxStatusFreshnessWindow:    defaultSandboxStatusFreshness,

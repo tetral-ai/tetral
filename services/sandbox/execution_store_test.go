@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 )
 
 func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *testing.T) {
@@ -384,6 +385,109 @@ func TestPostgreSQLSandboxExecutionRejectsStaleMissingBindingObservation(t *test
 	}
 	if operations != 0 {
 		t.Fatalf("lifecycle operations = %d; want none from stale missing-binding observation", operations)
+	}
+}
+
+func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningActivation(t *testing.T) {
+	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	first := loadReadySandboxExecutionWork(t, coordinator)
+	if err := coordinator.WaitForActivation(context.Background(), first, ExecutionNeedsActivation); err != nil {
+		t.Fatalf("create activation: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE sandbox_lifecycle_operations SET state = 'running'
+		WHERE workspace_id = 'ws_execution_store' AND kind = 'start'`); err != nil {
+		t.Fatalf("mark activation running: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings
+		SET provider_resource_id = 'provider_replacement', binding_revision = binding_revision + 1
+		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`); err != nil {
+		t.Fatalf("replace binding: %v", err)
+	}
+	second := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_b")
+	if err := coordinator.WaitForActivation(context.Background(), second, ExecutionNeedsActivation); !errors.Is(err, errSandboxExecutionReinspection) {
+		t.Fatalf("WaitForActivation error = %v; want reinspection instead of joining stale operation", err)
+	}
+	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "pending", 1)
+}
+
+func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *testing.T) {
+	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings SET materialized_resource_revision = 0
+		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`); err != nil {
+		t.Fatalf("make materialization necessary: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	first := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForMaterialization(context.Background(), first); err != nil {
+		t.Fatalf("create materialization: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE sandbox_lifecycle_operations SET state = 'running'
+		WHERE workspace_id = 'ws_execution_store' AND kind = 'materialize'`); err != nil {
+		t.Fatalf("mark materialization running: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings
+		SET provider_resource_id = 'provider_replacement', binding_revision = binding_revision + 1
+		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`); err != nil {
+		t.Fatalf("replace binding: %v", err)
+	}
+	second := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_b")
+	if err := coordinator.WaitForMaterialization(context.Background(), second); !errors.Is(err, errSandboxExecutionReinspection) {
+		t.Fatalf("WaitForMaterialization error = %v; want reinspection instead of joining stale operation", err)
+	}
+	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "pending", 1)
+}
+
+func TestPostgreSQLSandboxExecutionStartsBackgroundReconciliationAtomically(t *testing.T) {
+	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	work := loadReadySandboxExecutionWork(t, coordinator)
+	if prepared, err := coordinator.BeginPreparing(context.Background(), work, now.Add(time.Minute)); err != nil || !prepared {
+		t.Fatalf("BeginPreparing = %t, %v", prepared, err)
+	}
+	if authorized, err := coordinator.AuthorizeRunning(context.Background(), work); err != nil || !authorized {
+		t.Fatalf("AuthorizeRunning = %t, %v", authorized, err)
+	}
+	if err := coordinator.SettleExecution(context.Background(), work, SandboxExecutionSettlement{
+		Kind:       SandboxExecutionCompleted,
+		ResultJSON: `{"status":"running","result":{"task_id":"task_execution"}}`,
+		BackgroundTask: &sandboxdriver.BackgroundTask{
+			TaskID: "task_execution", SourceToolUseEventID: work.Ref.ToolUseEventID,
+			ProviderSessionID: "provider_execution_store", ProviderCommandID: "task_execution",
+			ProviderCommandMetadataJSON: `{}`,
+		},
+	}); err != nil {
+		t.Fatalf("SettleExecution: %v", err)
+	}
+	var status string
+	var generation int64
+	var nextPoll time.Time
+	if err := adminDB.QueryRow(`SELECT status, reconcile_generation, next_poll_at
+		FROM session_background_tasks
+		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'
+		  AND task_id = 'task_execution'`).Scan(&status, &generation, &nextPoll); err != nil {
+		t.Fatalf("read background task: %v", err)
+	}
+	if status != "running" || generation != 1 || nextPoll.IsZero() {
+		t.Fatalf("background task = %q generation %d next %v; want running generation 1", status, generation, nextPoll)
+	}
+	var queueJobs int
+	if err := adminDB.QueryRow(`SELECT count(*) FROM queue_jobs
+		WHERE workspace_id = 'ws_execution_store' AND kind = 'sandbox_background_reconcile'
+		  AND status = 'pending'`).Scan(&queueJobs); err != nil {
+		t.Fatalf("count reconcile jobs: %v", err)
+	}
+	if queueJobs != 1 {
+		t.Fatalf("reconcile jobs = %d; want 1", queueJobs)
 	}
 }
 

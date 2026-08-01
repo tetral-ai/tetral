@@ -648,6 +648,9 @@ func (a *recordingLifecycleAdapter) PrepareTool(context.Context, ToolExecutionRe
 func (a *recordingLifecycleAdapter) ExecuteTool(context.Context, ToolExecutionRequest) ProviderOutcome[sandboxdriver.ToolExecution] {
 	return ProviderOutcome[sandboxdriver.ToolExecution]{}
 }
+func (a *recordingLifecycleAdapter) ObserveTool(context.Context, sandboxdriver.ForegroundCommandObservation) ProviderOutcome[sandboxdriver.ToolExecution] {
+	return ProviderOutcome[sandboxdriver.ToolExecution]{}
+}
 func (a *recordingLifecycleAdapter) Release(context.Context, ReleaseRequest) ProviderOutcome[ReleaseResult] {
 	return ProviderOutcome[ReleaseResult]{}
 }

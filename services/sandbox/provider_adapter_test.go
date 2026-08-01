@@ -249,6 +249,14 @@ func (f *adapterToolExecutorFake) ExecutePreparedTool(context.Context, sandboxdr
 	return f.result, nil
 }
 
+func (f *adapterToolExecutorFake) SubmitPreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error) {
+	return f.result, nil
+}
+
+func (f *adapterToolExecutorFake) ObserveForegroundTool(context.Context, sandboxdriver.ForegroundCommandObservation) (sandboxdriver.ToolExecution, error) {
+	return f.result, nil
+}
+
 func (f *adapterToolExecutorFake) CheckHealth(context.Context, sandboxdriver.ToolTarget) error {
 	return nil
 }

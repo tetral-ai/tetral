@@ -215,8 +215,6 @@ spec:
                   key: bridge-url
             - name: TETRAL_QUEUE_GRPC_ADDR
               value: queue.tetral-system.svc.cluster.local:9090
-            - name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_GRPC_ADDR
-              value: 127.0.0.1:9090
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
               value: bridge-job-runner
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
@@ -245,8 +243,6 @@ spec:
               value: "9090"
             - name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token
-            - name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_TOKEN_PATH
-              value: /var/run/secrets/tetral-internal-grpc/bridge-api/token
             - name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR
               value: gateway.tetral-system.svc.cluster.local:9091
             - name: TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH
@@ -286,9 +282,6 @@ spec:
             - name: bridge-runtime-pod-token
               mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime
               readOnly: true
-            - name: bridge-job-runner-bridge-api-token
-              mountPath: /var/run/secrets/tetral-internal-grpc/bridge-api
-              readOnly: true
             - name: bridge-job-runner-gateway-token
               mountPath: /var/run/secrets/tetral-internal-grpc/gateway
               readOnly: true
@@ -318,13 +311,6 @@ spec:
                   expirationSeconds: 600
                   path: token
         - name: bridge-runtime-pod-token
-          projected:
-            sources:
-              - serviceAccountToken:
-                  audience: tetral-internal-grpc
-                  expirationSeconds: 600
-                  path: token
-        - name: bridge-job-runner-bridge-api-token
           projected:
             sources:
               - serviceAccountToken:

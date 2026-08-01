@@ -16,7 +16,10 @@ import (
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
-const SandboxToolExecuteMaxAttempts = 5
+const (
+	SandboxToolExecuteMaxAttempts         = 5
+	SandboxBackgroundReconcileMaxAttempts = 5
+)
 
 type SandboxExecutionRef struct {
 	WorkspaceID     string
@@ -78,6 +81,11 @@ type SandboxExecutionSettlement struct {
 	ResultJSON               string
 	ResultDigest             string
 	ProviderCommandReference string
+	BackgroundTask           *sandboxdriver.BackgroundTask
+	LogicalSandboxID         string
+	Provider                 string
+	BindingRevision          int64
+	ResourceRootsJSON        string
 	ErrorKind                string
 	SafeMessage              string
 }
@@ -88,6 +96,7 @@ type SandboxExecutionCoordinator interface {
 	WaitForMaterialization(context.Context, SandboxExecutionWork) error
 	BeginPreparing(context.Context, SandboxExecutionWork, time.Time) (bool, error)
 	AuthorizeRunning(context.Context, SandboxExecutionWork) (bool, error)
+	RecordProviderCommandReference(context.Context, SandboxExecutionWork, string) (bool, error)
 	SettleExecution(context.Context, SandboxExecutionWork, SandboxExecutionSettlement) error
 	FinalizeInvalidExecution(context.Context, *queuev1.QueueJob) error
 	FinalizeExhaustedExecution(context.Context, *queuev1.QueueJob) error
@@ -213,10 +222,13 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		return nil
 	}
 	if work.State == "running" {
-		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
-			Kind: SandboxExecutionUnknownOutcome, ProviderCommandReference: work.ProviderCommandReference,
-			ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
-		})
+		if work.ProviderCommandReference == "" {
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind:      SandboxExecutionUnknownOutcome,
+				ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
+			})
+		}
+		return r.observeRunningExecution(ctx, work)
 	}
 	if work.Binding == nil || work.Binding.ProviderResourceID == "" {
 		return sandboxExecutionDependencyResult(r.Coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation))
@@ -310,9 +322,115 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 			Kind: kind, ErrorKind: valueOrDefault(outcome.ErrorKind, "sandbox_execution_failed"), SafeMessage: outcome.SafeMessage,
 		})
 	}
+	if outcome.Value.ForegroundObservation != nil {
+		encodedReference, err := encodeSandboxToolObservationReference(work.Binding.Provider, *outcome.Value.ForegroundObservation)
+		if err != nil {
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind: SandboxExecutionUnknownOutcome, ErrorKind: "sandbox_execution_outcome_unknown",
+				SafeMessage: "sandbox execution outcome is unknown",
+			})
+		}
+		recorded, err := r.Coordinator.RecordProviderCommandReference(ctx, work, encodedReference)
+		if err != nil {
+			return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox command reference could not be recorded")
+		}
+		if !recorded {
+			return nil
+		}
+		work.ProviderCommandReference = encodedReference
+		return r.observeRunningExecution(ctx, work)
+	}
+	backgroundTask := outcome.Value.BackgroundTask
+	if backgroundTask != nil {
+		owned := *backgroundTask
+		owned.SourceToolUseEventID = work.Ref.ToolUseEventID
+		backgroundTask = &owned
+	}
 	return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
 		Kind: SandboxExecutionCompleted, ResultJSON: outcome.Value.ResultJSON,
+		BackgroundTask: backgroundTask,
 	})
+}
+
+type sandboxToolObservationReference struct {
+	Provider    string                                     `json:"provider"`
+	Observation sandboxdriver.ForegroundCommandObservation `json:"observation"`
+}
+
+func encodeSandboxToolObservationReference(provider string, observation sandboxdriver.ForegroundCommandObservation) (string, error) {
+	if provider == "" || observation.Reference.Target.ProviderSandboxID == "" ||
+		observation.Reference.Task.TaskID == "" || observation.Reference.Task.ProviderCommandID == "" {
+		return "", errors.New("sandbox command observation reference is incomplete")
+	}
+	encoded, err := json.Marshal(sandboxToolObservationReference{Provider: provider, Observation: observation})
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func decodeSandboxToolObservationReference(encoded string) (sandboxToolObservationReference, error) {
+	var reference sandboxToolObservationReference
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&reference); err != nil {
+		return sandboxToolObservationReference{}, err
+	}
+	if reference.Provider == "" || reference.Observation.Reference.Target.ProviderSandboxID == "" ||
+		reference.Observation.Reference.Task.TaskID == "" || reference.Observation.Reference.Task.ProviderCommandID == "" {
+		return sandboxToolObservationReference{}, errors.New("sandbox command observation reference is incomplete")
+	}
+	return reference, nil
+}
+
+func (r *SandboxToolExecutionJobRunner) observeRunningExecution(ctx context.Context, work SandboxExecutionWork) error {
+	for {
+		reference, err := decodeSandboxToolObservationReference(work.ProviderCommandReference)
+		if err != nil {
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind: SandboxExecutionUnknownOutcome, ErrorKind: "sandbox_execution_outcome_unknown",
+				SafeMessage: "sandbox execution outcome is unknown",
+			})
+		}
+		adapter, ok := r.Providers.Resolve(reference.Provider)
+		if !ok {
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind: SandboxExecutionUnknownOutcome, ProviderCommandReference: work.ProviderCommandReference,
+				ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
+			})
+		}
+		outcome := adapter.ObserveTool(ctx, reference.Observation)
+		if outcome.Failed() {
+			if outcome.Disposition == ProviderRetryable {
+				return newSandboxExecutionRetry(valueOrDefault(outcome.ErrorKind, "sandbox_execution_observation_retryable"), "sandbox execution observation will be retried")
+			}
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind: SandboxExecutionUnknownOutcome, ProviderCommandReference: work.ProviderCommandReference,
+				ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
+			})
+		}
+		if outcome.Value.ForegroundObservation == nil {
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind: SandboxExecutionCompleted, ResultJSON: outcome.Value.ResultJSON,
+				ProviderCommandReference: work.ProviderCommandReference,
+			})
+		}
+		encodedReference, err := encodeSandboxToolObservationReference(reference.Provider, *outcome.Value.ForegroundObservation)
+		if err != nil {
+			return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+				Kind: SandboxExecutionUnknownOutcome, ProviderCommandReference: work.ProviderCommandReference,
+				ErrorKind: "sandbox_execution_outcome_unknown", SafeMessage: "sandbox execution outcome is unknown",
+			})
+		}
+		recorded, err := r.Coordinator.RecordProviderCommandReference(ctx, work, encodedReference)
+		if err != nil {
+			return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox command observation could not be recorded")
+		}
+		if !recorded {
+			return nil
+		}
+		work.ProviderCommandReference = encodedReference
+	}
 }
 
 func sandboxExecutionDependencyResult(err error) error {

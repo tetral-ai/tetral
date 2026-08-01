@@ -779,6 +779,64 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_background_consume", "thr_bridge_background_consume")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_background_consume", "bind_bridge_background_consume", 1, "pod_uid_bridge_background_consume")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_background_consume", "thr_bridge_background_consume", "bind_bridge_background_consume", 1, "pod_uid_bridge_background_consume")
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_use", ModelRequestId: "mreq_bridge_background_consume",
+		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"write_stdin","input":{"task_id":"task_background","chars":"ok"},"evaluated_permission":"allow"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_bridge_background_consume_use", "agent.tool_use", "streaming",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_background_consume","toolName":"write_stdin","state":{"status":"running","input":{"value":{"task_id":"task_background","chars":"ok"},"preview":"{}","truncated":false}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent background tool use: %v", err)
+	}
+	const resultJSON = `{"status":"accepted"}`
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json, result_digest,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, background_write_sequence,
+		created_at, updated_at
+	) VALUES ('default','sesn_bridge_background_consume','thr_bridge_background_consume',$1,'sandbox_background',
+		'hash_background_consume','write_stdin','{}','committed',$2,$3,
+		'stdin','terminal','request_background_consume','task_background',0,1,
+		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		toolUse.GetEventId(), resultJSON, sha256Hex(resultJSON)); err != nil {
+		t.Fatalf("seed terminal background result: %v", err)
+	}
+
+	settled, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_result", ModelRequestId: "mreq_bridge_background_consume",
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"accepted"}]}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_bridge_background_consume_result", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_background_consume","toolName":"write_stdin","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"task_id":"task_background","chars":"ok"},"preview":"{}","truncated":false},"output":{"text":"accepted","truncated":false}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent background tool result: %v", err)
+	}
+	var storedResult sql.NullString
+	var digest, terminalEventID, reason string
+	if err := admin.QueryRowContext(context.Background(), `SELECT result_json, result_digest, consumed_by_terminal_event_id, consumption_reason
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id='sesn_bridge_background_consume'
+		  AND session_thread_id='thr_bridge_background_consume' AND tool_use_event_id=$1`, toolUse.GetEventId()).Scan(
+		&storedResult, &digest, &terminalEventID, &reason,
+	); err != nil {
+		t.Fatalf("read consumed background result: %v", err)
+	}
+	if storedResult.Valid || digest != sha256Hex(resultJSON) || terminalEventID != settled.GetEventId() || reason != "conversation_tool_result" {
+		t.Fatalf("consumed background result = result %+v digest %q event %q reason %q", storedResult, digest, terminalEventID, reason)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteEventForInternalReviewerStaysInternal(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_reviewer_event", "thr_bridge_reviewer_parent")

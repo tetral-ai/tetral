@@ -11,21 +11,42 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
+func TestNewTaskNotificationRuntimeInputEnqueueRequestIsBindingNeutral(t *testing.T) {
+	now := time.Date(2026, 7, 31, 18, 0, 0, 0, time.UTC)
+	request, err := NewTaskNotificationRuntimeInputEnqueueRequest(
+		"ws_task_notification", "sesn_task_notification", "thr_task_notification", "task_notification", now,
+	)
+	if err != nil {
+		t.Fatalf("NewTaskNotificationRuntimeInputEnqueueRequest: %v", err)
+	}
+	if request.Kind != KindRuntimeInput || request.PartitionKey != "session:ws_task_notification:sesn_task_notification" ||
+		request.DedupeKey != "runtime_input:ws_task_notification:sesn_task_notification:task_notification:task_notification" ||
+		request.MaxAttempts != DefaultMaxAttempts || !request.Now.Equal(now) {
+		t.Fatalf("request transport identity = %#v", request)
+	}
+	const wantPayload = `{"workspace_id":"ws_task_notification","session_id":"sesn_task_notification","session_thread_id":"thr_task_notification","runtime_input_id":"task_notification:task_notification","event_ids":[],"sequence_from":0,"sequence_to":0,"input_kind":"task_notification"}`
+	if string(request.PayloadJSON) != wantPayload {
+		t.Fatalf("payload = %s; want %s", request.PayloadJSON, wantPayload)
+	}
+	if _, err := NormalizeEnqueueRequest(request); err != nil {
+		t.Fatalf("NormalizeEnqueueRequest: %v", err)
+	}
+}
+
 func TestNormalizeEnqueueRequestRejectsRuntimeInputBeyondEventReferenceLimit(t *testing.T) {
 	eventIDs := make([]string, MaxRuntimeInputEventRefsPerJob+1)
 	for i := range eventIDs {
 		eventIDs[i] = "sevt_event_reference"
 	}
 	payload, err := json.Marshal(map[string]any{
-		"workspace_id":           "ws_event_reference_limit",
-		"session_id":             "sesn_event_reference_limit",
-		"session_thread_id":      "thrd_event_reference_limit",
-		"runtime_input_id":       "rin_event_reference_limit",
-		"event_ids":              eventIDs,
-		"sequence_from":          1,
-		"sequence_to":            len(eventIDs),
-		"input_kind":             "messages",
-		"preparation_attempt_id": "prep_event_reference_limit",
+		"workspace_id":      "ws_event_reference_limit",
+		"session_id":        "sesn_event_reference_limit",
+		"session_thread_id": "thrd_event_reference_limit",
+		"runtime_input_id":  "rin_event_reference_limit",
+		"event_ids":         eventIDs,
+		"sequence_from":     1,
+		"sequence_to":       len(eventIDs),
+		"input_kind":        "messages",
 	})
 	if err != nil {
 		t.Fatalf("marshal runtime input payload: %v", err)
@@ -45,15 +66,14 @@ func TestNormalizeEnqueueRequestRejectsRuntimeInputBeyondEventReferenceLimit(t *
 
 func TestNormalizeEnqueueRequestAcceptsOnlyBareAgentMailPokes(t *testing.T) {
 	base := map[string]any{
-		"workspace_id":           "ws_agent_mail",
-		"session_id":             "sesn_agent_mail",
-		"session_thread_id":      "thrd_agent_mail_main",
-		"runtime_input_id":       "agent_mail:delivery_agent_mail",
-		"event_ids":              []string{},
-		"sequence_from":          0,
-		"sequence_to":            0,
-		"input_kind":             "agent_mail",
-		"preparation_attempt_id": "prep_agent_mail",
+		"workspace_id":      "ws_agent_mail",
+		"session_id":        "sesn_agent_mail",
+		"session_thread_id": "thrd_agent_mail_main",
+		"runtime_input_id":  "agent_mail:delivery_agent_mail",
+		"event_ids":         []string{},
+		"sequence_from":     0,
+		"sequence_to":       0,
+		"input_kind":        "agent_mail",
 	}
 	normalize := func(t *testing.T, payload map[string]any) error {
 		t.Helper()

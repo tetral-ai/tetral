@@ -206,6 +206,75 @@ func TestSandboxToolExecutionRunnerDoesNotResubmitRunningExecution(t *testing.T)
 	}
 }
 
+func TestSandboxToolExecutionRunnerOwnsBackgroundTaskSourceIdentity(t *testing.T) {
+	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	work := sandboxExecutionTestWork(true)
+	coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true, prepare: true, authorize: true}
+	adapter := &recordingProviderAdapter{inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady}, execution: ProviderOutcome[sandboxdriver.ToolExecution]{
+		Value: sandboxdriver.ToolExecution{
+			ResultJSON: `{"status":"running","result":{"task_id":"task_execution"}}`,
+			BackgroundTask: &sandboxdriver.BackgroundTask{
+				TaskID: "task_execution", ProviderSessionID: "provider_execution",
+				ProviderCommandID: "command_execution", ProviderCommandMetadataJSON: `{}`,
+			},
+		},
+	}}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxToolExecutionJobRunner{
+		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(coordinator.settlements) != 1 || coordinator.settlements[0].BackgroundTask == nil ||
+		coordinator.settlements[0].BackgroundTask.SourceToolUseEventID != work.Ref.ToolUseEventID {
+		t.Fatalf("settlements = %#v; want runner-owned Tool Use source", coordinator.settlements)
+	}
+}
+
+func TestSandboxToolExecutionRunnerObservesRunningExecutionByStoredReference(t *testing.T) {
+	queueClient := &recordingSessionPrepareQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	work := sandboxExecutionTestWork(true)
+	work.State = "running"
+	encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, sandboxdriver.ForegroundCommandObservation{
+		Reference: sandboxdriver.CommandReference{
+			Target: sandboxdriver.ToolTarget{ProviderSandboxID: "provider_execution"},
+			Task: sandboxdriver.BackgroundTask{
+				TaskID: "task_execution", ProviderSessionID: "provider_execution", ProviderCommandID: "task_execution",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode command reference: %v", err)
+	}
+	work.ProviderCommandReference = encodedReference
+	coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true}
+	adapter := &recordingProviderAdapter{observation: ProviderOutcome[sandboxdriver.ToolExecution]{
+		Value: sandboxdriver.ToolExecution{ResultJSON: `{"status":"success"}`},
+	}}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxToolExecutionJobRunner{
+		Queue: queueClient, Coordinator: coordinator, Providers: registry,
+		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(coordinator.calls, []string{"load", "settle:completed"}) {
+		t.Fatalf("coordinator calls = %v; want observed terminal settlement", coordinator.calls)
+	}
+	if !reflect.DeepEqual(adapter.calls, []string{"observe"}) {
+		t.Fatalf("provider calls = %v; want observation without submission", adapter.calls)
+	}
+}
+
 func TestSandboxToolExecutionRunnerSettlesOnlyDurableProviderOutcomes(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -306,11 +375,12 @@ func sandboxExecutionQueueJob() *queuev1.QueueJob {
 }
 
 type recordingSandboxExecutionCoordinator struct {
-	work      SandboxExecutionWork
-	load      bool
-	prepare   bool
-	authorize bool
-	calls     []string
+	work        SandboxExecutionWork
+	load        bool
+	prepare     bool
+	authorize   bool
+	calls       []string
+	settlements []SandboxExecutionSettlement
 }
 
 func (c *recordingSandboxExecutionCoordinator) LoadExecution(context.Context, SandboxExecutionJob) (SandboxExecutionWork, bool, error) {
@@ -333,8 +403,13 @@ func (c *recordingSandboxExecutionCoordinator) AuthorizeRunning(context.Context,
 	c.calls = append(c.calls, "running")
 	return c.authorize, nil
 }
+func (c *recordingSandboxExecutionCoordinator) RecordProviderCommandReference(context.Context, SandboxExecutionWork, string) (bool, error) {
+	c.calls = append(c.calls, "reference")
+	return true, nil
+}
 func (c *recordingSandboxExecutionCoordinator) SettleExecution(_ context.Context, _ SandboxExecutionWork, result SandboxExecutionSettlement) error {
 	c.calls = append(c.calls, "settle:"+string(result.Kind))
+	c.settlements = append(c.settlements, result)
 	return nil
 }
 func (c *recordingSandboxExecutionCoordinator) FinalizeExhaustedExecution(context.Context, *queuev1.QueueJob) error {
@@ -347,9 +422,10 @@ func (c *recordingSandboxExecutionCoordinator) FinalizeInvalidExecution(context.
 }
 
 type recordingProviderAdapter struct {
-	inspection ProviderOutcome[ExecutionReadiness]
-	execution  ProviderOutcome[sandboxdriver.ToolExecution]
-	calls      []string
+	inspection  ProviderOutcome[ExecutionReadiness]
+	execution   ProviderOutcome[sandboxdriver.ToolExecution]
+	observation ProviderOutcome[sandboxdriver.ToolExecution]
+	calls       []string
 }
 
 func (a *recordingProviderAdapter) InspectForExecution(context.Context, string) ProviderOutcome[ExecutionReadiness] {
@@ -372,6 +448,10 @@ func (a *recordingProviderAdapter) PrepareTool(context.Context, ToolExecutionReq
 func (a *recordingProviderAdapter) ExecuteTool(context.Context, ToolExecutionRequest) ProviderOutcome[sandboxdriver.ToolExecution] {
 	a.calls = append(a.calls, "execute")
 	return a.execution
+}
+func (a *recordingProviderAdapter) ObserveTool(context.Context, sandboxdriver.ForegroundCommandObservation) ProviderOutcome[sandboxdriver.ToolExecution] {
+	a.calls = append(a.calls, "observe")
+	return a.observation
 }
 
 type recordingPreparedTool struct{}

@@ -240,14 +240,27 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 			(binding.BindingRevision != work.Binding.BindingRevision || binding.ProviderResourceID != work.Binding.ProviderResourceID) {
 			return errSandboxExecutionReinspection
 		}
+		if binding.ReleaseRequested() {
+			errorKind := "sandbox_released"
+			if binding.ReleaseReason == "session_delete" {
+				errorKind = "session_deleted"
+			}
+			return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, SandboxExecutionSettlement{
+				Kind: SandboxExecutionFailed, ErrorKind: errorKind, SafeMessage: "sandbox execution is no longer available",
+			}, now)
+		}
 		if binding.Provider != sandboxdriver.DaytonaProviderName {
 			return errors.New("sandbox binding has an unsupported provider")
 		}
 
-		var operationID string
+		var operationID, operationKind string
+		var operationRevision int64
+		var operationGeneration sql.NullInt64
+		var operationHandle sql.NullString
 		var activationQueueRequest *queue.EnqueueRequest
 		err = tx.QueryRow(ctx,
-			`SELECT operation_id
+			`SELECT operation_id, kind, observed_binding_revision,
+			        target_environment_generation, target_provider_resource_id
 			   FROM sandbox_lifecycle_operations
 			  WHERE workspace_id = $1
 			    AND logical_sandbox_id = $2
@@ -255,9 +268,31 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 			    AND state IN ('pending', 'waiting_artifact', 'running')
 			  FOR UPDATE`,
 			work.Ref.WorkspaceID, binding.LogicalSandboxID,
-		).Scan(&operationID)
+		).Scan(&operationID, &operationKind, &operationRevision, &operationGeneration, &operationHandle)
 		if err != nil && !dbconnect.IsNoRows(err) {
 			return err
+		}
+		if err == nil {
+			operationMatches := operationRevision == binding.BindingRevision
+			switch operationKind {
+			case "start":
+				operationMatches = operationMatches && readiness == ExecutionNeedsActivation &&
+					operationHandle.Valid && operationHandle.String == binding.ProviderResourceID &&
+					!operationGeneration.Valid
+			case "create":
+				operationMatches = operationMatches && readiness == ExecutionNeedsCreation &&
+					binding.ProviderResourceID == "" && !operationHandle.Valid &&
+					operationGeneration.Valid && operationGeneration.Int64 == generation
+			case "replace":
+				operationMatches = operationMatches && readiness == ExecutionNeedsCreation &&
+					binding.ProviderResourceID != "" && !operationHandle.Valid &&
+					operationGeneration.Valid && operationGeneration.Int64 == generation
+			default:
+				operationMatches = false
+			}
+			if !operationMatches {
+				return errSandboxExecutionReinspection
+			}
 		}
 		if dbconnect.IsNoRows(err) {
 			if staleMissingBindingObservation {
@@ -383,6 +418,15 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 		if !exists || binding.BindingRevision != work.Binding.BindingRevision || binding.ProviderResourceID != work.Binding.ProviderResourceID {
 			return errSandboxExecutionReinspection
 		}
+		if binding.ReleaseRequested() {
+			errorKind := "sandbox_released"
+			if binding.ReleaseReason == "session_delete" {
+				errorKind = "session_deleted"
+			}
+			return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, SandboxExecutionSettlement{
+				Kind: SandboxExecutionFailed, ErrorKind: errorKind, SafeMessage: "sandbox execution is no longer available",
+			}, now)
+		}
 		var resourceRevision int64
 		if err := tx.QueryRow(ctx,
 			`SELECT sandbox_resource_revision FROM sessions WHERE workspace_id = $1 AND id = $2`,
@@ -391,18 +435,27 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 			return err
 		}
 		var operationID string
+		var operationRevision, operationEnvironmentGeneration, operationResourceRevision int64
+		var operationHandle string
 		var materializationQueueRequest *queue.EnqueueRequest
 		err = tx.QueryRow(ctx,
-			`SELECT operation_id
+			`SELECT operation_id, observed_binding_revision, target_environment_generation,
+			        target_resource_revision, target_provider_resource_id
 			   FROM sandbox_lifecycle_operations
 			  WHERE workspace_id = $1 AND logical_sandbox_id = $2
 			    AND kind = 'materialize'
 			    AND state IN ('pending', 'waiting_activation', 'running')
 			  FOR UPDATE`,
 			work.Ref.WorkspaceID, binding.LogicalSandboxID,
-		).Scan(&operationID)
+		).Scan(&operationID, &operationRevision, &operationEnvironmentGeneration,
+			&operationResourceRevision, &operationHandle)
 		if err != nil && !dbconnect.IsNoRows(err) {
 			return err
+		}
+		if err == nil && (operationRevision != binding.BindingRevision ||
+			operationEnvironmentGeneration != binding.EnvironmentGeneration ||
+			operationResourceRevision != resourceRevision || operationHandle != binding.ProviderResourceID) {
+			return errSandboxExecutionReinspection
 		}
 		if dbconnect.IsNoRows(err) {
 			resources, err := c.resources.ListSessionResourcesTx(ctx, tx, workspace.ID(work.Ref.WorkspaceID), work.Ref.SessionID)
@@ -480,6 +533,68 @@ func (c *PostgreSQLSandboxExecutionCoordinator) AuthorizeRunning(ctx context.Con
 		return false, errors.New("sandbox execution authorization requires a binding")
 	}
 	return c.transitionExecutionAuthorization(ctx, work, "preparing", "running", time.Time{})
+}
+
+func (c *PostgreSQLSandboxExecutionCoordinator) RecordProviderCommandReference(ctx context.Context, work SandboxExecutionWork, encodedReference string) (bool, error) {
+	reference, err := decodeSandboxToolObservationReference(encodedReference)
+	if err != nil {
+		return false, err
+	}
+	var recorded bool
+	err = c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.record_command_reference", func(tx *dbconnect.Tx) error {
+		if err := lockSession(ctx, tx, work.Ref); err != nil {
+			return err
+		}
+		var state string
+		var generation int64
+		var authorizedProviderResourceID sql.NullString
+		var existingReference sql.NullString
+		if err := tx.QueryRow(ctx,
+			`SELECT execution_state, execution_attempt_generation,
+			        authorized_provider_resource_id, provider_command_reference_json
+			   FROM session_runtime_tool_results
+			  WHERE workspace_id = $1 AND session_id = $2
+			    AND session_thread_id = $3 AND tool_use_event_id = $4
+			  FOR UPDATE`,
+			work.Ref.WorkspaceID, work.Ref.SessionID, work.Ref.SessionThreadID, work.Ref.ToolUseEventID,
+		).Scan(&state, &generation, &authorizedProviderResourceID, &existingReference); err != nil {
+			return err
+		}
+		if state != "running" || generation != work.AttemptGeneration {
+			return nil
+		}
+		if !authorizedProviderResourceID.Valid ||
+			reference.Observation.Reference.Target.ProviderSandboxID != authorizedProviderResourceID.String {
+			return errors.New("sandbox command reference does not match the authorized provider resource")
+		}
+		if existingReference.Valid {
+			existing, err := decodeSandboxToolObservationReference(existingReference.String)
+			if err != nil {
+				return err
+			}
+			if existing.Provider != reference.Provider ||
+				existing.Observation.Reference.Target.ProviderSandboxID != reference.Observation.Reference.Target.ProviderSandboxID ||
+				existing.Observation.Reference.Task.TaskID != reference.Observation.Reference.Task.TaskID ||
+				existing.Observation.Reference.Task.ProviderCommandID != reference.Observation.Reference.Task.ProviderCommandID {
+				return errors.New("sandbox command reference identity changed during observation")
+			}
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE session_runtime_tool_results
+			    SET provider_command_reference_json = $5, updated_at = $6
+			  WHERE workspace_id = $1 AND session_id = $2
+			    AND session_thread_id = $3 AND tool_use_event_id = $4
+			    AND execution_state = 'running' AND execution_attempt_generation = $7`,
+			work.Ref.WorkspaceID, work.Ref.SessionID, work.Ref.SessionThreadID, work.Ref.ToolUseEventID,
+			encodedReference, c.now(), work.AttemptGeneration,
+		)
+		if err != nil {
+			return err
+		}
+		recorded = transitionRowsAffected(result)
+		return nil
+	})
+	return recorded, err
 }
 
 func (c *PostgreSQLSandboxExecutionCoordinator) transitionExecutionAuthorization(ctx context.Context, work SandboxExecutionWork, from string, to string, deadline time.Time) (bool, error) {
@@ -625,6 +740,15 @@ func (c *PostgreSQLSandboxExecutionCoordinator) transitionExecutionAuthorization
 }
 
 func (c *PostgreSQLSandboxExecutionCoordinator) SettleExecution(ctx context.Context, work SandboxExecutionWork, settlement SandboxExecutionSettlement) error {
+	if settlement.BackgroundTask != nil {
+		if work.Binding == nil {
+			return errors.New("background sandbox execution requires a binding")
+		}
+		settlement.LogicalSandboxID = work.Binding.LogicalSandboxID
+		settlement.Provider = work.Binding.Provider
+		settlement.BindingRevision = work.Binding.BindingRevision
+		settlement.ResourceRootsJSON = work.Binding.ResourceRootsJSON
+	}
 	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.settle", func(tx *dbconnect.Tx) error {
 		return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, settlement, c.now())
 	})
@@ -784,19 +908,27 @@ func settleSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, ref Sandbox
 		sum := sha256.Sum256([]byte(resultJSON))
 		digest = hex.EncodeToString(sum[:])
 	}
+	backgroundTaskStarted := settlement.BackgroundTask != nil
+	var taskID any
+	if backgroundTaskStarted {
+		taskID = settlement.BackgroundTask.TaskID
+	}
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
 		    SET execution_state = 'terminal_unconsumed',
 		        result_json = $6,
 		        result_digest = $7,
 		        provider_command_reference_json = NULLIF($8, ''),
-		        updated_at = $9
+		        background_task_started = $9,
+		        task_id = $10,
+		        updated_at = $11
 		  WHERE workspace_id = $1 AND session_id = $2
 		    AND session_thread_id = $3 AND tool_use_event_id = $4
 		    AND execution_attempt_generation = $5
 		    AND execution_state IN ('pending', 'preparing', 'running', 'waiting_activation', 'waiting_materialization')`,
 		ref.WorkspaceID, ref.SessionID, ref.SessionThreadID, ref.ToolUseEventID,
-		generation, resultJSON, digest, settlement.ProviderCommandReference, now.UTC(),
+		generation, resultJSON, digest, settlement.ProviderCommandReference,
+		backgroundTaskStarted, taskID, now.UTC(),
 	)
 	if err != nil {
 		return err
@@ -804,7 +936,66 @@ func settleSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, ref Sandbox
 	if !transitionRowsAffected(result) {
 		return nil
 	}
+	if settlement.BackgroundTask != nil {
+		if err := insertBackgroundTaskAndReconcileTx(ctx, tx, ref, settlement, now); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, ref SandboxExecutionRef, settlement SandboxExecutionSettlement, now time.Time) error {
+	task := settlement.BackgroundTask
+	if task == nil || task.TaskID == "" || task.SourceToolUseEventID != ref.ToolUseEventID ||
+		task.ProviderSessionID == "" || task.ProviderCommandID == "" || settlement.LogicalSandboxID == "" ||
+		settlement.Provider == "" || settlement.BindingRevision <= 0 {
+		return errors.New("sandbox background task identity is incomplete")
+	}
+	metadataJSON := task.ProviderCommandMetadataJSON
+	if metadataJSON == "" {
+		metadataJSON = "{}"
+	}
+	var metadata map[string]any
+	if len([]byte(metadataJSON)) > 4096 || json.Unmarshal([]byte(metadataJSON), &metadata) != nil || metadata == nil {
+		return errors.New("sandbox background task metadata is invalid")
+	}
+	resourceRootsJSON := settlement.ResourceRootsJSON
+	if resourceRootsJSON == "" {
+		resourceRootsJSON = "[]"
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_background_tasks (
+			workspace_id, session_id, session_thread_id, task_id, source_tool_use_event_id,
+			binding_id, sandbox_id, provider, binding_revision,
+			provider_session_id, provider_command_id, provider_command_metadata_json,
+			resource_roots_json, status, reconcile_generation, next_poll_at,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, $12,
+			'running', 1, $13, $13, $13)`,
+		ref.WorkspaceID, ref.SessionID, ref.SessionThreadID, task.TaskID, ref.ToolUseEventID,
+		settlement.LogicalSandboxID, settlement.Provider, settlement.BindingRevision,
+		task.ProviderSessionID, task.ProviderCommandID, metadataJSON, resourceRootsJSON, now.UTC(),
+	); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(struct {
+		WorkspaceID         string `json:"workspace_id"`
+		SessionID           string `json:"session_id"`
+		TaskID              string `json:"task_id"`
+		ReconcileGeneration int64  `json:"reconcile_generation"`
+	}{WorkspaceID: ref.WorkspaceID, SessionID: ref.SessionID, TaskID: task.TaskID, ReconcileGeneration: 1})
+	if err != nil {
+		return err
+	}
+	workspaceID := workspace.ID(ref.WorkspaceID)
+	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxBackgroundReconcile,
+		PartitionKey:   queue.FormatSandboxBackgroundPartitionKey(workspaceID, ref.SessionID, task.TaskID),
+		DedupeKey:      queue.FormatSandboxBackgroundReconcileDedupeKey(workspaceID, ref.SessionID, task.TaskID, 1),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: SandboxBackgroundReconcileMaxAttempts,
+		AvailableAt: now.UTC(), Now: now.UTC(),
+	})
+	return err
 }
 
 func sandboxLifecycleQueuePayload(ref SandboxExecutionRef, logicalSandboxID string, operationID string) ([]byte, error) {

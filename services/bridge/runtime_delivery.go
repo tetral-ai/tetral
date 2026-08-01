@@ -64,10 +64,6 @@ type RuntimeCommandSender interface {
 	SendRuntimeCommand(context.Context, RuntimePodTarget, *agentruntimev1.RuntimeInputCommandRequest) (*agentruntimev1.RuntimeInputCommandResponse, error)
 }
 
-type TaskNotificationResultReader interface {
-	ReadTaskNotificationResult(context.Context, *bridgev1.RuntimeScope, string, string) (string, error)
-}
-
 type SandboxReleaseClient interface {
 	ReleaseSandbox(context.Context, SandboxReleaseRequest) (SandboxReleaseResult, error)
 }
@@ -314,7 +310,6 @@ type PostgreSQLRuntimeDeliveryStore struct {
 	Logger                          *slog.Logger
 	RuntimeGRPCPort                 int
 	TargetResolver                  RuntimeTargetResolver
-	TaskNotificationResultReader    TaskNotificationResultReader
 	MCPManifestLister               MCPManifestLister
 	SandboxReleaser                 SandboxReleaseClient
 	SandboxStatusFreshnessWindow    time.Duration
@@ -341,12 +336,10 @@ func NewJobRunnerRuntimeDeliveryStore(
 	client *dbconnect.Client,
 	logger *slog.Logger,
 	cfg JobRunnerConfig,
-	taskNotificationReader TaskNotificationResultReader,
 	bindingSnapshot func() enginekubernetes.BindingVisibilitySnapshot,
 ) *PostgreSQLRuntimeDeliveryStore {
 	store := NewPostgreSQLRuntimeDeliveryStore(client, cfg.AgentRuntimeGRPCPort)
 	store.Logger = logger
-	store.TaskNotificationResultReader = taskNotificationReader
 	store.MCPManifestLister = NewGatewayMCPManifestLister(cfg.MCPConnectorGRPCAddress, internalgrpcauth.FileTokenSource{
 		Path: cfg.GatewayTokenPath,
 	})
@@ -363,7 +356,13 @@ func (s *PostgreSQLRuntimeDeliveryStore) ResolveRuntimeInputSeal(ctx context.Con
 	if s == nil || s.Client == nil {
 		return "", runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
-	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" || job.PreparationAttemptID == "" {
+	if job.Kind != queue.KindRuntimeInput || job.WorkspaceID == "" || job.SessionID == "" {
+		return "", runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime input birth attempt is incomplete", retryable: false}
+	}
+	if job.InputKind == "task_notification" {
+		return "", nil
+	}
+	if job.PreparationAttemptID == "" {
 		return "", runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime input birth attempt is incomplete", retryable: false}
 	}
 	var sealedAttemptID string
@@ -466,22 +465,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 			return nil
 		}
 		if job.Kind == queue.KindRuntimeInput && job.InputKind == "task_notification" {
-			readiness, sealed, err := loadEarliestFailedPreparationAtOrAfterTx(ctx, tx, job.WorkspaceID, job.SessionID, job.PreparationAttemptID, true)
-			if err != nil {
-				return err
-			}
-			if sealed {
-				settled, err := settleTerminalRuntimePreparationFailureTx(ctx, tx, job, readiness, now)
-				if err != nil {
-					return err
-				}
-				if settled {
-					plan = RuntimeCommandPlan{SettledAccepted: true}
-				} else {
-					plan = RuntimeCommandPlan{StaleAccepted: true}
-				}
-				return nil
-			}
 			taskPlan, taskCommandPlan, err := s.prepareTaskNotificationCommandTx(ctx, tx, job, port, now)
 			if err != nil {
 				var requeued runtimePreparationRequeuedError
@@ -649,13 +632,6 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 	}
 	if requeuedInboxRepairErr != nil {
 		return RuntimeCommandPlan{}, *requeuedInboxRepairErr
-	}
-	if plan.TaskNotification != nil && !plan.StaleAccepted {
-		var err error
-		plan, err = s.prepareTaskNotificationResult(ctx, plan)
-		if err != nil {
-			return RuntimeCommandPlan{}, err
-		}
 	}
 	return plan, nil
 }
@@ -1361,20 +1337,8 @@ func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbcon
 	if taskID == "" {
 		return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "task notification runtime input id must identify a task", retryable: false}
 	}
-	scope := bridgeSessionScope(job.WorkspaceID, job.SessionID, job.SessionThreadID)
-	key := taskNotificationBridgeOperationKey(taskID, job.RuntimeInputID)
-	existing, ok, err := readBridgeOperationTx(ctx, tx, scope, bridgeOpCommitTaskNotificationResult, key)
-	if err != nil {
-		return RuntimeDeliveryResult{}, false, err
-	}
-	if ok {
-		if taskNotificationOperationIsExhausted(existing.ResultJSON) {
-			return runtimeDeliveryExhaustedResult(), true, nil
-		}
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-	}
 	var inboxStatus string
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT status
 		   FROM session_runtime_inbox
 		  WHERE workspace_id = $1
@@ -1391,17 +1355,17 @@ func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbcon
 			return runtimeDeliveryExhaustedResult(), true, nil
 		case "committed", "cancelled":
 			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-		case "delivering", "accepted":
+		case "queued", "delivering", "accepted", "parked":
 		default:
 			return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}
 		}
 	} else if !dbconnect.IsNoRows(err) {
 		return RuntimeDeliveryResult{}, false, err
 	}
-	var taskStatus string
 	var taskThreadID string
+	var terminalResultJSON sql.NullString
 	err = tx.QueryRow(ctx,
-		`SELECT status, session_thread_id
+		`SELECT session_thread_id, terminal_result_json
 		   FROM session_background_tasks
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -1410,24 +1374,14 @@ func replayTaskNotificationDeliveryFinalizationTx(ctx context.Context, tx *dbcon
 		job.WorkspaceID,
 		job.SessionID,
 		taskID,
-	).Scan(&taskStatus, &taskThreadID)
+	).Scan(&taskThreadID, &terminalResultJSON)
 	if dbconnect.IsNoRows(err) {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
 	}
 	if err != nil {
 		return RuntimeDeliveryResult{}, false, err
 	}
-	existing, ok, err = readBridgeOperationTx(ctx, tx, scope, bridgeOpCommitTaskNotificationResult, key)
-	if err != nil {
-		return RuntimeDeliveryResult{}, false, err
-	}
-	if ok {
-		if taskNotificationOperationIsExhausted(existing.ResultJSON) {
-			return runtimeDeliveryExhaustedResult(), true, nil
-		}
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-	}
-	if taskStatus != "running" || taskThreadID != job.SessionThreadID {
+	if taskThreadID != job.SessionThreadID || !terminalResultJSON.Valid || terminalResultJSON.String == "" {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
 	}
 	return RuntimeDeliveryResult{}, false, nil
@@ -1471,26 +1425,7 @@ func agentMailRecipientTerminalTx(ctx context.Context, tx *dbconnect.Tx, job Run
 }
 
 func finalizeTaskNotificationDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) (RuntimeDeliveryResult, error) {
-	taskID := taskNotificationTaskID(job.RuntimeInputID)
-	scope := bridgeSessionScope(job.WorkspaceID, job.SessionID, job.SessionThreadID)
-	key := taskNotificationBridgeOperationKey(taskID, job.RuntimeInputID)
 	if err := insertRuntimeDeliveryExhaustionEventTx(ctx, tx, job, now); err != nil {
-		return RuntimeDeliveryResult{}, err
-	}
-	resultJSON, err := taskNotificationExhaustedOperationResultJSON(taskID, job.RuntimeInputID)
-	if err != nil {
-		return RuntimeDeliveryResult{}, err
-	}
-	if err := insertBridgeOperationTx(ctx, tx, scope, bridgeOperationInsert{
-		Operation:      bridgeOpCommitTaskNotificationResult,
-		IdempotencyKey: key,
-		RequestHash:    bridgeRequestHash(bridgeOpCommitTaskNotificationResult, key, "delivery_exhausted"),
-		AckStatus:      bridgeAckRejected,
-		RuntimeInputID: sql.NullString{String: job.RuntimeInputID, Valid: true},
-		ErrorCode:      sql.NullString{String: "task_notification_delivery_exhausted", Valid: true},
-		ResultJSON:     resultJSON,
-		Now:            now,
-	}); err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
 	if _, err := tx.Exec(ctx,
@@ -1591,61 +1526,6 @@ func runtimeDeliveryExhaustedResult() RuntimeDeliveryResult {
 		ErrorKind:    "runtime_delivery_exhausted",
 		ErrorMessage: "runtime delivery attempts are exhausted",
 	}
-}
-
-func taskNotificationBridgeOperationKey(taskID string, runtimeInputID string) string {
-	return taskID + ":" + runtimeInputID
-}
-
-func taskNotificationExhaustedOperationResultJSON(taskID string, runtimeInputID string) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"disposition":      "delivery_exhausted",
-		"runtime_input_id": runtimeInputID,
-		"task_id":          taskID,
-	})
-}
-
-func taskNotificationOperationIsExhausted(resultJSON string) bool {
-	var result struct {
-		Disposition string `json:"disposition"`
-	}
-	return json.Unmarshal([]byte(resultJSON), &result) == nil && result.Disposition == "delivery_exhausted"
-}
-
-func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationResult(ctx context.Context, plan RuntimeCommandPlan) (RuntimeCommandPlan, error) {
-	if plan.Request == nil || plan.TaskNotification == nil {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "task notification command plan is incomplete", retryable: false}
-	}
-	if s.TaskNotificationResultReader == nil {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "sandbox_helper_unavailable", message: "sandbox helper command polling is unavailable", retryable: true}
-	}
-	resultJSON, err := s.TaskNotificationResultReader.ReadTaskNotificationResult(
-		ctx,
-		runtimeScopeFromCommandRequest(plan.Request),
-		plan.TaskNotification.TaskID,
-		plan.TaskNotification.SourceToolUseEventID,
-	)
-	if err != nil {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "sandbox_helper_unavailable", message: "sandbox helper command polling failed", retryable: true}
-	}
-	if resultJSON == "" || !json.Valid([]byte(resultJSON)) {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "sandbox_helper_protocol_error", message: "sandbox helper returned an invalid task notification result", retryable: false}
-	}
-	resultJSON = stripInternalProviderFields(resultJSON)
-	terminalStatus, terminalErr := terminalStatusFromResultJSON(resultJSON)
-	if terminalErr != nil {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "task_notification_not_terminal", message: "task notification result is not terminal", retryable: true}
-	}
-	if !validBackgroundTaskTerminalStatus(terminalStatus) {
-		return RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "sandbox_helper_protocol_error", message: "sandbox helper returned an invalid terminal task status", retryable: false}
-	}
-	payloadJSON, err := runtimeTaskNotificationPayloadJSON(plan.TaskNotification, terminalStatus, resultJSON)
-	if err != nil {
-		return RuntimeCommandPlan{}, err
-	}
-	plan.TaskNotification.ResultJSON = payloadJSON
-	plan.Request.PayloadJson = payloadJSON
-	return plan, nil
 }
 
 type runtimeInitialMCPManifestRequiredError struct {
@@ -1833,7 +1713,7 @@ func runtimeTaskNotificationStatus(terminalStatus string) string {
 	switch terminalStatus {
 	case "completed":
 		return "completed"
-	case "failed":
+	case "failed", "unknown_outcome":
 		return "failed"
 	case "cancelled", "cancelled_by_cleanup":
 		return "cancelled"
@@ -2434,33 +2314,37 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 	if taskID == "" {
 		return nil, RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "task notification runtime input id must identify a task", retryable: false}
 	}
-	sessionThreadID := job.SessionThreadID
-	var err error
-	if sessionThreadID == "" {
-		sessionThreadID, err = readRuntimeCommandSessionThreadIDTx(ctx, tx, job.WorkspaceID, job.SessionID)
-		if err != nil {
-			return nil, RuntimeCommandPlan{}, err
-		}
+	var sessionThreadID, sourceToolUseEventID, taskStatus string
+	var terminalResultJSON, terminalEventID sql.NullString
+	err := tx.QueryRow(ctx, `SELECT session_thread_id, source_tool_use_event_id, status,
+		terminal_result_json, terminal_event_id
+		FROM session_background_tasks
+		WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3
+		FOR UPDATE`, job.WorkspaceID, job.SessionID, taskID).Scan(
+		&sessionThreadID, &sourceToolUseEventID, &taskStatus, &terminalResultJSON, &terminalEventID,
+	)
+	if dbconnect.IsNoRows(err) {
+		return nil, RuntimeCommandPlan{StaleAccepted: true}, nil
 	}
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
-		return nil, RuntimeCommandPlan{}, err
-	}
-	scopedJob := job
-	scopedJob.SessionThreadID = sessionThreadID
-	staleTask, err := taskNotificationStaleBeforeDeliveryTx(ctx, tx, scopedJob, taskID)
 	if err != nil {
 		return nil, RuntimeCommandPlan{}, err
 	}
-	if staleTask {
+	if sessionThreadID != job.SessionThreadID || sourceToolUseEventID == "" {
+		return nil, RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "task_notification_identity_invalid", message: "task notification durable identity is invalid", retryable: false}
+	}
+	if terminalEventID.Valid {
 		return nil, RuntimeCommandPlan{StaleAccepted: true}, nil
 	}
-	if err := requireRuntimePreparationReadyTx(ctx, tx, job.WorkspaceID, job.SessionID, s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), now); err != nil {
-		return nil, RuntimeCommandPlan{}, err
+	if taskStatus == "running" {
+		return nil, RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "task_notification_not_terminal", message: "task notification result is not terminal", retryable: true}
+	}
+	if !terminalResultJSON.Valid || terminalResultJSON.String == "" || !json.Valid([]byte(terminalResultJSON.String)) || !validBackgroundTaskTerminalStatus(taskStatus) {
+		return nil, RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "task_notification_result_invalid", message: "task notification durable result is invalid", retryable: false}
 	}
 	if err := requireInitialMCPManifestReadyTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 		return nil, RuntimeCommandPlan{}, err
 	}
-	binding, err := s.resolveRuntimeTarget(ctx, tx, scopedJob)
+	binding, err := s.resolveRuntimeTarget(ctx, tx, job)
 	if err != nil {
 		var prepareErr runtimeDeliveryPrepareError
 		if errors.As(err, &prepareErr) && prepareErr.kind == "runtime_binding_unavailable" {
@@ -2468,29 +2352,19 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 		}
 		return nil, RuntimeCommandPlan{}, err
 	}
-	scope := runtimeScopeForDeliveryJob(scopedJob, binding)
-	reference, terminalResultJSON, err := loadBackgroundTaskTx(ctx, tx, scope, taskID)
+	payloadJSON, err := runtimeTaskNotificationPayloadJSON(&RuntimeTaskNotificationPlan{
+		TaskID: taskID, SourceToolUseEventID: sourceToolUseEventID,
+	}, taskStatus, terminalResultJSON.String)
 	if err != nil {
-		if backgroundTaskStaleError(err) {
-			return nil, RuntimeCommandPlan{StaleAccepted: true}, nil
-		}
 		return nil, RuntimeCommandPlan{}, err
 	}
-	if terminalResultJSON != "" {
-		if err := upsertRuntimeInboxDeliveryTx(ctx, tx, scopedJob, binding, now); err != nil {
-			return nil, RuntimeCommandPlan{}, err
-		}
-		if err := commitTaskNotificationInboxTx(ctx, tx, scope, job.RuntimeInputID, now); err != nil {
-			return nil, RuntimeCommandPlan{}, err
-		}
-		return nil, RuntimeCommandPlan{StaleAccepted: true}, nil
-	}
-	if err := upsertRuntimeInboxDeliveryTx(ctx, tx, scopedJob, binding, now); err != nil {
+	if err := upsertRuntimeInboxDeliveryTx(ctx, tx, job, binding, now); err != nil {
 		return nil, RuntimeCommandPlan{}, err
 	}
 	return &RuntimeTaskNotificationPlan{
 			TaskID:               taskID,
-			SourceToolUseEventID: reference.Task.SourceToolUseEventID,
+			SourceToolUseEventID: sourceToolUseEventID,
+			ResultJSON:           payloadJSON,
 		}, RuntimeCommandPlan{
 			Target: RuntimePodTarget{
 				Namespace: binding.Namespace,
@@ -2503,7 +2377,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 				RequestId:          job.JobID + ":" + job.LeaseToken,
 				WorkspaceId:        job.WorkspaceID,
 				SessionId:          job.SessionID,
-				SessionThreadId:    sessionThreadID,
+				SessionThreadId:    job.SessionThreadID,
 				BindingId:          binding.BindingID,
 				BindingGeneration:  int64(binding.BindingGeneration),
 				TargetPodNamespace: binding.Namespace,
@@ -2515,63 +2389,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 				SequenceFrom:       job.SequenceFrom,
 				SequenceTo:         job.SequenceTo,
 				CommandKind:        job.CommandKind,
-				PayloadJson:        "{}",
+				PayloadJson:        payloadJSON,
 			},
 		}, nil
-}
-
-func backgroundTaskStaleError(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := err.Error()
-	return strings.Contains(message, "background task binding is stale") ||
-		strings.Contains(message, "background task sandbox is stale")
-}
-
-func taskNotificationStaleBeforeDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, taskID string) (bool, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT t.session_thread_id,
-		        t.status,
-		        t.binding_id,
-		        COALESCE(rb.binding_id, ''),
-		        COALESCE(s.provider_sandbox_id, ''),
-		        COALESCE(s.status, '')
-		   FROM session_background_tasks t
-		   LEFT JOIN session_runtime_bindings rb
-		     ON rb.workspace_id = t.workspace_id
-		    AND rb.session_id = t.session_id
-		    AND rb.binding_id = t.binding_id
-		   LEFT JOIN sandboxes s
-		     ON s.workspace_id = t.workspace_id
-		    AND s.session_id = t.session_id
-		    AND s.id = t.sandbox_id
-		  WHERE t.workspace_id = $1
-		    AND t.session_id = $2
-		    AND t.task_id = $3
-		  FOR UPDATE OF t`,
-		job.WorkspaceID,
-		job.SessionID,
-		taskID,
-	)
-	var threadID string
-	var taskStatus string
-	var taskBindingID string
-	var activeBindingID string
-	var providerSandboxID string
-	var sandboxStatus string
-	if err := row.Scan(&threadID, &taskStatus, &taskBindingID, &activeBindingID, &providerSandboxID, &sandboxStatus); dbconnect.IsNoRows(err) {
-		return true, nil
-	} else if err != nil {
-		return false, err
-	}
-	if taskStatus != "running" {
-		return true, nil
-	}
-	if threadID != job.SessionThreadID || activeBindingID == "" || activeBindingID != taskBindingID {
-		return true, nil
-	}
-	return providerSandboxID == "" || sandboxStatus != "active", nil
 }
 
 func taskNotificationTaskID(runtimeInputID string) string {
@@ -3333,10 +3153,7 @@ type taskNotificationInboxRepairCandidate struct {
 	SessionID       string
 	SessionThreadID string
 	RuntimeInputID  string
-	PayloadVersion  int
-	PayloadJSON     string
-	Priority        int
-	MaxAttempts     int
+	TaskID          string
 }
 
 func requeueEarlierPendingRuntimeInboxTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) (bool, error) {
@@ -3423,39 +3240,20 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 		ws := workspace.ID(workspaceID)
 		enqueueRequests := make([]queue.EnqueueRequest, 0, len(taskCandidates))
 		for _, candidate := range taskCandidates {
-			if !json.Valid([]byte(candidate.PayloadJSON)) {
-				return runtimeDeliveryPrepareError{kind: "runtime_inbox_repair_invalid", message: "task notification inbox repair has an invalid retained payload", retryable: false}
+			if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+				SET status='queued', binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$3
+				WHERE workspace_id=$1 AND runtime_input_id=$2
+				  AND status IN ('queued','delivering','accepted','parked','dead_lettered')`,
+				workspaceID, candidate.RuntimeInputID, now); err != nil {
+				return err
 			}
-			var payload struct {
-				WorkspaceID          string   `json:"workspace_id"`
-				SessionID            string   `json:"session_id"`
-				SessionThreadID      string   `json:"session_thread_id"`
-				RuntimeInputID       string   `json:"runtime_input_id"`
-				EventIDs             []string `json:"event_ids"`
-				InputKind            string   `json:"input_kind"`
-				PreparationAttemptID string   `json:"preparation_attempt_id"`
+			request, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(
+				ws, candidate.SessionID, candidate.SessionThreadID, candidate.TaskID, now,
+			)
+			if err != nil {
+				return err
 			}
-			if err := json.Unmarshal([]byte(candidate.PayloadJSON), &payload); err != nil ||
-				payload.WorkspaceID != workspaceID ||
-				payload.SessionID != candidate.SessionID ||
-				payload.SessionThreadID != candidate.SessionThreadID ||
-				payload.RuntimeInputID != candidate.RuntimeInputID ||
-				payload.InputKind != "task_notification" ||
-				payload.PreparationAttemptID == "" ||
-				len(payload.EventIDs) != 0 {
-				return runtimeDeliveryPrepareError{kind: "runtime_inbox_repair_invalid", message: "task notification inbox repair retained payload does not match its inbox", retryable: false}
-			}
-			enqueueRequests = append(enqueueRequests, queue.EnqueueRequest{
-				WorkspaceID:    ws,
-				Kind:           queue.KindRuntimeInput,
-				PartitionKey:   queue.FormatSessionPartitionKey(ws, candidate.SessionID),
-				DedupeKey:      queue.FormatRuntimeInputDedupeKey(ws, candidate.SessionID, candidate.RuntimeInputID),
-				PayloadVersion: candidate.PayloadVersion,
-				PayloadJSON:    []byte(candidate.PayloadJSON),
-				Priority:       candidate.Priority,
-				MaxAttempts:    candidate.MaxAttempts,
-				Now:            now,
-			})
+			enqueueRequests = append(enqueueRequests, request)
 		}
 		remaining := limit - len(taskCandidates)
 		if remaining == 0 {
@@ -3684,10 +3482,7 @@ func pendingTaskNotificationInboxRepairCandidatesTx(
 		`SELECT inbox.session_id,
 		        inbox.session_thread_id,
 		        inbox.runtime_input_id,
-		        retained.payload_version,
-		        retained.payload_json,
-		        retained.priority,
-		        retained.max_attempts
+		        task.task_id
 		   FROM session_runtime_inbox inbox
 		   JOIN session_background_tasks task
 		     ON task.workspace_id = inbox.workspace_id
@@ -3695,26 +3490,16 @@ func pendingTaskNotificationInboxRepairCandidatesTx(
 		    AND task.session_thread_id = inbox.session_thread_id
 		    AND inbox.runtime_input_id = 'task_notification:' || task.task_id
 		    AND task.terminal_event_id IS NULL
-		   JOIN LATERAL (
-		        SELECT q.status,
-		               q.payload_version,
-		               q.payload_json,
-		               q.priority,
-		               q.max_attempts
-		          FROM queue_jobs q
-		         WHERE q.workspace_id = inbox.workspace_id
-		           AND q.kind = 'runtime_input'
-		           AND q.dedupe_key =
-		               'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
-		         ORDER BY CASE WHEN q.status IN ('pending', 'leased') THEN 0 ELSE 1 END,
-		                  q.queue_partition_sequence DESC,
-		                  q.created_at DESC,
-		                  q.id DESC
-		         LIMIT 1
-		   ) retained ON retained.status NOT IN ('pending', 'leased')
 		  WHERE inbox.workspace_id = $1
 		    AND inbox.input_kind = 'task_notification'
-		    AND inbox.status IN ('delivering', 'accepted')
+		    AND inbox.status IN ('queued', 'delivering', 'accepted', 'parked', 'dead_lettered')
+		    AND NOT EXISTS (
+		        SELECT 1 FROM queue_jobs q
+		         WHERE q.workspace_id=inbox.workspace_id
+		           AND q.kind='runtime_input'
+		           AND q.dedupe_key='runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		           AND q.status IN ('pending','leased')
+		    )
 		  ORDER BY inbox.updated_at ASC, inbox.created_at ASC, inbox.runtime_input_id ASC
 		  LIMIT $2
 		  FOR UPDATE OF inbox SKIP LOCKED`,
@@ -3732,10 +3517,7 @@ func pendingTaskNotificationInboxRepairCandidatesTx(
 			&candidate.SessionID,
 			&candidate.SessionThreadID,
 			&candidate.RuntimeInputID,
-			&candidate.PayloadVersion,
-			&candidate.PayloadJSON,
-			&candidate.Priority,
-			&candidate.MaxAttempts,
+			&candidate.TaskID,
 		); err != nil {
 			return nil, err
 		}
@@ -4044,7 +3826,11 @@ func latestProcessedInterruptFenceSequenceTx(ctx context.Context, tx *dbconnect.
 // which moves a delivering|accepted row to committed after persisting its error
 // event — so a preparation-failed input reaches committed without CommitInputs.
 func upsertRuntimeInboxDeliveryTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, binding runtimeBindingForDelivery, now time.Time) error {
-	events, err := json.Marshal(job.EventIDs)
+	eventIDs := job.EventIDs
+	if eventIDs == nil {
+		eventIDs = []string{}
+	}
+	events, err := json.Marshal(eventIDs)
 	if err != nil {
 		return err
 	}

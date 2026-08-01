@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -33,6 +35,15 @@ import (
 )
 
 // This file owns shared Bridge API store test fixtures and assertions.
+
+func repoRootFromBridgeTest(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	return filepath.Clean(filepath.Join(wd, "../.."))
+}
 
 func assertCommitInputsConflictDidNotAdvance(t *testing.T, admin *sql.DB, sessionID string, runtimeInputID string, eventIDs []string) {
 	t.Helper()
@@ -2805,83 +2816,6 @@ func capturedOutputFile(sourcePath string, body string) outputcapture.SandboxOut
 			return io.NopCloser(strings.NewReader(body)), nil
 		},
 	}
-}
-
-type recordingSandboxToolExecutor struct {
-	healthChecks  []SandboxToolTarget
-	reads         []SandboxCommandReference
-	inputs        []SandboxCommandInput
-	commandResult SandboxCommandResult
-	inputResult   SandboxCommandResult
-	cancelResult  SandboxCommandResult
-	cancels       []SandboxCommandCancel
-	onRead        func(SandboxCommandReference)
-	onInput       func(SandboxCommandInput)
-	onCancel      func(SandboxCommandCancel)
-	err           error
-	healthErr     error
-	commandErr    error
-}
-
-func (e *recordingSandboxToolExecutor) CheckHealth(_ context.Context, target SandboxToolTarget) error {
-	e.healthChecks = append(e.healthChecks, target)
-	return e.healthErr
-}
-
-func (e *recordingSandboxToolExecutor) ReadCommandResult(_ context.Context, reference SandboxCommandReference) (SandboxCommandResult, error) {
-	e.reads = append(e.reads, reference)
-	if e.onRead != nil {
-		e.onRead(reference)
-	}
-	if e.commandErr != nil {
-		return SandboxCommandResult{}, e.commandErr
-	}
-	if e.commandResult.ResultJSON == "" {
-		return SandboxCommandResult{ResultJSON: `{"status":"running"}`}, nil
-	}
-	return e.commandResult, nil
-}
-
-func (e *recordingSandboxToolExecutor) SendCommandInput(_ context.Context, input SandboxCommandInput) (SandboxCommandResult, error) {
-	e.inputs = append(e.inputs, input)
-	if e.onInput != nil {
-		e.onInput(input)
-	}
-	if e.inputResult.ResultJSON != "" || e.inputResult.TerminalStatus != "" {
-		return e.inputResult, nil
-	}
-	return SandboxCommandResult{ResultJSON: `{"status":"accepted"}`}, nil
-}
-
-func (e *recordingSandboxToolExecutor) CancelCommand(_ context.Context, cancel SandboxCommandCancel) (SandboxCommandResult, error) {
-	e.cancels = append(e.cancels, cancel)
-	if e.onCancel != nil {
-		e.onCancel(cancel)
-	}
-	if e.cancelResult.ResultJSON != "" || e.cancelResult.TerminalStatus != "" {
-		return e.cancelResult, nil
-	}
-	return SandboxCommandResult{ResultJSON: `{"status":"cancelled"}`, TerminalStatus: "cancelled"}, nil
-}
-
-type recordingTaskNotificationResultReader struct {
-	reads      []recordedTaskNotificationRead
-	resultJSON string
-	err        error
-}
-
-type recordedTaskNotificationRead struct {
-	scope                *bridgev1.RuntimeScope
-	taskID               string
-	sourceToolUseEventID string
-}
-
-func (r *recordingTaskNotificationResultReader) ReadTaskNotificationResult(_ context.Context, scope *bridgev1.RuntimeScope, taskID string, sourceToolUseEventID string) (string, error) {
-	r.reads = append(r.reads, recordedTaskNotificationRead{scope: scope, taskID: taskID, sourceToolUseEventID: sourceToolUseEventID})
-	if r.err != nil {
-		return "", r.err
-	}
-	return r.resultJSON, nil
 }
 
 type recordingMCPManifestLister struct {

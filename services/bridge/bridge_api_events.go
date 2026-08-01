@@ -1239,22 +1239,44 @@ func consumeSandboxExecutionTx(
 	projection runtimeToolProjectionPayload,
 	now time.Time,
 ) error {
-	var toolKind, toolName, executionState string
+	var toolKind, toolName string
 	var modelToolCallID sql.NullString
-	var resultJSON sql.NullString
+	var executionState, backgroundOperationState, resultJSON sql.NullString
 	err := tx.QueryRow(ctx,
-		`SELECT tool_kind, tool_name, model_tool_call_id, execution_state, result_json
+		`SELECT tool_kind, tool_name, model_tool_call_id, execution_state, background_operation_state, result_json
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-	).Scan(&toolKind, &toolName, &modelToolCallID, &executionState, &resultJSON)
+	).Scan(&toolKind, &toolName, &modelToolCallID, &executionState, &backgroundOperationState, &resultJSON)
 	if dbconnect.IsNoRows(err) {
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+	if toolKind == bridgeToolKindSandboxBackground {
+		if !backgroundOperationState.Valid || backgroundOperationState.String != "terminal" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
+			return status.Error(codes.FailedPrecondition, "sandbox background result is not ready for conversation settlement")
+		}
+		updated, err := tx.Exec(ctx,
+			`UPDATE session_runtime_tool_results
+			    SET result_json = NULL, consumed_by_terminal_event_id = $5,
+			        consumption_reason = 'conversation_tool_result', updated_at = $6
+			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+			    AND tool_use_event_id = $4 AND tool_kind = 'sandbox_background'
+			    AND background_operation_state = 'terminal' AND result_json IS NOT NULL`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+			toolUseEventID, terminalEventID, now,
+		)
+		if err != nil {
+			return err
+		}
+		if !rowsAffected(updated) {
+			return status.Error(codes.FailedPrecondition, "sandbox background result consume failed")
+		}
+		return nil
 	}
 	if toolKind != bridgeToolKindSandbox {
 		return nil
@@ -1262,7 +1284,7 @@ func consumeSandboxExecutionTx(
 	if !modelToolCallID.Valid || modelToolCallID.String != projection.ModelToolCallID || toolName != projection.ToolName {
 		return status.Error(codes.FailedPrecondition, "sandbox tool result identity does not match its execution")
 	}
-	if executionState != "terminal_unconsumed" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
+	if !executionState.Valid || executionState.String != "terminal_unconsumed" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
 		return status.Error(codes.FailedPrecondition, "sandbox tool execution is not ready for conversation settlement")
 	}
 	attachmentRefs, err := sandboxExecutionAttachmentRefs(resultJSON.String)

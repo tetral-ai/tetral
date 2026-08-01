@@ -630,6 +630,41 @@ func TestDaytonaRunToolPollsLongForegroundBashToTerminal(t *testing.T) {
 	}
 }
 
+func TestDaytonaPreparedForegroundSubmissionExposesDurableObservationState(t *testing.T) {
+	client := newRecordingMemoryProjectionClient()
+	client.process.results = []string{
+		"",
+		`{"schema_version":1,"tool":"exec","status":"running","truncated":false,"error":null,"result":{"task_id":"evt_durable","stdout":{"text":"started\n","total_bytes":8,"total_lines":1,"returned_bytes":8,"truncated":false},"stderr":{"text":"","total_bytes":0,"total_lines":0,"returned_bytes":0,"truncated":false}}}`,
+		"",
+		`{"schema_version":1,"tool":"poll","status":"success","truncated":false,"error":null,"result":{"exit_code":0,"stdout":{"text":"done\n","total_bytes":13,"total_lines":2,"returned_bytes":5,"truncated":false},"stderr":{"text":"","total_bytes":0,"total_lines":0,"returned_bytes":0,"truncated":false}}}`,
+	}
+	executor := NewDaytonaHelperExecutorForClient(client)
+	prepared, err := executor.PrepareTool(context.Background(), ToolInvocation{
+		Target: ToolTarget{ProviderSandboxID: "provider_sandbox"}, ToolUseEventID: "evt_durable",
+		ToolName: "Bash", InputJSON: `{"command":"sleep 120","timeout":120000}`,
+	})
+	if err != nil {
+		t.Fatalf("PrepareTool: %v", err)
+	}
+	submitted, err := executor.SubmitPreparedTool(context.Background(), prepared)
+	if err != nil {
+		t.Fatalf("SubmitPreparedTool: %v", err)
+	}
+	if submitted.ForegroundObservation == nil || submitted.ForegroundObservation.Reference.Task.TaskID != "evt_durable" {
+		t.Fatalf("submission = %+v; want durable foreground command reference", submitted)
+	}
+	if len(client.fileSystem.uploads) != 1 {
+		t.Fatalf("uploads after submit = %d; want no poll before durable reference", len(client.fileSystem.uploads))
+	}
+	observed, err := executor.ObserveForegroundTool(context.Background(), *submitted.ForegroundObservation)
+	if err != nil {
+		t.Fatalf("ObserveForegroundTool: %v", err)
+	}
+	if observed.ForegroundObservation != nil || !strings.Contains(observed.ResultJSON, "started\\n") || !strings.Contains(observed.ResultJSON, "done\\n") {
+		t.Fatalf("observed = %+v; want terminal aggregate", observed)
+	}
+}
+
 func TestDaytonaRunToolCancelsHiddenForegroundBashTaskWhenPollContextCancels(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -928,6 +963,15 @@ func TestTerminalStatusFromResultUsesHelperContractVocabulary(t *testing.T) {
 			name: "failed signal",
 			raw:  `{"schema_version":1,"tool":"poll","status":"success","result":{"signal":"TERM"}}`,
 			want: "failed",
+		},
+		{
+			name: "lost task",
+			raw:  `{"schema_version":1,"tool":"poll","status":"error","error":{"kind":"task_lost","message":"task supervisor is not reachable"},"result":{}}`,
+			want: "failed",
+		},
+		{
+			name: "other helper error is not a terminal task observation",
+			raw:  `{"schema_version":1,"tool":"poll","status":"error","error":{"kind":"helper_failure","message":"helper is unavailable"},"result":{}}`,
 		},
 	}
 	for _, tc := range tests {

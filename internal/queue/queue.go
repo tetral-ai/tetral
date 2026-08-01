@@ -563,6 +563,29 @@ func FormatRuntimeInputDedupeKey(workspaceID workspace.ID, sessionID string, run
 	return "runtime_input:" + string(workspaceID) + ":" + sessionID + ":" + runtimeInputID
 }
 
+func NewTaskNotificationRuntimeInputEnqueueRequest(workspaceID workspace.ID, sessionID string, sessionThreadID string, taskID string, now time.Time) (EnqueueRequest, error) {
+	runtimeInputID := "task_notification:" + taskID
+	payload, err := json.Marshal(struct {
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+		InputKind       string   `json:"input_kind"`
+	}{string(workspaceID), sessionID, sessionThreadID, runtimeInputID, []string{}, 0, 0, "task_notification"})
+	if err != nil {
+		return EnqueueRequest{}, err
+	}
+	return EnqueueRequest{
+		ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindRuntimeInput,
+		PartitionKey:   FormatSessionPartitionKey(workspaceID, sessionID),
+		DedupeKey:      FormatRuntimeInputDedupeKey(workspaceID, sessionID, runtimeInputID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: DefaultMaxAttempts, Now: now,
+	}, nil
+}
+
 func FormatRuntimeConfigUpdateDedupeKey(workspaceID workspace.ID, sessionID string, configGeneration string) string {
 	return formatQueueDedupeKey(KindRuntimeConfigUpdate, workspaceID, sessionID, configGeneration)
 }
@@ -724,10 +747,7 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 	}
 	switch request.Kind {
 	case KindRuntimeInput:
-		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind", "preparation_attempt_id"}
-		if value, ok := payloadToken(rawPayload["preparation_attempt_id"]); !ok || value == "" {
-			return &ValidationError{Message: "runtime_input preparation_attempt_id is invalid"}
-		}
+		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind"}
 		if err := validatePayloadKeys(rawPayload, runtimeInputKeys...); err != nil {
 			return err
 		}

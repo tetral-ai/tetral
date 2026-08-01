@@ -137,6 +137,26 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 			errorKind = "sandbox_materialization_attempts_exhausted"
 			errorMessage = "sandbox materialization attempt budget exhausted"
 		}
+	case queue.KindSandboxBackgroundReconcile, queue.KindSandboxBackgroundCommand:
+		identity, err := decodeBackgroundQueueIdentity(
+			candidate.WorkspaceID.String(), candidate.Kind, candidate.PartitionKey, candidate.DedupeKey,
+		)
+		if err != nil {
+			return false, err
+		}
+		if candidate.Kind == queue.KindSandboxBackgroundReconcile {
+			finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
+				return finalizeExhaustedBackgroundReconcileTx(ctx, tx, identity, now)
+			}
+			errorKind = "sandbox_background_reconcile_attempts_exhausted"
+			errorMessage = "sandbox background reconcile attempt budget exhausted"
+		} else {
+			finalizeBusiness = func(ctx context.Context, tx *dbconnect.Tx) error {
+				return finalizeExhaustedBackgroundCommandTx(ctx, tx, identity, now)
+			}
+			errorKind = "sandbox_background_command_attempts_exhausted"
+			errorMessage = "sandbox background command attempt budget exhausted"
+		}
 	default:
 		return false, errors.New("sandbox over-limit job kind is not owned by an installed finalizer")
 	}

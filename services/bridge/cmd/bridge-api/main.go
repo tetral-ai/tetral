@@ -111,7 +111,6 @@ func run(ctx context.Context, env envReader) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, fmt.Errorf("blob store: %w", err))
 	}
 	sandboxExecutor := agentruntimebridge.NewSandboxDriverToolExecutor(executor)
-	store.SandboxToolExecutor = sandboxExecutor
 	store.AttachmentBlobStore = blobStore
 	store.FileBlobStore = blobStore
 	store.OutputCapturer = outputcapture.NewCapturer(blobStore, sandboxExecutor)

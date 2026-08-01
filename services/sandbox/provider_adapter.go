@@ -121,6 +121,7 @@ type ProviderAdapter interface {
 	MaterializeResources(context.Context, MaterializationRequest) ProviderOutcome[MaterializationResult]
 	PrepareTool(context.Context, ToolExecutionRequest) ProviderOutcome[ToolPreparationResult]
 	ExecuteTool(context.Context, ToolExecutionRequest) ProviderOutcome[sandboxdriver.ToolExecution]
+	ObserveTool(context.Context, sandboxdriver.ForegroundCommandObservation) ProviderOutcome[sandboxdriver.ToolExecution]
 	Release(context.Context, ReleaseRequest) ProviderOutcome[ReleaseResult]
 }
 
@@ -161,6 +162,51 @@ type DaytonaSandboxResolver interface {
 type DaytonaToolExecutor interface {
 	PrepareTool(context.Context, sandboxdriver.ToolInvocation) (sandboxdriver.PreparedToolExecution, error)
 	ExecutePreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error)
+	SubmitPreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error)
+	ObserveForegroundTool(context.Context, sandboxdriver.ForegroundCommandObservation) (sandboxdriver.ToolExecution, error)
+	ReadCommandResult(context.Context, sandboxdriver.CommandReference) (sandboxdriver.CommandResult, error)
+	SendCommandInput(context.Context, sandboxdriver.CommandInput) (sandboxdriver.CommandResult, error)
+	CancelCommand(context.Context, sandboxdriver.CommandCancel) (sandboxdriver.CommandResult, error)
+}
+
+func (a *DaytonaAdapter) PollBackground(ctx context.Context, reference sandboxdriver.CommandReference) ProviderOutcome[sandboxdriver.CommandResult] {
+	if a == nil || a.Tools == nil {
+		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_configuration_invalid", "daytona background command adapter is unavailable")
+	}
+	result, err := a.Tools.ReadCommandResult(ctx, reference)
+	if err != nil {
+		return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderProvedNotStarted)
+	}
+	return normalizeBackgroundCommandResult(result)
+}
+
+func (a *DaytonaAdapter) SendBackgroundInput(ctx context.Context, input sandboxdriver.CommandInput) ProviderOutcome[sandboxdriver.CommandResult] {
+	if a == nil || a.Tools == nil {
+		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_configuration_invalid", "daytona background command adapter is unavailable")
+	}
+	result, err := a.Tools.SendCommandInput(ctx, input)
+	if err != nil {
+		return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderOutcomeUnknown)
+	}
+	return normalizeBackgroundCommandResult(result)
+}
+
+func (a *DaytonaAdapter) CancelBackground(ctx context.Context, cancel sandboxdriver.CommandCancel) ProviderOutcome[sandboxdriver.CommandResult] {
+	if a == nil || a.Tools == nil {
+		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_configuration_invalid", "daytona background command adapter is unavailable")
+	}
+	result, err := a.Tools.CancelCommand(ctx, cancel)
+	if err != nil {
+		return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderOutcomeUnknown)
+	}
+	return normalizeBackgroundCommandResult(result)
+}
+
+func normalizeBackgroundCommandResult(result sandboxdriver.CommandResult) ProviderOutcome[sandboxdriver.CommandResult] {
+	if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
+		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_response_malformed", "daytona returned a malformed background command result")
+	}
+	return ProviderOutcome[sandboxdriver.CommandResult]{Value: result}
 }
 
 // DaytonaResourceMaterialization owns Daytona-specific credentials, mounts,
@@ -296,7 +342,7 @@ func (a *DaytonaAdapter) ExecuteTool(ctx context.Context, request ToolExecutionR
 	if !ok {
 		return terminalProviderFailure[sandboxdriver.ToolExecution]("provider_request_invalid", "daytona tool execution requires a prepared payload")
 	}
-	result, err := a.Tools.ExecutePreparedTool(ctx, prepared.value)
+	result, err := a.Tools.SubmitPreparedTool(ctx, prepared.value)
 	if err != nil {
 		return ProviderOutcome[sandboxdriver.ToolExecution]{
 			EffectBoundary: ProviderOutcomeUnknown,
@@ -311,6 +357,29 @@ func (a *DaytonaAdapter) ExecuteTool(ctx context.Context, request ToolExecutionR
 			Disposition:    ProviderTerminal,
 			ErrorKind:      "provider_response_malformed",
 			SafeMessage:    "daytona returned a malformed tool result",
+		}
+	}
+	return ProviderOutcome[sandboxdriver.ToolExecution]{Value: result}
+}
+
+func (a *DaytonaAdapter) ObserveTool(ctx context.Context, observation sandboxdriver.ForegroundCommandObservation) ProviderOutcome[sandboxdriver.ToolExecution] {
+	if a == nil || a.Tools == nil {
+		return terminalProviderFailure[sandboxdriver.ToolExecution]("provider_configuration_invalid", "daytona tool observation is unavailable")
+	}
+	if observation.Reference.Target.ProviderSandboxID == "" ||
+		observation.Reference.Task.TaskID == "" || observation.Reference.Task.ProviderCommandID == "" {
+		return terminalProviderFailure[sandboxdriver.ToolExecution]("provider_response_malformed", "daytona command reference is malformed")
+	}
+	result, err := a.Tools.ObserveForegroundTool(ctx, observation)
+	if err != nil {
+		return outcomeFromProviderError[sandboxdriver.ToolExecution](err, ProviderSubmitted)
+	}
+	if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
+		return ProviderOutcome[sandboxdriver.ToolExecution]{
+			EffectBoundary: ProviderSubmitted,
+			Disposition:    ProviderTerminal,
+			ErrorKind:      "provider_response_malformed",
+			SafeMessage:    "daytona returned a malformed observed tool result",
 		}
 	}
 	return ProviderOutcome[sandboxdriver.ToolExecution]{Value: result}

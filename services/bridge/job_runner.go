@@ -492,15 +492,14 @@ func DecodeRuntimeJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 
 func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	var payload struct {
-		WorkspaceID          string   `json:"workspace_id"`
-		SessionID            string   `json:"session_id"`
-		SessionThreadID      string   `json:"session_thread_id"`
-		RuntimeInputID       string   `json:"runtime_input_id"`
-		PreparationAttemptID string   `json:"preparation_attempt_id"`
-		EventIDs             []string `json:"event_ids"`
-		SequenceFrom         int64    `json:"sequence_from"`
-		SequenceTo           int64    `json:"sequence_to"`
-		InputKind            string   `json:"input_kind"`
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+		InputKind       string   `json:"input_kind"`
 	}
 	if err := json.Unmarshal([]byte(queueJob.GetPayloadJson()), &payload); err != nil {
 		return RuntimeJob{}, err
@@ -508,7 +507,7 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 	if payload.WorkspaceID == "" || payload.WorkspaceID != queueJob.GetWorkspaceId() {
 		return RuntimeJob{}, errors.New("payload workspace_id must match queue job")
 	}
-	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" || payload.SessionID == "" || payload.SessionThreadID == "" || payload.RuntimeInputID == "" || payload.PreparationAttemptID == "" {
+	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" || payload.SessionID == "" || payload.SessionThreadID == "" || payload.RuntimeInputID == "" {
 		return RuntimeJob{}, errors.New("runtime input payload has missing identity fields")
 	}
 	eventless := payload.InputKind == "task_notification" || payload.InputKind == "agent_mail"
@@ -523,22 +522,21 @@ func decodeRuntimeInputJob(queueJob *queuev1.QueueJob) (RuntimeJob, error) {
 		return RuntimeJob{}, err
 	}
 	return RuntimeJob{
-		JobID:                queueJob.GetId(),
-		LeaseToken:           queueJob.GetLeaseToken(),
-		Kind:                 queue.KindRuntimeInput,
-		WorkspaceID:          payload.WorkspaceID,
-		SessionID:            payload.SessionID,
-		SessionThreadID:      payload.SessionThreadID,
-		RuntimeInputID:       payload.RuntimeInputID,
-		PreparationAttemptID: payload.PreparationAttemptID,
-		EventIDs:             append([]string(nil), payload.EventIDs...),
-		SequenceFrom:         payload.SequenceFrom,
-		SequenceTo:           payload.SequenceTo,
-		InputKind:            payload.InputKind,
-		CommandKind:          commandKind,
-		PayloadJSON:          queueJob.GetPayloadJson(),
-		AttemptCount:         queueJob.GetAttemptCount(),
-		MaxAttempts:          queueJob.GetMaxAttempts(),
+		JobID:           queueJob.GetId(),
+		LeaseToken:      queueJob.GetLeaseToken(),
+		Kind:            queue.KindRuntimeInput,
+		WorkspaceID:     payload.WorkspaceID,
+		SessionID:       payload.SessionID,
+		SessionThreadID: payload.SessionThreadID,
+		RuntimeInputID:  payload.RuntimeInputID,
+		EventIDs:        append([]string(nil), payload.EventIDs...),
+		SequenceFrom:    payload.SequenceFrom,
+		SequenceTo:      payload.SequenceTo,
+		InputKind:       payload.InputKind,
+		CommandKind:     commandKind,
+		PayloadJSON:     queueJob.GetPayloadJson(),
+		AttemptCount:    queueJob.GetAttemptCount(),
+		MaxAttempts:     queueJob.GetMaxAttempts(),
 	}, nil
 }
 

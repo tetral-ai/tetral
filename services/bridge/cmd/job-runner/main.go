@@ -69,13 +69,6 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
 	}
 	defer func() { _ = queueConn.Close() }()
-	bridgeReader, bridgeConn, err := agentruntimebridge.DialBridgeAPITaskNotificationReader(cfg.BridgeAPIGRPCAddress, internalgrpcauth.FileTokenSource{
-		Path: cfg.BridgeAPITokenPath,
-	})
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
-	}
-	defer func() { _ = bridgeConn.Close() }()
 	visibilityConfig, err := enginekubernetes.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
@@ -109,7 +102,6 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 					database.Client,
 					logger,
 					cfg,
-					bridgeReader,
 					kubernetesCache.BindingVisibilitySnapshot,
 				),
 				Sender: agentruntimebridge.NewRuntimePodCommandClient(internalgrpcauth.FileTokenSource{

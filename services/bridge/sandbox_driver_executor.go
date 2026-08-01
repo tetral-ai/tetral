@@ -24,45 +24,6 @@ func NewSandboxDriverToolExecutor(driver sandboxdriver.ToolExecutor) *SandboxDri
 	return &SandboxDriverToolExecutor{Driver: driver}
 }
 
-func (e *SandboxDriverToolExecutor) CheckHealth(ctx context.Context, target SandboxToolTarget) error {
-	return e.Driver.CheckHealth(ctx, toDriverTarget(target))
-}
-
-func (e *SandboxDriverToolExecutor) ReadCommandResult(ctx context.Context, reference SandboxCommandReference) (SandboxCommandResult, error) {
-	result, err := e.Driver.ReadCommandResult(ctx, sandboxdriver.CommandReference{
-		Target:          toDriverTarget(reference.Target),
-		Task:            toDriverBackgroundTask(reference.Task),
-		ToolUseEventID:  reference.ToolUseEventID,
-		MaxOutputTokens: reference.MaxOutputTokens,
-	})
-	return fromDriverCommandResult(result), err
-}
-
-func (e *SandboxDriverToolExecutor) SendCommandInput(ctx context.Context, input SandboxCommandInput) (SandboxCommandResult, error) {
-	result, err := e.Driver.SendCommandInput(ctx, sandboxdriver.CommandInput{
-		CommandReference: sandboxdriver.CommandReference{
-			Target:          toDriverTarget(input.Target),
-			Task:            toDriverBackgroundTask(input.Task),
-			ToolUseEventID:  input.ToolUseEventID,
-			MaxOutputTokens: input.MaxOutputTokens,
-		},
-		InputJSON: input.InputJSON,
-	})
-	return fromDriverCommandResult(result), err
-}
-
-func (e *SandboxDriverToolExecutor) CancelCommand(ctx context.Context, cancel SandboxCommandCancel) (SandboxCommandResult, error) {
-	result, err := e.Driver.CancelCommand(ctx, sandboxdriver.CommandCancel{
-		CommandReference: sandboxdriver.CommandReference{
-			Target:         toDriverTarget(cancel.Target),
-			Task:           toDriverBackgroundTask(cancel.Task),
-			ToolUseEventID: cancel.ToolUseEventID,
-		},
-		Reason: cancel.Reason,
-	})
-	return fromDriverCommandResult(result), err
-}
-
 func (e *SandboxDriverToolExecutor) ScanOutputs(ctx context.Context, target outputcapture.SandboxOutputTarget) (outputcapture.SandboxOutputScan, error) {
 	capturer, ok := e.Driver.(sandboxdriver.OutputCapturer)
 	if !ok {
@@ -146,31 +107,4 @@ func toDriverTarget(target SandboxToolTarget) sandboxdriver.ToolTarget {
 		ProviderSandboxID: target.ProviderSandboxID,
 		ResourceRootsJSON: target.ResourceRootsJSON,
 	}
-}
-
-func toDriverBackgroundTask(task SandboxBackgroundTask) sandboxdriver.BackgroundTask {
-	return sandboxdriver.BackgroundTask{
-		TaskID:                      task.TaskID,
-		SourceToolUseEventID:        task.SourceToolUseEventID,
-		ProviderSessionID:           task.ProviderSessionID,
-		ProviderCommandID:           task.ProviderCommandID,
-		ProviderCommandMetadataJSON: task.ProviderCommandMetadataJSON,
-	}
-}
-
-func fromDriverBackgroundTask(task *sandboxdriver.BackgroundTask) *SandboxBackgroundTask {
-	if task == nil {
-		return nil
-	}
-	return &SandboxBackgroundTask{
-		TaskID:                      task.TaskID,
-		SourceToolUseEventID:        task.SourceToolUseEventID,
-		ProviderSessionID:           task.ProviderSessionID,
-		ProviderCommandID:           task.ProviderCommandID,
-		ProviderCommandMetadataJSON: task.ProviderCommandMetadataJSON,
-	}
-}
-
-func fromDriverCommandResult(result sandboxdriver.CommandResult) SandboxCommandResult {
-	return SandboxCommandResult{ResultJSON: result.ResultJSON, TerminalStatus: result.TerminalStatus}
 }

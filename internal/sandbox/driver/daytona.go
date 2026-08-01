@@ -231,6 +231,72 @@ func (e *DaytonaHelperExecutor) ExecutePreparedTool(ctx context.Context, prepare
 	return ToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: backgroundTask}, nil
 }
 
+// SubmitPreparedTool invokes the user-facing helper command once and returns
+// immediately with durable observation state when a foreground task remains
+// running. Callers must persist that state before polling it.
+func (e *DaytonaHelperExecutor) SubmitPreparedTool(ctx context.Context, prepared PreparedToolExecution) (ToolExecution, error) {
+	if prepared.immediateResult != nil {
+		return *prepared.immediateResult, nil
+	}
+	result, err := e.executePreparedHelper(ctx, prepared.process, prepared.helperCommand, prepared.payloadPath)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	if prepared.pollUntilTerminal {
+		return newForegroundCommandSubmission(prepared.target, prepared.toolUseEventID, protocol.Limits{
+			VisibleBytes: prepared.visibleBytes,
+			VisibleLines: prepared.visibleLines,
+		}, result)
+	}
+	var backgroundTask *BackgroundTask
+	if prepared.helperCommand == helperSubcommandExec {
+		backgroundTask = synthesizeHelperBackgroundTask(prepared.target, result)
+	}
+	return ToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: backgroundTask}, nil
+}
+
+func newForegroundCommandSubmission(target ToolTarget, sourceToolUseEventID string, limits protocol.Limits, first helperResult) (ToolExecution, error) {
+	task := synthesizeHelperBackgroundTask(target, first)
+	if task == nil {
+		return ToolExecution{ResultJSON: first.ResultJSON}, nil
+	}
+	accumulator := newForegroundCommandAccumulator(limits.VisibleBytes, limits.VisibleLines)
+	resultJSON, err := accumulator.add(first.ResultJSON)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	observation := accumulator.observation(CommandReference{
+		Target:          target,
+		Task:            *task,
+		ToolUseEventID:  sourceToolUseEventID,
+		MaxOutputTokens: limits.VisibleBytes / 4,
+	}, limits)
+	return ToolExecution{ResultJSON: resultJSON, ForegroundObservation: &observation}, nil
+}
+
+// ObserveForegroundTool performs one observation call for a previously
+// submitted foreground command. A running response returns updated durable
+// state; a terminal response returns the complete bounded aggregate.
+func (e *DaytonaHelperExecutor) ObserveForegroundTool(ctx context.Context, observation ForegroundCommandObservation) (ToolExecution, error) {
+	result, err := e.ReadCommandResult(ctx, observation.Reference)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	accumulator := foregroundCommandAccumulatorFromObservation(observation)
+	resultJSON, err := accumulator.add(result.ResultJSON)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	if result.TerminalStatus != "" {
+		return ToolExecution{ResultJSON: resultJSON}, nil
+	}
+	next := accumulator.observation(observation.Reference, protocol.Limits{
+		VisibleBytes: observation.Limits.VisibleBytes,
+		VisibleLines: observation.Limits.VisibleLines,
+	})
+	return ToolExecution{ResultJSON: resultJSON, ForegroundObservation: &next}, nil
+}
+
 func (e *DaytonaHelperExecutor) pollForegroundTaskUntilTerminal(ctx context.Context, target ToolTarget, sourceToolUseEventID string, limits protocol.Limits, first helperResult) (ToolExecution, error) {
 	taskID := runningTaskIDFromResult(first.ResultJSON)
 	if taskID == "" {
@@ -305,6 +371,25 @@ func newForegroundCommandAccumulator(visibleBytes int, visibleLines int) *foregr
 	}
 }
 
+func foregroundCommandAccumulatorFromObservation(observation ForegroundCommandObservation) *foregroundCommandAccumulator {
+	return &foregroundCommandAccumulator{
+		stdout: foregroundStreamAccumulatorFromObservation(observation.Stdout, observation.Limits),
+		stderr: foregroundStreamAccumulatorFromObservation(observation.Stderr, observation.Limits),
+	}
+}
+
+func (a *foregroundCommandAccumulator) observation(reference CommandReference, limits protocol.Limits) ForegroundCommandObservation {
+	return ForegroundCommandObservation{
+		Reference: reference,
+		Stdout:    a.stdout.observation(),
+		Stderr:    a.stderr.observation(),
+		Limits: ForegroundObservationLimits{
+			VisibleBytes: limits.VisibleBytes,
+			VisibleLines: limits.VisibleLines,
+		},
+	}
+}
+
 func (a *foregroundCommandAccumulator) add(resultJSON string) (string, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(resultJSON), &envelope); err != nil {
@@ -372,6 +457,28 @@ func newForegroundStreamAccumulator(visibleBytes int, visibleLines int) *foregro
 		visibleLines = helperVisibleLines
 	}
 	return &foregroundStreamAccumulator{visibleBytes: visibleBytes, visibleLines: visibleLines}
+}
+
+func foregroundStreamAccumulatorFromObservation(state ForegroundStreamObservationState, limits ForegroundObservationLimits) *foregroundStreamAccumulator {
+	accumulator := newForegroundStreamAccumulator(limits.VisibleBytes, limits.VisibleLines)
+	accumulator.head = append([]byte(nil), state.Head...)
+	accumulator.tail = append([]byte(nil), state.Tail...)
+	accumulator.capturedBytes = state.CapturedBytes
+	accumulator.totalBytes = state.TotalBytes
+	accumulator.totalLines = state.TotalLines
+	accumulator.truncated = state.Truncated
+	return accumulator
+}
+
+func (a *foregroundStreamAccumulator) observation() ForegroundStreamObservationState {
+	return ForegroundStreamObservationState{
+		Head:          append([]byte(nil), a.head...),
+		Tail:          append([]byte(nil), a.tail...),
+		CapturedBytes: a.capturedBytes,
+		TotalBytes:    a.totalBytes,
+		TotalLines:    a.totalLines,
+		Truncated:     a.truncated,
+	}
 }
 
 func (a *foregroundStreamAccumulator) add(latest foregroundStreamSnapshot) foregroundStreamSnapshot {
@@ -917,7 +1024,7 @@ func stripProviderMetadataValue(value any) any {
 //	result.cancelled = true                          "cancelled"
 //	result.timed_out = true                          "expired"
 //	result.exit_code = 0                            "completed"
-//	result.exit_code != 0, or result.signal set      "failed"
+//	result.exit_code != 0, result.signal set, or task_lost "failed"
 //	otherwise, including unparseable JSON            ""
 //
 // cancelled outranks timed_out, which outranks the exit_code/signal split, so a
@@ -925,6 +1032,9 @@ func stripProviderMetadataValue(value any) any {
 func terminalStatusFromResult(resultJSON string) string {
 	var payload struct {
 		Status string `json:"status"`
+		Error  *struct {
+			Kind string `json:"kind"`
+		} `json:"error"`
 		Result struct {
 			ExitCode  *int    `json:"exit_code"`
 			Signal    *string `json:"signal"`
@@ -944,7 +1054,7 @@ func terminalStatusFromResult(resultJSON string) string {
 		return "expired"
 	case payload.Result.ExitCode != nil && *payload.Result.ExitCode == 0:
 		return "completed"
-	case payload.Result.ExitCode != nil || payload.Result.Signal != nil:
+	case payload.Result.ExitCode != nil || payload.Result.Signal != nil || payload.Error != nil && payload.Error.Kind == protocol.ErrorKindTaskLost:
 		return "failed"
 	default:
 		return ""

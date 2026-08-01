@@ -909,7 +909,7 @@ func TestRuntimeInputTaskNotificationDoesNotRequirePublicEvents(t *testing.T) {
 	job := runtimeInputQueueJob()
 	job.AttemptCount = 3
 	job.MaxAttempts = 5
-	job.PayloadJson = `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_task","event_ids":[],"input_kind":"task_notification","preparation_attempt_id":"prep_1"}`
+	job.PayloadJson = `{"workspace_id":"ws_bridge","session_id":"sesn_1","session_thread_id":"thr_1","runtime_input_id":"rin_task","event_ids":[],"input_kind":"task_notification"}`
 	decoded, err := DecodeRuntimeJob(job)
 	if err != nil {
 		t.Fatalf("DecodeRuntimeJob task_notification: %v", err)

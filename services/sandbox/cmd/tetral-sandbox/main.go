@@ -107,6 +107,7 @@ func run(ctx context.Context, env envReader) error {
 	workspaceStore := workspace.NewStore(openResult.RawDatabaseForExcludedStores)
 	executionCoordinator := tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(openResult.Client, cfg.ResourceCredentialRefreshMargin)
 	lifecycleStore := tetralsandbox.NewPostgreSQLSandboxLifecycleStore(openResult.Client, store, cfg.ResourceCredentialRefreshMargin)
+	backgroundCommandStore := tetralsandbox.NewPostgreSQLSandboxBackgroundCommandStore(openResult.Client)
 	overLimitFinalizer := tetralsandbox.NewPostgreSQLSandboxQueueOverLimitFinalizer(openResult.Client)
 	environmentStore := tetralsandbox.NewEnvironmentArtifactStore(openResult.Client)
 	overLimitLoopCtx, cancelOverLimitLoop := context.WithCancel(ctx)
@@ -143,6 +144,34 @@ func run(ctx context.Context, env envReader) error {
 					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval, PreparationTimeout: cfg.PreparationCommandTimeout,
 					LateCommandMargin: cfg.LateCommandMargin,
+				},
+			}).RunOnceWithActivity(cycleCtx)
+		})
+	}()
+	backgroundReconcileLoopCtx, cancelBackgroundReconcileLoop := context.WithCancel(ctx)
+	defer cancelBackgroundReconcileLoop()
+	go func() {
+		_ = tetralsandbox.RunWorkspaceConsumerLoop(backgroundReconcileLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+			return (&tetralsandbox.SandboxBackgroundReconcileJobRunner{
+				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
+				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
+					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
+					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
+					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
+				},
+			}).RunOnceWithActivity(cycleCtx)
+		})
+	}()
+	backgroundCommandLoopCtx, cancelBackgroundCommandLoop := context.WithCancel(ctx)
+	defer cancelBackgroundCommandLoop()
+	go func() {
+		_ = tetralsandbox.RunWorkspaceConsumerLoop(backgroundCommandLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+			return (&tetralsandbox.SandboxBackgroundCommandJobRunner{
+				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
+				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
+					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
+					MaxJobs: cfg.SessionPrepareConcurrency, LeaseDuration: cfg.SessionPrepareLeaseDuration,
+					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
 		})

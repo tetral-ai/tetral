@@ -2,8 +2,10 @@ package tetralsandbox
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,6 +130,154 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerRollsBackWhenQueueObservationCh
 	}
 	if executionState != "pending" || queueStatus != queue.StatusPending {
 		t.Fatalf("execution/Queue state = %s/%s; want pending/pending after rollback", executionState, queueStatus)
+	}
+}
+
+func TestPostgreSQLSandboxQueueOverLimitFinalizerAdvancesBackgroundReconcileWithDeadLetter(t *testing.T) {
+	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
+	now := time.Now().UTC().Add(time.Minute)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	candidate := reclaimBackgroundQueueJobAtBudget(t, adminDB, queueStore, queue.KindSandboxBackgroundReconcile, now)
+
+	updated, err := NewPostgreSQLSandboxQueueOverLimitFinalizer(client).FinalizePendingAtOrOverBudget(context.Background(), candidate, now)
+	if err != nil || !updated {
+		t.Fatalf("FinalizePendingAtOrOverBudget = (%t,%v); want true,nil", updated, err)
+	}
+
+	var generation int64
+	var nextPoll time.Time
+	if err := adminDB.QueryRow(`SELECT reconcile_generation, next_poll_at FROM session_background_tasks
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND task_id='task_execution'`).Scan(&generation, &nextPoll); err != nil {
+		t.Fatalf("read background task: %v", err)
+	}
+	if generation != 2 || nextPoll.Sub(now.Add(SandboxBackgroundOutageRetryBackoff)).Abs() >= time.Microsecond {
+		t.Fatalf("background task generation/next poll = %d/%v; want 2/%v", generation, nextPoll, now.Add(SandboxBackgroundOutageRetryBackoff))
+	}
+	var oldStatus string
+	if err := adminDB.QueryRow(`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, candidate.WorkspaceID, candidate.JobID).Scan(&oldStatus); err != nil {
+		t.Fatalf("read exhausted Queue job: %v", err)
+	}
+	if oldStatus != queue.StatusDeadLettered {
+		t.Fatalf("exhausted Queue status = %q; want dead_lettered", oldStatus)
+	}
+	var createdAt, availableAt time.Time
+	if err := adminDB.QueryRow(`SELECT created_at, available_at FROM queue_jobs
+		WHERE workspace_id='ws_execution_store' AND kind=$1 AND dedupe_key=$2`,
+		queue.KindSandboxBackgroundReconcile,
+		queue.FormatSandboxBackgroundReconcileDedupeKey("ws_execution_store", "sesn_execution_store", "task_execution", 2),
+	).Scan(&createdAt, &availableAt); err != nil {
+		t.Fatalf("read successor Queue job: %v", err)
+	}
+	if createdAt.Sub(now).Abs() >= time.Microsecond || availableAt.Sub(now.Add(SandboxBackgroundOutageRetryBackoff)).Abs() >= time.Microsecond {
+		t.Fatalf("successor Queue times = created %v available %v; want %v/%v", createdAt, availableAt, now, now.Add(SandboxBackgroundOutageRetryBackoff))
+	}
+}
+
+func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesSubmittedBackgroundCommandUnknown(t *testing.T) {
+	runtimeDB, adminDB := newReleaseHandlerTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
+	now := time.Now().UTC().Add(time.Minute)
+	requestID := "request_background_submitted"
+	seedBackgroundCommandReceipt(t, adminDB, requestID, "stdin", "submitted", now.Add(-time.Minute))
+	if _, err := adminDB.Exec(`UPDATE queue_jobs SET status='acknowledged', acknowledged_at=$1, updated_at=$1
+		WHERE workspace_id='ws_execution_store' AND kind=$2`, now, queue.KindSandboxBackgroundReconcile); err != nil {
+		t.Fatalf("close seed reconcile job: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	job, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: "ws_execution_store", Kind: queue.KindSandboxBackgroundCommand,
+		PartitionKey:   queue.FormatSandboxBackgroundPartitionKey("ws_execution_store", "sesn_execution_store", "task_execution"),
+		DedupeKey:      queue.FormatSandboxBackgroundCommandDedupeKey("ws_execution_store", "sesn_execution_store", "task_execution", requestID),
+		PayloadVersion: 1,
+		PayloadJSON:    []byte(`{"workspace_id":"ws_execution_store","session_id":"sesn_execution_store","task_id":"task_execution","request_id":"request_background_submitted"}`),
+		MaxAttempts:    1, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("enqueue background command: %v", err)
+	}
+	candidate := reclaimQueueJobAtBudget(t, queueStore, job.ID, queue.KindSandboxBackgroundCommand, now)
+
+	updated, err := NewPostgreSQLSandboxQueueOverLimitFinalizer(client).FinalizePendingAtOrOverBudget(context.Background(), candidate, now.Add(3*time.Second))
+	if err != nil || !updated {
+		t.Fatalf("FinalizePendingAtOrOverBudget = (%t,%v); want true,nil", updated, err)
+	}
+	var operationState, resultJSON, queueStatus string
+	if err := adminDB.QueryRow(`SELECT background_operation_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND session_thread_id='thr_execution_store' AND tool_use_event_id='evt_background_submitted'`).Scan(&operationState, &resultJSON); err != nil {
+		t.Fatalf("read background operation: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, candidate.WorkspaceID, candidate.JobID).Scan(&queueStatus); err != nil {
+		t.Fatalf("read Queue job: %v", err)
+	}
+	if operationState != "terminal" || queueStatus != queue.StatusDeadLettered || !strings.Contains(resultJSON, `"kind":"sandbox_background_outcome_unknown"`) {
+		t.Fatalf("background operation/Queue = %s/%s result %s; want terminal/dead_lettered unknown outcome", operationState, queueStatus, resultJSON)
+	}
+	var taskStatus string
+	if err := adminDB.QueryRow(`SELECT status FROM session_background_tasks
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND task_id='task_execution'`).Scan(&taskStatus); err != nil {
+		t.Fatalf("read background task: %v", err)
+	}
+	if taskStatus != "running" {
+		t.Fatalf("background task status = %q; explicit command exhaustion must not terminalize it", taskStatus)
+	}
+}
+
+func reclaimBackgroundQueueJobAtBudget(t *testing.T, adminDB *sql.DB, queueStore *queue.PostgreSQLQueueStore, kind string, now time.Time) queue.PendingAtOrOverBudgetJob {
+	t.Helper()
+	var jobID string
+	if err := adminDB.QueryRow(`UPDATE queue_jobs SET max_attempts=1, available_at=$2, updated_at=$2
+		WHERE workspace_id='ws_execution_store' AND kind=$1 RETURNING id`, kind, now).Scan(&jobID); err != nil {
+		t.Fatalf("prepare background Queue job: %v", err)
+	}
+	return reclaimQueueJobAtBudget(t, queueStore, jobID, kind, now)
+}
+
+func reclaimQueueJobAtBudget(t *testing.T, queueStore *queue.PostgreSQLQueueStore, jobID string, kind string, now time.Time) queue.PendingAtOrOverBudgetJob {
+	t.Helper()
+	ctx := context.Background()
+	leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
+		WorkspaceID: "ws_execution_store", Kinds: []string{kind}, LeaseOwner: "sandbox-background-test",
+		MaxJobs: 1, LeaseDuration: time.Second, Now: now,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != jobID {
+		t.Fatalf("Lease = %#v err %v; want %s", leased, err, jobID)
+	}
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: "ws_execution_store", Limit: 1, Now: now.Add(2 * time.Second),
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("ReclaimExpiredLeases = (%d,%v); want 1,nil", reclaimed, err)
+	}
+	candidates, err := queueStore.ListPendingAtOrOverBudget(ctx, queue.ListPendingAtOrOverBudgetRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListPendingAtOrOverBudget: %v", err)
+	}
+	for _, candidate := range candidates {
+		if candidate.JobID == jobID {
+			return candidate
+		}
+	}
+	t.Fatalf("over-limit candidate %s not found", jobID)
+	return queue.PendingAtOrOverBudgetJob{}
+}
+
+func seedBackgroundCommandReceipt(t *testing.T, adminDB *sql.DB, requestID string, kind string, state string, now time.Time) {
+	t.Helper()
+	if _, err := adminDB.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, background_write_sequence,
+		created_at, updated_at
+	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store','evt_background_submitted','sandbox_background',
+		'hash_background_submitted','write_stdin','{}','committed',$1,$2,$3,'task_execution',0,1,$4,$4)`,
+		kind, state, requestID, now); err != nil {
+		t.Fatalf("seed background command receipt: %v", err)
 	}
 }
 

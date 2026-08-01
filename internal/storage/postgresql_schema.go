@@ -547,22 +547,33 @@ const (
 		session_thread_id TEXT NOT NULL,
 		task_id TEXT NOT NULL,
 		source_tool_use_event_id TEXT NOT NULL,
-		binding_id TEXT NOT NULL,
+		binding_id TEXT,
 		sandbox_id TEXT NOT NULL,
+		provider TEXT NOT NULL DEFAULT 'daytona',
+		binding_revision BIGINT NOT NULL DEFAULT 1,
 		provider_session_id TEXT NOT NULL,
 		provider_command_id TEXT NOT NULL,
 		provider_command_metadata_json TEXT NOT NULL DEFAULT '{}',
+		resource_roots_json TEXT NOT NULL DEFAULT '[]',
 		stdin_write_sequence BIGINT NOT NULL DEFAULT 0,
 		status TEXT NOT NULL,
+		terminal_result_json TEXT,
+		terminal_result_digest TEXT,
 		terminal_event_id TEXT,
+		reconcile_generation BIGINT NOT NULL DEFAULT 1,
+		next_poll_at TIMESTAMPTZ,
+		release_operation_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		terminal_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, session_id, task_id),
 		UNIQUE (workspace_id, session_id, source_tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'cancelled_by_cleanup', 'stale')),
+		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'unknown_outcome', 'cancelled_by_cleanup', 'stale')),
 		CONSTRAINT session_background_tasks_stdin_write_sequence_shape CHECK (stdin_write_sequence >= 0),
+		CONSTRAINT session_background_tasks_binding_revision_shape CHECK (binding_revision > 0),
+		CONSTRAINT session_background_tasks_reconcile_generation_shape CHECK (reconcile_generation > 0),
+		CONSTRAINT session_background_tasks_resource_roots_shape CHECK (jsonb_typeof(resource_roots_json::jsonb) = 'array'),
 		CONSTRAINT session_background_tasks_provider_metadata_shape CHECK (
 			jsonb_typeof(provider_command_metadata_json::jsonb) = 'object'
 			AND octet_length(convert_to(provider_command_metadata_json, 'UTF8')) <= 4096
@@ -580,21 +591,33 @@ const (
 		sequence_from BIGINT,
 		sequence_to BIGINT,
 		status TEXT NOT NULL,
-		binding_id TEXT NOT NULL,
-		binding_generation BIGINT NOT NULL,
-		target_pod_uid TEXT NOT NULL,
+		binding_id TEXT,
+		binding_generation BIGINT,
+		target_pod_uid TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection')),
-		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
+		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('queued', 'delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
 			OR (sequence_from IS NOT NULL AND sequence_to IS NOT NULL AND sequence_from <= sequence_to)
 		),
-		CONSTRAINT session_runtime_inbox_generation_shape CHECK (binding_generation > 0)
+		CONSTRAINT session_runtime_inbox_binding_shape CHECK (
+			(status = 'queued' AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+			OR (status IN ('delivering', 'accepted', 'parked', 'committed')
+				AND binding_id IS NOT NULL AND binding_id <> ''
+				AND binding_generation IS NOT NULL AND binding_generation > 0
+				AND target_pod_uid IS NOT NULL AND target_pod_uid <> '')
+			OR (status IN ('cancelled', 'dead_lettered') AND (
+				(binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+				OR (binding_id IS NOT NULL AND binding_id <> ''
+					AND binding_generation IS NOT NULL AND binding_generation > 0
+					AND target_pod_uid IS NOT NULL AND target_pod_uid <> '')
+			))
+		)
 	)`
 
 	// session_event_idempotency_keys stores hashed idempotency state for accepted
@@ -764,6 +787,15 @@ const (
 		helper_recovery_count INTEGER NOT NULL DEFAULT 0,
 		background_task_started BOOLEAN NOT NULL DEFAULT FALSE,
 		task_id TEXT,
+		background_operation_kind TEXT,
+		background_operation_state TEXT,
+		background_request_id TEXT,
+		background_task_id TEXT,
+		background_max_output_tokens INTEGER,
+		background_write_sequence BIGINT,
+		background_cancel_request_id TEXT,
+		background_cancel_input_json TEXT,
+		background_cancel_result_json TEXT,
 		memory_projection_state TEXT,
 		mcp_claim_status TEXT NOT NULL DEFAULT 'stored',
 		mcp_claim_owner_request_id TEXT,
@@ -773,7 +805,7 @@ const (
 		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, consumed_by_terminal_event_id) REFERENCES session_events(workspace_id, event_id),
-		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'memory', 'mcp')),
+		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'sandbox_background', 'memory', 'mcp')),
 		CONSTRAINT session_runtime_tool_results_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
 		CONSTRAINT session_runtime_tool_results_execution_state_shape CHECK (
 			execution_state IS NULL OR execution_state IN (
@@ -789,7 +821,20 @@ const (
 				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> ''
 				AND execution_state IS NOT NULL
 				AND execution_attempt_generation IS NOT NULL)
-			OR (tool_kind <> 'sandbox_tool'
+			OR (tool_kind = 'sandbox_background'
+				AND model_tool_call_id IS NULL
+				AND execution_state IS NULL
+				AND execution_attempt_generation IS NULL
+				AND waiting_activation_operation_id IS NULL
+				AND waiting_materialization_operation_id IS NULL
+				AND authorized_binding_revision IS NULL
+				AND authorized_provider_resource_id IS NULL
+				AND preparation_deadline IS NULL
+				AND provider_command_reference_json IS NULL
+				AND helper_recovery_count = 0
+				AND background_task_started = FALSE
+				AND task_id IS NULL)
+			OR (tool_kind IN ('memory', 'mcp')
 				AND result_json IS NOT NULL
 				AND model_tool_call_id IS NULL
 				AND execution_state IS NULL
@@ -810,13 +855,46 @@ const (
 				AND background_task_started = FALSE
 				AND task_id IS NULL)
 		),
+		CONSTRAINT session_runtime_tool_results_background_operation_shape CHECK (
+			(tool_kind = 'sandbox_background'
+				AND background_operation_kind IN ('poll', 'stdin')
+				AND background_operation_state IN ('pending', 'submitted', 'terminal')
+				AND background_request_id IS NOT NULL AND background_request_id <> ''
+				AND background_task_id IS NOT NULL AND background_task_id <> ''
+				AND background_max_output_tokens IS NOT NULL AND background_max_output_tokens >= 0
+				AND (background_write_sequence IS NULL OR background_write_sequence > 0)
+				AND (background_cancel_request_id IS NULL OR background_cancel_request_id <> ''))
+			OR (tool_kind <> 'sandbox_background'
+				AND background_operation_kind IS NULL
+				AND background_operation_state IS NULL
+				AND background_request_id IS NULL
+				AND background_task_id IS NULL
+				AND background_max_output_tokens IS NULL
+				AND background_write_sequence IS NULL
+				AND background_cancel_request_id IS NULL
+				AND background_cancel_input_json IS NULL
+				AND background_cancel_result_json IS NULL)
+		),
 		CONSTRAINT session_runtime_tool_results_cancellation_shape CHECK (
-			(cancel_requested_at IS NULL AND cancel_state IS NULL AND cancel_submitted_at IS NULL)
-			OR (cancel_requested_at IS NOT NULL AND cancel_state = 'pending' AND cancel_submitted_at IS NULL)
-			OR (cancel_requested_at IS NOT NULL AND cancel_state = 'submitted' AND cancel_submitted_at IS NOT NULL)
+			(cancel_requested_at IS NULL AND cancel_state IS NULL AND cancel_submitted_at IS NULL
+				AND background_cancel_request_id IS NULL AND background_cancel_input_json IS NULL AND background_cancel_result_json IS NULL)
+			OR (tool_kind = 'sandbox_tool' AND cancel_requested_at IS NOT NULL
+				AND cancel_state = 'pending' AND cancel_submitted_at IS NULL
+				AND background_cancel_request_id IS NULL AND background_cancel_input_json IS NULL AND background_cancel_result_json IS NULL)
+			OR (tool_kind = 'sandbox_tool' AND cancel_requested_at IS NOT NULL
+				AND cancel_state = 'submitted' AND cancel_submitted_at IS NOT NULL
+				AND background_cancel_request_id IS NULL AND background_cancel_input_json IS NULL AND background_cancel_result_json IS NULL)
+			OR (tool_kind = 'sandbox_background' AND cancel_requested_at IS NOT NULL AND cancel_state = 'pending' AND cancel_submitted_at IS NULL
+				AND background_cancel_request_id IS NOT NULL AND background_cancel_input_json IS NOT NULL)
+			OR (tool_kind = 'sandbox_background' AND cancel_requested_at IS NOT NULL AND cancel_state = 'submitted' AND cancel_submitted_at IS NOT NULL
+				AND background_cancel_request_id IS NOT NULL AND background_cancel_input_json IS NOT NULL)
+			OR (tool_kind = 'sandbox_background' AND cancel_requested_at IS NOT NULL AND cancel_state = 'terminal' AND cancel_submitted_at IS NOT NULL
+				AND background_cancel_request_id IS NOT NULL AND background_cancel_input_json IS NOT NULL
+				AND background_cancel_result_json IS NOT NULL)
 		),
 		CONSTRAINT session_runtime_tool_results_consumption_shape CHECK (
-			tool_kind <> 'sandbox_tool' OR (
+			(tool_kind NOT IN ('sandbox_tool', 'sandbox_background')) OR (
+			tool_kind = 'sandbox_tool' AND (
 				(execution_state IN ('pending', 'preparing', 'running', 'waiting_activation', 'waiting_materialization')
 					AND result_json IS NULL AND result_digest IS NULL
 					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
@@ -829,7 +907,20 @@ const (
 					AND consumption_reason IN (
 						'conversation_tool_result', 'pod_lost', 'runtime_terminated', 'cleanup_wait_expired'
 					))
-			)
+			)) OR (tool_kind = 'sandbox_background' AND (
+				(background_operation_state IN ('pending', 'submitted')
+					AND result_json IS NULL AND result_digest IS NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (background_operation_state = 'terminal' AND result_json IS NOT NULL
+					AND result_digest IS NOT NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (background_operation_state = 'terminal' AND result_json IS NULL
+					AND result_digest IS NOT NULL
+					AND consumed_by_terminal_event_id IS NOT NULL
+					AND consumption_reason IN (
+						'conversation_tool_result', 'pod_lost', 'runtime_terminated', 'cleanup_wait_expired'
+					))
+			))
 		),
 		CONSTRAINT session_runtime_tool_results_helper_recovery_shape CHECK (helper_recovery_count >= 0 AND helper_recovery_count <= 1),
 		CONSTRAINT session_runtime_tool_results_memory_projection_state_shape CHECK (

@@ -79,9 +79,10 @@ const (
 	bridgeOpSettleSealedAgentMail          = "settle_sealed_agent_mail"
 	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
 
-	bridgeToolKindSandbox = "sandbox_tool"
-	bridgeToolKindMemory  = "memory"
-	bridgeToolKindMCP     = "mcp"
+	bridgeToolKindSandbox           = "sandbox_tool"
+	bridgeToolKindSandboxBackground = "sandbox_background"
+	bridgeToolKindMemory            = "memory"
+	bridgeToolKindMCP               = "mcp"
 
 	// mcpClaimLeaseTTL bounds an MCP tool-call reservation. Derivation: the
 	// 120s MCP call timeout plus margin, so a connector crash mid-call cannot
@@ -150,7 +151,6 @@ type PostgreSQLBridgeAPIStore struct {
 	Client                          *dbconnect.Client
 	Logger                          *slog.Logger
 	Clock                           func() time.Time
-	SandboxToolExecutor             SandboxToolExecutor
 	OutputCapturer                  OutputCapturer
 	AttachmentBlobStore             blob.BlobStore
 	FileBlobStore                   blob.BlobStore
@@ -178,13 +178,6 @@ type transientAttachmentGCRow struct {
 	PreviousStatus string
 }
 
-type SandboxToolExecutor interface {
-	CheckHealth(context.Context, SandboxToolTarget) error
-	ReadCommandResult(context.Context, SandboxCommandReference) (SandboxCommandResult, error)
-	SendCommandInput(context.Context, SandboxCommandInput) (SandboxCommandResult, error)
-	CancelCommand(context.Context, SandboxCommandCancel) (SandboxCommandResult, error)
-}
-
 type OutputCapturer interface {
 	CaptureOutputs(context.Context, *dbconnect.Tx, outputcapture.Request) (outputcapture.Result, error)
 }
@@ -203,37 +196,6 @@ type SandboxToolTarget struct {
 	ProviderSandboxID    string
 	PreparationAttemptID string
 	ResourceRootsJSON    string
-}
-
-type SandboxBackgroundTask struct {
-	TaskID                      string
-	SourceToolUseEventID        string
-	ProviderSessionID           string
-	ProviderCommandID           string
-	ProviderCommandMetadataJSON string
-}
-
-type SandboxCommandReference struct {
-	Target          SandboxToolTarget
-	Task            SandboxBackgroundTask
-	OwnerRequestID  string
-	ToolUseEventID  string
-	MaxOutputTokens int
-}
-
-type SandboxCommandInput struct {
-	SandboxCommandReference
-	InputJSON string
-}
-
-type SandboxCommandCancel struct {
-	SandboxCommandReference
-	Reason string
-}
-
-type SandboxCommandResult struct {
-	ResultJSON     string
-	TerminalStatus string
 }
 
 type MemoryProjectionRefresh struct {
