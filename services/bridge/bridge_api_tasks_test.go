@@ -125,9 +125,9 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt
 	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
 	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
 	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, terminalEventID, 2, "agent.tool_result", `{"tool_use_id":"`+toolUseEventID+`"}`)
-	requestID, _, _ := readCommandResultOwnerIdentity(toolUseEventID, taskID, false, 0)
+	requestID, _, _ := readCommandResultOwnerIdentity(toolUseEventID, taskID, 0)
 	inputJSON, err := marshalBridgeJSON(map[string]any{
-		"task_id": taskID, "max_output_tokens": 0, "defer_terminal_settlement": false,
+		"task_id": taskID, "max_output_tokens": 0,
 	})
 	if err != nil {
 		t.Fatalf("marshal poll input: %v", err)

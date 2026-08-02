@@ -1014,7 +1014,6 @@ export interface AwaitSandboxExecutionResponse {
 export interface ReadCommandResultRequest {
   scope: RuntimeScope | undefined;
   taskId: string;
-  deferTerminalSettlement: boolean;
   maxOutputTokens: number;
   toolUseEventId: string;
 }
@@ -10672,7 +10671,7 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
 };
 
 function createBaseReadCommandResultRequest(): ReadCommandResultRequest {
-  return { scope: undefined, taskId: "", deferTerminalSettlement: false, maxOutputTokens: 0, toolUseEventId: "" };
+  return { scope: undefined, taskId: "", maxOutputTokens: 0, toolUseEventId: "" };
 }
 
 export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
@@ -10682,9 +10681,6 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
     }
     if (message.taskId !== "") {
       writer.uint32(18).string(message.taskId);
-    }
-    if (message.deferTerminalSettlement !== false) {
-      writer.uint32(24).bool(message.deferTerminalSettlement);
     }
     if (message.maxOutputTokens !== 0) {
       writer.uint32(32).int32(message.maxOutputTokens);
@@ -10716,14 +10712,6 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
           }
 
           message.taskId = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.deferTerminalSettlement = reader.bool();
           continue;
         }
         case 4: {
@@ -10759,11 +10747,6 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
         : isSet(object.task_id)
         ? globalThis.String(object.task_id)
         : "",
-      deferTerminalSettlement: isSet(object.deferTerminalSettlement)
-        ? globalThis.Boolean(object.deferTerminalSettlement)
-        : isSet(object.defer_terminal_settlement)
-        ? globalThis.Boolean(object.defer_terminal_settlement)
-        : false,
       maxOutputTokens: isSet(object.maxOutputTokens)
         ? globalThis.Number(object.maxOutputTokens)
         : isSet(object.max_output_tokens)
@@ -10785,9 +10768,6 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
     if (message.taskId !== "") {
       obj.taskId = message.taskId;
     }
-    if (message.deferTerminalSettlement !== false) {
-      obj.deferTerminalSettlement = message.deferTerminalSettlement;
-    }
     if (message.maxOutputTokens !== 0) {
       obj.maxOutputTokens = Math.round(message.maxOutputTokens);
     }
@@ -10806,7 +10786,6 @@ export const ReadCommandResultRequest: MessageFns<ReadCommandResultRequest> = {
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.taskId = object.taskId ?? "";
-    message.deferTerminalSettlement = object.deferTerminalSettlement ?? false;
     message.maxOutputTokens = object.maxOutputTokens ?? 0;
     message.toolUseEventId = object.toolUseEventId ?? "";
     return message;

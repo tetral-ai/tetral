@@ -380,7 +380,6 @@ export class RuntimePodToolRunner {
           const response = await readCommandResult(this.bridgeClient, {
             scope: commandScope,
             taskId,
-            deferTerminalSettlement: false,
             maxOutputTokens,
             toolUseEventId: request.toolUseEventId,
           }, metadata, request.abortSignal);

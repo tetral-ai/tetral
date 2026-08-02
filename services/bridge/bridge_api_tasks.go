@@ -230,13 +230,11 @@ func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, reques
 	requestID, _, _ := readCommandResultOwnerIdentity(
 		request.GetToolUseEventId(),
 		request.GetTaskId(),
-		request.GetDeferTerminalSettlement(),
 		maxOutputTokens,
 	)
 	scope := copyRuntimeScopeWithRequestID(request.GetScope(), requestID)
 	inputJSON, err := marshalBridgeJSON(map[string]any{
 		"task_id": request.GetTaskId(), "max_output_tokens": maxOutputTokens,
-		"defer_terminal_settlement": request.GetDeferTerminalSettlement(),
 	})
 	if err != nil {
 		return nil, err
@@ -566,7 +564,7 @@ func backgroundCommandReceiptID(requestID string) string {
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, scope *bridgev1.RuntimeScope, receiptID string) (commandOperationResult, error) {
-	ticker := time.NewTicker(runToolResultPollInterval)
+	ticker := time.NewTicker(runtimeToolResultPollInterval)
 	defer ticker.Stop()
 	for {
 		var result commandOperationResult
@@ -659,11 +657,10 @@ func positiveInt32(value int32) int {
 	return int(value)
 }
 
-func readCommandResultOwnerIdentity(sourceToolUseEventID string, taskID string, deferTerminalSettlement bool, maxOutputTokens int) (string, string, string) {
+func readCommandResultOwnerIdentity(sourceToolUseEventID string, taskID string, maxOutputTokens int) (string, string, string) {
 	digest := sha256.Sum256([]byte("command-followup:" + sourceToolUseEventID))
 	requestID := "req_" + hex.EncodeToString(digest[:])[:32]
-	payload := "defer_terminal_settlement=" + strconv.FormatBool(deferTerminalSettlement) +
-		";max_output_tokens=" + strconv.Itoa(maxOutputTokens)
+	payload := "max_output_tokens=" + strconv.Itoa(maxOutputTokens)
 	key := requestID + ":" + taskID + ":" + bridgeRequestHash(payload)[:32]
 	return requestID, key, payload
 }

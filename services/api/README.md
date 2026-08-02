@@ -405,7 +405,7 @@ never added through `POST /resources`) are covered above.
   pattern is one PostgreSQL transaction containing both the business rows and the
   `queue_jobs` rows: an admitted `user.message` writes its events and the
   `runtime_input` job together; environment admission enqueues
-	`environment_build`; Session delete writes the tombstone,
+  `environment_build`; Session delete writes the tombstone,
   cleanup identity, and Sandbox release request atomically.
 - **Invariant.** Runtime input never depends on Sandbox readiness. Session create
   records the Environment and resource declarations but does not allocate or

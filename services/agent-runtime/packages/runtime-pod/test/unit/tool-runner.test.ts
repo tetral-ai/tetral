@@ -789,7 +789,6 @@ describe("RuntimePodToolRunner", () => {
           requestId: stableTestId("req", "command-followup:sevt_tool_poll"),
         }),
         taskId: "task_1",
-        deferTerminalSettlement: false,
         maxOutputTokens: 123,
         toolUseEventId: "sevt_tool_poll",
       }),

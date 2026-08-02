@@ -397,8 +397,7 @@ replacement must preserve, and the conformance suites that prove it.
 
 - **Contract.** `internal/kubernetes` and `internal/internalgrpc/auth` are
   engine-root shared packages — they live at the repository root, not under
-  `services/bridge/`, whose own `internal/` holds only
-  `outputcapture`; the bridge consumes them but does not own them.
+  `services/bridge/`; the bridge consumes them but does not own them.
   `internal/kubernetes` owns Pod and EndpointSlice visibility clients
   (`VisibilityClient`: list/watch) and a `WatcherCache` that the Job Runner
   consumes via `BindingVisibilitySnapshot`. It holds no control-plane

@@ -5888,14 +5888,13 @@ func (x *AwaitSandboxExecutionResponse) GetResultDigest() string {
 }
 
 type ReadCommandResultRequest struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	Scope                   *RuntimeScope          `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
-	TaskId                  string                 `protobuf:"bytes,2,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	DeferTerminalSettlement bool                   `protobuf:"varint,3,opt,name=defer_terminal_settlement,json=deferTerminalSettlement,proto3" json:"defer_terminal_settlement,omitempty"`
-	MaxOutputTokens         int32                  `protobuf:"varint,4,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
-	ToolUseEventId          string                 `protobuf:"bytes,5,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Scope           *RuntimeScope          `protobuf:"bytes,1,opt,name=scope,proto3" json:"scope,omitempty"`
+	TaskId          string                 `protobuf:"bytes,2,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	MaxOutputTokens int32                  `protobuf:"varint,4,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
+	ToolUseEventId  string                 `protobuf:"bytes,5,opt,name=tool_use_event_id,json=toolUseEventId,proto3" json:"tool_use_event_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReadCommandResultRequest) Reset() {
@@ -5940,13 +5939,6 @@ func (x *ReadCommandResultRequest) GetTaskId() string {
 		return x.TaskId
 	}
 	return ""
-}
-
-func (x *ReadCommandResultRequest) GetDeferTerminalSettlement() bool {
-	if x != nil {
-		return x.DeferTerminalSettlement
-	}
-	return false
 }
 
 func (x *ReadCommandResultRequest) GetMaxOutputTokens() int32 {
@@ -6862,11 +6854,10 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"resultJson\x126\n" +
 	"\x17background_task_started\x18\x02 \x01(\bR\x15backgroundTaskStarted\x12\x17\n" +
 	"\atask_id\x18\x03 \x01(\tR\x06taskId\x12#\n" +
-	"\rresult_digest\x18\x04 \x01(\tR\fresultDigest\"\xfc\x01\n" +
+	"\rresult_digest\x18\x04 \x01(\tR\fresultDigest\"\xc0\x01\n" +
 	"\x18ReadCommandResultRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12\x17\n" +
-	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12:\n" +
-	"\x19defer_terminal_settlement\x18\x03 \x01(\bR\x17deferTerminalSettlement\x12*\n" +
+	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12*\n" +
 	"\x11max_output_tokens\x18\x04 \x01(\x05R\x0fmaxOutputTokens\x12)\n" +
 	"\x11tool_use_event_id\x18\x05 \x01(\tR\x0etoolUseEventId\"p\n" +
 	"\x19ReadCommandResultResponse\x122\n" +

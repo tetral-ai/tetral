@@ -394,6 +394,7 @@ func TestSandboxToolExecutionRunnerCancelsForegroundObservationWait(t *testing.T
 			t.Fatalf("NewProviderRegistry: %v", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		adapter.onObserve = cancel
 		runner := &SandboxToolExecutionJobRunner{
 			Queue:       &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}},

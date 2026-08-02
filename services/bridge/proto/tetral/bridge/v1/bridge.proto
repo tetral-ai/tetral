@@ -668,7 +668,6 @@ message AwaitSandboxExecutionResponse {
 message ReadCommandResultRequest {
   RuntimeScope scope = 1;
   string task_id = 2;
-  bool defer_terminal_settlement = 3;
   int32 max_output_tokens = 4;
   string tool_use_event_id = 5;
 }

@@ -31,8 +31,8 @@ import (
 
 const (
 	sandboxToolExecuteMaxAttempts = 5
-	runToolResultPollInterval     = 25 * time.Millisecond
-	runToolWaitAttemptTimeout     = 30 * time.Second
+	runtimeToolResultPollInterval = 25 * time.Millisecond
+	sandboxExecutionWaitTimeout   = 30 * time.Second
 )
 
 // AcceptSandboxExecution durably transfers one already-authored Tool Use to
@@ -334,9 +334,9 @@ func sandboxExecutionIdentityMatches(existing runtimeToolResult, request sandbox
 }
 
 func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request sandboxExecutionRequest) (runtimeToolResult, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, runToolWaitAttemptTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, sandboxExecutionWaitTimeout)
 	defer cancel()
-	ticker := time.NewTicker(runToolResultPollInterval)
+	ticker := time.NewTicker(runtimeToolResultPollInterval)
 	defer ticker.Stop()
 	for {
 		var stored runtimeToolResult
