@@ -65,12 +65,15 @@ func TestPostgreSQLSandboxExecutionSettlementRollsBackAfterQueueAuthorityExpires
 func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	seedSandboxExecutionStoreRows(t, adminDB, "evt_execution_c", "evt_execution_d")
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
 
 	works := []SandboxExecutionWork{
 		loadSandboxExecutionWork(t, coordinator, "evt_execution_a"),
 		loadSandboxExecutionWork(t, coordinator, "evt_execution_b"),
+		loadSandboxExecutionWork(t, coordinator, "evt_execution_c"),
+		loadSandboxExecutionWork(t, coordinator, "evt_execution_d"),
 	}
 	start := make(chan struct{})
 	errs := make(chan error, len(works))
@@ -93,7 +96,7 @@ func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *
 		}
 	}
 
-	var bindingCount, operationCount, queueCount int
+	var bindingCount, operationCount, queueCount, waiterCount int
 	if err := adminDB.QueryRow(`SELECT count(*) FROM session_sandbox_bindings
 		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`).Scan(&bindingCount); err != nil {
 		t.Fatalf("count binding rows: %v", err)
@@ -107,8 +110,13 @@ func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *
 		WHERE workspace_id = 'ws_execution_store' AND kind = 'sandbox_activate'`).Scan(&queueCount); err != nil {
 		t.Fatalf("count activation Queue rows: %v", err)
 	}
-	if bindingCount != 1 || operationCount != 1 || queueCount != 1 {
-		t.Fatalf("binding/operation/queue counts = %d/%d/%d; want 1/1/1", bindingCount, operationCount, queueCount)
+	if err := adminDB.QueryRow(`SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'
+		  AND waiting_activation_operation_id IS NOT NULL`).Scan(&waiterCount); err != nil {
+		t.Fatalf("count activation waiters: %v", err)
+	}
+	if bindingCount != 1 || operationCount != 1 || queueCount != 1 || waiterCount != 4 {
+		t.Fatalf("binding/operation/queue/waiter counts = %d/%d/%d/%d; want 1/1/1/4", bindingCount, operationCount, queueCount, waiterCount)
 	}
 	rows, err := adminDB.Query(`SELECT DISTINCT waiting_activation_operation_id
 		FROM session_runtime_tool_results
@@ -742,7 +750,13 @@ func seedSandboxExecutionStoreFixture(t *testing.T, db *sql.DB) {
 	)`, now); err != nil {
 		t.Fatalf("seed session thread: %v", err)
 	}
-	for _, eventID := range []string{"evt_execution_a", "evt_execution_b"} {
+	seedSandboxExecutionStoreRows(t, db, "evt_execution_a", "evt_execution_b")
+}
+
+func seedSandboxExecutionStoreRows(t *testing.T, db *sql.DB, eventIDs ...string) {
+	t.Helper()
+	now := "2026-07-31T00:00:00Z"
+	for _, eventID := range eventIDs {
 		if _, err := db.Exec(`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,6 +75,61 @@ func TestRunWorkspaceConsumerLoopResetsBackoffAfterActiveFailedPoll(t *testing.T
 	}
 	if want := []time.Duration{time.Second, 2 * time.Second, time.Second}; !reflect.DeepEqual(delays, want) {
 		t.Fatalf("poll delays = %v; want active failure to reset backoff to %v", delays, want)
+	}
+}
+
+func TestRunWorkspaceConsumerGroupExposesSharedBoundedConcurrency(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool, err := NewWorkspaceConsumerPool(3)
+	if err != nil {
+		t.Fatalf("NewWorkspaceConsumerPool: %v", err)
+	}
+	entered := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var once sync.Once
+	consumer := func(ctx context.Context, _ workspace.ID) (bool, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		select {
+		case <-release:
+			once.Do(cancel)
+			return true, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWorkspaceConsumerGroup(ctx, 6, pool, sandboxStaticWorkspaceLister{"ws_alpha"}, time.Millisecond, consumer)
+	}()
+	for range 3 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("consumer group did not expose the configured worker capacity")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("consumer group exceeded the shared worker capacity")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunWorkspaceConsumerGroup error = %v; want context cancellation", err)
+	}
+	if maximum.Load() != 3 {
+		t.Fatalf("maximum active consumers = %d; want 3", maximum.Load())
 	}
 }
 

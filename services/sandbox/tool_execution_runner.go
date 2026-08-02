@@ -168,6 +168,30 @@ func (r *SandboxToolExecutionJobRunner) RunOnceWithActivity(ctx context.Context)
 	return hadWork, nil
 }
 
+// RunSandboxToolExecutionConsumerGroup composes the production Sandbox Tool
+// execution runner with long-lived contenders sharing the process-wide worker
+// pool. Each contender receives a worker slot before it can lease one job.
+func RunSandboxToolExecutionConsumerGroup(
+	ctx context.Context,
+	contenders int,
+	pool *WorkspaceConsumerPool,
+	lister WorkspaceLister,
+	pollInterval time.Duration,
+	queueClient SandboxQueueClient,
+	coordinator SandboxExecutionCoordinator,
+	providers *ProviderRegistry,
+	media SandboxMediaMaterializer,
+	config SandboxToolExecutionRunnerConfig,
+) error {
+	return RunWorkspaceConsumerGroup(ctx, contenders, pool, lister, pollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		workspaceConfig := config
+		workspaceConfig.WorkspaceID = workspaceID.String()
+		return (&SandboxToolExecutionJobRunner{
+			Queue: queueClient, Coordinator: coordinator, Providers: providers, Media: media, Config: workspaceConfig,
+		}).RunOnceWithActivity(cycleCtx)
+	})
+}
+
 func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxToolExecutionRunnerConfig, localExpiry time.Time) (resultErr error) {
 	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
 	if err != nil {

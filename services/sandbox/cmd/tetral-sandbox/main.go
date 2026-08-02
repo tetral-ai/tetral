@@ -32,35 +32,6 @@ type osEnv struct{}
 
 func (osEnv) Getenv(key string) string { return os.Getenv(key) }
 
-type sandboxWorkerPool struct {
-	slots chan struct{}
-}
-
-func newSandboxWorkerPool(size int) *sandboxWorkerPool {
-	return &sandboxWorkerPool{slots: make(chan struct{}, size)}
-}
-
-func (p *sandboxWorkerPool) run(ctx context.Context, work func(context.Context) (bool, error)) (bool, error) {
-	select {
-	case p.slots <- struct{}{}:
-		defer func() { <-p.slots }()
-		return work(ctx)
-	case <-ctx.Done():
-		return false, ctx.Err()
-	}
-}
-
-func pooledWorkspaceConsumer(
-	pool *sandboxWorkerPool,
-	consume func(context.Context, workspace.ID) (bool, error),
-) func(context.Context, workspace.ID) (bool, error) {
-	return func(ctx context.Context, workspaceID workspace.ID) (bool, error) {
-		return pool.run(ctx, func(workerCtx context.Context) (bool, error) {
-			return consume(workerCtx, workspaceID)
-		})
-	}
-}
-
 func main() {
 	if err := run(context.Background(), osEnv{}); err != nil {
 		os.Exit(1)
@@ -113,7 +84,10 @@ func run(ctx context.Context, env envReader) error {
 	outputCaptureStore := tetralsandbox.NewPostgreSQLSandboxOutputCaptureStore(openResult.Client)
 	overLimitFinalizer := tetralsandbox.NewPostgreSQLSandboxQueueOverLimitFinalizer(openResult.Client)
 	environmentStore := tetralsandbox.NewEnvironmentArtifactStore(openResult.Client)
-	workerPool := newSandboxWorkerPool(cfg.WorkerConcurrency)
+	workerPool, err := tetralsandbox.NewWorkspaceConsumerPool(cfg.WorkerConcurrency)
+	if err != nil {
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+	}
 	overLimitLoopCtx, cancelOverLimitLoop := context.WithCancel(ctx)
 	defer cancelOverLimitLoop()
 	go tetralsandbox.RunSandboxQueueOverLimitLoop(overLimitLoopCtx, &tetralsandbox.SandboxQueueOverLimitReconciler{
@@ -140,7 +114,7 @@ func run(ctx context.Context, env envReader) error {
 	outputCaptureLoopCtx, cancelOutputCaptureLoop := context.WithCancel(ctx)
 	defer cancelOutputCaptureLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(outputCaptureLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxOutputCaptureJobRunner{
 				Queue: queueClient, Store: outputCaptureStore, Providers: providerRegistry, BlobStore: providerAdapter.BlobStore, Logger: logger,
 				Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
@@ -149,12 +123,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	outputCaptureCleanupLoopCtx, cancelOutputCaptureCleanupLoop := context.WithCancel(ctx)
 	defer cancelOutputCaptureCleanupLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureCleanupLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(outputCaptureCleanupLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxOutputCaptureCleanupRunner{
 				Queue: queueClient, Store: outputCaptureStore, BlobStore: providerAdapter.BlobStore,
 				Config: tetralsandbox.SandboxOutputCaptureRunnerConfig{
@@ -163,7 +137,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	outputCaptureSweepLoopCtx, cancelOutputCaptureSweepLoop := context.WithCancel(ctx)
 	defer cancelOutputCaptureSweepLoop()
@@ -176,22 +150,20 @@ func run(ctx context.Context, env envReader) error {
 	executionLoopCtx, cancelExecutionLoop := context.WithCancel(ctx)
 	defer cancelExecutionLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(executionLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
-			return (&tetralsandbox.SandboxToolExecutionJobRunner{
-				Queue: queueClient, Coordinator: executionCoordinator, Providers: providerRegistry, Media: mediaMaterializer,
-				Config: tetralsandbox.SandboxToolExecutionRunnerConfig{
-					WorkspaceID: workspaceID.String(), LeaseOwner: tetralsandbox.ServiceName,
-					MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
-					HeartbeatInterval: cfg.LeaseHeartbeatInterval, PreparationTimeout: cfg.ProviderCommandTimeout,
-					LateCommandMargin: cfg.LateCommandMargin,
-				},
-			}).RunOnceWithActivity(cycleCtx)
-		}))
+		_ = tetralsandbox.RunSandboxToolExecutionConsumerGroup(
+			executionLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval,
+			queueClient, executionCoordinator, providerRegistry, mediaMaterializer,
+			tetralsandbox.SandboxToolExecutionRunnerConfig{
+				LeaseOwner: tetralsandbox.ServiceName, MaxJobs: 1, LeaseDuration: cfg.JobLeaseDuration,
+				HeartbeatInterval: cfg.LeaseHeartbeatInterval, PreparationTimeout: cfg.ProviderCommandTimeout,
+				LateCommandMargin: cfg.LateCommandMargin,
+			},
+		)
 	}()
 	cancellationLoopCtx, cancelCancellationLoop := context.WithCancel(ctx)
 	defer cancelCancellationLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(cancellationLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(cancellationLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxToolCancelJobRunner{
 				Queue: queueClient, Store: executionCoordinator, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
@@ -200,12 +172,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	backgroundReconcileLoopCtx, cancelBackgroundReconcileLoop := context.WithCancel(ctx)
 	defer cancelBackgroundReconcileLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(backgroundReconcileLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(backgroundReconcileLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxBackgroundReconcileJobRunner{
 				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
@@ -214,12 +186,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	backgroundCommandLoopCtx, cancelBackgroundCommandLoop := context.WithCancel(ctx)
 	defer cancelBackgroundCommandLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(backgroundCommandLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(backgroundCommandLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxBackgroundCommandJobRunner{
 				Queue: queueClient, Store: backgroundCommandStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxBackgroundRunnerConfig{
@@ -228,12 +200,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	memoryProjectionLoopCtx, cancelMemoryProjectionLoop := context.WithCancel(ctx)
 	defer cancelMemoryProjectionLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(memoryProjectionLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(memoryProjectionLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxMemoryProjectionJobRunner{
 				Queue: queueClient, Store: memoryProjectionStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxMemoryProjectionRunnerConfig{
@@ -242,12 +214,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	activationLoopCtx, cancelActivationLoop := context.WithCancel(ctx)
 	defer cancelActivationLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(activationLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(activationLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxActivationJobRunner{
 				Queue: queueClient, Store: lifecycleStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
@@ -256,12 +228,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	materializationLoopCtx, cancelMaterializationLoop := context.WithCancel(ctx)
 	defer cancelMaterializationLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(materializationLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(materializationLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxMaterializationJobRunner{
 				Queue: queueClient, Store: lifecycleStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
@@ -270,12 +242,12 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	releaseLoopCtx, cancelReleaseLoop := context.WithCancel(ctx)
 	defer cancelReleaseLoop()
 	go func() {
-		_ = tetralsandbox.RunWorkspaceConsumerLoop(releaseLoopCtx, workspaceStore, cfg.JobPollInterval, pooledWorkspaceConsumer(workerPool, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+		_ = tetralsandbox.RunWorkspaceConsumerGroup(releaseLoopCtx, cfg.WorkerConcurrency, workerPool, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			return (&tetralsandbox.SandboxReleaseJobRunner{
 				Queue: queueClient, Store: lifecycleStore, Providers: providerRegistry,
 				Config: tetralsandbox.SandboxLifecycleRunnerConfig{
@@ -284,7 +256,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		}))
+		})
 	}()
 	environmentReadyFanoutLoopCtx, cancelEnvironmentReadyFanoutLoop := context.WithCancel(ctx)
 	defer cancelEnvironmentReadyFanoutLoop()

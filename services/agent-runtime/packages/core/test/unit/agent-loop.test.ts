@@ -7019,13 +7019,14 @@ Previous anchored summary.
     expect(maxActive).toBe(1);
   });
 
-  test("serializes shared-message Tool Use declarations without serializing safe execution", async () => {
+  test("serializes one shared-message declaration stream while four safe tools execute independently", async () => {
     const session = new Session("sesn_tool_declaration_order");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const firstDeclarationArrived = deferred<void>();
     const releaseFirstDeclaration = deferred<void>();
     const releaseExecutions = deferred<void>();
     const declarations: SessionEventEnvelope[] = [];
+    const settlements: SessionEventEnvelope[] = [];
     const executions: string[] = [];
     let activeExecutions = 0;
     let maxActiveExecutions = 0;
@@ -7044,6 +7045,8 @@ Previous anchored summary.
             firstDeclarationArrived.resolve(undefined);
             await releaseFirstDeclaration.promise;
           }
+        } else if (envelope.event.type === "agent.tool_result") {
+          settlements.push(envelope);
         }
         return await baseWriter.append(envelope);
       },
@@ -7056,6 +7059,12 @@ Previous anchored summary.
       }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
         writer,
         events: [
+          { type: "reasoning-start", id: "reasoning-1" },
+          { type: "reasoning-delta", id: "reasoning-1", text_delta: "first completed reasoning part" },
+          { type: "reasoning-end", id: "reasoning-1" },
+          { type: "reasoning-start", id: "reasoning-2" },
+          { type: "reasoning-delta", id: "reasoning-2", text_delta: "second completed reasoning part" },
+          { type: "reasoning-end", id: "reasoning-2" },
           {
             type: "tool-call",
             id: "tool-1",
@@ -7069,6 +7078,20 @@ Previous anchored summary.
             toolName: "Read",
             input: { file_path: "src/b.ts" },
             inputPreview: { value: { file_path: "src/b.ts" }, preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+          },
+          {
+            type: "tool-call",
+            id: "tool-3",
+            toolName: "Read",
+            input: { file_path: "src/c.ts", query: "x".repeat(9_000) },
+            inputPreview: { preview: "x".repeat(8_192), truncated: true },
+          },
+          {
+            type: "tool-call",
+            id: "tool-4",
+            toolName: "Read",
+            input: { file_path: "src/d.ts" },
+            inputPreview: { value: { file_path: "src/d.ts" }, preview: "{\"file_path\":\"src/d.ts\"}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -7091,16 +7114,22 @@ Previous anchored summary.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(declarations).toHaveLength(1);
     releaseFirstDeclaration.resolve(undefined);
-    await waitForCondition(() => executions.length === 2, "parallel safe tool execution");
-    expect(executions).toEqual(["tool-1", "tool-2"]);
-    expect(maxActiveExecutions).toBe(2);
+    await waitForCondition(() => executions.length === 4, "four parallel safe tool executions");
+    expect(executions).toEqual(["tool-1", "tool-2", "tool-3", "tool-4"]);
+    expect(maxActiveExecutions).toBe(4);
     releaseExecutions.resolve(undefined);
 
     expect(await runPromise).toMatchObject({ type: "completed" });
+    expect(settlements).toHaveLength(4);
     const toolCallIds = declarations.map((envelope) =>
       envelope.drafts[0]?.parts.filter((part) => part.type === "tool").map((part) => part.toolCallId)
     );
-    expect(toolCallIds).toEqual([["tool-1"], ["tool-1", "tool-2"]]);
+    expect(toolCallIds).toEqual([
+      ["tool-1"],
+      ["tool-1", "tool-2"],
+      ["tool-1", "tool-2", "tool-3"],
+      ["tool-1", "tool-2", "tool-3", "tool-4"],
+    ]);
   });
 
   test("holds an earlier Tool Result behind a sibling Tool Use declaration ACK", async () => {

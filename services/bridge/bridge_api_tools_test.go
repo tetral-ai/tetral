@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
@@ -452,6 +454,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 			}
 		})
 	}
+	settledParts := append([]bridgeRuntimePartDraftForTest(nil), draftParts...)
 	for index, tool := range tools {
 		accepted, err := store.AcceptSandboxExecution(context.Background(), baseRequest(tool))
 		if err != nil {
@@ -484,6 +487,214 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 	}
 	if messageCount != 1 || partCount != 6 || executionCount != 4 || queueCount != 4 {
 		t.Fatalf("shared message/parts/executions/jobs = %d/%d/%d/%d; want 1/6/4/4", messageCount, partCount, executionCount, queueCount)
+	}
+	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
+	provider := newGatedBridgeToolProvider()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{sandboxdriver.DaytonaProviderName: provider})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	pool, err := tetralsandbox.NewWorkspaceConsumerPool(4)
+	if err != nil {
+		t.Fatalf("NewWorkspaceConsumerPool: %v", err)
+	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- tetralsandbox.RunWorkspaceConsumerGroup(
+			runCtx,
+			4,
+			pool,
+			staticWorkspaceLister{workspace.ID(workspaceID)},
+			time.Millisecond,
+			func(cycleCtx context.Context, discovered workspace.ID) (bool, error) {
+				return (&tetralsandbox.SandboxToolExecutionJobRunner{
+					Queue:       tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
+					Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute),
+					Providers:   registry,
+					Media:       backgroundNotificationMedia{},
+					Config: tetralsandbox.SandboxToolExecutionRunnerConfig{
+						WorkspaceID: discovered.String(), LeaseOwner: "sandbox-shared-projection", MaxJobs: 1,
+						LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second,
+					},
+				}).RunOnceWithActivity(cycleCtx)
+			},
+		)
+	}()
+	for range 4 {
+		select {
+		case <-provider.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("four accepted Sandbox executions did not overlap at the provider")
+		}
+	}
+	if provider.maximum.Load() != 4 {
+		t.Fatalf("shared projection provider concurrency = %d; want 4", provider.maximum.Load())
+	}
+	close(provider.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var terminal, acknowledged int
+		if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND execution_state='terminal_unconsumed'`, workspaceID, sessionID).Scan(&terminal); err != nil {
+			t.Fatalf("count shared terminal executions: %v", err)
+		}
+		if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs
+			WHERE workspace_id=$1 AND kind=$2 AND status='acknowledged'`, workspaceID, queue.KindSandboxToolExecute).Scan(&acknowledged); err != nil {
+			t.Fatalf("count shared acknowledged executions: %v", err)
+		}
+		if terminal == 4 && acknowledged == 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shared terminal/acknowledged executions = %d/%d; want 4/4", terminal, acknowledged)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for index, tool := range tools {
+		result, err := store.AwaitSandboxExecution(context.Background(), awaitSandboxExecutionRequest(baseRequest(tool)))
+		if err != nil {
+			t.Fatalf("AwaitSandboxExecution shared tool %d: %v", index, err)
+		}
+		if result.GetResultJson() == "" || result.GetResultDigest() == "" {
+			t.Fatalf("shared tool %d result/digest is empty", index)
+		}
+		var exactInput any
+		if err := json.Unmarshal([]byte(tool.input), &exactInput); err != nil {
+			t.Fatalf("decode settled tool input %d: %v", index, err)
+		}
+		inputValue := map[string]any{"value": exactInput, "preview": tool.input, "truncated": false}
+		if len(tool.input) > 8192 {
+			inputValue = map[string]any{"preview": tool.input[:8192], "truncated": true}
+		}
+		partJSON, err := json.Marshal(map[string]any{
+			"type": "tool", "toolCallId": tool.callID, "toolName": tool.toolName,
+			"toolUseEventId": tool.eventID, "toolEvent": map[string]any{"kind": "tool"},
+			"state": map[string]any{
+				"status": "completed", "input": inputValue,
+				"output": map[string]any{"text": "done", "truncated": false},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal settled tool part %d: %v", index, err)
+		}
+		settledParts[len(reasoning)+index].json = string(partJSON)
+		runtimeWriteID := fmt.Sprintf("rwrite_bridge_shared_result_%d", index+1)
+		digest := result.GetResultDigest()
+		messageStatus := "streaming"
+		if index == len(tools)-1 {
+			messageStatus = "completed"
+		}
+		written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: modelRequestID,
+			EventType:           "agent.tool_result",
+			PayloadJson:         `{"type":"agent.tool_result","tool_use_event_id":"` + tool.eventID + `","content":[{"type":"text","text":"done"}]}`,
+			SandboxResultDigest: &digest,
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+				t, scope, runtimeWriteID, "agent.tool_result", messageStatus, settledParts...,
+			)},
+		})
+		if err != nil {
+			t.Fatalf("WriteEvent shared tool result %d: %v", index, err)
+		}
+		if written.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+			t.Fatalf("shared tool result %d ack = %s; want committed", index, written.GetAck().GetStatus())
+		}
+	}
+	var resultEvents, consumedExecutions int
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND model_request_id=$4 AND type='agent.tool_result'`, workspaceID, sessionID, threadID, modelRequestID).Scan(&resultEvents); err != nil {
+		t.Fatalf("count shared Tool Result events: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND execution_state='consumed'`, workspaceID, sessionID, threadID).Scan(&consumedExecutions); err != nil {
+		t.Fatalf("count consumed shared executions: %v", err)
+	}
+	if resultEvents != 4 || consumedExecutions != 4 {
+		t.Fatalf("shared result events/consumed executions = %d/%d; want 4/4", resultEvents, consumedExecutions)
+	}
+	cancelRun()
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunWorkspaceConsumerGroup error = %v; want context cancellation", err)
+	}
+}
+
+type gatedBridgeToolProvider struct {
+	*bridgeMemoryProjectionProvider
+	started chan struct{}
+	release chan struct{}
+	active  atomic.Int32
+	maximum atomic.Int32
+}
+
+func newGatedBridgeToolProvider() *gatedBridgeToolProvider {
+	return &gatedBridgeToolProvider{
+		bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{},
+		started:                        make(chan struct{}, 4), release: make(chan struct{}),
+	}
+}
+
+func (*gatedBridgeToolProvider) InspectForExecution(context.Context, string) tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness]{Value: tetralsandbox.ExecutionReady}
+}
+
+func (*gatedBridgeToolProvider) PrepareTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult]{Value: tetralsandbox.ToolPreparationResult{}}
+}
+
+func (p *gatedBridgeToolProvider) ExecuteTool(ctx context.Context, _ tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+	current := p.active.Add(1)
+	defer p.active.Add(-1)
+	for {
+		observed := p.maximum.Load()
+		if current <= observed || p.maximum.CompareAndSwap(observed, current) {
+			break
+		}
+	}
+	p.started <- struct{}{}
+	select {
+	case <-p.release:
+		return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{Value: sandboxdriver.ToolExecution{
+			ResultJSON: `{"status":"success","result":{"text":"done"}}`,
+		}}
+	case <-ctx.Done():
+		return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{
+			EffectBoundary: tetralsandbox.ProviderOutcomeUnknown, Disposition: tetralsandbox.ProviderTerminal,
+			ErrorKind: "provider_cancelled", SafeMessage: "provider execution was cancelled",
+		}
+	}
+}
+
+var _ tetralsandbox.ProviderAdapter = (*gatedBridgeToolProvider)(nil)
+
+func seedReadySandboxForSharedToolExecution(t *testing.T, db *sql.DB, workspaceID string, sessionID string) {
+	t.Helper()
+	environmentID := "env_" + sessionID
+	if _, err := db.Exec(`UPDATE environments SET current_generation=1 WHERE workspace_id=$1 AND id=$2`, workspaceID, environmentID); err != nil {
+		t.Fatalf("set shared-tool environment generation: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO environment_artifacts (
+		workspace_id, environment_id, generation, status, provider, provider_artifact_ref,
+		normalized_config_hash, artifact_input_hash, runtime_network_policy_json, packages_json,
+		created_at, updated_at
+	) VALUES ($1, $2, 1, 'ready', 'daytona', 'artifact_shared_tool_execution',
+		'config_hash', 'artifact_hash', '{"type":"unrestricted"}', '{}', clock_timestamp(), clock_timestamp())`, workspaceID, environmentID); err != nil {
+		t.Fatalf("seed shared-tool environment artifact: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id, environment_generation,
+		provider, provider_resource_id, binding_revision, materialized_resource_revision,
+		resource_credential_expires_at, resource_roots_json, provider_metadata_json,
+		helper_verified_at, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, 1,
+		clock_timestamp()+interval '2 hours', '[]', '{}', clock_timestamp(), clock_timestamp(), clock_timestamp())`,
+		workspaceID, sessionID, "sbox_"+sessionID, environmentID, "provider_"+sessionID); err != nil {
+		t.Fatalf("seed ready shared-tool Sandbox binding: %v", err)
 	}
 }
 
