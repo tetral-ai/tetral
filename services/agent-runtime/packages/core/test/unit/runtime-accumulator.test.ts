@@ -306,9 +306,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-1",
       toolName: "search",
-      input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      input: { q: "x" },
+      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }))).events);
-    events.push(...(await processor.commitPublicToolUse(source, "tool-1", "allow")).events);
+    events.push(...(await processor.commitPublicToolUse(source, "tool-1", { q: "x" }, "allow")).events);
     events.push(...(await processor.commitToolSettlement(source, "tool-1", {
       type: "completed",
       output: { text: "done", truncated: false },
@@ -336,10 +337,16 @@ describe("SessionProcessor", () => {
     await processor.process(envelope({ type: "reasoning-start", id: "reasoning-1" }));
     await processor.process(envelope({ type: "reasoning-delta", id: "reasoning-1", text_delta: "first", providerMetadata: { anthropic: { signature: "sig" } } }));
     await processor.process(envelope({ type: "reasoning-end", id: "reasoning-1" }));
-    await processor.process(envelope({ type: "tool-call", id: "tool-1", toolName: "search", input: { value: {}, preview: "{}", truncated: false } }));
-    await processor.commitPublicToolUse(source, "tool-1", "allow");
-    await processor.process(envelope({ type: "tool-call", id: "tool-2", toolName: "create_issue", input: { value: {}, preview: "{}", truncated: false } }));
-    await processor.commitPublicToolUse(source, "tool-2", "allow", { kind: "mcp", mcpServerName: "github" });
+    await processor.process(envelope({
+      type: "tool-call", id: "tool-1", toolName: "search", input: {},
+      inputPreview: { value: {}, preview: "{}", truncated: false },
+    }));
+    await processor.commitPublicToolUse(source, "tool-1", {}, "allow");
+    await processor.process(envelope({
+      type: "tool-call", id: "tool-2", toolName: "create_issue", input: {},
+      inputPreview: { value: {}, preview: "{}", truncated: false },
+    }));
+    await processor.commitPublicToolUse(source, "tool-2", {}, "allow", { kind: "mcp", mcpServerName: "github" });
 
     expect(anchors).toEqual([
       { type: "agent.tool_use", parts: [expect.objectContaining({ partSequence: 0, text: "first" })] },
@@ -372,9 +379,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-1",
       toolName: "search",
-      input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      input: { q: "x" },
+      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }));
-    await processor.commitPublicToolUse(source, "tool-1", "allow");
+    await processor.commitPublicToolUse(source, "tool-1", { q: "x" }, "allow");
     await processor.commitToolSettlement(source, "tool-1", {
       type: "completed",
       output: { text: "done", truncated: false },
@@ -413,6 +421,61 @@ describe("SessionProcessor", () => {
     ]);
   });
 
+  test("a settled tool stays current when a sibling Tool Use is declared later", async () => {
+    const projections: Array<{ readonly type: string; readonly message: RuntimeMessageDraft }> = [];
+    let toolUseCount = 0;
+    const processor = createProcessor({
+      appendEvent: async (event, output) => {
+        if (output !== undefined) {
+          projections.push({ type: event.type, message: output.message });
+        }
+        if (event.type === "agent.tool_use") {
+          toolUseCount += 1;
+        }
+        return {
+          ok: true,
+          writeId: `write-${projections.length}`,
+          eventId: event.type === "agent.tool_use" ? `bridge-tool-use-${toolUseCount}` : `bridge-event-${projections.length}`,
+          processedAt: createdAt,
+        };
+      },
+    });
+
+    for (const [id, path] of [["tool-1", "src/a.ts"], ["tool-2", "src/b.ts"]] as const) {
+      await processor.process(envelope({
+        type: "tool-call",
+        id,
+        toolName: "Read",
+        input: { file_path: path },
+        inputPreview: { value: { file_path: path }, preview: JSON.stringify({ file_path: path }), truncated: false },
+      }));
+    }
+    await processor.commitPublicToolUse(source, "tool-1", { file_path: "src/a.ts" }, "allow");
+    await processor.commitToolSettlement(source, "tool-1", {
+      type: "completed",
+      output: { text: "first done", truncated: false },
+    });
+    await processor.commitPublicToolUse(source, "tool-2", { file_path: "src/b.ts" }, "allow");
+
+    const toolStates = projections.map(({ type, message }) => ({
+      type,
+      tools: message.parts
+        .filter((part) => part.type === "tool")
+        .map((part) => ({ id: part.toolCallId, status: part.state.status })),
+    }));
+    expect(toolStates).toEqual([
+      { type: "agent.tool_use", tools: [{ id: "tool-1", status: "running" }] },
+      { type: "agent.tool_result", tools: [{ id: "tool-1", status: "completed" }] },
+      {
+        type: "agent.tool_use",
+        tools: [
+          { id: "tool-1", status: "completed" },
+          { id: "tool-2", status: "running" },
+        ],
+      },
+    ]);
+  });
+
   test("MCP tools emit fork-SDK MCP tool use and result events", async () => {
     const modelRequestIds: Array<{ readonly type: string; readonly modelRequestId: string | undefined }> = [];
     const processor = createProcessor({
@@ -432,9 +495,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-1",
       toolName: "create_issue",
-      input: { value: { title: "Bug" }, preview: "{\"title\":\"Bug\"}", truncated: false },
+      input: { title: "Bug" },
+      inputPreview: { value: { title: "Bug" }, preview: "{\"title\":\"Bug\"}", truncated: false },
     }))).events);
-    events.push(...(await processor.commitPublicToolUse(source, "tool-1", "allow", { kind: "mcp", mcpServerName: "github" })).events);
+    events.push(...(await processor.commitPublicToolUse(source, "tool-1", { title: "Bug" }, "allow", { kind: "mcp", mcpServerName: "github" })).events);
     events.push(...(await processor.commitToolSettlement(source, "tool-1", {
       type: "completed",
       output: { text: "created", truncated: false },
@@ -512,9 +576,10 @@ describe("SessionProcessor", () => {
         type: "tool-call",
         id: "tool-1",
         toolName: "create_issue",
-        input: { value: { title: "Bug" }, preview: "{\"title\":\"Bug\"}", truncated: false },
+        input: { title: "Bug" },
+        inputPreview: { value: { title: "Bug" }, preview: "{\"title\":\"Bug\"}", truncated: false },
       }))).events);
-      events.push(...(await processor.commitPublicToolUse(source, "tool-1", "allow", { kind: "mcp", mcpServerName: "github" })).events);
+      events.push(...(await processor.commitPublicToolUse(source, "tool-1", { title: "Bug" }, "allow", { kind: "mcp", mcpServerName: "github" })).events);
       events.push(...(await processor.commitToolSettlement(source, "tool-1", {
         type: "error",
         error: {
@@ -592,9 +657,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "internal-tool-call",
       toolName: "search",
-      input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      input: { q: "x" },
+      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }));
-    const toolUse = await processor.commitPublicToolUse(source, "internal-tool-call", "allow");
+    const toolUse = await processor.commitPublicToolUse(source, "internal-tool-call", { q: "x" }, "allow");
     expect(toolUse).toMatchObject({ ok: true, toolUseEventId: "bridge-event-tool-use" });
     const result = await processor.commitToolSettlement(source, "internal-tool-call", {
       type: "completed",
@@ -636,9 +702,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "web-tool-call",
       toolName: "web",
-      input: { value: { search_query: [{ q: "tetral" }] }, preview: "{}", truncated: false },
+      input: { search_query: [{ q: "tetral" }] },
+      inputPreview: { value: { search_query: [{ q: "tetral" }] }, preview: "{}", truncated: false },
     }));
-    await processor.commitPublicToolUse(source, "web-tool-call", "allow");
+    await processor.commitPublicToolUse(source, "web-tool-call", { search_query: [{ q: "tetral" }] }, "allow");
     await processor.commitToolSettlement(source, "web-tool-call", {
       type: "completed",
       output: { text: "web result", truncated: false },
@@ -672,7 +739,8 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "unknown-tool-call",
       toolName: "unknown_tool",
-      input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      input: { q: "x" },
+      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }));
     const repaired = await processor.commitInternalToolRepair(
       source,
@@ -715,7 +783,8 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "unknown-tool-call",
       toolName: "unknown_tool",
-      input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      input: { q: "x" },
+      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }));
     const pendingRepair = processor.commitInternalToolRepair(
       source,
@@ -862,9 +931,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-ok",
       toolName: "search",
-      input: { value: { query: hostileText }, preview: hostileText, truncated: false },
+      input: { query: hostileText },
+      inputPreview: { value: { query: hostileText }, preview: hostileText, truncated: false },
     }))).events);
-    successEvents.push(...(await successProcessor.commitPublicToolUse(source, "tool-ok", "allow")).events);
+    successEvents.push(...(await successProcessor.commitPublicToolUse(source, "tool-ok", { query: hostileText }, "allow")).events);
     successEvents.push(...(await successProcessor.commitToolSettlement(source, "tool-ok", {
       type: "completed",
       output: { text: hostileText, truncated: false },
@@ -882,9 +952,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-1",
       toolName: "search",
-      input: { value: { query: hostileText }, preview: hostileText, truncated: false },
+      input: { query: hostileText },
+      inputPreview: { value: { query: hostileText }, preview: hostileText, truncated: false },
     }))).events);
-    events.push(...(await processor.commitPublicToolUse(source, "tool-1", "allow")).events);
+    events.push(...(await processor.commitPublicToolUse(source, "tool-1", { query: hostileText }, "allow")).events);
     events.push(...(await processor.commitToolSettlement(source, "tool-1", {
       type: "error",
       error: providerFailure({
@@ -934,9 +1005,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-large",
       toolName: "Read",
-      input: { value: { file_path: "notes/a.txt" }, preview: "{}", truncated: false },
+      input: { file_path: "notes/a.txt" },
+      inputPreview: { value: { file_path: "notes/a.txt" }, preview: "{}", truncated: false },
     }));
-    await processor.commitPublicToolUse(source, "tool-large", "allow");
+    await processor.commitPublicToolUse(source, "tool-large", { file_path: "notes/a.txt" }, "allow");
     const output = `content: ${"x".repeat(60 * 1024)}\nnext_offset: 61440`;
 
     await processor.commitToolSettlement(source, "tool-large", {
@@ -1023,9 +1095,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "tool-1",
       toolName: "search",
-      input: { value: {}, preview: "{}", truncated: false },
+      input: {},
+      inputPreview: { value: {}, preview: "{}", truncated: false },
     }));
-    await processor.commitPublicToolUse(source, "tool-1", "allow");
+    await processor.commitPublicToolUse(source, "tool-1", {}, "allow");
 
     expect(anchoredReasoning).toEqual([expect.objectContaining({
       text: "think",
@@ -1145,9 +1218,10 @@ describe("SessionProcessor", () => {
       type: "tool-call",
       id: "running-tool",
       toolName: "search",
-      input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      input: { q: "x" },
+      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }));
-    await processor.commitPublicToolUse(source, "running-tool", "allow");
+    await processor.commitPublicToolUse(source, "running-tool", { q: "x" }, "allow");
     const result = await processor.process(envelope({
       type: "provider-error",
       error: providerFailure({ code: "provider_stream_error", retryable: false, providerId: "fake", modelId: "fake-chat" }),

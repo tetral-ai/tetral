@@ -245,7 +245,7 @@ export class RuntimePodToolRunner {
   async acceptSandboxExecution(request: RuntimeSandboxExecutionRequest): Promise<RuntimeSandboxExecutionAcceptanceResult> {
     const scope = this.scope(request);
     const inputJson = stableJsonStringify(request.input);
-    const durableRequest: AwaitSandboxExecutionRequest = {
+    const durableRequest: AcceptSandboxExecutionRequest = {
       scope,
       toolUseEventId: request.toolUseEventId,
       modelToolCallId: request.modelToolCallId,
@@ -273,7 +273,7 @@ export class RuntimePodToolRunner {
   async awaitSandboxExecution(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const scope = this.scope(request);
     const inputJson = stableJsonStringify(request.input);
-    const durableRequest: AcceptSandboxExecutionRequest = {
+    const durableRequest: AwaitSandboxExecutionRequest = {
       scope,
       toolUseEventId: request.toolUseEventId,
       modelToolCallId: request.modelToolCallId,
@@ -285,9 +285,15 @@ export class RuntimePodToolRunner {
       try {
         const response = await awaitSandboxExecution(this.bridgeClient, durableRequest, await this.metadata(), request.abortSignal);
         if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
-          return await this.mediaResultToAttachment(request, response.resultJson);
+          return withSandboxResultDigest(
+            await this.mediaResultToAttachment(request, response.resultJson, response.resultDigest),
+            response.resultDigest,
+          );
         }
-        return resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId));
+        return withSandboxResultDigest(
+          resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId), response.resultDigest),
+          response.resultDigest,
+        );
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Sandbox tool execution was cancelled.");
@@ -303,10 +309,11 @@ export class RuntimePodToolRunner {
   private async mediaResultToAttachment(
     request: RuntimeToolExecutionRequest,
     resultJson: string,
+    resultDigest: string,
   ): Promise<RuntimeToolExecutionResult> {
     const parsed = parseResultJson(resultJson);
     if (!isRecord(parsed) || stringField(parsed, "status") !== "success") {
-      return resultJsonToExecutionResult(request, resultJson);
+      return resultJsonToExecutionResult(request, resultJson, resultDigest);
     }
     const result = recordField(parsed, "result");
     const source = isRecord(result) ? result : parsed;
@@ -330,6 +337,7 @@ export class RuntimePodToolRunner {
       return {
         type: "completed",
         output: capturedToolText(lines.join("\n")),
+        sandboxResultDigest: resultDigest,
         attachments: [providerAttachmentFromBridge({
           attachmentRef,
           mime,
@@ -346,7 +354,7 @@ export class RuntimePodToolRunner {
     }
     if (mime === undefined) {
       if (request.entry.route.kind === "sandbox" && request.entry.route.helperSubcommand === "read") {
-        return resultJsonToExecutionResult(request, resultJson);
+        return resultJsonToExecutionResult(request, resultJson, resultDigest);
       }
       return toolFailure(request, `${request.entry.name} returned malformed media payload.`, false);
     }
@@ -1782,31 +1790,58 @@ function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
   return status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE;
 }
 
-function resultJsonToExecutionResult(request: RuntimeToolExecutionRequest, resultJson: string): RuntimeToolExecutionResult {
+function resultJsonToExecutionResult(
+  request: RuntimeToolExecutionRequest,
+  resultJson: string,
+  sandboxResultDigest?: string,
+): RuntimeToolExecutionResult {
   const parsed = parseResultJson(resultJson);
   if (parsed === undefined) {
     return toolFailure(request, "Tool route returned malformed result JSON.", false);
   }
   const visible = filterVisibleToolResult(request, parsed);
   const status = isRecord(visible) ? stringField(visible, "status") : undefined;
+  const retryableValue = isRecord(visible) && Object.hasOwn(visible, "retryable")
+    ? visible.retryable
+    : undefined;
+  if (retryableValue !== undefined && typeof retryableValue !== "boolean") {
+    return {
+      ...toolFailure(request, "Tool route returned malformed retryability.", false),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
+    };
+  }
   if (status === "success" || status === "completed" || status === "running" || status === "accepted") {
     const backgroundTask = status === "running" ? backgroundTaskFromResult(visible) : undefined;
     return {
       type: "completed",
       output: { text: formatToolResult(request, visible), truncated: resultIsTruncated(parsed) },
       ...(backgroundTask !== undefined ? { backgroundTask } : {}),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
   }
   if (status === "cancelled" || status === "expired") {
     return {
       type: "cancelled",
       error: runtimeFailure(request, resultErrorMessage(request, visible, `Tool route ${status}.`), false),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
   }
   return {
     type: "error",
-    error: runtimeFailure(request, resultErrorMessage(request, visible, "Tool route failed."), status === "runtime_error" || status === "failed"),
+    error: runtimeFailure(
+      request,
+      resultErrorMessage(request, visible, "Tool route failed."),
+      typeof retryableValue === "boolean" ? retryableValue : status === "runtime_error" || status === "failed",
+    ),
+    ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
   };
+}
+
+function withSandboxResultDigest(
+  result: RuntimeToolExecutionResult,
+  sandboxResultDigest: string,
+): RuntimeToolExecutionResult {
+  return result.type === "stale_custody" ? result : { ...result, sandboxResultDigest };
 }
 
 function backgroundTaskFromResult(parsed: RuntimeJsonValue): { readonly taskId: string } | undefined {

@@ -70,10 +70,11 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifySandboxExecutionDurableIdentityTx(ctx, tx, request, canonicalInputJSON); err != nil {
+		evaluatedPermission, err := verifySandboxExecutionDurableIdentityTx(ctx, tx, request, canonicalInputJSON)
+		if err != nil {
 			return err
 		}
-		if err := verifyApprovedSandboxExecutionHandoffTx(ctx, tx, request, canonicalInputJSON); err != nil {
+		if err := verifyApprovedSandboxExecutionHandoffTx(ctx, tx, request, canonicalInputJSON, evaluatedPermission); err != nil {
 			return err
 		}
 		now := s.now()
@@ -154,6 +155,7 @@ func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, re
 	}
 	return &bridgev1.AwaitSandboxExecutionResponse{
 		ResultJson:            terminal.ResultJSON,
+		ResultDigest:          terminal.ResultDigest,
 		BackgroundTaskStarted: terminal.BackgroundTaskStarted,
 		TaskId:                terminal.TaskID.String,
 	}, nil
@@ -200,40 +202,44 @@ func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *
 	return nil
 }
 
-func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) error {
+func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) (string, error) {
 	var payloadJSON string
+	var modelRequestID sql.NullString
 	if err := tx.QueryRow(ctx,
-		`SELECT payload_json FROM session_events
+		`SELECT payload_json, model_request_id FROM session_events
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		    AND event_id = $4 AND type = 'agent.tool_use'
 		  FOR UPDATE`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
-	).Scan(&payloadJSON); dbconnect.IsNoRows(err) {
-		return status.Error(codes.FailedPrecondition, "durable sandbox tool use is missing")
+	).Scan(&payloadJSON, &modelRequestID); dbconnect.IsNoRows(err) {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use is missing")
 	} else if err != nil {
-		return err
+		return "", err
 	}
 	var payload runtimeToolUseEventPayload
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name != request.GetToolName() {
-		return status.Error(codes.FailedPrecondition, "durable sandbox tool use identity is invalid")
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use identity is invalid")
 	}
 	eventInputJSON, _, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
 	if err != nil || eventInputJSON != canonicalInputJSON {
-		return status.Error(codes.FailedPrecondition, "durable sandbox tool use input does not match")
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use input does not match")
+	}
+	if !modelRequestID.Valid || modelRequestID.String == "" {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use has no model request")
 	}
 	var messageJSON string
 	if err := tx.QueryRow(ctx,
 		`SELECT data_json FROM session_messages
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND source_event_id = $4 AND kind = 'assistant'
-		  ORDER BY sequence ASC LIMIT 1`,
+		    AND model_request_id = $4 AND kind = 'assistant'
+		  LIMIT 1`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+		request.GetScope().GetSessionThreadId(), modelRequestID.String,
 	).Scan(&messageJSON); dbconnect.IsNoRows(err) {
-		return status.Error(codes.FailedPrecondition, "durable sandbox tool message is missing")
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool message is missing")
 	} else if err != nil {
-		return err
+		return "", err
 	}
 	var message struct {
 		Parts []struct {
@@ -244,15 +250,15 @@ func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.
 		} `json:"parts"`
 	}
 	if err := json.Unmarshal([]byte(messageJSON), &message); err != nil {
-		return status.Error(codes.FailedPrecondition, "durable sandbox tool message is invalid")
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool message is invalid")
 	}
 	for _, part := range message.Parts {
 		if part.Type == "tool" && part.ToolUseEventID == request.GetToolUseEventId() &&
 			part.ToolCallID == request.GetModelToolCallId() && part.ToolName == request.GetToolName() {
-			return nil
+			return payload.EvaluatedPermission, nil
 		}
 	}
-	return status.Error(codes.FailedPrecondition, "durable sandbox tool call identity does not match")
+	return "", status.Error(codes.FailedPrecondition, "durable sandbox tool call identity does not match")
 }
 
 func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMessage {
@@ -262,7 +268,13 @@ func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMes
 	return value
 }
 
-func verifyApprovedSandboxExecutionHandoffTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) error {
+func verifyApprovedSandboxExecutionHandoffTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request sandboxExecutionRequest,
+	canonicalInputJSON string,
+	evaluatedPermission string,
+) error {
 	var modelToolCallID, toolName, inputJSON, statusValue string
 	var decision sql.NullString
 	err := tx.QueryRow(ctx,
@@ -275,7 +287,14 @@ func verifyApprovedSandboxExecutionHandoffTx(ctx context.Context, tx *dbconnect.
 		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
 	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
 	if dbconnect.IsNoRows(err) {
-		return nil
+		switch evaluatedPermission {
+		case "allow":
+			return nil
+		case "ask", "deny":
+			return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
+		default:
+			return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
+		}
 	}
 	if err != nil {
 		return err
@@ -285,10 +304,19 @@ func verifyApprovedSandboxExecutionHandoffTx(ctx context.Context, tx *dbconnect.
 		canonicalApprovalInput != canonicalInputJSON {
 		return status.Error(codes.AlreadyExists, "approved tool identity conflicts with execution")
 	}
-	if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
-		return status.Error(codes.FailedPrecondition, "sandbox tool approval is not executable")
+	switch evaluatedPermission {
+	case "allow":
+		return nil
+	case "deny":
+		return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
+	case "ask":
+		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
+			return status.Error(codes.FailedPrecondition, "sandbox tool approval is not executable")
+		}
+		return nil
+	default:
+		return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
 	}
-	return nil
 }
 
 func mustCanonicalRunToolInput(raw string) string {

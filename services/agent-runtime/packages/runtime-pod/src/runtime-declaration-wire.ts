@@ -119,6 +119,7 @@ export function writeEventDeclarationDigest(
     | "stableReasoningParts"
     | "serverToolUse"
     | "mcpMaterializationHandle"
+    | "sandboxResultDigest"
     | "drafts"
   >,
 ): string {
@@ -132,6 +133,9 @@ export function writeEventDeclarationDigest(
     operation_kind: "write_event",
     payload: JSON.parse(canonicalRunToolJSON(request.payloadJson)) as unknown,
     runtime_write_id: request.runtimeWriteId,
+    sandbox_result_digest: request.sandboxResultDigest === undefined || request.sandboxResultDigest.length === 0
+      ? null
+      : request.sandboxResultDigest,
     server_tool_use: request.serverToolUse === undefined
       ? null
       : {

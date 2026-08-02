@@ -4757,7 +4757,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-unit15",
               toolName: "mutate_record",
-              input: {
+              input: { record_id: "unit15", value: "committed" },
+              inputPreview: {
                 value: { record_id: "unit15", value: "committed" },
                 preview: "{\"record_id\":\"unit15\",\"value\":\"committed\"}",
                 truncated: false,
@@ -4912,7 +4913,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-same-request",
               toolName: "mutate_record",
-              input: { value: { id: "one" }, preview: "{\"id\":\"one\"}", truncated: false },
+              input: { id: "one" },
+              inputPreview: { value: { id: "one" }, preview: "{\"id\":\"one\"}", truncated: false },
             };
             await toolResultCommitted.promise;
             yield { type: "provider-error" as const, error: failure };
@@ -5565,7 +5567,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "search",
-                input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                input: { q: "x" },
+                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -5627,7 +5630,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "search",
-                input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                input: { q: "x" },
+                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -5956,7 +5960,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "search",
-                input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                input: { q: "x" },
+                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -6579,7 +6584,8 @@ Previous anchored summary.
                 type: "tool-call" as const,
                 id: "tool-live",
                 toolName: "Write",
-                input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
               };
               await toolStarted.promise;
               yield { type: "finish" as const, finishReason: "tool-calls" as const };
@@ -6613,6 +6619,81 @@ Previous anchored summary.
     expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([
       expect.objectContaining({ tool_use_id: "sevt_live_tool", is_error: true }),
     ]);
+  });
+
+  test("request end waits for an in-flight Tool Result declaration ACK", async () => {
+    const session = new Session("sesn_request_end_tool_result_order");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "read it")] });
+    const toolStarted = deferred<void>();
+    const releaseTool = deferred<void>();
+    const resultAppendArrived = deferred<void>();
+    const releaseResultAppend = deferred<void>();
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: envelope.event.type === "agent.tool_use" ? "sevt_ordered_tool" : `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      append: async (envelope) => {
+        if (envelope.event.type === "agent.tool_result") {
+          resultAppendArrived.resolve(undefined);
+          await releaseResultAppend.promise;
+        }
+        return await baseWriter.append(envelope);
+      },
+      writeRequestEnd: async (envelope) => {
+        requestEnds.push(envelope);
+        return await baseWriter.writeRequestEnd(envelope);
+      },
+    };
+    const runPromise = Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        llmService: {
+          stream() {
+            return Stream.fromAsyncIterable((async function* () {
+              yield {
+                type: "tool-call" as const,
+                id: "tool-live",
+                toolName: "Read",
+                input: { file_path: "src/a.ts" },
+                inputPreview: { value: { file_path: "src/a.ts" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+              };
+              await toolStarted.promise;
+              releaseTool.resolve(undefined);
+              await resultAppendArrived.promise;
+              yield { type: "finish" as const, finishReason: "tool-calls" as const };
+            })(), (error): LLMServiceError => ({
+              type: "llm-service",
+              error: runtimeFailureFromProviderError(normalizeProviderError({ code: "provider_stream_error", message: String(error), retryable: true })),
+            }));
+          },
+        },
+        providerCallRuntime: {
+          systemInstructions: "request end projection ordering test",
+          toolCatalog: catalogForTest({ name: "Read", description: "Read file", inputSchema: { type: "object" } }),
+        },
+        runTool: async () => {
+          toolStarted.resolve(undefined);
+          await releaseTool.promise;
+          return { type: "completed", output: { text: "done", truncated: false } };
+        },
+      }))),
+    );
+
+    await resultAppendArrived.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requestEnds).toHaveLength(0);
+    releaseResultAppend.resolve(undefined);
+
+    expect(await runPromise).toMatchObject({ type: "completed" });
+    expect(requestEnds).toHaveLength(1);
   });
 
   test("attachment rejections survive reschedule as a model note and settle in the cumulative origin union", async () => {
@@ -6783,7 +6864,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "search",
-                input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                input: { q: "x" },
+                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -6852,7 +6934,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-other-family",
                 toolName: tc.absentTool,
-                input: { value: {}, preview: "{}", truncated: false },
+                input: {},
+                inputPreview: { value: {}, preview: "{}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -6895,13 +6978,15 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "Write",
-                input: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                input: { file_path: "src/a.ts", content: "one" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
               },
               {
                 type: "tool-call",
                 id: "tool-2",
                 toolName: "Write",
-                input: { value: { file_path: "/workspace/src/a.ts", content: "two" }, preview: "{\"file_path\":\"/workspace/src/a.ts\"}", truncated: false },
+                input: { file_path: "/workspace/src/a.ts", content: "two" },
+                inputPreview: { value: { file_path: "/workspace/src/a.ts", content: "two" }, preview: "{\"file_path\":\"/workspace/src/a.ts\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -6934,6 +7019,166 @@ Previous anchored summary.
     expect(maxActive).toBe(1);
   });
 
+  test("serializes shared-message Tool Use declarations without serializing safe execution", async () => {
+    const session = new Session("sesn_tool_declaration_order");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const firstDeclarationArrived = deferred<void>();
+    const releaseFirstDeclaration = deferred<void>();
+    const releaseExecutions = deferred<void>();
+    const declarations: SessionEventEnvelope[] = [];
+    const executions: string[] = [];
+    let activeExecutions = 0;
+    let maxActiveExecutions = 0;
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      append: async (envelope) => {
+        if (envelope.event.type === "agent.tool_use") {
+          declarations.push(envelope);
+          if (declarations.length === 1) {
+            firstDeclarationArrived.resolve(undefined);
+            await releaseFirstDeclaration.promise;
+          }
+        }
+        return await baseWriter.append(envelope);
+      },
+    };
+
+    const runPromise = Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        events: [
+          {
+            type: "tool-call",
+            id: "tool-1",
+            toolName: "Read",
+            input: { file_path: "src/a.ts" },
+            inputPreview: { value: { file_path: "src/a.ts" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+          },
+          {
+            type: "tool-call",
+            id: "tool-2",
+            toolName: "Read",
+            input: { file_path: "src/b.ts" },
+            inputPreview: { value: { file_path: "src/b.ts" }, preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+          },
+          { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+          systemInstructions: "tool declaration ordering test system",
+          toolCatalog: catalogForTest({ name: "Read", description: "Read file", inputSchema: { type: "object" } }),
+        },
+        runTool: async (request) => {
+          executions.push(request.modelToolCallId);
+          activeExecutions += 1;
+          maxActiveExecutions = Math.max(maxActiveExecutions, activeExecutions);
+          await releaseExecutions.promise;
+          activeExecutions -= 1;
+          return { type: "completed", output: { text: `done ${request.modelToolCallId}`, truncated: false } };
+        },
+      }))),
+    );
+
+    await firstDeclarationArrived.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(declarations).toHaveLength(1);
+    releaseFirstDeclaration.resolve(undefined);
+    await waitForCondition(() => executions.length === 2, "parallel safe tool execution");
+    expect(executions).toEqual(["tool-1", "tool-2"]);
+    expect(maxActiveExecutions).toBe(2);
+    releaseExecutions.resolve(undefined);
+
+    expect(await runPromise).toMatchObject({ type: "completed" });
+    const toolCallIds = declarations.map((envelope) =>
+      envelope.drafts[0]?.parts.filter((part) => part.type === "tool").map((part) => part.toolCallId)
+    );
+    expect(toolCallIds).toEqual([["tool-1"], ["tool-1", "tool-2"]]);
+  });
+
+  test("holds an earlier Tool Result behind a sibling Tool Use declaration ACK", async () => {
+    const session = new Session("sesn_tool_projection_order");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const secondDeclarationArrived = deferred<void>();
+    const releaseSecondDeclaration = deferred<void>();
+    const releaseFirstExecution = deferred<void>();
+    const declarations: SessionEventEnvelope[] = [];
+    const settlements: SessionEventEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+      ok: true,
+      writeId: envelope.writeId,
+      eventId: `bridge-${envelope.writeId}`,
+      processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      append: async (envelope) => {
+        if (envelope.event.type === "agent.tool_use") {
+          declarations.push(envelope);
+          if (declarations.length === 2) {
+            secondDeclarationArrived.resolve(undefined);
+            await releaseSecondDeclaration.promise;
+          }
+        } else if (envelope.event.type === "agent.tool_result") {
+          settlements.push(envelope);
+        }
+        return await baseWriter.append(envelope);
+      },
+    };
+
+    const runPromise = Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        events: [
+          {
+            type: "tool-call",
+            id: "tool-1",
+            toolName: "Read",
+            input: { file_path: "src/a.ts" },
+            inputPreview: { value: { file_path: "src/a.ts" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+          },
+          {
+            type: "tool-call",
+            id: "tool-2",
+            toolName: "Read",
+            input: { file_path: "src/b.ts" },
+            inputPreview: { value: { file_path: "src/b.ts" }, preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+          },
+          { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+          systemInstructions: "tool projection ordering test system",
+          toolCatalog: catalogForTest({ name: "Read", description: "Read file", inputSchema: { type: "object" } }),
+        },
+        runTool: async (request) => {
+          if (request.modelToolCallId === "tool-1") {
+            await releaseFirstExecution.promise;
+          }
+          return { type: "completed", output: { text: `done ${request.modelToolCallId}`, truncated: false } };
+        },
+      }))),
+    );
+
+    await secondDeclarationArrived.promise;
+    releaseFirstExecution.resolve(undefined);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settlements).toHaveLength(0);
+    releaseSecondDeclaration.resolve(undefined);
+
+    expect(await runPromise).toMatchObject({ type: "completed" });
+    expect(settlements).toHaveLength(2);
+  });
+
   test("separate thread RequestTurns share session-wide tool admission", async () => {
     const coordinator = new SessionToolCoordinator({ maxConcurrentTools: 8 });
     const identity = (sessionThreadId: string) => ({
@@ -6954,7 +7199,8 @@ Previous anchored summary.
         type: "tool-call",
         id: "tool-memory",
         toolName: "memory",
-        input: { value: { action: "view", path: "notes" }, preview: "{\"action\":\"view\",\"path\":\"notes\"}", truncated: false },
+        input: { action: "view", path: "notes" },
+        inputPreview: { value: { action: "view", path: "notes" }, preview: "{\"action\":\"view\",\"path\":\"notes\"}", truncated: false },
       },
       { type: "finish", finishReason: "tool-calls" },
     ];
@@ -7024,7 +7270,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-memory",
             toolName: "memory",
-            input: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
+            input: { action: "create", path: "notes/todo.md", content: "one" },
+            inputPreview: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -7599,7 +7846,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-gated",
               toolName: "Write",
-              input: { value: { file_path: "src/gated.ts", content: "one" }, preview: "{}", truncated: false },
+              input: { file_path: "src/gated.ts", content: "one" },
+              inputPreview: { value: { file_path: "src/gated.ts", content: "one" }, preview: "{}", truncated: false },
             };
             if (options?.abortSignal === undefined) {
               throw new Error("provider stream requires an abort signal");
@@ -7752,7 +8000,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-invalid",
               toolName: "MissingTool",
-              input: { value: {}, preview: "{}", truncated: false },
+              input: {},
+              inputPreview: { value: {}, preview: "{}", truncated: false },
             };
             if (options?.abortSignal === undefined) {
               throw new Error("provider stream requires an abort signal");
@@ -7965,7 +8214,8 @@ Previous anchored summary.
                 type: "tool-call" as const,
                 id: "tool-repair-failure",
                 toolName: "Write",
-                input: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
+                input: { file_path: "src/failure.ts", content: "one" },
+                inputPreview: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
               };
               if (streamOptions?.abortSignal === undefined) {
                 throw new Error("provider stream requires an abort signal");
@@ -8068,7 +8318,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-post-success-cooperative-failure",
             toolName: "Write",
-            input: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
+            input: { file_path: "src/failure.ts", content: "one" },
+            inputPreview: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -8163,7 +8414,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-post-success-interrupt-failure",
             toolName: "Write",
-            input: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
+            input: { file_path: "src/failure.ts", content: "one" },
+            inputPreview: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -8417,7 +8669,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-memory",
               toolName: "memory",
-              input: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
+              input: { action: "create", path: "notes/todo.md", content: "one" },
+              inputPreview: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
             };
             if (options?.abortSignal === undefined) {
               throw new Error("provider stream requires an abort signal");
@@ -8677,21 +8930,24 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-terminal",
               toolName: "Read",
-              input: { value: { file_path: "src/shared.ts", content: "terminal" }, preview: "{}", truncated: false },
+              input: { file_path: "src/shared.ts", content: "terminal" },
+              inputPreview: { value: { file_path: "src/shared.ts", content: "terminal" }, preview: "{}", truncated: false },
             };
             await releaseNextProviderTool.promise;
             yield {
               type: "tool-call" as const,
               id: "tool-running",
               toolName: "Write",
-              input: { value: { file_path: "src/shared.ts", content: "running" }, preview: "{}", truncated: false },
+              input: { file_path: "src/shared.ts", content: "running" },
+              inputPreview: { value: { file_path: "src/shared.ts", content: "running" }, preview: "{}", truncated: false },
             };
             await pendingToolUseAppendStarted.promise;
             yield {
               type: "tool-call" as const,
               id: "tool-uncommitted",
               toolName: "UncommittedWrite",
-              input: { value: { file_path: "src/shared.ts", content: "must-not-commit" }, preview: "{}", truncated: false },
+              input: { file_path: "src/shared.ts", content: "must-not-commit" },
+              inputPreview: { value: { file_path: "src/shared.ts", content: "must-not-commit" }, preview: "{}", truncated: false },
             };
             yield { type: "finish" as const, finishReason: "tool-calls" as const };
           })(), (error): LLMServiceError => ({
@@ -8923,7 +9179,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-non-cooperative-route",
               toolName: "Write",
-              input: { value: { file_path: "src/non-cooperative.ts", content: "late" }, preview: "{}", truncated: false },
+              input: { file_path: "src/non-cooperative.ts", content: "late" },
+              inputPreview: { value: { file_path: "src/non-cooperative.ts", content: "late" }, preview: "{}", truncated: false },
             },
             { type: "finish" as const, finishReason: "tool-calls" as const },
           ]);
@@ -9421,7 +9678,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-accept-fence",
             toolName: "Write",
-            input: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+            input: { file_path: "src/a.ts", content: "one" },
+            inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -9480,7 +9738,8 @@ Previous anchored summary.
               type: "tool-call" as const,
               id: "tool-1",
               toolName: "Write",
-              input: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+              input: { file_path: "src/a.ts", content: "one" },
+              inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             };
             if (options?.abortSignal === undefined) {
               throw new Error("provider stream requires an abort signal");
@@ -9574,7 +9833,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "Write",
-                input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -9635,7 +9895,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "Write",
-                input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -9688,7 +9949,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "Write",
-                input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -9738,7 +10000,8 @@ Previous anchored summary.
                 type: "tool-call",
                 id: "tool-1",
                 toolName: "Write",
-                input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                input: { file_path: "src/a.ts", content: "ok" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
               },
               { type: "finish", finishReason: "tool-calls" },
             ],
@@ -9798,7 +10061,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-1",
             toolName: "Write",
-            input: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+            input: { file_path: "src/a.ts", content: "ok" },
+            inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -10105,6 +10369,9 @@ Previous anchored summary.
     const writer = writerFrom(
       (envelope) => {
         appended.push(envelope.event);
+        if (envelope.event.type === "agent.tool_result") {
+          sandboxResultDigests.push((envelope as unknown as { readonly sandboxResultDigest?: string }).sandboxResultDigest);
+        }
         return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
       },
       undefined,
@@ -10112,6 +10379,8 @@ Previous anchored summary.
     );
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
+    const sandboxResultDigests: Array<string | undefined> = [];
+    let refreshAttempts = 0;
     const store = new AgentLoopRuntimeStore([]);
     const sandboxCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
     const layer = runtimeAgentLoopLayer(loader, {
@@ -10135,8 +10404,20 @@ Previous anchored summary.
       },
       runTool: (request) => {
         runToolCalls.push(`${request.modelRequestId}:${request.modelToolCallId}:${request.toolUseEventId}`);
+        expect(refreshAttempts).toBe(2);
         expect(request.input).toEqual(input);
-        return { type: "completed", output: { text: "cold sandbox write", truncated: false } };
+        return {
+          type: "completed",
+          output: { text: "cold sandbox write", truncated: false },
+          sandboxResultDigest: "a".repeat(64),
+        };
+      },
+      refreshRuntimeBindingToken: async () => {
+        refreshAttempts += 1;
+        if (refreshAttempts === 1) {
+          throw new Error("transient token refresh failure");
+        }
+        return "refreshed-runtime-binding-token";
       },
       acceptSandboxExecution: () => {
         throw new Error("cold accepted Sandbox execution must not be accepted again");
@@ -10155,10 +10436,113 @@ Previous anchored summary.
     );
 
     expect(result).toMatchObject({ type: "completed" });
+    expect(refreshAttempts).toBe(3);
+    expect(sandboxResultDigests).toEqual(["a".repeat(64)]);
     expect(runToolCalls).toEqual(["mrq_cold_sandbox:tool-sandbox-1:sevt_sandbox_tool_1"]);
     expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(0);
     expect(appended.some((event) => event.type === "agent.tool_result")).toBe(true);
     expect(requests).toHaveLength(1);
+  });
+
+  test("cold accepted Sandbox execution releases stale Runtime custody without authoring a result", async () => {
+    const session = new Session("sesn_1");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_cold_sandbox_stale_custody"));
+    const input = { file_path: "src/a.ts", content: "ok" };
+    const durableToolMessage = DurableRuntimeMessageSchema.parse({
+      id: "assistant-cold-sandbox-stale",
+      sessionId: "sesn_1",
+      owningEventId: "sevt_sandbox_tool_stale",
+      eventSequence: 2,
+      role: "assistant",
+      origin: "agent",
+      sequence: 1,
+      status: "completed",
+      createdAt,
+      parts: [{
+        id: "assistant-cold-sandbox-stale-tool",
+        sessionId: "sesn_1",
+        messageId: "assistant-cold-sandbox-stale",
+        sequence: 0,
+        type: "tool",
+        toolCallId: "tool-sandbox-stale",
+        toolName: "Write",
+        toolUseEventId: "sevt_sandbox_tool_stale",
+        toolEvent: { kind: "tool" },
+        state: { status: "running", input: { value: input, preview: JSON.stringify(input), truncated: false } },
+        startedAt: createdAt,
+        createdAt,
+      }],
+    });
+    const loadedMessages = [userMessage("user-cold-sandbox-stale", 0, "hello"), durableToolMessage];
+    const pendingSandboxExecutions = [{
+      toolUseEventId: "sevt_sandbox_tool_stale",
+      modelRequestId: "mrq_cold_sandbox_stale",
+      modelToolCallId: "tool-sandbox-stale",
+      toolName: "Write",
+      input,
+      executionState: "running" as const,
+    }];
+    const appended: SessionEvent[] = [];
+    const requests: LLMRequest[] = [];
+    let refreshAttempts = 0;
+    const sandboxCatalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
+    const layer = runtimeAgentLoopLayer(new QueuedContextLoader([], []), {
+      writer: writerFrom(
+        (envelope) => {
+          appended.push(envelope.event);
+          return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        },
+        undefined,
+        [{ sessionThreadId: session.identity.sessionThreadId, message: durableToolMessage }],
+      ),
+      llmService: queuedLLMService([[{ type: "finish", finishReason: "stop" }]], requests),
+      providerCallRuntime: {
+        systemInstructions: "cold sandbox stale custody test system",
+        toolCatalog: {
+          ...sandboxCatalog,
+          entries: sandboxCatalog.entries.map((entry) => ({
+            ...entry,
+            route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+          })),
+        },
+      },
+      runTool: () => {
+        throw new Error("stale Sandbox custody must not await or execute");
+      },
+      refreshRuntimeBindingToken: async () => {
+        refreshAttempts += 1;
+        if (refreshAttempts > 1) {
+          session.state.beginRuntimeShutdown();
+        }
+        throw {
+          type: "context-loader",
+          code: "superseded",
+          message: "Context loader operation failed.",
+          retryable: false,
+          fatal: true,
+          sessionId: session.sessionId,
+        };
+      },
+      acceptSandboxExecution: () => {
+        throw new Error("cold accepted Sandbox execution must not be accepted again");
+      },
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        session.state.contextManager.replaceMessages(loadedMessages);
+        session.state.markPersistentContextLoaded();
+        agentLoop.seedRuntimeModel(session);
+        expect(yield* agentLoop.installLoadedSandboxExecutions(session, pendingSandboxExecutions, loadedMessages)).toEqual({ ok: true });
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result).toEqual({ type: "interrupted", discardHotState: true });
+    expect(refreshAttempts).toBe(1);
+    expect(appended.some((event) => event.type === "agent.tool_result")).toBe(false);
+    expect(requests).toEqual([]);
   });
 
   test("cold unresolved approval does not strand an accepted Sandbox execution", async () => {
@@ -10413,13 +10797,15 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-1",
             toolName: "Write",
-            input: { value: { file_path: "src/shared.ts", content: "one" }, preview: "{\"file_path\":\"src/shared.ts\"}", truncated: false },
+            input: { file_path: "src/shared.ts", content: "one" },
+            inputPreview: { value: { file_path: "src/shared.ts", content: "one" }, preview: "{\"file_path\":\"src/shared.ts\"}", truncated: false },
           },
           {
             type: "tool-call",
             id: "tool-2",
             toolName: "Write",
-            input: { value: { file_path: "/workspace/src/shared.ts", content: "two" }, preview: "{\"file_path\":\"/workspace/src/shared.ts\"}", truncated: false },
+            input: { file_path: "/workspace/src/shared.ts", content: "two" },
+            inputPreview: { value: { file_path: "/workspace/src/shared.ts", content: "two" }, preview: "{\"file_path\":\"/workspace/src/shared.ts\"}", truncated: false },
           },
           { type: "finish", finishReason: "tool-calls" },
         ],
@@ -11336,7 +11722,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-uncommitted",
             toolName: "search",
-            input: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+            input: { q: "x" },
+            inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
           },
           { type: "provider-error", error: providerError },
         ],
@@ -11394,7 +11781,8 @@ Previous anchored summary.
             type: "tool-call",
             id: "tool-internal-repair",
             toolName: "Bash",
-            input: { value: {}, preview: "{}", truncated: false },
+            input: {},
+            inputPreview: { value: {}, preview: "{}", truncated: false },
           },
           { type: "provider-error", error: providerError },
         ],

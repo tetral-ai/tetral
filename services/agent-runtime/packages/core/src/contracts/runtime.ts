@@ -56,9 +56,9 @@ export interface SessionEventWriterServerToolUse {
 
 /** Final disposition returned by a Runtime tool route to its request turn. */
 export type RuntimeToolSettlement =
-  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string }
-  | { readonly type: "cancelled"; readonly error?: RuntimeFailure };
+  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly serverToolUse?: SessionEventWriterServerToolUse; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string };
 
 const IdentifierSchema = z.string().min(1);
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -644,6 +644,7 @@ export type PendingInputResult = z.infer<typeof PendingInputResultSchema>;
 export const ContextLoaderErrorCodes = [
   "unavailable",
   "timeout",
+  "superseded",
   "schema_mismatch",
   "wrong_session",
   "bounds_exceeded",
@@ -969,6 +970,7 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   stableReasoningParts: z.array(SessionEventWriterStableReasoningPartSchema).max(MaxStableReasoningPartsPerRequest).optional(),
   serverToolUse: SessionEventWriterServerToolUseSchema.optional(),
   mcpMaterializationHandle: SanitizedIdentifierSchema.optional(),
+  sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).superRefine((envelope, context) => {
   const parts = envelope.stableReasoningParts ?? [];
   if (parts.length > 0 && envelope.event.type !== "agent.tool_use" && envelope.event.type !== "agent.mcp_tool_use") {
@@ -991,6 +993,9 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   }
   if (envelope.event.type === "agent.mcp_tool_result" && envelope.mcpMaterializationHandle === undefined) {
     context.addIssue({ code: "custom", message: "MCP tool-result event requires materialization" });
+  }
+  if (envelope.sandboxResultDigest !== undefined && envelope.event.type !== "agent.tool_result") {
+    context.addIssue({ code: "custom", message: "sandbox result digest requires a tool-result event" });
   }
   validateStableReasoningSet(parts, context);
 });
@@ -1443,7 +1448,7 @@ export function normalizeContextLoaderError(input: ContextLoaderErrorInput): Con
     code,
     message: "Context loader operation failed.",
     retryable: code === "unavailable" || code === "timeout",
-    fatal: code === "schema_mismatch" || code === "wrong_session" || code === "bounds_exceeded" || code === "unsafe_payload",
+    fatal: code === "superseded" || code === "schema_mismatch" || code === "wrong_session" || code === "bounds_exceeded" || code === "unsafe_payload",
     ...(input.sessionId !== undefined ? { sessionId: sanitizeRuntimeText(input.sessionId) } : {}),
     ...(input.reason !== undefined ? { reason: sanitizeRuntimeText(input.reason) } : {}),
   };

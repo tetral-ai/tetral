@@ -8,8 +8,12 @@ every durable-write RPC is one PostgreSQL transaction; read-only resolvers
 are the exception. Sandbox execution crosses two distinct boundaries:
 `AcceptSandboxExecution` atomically records the execution and its refs-only
 Queue job, while `AwaitSandboxExecution` only reads that durable execution
-until Sandbox Service stores a terminal result. Bridge never performs the
-provider call while a Runtime RPC is open. Only the MCP `Claim`/`Commit` pair
+until Sandbox Service stores a terminal result. Acceptance validates the exact
+durable Tool Use event and its stamped Tool Part in the shared assistant
+projection; approval input comes from the event rather than the bounded message
+preview. Terminal Sandbox results return an internal digest that `WriteEvent`
+must present before Bridge consumes the staged result. Bridge never performs
+the provider call while a Runtime RPC is open. Only the MCP `Claim`/`Commit` pair
 uses a connector-side leased reservation before its refs-only result commit.
 The Runtime Pod
 holds hot state only and mutates it after the Bridge ACK; nothing the pod
@@ -184,7 +188,9 @@ replacement must preserve, and the conformance suites that prove it.
   while `allow` and `deny` write no row. A public tool event may
   carry an anchored reasoning prefix; a web tool-result event may carry one
   `server_tool_use` usage attachment that increments `sessions.usage`
-  exactly once per event identity (insert-wins).
+  exactly once per event identity (insert-wins). A Sandbox tool-result also
+  carries its internal result digest; that digest participates in declaration
+  idempotency and never enters the public event or message projection.
 - **Lifecycle.** Idempotency-keyed by `runtime_write_id`; the attached
   reasoning set and usage block fold into the request hash. Runtime updates
   hot state only after applying the declaration receipt. An unknown transport

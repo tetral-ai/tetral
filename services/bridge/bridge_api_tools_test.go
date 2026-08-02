@@ -43,7 +43,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	)
 	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool")
-	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf ok"},"evaluated_permission":"allow"}`)
+	const reasoningEventID = "evt_bridge_durable_reasoning"
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, reasoningEventID, 1, "agent.thinking", `{}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 2, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf ok"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events SET model_request_id = $2 WHERE workspace_id = $1 AND event_id = $3`,
 		workspaceID, modelRequest, toolUseID,
@@ -51,6 +53,13 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		t.Fatalf("stamp durable tool-use model request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequest, toolUseID, modelCallID, "exec_command")
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_messages SET source_event_id = $5
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
+		workspaceID, sessionID, threadID, modelRequest, reasoningEventID,
+	); err != nil {
+		t.Fatalf("move durable assistant message ownership to its first event: %v", err)
+	}
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
@@ -126,6 +135,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 		if completed.response.GetResultJson() != terminalResult {
 			t.Fatalf("AwaitSandboxExecution response = %+v; want durable result", completed.response)
 		}
+		if completed.response.GetResultDigest() != sha256Hex(terminalResult) {
+			t.Fatalf("AwaitSandboxExecution digest = %q; want durable result digest", completed.response.GetResultDigest())
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("AwaitSandboxExecution did not observe durable sandbox settlement")
 	}
@@ -173,6 +185,347 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	conflict.ModelToolCallId = "call_bridge_durable_tool_changed"
 	if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("AcceptSandboxExecution model call conflict error = %v; want AlreadyExists", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjection(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID    = "default"
+		sessionID      = "sesn_bridge_shared_tools"
+		threadID       = "thr_bridge_shared_tools"
+		bindingID      = "bind_bridge_shared_tools"
+		podUID         = "pod_bridge_shared_tools"
+		modelRequestID = "mreq_bridge_shared_tools"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-shared-tool-projection-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+
+	encoded, err := os.ReadFile(filepath.Join(repoRootFromBridgeTest(t), "testdata", "stable-reasoning-anchor-vector.json"))
+	if err != nil {
+		t.Fatalf("read stable reasoning fixture: %v", err)
+	}
+	var fixture struct {
+		Parts []struct {
+			ReasoningPartID string `json:"reasoning_part_id"`
+			ProviderPartID  string `json:"provider_part_id"`
+			PartSequence    int32  `json:"part_sequence"`
+			Text            string `json:"text"`
+			MetadataJSON    string `json:"metadata_json"`
+			Truncated       bool   `json:"truncated"`
+		} `json:"stable_reasoning_parts"`
+	}
+	if err := json.Unmarshal(encoded, &fixture); err != nil {
+		t.Fatalf("decode stable reasoning fixture: %v", err)
+	}
+	if len(fixture.Parts) != 2 {
+		t.Fatalf("stable reasoning fixture parts = %d; want 2", len(fixture.Parts))
+	}
+	reasoning := make([]*bridgev1.StableReasoningPart, 0, len(fixture.Parts))
+	draftParts := make([]bridgeRuntimePartDraftForTest, 0, len(fixture.Parts)+4)
+	for _, part := range fixture.Parts {
+		reasoning = append(reasoning, &bridgev1.StableReasoningPart{
+			ReasoningPartId: part.ReasoningPartID,
+			ProviderPartId:  part.ProviderPartID,
+			PartSequence:    part.PartSequence,
+			Text:            part.Text,
+			MetadataJson:    part.MetadataJSON,
+			Truncated:       part.Truncated,
+		})
+		draftParts = append(draftParts, bridgeRuntimePartDraftForTest{
+			kind: "reasoning",
+			json: fmt.Sprintf(
+				`{"type":"reasoning","providerPartId":%q,"providerMetadata":%s,"text":%q,"truncated":%t,"status":"completed"}`,
+				part.ProviderPartID, part.MetadataJSON, part.Text, part.Truncated,
+			),
+		})
+	}
+
+	type acceptedTool struct {
+		eventID  string
+		callID   string
+		toolName string
+		input    string
+		hash     string
+	}
+	inputs := []string{
+		`{"cmd":"printf one"}`,
+		`{"cmd":"printf two"}`,
+		`{"cmd":"` + strings.Repeat("x", 9000) + `"}`,
+		`{"cmd":"printf four"}`,
+	}
+	tools := make([]acceptedTool, 0, len(inputs))
+	for index, input := range inputs {
+		canonicalInput, inputHash, err := canonicalRunToolInput(input)
+		if err != nil {
+			t.Fatalf("canonical tool input %d: %v", index, err)
+		}
+		callID := fmt.Sprintf("call_bridge_shared_%d", index+1)
+		runtimeWriteID := fmt.Sprintf("rwrite_bridge_shared_%d", index+1)
+		var exactInput any
+		if err := json.Unmarshal([]byte(canonicalInput), &exactInput); err != nil {
+			t.Fatalf("decode canonical tool input %d: %v", index, err)
+		}
+		inputValue := map[string]any{"value": exactInput, "preview": canonicalInput, "truncated": false}
+		if index == 2 {
+			inputValue = map[string]any{"preview": canonicalInput[:8192], "truncated": true}
+		}
+		partJSON, err := json.Marshal(map[string]any{
+			"type":       "tool",
+			"toolCallId": callID,
+			"toolName":   "exec_command",
+			"state": map[string]any{
+				"status": "running",
+				"input":  inputValue,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal tool part %d: %v", index, err)
+		}
+		draftParts = append(draftParts, bridgeRuntimePartDraftForTest{kind: "tool", json: string(partJSON)})
+		request := &bridgev1.WriteEventRequest{
+			Scope:          scope,
+			RuntimeWriteId: runtimeWriteID,
+			ModelRequestId: modelRequestID,
+			EventType:      "agent.tool_use",
+			PayloadJson:    `{"type":"agent.tool_use","name":"exec_command","input":` + canonicalInput + `,"evaluated_permission":"ask"}`,
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+				t, scope, runtimeWriteID, "agent.tool_use", "streaming", draftParts...,
+			)},
+		}
+		if index == 0 {
+			request.StableReasoningParts = reasoning
+		}
+		written, err := store.WriteEvent(context.Background(), request)
+		if err != nil {
+			t.Fatalf("WriteEvent shared tool %d: %v", index, err)
+		}
+		tools = append(tools, acceptedTool{
+			eventID: written.GetEventId(), callID: callID, toolName: "exec_command", input: canonicalInput, hash: inputHash,
+		})
+		var stamped map[string]any
+		if err := json.Unmarshal(partJSON, &stamped); err != nil {
+			t.Fatalf("decode tool part %d: %v", index, err)
+		}
+		stamped["toolUseEventId"] = written.GetEventId()
+		stamped["toolEvent"] = map[string]any{"kind": "tool"}
+		stampedJSON, err := json.Marshal(stamped)
+		if err != nil {
+			t.Fatalf("stamp tool part %d: %v", index, err)
+		}
+		draftParts[len(draftParts)-1].json = string(stampedJSON)
+	}
+	var reboundPart map[string]any
+	if err := json.Unmarshal([]byte(draftParts[len(fixture.Parts)].json), &reboundPart); err != nil {
+		t.Fatalf("decode stamped tool part for rebound attempt: %v", err)
+	}
+	delete(reboundPart, "toolUseEventId")
+	delete(reboundPart, "toolEvent")
+	reboundJSON, err := json.Marshal(reboundPart)
+	if err != nil {
+		t.Fatalf("marshal rebound tool part: %v", err)
+	}
+	reboundParts := append([]bridgeRuntimePartDraftForTest(nil), draftParts...)
+	reboundParts[len(fixture.Parts)].json = string(reboundJSON)
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_bridge_shared_rebind",
+		ModelRequestId: modelRequestID,
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"exec_command","input":` + tools[0].input + `,"evaluated_permission":"ask"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_bridge_shared_rebind", "agent.tool_use", "streaming", reboundParts...,
+		)},
+	}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("WriteEvent rebound stamped tool part error = %v; want AlreadyExists", err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_pending_tool_uses
+		    SET status = 'resolving', decision = 'allow', updated_at = clock_timestamp()
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+		workspaceID, sessionID, threadID,
+	); err != nil {
+		t.Fatalf("resolve shared tool approvals: %v", err)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_shared_tools_cold",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext shared tools: %v", err)
+	}
+	var contextPayload struct {
+		PendingToolUses []struct {
+			ToolUseEventID string          `json:"toolUseEventId"`
+			Input          json.RawMessage `json:"input"`
+		} `json:"pendingToolUses"`
+	}
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &contextPayload); err != nil {
+		t.Fatalf("decode shared tool context: %v", err)
+	}
+	if len(contextPayload.PendingToolUses) != len(tools) {
+		t.Fatalf("cold pending tools = %d; want %d", len(contextPayload.PendingToolUses), len(tools))
+	}
+	loadedInput := make(map[string]string, len(contextPayload.PendingToolUses))
+	for _, pending := range contextPayload.PendingToolUses {
+		loadedInput[pending.ToolUseEventID] = string(pending.Input)
+	}
+	for _, tool := range tools {
+		if loadedInput[tool.eventID] != tool.input {
+			t.Fatalf("cold approval input for %s differs from exact durable input", tool.eventID)
+		}
+	}
+
+	baseRequest := func(tool acceptedTool) *bridgev1.AcceptSandboxExecutionRequest {
+		return &bridgev1.AcceptSandboxExecutionRequest{
+			Scope: scope, ToolUseEventId: tool.eventID, ModelToolCallId: tool.callID,
+			NormalizedInputHash: tool.hash, ToolName: tool.toolName, InputJson: tool.input,
+		}
+	}
+	for name, mutate := range map[string]func(*bridgev1.AcceptSandboxExecutionRequest){
+		"tool use event": func(request *bridgev1.AcceptSandboxExecutionRequest) { request.ToolUseEventId = tools[0].eventID },
+		"model tool call": func(request *bridgev1.AcceptSandboxExecutionRequest) {
+			request.ModelToolCallId = "call_bridge_shared_changed"
+		},
+		"tool name": func(request *bridgev1.AcceptSandboxExecutionRequest) { request.ToolName = "Read" },
+		"canonical input": func(request *bridgev1.AcceptSandboxExecutionRequest) {
+			request.InputJson = `{"cmd":"changed"}`
+			request.NormalizedInputHash = sha256Hex(request.InputJson)
+		},
+	} {
+		t.Run("reject changed "+name, func(t *testing.T) {
+			request := baseRequest(tools[3])
+			mutate(request)
+			if _, err := store.AcceptSandboxExecution(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("AcceptSandboxExecution changed %s error = %v; want FailedPrecondition", name, err)
+			}
+		})
+	}
+	for index, tool := range tools {
+		accepted, err := store.AcceptSandboxExecution(context.Background(), baseRequest(tool))
+		if err != nil {
+			t.Fatalf("AcceptSandboxExecution shared tool %d: %v", index, err)
+		}
+		if accepted.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+			t.Fatalf("shared tool %d ack = %s; want committed", index, accepted.GetAck().GetStatus())
+		}
+	}
+	var messageCount, partCount, executionCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*), COALESCE(sum(jsonb_array_length(data_json::jsonb->'parts')), 0)
+		   FROM session_messages
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
+		workspaceID, sessionID, threadID, modelRequestID,
+	).Scan(&messageCount, &partCount); err != nil {
+		t.Fatalf("count shared projection: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND tool_kind = 'sandbox_tool'`,
+		workspaceID, sessionID, threadID,
+	).Scan(&executionCount); err != nil {
+		t.Fatalf("count shared executions: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = 'sandbox_tool_execute'`, workspaceID,
+	).Scan(&queueCount); err != nil {
+		t.Fatalf("count shared execution jobs: %v", err)
+	}
+	if messageCount != 1 || partCount != 6 || executionCount != 4 || queueCount != 4 {
+		t.Fatalf("shared message/parts/executions/jobs = %d/%d/%d/%d; want 1/6/4/4", messageCount, partCount, executionCount, queueCount)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission(t *testing.T) {
+	for _, testCase := range []struct {
+		name                string
+		evaluatedPermission string
+		approvalStatus      string
+		approvalDecision    string
+		approvalInput       string
+		wantCode            codes.Code
+		wantAccepted        bool
+	}{
+		{name: "direct allow", evaluatedPermission: "allow", wantCode: codes.OK, wantAccepted: true},
+		{name: "resolved ask allow", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", wantCode: codes.OK, wantAccepted: true},
+		{name: "deny", evaluatedPermission: "deny", wantCode: codes.FailedPrecondition},
+		{name: "ask missing approval", evaluatedPermission: "ask", wantCode: codes.FailedPrecondition},
+		{name: "ask denied", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "deny", wantCode: codes.FailedPrecondition},
+		{name: "unknown permission", evaluatedPermission: "unknown", wantCode: codes.FailedPrecondition},
+		{name: "approval identity conflict", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", approvalInput: `{"cmd":"different"}`, wantCode: codes.AlreadyExists},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(testCase.name, " ", "_")
+			sessionID := "sesn_permission_" + suffix
+			threadID := "thr_permission_" + suffix
+			toolUseID := "evt_permission_" + suffix
+			modelRequestID := "mreq_permission_" + suffix
+			modelToolCallID := "call_permission_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.tool_use",
+				`{"name":"exec_command","input":{"cmd":"printf ok"},"evaluated_permission":"`+testCase.evaluatedPermission+`"}`)
+			if _, err := admin.ExecContext(context.Background(),
+				`UPDATE session_events SET model_request_id = $2 WHERE workspace_id = $1 AND event_id = $3`,
+				"default", modelRequestID, toolUseID,
+			); err != nil {
+				t.Fatalf("stamp permission model request: %v", err)
+			}
+			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "exec_command")
+			if testCase.approvalStatus != "" {
+				approvalInput := testCase.approvalInput
+				if approvalInput == "" {
+					approvalInput = `{"cmd":"printf ok"}`
+				}
+				if _, err := admin.ExecContext(context.Background(),
+					`INSERT INTO session_pending_tool_uses (
+						workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+						tool_name, kind, input_json, decision, status, expires_at, created_at, updated_at
+					) VALUES ('default', $1, $2, $3, $4, 'exec_command', 'approval', $5, $6, $7,
+						'2026-01-01T01:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+					sessionID, threadID, toolUseID, modelToolCallID, approvalInput, testCase.approvalDecision, testCase.approvalStatus,
+				); err != nil {
+					t.Fatalf("seed permission approval: %v", err)
+				}
+			}
+
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+				Scope:               bridgeAPIScope(sessionID, threadID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix),
+				ToolUseEventId:      toolUseID,
+				ModelToolCallId:     modelToolCallID,
+				NormalizedInputHash: sha256Hex(`{"cmd":"printf ok"}`),
+				ToolName:            "exec_command",
+				InputJson:           `{"cmd":"printf ok"}`,
+			})
+			if status.Code(err) != testCase.wantCode {
+				t.Fatalf("AcceptSandboxExecution error = %v; want %s", err, testCase.wantCode)
+			}
+			var executionCount, queueCount int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id = 'default' AND session_id = $1`,
+				sessionID,
+			).Scan(&executionCount); err != nil {
+				t.Fatalf("count permission executions: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM queue_jobs WHERE workspace_id = 'default' AND kind = 'sandbox_tool_execute' AND partition_key LIKE $1`,
+				"%"+sessionID+"%",
+			).Scan(&queueCount); err != nil {
+				t.Fatalf("count permission jobs: %v", err)
+			}
+			wantCount := 0
+			if testCase.wantAccepted {
+				wantCount = 1
+			}
+			if executionCount != wantCount || queueCount != wantCount {
+				t.Fatalf("permission execution/job counts = %d/%d; want %d/%d", executionCount, queueCount, wantCount, wantCount)
+			}
+		})
 	}
 }
 

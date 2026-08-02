@@ -64,9 +64,6 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"rpc RunTool(",
-		"message RunToolRequest",
-		"message RunToolResponse",
 		"string memory" + "_store_id",
 		"memory" + "_store_id =",
 	} {

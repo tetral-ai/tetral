@@ -147,12 +147,9 @@ describe("BridgeAPIContextLoader", () => {
     });
   });
 
-  test("retries stale-generation refresh failures with a bounded policy", async () => {
+  test("classifies a stale-generation refresh as lost Runtime custody", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.refreshErrors.push(
-      Object.assign(new Error("stale binding"), { code: status.FAILED_PRECONDITION }),
-      Object.assign(new Error("stale binding"), { code: status.FAILED_PRECONDITION }),
-    );
+    bridge.refreshErrors.push(Object.assign(new Error("stale binding"), { code: status.FAILED_PRECONDITION }));
     const sleeps: number[] = [];
     const loader = new BridgeAPIContextLoader({
       address: "bridge.test:9090",
@@ -164,9 +161,13 @@ describe("BridgeAPIContextLoader", () => {
       },
     });
 
-    await expect(loader.refreshRuntimeBindingToken(bindingIdentity("opaque-token"), { force: true })).resolves.toBe("runtime-binding-token-refreshed");
-    expect(bridge.refreshRuntimeBindingTokenRequests).toHaveLength(3);
-    expect(sleeps).toEqual([100, 300]);
+    await expect(loader.refreshRuntimeBindingToken(bindingIdentity("opaque-token"), { force: true })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "superseded",
+      retryable: false,
+    });
+    expect(bridge.refreshRuntimeBindingTokenRequests).toHaveLength(1);
+    expect(sleeps).toEqual([]);
   });
 
   test("resolves the exact public agent-mail envelope and rejects derived-content drift", async () => {

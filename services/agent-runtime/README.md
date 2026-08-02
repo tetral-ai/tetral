@@ -255,6 +255,12 @@ with separate anchors.
 | `bridge` | `RunMemory` | Bridge |
 | `subagent` | `spawn_agent` … `list_agents` | in-process child thread |
 
+Sandbox dispatch accepts one exact durable Tool Use before waiting for its
+result. A cold Runtime rejoins that accepted execution after refreshing its
+binding token; a transient refresh failure does not invent a Tool Result or
+consume durable custody. The terminal result digest stays internal and is
+returned to Bridge with the loop-authored tool-result declaration.
+
 `RunWeb` reaches the web-connector through `TETRAL_WEB_CONNECTOR_GRPC_ADDR`,
 which boot config requires and gives no default: a Runtime Pod whose Deployment
 spec lacks it fails to start rather than losing web tools alone. Roll the spec

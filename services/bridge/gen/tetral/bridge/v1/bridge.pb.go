@@ -3853,6 +3853,7 @@ type WriteEventRequest struct {
 	ServerToolUse            *ServerToolUseUsage    `protobuf:"bytes,9,opt,name=server_tool_use,json=serverToolUse,proto3" json:"server_tool_use,omitempty"`
 	Drafts                   []*RuntimeMessageDraft `protobuf:"bytes,10,rep,name=drafts,proto3" json:"drafts,omitempty"`
 	McpMaterializationHandle *string                `protobuf:"bytes,11,opt,name=mcp_materialization_handle,json=mcpMaterializationHandle,proto3,oneof" json:"mcp_materialization_handle,omitempty"`
+	SandboxResultDigest      *string                `protobuf:"bytes,12,opt,name=sandbox_result_digest,json=sandboxResultDigest,proto3,oneof" json:"sandbox_result_digest,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
 }
@@ -3953,6 +3954,13 @@ func (x *WriteEventRequest) GetDrafts() []*RuntimeMessageDraft {
 func (x *WriteEventRequest) GetMcpMaterializationHandle() string {
 	if x != nil && x.McpMaterializationHandle != nil {
 		return *x.McpMaterializationHandle
+	}
+	return ""
+}
+
+func (x *WriteEventRequest) GetSandboxResultDigest() string {
+	if x != nil && x.SandboxResultDigest != nil {
+		return *x.SandboxResultDigest
 	}
 	return ""
 }
@@ -5816,6 +5824,7 @@ type AwaitSandboxExecutionResponse struct {
 	ResultJson            string                 `protobuf:"bytes,1,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
 	BackgroundTaskStarted bool                   `protobuf:"varint,2,opt,name=background_task_started,json=backgroundTaskStarted,proto3" json:"background_task_started,omitempty"`
 	TaskId                string                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	ResultDigest          string                 `protobuf:"bytes,4,opt,name=result_digest,json=resultDigest,proto3" json:"result_digest,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -5867,6 +5876,13 @@ func (x *AwaitSandboxExecutionResponse) GetBackgroundTaskStarted() bool {
 func (x *AwaitSandboxExecutionResponse) GetTaskId() string {
 	if x != nil {
 		return x.TaskId
+	}
+	return ""
+}
+
+func (x *AwaitSandboxExecutionResponse) GetResultDigest() string {
+	if x != nil {
+		return x.ResultDigest
 	}
 	return ""
 }
@@ -6667,7 +6683,7 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x1fReadFileAttachmentChunkResponse\x12\x14\n" +
 	"\x04data\x18\x01 \x01(\fH\x00R\x04data\x12G\n" +
 	"\brejected\x18\x02 \x01(\v2).tetral.bridge.v1.FileAttachmentRejectionH\x00R\brejectedB\t\n" +
-	"\aoutcome\"\xda\x04\n" +
+	"\aoutcome\"\xad\x05\n" +
 	"\x11WriteEventRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12(\n" +
 	"\x10runtime_write_id\x18\x02 \x01(\tR\x0eruntimeWriteId\x12(\n" +
@@ -6680,8 +6696,10 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x0fserver_tool_use\x18\t \x01(\v2$.tetral.bridge.v1.ServerToolUseUsageR\rserverToolUse\x12=\n" +
 	"\x06drafts\x18\n" +
 	" \x03(\v2%.tetral.bridge.v1.RuntimeMessageDraftR\x06drafts\x12A\n" +
-	"\x1amcp_materialization_handle\x18\v \x01(\tH\x00R\x18mcpMaterializationHandle\x88\x01\x01B\x1d\n" +
-	"\x1b_mcp_materialization_handleJ\x04\b\x06\x10\a\"r\n" +
+	"\x1amcp_materialization_handle\x18\v \x01(\tH\x00R\x18mcpMaterializationHandle\x88\x01\x01\x127\n" +
+	"\x15sandbox_result_digest\x18\f \x01(\tH\x01R\x13sandboxResultDigest\x88\x01\x01B\x1d\n" +
+	"\x1b_mcp_materialization_handleB\x18\n" +
+	"\x16_sandbox_result_digestJ\x04\b\x06\x10\a\"r\n" +
 	"\x12ServerToolUseUsage\x12.\n" +
 	"\x13web_search_requests\x18\x01 \x01(\x03R\x11webSearchRequests\x12,\n" +
 	"\x12web_fetch_requests\x18\x02 \x01(\x03R\x10webFetchRequests\"\xc8\x01\n" +
@@ -6838,12 +6856,13 @@ const file_tetral_bridge_v1_bridge_proto_rawDesc = "" +
 	"\ttool_name\x18\x04 \x01(\tR\btoolName\x12\x1d\n" +
 	"\n" +
 	"input_json\x18\x05 \x01(\tR\tinputJson\x12+\n" +
-	"\x12model_tool_call_id\x18\a \x01(\tR\x0fmodelToolCallIdJ\x04\b\x06\x10\a\"\x91\x01\n" +
+	"\x12model_tool_call_id\x18\a \x01(\tR\x0fmodelToolCallIdJ\x04\b\x06\x10\a\"\xb6\x01\n" +
 	"\x1dAwaitSandboxExecutionResponse\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\x126\n" +
 	"\x17background_task_started\x18\x02 \x01(\bR\x15backgroundTaskStarted\x12\x17\n" +
-	"\atask_id\x18\x03 \x01(\tR\x06taskId\"\xfc\x01\n" +
+	"\atask_id\x18\x03 \x01(\tR\x06taskId\x12#\n" +
+	"\rresult_digest\x18\x04 \x01(\tR\fresultDigest\"\xfc\x01\n" +
 	"\x18ReadCommandResultRequest\x124\n" +
 	"\x05scope\x18\x01 \x01(\v2\x1e.tetral.bridge.v1.RuntimeScopeR\x05scope\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12:\n" +

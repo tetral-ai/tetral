@@ -836,7 +836,8 @@ describe("runtime boundary contracts", () => {
       type: "tool-call",
       id: canary,
       toolName: "search",
-      input: boundedJson,
+      input: boundedJson.value,
+      inputPreview: boundedJson,
     });
     const failure = RuntimeFailureSchema.parse({
       type: "provider",
@@ -848,7 +849,10 @@ describe("runtime boundary contracts", () => {
 
     expect(boundedJson).toEqual({ value: { [rawHeaders]: executableText }, preview: executableText, truncated: false });
     expect(runtimeMessage.parts[0]).toMatchObject({ text: executableText });
-    expect(toolCall).toMatchObject({ input: { value: { [rawHeaders]: executableText }, preview: executableText } });
+    expect(toolCall).toMatchObject({
+      input: { [rawHeaders]: executableText },
+      inputPreview: { value: { [rawHeaders]: executableText }, preview: executableText },
+    });
     expectSanitized(failure);
   });
 

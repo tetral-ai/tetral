@@ -94,6 +94,7 @@ export interface SessionProcessorWriter {
     modelRequestId?: string,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
     mcpMaterializationHandle?: string,
+    sandboxResultDigest?: string,
   ) => Promise<SessionEventWriterAppendResult>;
   readonly commitInternalToolRepair: (
     repair: RuntimeInternalToolRepairCommit,
@@ -534,6 +535,7 @@ export class SessionProcessor {
   async commitPublicToolUse(
     source: RuntimeProcessorSource,
     toolCallId: string,
+    input: RuntimeJsonValue,
     evaluatedPermission: "allow" | "ask" | "deny",
     toolEvent: PublicToolEvent = { kind: "tool" },
   ): Promise<ToolUseCommitResult> {
@@ -549,7 +551,7 @@ export class SessionProcessor {
     if (existingToolUseEventId !== undefined) {
       return { ok: true, events: [], toolUseEventId: existingToolUseEventId };
     }
-    const event = toolUseSessionEvent(existing, evaluatedPermission, toolEvent);
+    const event = toolUseSessionEvent(existing, input, evaluatedPermission, toolEvent);
     const anchoredReasoning = this.stableReasoningPrefixForTool(existing);
     const draftPart = parseToolPart({
       ...existing,
@@ -557,7 +559,7 @@ export class SessionProcessor {
     });
     this.toolParts.set(toolCallId, draftPart);
     this.upsertPart(draftPart);
-    const declaredMessage = this.declarationMessage(anchoredReasoning);
+    const declaredMessage = this.declarationMessage(anchoredReasoning, toolCallId);
     // Transport and receipt application share this snapshot because another
     // tool fiber may mutate the accumulator while the durable write is pending.
     const appendResult = await this.options.writer.appendEvent(
@@ -623,7 +625,7 @@ export class SessionProcessor {
         completedAt: this.options.now(),
       });
       this.toolParts.set(toolCallId, completed);
-      return await this.writePart(completed, source, settlement.serverToolUse, settlement.mcpMaterializationHandle);
+      return await this.writePart(completed, source, settlement.serverToolUse, settlement.mcpMaterializationHandle, settlement.sandboxResultDigest);
     }
     if (settlement.type === "error") {
       const errored = parseToolPart({
@@ -636,7 +638,7 @@ export class SessionProcessor {
         completedAt: this.options.now(),
       });
       this.toolParts.set(toolCallId, errored);
-      const result = await this.writePart(errored, source, settlement.serverToolUse, settlement.mcpMaterializationHandle);
+      const result = await this.writePart(errored, source, settlement.serverToolUse, settlement.mcpMaterializationHandle, settlement.sandboxResultDigest);
       return await this.appendPublicMcpErrorEvent(result, settlement.publicErrorEvent, source);
     }
     const cancelled = parseToolPart({
@@ -649,7 +651,7 @@ export class SessionProcessor {
       completedAt: this.options.now(),
     });
     this.toolParts.set(toolCallId, cancelled);
-    return await this.writePart(cancelled, source);
+    return await this.writePart(cancelled, source, undefined, undefined, settlement.sandboxResultDigest);
   }
 
   async commitInternalToolRepair(
@@ -923,7 +925,7 @@ export class SessionProcessor {
       toolName: envelope.event.toolName,
       state: {
         status: "running",
-        input: runtimeJsonFromProvider(envelope.event.input, this.maxBytes()),
+        input: runtimeJsonFromProvider(envelope.event.inputPreview, this.maxBytes()),
       },
     });
     this.toolParts.set(envelope.event.id, updated);
@@ -1064,9 +1066,10 @@ export class SessionProcessor {
     source: RuntimeProcessorSource,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
     mcpMaterializationHandle?: string,
+    sandboxResultDigest?: string,
   ): Promise<SessionProcessorResult> {
     this.upsertPart(part);
-    return await this.appendStablePartEvents(part, source, serverToolUse, mcpMaterializationHandle);
+    return await this.appendStablePartEvents(part, source, serverToolUse, mcpMaterializationHandle, sandboxResultDigest);
   }
 
   private async appendStablePartEvents(
@@ -1074,6 +1077,7 @@ export class SessionProcessor {
     source: RuntimeProcessorSource,
     serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
     mcpMaterializationHandle?: string,
+    sandboxResultDigest?: string,
   ): Promise<SessionProcessorResult> {
     const events = sessionEventsForStablePart(part, this.toolUseEventIds, this.toolEvents);
     const appendedEvents: SessionEvent[] = [];
@@ -1098,6 +1102,7 @@ export class SessionProcessor {
         modelRequestId,
         event.type === "agent.tool_result" ? serverToolUse : undefined,
         event.type === "agent.mcp_tool_result" ? mcpMaterializationHandle : undefined,
+        event.type === "agent.tool_result" ? sandboxResultDigest : undefined,
       );
       if (!appendResult.ok) {
         return {
@@ -1263,6 +1268,7 @@ export class SessionProcessor {
 
   private declarationMessage(
     anchoredReasoning: readonly SessionEventWriterStableReasoningPart[],
+    currentToolCallId?: string,
   ): RuntimeMessageDraft {
     const admittedReasoning = new Set([
       ...this.durableReasoningPartIds,
@@ -1271,7 +1277,13 @@ export class SessionProcessor {
     return RuntimeMessageDraftSchema.parse({
       ...this.workingMessage,
       parts: this.workingMessage.parts.filter(
-        (part) => part.type !== "reasoning" || admittedReasoning.has(part.runtimeLocalPartId),
+        (part) =>
+          (part.type !== "reasoning" || admittedReasoning.has(part.runtimeLocalPartId)) &&
+          (
+            part.type !== "tool" ||
+            part.toolCallId === currentToolCallId ||
+            part.toolUseEventId !== undefined
+          ),
       ),
     });
   }
@@ -1450,10 +1462,13 @@ function byteLength(value: string): number {
 
 function toolUseSessionEvent(
   part: ToolRuntimePartDraft,
+  input: RuntimeJsonValue,
   evaluatedPermission: "allow" | "ask" | "deny",
   toolEvent: PublicToolEvent,
 ): SessionEvent {
-  const input = toolInputForEvent(part);
+  if (!isRuntimeJsonObjectForEvent(input)) {
+    throw new Error("public tool input must be a JSON object");
+  }
   if (toolEvent.kind === "mcp") {
     return SessionEventSchema.parse({
       type: "agent.mcp_tool_use",
@@ -1469,16 +1484,6 @@ function toolUseSessionEvent(
     input,
     evaluated_permission: evaluatedPermission,
   });
-}
-
-function toolInputForEvent(part: ToolRuntimePartDraft): RuntimeJsonValue {
-  if ("input" in part.state) {
-    const input = part.state.input;
-    if (input !== undefined && input.value !== undefined && isRuntimeJsonObjectForEvent(input.value)) {
-      return input.value;
-    }
-  }
-  return {};
 }
 
 function isRuntimeJsonObjectForEvent(value: RuntimeJsonValue): value is { readonly [key: string]: RuntimeJsonValue } {

@@ -244,6 +244,7 @@ export const contextLoaderLayer = ContextLoader.layer;
 const ToolRouteCancelJoinTimeoutMs = 250;
 const RequestTurnScopeCloseTimeoutMs = ToolRouteCancelJoinTimeoutMs + 50;
 const TaskNotificationCommitReplayBackoffMs = 300;
+const RecoveredSandboxBindingRefreshBackoffMs = 100;
 
 class HotDurableOperationFenced extends Error {}
 
@@ -442,6 +443,9 @@ interface ProviderTurnStreamState {
   terminalProviderEventSeen: boolean;
   waitingToolUseEventIds: string[];
   toolFibers: Fiber.Fiber<ProviderTurnResult, unknown>[];
+  // One assistant projection is mutated through its durable ACKs in order;
+  // tool route execution remains independently concurrent outside this gate.
+  assistantProjectionGate: Semaphore.Semaphore;
   requestTurnScope: Scope.Scope;
   toolScheduler: ToolScheduler;
   toolEntries: Record<string, ToolEntry | undefined>;
@@ -456,9 +460,9 @@ interface RejectedProviderAttachment {
 
 /** Normalizes a concrete tool route outcome before SessionProcessor persists it. */
 export type RuntimeToolExecutionResult =
-  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly ProviderRequestAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string }
-  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string }
-  | { readonly type: "cancelled"; readonly error?: RuntimeFailure }
+  | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly ProviderRequestAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
+  | { readonly type: "cancelled"; readonly error?: RuntimeFailure; readonly sandboxResultDigest?: string }
   | { readonly type: "stale_custody" };
 
 /** Identifies durable background work whose later notification updates the originating tool. */
@@ -1071,7 +1075,10 @@ function runAgentLoopEffect(
         return yield* nonAbandonablePromise(() => completeRun(session, options, custody));
       }
       const bindingTokenRefresh = yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
-      if (!bindingTokenRefresh.ok) {
+      if (bindingTokenRefresh.type === "stale_custody") {
+        return { type: "interrupted", discardHotState: true };
+      }
+      if (bindingTokenRefresh.type === "failed") {
         const terminalAppend = yield* nonAbandonablePromise(() => appendTerminalEventsBestEffort(options, session, bindingTokenRefresh.error));
         if (!terminalAppend.ok) {
           return { type: "failed", error: terminalAppend.error, releaseSession: { reason: "event_write_failed" } };
@@ -2695,8 +2702,8 @@ function runProviderTurnEffect(
           : {}),
         now: options.runtime.now,
         writer: {
-          appendEvent: async (event, _source, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle) =>
-            await appendEvent(options, session, event, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle),
+          appendEvent: async (event, _source, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest) =>
+            await appendEvent(options, session, event, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest),
           commitInternalToolRepair: async (repair, envelope) => await commitInternalToolRepairStable(session, options, repair, envelope, processorWriteSignal()),
         },
       });
@@ -2783,6 +2790,7 @@ function runProviderTurnEffect(
       terminalProviderEventSeen: false,
       waitingToolUseEventIds: [],
       toolFibers: [],
+      assistantProjectionGate: Semaphore.makeUnsafe(1),
       requestTurnScope,
       toolScheduler: new ToolScheduler(),
       toolEntries: Object.create(null) as Record<string, ToolEntry | undefined>,
@@ -3013,9 +3021,15 @@ function runProviderTurnEffect(
         }
 
         const providerFailure = runtimeFailureFromLlmService(failure);
-        const processed = yield* Effect.promise(() => durableOperations.run(
-          () => processor.process({ ...source, event: { type: "provider-error", error: providerFailure } }),
-        ));
+        const processed = yield* streamState.assistantProjectionGate.withPermit(Effect.promise(async () => {
+          const result = await durableOperations.run(
+            () => processor.process({ ...source, event: { type: "provider-error", error: providerFailure } }),
+          );
+          if (result.ok) {
+            commitProcessorProjectionWithoutStableReasoning(session, processor);
+          }
+          return result;
+        }));
         if (!processed.ok) {
           return yield* Effect.promise(() => closeStartedRequestAfterProcessorFailure(
             session,
@@ -3029,7 +3043,6 @@ function runProviderTurnEffect(
             requestEndKind,
           ));
         }
-        commitProcessorProjectionWithoutStableReasoning(session, processor);
         return yield* closeProviderFailureEffect(
           session,
           options,
@@ -3084,7 +3097,13 @@ function processProviderEventEffect(
     if (event.type === "attachment-rejections") {
       recordAttachmentRejections(session, options, request.attachments, state.rejectedAttachments, event.rejections);
     }
-    const processed = yield* Effect.promise(() => processor.process({ ...source, event }));
+    const processed = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+      const result = await processor.process({ ...source, event });
+      if (result.ok) {
+        commitProcessorProjectionWithoutStableReasoning(session, processor);
+      }
+      return result;
+    }));
     if (!processed.ok) {
       const result = yield* Effect.promise(() => closeStartedRequestAfterProcessorFailure(
         session,
@@ -3099,7 +3118,6 @@ function processProviderEventEffect(
       ));
       return yield* Effect.fail(new ProviderTurnShortCircuit(result));
     }
-    commitProcessorProjectionWithoutStableReasoning(session, processor);
     if (event.type === "provider-error") {
       const result = yield* closeProviderFailureEffect(
         session,
@@ -3167,13 +3185,19 @@ function processProviderEventEffect(
       }
       const registered = registerRuntimeToolCall(session, options, request.modelRequestId, state, event);
       if (registered.type === "invalid") {
-        const settled = yield* Effect.promise(() => processor.commitInternalToolRepair(
-          source,
-          event.id,
-          request.modelRequestId,
-          internalToolRepairKey(request.modelRequestId, event.id, event.toolName),
-          invalidToolCallFailure(session.sessionId, source, event.toolName),
-        ));
+        const settled = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+          const result = await processor.commitInternalToolRepair(
+            source,
+            event.id,
+            request.modelRequestId,
+            internalToolRepairKey(request.modelRequestId, event.id, event.toolName),
+            invalidToolCallFailure(session.sessionId, source, event.toolName),
+          );
+          if (result.ok) {
+            commitProcessorProjectionWithoutStableReasoning(session, processor);
+          }
+          return result;
+        }));
         if (!settled.ok) {
           const result = yield* Effect.promise(() => closeStartedRequestAfterProcessorFailure(
             session,
@@ -3188,7 +3212,6 @@ function processProviderEventEffect(
           ));
           return yield* Effect.fail(new ProviderTurnShortCircuit(result));
         }
-        commitProcessorProjectionWithoutStableReasoning(session, processor);
         return;
       }
       yield* pumpToolSchedulerEffect(session, options, processor, source, request.modelRequestId, state);
@@ -3389,7 +3412,7 @@ function registerRuntimeToolCall(
   if (entry === undefined || toolCatalog === undefined) {
     return { type: "invalid" };
   }
-  const input = event.input.value ?? event.input.preview;
+  const input = event.input;
   const jobId = `${modelRequestId}:${event.id}`;
   const job: ToolJob = {
     id: jobId,
@@ -3668,8 +3691,8 @@ function createPendingApprovalSettlementProcessor(
       : {}),
     now: options.runtime.now,
     writer: {
-      appendEvent: async (event, _source, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle) =>
-        await appendEvent(options, session, event, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle),
+      appendEvent: async (event, _source, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest) =>
+        await appendEvent(options, session, event, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest),
       commitInternalToolRepair: async (repair, envelope) => await commitInternalToolRepairStable(session, options, repair, envelope, durability.writeSignal()),
     },
   });
@@ -3957,9 +3980,13 @@ function resumeRecoveredToolJobsEffect(
         ).pipe(Effect.map((results) => ({ type: "joined" as const, results })));
         const completed = yield* joined;
         activeSettlementFibers = [];
-        const interrupted = completed.results.some(({ result }) => result.type === "interrupted");
+        const interrupted = completed.results.find(({ result }) => result.type === "interrupted");
         if (interrupted || session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
-          return yield* closeForRuntimeControl(active.map(({ fiber }) => fiber));
+          const closed = yield* closeForRuntimeControl(active.map(({ fiber }) => fiber));
+          return interrupted?.result.type === "interrupted" &&
+              interrupted.result.attachmentRideDisposition === "discard_hot_state"
+            ? interrupted.result
+            : closed;
         }
         const failed = completed.results.find(({ result }) => result.type === "failed");
         if (failed?.result.type === "failed") {
@@ -4019,7 +4046,10 @@ function resumeRecoveredToolJobEffect(
       return { type: "interrupted" as const };
     }
     const currentModel = pending.currentModel ?? session.state.currentModel();
-    const tokenRefresh = yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
+    let ownsSandboxExecution = isPendingSandboxExecution(pending);
+    const tokenRefresh = ownsSandboxExecution
+      ? yield* refreshAcceptedSandboxBindingTokenEffect(session, options)
+      : yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
       return { type: "interrupted" as const };
     }
@@ -4041,9 +4071,10 @@ function resumeRecoveredToolJobEffect(
       ...(currentModel !== undefined ? { currentModel } : {}),
       committedMessages: pending.committedMessages,
     };
-    let ownsSandboxExecution = isPendingSandboxExecution(pending);
     let executionResult: RuntimeToolExecutionResult;
-    if (!tokenRefresh.ok) {
+    if (tokenRefresh.type === "stale_custody") {
+      executionResult = { type: "stale_custody" };
+    } else if (tokenRefresh.type === "failed") {
       executionResult = { type: "error", error: tokenRefresh.error };
     } else if (ownsSandboxExecution) {
       executionResult = yield* runRuntimeToolEffect(
@@ -4235,19 +4266,24 @@ function handleRuntimeToolJobEffect(
       approvalMode: state.executionPolicy.approvalMode ?? options.approvalMode ?? "ask_for_approval",
     });
     if (gateDecision.type === "invalid") {
-      const settled = yield* Effect.promise(() => state.durableOperations.run(
-        () => processor.commitInternalToolRepair(
-          source,
-          job.modelToolCallId,
-          modelRequestId,
-          internalToolRepairKey(modelRequestId, job.modelToolCallId, job.name),
-          invalidToolCallFailure(session.sessionId, source, job.name),
-        ),
-      ));
+      const settled = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+        const result = await state.durableOperations.run(
+          () => processor.commitInternalToolRepair(
+            source,
+            job.modelToolCallId,
+            modelRequestId,
+            internalToolRepairKey(modelRequestId, job.modelToolCallId, job.name),
+            invalidToolCallFailure(session.sessionId, source, job.name),
+          ),
+        );
+        if (result.ok) {
+          commitProcessorProjectionWithoutStableReasoning(session, processor);
+        }
+        return result;
+      }));
       if (!settled.ok) {
         return yield* Effect.promise(() => handleProcessorFailure(session, options, settled.error));
       }
-      commitProcessorProjectionWithoutStableReasoning(session, processor);
       state.toolScheduler.finishJob(job.id);
       return providerTurnCompleted();
     }
@@ -4302,13 +4338,18 @@ function handleRuntimeToolJobEffect(
       return providerTurnCompleted();
     }
 
-    const toolUse = yield* Effect.promise(() => state.durableOperations.run(
-      () => processor.commitPublicToolUse(source, job.modelToolCallId, gateDecision.evaluatedPermission, publicToolEventForEntry(entry)),
-    ));
+    const toolUse = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+      const result = await state.durableOperations.run(
+        () => processor.commitPublicToolUse(source, job.modelToolCallId, job.input, gateDecision.evaluatedPermission, publicToolEventForEntry(entry)),
+      );
+      if (result.ok) {
+        commitProcessorProjectionWithoutStableReasoning(session, processor);
+      }
+      return result;
+    }));
     if (!toolUse.ok) {
       return yield* Effect.promise(() => handleProcessorFailure(session, options, toolUse.error));
     }
-    commitProcessorProjectionWithoutStableReasoning(session, processor);
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
       return providerTurnInterrupted();
     }
@@ -4349,16 +4390,21 @@ function handleRuntimeToolJobEffect(
     }
 
     if (gateDecision.type === "deny") {
-      const denied = yield* Effect.promise(() => state.durableOperations.run(
-        () => processor.commitToolSettlement(source, job.modelToolCallId, {
-          type: "error",
-          error: deniedToolCallFailure(session.sessionId, source, gateDecision.message),
-        }),
-      ));
+      const denied = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+        const result = await state.durableOperations.run(
+          () => processor.commitToolSettlement(source, job.modelToolCallId, {
+            type: "error",
+            error: deniedToolCallFailure(session.sessionId, source, gateDecision.message),
+          }),
+        );
+        if (result.ok) {
+          commitProcessorProjectionWithoutStableReasoning(session, processor);
+        }
+        return result;
+      }));
       if (!denied.ok) {
         return yield* Effect.promise(() => handleProcessorFailure(session, options, denied.error));
       }
-      commitProcessorProjectionWithoutStableReasoning(session, processor);
       state.toolScheduler.finishJob(job.id, gateDecision.message);
       return providerTurnCompleted();
     }
@@ -4384,7 +4430,9 @@ function handleRuntimeToolJobEffect(
       committedMessages: session.state.contextManager.messages(),
     };
     let executionResult: RuntimeToolExecutionResult;
-    if (!tokenRefresh.ok) {
+    if (tokenRefresh.type === "stale_custody") {
+      executionResult = { type: "stale_custody" };
+    } else if (tokenRefresh.type === "failed") {
       executionResult = { type: "error", error: tokenRefresh.error };
     } else if (!tracksSandboxExecution) {
       executionResult = yield* runRuntimeToolEffect(
@@ -4438,13 +4486,18 @@ function handleRuntimeToolJobEffect(
     if (executionResult.type === "stale_custody") {
       return providerTurnInterruptedWithDiscard();
     }
-    const settled = yield* Effect.promise(() => state.durableOperations.run(
-      () => processor.commitToolSettlement(source, job.modelToolCallId, executionResult),
-    ));
+    const settled = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+      const result = await state.durableOperations.run(
+        () => processor.commitToolSettlement(source, job.modelToolCallId, executionResult),
+      );
+      if (result.ok) {
+        commitProcessorProjectionWithoutStableReasoning(session, processor);
+      }
+      return result;
+    }));
     if (!settled.ok) {
       return yield* Effect.promise(() => handleProcessorFailure(session, options, settled.error));
     }
-    commitProcessorProjectionWithoutStableReasoning(session, processor);
     if (tracksSandboxExecution) {
       session.state.removePendingSandboxExecutionJob(toolUse.toolUseEventId);
     }
@@ -4462,6 +4515,34 @@ function handleRuntimeToolJobEffect(
   });
 }
 
+function refreshAcceptedSandboxBindingTokenEffect(
+  session: Session,
+  options: AgentLoopRuntimeOptions,
+): Effect.Effect<RuntimeBindingTokenRefreshResult, never> {
+  return Effect.gen(function* () {
+    for (;;) {
+      if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
+        return {
+          type: "failed" as const,
+          error: normalizeRuntimeFailure({
+            type: "session-binding",
+            code: "gateway_unavailable",
+            sessionId: session.sessionId,
+            retryable: true,
+            fatal: false,
+            reason: "runtime_shutdown",
+          }),
+        };
+      }
+      const refreshed = yield* Effect.promise(() => refreshSessionRuntimeBindingToken(session, options));
+      if (refreshed.type !== "failed") {
+        return refreshed;
+      }
+      yield* Effect.sleep(RecoveredSandboxBindingRefreshBackoffMs);
+    }
+  });
+}
+
 function publicToolEventForEntry(entry: ToolEntry): PublicToolEvent {
   if (entry.route.kind === "gateway" && entry.route.operation === "RunMcpTool") {
     return { kind: "mcp", mcpServerName: entry.route.mcpServerName };
@@ -4472,9 +4553,9 @@ function publicToolEventForEntry(entry: ToolEntry): PublicToolEvent {
 async function refreshSessionRuntimeBindingToken(
   session: Session,
   options: AgentLoopRuntimeOptions,
-): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: RuntimeFailure }> {
+): Promise<RuntimeBindingTokenRefreshResult> {
   if (options.refreshRuntimeBindingToken === undefined) {
-    return { ok: true };
+    return { type: "refreshed" };
   }
   try {
     const runtimeBindingToken = await options.refreshRuntimeBindingToken(session.identity);
@@ -4482,10 +4563,14 @@ async function refreshSessionRuntimeBindingToken(
       throw new Error("runtime binding token refresh returned an empty token");
     }
     session.updateIdentity({ ...session.identity, runtimeBindingToken });
-    return { ok: true };
+    return { type: "refreshed" };
   } catch (error) {
+    const loaderError = ContextLoaderErrorSchema.safeParse(error);
+    if (loaderError.success && loaderError.data.code === "superseded") {
+      return { type: "stale_custody" };
+    }
     return {
-      ok: false,
+      type: "failed",
       error: normalizeRuntimeFailure({
         type: "session-binding",
         code: "gateway_unavailable",
@@ -4497,6 +4582,11 @@ async function refreshSessionRuntimeBindingToken(
     };
   }
 }
+
+type RuntimeBindingTokenRefreshResult =
+  | { readonly type: "refreshed" }
+  | { readonly type: "stale_custody" }
+  | { readonly type: "failed"; readonly error: RuntimeFailure };
 
 function runRuntimeToolEffect(
   request: RuntimeToolExecutionRequestBase,
@@ -4577,9 +4667,15 @@ function handleProviderStreamExhaustedEffect(
 ): Effect.Effect<ProviderTurnResult, unknown> {
   return Effect.gen(function* () {
     const failure = providerStreamExhaustedFailure(request);
-    const processed = yield* Effect.promise(() => state.durableOperations.run(
-      () => processor.process({ ...source, event: { type: "provider-error", error: failure } }),
-    ));
+    const processed = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+      const result = await state.durableOperations.run(
+        () => processor.process({ ...source, event: { type: "provider-error", error: failure } }),
+      );
+      if (result.ok) {
+        commitProcessorProjectionWithoutStableReasoning(session, processor);
+      }
+      return result;
+    }));
     if (!processed.ok) {
       return yield* Effect.promise(() => closeStartedRequestAfterProcessorFailure(
         session,
@@ -4593,7 +4689,6 @@ function handleProviderStreamExhaustedEffect(
         requestEndKindFromRequest(request),
       ));
     }
-    commitProcessorProjectionWithoutStableReasoning(session, processor);
     return yield* closeProviderFailureEffect(
       session,
       options,
@@ -6360,9 +6455,10 @@ async function appendEvent(
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
+  sandboxResultDigest?: string,
 ): Promise<SessionEventWriterAppendResult> {
   const writeId = options.runtime.createId("event_write");
-  return await appendEventWithWriteId(options, session, writeId, event, output, stableReasoningParts, modelRequestId, serverToolUse, mcpMaterializationHandle);
+  return await appendEventWithWriteId(options, session, writeId, event, output, stableReasoningParts, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest);
 }
 
 async function appendRunningEvent(
@@ -6508,6 +6604,7 @@ async function appendEventWithWriteId(
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
+  sandboxResultDigest?: string,
 ): Promise<SessionEventWriterAppendResult> {
   const startedAt = options.runtime.monotonicMs();
   try {
@@ -6537,6 +6634,7 @@ async function appendEventWithWriteId(
       ...(stableReasoningParts !== undefined ? { stableReasoningParts: [...stableReasoningParts] } : {}),
       ...(serverToolUse !== undefined ? { serverToolUse } : {}),
       ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     });
     runtimeMetrics(options).observeEventWriteLatency("append", options.runtime.monotonicMs() - startedAt, result.ok ? "success" : "error");
     return result;

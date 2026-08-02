@@ -100,10 +100,13 @@ func writeEventDeclarationDigest(
 		"mcp_materialization_handle": nullableDeclarationString(
 			request.GetMcpMaterializationHandle(),
 		),
-		"model_request_id":  nullableDeclarationString(request.GetModelRequestId()),
-		"operation_kind":    bridgeOpWriteEvent,
-		"payload":           json.RawMessage(payloadJSON),
-		"runtime_write_id":  request.GetRuntimeWriteId(),
+		"model_request_id": nullableDeclarationString(request.GetModelRequestId()),
+		"operation_kind":   bridgeOpWriteEvent,
+		"payload":          json.RawMessage(payloadJSON),
+		"runtime_write_id": request.GetRuntimeWriteId(),
+		"sandbox_result_digest": nullableDeclarationString(
+			request.GetSandboxResultDigest(),
+		),
 		"server_tool_use":   json.RawMessage(serverToolUseJSON),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
 		"stable_reasoning":  json.RawMessage(stableReasoningJSON),
@@ -1090,17 +1093,26 @@ func stampRuntimeOutputParts(
 				return nil, nil, status.Error(codes.InvalidArgument, "runtime output part contains a durable field")
 			}
 		}
-		if partInfo["type"] == "tool" && (eventType == "agent.tool_use" || eventType == "agent.mcp_tool_use") {
-			partInfo["toolUseEventId"] = eventID
-			if eventType == "agent.tool_use" {
-				partInfo["toolEvent"] = map[string]any{"kind": "tool"}
-			}
-		}
 		key, err := runtimePartAssociationKey(partInfo, int(partDraft.GetOrdinal()))
 		if err != nil {
 			return nil, nil, err
 		}
 		existing := existingByKey[key]
+		toolUseEvent := partInfo["type"] == "tool" && (eventType == "agent.tool_use" || eventType == "agent.mcp_tool_use")
+		priorToolUseEventID, _ := partInfo["toolUseEventId"].(string)
+		if toolUseEvent && priorToolUseEventID == "" && existing != nil {
+			return nil, nil, status.Error(codes.AlreadyExists, "runtime tool declaration cannot remove a stamped tool association")
+		}
+		if toolUseEvent && priorToolUseEventID == "" {
+			partInfo["toolUseEventId"] = eventID
+			if eventType == "agent.tool_use" {
+				partInfo["toolEvent"] = map[string]any{"kind": "tool"}
+			}
+		}
+		if toolUseEvent && priorToolUseEventID != "" &&
+			(existing == nil || !sameRuntimeSealPartContent(existing, partInfo)) {
+			return nil, nil, status.Error(codes.AlreadyExists, "runtime tool declaration cannot change a stamped tool part")
+		}
 		partID := id.New("part_")
 		partSequence := int64(index)
 		partCreatedAt := now.UTC().Format(time.RFC3339Nano)

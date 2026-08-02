@@ -458,6 +458,7 @@ message WriteEventRequest {
   ServerToolUseUsage server_tool_use = 9;
   repeated RuntimeMessageDraft drafts = 10;
   optional string mcp_materialization_handle = 11;
+  optional string sandbox_result_digest = 12;
 }
 
 message ServerToolUseUsage {
@@ -661,6 +662,7 @@ message AwaitSandboxExecutionResponse {
   string result_json = 1;
   bool background_task_started = 2;
   string task_id = 3;
+  string result_digest = 4;
 }
 
 message ReadCommandResultRequest {

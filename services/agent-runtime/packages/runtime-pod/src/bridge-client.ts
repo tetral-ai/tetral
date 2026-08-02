@@ -717,6 +717,13 @@ export class BridgeAPIContextLoader implements ContextLoader {
         }
         return response.runtimeBindingToken;
       } catch (error) {
+        if (grpcStatusCode(error) === status.FAILED_PRECONDITION) {
+          throw normalizeContextLoaderError({
+            code: "superseded",
+            sessionId: identity.sessionId,
+            reason: "runtime binding custody is stale",
+          });
+        }
         if (!refreshRuntimeBindingTokenErrorRetryable(error) || attempt === RuntimeBindingTokenRefreshPolicy.attempts) {
           throw normalizeContextLoaderError({
             code: "unavailable",
@@ -1054,7 +1061,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }
 
-  /** Writes one semantic event and its optional projection, reasoning, or web-usage attachment. */
+  /** Writes one semantic event and its optional projection, reasoning, or internal result evidence. */
   async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
     try {
       const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
@@ -1076,6 +1083,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         })),
         serverToolUse: envelope.serverToolUse,
         mcpMaterializationHandle: envelope.mcpMaterializationHandle,
+        sandboxResultDigest: envelope.sandboxResultDigest,
         drafts: envelope.drafts.map(runtimeMessageDraftForBridge),
       };
       const declarationDigest = writeEventDeclarationDigest(request);
@@ -2426,8 +2434,14 @@ function bindingTokenNeedsRefresh(token: string, nowEpochMs: number, marginMs: n
 }
 
 function refreshRuntimeBindingTokenErrorRetryable(error: unknown): boolean {
-  const code = typeof error === "object" && error !== null && "code" in error ? (error as { readonly code?: unknown }).code : undefined;
-  return code === status.FAILED_PRECONDITION || code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED;
+  const code = grpcStatusCode(error);
+  return code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED;
+}
+
+function grpcStatusCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "code" in error
+    ? (error as { readonly code?: unknown }).code
+    : undefined;
 }
 
 function approvalReviewerParentScope(input: ApprovalReviewerThreadCreation): RuntimeScope {

@@ -400,6 +400,7 @@ type runtimeToolResult struct {
 	InputJSON              string
 	AckStatus              string
 	ResultJSON             string
+	ResultDigest           string
 	ModelToolCallID        sql.NullString
 	ExecutionState         sql.NullString
 	BackgroundTaskStarted  bool
@@ -437,7 +438,7 @@ func readRuntimeToolResultReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scop
 
 func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool) (runtimeToolResult, bool, error) {
 	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
-	               COALESCE(result_json, ''), model_tool_call_id, execution_state,
+	               COALESCE(result_json, ''), COALESCE(result_digest, ''), model_tool_call_id, execution_state,
 	               background_task_started, task_id, memory_projection_state,
 	               mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
@@ -459,7 +460,7 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 	var existing runtimeToolResult
 	if err := row.Scan(
 		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
-		&existing.AckStatus, &existing.ResultJSON, &existing.ModelToolCallID, &existing.ExecutionState,
+		&existing.AckStatus, &existing.ResultJSON, &existing.ResultDigest, &existing.ModelToolCallID, &existing.ExecutionState,
 		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
 		&existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt,
 	); dbconnect.IsNoRows(err) {

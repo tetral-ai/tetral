@@ -82,6 +82,7 @@ describe("RuntimePodToolRunner", () => {
         sandbox_process_id: "pid-secret",
       },
     });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
     const runner = makeRunner({ bridge });
 
     const result = await runner.runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }));
@@ -92,6 +93,7 @@ describe("RuntimePodToolRunner", () => {
         text: "status: success\nsummary: created notes/a.txt",
         truncated: false,
       },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
     expect(JSON.stringify(result)).not.toContain("payload");
     expect(JSON.stringify(result)).not.toContain("provider-secret");
@@ -123,6 +125,53 @@ describe("RuntimePodToolRunner", () => {
           targetPodUid: "pod_1",
         },
       },
+    });
+  });
+
+  test("preserves explicit non-retryable sandbox failures", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
+      status: "runtime_error",
+      error_code: "projection_refresh_failed",
+      message: "memory projection failed",
+      retryable: false,
+    });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
+
+    const result = await makeRunner({ bridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        code: "runtime_invalid_sequence",
+        retryable: false,
+      },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
+    });
+  });
+
+  test("rejects non-boolean sandbox retryability instead of deriving it from status", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
+      status: "runtime_error",
+      message: "bad retry marker",
+      retryable: "yes",
+    });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
+
+    const result = await makeRunner({ bridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Tool route returned malformed retryability.",
+        retryable: false,
+      },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
   });
 
@@ -523,6 +572,7 @@ describe("RuntimePodToolRunner", () => {
         truncated: false,
       },
       backgroundTask: { taskId: "task_bridge_1" },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
   });
 
@@ -2185,6 +2235,7 @@ class RecordingBridgeClient {
   createChildThreadErrorCode: GrpcStatus | undefined;
   childStatus = "idle";
   awaitSandboxExecutionResultJson = '{"status":"success","result":{"text":"ok"}}';
+  awaitSandboxExecutionResultDigest = sha256(this.awaitSandboxExecutionResultJson);
   awaitSandboxExecutionBackgroundTaskStarted = false;
   awaitSandboxExecutionTaskId = "";
   runMemoryResultJson = '{"status":"completed","summary":"created"}';
@@ -2279,6 +2330,7 @@ class RecordingBridgeClient {
     }
     callback(null, {
       resultJson: this.awaitSandboxExecutionResultJson,
+      resultDigest: this.awaitSandboxExecutionResultDigest,
       backgroundTaskStarted: this.awaitSandboxExecutionBackgroundTaskStarted,
       taskId: this.awaitSandboxExecutionTaskId,
     });

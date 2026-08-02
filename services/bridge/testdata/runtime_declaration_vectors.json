@@ -29,8 +29,8 @@
     "model_request_id": "",
     "event_type": "session.status_running",
     "payload_json": "{\"status\":\"running\"}",
-    "canonical_json": "{\"drafts\":[],\"event_type\":\"session.status_running\",\"mcp_materialization_handle\":null,\"model_request_id\":null,\"operation_kind\":\"write_event\",\"payload\":{\"status\":\"running\"},\"runtime_write_id\":\"write_vector\",\"server_tool_use\":null,\"session_thread_id\":\"thr_vector\",\"stable_reasoning\":[]}",
-    "digest": "f59527e83531ad5cf2e3971796c669d2f2a8776b8f984275160391a18fae6340"
+    "canonical_json": "{\"drafts\":[],\"event_type\":\"session.status_running\",\"mcp_materialization_handle\":null,\"model_request_id\":null,\"operation_kind\":\"write_event\",\"payload\":{\"status\":\"running\"},\"runtime_write_id\":\"write_vector\",\"sandbox_result_digest\":null,\"server_tool_use\":null,\"session_thread_id\":\"thr_vector\",\"stable_reasoning\":[]}",
+    "digest": "6e5451234da77c6b60fb8f6cbf410ae29ca1c450fff5b97d5c6ee1bba2a305e3"
   },
   "write_request_end": {
     "session_thread_id": "thr_vector",

@@ -812,6 +812,7 @@ export interface WriteEventRequest {
   serverToolUse: ServerToolUseUsage | undefined;
   drafts: RuntimeMessageDraft[];
   mcpMaterializationHandle?: string | undefined;
+  sandboxResultDigest?: string | undefined;
 }
 
 export interface ServerToolUseUsage {
@@ -1007,6 +1008,7 @@ export interface AwaitSandboxExecutionResponse {
   resultJson: string;
   backgroundTaskStarted: boolean;
   taskId: string;
+  resultDigest: string;
 }
 
 export interface ReadCommandResultRequest {
@@ -6921,6 +6923,7 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     serverToolUse: undefined,
     drafts: [],
     mcpMaterializationHandle: undefined,
+    sandboxResultDigest: undefined,
   };
 }
 
@@ -6955,6 +6958,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.mcpMaterializationHandle !== undefined) {
       writer.uint32(90).string(message.mcpMaterializationHandle);
+    }
+    if (message.sandboxResultDigest !== undefined) {
+      writer.uint32(98).string(message.sandboxResultDigest);
     }
     return writer;
   },
@@ -7046,6 +7052,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.mcpMaterializationHandle = reader.string();
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.sandboxResultDigest = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7101,6 +7115,11 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.mcp_materialization_handle)
         ? globalThis.String(object.mcp_materialization_handle)
         : undefined,
+      sandboxResultDigest: isSet(object.sandboxResultDigest)
+        ? globalThis.String(object.sandboxResultDigest)
+        : isSet(object.sandbox_result_digest)
+        ? globalThis.String(object.sandbox_result_digest)
+        : undefined,
     };
   },
 
@@ -7136,6 +7155,9 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.mcpMaterializationHandle !== undefined) {
       obj.mcpMaterializationHandle = message.mcpMaterializationHandle;
     }
+    if (message.sandboxResultDigest !== undefined) {
+      obj.sandboxResultDigest = message.sandboxResultDigest;
+    }
     return obj;
   },
 
@@ -7158,6 +7180,7 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
       : undefined;
     message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     message.mcpMaterializationHandle = object.mcpMaterializationHandle ?? undefined;
+    message.sandboxResultDigest = object.sandboxResultDigest ?? undefined;
     return message;
   },
 };
@@ -10523,7 +10546,7 @@ export const AwaitSandboxExecutionRequest: MessageFns<AwaitSandboxExecutionReque
 };
 
 function createBaseAwaitSandboxExecutionResponse(): AwaitSandboxExecutionResponse {
-  return { resultJson: "", backgroundTaskStarted: false, taskId: "" };
+  return { resultJson: "", backgroundTaskStarted: false, taskId: "", resultDigest: "" };
 }
 
 export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResponse> = {
@@ -10536,6 +10559,9 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
     }
     if (message.taskId !== "") {
       writer.uint32(26).string(message.taskId);
+    }
+    if (message.resultDigest !== "") {
+      writer.uint32(34).string(message.resultDigest);
     }
     return writer;
   },
@@ -10571,6 +10597,14 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
           message.taskId = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.resultDigest = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -10597,6 +10631,11 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
         : isSet(object.task_id)
         ? globalThis.String(object.task_id)
         : "",
+      resultDigest: isSet(object.resultDigest)
+        ? globalThis.String(object.resultDigest)
+        : isSet(object.result_digest)
+        ? globalThis.String(object.result_digest)
+        : "",
     };
   },
 
@@ -10611,6 +10650,9 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
     if (message.taskId !== "") {
       obj.taskId = message.taskId;
     }
+    if (message.resultDigest !== "") {
+      obj.resultDigest = message.resultDigest;
+    }
     return obj;
   },
 
@@ -10624,6 +10666,7 @@ export const AwaitSandboxExecutionResponse: MessageFns<AwaitSandboxExecutionResp
     message.resultJson = object.resultJson ?? "";
     message.backgroundTaskStarted = object.backgroundTaskStarted ?? false;
     message.taskId = object.taskId ?? "";
+    message.resultDigest = object.resultDigest ?? "";
     return message;
   },
 };

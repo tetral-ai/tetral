@@ -23,8 +23,9 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { RuntimeFailure } from "./llm-event.js";
 import type { LLMEvent, RuntimeJsonValue } from "./llm-event.js";
-import { RuntimeBoundedJsonSchema, RuntimeFailureSchema, runtimeFailureFromProviderError } from "./llm-event.js";
+import { LLMEventTextMaxBytes, RuntimeBoundedJsonSchema, RuntimeFailureSchema, runtimeFailureFromProviderError } from "./llm-event.js";
 import { normalizeProviderError } from "../contracts/provider.js";
+import { boundRuntimeJson } from "../contracts/runtime.js";
 
 /** Provider request shape accepted by the Runtime LLM boundary. */
 export type LLMRequest = ProviderRequest;
@@ -287,8 +288,8 @@ class ProviderStreamValidator {
     if (streamedInput !== undefined && streamedInput.name !== undefined && streamedInput.name !== toolCall.name) {
       return gatewayProtocolFailure(this.request);
     }
-    const input = runtimeJsonFromString(toolCall.inputJson);
-    if (input === undefined) {
+    const toolInput = runtimeJsonFromString(toolCall.inputJson);
+    if (toolInput === undefined) {
       return gatewayProtocolFailure(this.request);
     }
     this.toolCalls.add(toolCall.id);
@@ -296,7 +297,8 @@ class ProviderStreamValidator {
       type: "tool-call",
       id: toolCall.id,
       toolName: toolCall.name,
-      input,
+      input: toolInput.input,
+      inputPreview: toolInput.inputPreview,
     };
   }
 
@@ -496,14 +498,16 @@ function gatewayProtocolFailure(request: ProviderRequest): RuntimeFailure {
   });
 }
 
-function runtimeJsonFromString(inputJson: string): ReturnType<typeof RuntimeBoundedJsonSchema.parse> | undefined {
+function runtimeJsonFromString(inputJson: string): {
+  readonly input: RuntimeJsonValue;
+  readonly inputPreview: ReturnType<typeof RuntimeBoundedJsonSchema.parse>;
+} | undefined {
   try {
     const value = JSON.parse(inputJson) as RuntimeJsonValue;
-    return RuntimeBoundedJsonSchema.parse({
-      value,
-      preview: JSON.stringify(value),
-      truncated: false,
-    });
+    return {
+      input: value,
+      inputPreview: RuntimeBoundedJsonSchema.parse(boundRuntimeJson(value, LLMEventTextMaxBytes)),
+    };
   } catch {
     return undefined;
   }

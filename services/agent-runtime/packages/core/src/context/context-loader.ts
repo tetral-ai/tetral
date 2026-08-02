@@ -49,7 +49,7 @@ export interface ContextLoader {
     readonly pendingAgentMail?: readonly RuntimeLoadedAgentMail[] | undefined;
     readonly coldCoverage: RuntimeColdCoverage;
   }>;
-  /** Refreshes the binding credential without changing durable declaration state. */
+  /** Refreshes the binding credential without changing durable declaration state; stale custody rejects as superseded. */
   readonly refreshRuntimeBindingToken?: (
     identity: RuntimeSessionIdentity,
     options?: { readonly force?: boolean | undefined },

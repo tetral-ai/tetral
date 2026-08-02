@@ -751,16 +751,40 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 		t.Fatalf("seed terminal sandbox execution: %v", err)
 	}
 
-	settled, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_consume_result", ModelRequestId: "mreq_bridge_sandbox_consume",
-		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"created a.txt"}]}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t, scope, "rwrite_bridge_sandbox_consume_result", "agent.tool_result", "completed",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_sandbox_consume","toolName":"Write","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"file_path":"a.txt","content":"ok"},"preview":"{}","truncated":false},"output":{"text":"created a.txt","truncated":false}}}`},
-		)},
-	})
+	resultRequest := func(runtimeWriteID string, digest *string) *bridgev1.WriteEventRequest {
+		return &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: "mreq_bridge_sandbox_consume",
+			EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"created a.txt"}]}`,
+			SandboxResultDigest: digest,
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+				t, scope, runtimeWriteID, "agent.tool_result", "completed",
+				bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_sandbox_consume","toolName":"Write","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"file_path":"a.txt","content":"ok"},"preview":"{}","truncated":false},"output":{"text":"created a.txt","truncated":false}}}`},
+			)},
+		}
+	}
+	missingDigest := resultRequest("rwrite_bridge_sandbox_consume_missing_digest", nil)
+	if _, err := store.WriteEvent(context.Background(), missingDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent sandbox tool result without digest err = %v; want FailedPrecondition", err)
+	}
+	wrongDigest := strings.Repeat("f", 64)
+	mismatchedDigest := resultRequest("rwrite_bridge_sandbox_consume_wrong_digest", &wrongDigest)
+	if _, err := store.WriteEvent(context.Background(), mismatchedDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent sandbox tool result with wrong digest err = %v; want FailedPrecondition", err)
+	}
+	settled, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &resultDigest))
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool result: %v", err)
+	}
+	replayed, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &resultDigest))
+	if err != nil {
+		t.Fatalf("replay WriteEvent sandbox tool result: %v", err)
+	}
+	if replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+		t.Fatalf("replay status = %s; want duplicate", replayed.GetAck().GetStatus())
+	}
+	changedDigest := strings.Repeat("e", 64)
+	if _, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &changedDigest)); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("replay WriteEvent sandbox tool result with changed digest err = %v; want AlreadyExists", err)
 	}
 	var state string
 	var storedResult sql.NullString
@@ -811,14 +835,21 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *te
 		t.Fatalf("seed terminal background result: %v", err)
 	}
 
-	settled, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+	resultRequest := &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_result", ModelRequestId: "mreq_bridge_background_consume",
 		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"accepted"}]}`,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t, scope, "rwrite_bridge_background_consume_result", "agent.tool_result", "completed",
 			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_bridge_background_consume","toolName":"write_stdin","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"task_id":"task_background","chars":"ok"},"preview":"{}","truncated":false},"output":{"text":"accepted","truncated":false}}}`},
 		)},
-	})
+	}
+	backgroundDigest := sha256Hex(resultJSON)
+	withDigest := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
+	withDigest.SandboxResultDigest = &backgroundDigest
+	if _, err := store.WriteEvent(context.Background(), withDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent background result with sandbox digest err = %v; want FailedPrecondition", err)
+	}
+	settled, err := store.WriteEvent(context.Background(), resultRequest)
 	if err != nil {
 		t.Fatalf("WriteEvent background tool result: %v", err)
 	}

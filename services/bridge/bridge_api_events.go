@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -46,6 +47,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		}
 	} else if request.GetMcpMaterializationHandle() != "" {
 		return nil, status.Error(codes.InvalidArgument, "materialization handle requires an mcp tool-result event")
+	}
+	if request.GetSandboxResultDigest() != "" {
+		if request.GetEventType() != "agent.tool_result" || !validSandboxResultDigest(request.GetSandboxResultDigest()) {
+			return nil, status.Error(codes.InvalidArgument, "sandbox result digest requires a valid tool-result event")
+		}
 	}
 	stableReasoning, err := normalizeStableReasoningParts(request)
 	if err != nil {
@@ -243,6 +249,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			eventType,
 			eventPayloadJSON,
 			toolProjection,
+			request.GetSandboxResultDigest(),
 			now,
 		); err != nil {
 			return err
@@ -1170,6 +1177,7 @@ func applyWriteEventToolBookkeepingTx(
 	eventType string,
 	payloadJSON string,
 	projection runtimeToolProjectionPayload,
+	sandboxResultDigest string,
 	now time.Time,
 ) error {
 	switch eventType {
@@ -1190,7 +1198,7 @@ func applyWriteEventToolBookkeepingTx(
 		}
 		switch payload.EvaluatedPermission {
 		case "ask":
-			inputJSON, err := runtimeToolProjectionInputJSON(projection.Input, payload.Input)
+			inputJSON, err := runtimeToolEventInputJSON(payload.Input)
 			if err != nil {
 				return err
 			}
@@ -1222,7 +1230,7 @@ func applyWriteEventToolBookkeepingTx(
 			return err
 		}
 		if eventType == "agent.tool_result" {
-			return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, eventID, projection, now)
+			return consumeSandboxExecutionTx(ctx, tx, scope, toolUseEventID, eventID, projection, sandboxResultDigest, now)
 		}
 		return nil
 	default:
@@ -1237,26 +1245,33 @@ func consumeSandboxExecutionTx(
 	toolUseEventID string,
 	terminalEventID string,
 	projection runtimeToolProjectionPayload,
+	sandboxResultDigest string,
 	now time.Time,
 ) error {
 	var toolKind, toolName string
 	var modelToolCallID sql.NullString
-	var executionState, backgroundOperationState, resultJSON sql.NullString
+	var executionState, backgroundOperationState, resultJSON, resultDigest sql.NullString
 	err := tx.QueryRow(ctx,
-		`SELECT tool_kind, tool_name, model_tool_call_id, execution_state, background_operation_state, result_json
+		`SELECT tool_kind, tool_name, model_tool_call_id, execution_state, background_operation_state, result_json, result_digest
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
 		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), toolUseEventID,
-	).Scan(&toolKind, &toolName, &modelToolCallID, &executionState, &backgroundOperationState, &resultJSON)
+	).Scan(&toolKind, &toolName, &modelToolCallID, &executionState, &backgroundOperationState, &resultJSON, &resultDigest)
 	if dbconnect.IsNoRows(err) {
+		if sandboxResultDigest != "" {
+			return status.Error(codes.FailedPrecondition, "sandbox result digest has no execution")
+		}
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if toolKind == bridgeToolKindSandboxBackground {
+		if sandboxResultDigest != "" {
+			return status.Error(codes.FailedPrecondition, "sandbox result digest does not belong to a background result")
+		}
 		if !backgroundOperationState.Valid || backgroundOperationState.String != "terminal" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
 			return status.Error(codes.FailedPrecondition, "sandbox background result is not ready for conversation settlement")
 		}
@@ -1279,6 +1294,9 @@ func consumeSandboxExecutionTx(
 		return nil
 	}
 	if toolKind != bridgeToolKindSandbox {
+		if sandboxResultDigest != "" {
+			return status.Error(codes.FailedPrecondition, "sandbox result digest does not belong to this tool result")
+		}
 		return nil
 	}
 	if !modelToolCallID.Valid || modelToolCallID.String != projection.ModelToolCallID || toolName != projection.ToolName {
@@ -1286,6 +1304,9 @@ func consumeSandboxExecutionTx(
 	}
 	if !executionState.Valid || executionState.String != "terminal_unconsumed" || !resultJSON.Valid || !json.Valid([]byte(resultJSON.String)) {
 		return status.Error(codes.FailedPrecondition, "sandbox tool execution is not ready for conversation settlement")
+	}
+	if sandboxResultDigest == "" || !resultDigest.Valid || resultDigest.String != sandboxResultDigest {
+		return status.Error(codes.FailedPrecondition, "sandbox tool result digest does not match its execution")
 	}
 	attachmentRefs, err := sandboxExecutionAttachmentRefs(resultJSON.String)
 	if err != nil {
@@ -1326,6 +1347,14 @@ func consumeSandboxExecutionTx(
 		return status.Error(codes.FailedPrecondition, "sandbox tool execution consume failed")
 	}
 	return nil
+}
+
+func validSandboxResultDigest(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func consumeSandboxExecutionForTerminalWriterTx(
@@ -1415,11 +1444,7 @@ func sandboxExecutionAttachmentRefs(resultJSON string) ([]string, error) {
 	return refs, nil
 }
 
-func runtimeToolProjectionInputJSON(primary json.RawMessage, fallback json.RawMessage) (string, error) {
-	raw := primary
-	if len(raw) == 0 {
-		raw = fallback
-	}
+func runtimeToolEventInputJSON(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
