@@ -618,6 +618,7 @@ describe("RuntimePodToolRunner", () => {
         source_path: "plot.png",
         page_range: "",
         detail: "auto",
+        data_base64: "AAEC",
       },
     });
     const runner = makeRunner({ bridge });
@@ -661,6 +662,7 @@ describe("RuntimePodToolRunner", () => {
         source_path: "docs/report.pdf",
         page_range: "2-6",
         detail: "auto",
+        data_base64: "JVBERi0=",
       },
     });
     const runner = makeRunner({ bridge });

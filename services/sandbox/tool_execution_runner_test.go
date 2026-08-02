@@ -282,6 +282,34 @@ func TestSandboxToolExecutionRunnerOwnsBackgroundTaskSourceIdentity(t *testing.T
 	}
 }
 
+func TestSandboxToolExecutionRunnerDoesNotCallProviderWhenAuthorizationIsCancelled(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
+	coordinator := &recordingSandboxExecutionCoordinator{
+		work: sandboxExecutionTestWork(true), load: true, prepare: true, authorize: false,
+	}
+	adapter := &recordingProviderAdapter{inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady}}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxToolExecutionJobRunner{
+		Queue: queueClient, Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
+		Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(coordinator.calls, []string{"load", "preparing", "running"}) {
+		t.Fatalf("coordinator calls = %v; want authorization cancellation before settlement", coordinator.calls)
+	}
+	if !reflect.DeepEqual(adapter.calls, []string{"inspect", "prepare"}) {
+		t.Fatalf("provider calls = %v; want no execution after authorization cancellation", adapter.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_sandbox_execution"}) {
+		t.Fatalf("queue transitions = %v; want acknowledged cancelled execution", queueClient.transitions)
+	}
+}
+
 func TestSandboxToolExecutionRunnerObservesRunningExecutionByStoredReference(t *testing.T) {
 	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}}
 	work := sandboxExecutionTestWork(true)

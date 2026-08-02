@@ -723,6 +723,8 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_sandbox_consume", "thr_bridge_sandbox_consume")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_sandbox_consume", "bind_bridge_sandbox_consume", 1, "pod_uid_bridge_sandbox_consume")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store.Clock = func() time.Time { return now }
 	scope := bridgeAPIScope("sesn_bridge_sandbox_consume", "thr_bridge_sandbox_consume", "bind_bridge_sandbox_consume", 1, "pod_uid_bridge_sandbox_consume")
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_consume_use", ModelRequestId: "mreq_bridge_sandbox_consume",
@@ -735,7 +737,9 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool use: %v", err)
 	}
-	const resultJSON = `{"status":"success","result":{"summary":"created a.txt"}}`
+	const attachmentRef = "att_bridge_sandbox_consume"
+	const secondAttachmentRef = "att_bridge_sandbox_consume_second"
+	const resultJSON = `{"status":"success","result":{"summary":"created a.txt","attachments":[{"attachment_ref":"` + attachmentRef + `"},{"attachment_ref":"` + secondAttachmentRef + `"}]}}`
 	resultDigest := sha256Hex(resultJSON)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_tool_results (
@@ -762,14 +766,96 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 			)},
 		}
 	}
+	assertRejectedResultHasNoSideEffects := func(runtimeWriteID string) {
+		t.Helper()
+		var resultEvents, bridgeOperations, assistantMessages int
+		var messageDataJSON, executionState string
+		var storedResult sql.NullString
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT
+				(SELECT count(*) FROM session_events
+				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND type='agent.tool_result'),
+				(SELECT count(*) FROM session_bridge_operations
+				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+				    AND session_thread_id='thr_bridge_sandbox_consume'
+				    AND operation='write_event' AND idempotency_key=$1),
+				(SELECT count(*) FROM session_messages
+				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND kind='assistant'),
+				(SELECT data_json FROM session_messages
+				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND kind='assistant'),
+				(SELECT execution_state FROM session_runtime_tool_results
+				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND tool_use_event_id=$2),
+				(SELECT result_json FROM session_runtime_tool_results
+				  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+				    AND session_thread_id='thr_bridge_sandbox_consume' AND tool_use_event_id=$2)`,
+			runtimeWriteID, toolUse.GetEventId(),
+		).Scan(&resultEvents, &bridgeOperations, &assistantMessages, &messageDataJSON, &executionState, &storedResult); err != nil {
+			t.Fatalf("read rejected sandbox result side effects for %s: %v", runtimeWriteID, err)
+		}
+		if resultEvents != 0 || bridgeOperations != 0 || assistantMessages != 1 || executionState != "terminal_unconsumed" ||
+			!storedResult.Valid || storedResult.String != resultJSON || !strings.Contains(messageDataJSON, `"status":"streaming"`) ||
+			strings.Contains(messageDataJSON, "created a.txt") {
+			t.Fatalf("rejected sandbox result %s leaked events=%d operations=%d messages=%d state=%q result=%v projection=%s",
+				runtimeWriteID, resultEvents, bridgeOperations, assistantMessages, executionState, storedResult, messageDataJSON)
+		}
+	}
 	missingDigest := resultRequest("rwrite_bridge_sandbox_consume_missing_digest", nil)
 	if _, err := store.WriteEvent(context.Background(), missingDigest); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("WriteEvent sandbox tool result without digest err = %v; want FailedPrecondition", err)
 	}
+	assertRejectedResultHasNoSideEffects(missingDigest.GetRuntimeWriteId())
 	wrongDigest := strings.Repeat("f", 64)
 	mismatchedDigest := resultRequest("rwrite_bridge_sandbox_consume_wrong_digest", &wrongDigest)
 	if _, err := store.WriteEvent(context.Background(), mismatchedDigest); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("WriteEvent sandbox tool result with wrong digest err = %v; want FailedPrecondition", err)
+	}
+	assertRejectedResultHasNoSideEffects(mismatchedDigest.GetRuntimeWriteId())
+	missingAttachment := resultRequest("rwrite_bridge_sandbox_consume_missing_attachment", &resultDigest)
+	if _, err := store.WriteEvent(context.Background(), missingAttachment); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent sandbox tool result with missing staged attachment err = %v; want FailedPrecondition", err)
+	}
+	assertRejectedResultHasNoSideEffects(missingAttachment.GetRuntimeWriteId())
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_transient_attachments (
+			workspace_id, attachment_ref, session_id, session_thread_id, source_tool_use_event_id,
+			blob_pointer, mime, metadata_json, status, expires_at, created_at, updated_at
+		) VALUES
+			('default', $1, 'sesn_bridge_sandbox_consume', 'thr_bridge_sandbox_consume', $3,
+			 'blob/bridge-sandbox-consume', 'image/png', '{}', 'staged', $4, $5, $5),
+			('default', $2, 'sesn_bridge_sandbox_consume', 'thr_bridge_sandbox_consume', $3,
+			 'blob/bridge-sandbox-consume-second', 'image/png', '{}', 'active', $4, $5, $5)`,
+		attachmentRef, secondAttachmentRef, toolUse.GetEventId(), now.Add(time.Minute), now,
+	); err != nil {
+		t.Fatalf("seed staged-first and non-staged-second sandbox attachments: %v", err)
+	}
+	activeAttachment := resultRequest("rwrite_bridge_sandbox_consume_active_attachment", &resultDigest)
+	if _, err := store.WriteEvent(context.Background(), activeAttachment); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent sandbox tool result with staged-first and active-second attachments err = %v; want FailedPrecondition", err)
+	}
+	assertRejectedResultHasNoSideEffects(activeAttachment.GetRuntimeWriteId())
+	var firstAttachmentStatus string
+	var firstAttachmentExpiry time.Time
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, expires_at FROM session_transient_attachments
+		  WHERE workspace_id='default' AND attachment_ref=$1`, attachmentRef,
+	).Scan(&firstAttachmentStatus, &firstAttachmentExpiry); err != nil {
+		t.Fatalf("read staged-first sandbox attachment after rejected multi-attachment result: %v", err)
+	}
+	if firstAttachmentStatus != "staged" || !firstAttachmentExpiry.Equal(now.Add(time.Minute)) {
+		t.Fatalf("staged-first sandbox attachment after rollback = %q/%s; want staged/%s",
+			firstAttachmentStatus, firstAttachmentExpiry, now.Add(time.Minute))
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_transient_attachments
+		    SET status='staged', expires_at=$2
+		  WHERE workspace_id='default' AND attachment_ref IN ($1,$3)`,
+		attachmentRef, now.Add(time.Minute), secondAttachmentRef,
+	); err != nil {
+		t.Fatalf("stage sandbox attachments: %v", err)
 	}
 	settled, err := store.WriteEvent(context.Background(), resultRequest("rwrite_bridge_sandbox_consume_result", &resultDigest))
 	if err != nil {
@@ -800,6 +886,47 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	}
 	if state != "consumed" || storedResult.Valid || storedDigest != resultDigest || terminalEventID != settled.GetEventId() || reason != "conversation_tool_result" {
 		t.Fatalf("consumed execution = state %q result %+v digest %q event %q reason %q; want thin conversation receipt", state, storedResult, storedDigest, terminalEventID, reason)
+	}
+	var activatedAttachmentCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_transient_attachments
+		  WHERE workspace_id='default' AND attachment_ref IN ($1,$2)
+		    AND status='active' AND expires_at=$3`,
+		attachmentRef, secondAttachmentRef, now.Add(defaultTransientAttachmentTTL),
+	).Scan(&activatedAttachmentCount); err != nil {
+		t.Fatalf("count activated sandbox attachments: %v", err)
+	}
+	if activatedAttachmentCount != 2 {
+		t.Fatalf("activated sandbox attachments = %d; want both active with refreshed TTL", activatedAttachmentCount)
+	}
+	var committedResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_events
+		  WHERE workspace_id='default' AND session_id='sesn_bridge_sandbox_consume'
+		    AND session_thread_id='thr_bridge_sandbox_consume' AND type='agent.tool_result'`,
+	).Scan(&committedResultCount); err != nil {
+		t.Fatalf("count committed sandbox result events: %v", err)
+	}
+	if committedResultCount != 1 {
+		t.Fatalf("committed sandbox result events = %d; want exactly one", committedResultCount)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreRejectsMCPHandleOnSandboxToolResult(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_non_mcp_handle", "thr_bridge_non_mcp_handle")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_non_mcp_handle", "bind_bridge_non_mcp_handle", 1, "pod_bridge_non_mcp_handle")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_non_mcp_handle", "thr_bridge_non_mcp_handle", "bind_bridge_non_mcp_handle", 1, "pod_bridge_non_mcp_handle")
+	materializationHandle := "evt_bridge_non_mcp_handle"
+
+	_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_non_mcp_handle", ModelRequestId: "mreq_bridge_non_mcp_handle",
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_event_id":"evt_bridge_non_mcp_handle","content":[{"type":"text","text":"done"}]}`,
+		McpMaterializationHandle: &materializationHandle,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("WriteEvent non-MCP result with MCP handle err = %v; want InvalidArgument", err)
 	}
 }
 

@@ -9752,6 +9752,102 @@ Previous anchored summary.
     expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
   });
 
+  test("user interrupt joins an unknown Sandbox acceptance ACK before taking its closeout snapshot", async () => {
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const acceptanceStarted = deferred<void>();
+    const releaseAcceptance = deferred<void>();
+    const appended: SessionEvent[] = [];
+    let awaitCalls = 0;
+    let interruptCommitStarted = false;
+    let interruptDeclaration: RuntimeControlInputDeclaration | undefined;
+    const catalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
+    const agentLayer = runtimeAgentLoopLayer(loader, {
+      writer: writerFrom((envelope) => {
+        appended.push(envelope.event);
+        return {
+          ok: true,
+          writeId: envelope.writeId,
+          eventId: envelope.event.type === "agent.tool_use" ? "sevt_interrupt_acceptance" : `bridge-${envelope.writeId}`,
+          processedAt: createdAt,
+        };
+      }),
+      events: [
+        {
+          type: "tool-call",
+          id: "tool-interrupt-acceptance",
+          toolName: "Write",
+          input: { file_path: "src/a.ts", content: "one" },
+          inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+        },
+        { type: "finish", finishReason: "tool-calls" },
+      ],
+      providerCallRuntime: {
+        systemInstructions: "sandbox acceptance interrupt test",
+        toolCatalog: {
+          ...catalog,
+          entries: catalog.entries.map((entry) => ({
+            ...entry,
+            route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+          })),
+        },
+      },
+      acceptSandboxExecution: async () => {
+        acceptanceStarted.resolve();
+        await releaseAcceptance.promise;
+        return { type: "accepted" };
+      },
+      awaitSandboxExecution: () => {
+        awaitCalls += 1;
+        return { type: "completed", output: { text: "must not wait after interrupt", truncated: false } };
+      },
+    });
+    const managerLayer = SessionManager.layer({ maxLocalSessions: 4, now: () => createdAt }).pipe(Layer.provide(agentLayer));
+    const { manager, scope } = await Effect.runPromise(Effect.gen(function* () {
+      const layerScope = yield* Scope.make();
+      const context = yield* Layer.buildWithScope(managerLayer, layerScope);
+      return { manager: Context.get(context, SessionManager.Service), scope: layerScope };
+    }));
+
+    try {
+      const input = acceptedInput("rin_interrupt_acceptance");
+      await Effect.runPromise(manager.preloadThread({
+        ...input,
+        runtimeBindingToken: "runtime-binding-token",
+        coldCoverage: emptyColdCoverage,
+        messages: [userMessage("user-1", 0, "hello")],
+        thread: { role: "main", visibility: "public", agentType: "general", status: "idle" },
+      }));
+      await Effect.runPromise(manager.acceptInput(input));
+      await acceptanceStarted.promise;
+
+      const command = {
+        ...acceptedInput("rin_interrupt_acceptance_control"),
+        eventIds: ["sevt_interrupt_acceptance_control"],
+        sequenceFrom: 9,
+        sequenceTo: 9,
+      };
+      const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
+        interruptCommitStarted = true;
+        interruptDeclaration = declaration;
+        return buildRuntimeControlCommitResult(command, "interrupt_control", declaration);
+      }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await flushMicrotasks(20);
+
+      expect(interruptCommitStarted).toBe(false);
+      releaseAcceptance.resolve();
+      await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
+
+      expect(interruptDeclaration?.sandboxExecutionToolUseEventIds).toEqual(["sevt_interrupt_acceptance"]);
+      expect(awaitCalls).toBe(0);
+      expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
+      expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
+    } finally {
+      releaseAcceptance.resolve();
+      await Effect.runPromise(Scope.close(scope, Exit.void));
+    }
+  });
+
   test("provider closeout joins durable Sandbox acceptance before freezing execution ownership", async () => {
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });

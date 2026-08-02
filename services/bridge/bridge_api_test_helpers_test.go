@@ -743,6 +743,9 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_identity", "bind_bridge_tool_identity", 1, "pod_uid_tool_identity")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "thr_bridge_tool_identity_other")
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_identity_other", "thr_bridge_tool_identity_foreign")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_identity_other", "bind_bridge_tool_identity_foreign", 1, "pod_uid_tool_identity_foreign")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_tool_identity", "thr_bridge_tool_identity", "evt_tool_identity", 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf '<>&'","workdir":"/workspace"},"evaluated_permission":"allow"}`)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_events SET model_request_id = 'mreq_tool_identity' WHERE workspace_id = 'default' AND event_id = 'evt_tool_identity'`); err != nil {
@@ -785,12 +788,23 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 		"payload_reusing_hash": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.InputJson = `{"cmd":"printf different","workdir":"/workspace"}`
 		},
+		"other_thread": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+			conflict.Scope.SessionThreadId = "thr_bridge_tool_identity_other"
+		},
+		"other_session": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+			conflict.Scope.SessionId = "sesn_bridge_tool_identity_other"
+			conflict.Scope.SessionThreadId = "thr_bridge_tool_identity_foreign"
+			conflict.Scope.Binding = &bridgev1.RuntimeBindingRef{
+				BindingId: "bind_bridge_tool_identity_foreign", BindingGeneration: 1,
+				TargetPodUid: "pod_uid_tool_identity_foreign",
+			}
+		},
 	} {
 		t.Run(name+" conflict", func(t *testing.T) {
 			conflict := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
 			conflict.Scope.RequestId = "req_bridge_tool_identity_conflict_" + name
 			mutate(conflict)
-			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists && status.Code(err) != codes.InvalidArgument {
+			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists && status.Code(err) != codes.InvalidArgument && status.Code(err) != codes.FailedPrecondition {
 				t.Fatalf("AcceptSandboxExecution %s conflict error = %v; want fatal identity rejection", name, err)
 			}
 		})

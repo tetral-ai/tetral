@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -49,6 +50,32 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		"tool-call-pod-loss",
 		"Write",
 	)
+	attachmentStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	attachmentStore.AttachmentBlobStore = blob.NewFakeBlobStore()
+	attachmentStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+	attachment := createBridgeTransientAttachmentForTest(
+		t, attachmentStore,
+		bridgeAPIScope("sesn_bridge_pod_loss", "thr_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old"),
+		"attachment_pod_loss", "evt_pod_loss_tool", []byte("pod-loss-attachment"),
+	)
+	resultJSON := `{"status":"success","attachment_ref":"` + attachment.GetAttachmentRef() + `"}`
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_transient_attachments
+		SET status='staged', expires_at='2026-01-01T00:01:00Z'
+		WHERE workspace_id='default' AND attachment_ref=$1`, attachment.GetAttachmentRef()); err != nil {
+		t.Fatalf("stage pod-loss attachment: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		model_tool_call_id, execution_state, execution_attempt_generation, result_digest,
+		created_at, updated_at
+	) VALUES ('default','sesn_bridge_pod_loss','thr_bridge_pod_loss','evt_pod_loss_tool','sandbox_tool',
+		$1,'Write','{"file_path":"src/a.ts"}','committed',$2,
+		'tool-call-pod-loss','terminal_unconsumed',1,$3,
+		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		sha256Hex(`{"file_path":"src/a.ts"}`), resultJSON, sha256Hex(resultJSON)); err != nil {
+		t.Fatalf("seed pod-loss sandbox execution: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
@@ -217,6 +244,25 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	}
 	if boundPodUID != "pod_uid_pod_loss_new" {
 		t.Fatalf("replacement binding pod uid = %q; want new pod", boundPodUID)
+	}
+	var executionState, consumptionReason string
+	var storedResult sql.NullString
+	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, result_json, consumption_reason
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id='sesn_bridge_pod_loss' AND tool_use_event_id='evt_pod_loss_tool'`).Scan(
+		&executionState, &storedResult, &consumptionReason,
+	); err != nil {
+		t.Fatalf("read pod-loss execution receipt: %v", err)
+	}
+	if executionState != "consumed" || storedResult.Valid || consumptionReason != "pod_lost" {
+		t.Fatalf("pod-loss execution = %q/%v/%q; want consumed thin receipt", executionState, storedResult, consumptionReason)
+	}
+	attachmentStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC) }
+	if result, err := attachmentStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
+		t.Fatalf("reconcile pod-loss attachment = %+v, %v; want one deleted", result, err)
+	}
+	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
+		t.Fatalf("pod-loss attachment status = %q; want deleted", got)
 	}
 	var inboxStatus string
 	var inboxPodUID string

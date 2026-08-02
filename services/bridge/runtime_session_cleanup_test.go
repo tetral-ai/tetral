@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -112,6 +113,135 @@ func TestSessionDeleteCleanupDrainsUnadoptedOutputCaptureBeforeRemovingReceipt(t
 	}
 	if pending || rows != 0 {
 		t.Fatalf("finished output capture cleanup = pending %t rows %d; want false/0", pending, rows)
+	}
+}
+
+func TestHasOpenSessionSandboxQueueJobsUsesOnlyOpenStatusesInTheTargetSession(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := dbconnect.NewClientForTesting(runtime)
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	enqueue := func(id string, sessionID string) {
+		t.Helper()
+		if err := client.WithWorkspaceTx(context.Background(), "default", "test.open_sandbox_queue_job", func(tx *dbconnect.Tx) error {
+			_, err := queue.EnqueueTx(context.Background(), tx, queue.EnqueueRequest{
+				ID: id, WorkspaceID: "default", Kind: queue.KindSandboxToolExecute,
+				PartitionKey:   queue.FormatSandboxExecutionPartitionKey("default", sessionID, "thr_"+sessionID, "evt_"+sessionID),
+				DedupeKey:      queue.FormatSandboxToolExecuteDedupeKey("default", sessionID, "thr_"+sessionID, "evt_"+sessionID, 1),
+				PayloadVersion: 1, PayloadJSON: []byte(`{"workspace_id":"default","session_id":"` + sessionID + `","session_thread_id":"thr_` + sessionID + `","tool_use_event_id":"evt_` + sessionID + `"}`),
+				MaxAttempts: 5, Now: now,
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+	open := func(sessionID string) bool {
+		t.Helper()
+		var result bool
+		if err := client.WithWorkspaceTx(context.Background(), "default", "test.read_open_sandbox_queue_jobs", func(tx *dbconnect.Tx) error {
+			var err error
+			result, err = hasOpenSessionSandboxQueueJobsTx(context.Background(), tx, "default", sessionID)
+			return err
+		}); err != nil {
+			t.Fatalf("read open jobs for %s: %v", sessionID, err)
+		}
+		return result
+	}
+
+	enqueue("qjob_target_session", "sesn_target_queue_gate")
+	enqueue("qjob_other_session", "sesn_other_queue_gate")
+	if !open("sesn_target_queue_gate") {
+		t.Fatal("pending target Session job did not block cleanup")
+	}
+	if _, err := admin.Exec(`UPDATE queue_jobs SET status='leased', leased_by='worker', lease_token='lease', leased_at=$2, leased_until=$3, updated_at=$2 WHERE workspace_id='default' AND id=$1`, "qjob_target_session", now, now.Add(time.Minute)); err != nil {
+		t.Fatalf("lease target job: %v", err)
+	}
+	if !open("sesn_target_queue_gate") {
+		t.Fatal("leased target Session job did not block cleanup")
+	}
+	for _, terminalStatus := range []string{queue.StatusAcknowledged, queue.StatusCancelled, queue.StatusDeadLettered} {
+		if _, err := admin.Exec(`UPDATE queue_jobs
+			SET status=$2, leased_by=NULL, lease_token=NULL, leased_at=NULL, leased_until=NULL, updated_at=$3
+			WHERE workspace_id='default' AND id=$1`, "qjob_target_session", terminalStatus, now.Add(2*time.Minute)); err != nil {
+			t.Fatalf("set target job %s: %v", terminalStatus, err)
+		}
+		if open("sesn_target_queue_gate") {
+			t.Fatalf("%s target Session job blocked cleanup", terminalStatus)
+		}
+	}
+	if !open("sesn_other_queue_gate") {
+		t.Fatal("pending other Session job was not independently visible")
+	}
+}
+
+func TestSessionDeleteCleanupCompletesAfterConsumedAttachmentGC(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_delete_consumed_attachment"
+		threadID  = "thr_delete_consumed_attachment"
+		cleanupID = "delcln_consumed_attachment"
+		toolUseID = "evt_delete_consumed_attachment_tool"
+		resultID  = "evt_delete_consumed_attachment_result"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_delete_consumed_attachment", 1, "pod_delete_consumed_attachment")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.AttachmentBlobStore = blob.NewFakeBlobStore()
+	store.Clock = func() time.Time { return time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC) }
+	attachment := createBridgeTransientAttachmentForTest(t, store,
+		bridgeAPIScope(sessionID, threadID, "bind_delete_consumed_attachment", 1, "pod_delete_consumed_attachment"),
+		"delete_consumed_attachment", toolUseID, []byte("consumed-attachment"))
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, resultID, 1, "agent.tool_result", `{"type":"agent.tool_result"}`)
+	if _, err := admin.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		model_tool_call_id, execution_state, execution_attempt_generation, result_digest,
+		consumed_by_terminal_event_id, consumption_reason, created_at, updated_at
+	) VALUES ('default',$1,$2,$3,'sandbox_tool',$4,'view_image','{}','committed',NULL,
+		'call_delete_consumed_attachment','consumed',1,$5,$6,'conversation_tool_result',$7,$7)`,
+		sessionID, threadID, toolUseID, sha256Hex(`{}`), strings.Repeat("a", 64), resultID, store.Clock()); err != nil {
+		t.Fatalf("seed consumed attachment execution: %v", err)
+	}
+	if _, err := admin.Exec(`UPDATE session_transient_attachments
+		SET status='consumed', expires_at=$2
+		WHERE workspace_id='default' AND attachment_ref=$1`, attachment.GetAttachmentRef(), store.Clock().Add(-time.Minute)); err != nil {
+		t.Fatalf("mark attachment consumed: %v", err)
+	}
+	if result, err := store.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
+		t.Fatalf("reconcile consumed attachment = %+v, %v; want one deleted", result, err)
+	}
+	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
+		t.Fatalf("consumed attachment status = %q; want deleted", got)
+	}
+	if _, err := admin.Exec(`UPDATE sessions SET lifecycle_state='deleted', delete_cleanup_id=$2
+		WHERE workspace_id='default' AND id=$1`, sessionID, cleanupID); err != nil {
+		t.Fatalf("mark Session deleted: %v", err)
+	}
+	if _, err := admin.Exec(`DELETE FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, sessionID); err != nil {
+		t.Fatalf("remove runtime binding before deleted-session cleanup: %v", err)
+	}
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryStore.AttachmentBlobStore = store.AttachmentBlobStore
+	deliveryStore.Clock = func() time.Time { return store.Clock().Add(time.Minute) }
+	result, err := deliveryStore.finalizeSessionDeleteCleanup(context.Background(), RuntimeJob{
+		Kind: queue.KindSessionDeleteCleanup, WorkspaceID: "default", SessionID: sessionID,
+		DeleteCleanupID: cleanupID, AttemptCount: 1, MaxAttempts: 5,
+	})
+	if err != nil {
+		t.Fatalf("finalize Session delete cleanup: %v", err)
+	}
+	if result.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("Session delete cleanup = %+v; want accepted", result)
+	}
+	var attachmentRows, executionRows int
+	if err := admin.QueryRow(`SELECT count(*) FROM session_transient_attachments WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&attachmentRows); err != nil {
+		t.Fatalf("count deleted attachment rows: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id='default' AND session_id=$1`, sessionID).Scan(&executionRows); err != nil {
+		t.Fatalf("count deleted execution rows: %v", err)
+	}
+	if attachmentRows != 0 || executionRows != 0 {
+		t.Fatalf("Session delete cleanup retained attachment/execution rows = %d/%d", attachmentRows, executionRows)
 	}
 }
 
@@ -752,7 +882,31 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "sevt_cleanup_gone_wait", 1)
 
 	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridgeStore.AttachmentBlobStore = blob.NewFakeBlobStore()
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
+	attachment := createBridgeTransientAttachmentForTest(
+		t, bridgeStore,
+		bridgeAPIScope("sesn_bridge_cleanup_gone", "thr_bridge_cleanup_gone", "bind_bridge_cleanup_gone", 7, "pod_uid_cleanup_gone"),
+		"attachment_cleanup_gone", "sevt_cleanup_gone_wait", []byte("cleanup-wait-attachment"),
+	)
+	resultJSON := `{"status":"success","attachment_ref":"` + attachment.GetAttachmentRef() + `"}`
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_transient_attachments
+		SET status='staged', expires_at='2026-01-01T00:01:00Z'
+		WHERE workspace_id='default' AND attachment_ref=$1`, attachment.GetAttachmentRef()); err != nil {
+		t.Fatalf("stage cleanup-wait attachment: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		model_tool_call_id, execution_state, execution_attempt_generation, result_digest,
+		created_at, updated_at
+	) VALUES ('default','sesn_bridge_cleanup_gone','thr_bridge_cleanup_gone','sevt_cleanup_gone_wait','sandbox_tool',
+		$1,'dangerous_tool','{}','committed',$2,
+		'toolu_cleanup_wait','terminal_unconsumed',1,$3,
+		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		sha256Hex(`{}`), resultJSON, sha256Hex(resultJSON)); err != nil {
+		t.Fatalf("seed cleanup-wait sandbox execution: %v", err)
+	}
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, bridgeAPIFinishIdleRequest(
 		t,
 		admin,
@@ -843,6 +997,25 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	}
 	if pendingStatus != "expired" {
 		t.Fatalf("gone cleanup pending wait status = %q; want expired", pendingStatus)
+	}
+	var executionState, consumptionReason string
+	var storedResult sql.NullString
+	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, result_json, consumption_reason
+		FROM session_runtime_tool_results
+		WHERE workspace_id='default' AND session_id='sesn_bridge_cleanup_gone' AND tool_use_event_id='sevt_cleanup_gone_wait'`).Scan(
+		&executionState, &storedResult, &consumptionReason,
+	); err != nil {
+		t.Fatalf("read cleanup-wait execution receipt: %v", err)
+	}
+	if executionState != "consumed" || storedResult.Valid || consumptionReason != "cleanup_wait_expired" {
+		t.Fatalf("cleanup-wait execution = %q/%v/%q; want consumed thin receipt", executionState, storedResult, consumptionReason)
+	}
+	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
+	if result, err := bridgeStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
+		t.Fatalf("reconcile cleanup-wait attachment = %+v, %v; want one deleted", result, err)
+	}
+	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
+		t.Fatalf("cleanup-wait attachment status = %q; want deleted", got)
 	}
 }
 

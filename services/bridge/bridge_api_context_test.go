@@ -101,6 +101,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecution
 	); err != nil {
 		t.Fatalf("seed sandbox execution: %v", err)
 	}
+	seedBridgeAPIBackgroundTask(t, admin, "default", sessionID, threadID, bindingID, "task_bridge_sandbox_recovery", toolUseEventID)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-sandbox-recovery-key-32b")
@@ -136,6 +137,11 @@ func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecution
 	if !reflect.DeepEqual(payload.ColdCoverage.PendingSandboxExecutionIDs, []string{toolUseEventID}) ||
 		len(payload.ColdCoverage.PendingToolIDs) != 0 {
 		t.Fatalf("cold coverage = %#v; want disjoint sandbox execution identity", payload.ColdCoverage)
+	}
+	if !reflect.DeepEqual(payload.BackgroundTools, []bridgeLoadContextBackgroundTool{{
+		TaskID: "task_bridge_sandbox_recovery", SourceToolUseEventID: toolUseEventID,
+	}}) {
+		t.Fatalf("background tools = %#v; want durable task and Tool Use identity", payload.BackgroundTools)
 	}
 
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_bridge_sandbox_terminal", 2, "agent.tool_result",

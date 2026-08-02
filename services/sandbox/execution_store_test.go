@@ -424,6 +424,7 @@ func TestPostgreSQLSandboxExecutionAuthorizationRechecksDurableGates(t *testing.
 		{name: "release fence", mutate: `UPDATE session_sandbox_bindings SET release_requested_at = CURRENT_TIMESTAMP, release_reason = 'session_delete' WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`},
 		{name: "resource revision", mutate: `UPDATE sessions SET sandbox_resource_revision = sandbox_resource_revision + 1 WHERE workspace_id = 'ws_execution_store' AND id = 'sesn_execution_store'`},
 		{name: "credential expiry", mutate: `UPDATE session_sandbox_bindings SET resource_credential_expires_at = CURRENT_TIMESTAMP WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store'`},
+		{name: "cancellation", mutate: `UPDATE session_runtime_tool_results SET cancel_requested_at = CURRENT_TIMESTAMP WHERE workspace_id = 'ws_execution_store' AND session_id = 'sesn_execution_store' AND tool_use_event_id = 'evt_execution_a'`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtimeDB, adminDB := newSandboxServiceTestDB(t)
@@ -441,7 +442,7 @@ func TestPostgreSQLSandboxExecutionAuthorizationRechecksDurableGates(t *testing.
 				t.Fatalf("mutate gate: %v", err)
 			}
 			authorized, err := coordinator.AuthorizeRunning(ctx, work)
-			if test.name == "release fence" {
+			if test.name == "release fence" || test.name == "cancellation" {
 				if err != nil {
 					t.Fatalf("AuthorizeRunning: %v", err)
 				}
@@ -452,7 +453,7 @@ func TestPostgreSQLSandboxExecutionAuthorizationRechecksDurableGates(t *testing.
 				t.Fatal("execution crossed running authorization after a durable gate changed")
 			}
 			wantState := "pending"
-			if test.name == "release fence" {
+			if test.name == "release fence" || test.name == "cancellation" {
 				wantState = "terminal_unconsumed"
 			}
 			assertSandboxExecutionState(t, adminDB, "evt_execution_a", wantState, 1)

@@ -151,21 +151,8 @@ func (s *PostgreSQLBridgeAPIStore) ensureFinishIdleOutputCapture(ctx context.Con
 }
 
 func ensureSessionOutputCaptureCleanupTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, now time.Time) (bool, error) {
-	var transportOpen bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM queue_jobs
-			 WHERE workspace_id=$1
-			   AND payload_json::jsonb ->> 'session_id'=$2
-			   AND kind IN (
-			     'sandbox_tool_execute','sandbox_activate','sandbox_materialize','sandbox_release','sandbox_tool_cancel',
-			     'sandbox_output_capture','sandbox_output_capture_cleanup','sandbox_memory_projection',
-			     'sandbox_background_command','sandbox_background_reconcile'
-			   )
-			   AND status IN ('pending','leased')
-		)`,
-		workspaceID, sessionID,
-	).Scan(&transportOpen); err != nil {
+	transportOpen, err := hasOpenSessionSandboxQueueJobsTx(ctx, tx, workspaceID, sessionID)
+	if err != nil {
 		return false, err
 	}
 	if transportOpen {

@@ -624,6 +624,134 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 	}
 }
 
+func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID     = "default"
+		sessionID       = "sesn_sandbox_settle_consume_race"
+		threadID        = "thr_sandbox_settle_consume_race"
+		bindingID       = "bind_sandbox_settle_consume_race"
+		podUID          = "pod_sandbox_settle_consume_race"
+		toolUseEventID  = "evt_sandbox_settle_consume_race"
+		modelRequestID  = "mreq_sandbox_settle_consume_race"
+		modelToolCallID = "call_sandbox_settle_consume_race"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
+	if _, err := admin.Exec(`UPDATE session_events SET model_request_id=$2 WHERE workspace_id=$1 AND event_id=$3`, workspaceID, modelRequestID, toolUseEventID); err != nil {
+		t.Fatalf("stamp Tool Use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ModelToolCallId: modelToolCallID,
+		NormalizedInputHash: sha256Hex(`{}`), ToolName: "Read", InputJson: `{}`,
+	}); err != nil {
+		t.Fatalf("AcceptSandboxExecution: %v", err)
+	}
+	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
+	provider := newGatedBridgeToolProvider()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: provider,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &tetralsandbox.SandboxToolExecutionJobRunner{
+		Queue:       tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
+		Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute),
+		Providers:   registry,
+		Media:       backgroundNotificationMedia{},
+		Config: tetralsandbox.SandboxToolExecutionRunnerConfig{
+			WorkspaceID: workspaceID, LeaseOwner: "sandbox-settle-consume-race", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second,
+		},
+	}
+	type runnerResult struct {
+		active bool
+		err    error
+	}
+	runnerDone := make(chan runnerResult, 1)
+	go func() {
+		active, err := runner.RunOnceWithActivity(context.Background())
+		runnerDone <- runnerResult{active: active, err: err}
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Sandbox execution did not reach provider")
+	}
+
+	locker, lockerPID := lockPostgreSQLFinalizationFence(t, admin,
+		`SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, workspaceID, sessionID)
+	defer func() { _ = locker.Rollback() }()
+	const resultJSON = `{"status":"success","result":{"text":"done"}}`
+	resultDigest := sha256Hex(resultJSON)
+	writeRequest := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_sandbox_settle_consume_race", ModelRequestId: modelRequestID,
+		EventType:           "agent.tool_result",
+		PayloadJson:         `{"type":"agent.tool_result","tool_use_event_id":"` + toolUseEventID + `","content":[{"type":"text","text":"done"}]}`,
+		SandboxResultDigest: &resultDigest,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_sandbox_settle_consume_race", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"Read","toolUseEventId":"` + toolUseEventID + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{},"preview":"{}","truncated":false},"output":{"text":"done","truncated":false}}}`},
+		)},
+	}
+	type writeResult struct {
+		response *bridgev1.WriteEventResponse
+		err      error
+	}
+	writeDone := make(chan writeResult, 1)
+	go func() {
+		response, err := store.WriteEvent(context.Background(), writeRequest)
+		writeDone <- writeResult{response: response, err: err}
+	}()
+	close(provider.release)
+	waitForPostgreSQLLockWaiters(t, admin, lockerPID, 2)
+	if err := locker.Commit(); err != nil {
+		t.Fatalf("release Session race fence: %v", err)
+	}
+	settled := <-runnerDone
+	if settled.err != nil || !settled.active {
+		t.Fatalf("Sandbox execution runner = active %v, err %v; want true,nil", settled.active, settled.err)
+	}
+	written := <-writeDone
+	if written.err != nil {
+		if status.Code(written.err) != codes.FailedPrecondition {
+			t.Fatalf("concurrent WriteEvent: %v", written.err)
+		}
+		written.response, written.err = store.WriteEvent(context.Background(), writeRequest)
+	}
+	if written.err != nil {
+		t.Fatalf("WriteEvent after Sandbox settlement: %v", written.err)
+	}
+	if written.response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("WriteEvent status = %s; want committed", written.response.GetAck().GetStatus())
+	}
+
+	var executionState string
+	var retainedResult sql.NullString
+	var resultEvents int
+	if err := admin.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3`, workspaceID, sessionID, toolUseEventID).Scan(&executionState, &retainedResult); err != nil {
+		t.Fatalf("read converged execution: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND type='agent.tool_result'
+		  AND payload_json::jsonb ->> 'tool_use_event_id'=$3`, workspaceID, sessionID, toolUseEventID).Scan(&resultEvents); err != nil {
+		t.Fatalf("count converged Tool Result events: %v", err)
+	}
+	if executionState != "consumed" || retainedResult.Valid || resultEvents != 1 {
+		t.Fatalf("converged execution = state %q result %v events %d; want consumed/NULL/1", executionState, retainedResult, resultEvents)
+	}
+}
+
 type gatedBridgeToolProvider struct {
 	*bridgeMemoryProjectionProvider
 	started chan struct{}

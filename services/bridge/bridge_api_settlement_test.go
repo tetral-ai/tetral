@@ -22,6 +22,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/files"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
@@ -2474,6 +2475,238 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreFinishIdleAdoptsCaptureAndMailInOneTransaction(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_finish_idle_adoption_atomic"
+		threadID  = "thr_finish_idle_adoption_atomic"
+		senderID  = "thr_finish_idle_adoption_sender"
+		bindingID = "bind_finish_idle_adoption_atomic"
+		writeID   = "evt_finish_idle_adoption_atomic"
+		source    = "outputs/report.txt"
+		blobKey   = "capture/finish-idle-adoption/report.txt"
+		oldFileID = "file_finish_idle_adoption_old"
+		oldObject = "fobj_finish_idle_adoption_old"
+		oldBlob   = "capture/finish-idle-adoption/old-report.txt"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, senderID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_finish_idle_adoption_atomic")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, senderID, "evt_finish_idle_adoption_mail", 1,
+		"agent.thread_message_sent", bridgeInterAgentSentEventJSON(
+			t, "delivery_finish_idle_adoption", senderID, threadID, "", "sevt_finish_idle_adoption_spawn",
+			bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_finish_idle_adoption", completionMailEnvelope("main", "sender", "done")),
+		))
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return now }
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_finish_idle_adoption_atomic")
+	request := bridgeAPIFinishIdleRequest(t, admin, scope, writeID, `{"type":"end_turn"}`)
+	oldCapturedAt := now.Add(-time.Hour)
+	if _, err := admin.Exec(`INSERT INTO file_objects (
+		object_id, workspace_id, blob_key, size_bytes, sha256, created_at
+	) VALUES ($1,'default',$2,7,$3,$4)`, oldObject, oldBlob, strings.Repeat("d", 64), oldCapturedAt); err != nil {
+		t.Fatalf("seed previous capture object: %v", err)
+	}
+	if _, err := admin.Exec(`INSERT INTO files (
+		file_id, workspace_id, object_id, filename, mime_type, downloadable, scope_type, scope_id, created_at
+	) VALUES ($1,'default',$2,'old-report.txt','text/plain',true,'session',$3,$4)`, oldFileID, oldObject, sessionID, oldCapturedAt); err != nil {
+		t.Fatalf("seed previous captured file: %v", err)
+	}
+	if _, err := admin.Exec(`INSERT INTO session_output_captures (
+		workspace_id, session_id, source_path, last_file_id, last_size_bytes, last_sha256,
+		last_captured_at, created_at, updated_at
+	) VALUES ('default',$1,$2,$3,7,$4,$5,$5,$5)`, sessionID, source, oldFileID, strings.Repeat("d", 64), oldCapturedAt); err != nil {
+		t.Fatalf("seed previous capture index: %v", err)
+	}
+
+	quotaManifest := []stagedOutputCaptureEntry{{
+		SourcePath: source, Filename: "report.txt", MIMEType: "text/plain",
+		SizeBytes: files.MaxRetainedBytesPerWorkspace + 1, SHA256: strings.Repeat("a", 64), BlobPointer: blobKey,
+	}}
+	staged := make(chan error, 1)
+	go func() { staged <- stageOutputCaptureManifestForTest(admin, sessionID, writeID, 1, quotaManifest, now) }()
+	if _, err := store.FinishIdle(context.Background(), request); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("FinishIdle over quota err = %v; want ResourceExhausted", err)
+	}
+	if err := <-staged; err != nil {
+		t.Fatalf("stage over-quota capture: %v", err)
+	}
+
+	validEntry := stagedOutputCaptureEntry{
+		SourcePath: source, Filename: "report.txt", MIMEType: "text/plain",
+		SizeBytes: 3, SHA256: strings.Repeat("b", 64), BlobPointer: blobKey,
+	}
+	invalidExisting := stagedOutputCaptureEntry{
+		SourcePath: "outputs/missing.txt", Filename: "missing.txt", MIMEType: "text/plain",
+		SizeBytes: 1, SHA256: strings.Repeat("c", 64), ExistingFileID: "file_missing_adoption",
+	}
+	manifestJSON, err := json.Marshal([]stagedOutputCaptureEntry{validEntry, invalidExisting})
+	if err != nil {
+		t.Fatalf("encode rollback manifest: %v", err)
+	}
+	if _, err := admin.Exec(`UPDATE sandbox_output_capture_operations
+		SET manifest_json=$4, updated_at=$5
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=$3`,
+		sessionID, writeID, 1, string(manifestJSON), now); err != nil {
+		t.Fatalf("install rollback manifest: %v", err)
+	}
+	if _, err := admin.Exec(`INSERT INTO sandbox_output_capture_blobs (
+		workspace_id, session_id, finish_idle_write_id, capture_generation, source_path,
+		blob_pointer, size_bytes, sha256, state, created_at, updated_at, uploaded_at
+	) VALUES ('default',$1,$2,1,$3,$4,3,$5,'uploaded',$6,$6,$6)`,
+		sessionID, writeID, source, blobKey, validEntry.SHA256, now); err != nil {
+		t.Fatalf("seed uploaded capture blob: %v", err)
+	}
+	if _, err := store.FinishIdle(context.Background(), request); err == nil {
+		t.Fatal("FinishIdle with missing existing file succeeded")
+	}
+	var fileRows, objectRows, captureRows, idleEvents, wakeJobs int
+	var blobState string
+	var blobFileID sql.NullString
+	var indexedFileID, indexedDigest string
+	var indexedSize int64
+	var indexedAt time.Time
+	if err := admin.QueryRow(`SELECT count(*) FROM files WHERE workspace_id='default' AND scope_type='session' AND scope_id=$1`, sessionID).Scan(&fileRows); err != nil {
+		t.Fatalf("count rolled-back files: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM file_objects WHERE workspace_id='default'`).Scan(&objectRows); err != nil {
+		t.Fatalf("count rolled-back file objects: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*), min(last_file_id), min(last_size_bytes), min(last_sha256), min(last_captured_at)
+		FROM session_output_captures WHERE workspace_id='default' AND session_id=$1 AND source_path=$2`, sessionID, source).
+		Scan(&captureRows, &indexedFileID, &indexedSize, &indexedDigest, &indexedAt); err != nil {
+		t.Fatalf("read rolled-back capture index: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT state, file_id FROM sandbox_output_capture_blobs
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND source_path=$3`, sessionID, writeID, source).Scan(&blobState, &blobFileID); err != nil {
+		t.Fatalf("read rolled-back blob custody: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
+		t.Fatalf("count rolled-back idle events: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1 AND status IN ('pending','leased')`,
+		"runtime_input:default:"+sessionID+":agent_mail:delivery_finish_idle_adoption").Scan(&wakeJobs); err != nil {
+		t.Fatalf("count rolled-back mail wakes: %v", err)
+	}
+	if fileRows != 1 || objectRows != 1 || captureRows != 1 || indexedFileID != oldFileID || indexedSize != 7 ||
+		indexedDigest != strings.Repeat("d", 64) || !indexedAt.Equal(oldCapturedAt) ||
+		blobState != "uploaded" || blobFileID.Valid || idleEvents != 0 || wakeJobs != 0 {
+		t.Fatalf("failed adoption leaked files=%d objects=%d captures=%d index=%q/%d/%q/%s blob=%s/%v idle=%d wakes=%d",
+			fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt, blobState, blobFileID, idleEvents, wakeJobs)
+	}
+
+	manifestJSON, err = json.Marshal([]stagedOutputCaptureEntry{validEntry})
+	if err != nil {
+		t.Fatalf("encode successful manifest: %v", err)
+	}
+	if _, err := admin.Exec(`UPDATE sandbox_output_capture_operations
+		SET manifest_json=$4, updated_at=$5
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=$3`,
+		sessionID, writeID, 1, string(manifestJSON), now); err != nil {
+		t.Fatalf("install successful manifest: %v", err)
+	}
+	if _, err := admin.Exec(`CREATE FUNCTION reject_finish_idle_operation_for_test() RETURNS trigger
+		LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'reject finish idle operation for rollback proof'; END $$`); err != nil {
+		t.Fatalf("create FinishIdle rollback trigger function: %v", err)
+	}
+	if _, err := admin.Exec(`CREATE TRIGGER reject_finish_idle_operation_for_test
+		BEFORE INSERT ON session_bridge_operations FOR EACH ROW
+		WHEN (NEW.operation = 'finish_idle') EXECUTE FUNCTION reject_finish_idle_operation_for_test()`); err != nil {
+		t.Fatalf("create FinishIdle rollback trigger: %v", err)
+	}
+	if _, err := store.FinishIdle(context.Background(), request); err == nil {
+		t.Fatal("FinishIdle succeeded despite final operation rejection")
+	}
+	var captureState string
+	if err := admin.QueryRow(`SELECT state FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=1`, sessionID, writeID).Scan(&captureState); err != nil {
+		t.Fatalf("read capture operation after final-operation rollback: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM files WHERE workspace_id='default' AND scope_type='session' AND scope_id=$1`, sessionID).Scan(&fileRows); err != nil {
+		t.Fatalf("count files after final-operation rollback: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM file_objects WHERE workspace_id='default'`).Scan(&objectRows); err != nil {
+		t.Fatalf("count file objects after final-operation rollback: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*), min(last_file_id), min(last_size_bytes), min(last_sha256), min(last_captured_at)
+		FROM session_output_captures WHERE workspace_id='default' AND session_id=$1 AND source_path=$2`, sessionID, source).
+		Scan(&captureRows, &indexedFileID, &indexedSize, &indexedDigest, &indexedAt); err != nil {
+		t.Fatalf("read capture index after final-operation rollback: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT state, file_id FROM sandbox_output_capture_blobs
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND source_path=$3`, sessionID, writeID, source).Scan(&blobState, &blobFileID); err != nil {
+		t.Fatalf("read blob custody after final-operation rollback: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
+		t.Fatalf("count idle events after final-operation rollback: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1 AND status IN ('pending','leased')`,
+		"runtime_input:default:"+sessionID+":agent_mail:delivery_finish_idle_adoption").Scan(&wakeJobs); err != nil {
+		t.Fatalf("count mail wakes after final-operation rollback: %v", err)
+	}
+	if captureState != "staged" || fileRows != 1 || objectRows != 1 || captureRows != 1 || indexedFileID != oldFileID ||
+		indexedSize != 7 || indexedDigest != strings.Repeat("d", 64) || !indexedAt.Equal(oldCapturedAt) ||
+		blobState != "uploaded" || blobFileID.Valid || idleEvents != 0 || wakeJobs != 0 {
+		t.Fatalf("final-operation rollback leaked capture=%s files=%d objects=%d index=%d/%q/%d/%q/%s blob=%s/%v idle=%d wakes=%d",
+			captureState, fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt,
+			blobState, blobFileID, idleEvents, wakeJobs)
+	}
+	if _, err := admin.Exec(`DROP TRIGGER reject_finish_idle_operation_for_test ON session_bridge_operations`); err != nil {
+		t.Fatalf("drop FinishIdle rollback trigger: %v", err)
+	}
+	if _, err := admin.Exec(`DROP FUNCTION reject_finish_idle_operation_for_test()`); err != nil {
+		t.Fatalf("drop FinishIdle rollback trigger function: %v", err)
+	}
+	response, err := store.FinishIdle(context.Background(), request)
+	if err != nil {
+		t.Fatalf("FinishIdle successful adoption: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("FinishIdle ack = %s; want committed", response.GetAck().GetStatus())
+	}
+	var capturedFileID string
+	var capturedBlobKey, capturedDigest string
+	var capturedSize int64
+	if err := admin.QueryRow(`SELECT state FROM sandbox_output_capture_operations
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND capture_generation=1`, sessionID, writeID).Scan(&captureState); err != nil {
+		t.Fatalf("read adopted operation: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT state, file_id FROM sandbox_output_capture_blobs
+		WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2 AND source_path=$3`, sessionID, writeID, source).Scan(&blobState, &capturedFileID); err != nil {
+		t.Fatalf("read adopted blob custody: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM files WHERE workspace_id='default' AND scope_type='session' AND scope_id=$1`, sessionID).Scan(&fileRows); err != nil {
+		t.Fatalf("count adopted file: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM file_objects WHERE workspace_id='default'`).Scan(&objectRows); err != nil {
+		t.Fatalf("count adopted file objects: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*), min(last_file_id), min(last_size_bytes), min(last_sha256), min(last_captured_at)
+		FROM session_output_captures WHERE workspace_id='default' AND session_id=$1 AND source_path=$2`, sessionID, source).
+		Scan(&captureRows, &indexedFileID, &indexedSize, &indexedDigest, &indexedAt); err != nil {
+		t.Fatalf("read adopted capture index: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT o.blob_key, o.size_bytes, o.sha256
+		FROM files f JOIN file_objects o ON o.workspace_id=f.workspace_id AND o.object_id=f.object_id
+		WHERE f.workspace_id='default' AND f.file_id=$1`, capturedFileID).
+		Scan(&capturedBlobKey, &capturedSize, &capturedDigest); err != nil {
+		t.Fatalf("read adopted file object identity: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1 AND status IN ('pending','leased')`,
+		"runtime_input:default:"+sessionID+":agent_mail:delivery_finish_idle_adoption").Scan(&wakeJobs); err != nil {
+		t.Fatalf("count committed mail wake: %v", err)
+	}
+	if captureState != "adopted" || blobState != "adopted" || capturedFileID == "" || fileRows != 2 || objectRows != 2 ||
+		captureRows != 1 || indexedFileID != capturedFileID || indexedSize != validEntry.SizeBytes ||
+		indexedDigest != validEntry.SHA256 || !indexedAt.Equal(now) || capturedBlobKey != blobKey ||
+		capturedSize != validEntry.SizeBytes || capturedDigest != validEntry.SHA256 || wakeJobs != 1 {
+		t.Fatalf("adoption result operation=%s blob=%s file=%q files=%d objects=%d captures=%d index=%q/%d/%q/%s object=%q/%d/%q wakes=%d",
+			captureState, blobState, capturedFileID, fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt,
+			capturedBlobKey, capturedSize, capturedDigest, wakeJobs)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreFinishIdleReplaysFailedCaptureWithNewGeneration(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
@@ -2645,6 +2878,32 @@ func settleOutputCaptureGenerationForTest(db *sql.DB, sessionID string, writeID 
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("capture generation was not created")
+}
+
+func stageOutputCaptureManifestForTest(db *sql.DB, sessionID string, writeID string, generation int, manifest []stagedOutputCaptureEntry, now time.Time) error {
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		result, err := db.Exec(`UPDATE sandbox_output_capture_operations
+			SET state='staged', manifest_json=$4, skipped_json='[]', scan_records_json='[]',
+			    outcome_state='staged', outcome_digest=$5, staged_at=$6, updated_at=$6
+			WHERE workspace_id='default' AND session_id=$1 AND finish_idle_write_id=$2
+			  AND capture_generation=$3 AND state IN ('pending','running')`,
+			sessionID, writeID, generation, string(body), strings.Repeat("d", 64), now)
+		if err != nil {
+			return err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return err
+		} else if count == 1 {
+			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

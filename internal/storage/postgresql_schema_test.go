@@ -395,6 +395,91 @@ func TestSessionRuntimeInboxStatusShapeIncludesParkedDelivery(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeInboxBindingShapeRequiresCompleteDeliveryIdentity(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_inbox_binding", "sesn_inbox_binding")
+	if _, err := admin.Exec(`INSERT INTO session_threads (
+		workspace_id, id, session_id, role, visibility, status,
+		created_at, last_active_at, updated_at
+	) VALUES (
+		'workspace_inbox_binding', 'thr_inbox_binding', 'sesn_inbox_binding',
+		'main', 'public', 'idle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("seed inbox binding thread: %v", err)
+	}
+	insert := func(id string, statusValue string, bindingID any, generation any, podUID any) error {
+		_, err := admin.Exec(`INSERT INTO session_runtime_inbox (
+			workspace_id, session_id, session_thread_id, runtime_input_id,
+			input_kind, event_ids_json, status, binding_id, binding_generation,
+			target_pod_uid, created_at, updated_at
+		) VALUES (
+			'workspace_inbox_binding', 'sesn_inbox_binding', 'thr_inbox_binding', $1,
+			'messages', '[]', $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		)`, id, statusValue, bindingID, generation, podUID)
+		return err
+	}
+	if err := insert("rin_inbox_queued_unbound", "queued", nil, nil, nil); err != nil {
+		t.Fatalf("insert unbound queued inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_delivering_bound", "delivering", "bind_inbox", int64(1), "pod_inbox"); err != nil {
+		t.Fatalf("insert bound delivering inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_cancelled_unbound", "cancelled", nil, nil, nil); err != nil {
+		t.Fatalf("insert unbound cancelled inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_cancelled_bound", "cancelled", "bind_inbox", int64(1), "pod_inbox"); err != nil {
+		t.Fatalf("insert bound cancelled inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_dead_lettered_unbound", "dead_lettered", nil, nil, nil); err != nil {
+		t.Fatalf("insert unbound dead-lettered inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_dead_lettered_bound", "dead_lettered", "bind_inbox", int64(1), "pod_inbox"); err != nil {
+		t.Fatalf("insert bound dead-lettered inbox row: %v", err)
+	}
+	invalidShapes := []struct {
+		name       string
+		status     string
+		bindingID  any
+		generation any
+		podUID     any
+	}{
+		{name: "queued cannot carry binding", status: "queued", bindingID: "bind_inbox", generation: int64(1), podUID: "pod_inbox"},
+		{name: "delivering requires binding", status: "delivering"},
+	}
+	for _, statusValue := range []string{"parked", "cancelled", "dead_lettered"} {
+		invalidShapes = append(invalidShapes,
+			struct {
+				name       string
+				status     string
+				bindingID  any
+				generation any
+				podUID     any
+			}{name: statusValue + " identity without pod", status: statusValue, bindingID: "bind_inbox", generation: int64(1)},
+			struct {
+				name       string
+				status     string
+				bindingID  any
+				generation any
+				podUID     any
+			}{name: statusValue + " identity without generation", status: statusValue, bindingID: "bind_inbox", podUID: "pod_inbox"},
+			struct {
+				name       string
+				status     string
+				bindingID  any
+				generation any
+				podUID     any
+			}{name: statusValue + " identity without binding", status: statusValue, generation: int64(1), podUID: "pod_inbox"},
+		)
+	}
+	for _, test := range invalidShapes {
+		t.Run(test.name, func(t *testing.T) {
+			if err := insert("rin_inbox_invalid_"+strings.ReplaceAll(test.name, " ", "_"), test.status, test.bindingID, test.generation, test.podUID); err == nil {
+				t.Fatal("invalid inbox binding shape was accepted")
+			}
+		})
+	}
+}
+
 func TestSandboxToolTerminalResultRequiresNonemptyDigest(t *testing.T) {
 	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
 	seedStorageSchemaSession(t, admin, "workspace_tool_digest", "sesn_tool_digest")
@@ -802,21 +887,23 @@ func TestSandboxQueueSchemaCarriesClosedKindsMaintenanceAndCleanupIndexes(t *tes
 		}
 	}
 
-	var counterMaintenancePolicyCount int
-	if err := admin.QueryRowContext(ctx,
-		`SELECT COUNT(*)
-		   FROM pg_policies
-		  WHERE schemaname = $1
-		    AND tablename = 'queue_partition_counters'
-		    AND policyname = 'queue_maintenance'
-		    AND qual LIKE '%tetral.queue_maintenance%'
-		    AND with_check LIKE '%tetral.queue_maintenance%'`,
-		schema,
-	).Scan(&counterMaintenancePolicyCount); err != nil {
-		t.Fatalf("read queue counter maintenance policy: %v", err)
-	}
-	if counterMaintenancePolicyCount != 1 {
-		t.Fatalf("queue counter maintenance policy count = %d; want 1", counterMaintenancePolicyCount)
+	for _, table := range []string{"queue_jobs", "queue_partition_counters"} {
+		var maintenancePolicyCount int
+		if err := admin.QueryRowContext(ctx,
+			`SELECT COUNT(*)
+			   FROM pg_policies
+			  WHERE schemaname = $1
+			    AND tablename = $2
+			    AND policyname = 'queue_maintenance'
+			    AND qual LIKE '%tetral.queue_maintenance%'
+			    AND with_check LIKE '%tetral.queue_maintenance%'`,
+			schema, table,
+		).Scan(&maintenancePolicyCount); err != nil {
+			t.Fatalf("read %s maintenance policy: %v", table, err)
+		}
+		if maintenancePolicyCount != 1 {
+			t.Fatalf("%s maintenance policy count = %d; want 1", table, maintenancePolicyCount)
+		}
 	}
 }
 

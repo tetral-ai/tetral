@@ -600,6 +600,28 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		replayedResult.GetEventId() != resultEvent.GetEventId() {
 		t.Fatalf("MCP result replay = %+v; want duplicate original event", replayedResult)
 	}
+	var committedResultPayload string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND event_id=$1`,
+		resultEvent.GetEventId(),
+	).Scan(&committedResultPayload); err != nil {
+		t.Fatalf("read committed MCP result before changed replay: %v", err)
+	}
+	changedResultWrite := proto.Clone(resultWrite).(*bridgev1.WriteEventRequest)
+	changedResultWrite.PayloadJson = `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"changed after consumption"}]}`
+	if _, err := store.WriteEvent(context.Background(), changedResultWrite); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("WriteEvent consumed MCP result replay with changed body err = %v; want AlreadyExists", err)
+	}
+	var payloadAfterChangedReplay string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND event_id=$1`,
+		resultEvent.GetEventId(),
+	).Scan(&payloadAfterChangedReplay); err != nil {
+		t.Fatalf("read committed MCP result after changed replay: %v", err)
+	}
+	if payloadAfterChangedReplay != committedResultPayload {
+		t.Fatalf("committed MCP result changed during conflicting replay = %q; want %q", payloadAfterChangedReplay, committedResultPayload)
+	}
 
 	for _, lifecycle := range []struct {
 		name      string

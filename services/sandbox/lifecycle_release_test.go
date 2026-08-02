@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -346,6 +347,120 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	})
 	if _, disposition, err := store.ClaimRelease(claimCtx, claimJob, now.Add(2*time.Second)); err != nil || disposition != SandboxLifecycleApplied {
 		t.Fatalf("ClaimRelease(fresh generation) = %s, %v; want applied", disposition, err)
+	}
+}
+
+func TestForegroundCompletionAndSandboxReleaseConvergeUnderSessionLockRace(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Date(2026, 8, 2, 3, 0, 0, 0, time.UTC)
+	seedReadySandboxBinding(t, adminDB, now)
+	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+		SET execution_state='running', authorized_binding_revision=1,
+		    authorized_provider_resource_id='provider_execution_store', preparation_deadline=NULL
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND tool_use_event_id='evt_execution_a'`); err != nil {
+		t.Fatalf("mark foreground execution running: %v", err)
+	}
+
+	locker, err := adminDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin Session race fence: %v", err)
+	}
+	defer func() { _ = locker.Rollback() }()
+	var lockedSession string
+	if err := locker.QueryRow(`SELECT id FROM sessions
+		WHERE workspace_id='ws_execution_store' AND id='sesn_execution_store' FOR UPDATE`).Scan(&lockedSession); err != nil {
+		t.Fatalf("lock Session race fence: %v", err)
+	}
+	var blockerPID int
+	if err := locker.QueryRow(`SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+		t.Fatalf("read Session race blocker: %v", err)
+	}
+
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	settlementCtx := sandboxTestQueueContext(t, runtimeDB)
+	settleDone := make(chan error, 1)
+	go func() {
+		settleDone <- NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute).SettleExecution(
+			settlementCtx,
+			SandboxExecutionWork{Ref: SandboxExecutionRef{
+				WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+				SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",
+			}, AttemptGeneration: 1},
+			SandboxExecutionSettlement{
+				Kind: SandboxExecutionCompleted, ResultJSON: `{"status":"success","result":{"text":"done"}}`,
+			},
+		)
+	}()
+	type releaseResult struct {
+		operationID string
+		err         error
+	}
+	releaseDone := make(chan releaseResult, 1)
+	go func() {
+		var operationID string
+		err := client.WithWorkspaceTx(context.Background(), "ws_execution_store", "sandbox.release.completion_race_test", func(tx *dbconnect.Tx) error {
+			var err error
+			operationID, _, err = EnsureSandboxReleaseTx(
+				context.Background(), tx, "ws_execution_store", "sesn_execution_store",
+				SandboxReleaseSessionDelete, "provider_execution_store", now,
+			)
+			return err
+		})
+		releaseDone <- releaseResult{operationID: operationID, err: err}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiters int
+		if err := adminDB.QueryRow(`WITH RECURSIVE waiters(pid) AS (
+			SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))
+			UNION
+			SELECT activity.pid FROM pg_stat_activity activity
+			JOIN waiters blocker ON blocker.pid = ANY(pg_blocking_pids(activity.pid))
+		) SELECT count(*) FROM waiters`, blockerPID).Scan(&waiters); err != nil {
+			t.Fatalf("read Session race waiters: %v", err)
+		}
+		if waiters >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Session race waiters = %d; want 2", waiters)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := locker.Commit(); err != nil {
+		t.Fatalf("release Session race fence: %v", err)
+	}
+	if err := <-settleDone; err != nil {
+		t.Fatalf("SettleExecution: %v", err)
+	}
+	released := <-releaseDone
+	if released.err != nil || released.operationID == "" {
+		t.Fatalf("EnsureSandboxReleaseTx = %q, %v; want operation,nil", released.operationID, released.err)
+	}
+
+	var executionState, resultJSON string
+	var releaseOperations, releaseJobs int
+	if err := adminDB.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND tool_use_event_id='evt_execution_a'`).Scan(&executionState, &resultJSON); err != nil {
+		t.Fatalf("read raced execution: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT count(*) FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND kind='release' AND superseded_by_operation_id IS NULL`).Scan(&releaseOperations); err != nil {
+		t.Fatalf("count raced release operations: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='ws_execution_store' AND kind='sandbox_release' AND status='pending'`).Scan(&releaseJobs); err != nil {
+		t.Fatalf("count raced release jobs: %v", err)
+	}
+	if executionState != "terminal_unconsumed" || !strings.Contains(resultJSON, `"status":"success"`) ||
+		releaseOperations != 1 || releaseJobs != 1 {
+		t.Fatalf("race convergence = execution %q/%s releases/jobs %d/%d; want completed terminal and one queued release",
+			executionState, resultJSON, releaseOperations, releaseJobs)
 	}
 }
 

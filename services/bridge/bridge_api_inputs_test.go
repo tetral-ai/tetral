@@ -389,17 +389,26 @@ func TestPostgreSQLBridgeAPIStoreInterruptRejectsCancellationDraftForAcceptedSan
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_interrupt_accepted", 1, "pod_interrupt_accepted")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Write","input":{},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET model_request_id='mreq_interrupt_accepted' WHERE workspace_id='default' AND event_id=$1`, toolUseEventID); err != nil {
+		t.Fatalf("stamp accepted tool model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mreq_interrupt_accepted", toolUseEventID, "tool-accepted", "Write")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_accepted", 1, "pod_interrupt_accepted"),
+		ToolUseEventId: toolUseEventID, ModelToolCallId: "tool-accepted",
+		NormalizedInputHash: sha256Hex(`{}`), ToolName: "Write", InputJson: `{}`,
+	}); err != nil {
+		t.Fatalf("AcceptSandboxExecution: %v", err)
+	}
 	const terminalResult = `{"status":"success","result":{"text":"done"}}`
 	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO session_runtime_tool_results (
-			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
-			normalized_input_hash, tool_name, input_json, ack_status, result_json, result_digest,
-			model_tool_call_id, execution_state, execution_attempt_generation, created_at, updated_at
-		) VALUES ('default',$1,$2,$3,'sandbox_tool',$4,'Write','{}','committed',$5,$6,
-			'tool-accepted','terminal_unconsumed',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
-		sessionID, threadID, toolUseEventID, sha256Hex(`{}`), terminalResult, sha256Hex(terminalResult),
+		`UPDATE session_runtime_tool_results
+		    SET execution_state='terminal_unconsumed', result_json=$4, result_digest=$5
+		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
+		sessionID, threadID, toolUseEventID, terminalResult, sha256Hex(terminalResult),
 	); err != nil {
-		t.Fatalf("seed accepted sandbox execution: %v", err)
+		t.Fatalf("complete accepted sandbox execution: %v", err)
 	}
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptID, 2, "user.interrupt", `{"type":"user.interrupt"}`)
 	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+interruptID+`"]`, "accepted", "bind_interrupt_accepted", "pod_interrupt_accepted", 2, 2)
@@ -423,12 +432,149 @@ func TestPostgreSQLBridgeAPIStoreInterruptRejectsCancellationDraftForAcceptedSan
 		}},
 	}
 
-	_, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
+	_, err := store.CommitInputs(context.Background(), request)
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("accepted-execution cancellation draft error = %v; want FailedPrecondition", err)
 	}
 	if !strings.Contains(status.Convert(err).Message(), "interrupt loop-owned tool coverage is incomplete") {
 		t.Fatalf("accepted-execution cancellation draft error = %v; want loop-owned coverage rejection", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreInterruptSettlesAcceptedSandboxExecutionTimingArms(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		state     string
+		wantState string
+	}{
+		{name: "lost acceptance ack before worker lease", state: "pending", wantState: "terminal_unconsumed"},
+		{name: "during activation", state: "waiting_activation", wantState: "terminal_unconsumed"},
+		{name: "during provider execution", state: "running", wantState: "running"},
+		{name: "after provider completion", state: "terminal_unconsumed", wantState: "terminal_unconsumed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			const (
+				sessionID       = "sesn_interrupt_timing"
+				threadID        = "thr_interrupt_timing"
+				toolUseEventID  = "evt_interrupt_timing_tool"
+				interruptID     = "evt_interrupt_timing"
+				runtimeInputID  = "rin_interrupt_timing"
+				modelRequestID  = "mreq_interrupt_timing"
+				modelToolCallID = "call_interrupt_timing"
+			)
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_interrupt_timing", 1, "pod_interrupt_timing")
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
+			if _, err := admin.Exec(`UPDATE session_events SET model_request_id=$2 WHERE workspace_id='default' AND event_id=$1`, toolUseEventID, modelRequestID); err != nil {
+				t.Fatalf("stamp timing Tool Use model request: %v", err)
+			}
+			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			// The caller intentionally discards this response to model an accepted
+			// execution whose transport ACK never reached Runtime.
+			if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+				Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_timing", 1, "pod_interrupt_timing"),
+				ToolUseEventId: toolUseEventID, ModelToolCallId: modelToolCallID,
+				NormalizedInputHash: sha256Hex(`{}`), ToolName: "Read", InputJson: `{}`,
+			}); err != nil {
+				t.Fatalf("AcceptSandboxExecution: %v", err)
+			}
+			switch test.state {
+			case "waiting_activation":
+				if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
+					workspace_id, session_id, logical_sandbox_id, environment_id,
+					environment_generation, provider, provider_resource_id, binding_revision,
+					materialized_resource_revision, resource_roots_json, provider_metadata_json,
+					created_at, updated_at
+				) VALUES ('default',$1,'sbox_interrupt_timing','env_' || $1,
+					1,'daytona','provider_interrupt_timing',1,
+					1,'[]','{}','2026-08-02T00:00:00Z','2026-08-02T00:00:00Z')`, sessionID); err != nil {
+					t.Fatalf("seed sandbox binding: %v", err)
+				}
+				if _, err := admin.Exec(`INSERT INTO sandbox_lifecycle_operations (
+					workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+					observed_binding_revision, target_provider_resource_id,
+					created_at, updated_at
+				) VALUES ('default','sop_interrupt_timing',$1,'sbox_interrupt_timing','start','pending',
+					1,'provider_interrupt_timing',
+					'2026-08-02T00:00:00Z','2026-08-02T00:00:00Z')`, sessionID); err != nil {
+					t.Fatalf("seed activation dependency: %v", err)
+				}
+				if _, err := admin.Exec(`UPDATE sandbox_lifecycle_operations
+					SET state='running' WHERE workspace_id='default' AND operation_id='sop_interrupt_timing'`); err != nil {
+					t.Fatalf("start activation dependency: %v", err)
+				}
+				if _, err := admin.Exec(`UPDATE session_runtime_tool_results
+					SET execution_state='waiting_activation', waiting_activation_operation_id='sop_interrupt_timing'
+					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID); err != nil {
+					t.Fatalf("move execution into activation wait: %v", err)
+				}
+			case "terminal_unconsumed":
+				const resultJSON = `{"status":"success","result":{"text":"done"}}`
+				if _, err := admin.Exec(`UPDATE session_runtime_tool_results
+					SET execution_state='terminal_unconsumed', result_json=$3, result_digest=$4
+					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID, resultJSON, sha256Hex(resultJSON)); err != nil {
+					t.Fatalf("complete execution before interrupt: %v", err)
+				}
+			case "running":
+				if _, err := admin.Exec(`UPDATE session_runtime_tool_results
+					SET execution_state='running', provider_command_reference_json='{}'
+					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID); err != nil {
+					t.Fatalf("move execution into provider call: %v", err)
+				}
+			}
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptID, 2, "user.interrupt", `{"type":"user.interrupt"}`)
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+interruptID+`"]`, "accepted", "bind_interrupt_timing", "pod_interrupt_timing", 2, 2)
+			request := &bridgev1.CommitInputsRequest{
+				Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_timing", 1, "pod_interrupt_timing"),
+				RuntimeInputId: runtimeInputID, InputKind: "interrupt_control", EventIds: []string{interruptID}, SequenceFrom: 2, SequenceTo: 2,
+				SandboxExecutionToolUseEventIds: []string{toolUseEventID},
+			}
+			if _, err := store.CommitInputs(context.Background(), request); err != nil {
+				t.Fatalf("CommitInputs: %v", err)
+			}
+			var state string
+			var resultJSON sql.NullString
+			if err := admin.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+				WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&state, &resultJSON); err != nil {
+				t.Fatalf("read interrupted execution: %v", err)
+			}
+			if state != test.wantState {
+				t.Fatalf("execution state = %q; want %q", state, test.wantState)
+			}
+			if test.state == "waiting_activation" {
+				var operationState string
+				if err := admin.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+					WHERE workspace_id='default' AND operation_id='sop_interrupt_timing'`).Scan(&operationState); err != nil {
+					t.Fatalf("read interrupted activation: %v", err)
+				}
+				if operationState != "running" {
+					t.Fatalf("interrupted shared activation state = %q; want running", operationState)
+				}
+			}
+			if test.state == "terminal_unconsumed" {
+				if !resultJSON.Valid || resultJSON.String != `{"status":"success","result":{"text":"done"}}` {
+					t.Fatalf("completed provider result = %v; want unchanged", resultJSON)
+				}
+			} else if test.state == "running" {
+				var cancelState string
+				var cancelJobs int
+				if err := admin.QueryRow(`SELECT cancel_state FROM session_runtime_tool_results
+					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&cancelState); err != nil {
+					t.Fatalf("read running cancellation state: %v", err)
+				}
+				if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs
+					WHERE workspace_id='default' AND kind=$1 AND payload_json::jsonb ->> 'tool_use_event_id'=$2`, queue.KindSandboxToolCancel, toolUseEventID).Scan(&cancelJobs); err != nil {
+					t.Fatalf("count running cancellation jobs: %v", err)
+				}
+				if resultJSON.Valid || cancelState != "pending" || cancelJobs != 1 {
+					t.Fatalf("running interrupt = result %v cancel %q jobs %d; want pending cancel transport", resultJSON, cancelState, cancelJobs)
+				}
+			} else if !resultJSON.Valid || !strings.Contains(resultJSON.String, `"status":"cancelled"`) {
+				t.Fatalf("interrupted result = %v; want cancelled", resultJSON)
+			}
+		})
 	}
 }
 
