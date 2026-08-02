@@ -659,6 +659,37 @@ func TestEnqueueBatchTxLocksPartitionsInDeterministicOrder(t *testing.T) {
 	}
 }
 
+func TestEnqueueBatchTxPreservesCallerResultAssociationWhileOrderingOutputs(t *testing.T) {
+	store, _ := newPostgreSQLQueueStore(t)
+	ws := workspace.ID("ws_queue_batch_association")
+	now := time.Date(2026, 7, 1, 12, 56, 0, 0, time.UTC)
+	request := func(environmentID string) EnqueueRequest {
+		return EnqueueRequest{
+			ID:           "qjob_" + environmentID,
+			WorkspaceID:  ws,
+			Kind:         KindEnvironmentBuild,
+			PartitionKey: FormatEnvironmentPartitionKey(ws, environmentID),
+			DedupeKey:    FormatEnvironmentBuildDedupeKey(ws, environmentID, "1"),
+			PayloadJSON: queuePayload(t, map[string]any{
+				"workspace_id": string(ws), "environment_id": environmentID, "generation": "1",
+			}),
+			Now: now,
+		}
+	}
+	requests := []EnqueueRequest{request("env_z"), request("env_a")}
+	var jobs []*Job
+	if err := store.client.WithWorkspaceTx(context.Background(), string(ws), "queue.enqueue_batch_association_test", func(tx *dbconnect.Tx) error {
+		var err error
+		jobs, err = EnqueueBatchTx(context.Background(), tx, requests)
+		return err
+	}); err != nil {
+		t.Fatalf("EnqueueBatchTx: %v", err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != requests[0].ID || jobs[1].ID != requests[1].ID {
+		t.Fatalf("batch result IDs = %#v; want caller order %q, %q", jobs, requests[0].ID, requests[1].ID)
+	}
+}
+
 func TestPostgreSQLStoreActiveDedupeReplay(t *testing.T) {
 	store, admin := newPostgreSQLQueueStore(t)
 	ctx := context.Background()
@@ -1434,6 +1465,20 @@ func TestTargetedCancelTxRequiresExactPendingIdentity(t *testing.T) {
 	}); !IsIntegrityError(err) {
 		t.Fatalf("CancelTx mismatched identity = %v; want integrity error", err)
 	}
+
+	cancelled = true
+	if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_targeted_cancel_absent", func(tx *dbconnect.Tx) error {
+		var err error
+		cancelled, err = CancelTx(ctx, tx, TargetedCancelRequest{
+			WorkspaceID: ws, JobID: "qjob_retention_deleted", Kind: KindSandboxActivate,
+			PartitionKey: "sandbox-lifecycle:ws_targeted_cancel:sbox_absent",
+			DedupeKey:    "sandbox_activate:ws_targeted_cancel:sbox_absent:sop_absent",
+			Now:          now.Add(6 * time.Second),
+		})
+		return err
+	}); err != nil || cancelled {
+		t.Fatalf("CancelTx absent = (%v,%v); want false,nil", cancelled, err)
+	}
 }
 
 func TestPostgreSQLStoreListsAndConditionallyDeadLettersPendingOverBudgetSandboxJobs(t *testing.T) {
@@ -1559,8 +1604,19 @@ func TestPostgreSQLStoreSweepsOnlyExpiredSandboxTerminalJobsThenEmptyCounters(t 
 	); err != nil {
 		t.Fatalf("mark %s terminal without timestamp: %v", corrupt.ID, err)
 	}
-	if _, err := store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: 100}); !IsIntegrityError(err) {
-		t.Fatalf("SweepSandboxTerminalJobs missing terminal timestamp = %v; want integrity error", err)
+	oldAlongsideCorrupt := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_retention", "thrd_retention", "sevt_old_peer", "qjob_old_peer", 2, now.Add(-27*time.Hour)))
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE queue_jobs SET status = 'acknowledged', acknowledged_at = $3, updated_at = $3 WHERE workspace_id = $1 AND id = $2`,
+		string(ws), oldAlongsideCorrupt.ID, oldAlongsideCorrupt.CreatedAt,
+	); err != nil {
+		t.Fatalf("mark %s acknowledged: %v", oldAlongsideCorrupt.ID, err)
+	}
+	deleted, err = store.SweepSandboxTerminalJobs(ctx, SandboxTerminalSweepRequest{Now: now, Limit: 100})
+	if !IsIntegrityError(err) || deleted != 1 {
+		t.Fatalf("SweepSandboxTerminalJobs with corrupt peer = (%d,%v); want 1,integrity error", deleted, err)
+	}
+	if !queueJobExists(t, admin, ws, corrupt.ID) || queueJobExists(t, admin, ws, oldAlongsideCorrupt.ID) {
+		t.Fatal("terminal sweep did not retain corrupt row while deleting eligible peer")
 	}
 }
 

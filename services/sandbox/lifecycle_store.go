@@ -114,6 +114,9 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimActivation(ctx context.Context, j
 		if binding.EnvironmentID != environmentID {
 			return nil
 		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		var (
 			kind                    string
 			state                   string
@@ -148,9 +151,22 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimActivation(ctx context.Context, j
 			!sandboxLifecycleQueueIdentityMatches(job, queue.KindSandboxActivate, storedQueueJobID, storedQueueKind, storedQueuePartitionKey, storedQueueDedupeKey) {
 			return nil
 		}
-		if state == "pending" && (observedRevision != binding.BindingRevision || binding.ReleaseRequested() ||
+		unsubmittedRunning := state == "running" && !outcomeEffectBoundary.Valid
+		guardedBeforeSubmission := (state == "pending" || unsubmittedRunning) && (observedRevision != binding.BindingRevision || binding.ReleaseRequested() ||
 			(!preliminaryGeneration.Valid && binding.EnvironmentGeneration != targetGeneration) ||
-			(targetProviderResource.Valid && targetProviderResource.String != binding.ProviderResourceID)) {
+			(targetProviderResource.Valid && targetProviderResource.String != binding.ProviderResourceID))
+		if guardedBeforeSubmission {
+			if unsubmittedRunning {
+				leaseDisposition, err := recordLifecycleLease(ctx, tx, job, now)
+				if err != nil || leaseDisposition != SandboxLifecycleApplied {
+					disposition = leaseDisposition
+					return err
+				}
+				if err := abandonUnsubmittedLifecycleTx(ctx, tx, job, now); err != nil {
+					return err
+				}
+				return enqueueReadySandboxReleasesTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
+			}
 			return nil
 		}
 		leaseDisposition, err := recordLifecycleLease(ctx, tx, job, now)
@@ -199,7 +215,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 		return SandboxLifecycleNotApplicable, errors.New("sandbox activation returned an invalid provider handle")
 	}
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.complete", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.complete", func(tx *dbconnect.Tx) (txErr error) {
 		var environmentID string
 		var resourceRevision int64
 		var databaseNow time.Time
@@ -228,6 +244,12 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID); err != nil {
 			return err
 		}
+		var enqueueRequests []queue.EnqueueRequest
+		var cancelRequests []queue.TargetedCancelRequest
+		defer flushSandboxOutputsAndReadyReleasesOnSuccess(
+			ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now,
+			&enqueueRequests, &cancelRequests, &txErr,
+		)
 		var state, kind string
 		var observedRevision int64
 		var targetGeneration sql.NullInt64
@@ -263,13 +285,15 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 				return err
 			}
 			if binding.ReleaseRequested() {
-				return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
+				return nil
 			}
 			waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_activation_operation_id")
 			if err != nil {
 				return err
 			}
-			return releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+			requests, err := releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+			enqueueRequests = append(enqueueRequests, requests...)
+			return err
 		}
 		releaseRequested := binding.ReleaseRequested()
 		displacedHandle := binding.ProviderResourceID
@@ -331,22 +355,36 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 			binding.ResourceRootsJSON = "[]"
 		}
 		if kind == string(ActivationReplace) && displacedHandle != "" && displacedHandle != handle.SandboxID {
-			if _, _, err := EnsureSandboxReleaseTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, SandboxReleaseReplacedHandle, displacedHandle, now); err != nil {
+			enqueues, cancels, err := declareSandboxReleaseTx(
+				ctx, tx, work.Job.WorkspaceID, work.Job.SessionID,
+				SandboxReleaseReplacedHandle, displacedHandle, now,
+			)
+			if err != nil {
 				return err
 			}
+			enqueueRequests = append(enqueueRequests, enqueues...)
+			cancelRequests = append(cancelRequests, cancels...)
 		}
 		// Provider work that crossed its submission boundary remains durable even
 		// when release was requested during the call. Release owns the adopted
 		// handle next; cancelled execution waiters must not be revived here.
 		if releaseRequested {
-			if _, _, err := EnsureSandboxReleaseTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, SandboxReleaseSessionDelete, handle.SandboxID, now); err != nil {
+			enqueues, cancels, err := declareSandboxReleaseTx(
+				ctx, tx, work.Job.WorkspaceID, work.Job.SessionID,
+				SandboxReleaseSessionDelete, handle.SandboxID, now,
+			)
+			if err != nil {
 				return err
 			}
-			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
+			enqueueRequests = append(enqueueRequests, enqueues...)
+			cancelRequests = append(cancelRequests, cancels...)
+			return nil
 		}
-		if err := requeueActivationMaterializationsTx(ctx, tx, work.Job, binding, now); err != nil {
+		requests, err := requeueActivationMaterializationsTx(ctx, tx, work.Job, binding, now)
+		if err != nil {
 			return err
 		}
+		enqueueRequests = append(enqueueRequests, requests...)
 		ready := preserveMaterialization && binding.MaterializedResourceRevision == resourceRevision &&
 			binding.ResourceCredentialExpiresAt != nil && binding.ResourceCredentialExpiresAt.After(databaseNow.UTC().Add(s.credentialRefreshMargin)) &&
 			binding.HelperVerifiedAt != nil
@@ -358,18 +396,23 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 			return nil
 		}
 		if ready {
-			return releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+			requests, err := releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+			enqueueRequests = append(enqueueRequests, requests...)
+			return err
 		}
-		materializationID, err := s.ensureMaterializationOperationTx(ctx, tx, work.Job, binding, resourceRevision, now)
+		materializationID, request, err := s.ensureMaterializationOperationTx(ctx, tx, work.Job, binding, resourceRevision, now)
 		if err != nil {
 			return err
+		}
+		if request != nil {
+			enqueueRequests = append(enqueueRequests, *request)
 		}
 		return attachExecutionWaitersToMaterializationTx(ctx, tx, work.Job.WorkspaceID, waiters, materializationID, now)
 	})
 	return disposition, err
 }
 
-func requeueActivationMaterializationsTx(ctx context.Context, tx *dbconnect.Tx, activation SandboxLifecycleJob, binding SandboxBinding, now time.Time) error {
+func requeueActivationMaterializationsTx(ctx context.Context, tx *dbconnect.Tx, activation SandboxLifecycleJob, binding SandboxBinding, now time.Time) ([]queue.EnqueueRequest, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT operation_id
 		   FROM sandbox_lifecycle_operations
@@ -382,24 +425,25 @@ func requeueActivationMaterializationsTx(ctx context.Context, tx *dbconnect.Tx, 
 		activation.WorkspaceID, activation.OperationID,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var operationIDs []string
 	for rows.Next() {
 		var operationID string
 		if err := rows.Scan(&operationID); err != nil {
 			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		operationIDs = append(operationIDs, operationID)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return err
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return nil, err
 	}
+	requests := make([]queue.EnqueueRequest, 0, len(operationIDs))
 	for _, operationID := range operationIDs {
 		jobID := queue.NewJobID()
 		partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(activation.WorkspaceID), activation.LogicalSandboxID)
@@ -421,23 +465,21 @@ func requeueActivationMaterializationsTx(ctx context.Context, tx *dbconnect.Tx, 
 			partitionKey, dedupeKey, binding.BindingRevision, binding.EnvironmentGeneration,
 			binding.ProviderResourceID, now.UTC(),
 		); err != nil {
-			return err
+			return nil, err
 		}
 		payload, err := sandboxLifecycleQueuePayload(SandboxExecutionRef{
 			WorkspaceID: activation.WorkspaceID, SessionID: activation.SessionID,
 		}, activation.LogicalSandboxID, operationID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+		requests = append(requests, queue.EnqueueRequest{
 			ID: jobID, WorkspaceID: workspace.ID(activation.WorkspaceID), Kind: queue.KindSandboxMaterialize,
 			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
 			PayloadJSON: payload, MaxAttempts: sandboxMaterializationMaxAttempts, Now: now.UTC(),
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return requests, nil
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.Context, work SandboxActivationWork, now time.Time) (SandboxActivationWork, SandboxLifecycleDisposition, error) {
@@ -478,23 +520,30 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 		}
 		var state, kind string
 		var observedRevision int64
-		var leaseToken sql.NullString
+		var leaseToken, outcomeEffectBoundary sql.NullString
 		if err := tx.QueryRow(ctx,
-			`SELECT state, kind, observed_binding_revision, lease_token
+			`SELECT state, kind, observed_binding_revision, lease_token, outcome_effect_boundary
 			   FROM sandbox_lifecycle_operations
 			  WHERE workspace_id = $1 AND operation_id = $2 FOR UPDATE`,
 			work.Job.WorkspaceID, work.Job.OperationID,
-		).Scan(&state, &kind, &observedRevision, &leaseToken); err != nil {
+		).Scan(&state, &kind, &observedRevision, &leaseToken, &outcomeEffectBoundary); err != nil {
 			return err
 		}
 		if !leaseToken.Valid || leaseToken.String != work.Job.LeaseToken {
 			disposition = SandboxLifecycleLostAuthority
 			return nil
 		}
-		if state != "running" || kind != string(ActivationStart) ||
-			observedRevision != binding.BindingRevision ||
-			binding.ProviderResourceID != work.CurrentHandle.SandboxID || binding.ReleaseRequested() {
+		if state != "running" || kind != string(ActivationStart) {
 			return nil
+		}
+		guardedBeforeSubmission := !outcomeEffectBoundary.Valid && (observedRevision != binding.BindingRevision ||
+			binding.ProviderResourceID != work.CurrentHandle.SandboxID || binding.ReleaseRequested())
+		if guardedBeforeSubmission {
+			disposition = SandboxLifecycleApplied
+			if err := abandonUnsubmittedLifecycleTx(ctx, tx, work.Job, now); err != nil {
+				return err
+			}
+			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 		}
 		disposition = SandboxLifecycleApplied
 		if artifactProvider != sandboxdriver.DaytonaProviderName {
@@ -506,7 +555,7 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 			return err
 		}
 		if artifactStatus == "pending" || artifactStatus == "building" {
-			_, err := tx.Exec(ctx,
+			if _, err := tx.Exec(ctx,
 				`UPDATE sandbox_lifecycle_operations
 				    SET kind = 'replace', state = 'waiting_artifact',
 				        target_environment_generation = $3,
@@ -519,8 +568,10 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 				  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'running'`,
 				work.Job.WorkspaceID, work.Job.OperationID, generation,
 				binding.LogicalSandboxID, string(labelsJSON), now.UTC(),
-			)
-			return err
+			); err != nil {
+				return err
+			}
+			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 		}
 		if artifactStatus == "failed" {
 			if _, err := tx.Exec(ctx,
@@ -676,6 +727,25 @@ func lifecycleMutationDispositionTx(ctx context.Context, tx *dbconnect.Tx, job S
 	return SandboxLifecycleNotApplicable, nil
 }
 
+func abandonUnsubmittedLifecycleTx(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, now time.Time) error {
+	result, err := tx.Exec(ctx,
+		`UPDATE sandbox_lifecycle_operations
+		    SET state = 'abandoned', lease_owner = NULL, lease_token = NULL,
+		        lease_expires_at = NULL, completed_at = $3, updated_at = $3
+		  WHERE workspace_id = $1 AND operation_id = $2
+		    AND state = 'running' AND outcome_effect_boundary IS NULL
+		    AND lease_token = $4`,
+		job.WorkspaceID, job.OperationID, now.UTC(), job.LeaseToken,
+	)
+	if err != nil {
+		return err
+	}
+	if !transitionRowsAffected(result) {
+		return errors.New("unsubmitted sandbox lifecycle operation was not abandoned")
+	}
+	return nil
+}
+
 func (s *PostgreSQLSandboxLifecycleStore) ClaimMaterialization(ctx context.Context, job SandboxLifecycleJob, now time.Time) (SandboxMaterializationWork, SandboxLifecycleDisposition, error) {
 	if s == nil || s.client == nil || s.resources == nil {
 		return SandboxMaterializationWork{}, SandboxLifecycleNotApplicable, errors.New("sandbox materialization store dependencies are required")
@@ -733,14 +803,18 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimMaterialization(ctx context.Conte
 		if binding.LogicalSandboxID != job.LogicalSandboxID {
 			return nil
 		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		var state, materializationResourcesJSON string
 		var observedRevision, targetEnvironmentGeneration, targetRevision int64
 		var targetHandle string
-		var storedQueueJobID, storedQueueKind, storedQueuePartitionKey, storedQueueDedupeKey sql.NullString
+		var outcomeEffectBoundary, storedQueueJobID, storedQueueKind, storedQueuePartitionKey, storedQueueDedupeKey sql.NullString
 		if err := tx.QueryRow(ctx,
 			`SELECT state, observed_binding_revision, target_environment_generation, target_resource_revision,
 			        target_provider_resource_id, queue_job_id, queue_kind,
-			        queue_partition_key, queue_dedupe_key, materialization_resources_json
+			        queue_partition_key, queue_dedupe_key, materialization_resources_json,
+			        outcome_effect_boundary
 			   FROM sandbox_lifecycle_operations
 			  WHERE workspace_id = $1 AND operation_id = $2
 			    AND kind = 'materialize' AND session_id = $3
@@ -748,16 +822,29 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimMaterialization(ctx context.Conte
 			job.WorkspaceID, job.OperationID, job.SessionID,
 		).Scan(&state, &observedRevision, &targetEnvironmentGeneration, &targetRevision, &targetHandle,
 			&storedQueueJobID, &storedQueueKind, &storedQueuePartitionKey, &storedQueueDedupeKey,
-			&materializationResourcesJSON); err != nil {
+			&materializationResourcesJSON, &outcomeEffectBoundary); err != nil {
 			return err
 		}
 		if (state != "pending" && state != "running") ||
 			!sandboxLifecycleQueueIdentityMatches(job, queue.KindSandboxMaterialize, storedQueueJobID, storedQueueKind, storedQueuePartitionKey, storedQueueDedupeKey) {
 			return nil
 		}
-		if state == "pending" && (binding.ProviderResourceID == "" || binding.ReleaseRequested() ||
+		unsubmittedRunning := state == "running" && !outcomeEffectBoundary.Valid
+		guardedBeforeSubmission := (state == "pending" || unsubmittedRunning) && (binding.ProviderResourceID == "" || binding.ReleaseRequested() ||
 			observedRevision != binding.BindingRevision || targetHandle != binding.ProviderResourceID ||
-			targetEnvironmentGeneration != binding.EnvironmentGeneration) {
+			targetEnvironmentGeneration != binding.EnvironmentGeneration)
+		if guardedBeforeSubmission {
+			if unsubmittedRunning {
+				leaseDisposition, err := recordLifecycleLease(ctx, tx, job, now)
+				if err != nil || leaseDisposition != SandboxLifecycleApplied {
+					disposition = leaseDisposition
+					return err
+				}
+				if err := abandonUnsubmittedLifecycleTx(ctx, tx, job, now); err != nil {
+					return err
+				}
+				return enqueueReadySandboxReleasesTx(ctx, tx, job.WorkspaceID, job.SessionID, now)
+			}
 			return nil
 		}
 		if binding.EnvironmentID != environmentID || targetEnvironmentGeneration != preliminaryTargetEnvironmentGeneration {
@@ -830,6 +917,7 @@ func (s *PostgreSQLSandboxLifecycleStore) WaitMaterializationForActivation(ctx c
 		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID); err != nil {
 			return err
 		}
+		var enqueueRequests []queue.EnqueueRequest
 		var operationState string
 		var leaseOwner, leaseToken sql.NullString
 		if err := tx.QueryRow(ctx,
@@ -857,27 +945,42 @@ func (s *PostgreSQLSandboxLifecycleStore) WaitMaterializationForActivation(ctx c
 			if _, err := tx.Exec(ctx,
 				`UPDATE sandbox_lifecycle_operations
 				    SET state = 'skipped_cold', lease_owner = NULL, lease_token = NULL,
-				        lease_expires_at = NULL, completed_at = $3, updated_at = $3
+				        lease_expires_at = NULL, queue_job_id = NULL, queue_kind = NULL,
+				        queue_partition_key = NULL, queue_dedupe_key = NULL,
+				        completed_at = $3, updated_at = $3
 				  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'running'`,
 				work.Job.WorkspaceID, work.Job.OperationID, now.UTC(),
 			); err != nil {
 				return err
 			}
 		} else {
-			activationID, err := ensureActivationOperationTx(ctx, tx, work.Job, binding, generation, readiness, now)
+			activationID, activationRequest, err := ensureActivationOperationTx(ctx, tx, work.Job, binding, generation, readiness, now)
 			if err != nil {
 				return err
+			}
+			if activationRequest != nil {
+				enqueueRequests = append(enqueueRequests, *activationRequest)
 			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE sandbox_lifecycle_operations
 				    SET state = 'waiting_activation', waiting_activation_operation_id = $3,
 				        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+				        queue_job_id = NULL, queue_kind = NULL,
+				        queue_partition_key = NULL, queue_dedupe_key = NULL,
 				        updated_at = $4
 				  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'running'`,
 				work.Job.WorkspaceID, work.Job.OperationID, activationID, now.UTC(),
 			); err != nil {
 				return err
 			}
+		}
+		releaseRequests, err := readySandboxReleaseRequestsTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now, nil)
+		if err != nil {
+			return err
+		}
+		enqueueRequests = append(enqueueRequests, releaseRequests...)
+		if _, err := queue.EnqueueBatchTx(ctx, tx, enqueueRequests); err != nil {
+			return err
 		}
 		updated, err := queue.AckTx(ctx, tx, queue.AckRequest{
 			WorkspaceID: workspace.ID(work.Job.WorkspaceID), JobID: work.Job.JobID,
@@ -899,7 +1002,7 @@ func (s *PostgreSQLSandboxLifecycleStore) WaitMaterializationForActivation(ctx c
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Context, work SandboxMaterializationWork, result MaterializationResult, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.materialization.complete", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.materialization.complete", func(tx *dbconnect.Tx) (txErr error) {
 		var desiredRevision int64
 		if err := tx.QueryRow(ctx,
 			`SELECT sandbox_resource_revision FROM sessions
@@ -932,6 +1035,12 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID); err != nil {
 			return err
 		}
+		var enqueueRequests []queue.EnqueueRequest
+		var cancelRequests []queue.TargetedCancelRequest
+		defer flushSandboxOutputsAndReadyReleasesOnSuccess(
+			ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now,
+			&enqueueRequests, &cancelRequests, &txErr,
+		)
 		var state string
 		var observedRevision, targetEnvironmentGeneration, targetRevision int64
 		var targetHandle string
@@ -968,13 +1077,15 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 				return err
 			}
 			if binding.ReleaseRequested() {
-				return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
+				return nil
 			}
 			waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_materialization_operation_id")
 			if err != nil {
 				return err
 			}
-			return releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+			requests, err := releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+			enqueueRequests = append(enqueueRequests, requests...)
+			return err
 		}
 		releaseRequested := binding.ReleaseRequested()
 		if result.MaterializedEnvironmentGeneration != targetEnvironmentGeneration || result.MaterializedResourceRevision != targetRevision {
@@ -1031,7 +1142,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 		// Materialization that already reached the provider is recorded before a
 		// concurrent release takes ownership. It must not release cancelled waiters.
 		if releaseRequested {
-			return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
+			return nil
 		}
 		waiters, err := lockExecutionWaiters(ctx, tx, work.Job.WorkspaceID, work.Job.OperationID, "waiting_materialization_operation_id")
 		if err != nil {
@@ -1039,16 +1150,21 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Co
 		}
 		if desiredRevision > targetRevision {
 			binding.MaterializedResourceRevision = targetRevision
-			successorID, err := s.ensureMaterializationOperationTx(ctx, tx, work.Job, binding, desiredRevision, now)
+			successorID, request, err := s.ensureMaterializationOperationTx(ctx, tx, work.Job, binding, desiredRevision, now)
 			if err != nil {
 				return err
+			}
+			if request != nil {
+				enqueueRequests = append(enqueueRequests, *request)
 			}
 			return attachExecutionWaitersToMaterializationTx(ctx, tx, work.Job.WorkspaceID, waiters, successorID, now)
 		}
 		if desiredRevision != targetRevision {
 			return errors.New("sandbox resource revision moved backwards during materialization")
 		}
-		return releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+		requests, err := releaseExecutionWaitersTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, waiters, now)
+		enqueueRequests = append(enqueueRequests, requests...)
+		return err
 	})
 }
 
@@ -1587,9 +1703,15 @@ func finalizeExhaustedSandboxLifecycleTx(ctx context.Context, tx *dbconnect.Tx, 
 		return SandboxLifecycleNotApplicable, err
 	}
 	if queueKind != queue.KindSandboxActivate {
+		if err := enqueueReadySandboxReleasesTx(ctx, tx, job.WorkspaceID, job.SessionID, now); err != nil {
+			return SandboxLifecycleNotApplicable, err
+		}
 		return SandboxLifecycleApplied, nil
 	}
 	if err := failActivationMaterializationDependentsTx(ctx, tx, job.WorkspaceID, job.OperationID, errorKind, safeMessage, now); err != nil {
+		return SandboxLifecycleNotApplicable, err
+	}
+	if err := enqueueReadySandboxReleasesTx(ctx, tx, job.WorkspaceID, job.SessionID, now); err != nil {
 		return SandboxLifecycleNotApplicable, err
 	}
 	return SandboxLifecycleApplied, nil
@@ -1675,7 +1797,8 @@ func lockExecutionWaiters(ctx context.Context, tx *dbconnect.Tx, workspaceID str
 	return waiters, rows.Err()
 }
 
-func releaseExecutionWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, waiters []sandboxExecutionWaiter, now time.Time) error {
+func releaseExecutionWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, waiters []sandboxExecutionWaiter, now time.Time) ([]queue.EnqueueRequest, error) {
+	requests := make([]queue.EnqueueRequest, 0, len(waiters))
 	for _, waiter := range waiters {
 		generation := waiter.generation + 1
 		if _, err := tx.Exec(ctx,
@@ -1688,22 +1811,20 @@ func releaseExecutionWaitersTx(ctx context.Context, tx *dbconnect.Tx, workspaceI
 			    AND session_thread_id = $3 AND tool_use_event_id = $4`,
 			workspaceID, waiter.ref.SessionID, waiter.ref.SessionThreadID, waiter.ref.ToolUseEventID, generation, now.UTC(),
 		); err != nil {
-			return err
+			return nil, err
 		}
 		payload, err := sandboxExecutionQueuePayload(waiter.ref)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+		requests = append(requests, queue.EnqueueRequest{
 			WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxToolExecute,
 			PartitionKey:   queue.FormatSandboxExecutionPartitionKey(workspace.ID(workspaceID), sessionID, waiter.ref.SessionThreadID, waiter.ref.ToolUseEventID),
 			DedupeKey:      queue.FormatSandboxToolExecuteDedupeKey(workspace.ID(workspaceID), sessionID, waiter.ref.SessionThreadID, waiter.ref.ToolUseEventID, generation),
 			PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: SandboxToolExecuteMaxAttempts, Now: now,
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return requests, nil
 }
 
 func attachExecutionWaitersToMaterializationTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, waiters []sandboxExecutionWaiter, operationID string, now time.Time) error {
@@ -1735,7 +1856,7 @@ func settleExecutionWaitersTx(ctx context.Context, tx *dbconnect.Tx, waiters []s
 	return nil
 }
 
-func (s *PostgreSQLSandboxLifecycleStore) ensureMaterializationOperationTx(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, binding SandboxBinding, resourceRevision int64, now time.Time) (string, error) {
+func (s *PostgreSQLSandboxLifecycleStore) ensureMaterializationOperationTx(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, binding SandboxBinding, resourceRevision int64, now time.Time) (string, *queue.EnqueueRequest, error) {
 	var operationID string
 	err := tx.QueryRow(ctx,
 		`SELECT operation_id FROM sandbox_lifecycle_operations
@@ -1746,18 +1867,18 @@ func (s *PostgreSQLSandboxLifecycleStore) ensureMaterializationOperationTx(ctx c
 		job.WorkspaceID, binding.LogicalSandboxID,
 	).Scan(&operationID)
 	if err == nil {
-		return operationID, nil
+		return operationID, nil, nil
 	}
 	if !dbconnect.IsNoRows(err) {
-		return "", err
+		return "", nil, err
 	}
 	resources, err := s.resources.ListSessionResourcesTx(ctx, tx, workspace.ID(job.WorkspaceID), job.SessionID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	resourcesJSON, err := encodeMaterializationResources(resources)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	operationID = id.New(sandboxLifecycleOperationIDPrefix)
 	queueJobID := queue.NewJobID()
@@ -1774,23 +1895,21 @@ func (s *PostgreSQLSandboxLifecycleStore) ensureMaterializationOperationTx(ctx c
 		binding.BindingRevision, binding.EnvironmentGeneration, resourceRevision, binding.ProviderResourceID,
 		resourcesJSON, queueJobID, queue.KindSandboxMaterialize, partitionKey, dedupeKey, now.UTC(),
 	); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	payload, err := sandboxLifecycleQueuePayload(SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}, binding.LogicalSandboxID, operationID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+	request := queue.EnqueueRequest{
 		ID: queueJobID, WorkspaceID: workspace.ID(job.WorkspaceID), Kind: queue.KindSandboxMaterialize,
 		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
 		PayloadJSON: payload, MaxAttempts: sandboxMaterializationMaxAttempts, Now: now,
-	}); err != nil {
-		return "", err
 	}
-	return operationID, nil
+	return operationID, &request, nil
 }
 
-func ensureActivationOperationTx(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, binding SandboxBinding, generation int64, readiness ExecutionReadiness, now time.Time) (string, error) {
+func ensureActivationOperationTx(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, binding SandboxBinding, generation int64, readiness ExecutionReadiness, now time.Time) (string, *queue.EnqueueRequest, error) {
 	var operationID string
 	err := tx.QueryRow(ctx,
 		`SELECT operation_id FROM sandbox_lifecycle_operations
@@ -1801,10 +1920,10 @@ func ensureActivationOperationTx(ctx context.Context, tx *dbconnect.Tx, job Sand
 		job.WorkspaceID, binding.LogicalSandboxID,
 	).Scan(&operationID)
 	if err == nil {
-		return operationID, nil
+		return operationID, nil, nil
 	}
 	if !dbconnect.IsNoRows(err) {
-		return "", err
+		return "", nil, err
 	}
 	kind := "start"
 	if readiness == ExecutionNeedsCreation {
@@ -1816,7 +1935,7 @@ func ensureActivationOperationTx(ctx context.Context, tx *dbconnect.Tx, job Sand
 	dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxActivate, workspace.ID(job.WorkspaceID), binding.LogicalSandboxID, operationID)
 	labelsJSON, err := json.Marshal(sandboxActivationLabels(job.WorkspaceID, job.SessionID, binding.EnvironmentID, binding.LogicalSandboxID, operationID))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var targetGeneration, targetHandle, createName, labels any
 	if kind == "start" {
@@ -1838,20 +1957,18 @@ func ensureActivationOperationTx(ctx context.Context, tx *dbconnect.Tx, job Sand
 		kind, binding.BindingRevision, targetGeneration, targetHandle, createName, labels,
 		queueJobID, queue.KindSandboxActivate, partitionKey, dedupeKey, now.UTC(),
 	); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	payload, err := sandboxLifecycleQueuePayload(SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}, binding.LogicalSandboxID, operationID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+	request := queue.EnqueueRequest{
 		ID: queueJobID, WorkspaceID: workspace.ID(job.WorkspaceID), Kind: queue.KindSandboxActivate,
 		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
 		PayloadJSON: payload, MaxAttempts: sandboxActivationMaxAttempts, Now: now,
-	}); err != nil {
-		return "", err
 	}
-	return operationID, nil
+	return operationID, &request, nil
 }
 
 func recordLifecycleLease(ctx context.Context, tx *dbconnect.Tx, job SandboxLifecycleJob, now time.Time) (SandboxLifecycleDisposition, error) {

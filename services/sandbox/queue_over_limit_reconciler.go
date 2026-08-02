@@ -3,6 +3,7 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -51,16 +52,38 @@ func (r *SandboxQueueOverLimitReconciler) RunOnce(ctx context.Context) (int, err
 	}
 	now := r.now()
 	processed := 0
+	var candidateErrors []error
 	for _, candidate := range candidates {
 		updated, err := r.Finalizer.FinalizePendingAtOrOverBudget(ctx, candidate, now)
 		if err != nil {
-			return processed, err
+			logSandboxQueueOverLimitCandidateFailure(slog.Default(), candidate)
+			candidateErrors = append(candidateErrors, err)
+			continue
 		}
 		if updated {
 			processed++
 		}
 	}
-	return processed, nil
+	return processed, errors.Join(candidateErrors...)
+}
+
+func logSandboxQueueOverLimitCandidateFailure(logger *slog.Logger, candidate queue.PendingAtOrOverBudgetJob) {
+	if logger == nil {
+		return
+	}
+	logger.Warn("sandbox.queue_over_limit.candidate_failed",
+		slog.String("operation", "sandbox.queue_over_limit.reconcile"),
+		slog.String("event.kind", "sandbox.queue_over_limit.candidate_failed"),
+		slog.String("component", "sandbox"),
+		slog.String("workspace.id", candidate.WorkspaceID.String()),
+		slog.String("queue.job.id", candidate.JobID),
+		slog.String("queue.job.kind", candidate.Kind),
+		slog.Bool("retryable", true),
+		slog.Bool("terminal", false),
+		slog.String("error.class", "sandbox_queue_reconciliation_error"),
+		slog.String("error.code", "sandbox_queue_candidate_finalize_failed"),
+		slog.String("error.message_safe", "sandbox queue candidate finalization failed"),
+	)
 }
 
 func RunSandboxQueueOverLimitLoop(ctx context.Context, reconciler *SandboxQueueOverLimitReconciler, interval time.Duration) {

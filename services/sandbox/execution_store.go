@@ -394,10 +394,17 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 		if !transitionRowsAffected(result) {
 			return errors.New("sandbox execution changed before activation attachment")
 		}
+		var requests []queue.EnqueueRequest
 		if activationQueueRequest != nil {
-			if _, err := queue.EnqueueTx(ctx, tx, *activationQueueRequest); err != nil {
-				return err
-			}
+			requests = append(requests, *activationQueueRequest)
+		}
+		releaseRequests, err := readySandboxReleaseRequestsTx(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID, now, nil)
+		if err != nil {
+			return err
+		}
+		requests = append(requests, releaseRequests...)
+		if _, err := queue.EnqueueBatchTx(ctx, tx, requests); err != nil {
+			return err
 		}
 		_ = resourceRevision
 		_ = providerArtifactRef
@@ -515,10 +522,17 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 		if !transitionRowsAffected(result) {
 			return errors.New("sandbox execution changed before materialization attachment")
 		}
+		var requests []queue.EnqueueRequest
 		if materializationQueueRequest != nil {
-			if _, err := queue.EnqueueTx(ctx, tx, *materializationQueueRequest); err != nil {
-				return err
-			}
+			requests = append(requests, *materializationQueueRequest)
+		}
+		releaseRequests, err := readySandboxReleaseRequestsTx(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID, now, nil)
+		if err != nil {
+			return err
+		}
+		requests = append(requests, releaseRequests...)
+		if _, err := queue.EnqueueBatchTx(ctx, tx, requests); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -624,6 +638,7 @@ func (c *PostgreSQLSandboxExecutionCoordinator) transitionExecutionAuthorization
 		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
 			return err
 		}
+		defer wakeReadySandboxReleasesOnSuccess(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID, databaseNow, &txErr)
 		var cancelRequestedAt, storedPreparationDeadline sql.NullTime
 		var storedAuthorizedRevision sql.NullInt64
 		var storedAuthorizedProviderResourceID sql.NullString
@@ -990,20 +1005,29 @@ func settleSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, ref Sandbox
 	if !transitionRowsAffected(result) {
 		return nil
 	}
+	var requests []queue.EnqueueRequest
 	if settlement.BackgroundTask != nil {
-		if err := insertBackgroundTaskAndReconcileTx(ctx, tx, ref, settlement, now); err != nil {
+		request, err := insertBackgroundTaskAndReconcileTx(ctx, tx, ref, settlement, now)
+		if err != nil {
 			return err
 		}
+		requests = append(requests, request)
 	}
-	return enqueueReadySandboxReleasesTx(ctx, tx, ref.WorkspaceID, ref.SessionID, now)
+	releaseRequests, err := readySandboxReleaseRequestsTx(ctx, tx, ref.WorkspaceID, ref.SessionID, now, nil)
+	if err != nil {
+		return err
+	}
+	requests = append(requests, releaseRequests...)
+	_, err = queue.EnqueueBatchTx(ctx, tx, requests)
+	return err
 }
 
-func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, ref SandboxExecutionRef, settlement SandboxExecutionSettlement, now time.Time) error {
+func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, ref SandboxExecutionRef, settlement SandboxExecutionSettlement, now time.Time) (queue.EnqueueRequest, error) {
 	task := settlement.BackgroundTask
 	if task == nil || task.TaskID == "" || task.SourceToolUseEventID != ref.ToolUseEventID ||
 		task.ProviderSessionID == "" || task.ProviderCommandID == "" || settlement.LogicalSandboxID == "" ||
 		settlement.Provider == "" || settlement.BindingRevision <= 0 {
-		return errors.New("sandbox background task identity is incomplete")
+		return queue.EnqueueRequest{}, errors.New("sandbox background task identity is incomplete")
 	}
 	metadataJSON := task.ProviderCommandMetadataJSON
 	if metadataJSON == "" {
@@ -1011,7 +1035,7 @@ func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, r
 	}
 	var metadata map[string]any
 	if len([]byte(metadataJSON)) > 4096 || json.Unmarshal([]byte(metadataJSON), &metadata) != nil || metadata == nil {
-		return errors.New("sandbox background task metadata is invalid")
+		return queue.EnqueueRequest{}, errors.New("sandbox background task metadata is invalid")
 	}
 	resourceRootsJSON := settlement.ResourceRootsJSON
 	if resourceRootsJSON == "" {
@@ -1030,7 +1054,7 @@ func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, r
 		settlement.LogicalSandboxID, settlement.Provider, settlement.BindingRevision,
 		task.ProviderSessionID, task.ProviderCommandID, metadataJSON, resourceRootsJSON, now.UTC(),
 	); err != nil {
-		return err
+		return queue.EnqueueRequest{}, err
 	}
 	payload, err := json.Marshal(struct {
 		WorkspaceID         string `json:"workspace_id"`
@@ -1039,17 +1063,16 @@ func insertBackgroundTaskAndReconcileTx(ctx context.Context, tx *dbconnect.Tx, r
 		ReconcileGeneration int64  `json:"reconcile_generation"`
 	}{WorkspaceID: ref.WorkspaceID, SessionID: ref.SessionID, TaskID: task.TaskID, ReconcileGeneration: 1})
 	if err != nil {
-		return err
+		return queue.EnqueueRequest{}, err
 	}
 	workspaceID := workspace.ID(ref.WorkspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+	return queue.EnqueueRequest{
 		ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxBackgroundReconcile,
 		PartitionKey:   queue.FormatSandboxBackgroundPartitionKey(workspaceID, ref.SessionID, task.TaskID),
 		DedupeKey:      queue.FormatSandboxBackgroundReconcileDedupeKey(workspaceID, ref.SessionID, task.TaskID, 1),
 		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: SandboxBackgroundReconcileMaxAttempts,
 		AvailableAt: now.UTC(), Now: now.UTC(),
-	})
-	return err
+	}, nil
 }
 
 func sandboxLifecycleQueuePayload(ref SandboxExecutionRef, logicalSandboxID string, operationID string) ([]byte, error) {

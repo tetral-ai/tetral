@@ -18,7 +18,10 @@ import (
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
-const sandboxToolCancelMaxAttempts = 5
+const (
+	sandboxToolCancelMaxAttempts = 5
+	sandboxReleaseMaxAttempts    = 5
+)
 
 // This file owns the Bridge inputs protocol-family boundary.
 
@@ -685,13 +688,16 @@ type interruptedSandboxExecution struct {
 }
 
 type interruptedLifecycleOperation struct {
-	operationID  string
-	kind         string
-	state        string
-	queueJobID   sql.NullString
-	queueKind    sql.NullString
-	partitionKey sql.NullString
-	dedupeKey    sql.NullString
+	operationID      string
+	kind             string
+	state            string
+	logicalSandboxID string
+	targetProviderID sql.NullString
+	supersededByID   sql.NullString
+	queueJobID       sql.NullString
+	queueKind        sql.NullString
+	partitionKey     sql.NullString
+	dedupeKey        sql.NullString
 }
 
 func cancelInterruptedSandboxExecutionsTx(
@@ -705,7 +711,10 @@ func cancelInterruptedSandboxExecutionsTx(
 	if err != nil {
 		return err
 	}
-	operations, err := lockInterruptedLifecycleOperationsTx(ctx, tx, scope.GetWorkspaceId(), operationIDs)
+	if err := lockInterruptedSandboxBindingTx(ctx, tx, scope); err != nil {
+		return err
+	}
+	operations, releases, err := lockInterruptedLifecycleOperationsTx(ctx, tx, scope, operationIDs)
 	if err != nil {
 		return err
 	}
@@ -723,6 +732,7 @@ func cancelInterruptedSandboxExecutionsTx(
 		return status.Error(codes.FailedPrecondition, "interrupt sandbox-execution coverage is incomplete")
 	}
 
+	var enqueueRequests []queue.EnqueueRequest
 	for _, execution := range executions {
 		switch execution.executionState {
 		case "pending", "preparing", "waiting_activation", "waiting_materialization":
@@ -736,16 +746,38 @@ func cancelInterruptedSandboxExecutionsTx(
 				}
 				continue
 			}
-			if err := requestSandboxExecutionCancellationTx(ctx, tx, scope, execution, now); err != nil {
+			request, err := requestSandboxExecutionCancellationTx(ctx, tx, scope, execution, now)
+			if err != nil {
 				return err
 			}
+			enqueueRequests = append(enqueueRequests, request)
 		case "terminal_unconsumed":
 			// A durable completion already won; Runtime commits its ordinary Tool Result.
 		default:
 			return status.Error(codes.FailedPrecondition, "interrupt sandbox execution is not cancellable")
 		}
 	}
-	return abandonUnneededInterruptedLifecycleOperationsTx(ctx, tx, scope, operations, now)
+	cancelRequests, err := abandonUnneededInterruptedLifecycleOperationsTx(ctx, tx, scope, operations, now)
+	if err != nil {
+		return err
+	}
+	releaseRequests, err := interruptedSandboxReleaseRequestsTx(ctx, tx, scope, releases, now)
+	if err != nil {
+		return err
+	}
+	enqueueRequests = append(enqueueRequests, releaseRequests...)
+	if _, err := queue.EnqueueBatchTx(ctx, tx, enqueueRequests); err != nil {
+		return err
+	}
+	sort.Slice(cancelRequests, func(left, right int) bool {
+		return cancelRequests[left].JobID < cancelRequests[right].JobID
+	})
+	for _, request := range cancelRequests {
+		if _, err := queue.CancelTx(ctx, tx, request); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sandboxExecutionDependencyIDsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]string, error) {
@@ -784,24 +816,147 @@ func sandboxExecutionDependencyIDsTx(ctx context.Context, tx *dbconnect.Tx, scop
 	return result, nil
 }
 
-func lockInterruptedLifecycleOperationsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, operationIDs []string) ([]interruptedLifecycleOperation, error) {
+func lockInterruptedSandboxBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var logicalSandboxID string
+	err := tx.QueryRow(ctx,
+		`SELECT logical_sandbox_id FROM session_sandbox_bindings
+		  WHERE workspace_id=$1 AND session_id=$2 FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(),
+	).Scan(&logicalSandboxID)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
+	return err
+}
+
+func lockInterruptedLifecycleOperationsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operationIDs []string,
+) ([]interruptedLifecycleOperation, []interruptedLifecycleOperation, error) {
+	// Interrupt settlement locks the complete lifecycle set before execution
+	// rows, so release wakeup never has to reacquire an earlier lock class.
+	rows, err := tx.Query(ctx,
+		`SELECT operation_id, kind, state, logical_sandbox_id, target_provider_resource_id,
+		        superseded_by_operation_id,
+		        queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key
+		   FROM sandbox_lifecycle_operations
+		  WHERE workspace_id=$1 AND session_id=$2
+		  ORDER BY operation_id
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	all := make(map[string]interruptedLifecycleOperation)
+	var releases []interruptedLifecycleOperation
+	for rows.Next() {
+		var operation interruptedLifecycleOperation
+		if err := rows.Scan(
+			&operation.operationID, &operation.kind, &operation.state,
+			&operation.logicalSandboxID, &operation.targetProviderID,
+			&operation.supersededByID,
+			&operation.queueJobID, &operation.queueKind, &operation.partitionKey, &operation.dedupeKey,
+		); err != nil {
+			return nil, nil, err
+		}
+		all[operation.operationID] = operation
+		if operation.kind == "release" && operation.state == "pending" && !operation.supersededByID.Valid {
+			releases = append(releases, operation)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
 	operations := make([]interruptedLifecycleOperation, 0, len(operationIDs))
 	for _, operationID := range operationIDs {
-		operation := interruptedLifecycleOperation{operationID: operationID}
-		if err := tx.QueryRow(ctx,
-			`SELECT kind, state, queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key
-			   FROM sandbox_lifecycle_operations
-			  WHERE workspace_id = $1 AND operation_id = $2
-			  FOR UPDATE`,
-			workspaceID, operationID,
-		).Scan(&operation.kind, &operation.state, &operation.queueJobID, &operation.queueKind, &operation.partitionKey, &operation.dedupeKey); dbconnect.IsNoRows(err) {
-			return nil, status.Error(codes.FailedPrecondition, "sandbox execution dependency is missing")
-		} else if err != nil {
-			return nil, err
+		operation, ok := all[operationID]
+		if !ok {
+			return nil, nil, status.Error(codes.FailedPrecondition, "sandbox execution dependency is missing")
 		}
 		operations = append(operations, operation)
 	}
-	return operations, nil
+	return operations, releases, nil
+}
+
+func interruptedSandboxReleaseRequestsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	releases []interruptedLifecycleOperation,
+	now time.Time,
+) ([]queue.EnqueueRequest, error) {
+	workspaceID := scope.GetWorkspaceId()
+	sessionID := scope.GetSessionId()
+	requests := make([]queue.EnqueueRequest, 0, len(releases))
+	for _, release := range releases {
+		if !release.targetProviderID.Valid || release.targetProviderID.String == "" {
+			return nil, status.Error(codes.FailedPrecondition, "sandbox release target is missing")
+		}
+		var blocked bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (
+				SELECT 1 FROM session_runtime_tool_results
+				 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
+				   AND execution_state IN ('preparing','running')
+				   AND authorized_provider_resource_id=$3
+				UNION ALL
+				SELECT 1 FROM session_background_tasks
+				 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
+				   AND provider_session_id=$3
+				UNION ALL
+				SELECT 1 FROM sandbox_lifecycle_operations
+				 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
+				   AND kind IN ('create','start','replace','materialize') AND state='running'
+			)`,
+			workspaceID, sessionID, release.targetProviderID.String, release.logicalSandboxID, release.operationID,
+		).Scan(&blocked); err != nil {
+			return nil, err
+		}
+		if blocked {
+			continue
+		}
+		if release.queueJobID.Valid {
+			var queueStatus string
+			err := tx.QueryRow(ctx,
+				`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, workspaceID, release.queueJobID.String,
+			).Scan(&queueStatus)
+			if err != nil && !dbconnect.IsNoRows(err) {
+				return nil, err
+			}
+			if err == nil && (queueStatus == queue.StatusPending || queueStatus == queue.StatusLeased) {
+				continue
+			}
+		}
+		jobID := queue.NewJobID()
+		partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(workspaceID), release.logicalSandboxID)
+		dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxRelease, workspace.ID(workspaceID), release.logicalSandboxID, release.operationID)
+		payload, err := marshalBridgeJSON(map[string]string{
+			"workspace_id": workspaceID, "session_id": sessionID,
+			"logical_sandbox_id": release.logicalSandboxID, "operation_id": release.operationID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET queue_job_id=$3, queue_kind=$4, queue_partition_key=$5, queue_dedupe_key=$6,
+			        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, attempt_count=0, updated_at=$7
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state='pending'`,
+			workspaceID, release.operationID, jobID, queue.KindSandboxRelease, partitionKey, dedupeKey, now.UTC(),
+		); err != nil {
+			return nil, err
+		}
+		requests = append(requests, queue.EnqueueRequest{
+			ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
+			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+			PayloadJSON: []byte(payload), MaxAttempts: sandboxReleaseMaxAttempts, Now: now.UTC(),
+		})
+	}
+	return requests, nil
 }
 
 func lockInterruptedSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]interruptedSandboxExecution, error) {
@@ -878,7 +1033,7 @@ func terminalizeInterruptedSandboxExecutionTx(
 	return nil
 }
 
-func requestSandboxExecutionCancellationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, execution interruptedSandboxExecution, now time.Time) error {
+func requestSandboxExecutionCancellationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, execution interruptedSandboxExecution, now time.Time) (queue.EnqueueRequest, error) {
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
 		    SET cancel_requested_at = COALESCE(cancel_requested_at, $6),
@@ -891,26 +1046,25 @@ func requestSandboxExecutionCancellationTx(ctx context.Context, tx *dbconnect.Tx
 		execution.executionAttemptGeneration, now.UTC(),
 	)
 	if err != nil {
-		return err
+		return queue.EnqueueRequest{}, err
 	}
 	if !rowsAffected(result) {
-		return status.Error(codes.Aborted, "sandbox execution changed during interrupt settlement")
+		return queue.EnqueueRequest{}, status.Error(codes.Aborted, "sandbox execution changed during interrupt settlement")
 	}
 	payload, err := marshalBridgeJSON(map[string]string{
 		"workspace_id": scope.GetWorkspaceId(), "session_id": scope.GetSessionId(),
 		"session_thread_id": scope.GetSessionThreadId(), "tool_use_event_id": execution.toolUseEventID,
 	})
 	if err != nil {
-		return err
+		return queue.EnqueueRequest{}, err
 	}
 	workspaceID := workspace.ID(scope.GetWorkspaceId())
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+	return queue.EnqueueRequest{
 		ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxToolCancel,
 		PartitionKey:   queue.FormatSandboxCancelPartitionKey(workspaceID, scope.GetSessionId(), scope.GetSessionThreadId(), execution.toolUseEventID),
 		DedupeKey:      queue.FormatSandboxToolCancelDedupeKey(workspaceID, scope.GetSessionId(), scope.GetSessionThreadId(), execution.toolUseEventID),
 		PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: sandboxToolCancelMaxAttempts, Now: now,
-	})
-	return err
+	}, nil
 }
 
 func abandonUnneededInterruptedLifecycleOperationsTx(
@@ -919,7 +1073,8 @@ func abandonUnneededInterruptedLifecycleOperationsTx(
 	scope *bridgev1.RuntimeScope,
 	operations []interruptedLifecycleOperation,
 	now time.Time,
-) error {
+) ([]queue.TargetedCancelRequest, error) {
+	var cancelRequests []queue.TargetedCancelRequest
 	for _, operation := range operations {
 		var waiterCount int
 		if err := tx.QueryRow(ctx,
@@ -929,7 +1084,7 @@ func abandonUnneededInterruptedLifecycleOperationsTx(
 			    AND (waiting_activation_operation_id = $3 OR waiting_materialization_operation_id = $3)`,
 			scope.GetWorkspaceId(), scope.GetSessionId(), operation.operationID,
 		).Scan(&waiterCount); err != nil {
-			return err
+			return nil, err
 		}
 		if waiterCount != 0 {
 			continue
@@ -947,19 +1102,17 @@ func abandonUnneededInterruptedLifecycleOperationsTx(
 			  WHERE workspace_id = $1 AND operation_id = $2 AND state = $4`,
 			scope.GetWorkspaceId(), operation.operationID, now.UTC(), operation.state,
 		); err != nil {
-			return err
+			return nil, err
 		}
 		if operation.queueJobID.Valid && operation.queueKind.Valid && operation.partitionKey.Valid && operation.dedupeKey.Valid {
-			if _, err := queue.CancelTx(ctx, tx, queue.TargetedCancelRequest{
+			cancelRequests = append(cancelRequests, queue.TargetedCancelRequest{
 				WorkspaceID: workspace.ID(scope.GetWorkspaceId()), JobID: operation.queueJobID.String,
 				Kind: operation.queueKind.String, PartitionKey: operation.partitionKey.String,
 				DedupeKey: operation.dedupeKey.String, Now: now,
-			}); err != nil {
-				return err
-			}
+			})
 		}
 	}
-	return nil
+	return cancelRequests, nil
 }
 
 func cancellationDraftNamesPendingTool(draft *bridgev1.RuntimeMessageDraft, toolUseEventID string) bool {

@@ -3,11 +3,13 @@ package tetralsandbox
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -17,6 +19,23 @@ func TestEnsureSandboxReleaseFencesExecutionAndSchedulesBackgroundCancellation(t
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	now := time.Date(2026, 7, 31, 18, 0, 0, 0, time.UTC)
 	seedReadySandboxBinding(t, adminDB, now)
+	retainedActivationJobID := "qjob_retained_release_dependency"
+	retainedActivationPartition := queue.FormatSandboxLifecyclePartitionKey("ws_execution_store", "sbox_execution_store")
+	retainedActivationDedupe := queue.FormatSandboxLifecycleDedupeKey(
+		queue.KindSandboxActivate, "ws_execution_store", "sbox_execution_store", "sop_retained_release_dependency",
+	)
+	if _, err := adminDB.Exec(`INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		observed_binding_revision, target_provider_resource_id,
+		queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key,
+		created_at, updated_at
+	) VALUES (
+		'ws_execution_store', 'sop_retained_release_dependency', 'sesn_execution_store',
+		'sbox_execution_store', 'start', 'pending', 1, 'provider_execution_store',
+		$1, $2, $3, $4, $5, $5
+	)`, retainedActivationJobID, queue.KindSandboxActivate, retainedActivationPartition, retainedActivationDedupe, now); err != nil {
+		t.Fatalf("seed retained release dependency: %v", err)
+	}
 	if _, err := adminDB.Exec(`INSERT INTO session_background_tasks (
 		workspace_id, session_id, session_thread_id, task_id, source_tool_use_event_id,
 		sandbox_id, provider, binding_revision, provider_session_id, provider_command_id,
@@ -72,6 +91,14 @@ func TestEnsureSandboxReleaseFencesExecutionAndSchedulesBackgroundCancellation(t
 	}
 	if taskReleaseID != operationID {
 		t.Fatalf("task release operation = %q; want %q", taskReleaseID, operationID)
+	}
+	var retainedDependencyState string
+	if err := adminDB.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id='sop_retained_release_dependency'`).Scan(&retainedDependencyState); err != nil {
+		t.Fatalf("read retained release dependency: %v", err)
+	}
+	if retainedDependencyState != "abandoned" {
+		t.Fatalf("retained release dependency state = %q; want abandoned", retainedDependencyState)
 	}
 	var releaseJobs, cancelJobs, cancelReceipts int
 	if err := adminDB.QueryRow(`SELECT count(*) FROM queue_jobs
@@ -143,15 +170,20 @@ func TestReleaseBackgroundCancellationExhaustionCreatesANewReceipt(t *testing.T)
 		t.Fatalf("cancel receipts = old %q next %q/%q; want terminal and pending/cancel", oldState, nextState, nextKind)
 	}
 	var nextJobs int
-	if err := adminDB.QueryRow(`SELECT count(*) FROM queue_jobs
+	var nextAvailableAt time.Time
+	if err := adminDB.QueryRow(`SELECT count(*) OVER (), available_at FROM queue_jobs
 		WHERE workspace_id='ws_execution_store' AND kind='sandbox_background_command'
 		  AND dedupe_key=$1 AND status='pending'`,
 		queue.FormatSandboxBackgroundCommandDedupeKey("ws_execution_store", "sesn_execution_store", "task_execution", nextRequestID),
-	).Scan(&nextJobs); err != nil {
+	).Scan(&nextJobs, &nextAvailableAt); err != nil {
 		t.Fatalf("read successor cancellation job: %v", err)
 	}
 	if nextJobs != 1 {
 		t.Fatalf("successor cancellation jobs = %d; want 1", nextJobs)
+	}
+	wantAvailableAt := now.Add(time.Minute).Add(releaseBackgroundCancelSuccessorBackoffCap)
+	if !nextAvailableAt.Equal(wantAvailableAt) {
+		t.Fatalf("successor cancellation available_at = %v; want %v", nextAvailableAt, wantAvailableAt)
 	}
 }
 
@@ -314,6 +346,338 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	})
 	if _, disposition, err := store.ClaimRelease(claimCtx, claimJob, now.Add(2*time.Second)); err != nil || disposition != SandboxLifecycleApplied {
 		t.Fatalf("ClaimRelease(fresh generation) = %s, %v; want applied", disposition, err)
+	}
+}
+
+func TestSuccessfulSandboxLifecycleTransitionsWakeParkedRelease(t *testing.T) {
+	t.Run("activation completion", func(t *testing.T) {
+		runtimeDB, adminDB := newSandboxServiceTestDB(t)
+		seedSandboxExecutionStoreFixture(t, adminDB)
+		ctx := sandboxTestQueueContext(t, runtimeDB)
+		now := time.Now().UTC()
+		coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+		execution := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsCreation); err != nil {
+			t.Fatalf("WaitForActivation: %v", err)
+		}
+		store := NewPostgreSQLSandboxLifecycleStore(dbconnect.NewClientForTesting(runtimeDB), &fixedSandboxResourceSource{}, 30*time.Minute)
+		job := readLifecycleJob(t, adminDB, "evt_execution_a", "waiting_activation_operation_id")
+		work, disposition, err := store.ClaimActivation(ctx, job, now)
+		if err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimActivation = %s,%v", disposition, err)
+		}
+		seedParkedSandboxRelease(t, adminDB, "sop_release_after_activation", job.SessionID, job.LogicalSandboxID, "provider_replaced", now)
+		if _, err := store.CompleteActivation(ctx, work, sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_created"}, now.Add(time.Second)); err != nil {
+			t.Fatalf("CompleteActivation: %v", err)
+		}
+		assertSandboxReleaseQueued(t, adminDB, "sop_release_after_activation", true)
+	})
+
+	t.Run("materialization completion", func(t *testing.T) {
+		runtimeDB, adminDB := newSandboxServiceTestDB(t)
+		seedSandboxExecutionStoreFixture(t, adminDB)
+		ctx := sandboxTestQueueContext(t, runtimeDB)
+		now := time.Now().UTC()
+		coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+		execution := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsCreation); err != nil {
+			t.Fatalf("WaitForActivation: %v", err)
+		}
+		store := NewPostgreSQLSandboxLifecycleStore(dbconnect.NewClientForTesting(runtimeDB), &fixedSandboxResourceSource{}, 30*time.Minute)
+		activationJob := readLifecycleJob(t, adminDB, "evt_execution_a", "waiting_activation_operation_id")
+		activation, disposition, err := store.ClaimActivation(ctx, activationJob, now)
+		if err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimActivation = %s,%v", disposition, err)
+		}
+		if _, err := store.CompleteActivation(ctx, activation, sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_materialized"}, now.Add(time.Second)); err != nil {
+			t.Fatalf("CompleteActivation: %v", err)
+		}
+		job := readLifecycleJob(t, adminDB, "evt_execution_a", "waiting_materialization_operation_id")
+		work, disposition, err := store.ClaimMaterialization(ctx, job, now.Add(2*time.Second))
+		if err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimMaterialization = %s,%v", disposition, err)
+		}
+		seedParkedSandboxRelease(t, adminDB, "sop_release_after_materialization", job.SessionID, job.LogicalSandboxID, work.Handle.SandboxID, now)
+		if err := store.CompleteMaterialization(ctx, work, MaterializationResult{
+			MaterializedEnvironmentGeneration: work.TargetEnvironmentGeneration,
+			MaterializedResourceRevision:      work.TargetResourceRevision,
+			Resources:                         sandbox.ResourceSetup{ResourceCredExpiresAt: ptrTime(now.Add(time.Hour)), ResourceRootsJSON: "[]"},
+		}, now.Add(3*time.Second)); err != nil {
+			t.Fatalf("CompleteMaterialization: %v", err)
+		}
+		assertSandboxReleaseQueued(t, adminDB, "sop_release_after_materialization", true)
+	})
+
+	t.Run("materialization wait transition", func(t *testing.T) {
+		runtimeDB, adminDB := newSandboxServiceTestDB(t)
+		seedSandboxExecutionStoreFixture(t, adminDB)
+		ctx := sandboxTestQueueContext(t, runtimeDB)
+		now := time.Now().UTC()
+		client := dbconnect.NewClientForTesting(runtimeDB)
+		coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+		execution := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsCreation); err != nil {
+			t.Fatalf("WaitForActivation: %v", err)
+		}
+		store := NewPostgreSQLSandboxLifecycleStore(client, &fixedSandboxResourceSource{}, 30*time.Minute)
+		activationJob := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_activation_operation_id")
+		activation, disposition, err := store.ClaimActivation(ctx, activationJob, now)
+		if err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimActivation = %s,%v", disposition, err)
+		}
+		handle := sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_materialization_wait"}
+		if _, err := store.CompleteActivation(ctx, activation, handle, now.Add(time.Second)); err != nil {
+			t.Fatalf("CompleteActivation: %v", err)
+		}
+		job := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_materialization_operation_id")
+		materializationCtx := leaseSandboxMaterializationJobForTest(t, runtimeDB, adminDB, &job)
+		work, disposition, err := store.ClaimMaterialization(materializationCtx, job, now.Add(2*time.Second))
+		if err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimMaterialization = %s,%v", disposition, err)
+		}
+		if err := client.WithWorkspaceTx(ctx, execution.Ref.WorkspaceID, "sandbox.release.materialization_wait_test", func(tx *dbconnect.Tx) error {
+			return settleSandboxExecutionTx(ctx, tx, execution.Ref, execution.AttemptGeneration, SandboxExecutionSettlement{
+				Kind: SandboxExecutionFailed, ErrorKind: "execution_cancelled", SafeMessage: "sandbox execution was cancelled",
+			}, now.Add(2*time.Second))
+		}); err != nil {
+			t.Fatalf("settle materialization waiter: %v", err)
+		}
+		seedParkedSandboxRelease(t, adminDB, "sop_release_after_materialization_wait", job.SessionID, job.LogicalSandboxID, handle.SandboxID, now)
+		if disposition, err := store.WaitMaterializationForActivation(materializationCtx, work, ExecutionNeedsActivation, now.Add(3*time.Second)); err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("WaitMaterializationForActivation = %s,%v", disposition, err)
+		}
+		assertSandboxReleaseQueued(t, adminDB, "sop_release_after_materialization_wait", true)
+		var sourceStatus string
+		if err := adminDB.QueryRow(`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.JobID).Scan(&sourceStatus); err != nil {
+			t.Fatalf("read materialization Queue status: %v", err)
+		}
+		if sourceStatus != queue.StatusAcknowledged {
+			t.Fatalf("materialization Queue status = %q; want acknowledged", sourceStatus)
+		}
+	})
+
+	t.Run("preparation reinspection", func(t *testing.T) {
+		runtimeDB, adminDB := newSandboxServiceTestDB(t)
+		seedSandboxExecutionStoreFixture(t, adminDB)
+		now := time.Now().UTC()
+		seedReadySandboxBinding(t, adminDB, now)
+		ctx := sandboxTestQueueContext(t, runtimeDB)
+		coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+		work := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		prepared, err := coordinator.BeginPreparing(ctx, work, now.Add(time.Minute))
+		if err != nil || !prepared {
+			t.Fatalf("BeginPreparing = %t,%v", prepared, err)
+		}
+		seedParkedSandboxRelease(t, adminDB, "sop_release_after_preparation", work.Ref.SessionID, work.Binding.LogicalSandboxID, work.Binding.ProviderResourceID, now)
+		if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings SET helper_verified_at=NULL
+			WHERE workspace_id=$1 AND session_id=$2`, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
+			t.Fatalf("expire preparation gate: %v", err)
+		}
+		if authorized, err := coordinator.AuthorizeRunning(ctx, work); !errors.Is(err, errSandboxExecutionReinspection) || authorized {
+			t.Fatalf("AuthorizeRunning = %t,%v; want reinspection", authorized, err)
+		}
+		assertSandboxExecutionState(t, adminDB, work.Ref.ToolUseEventID, "pending", work.AttemptGeneration)
+		assertSandboxReleaseQueued(t, adminDB, "sop_release_after_preparation", true)
+	})
+}
+
+func TestSessionDeleteReleaseConvergesThroughProductionRunner(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	seedReadySandboxBinding(t, adminDB, now)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	var operationID string
+	if err := client.WithWorkspaceTx(context.Background(), "ws_execution_store", "sandbox.release.runner_test", func(tx *dbconnect.Tx) error {
+		var err error
+		operationID, _, err = EnsureSandboxReleaseTx(
+			context.Background(), tx, "ws_execution_store", "sesn_execution_store",
+			SandboxReleaseSessionDelete, "provider_execution_store", now,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("EnsureSandboxReleaseTx: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(client)
+	queueClient := sandboxProductionQueueClient(t, queueStore)
+	adapter := &recordingLifecycleAdapter{
+		releasePresenceSet: true,
+		releasePresence:    ProviderOutcome[bool]{Value: false},
+	}
+	providers, err := NewProviderRegistry(map[string]ProviderAdapter{"daytona": adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue:     queueClient,
+		Store:     NewPostgreSQLSandboxLifecycleStore(client, nil, 0),
+		Providers: providers,
+		Config: SandboxLifecycleRunnerConfig{
+			WorkspaceID: "ws_execution_store", LeaseOwner: "release-runner-test", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+		Clock: func() time.Time { return now.Add(time.Minute) },
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	var operationState, queueJobID, queueStatus string
+	var providerResourceID sql.NullString
+	if err := adminDB.QueryRow(`SELECT state, queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&operationState, &queueJobID); err != nil {
+		t.Fatalf("read completed release: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT provider_resource_id FROM session_sandbox_bindings
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'`).Scan(&providerResourceID); err != nil {
+		t.Fatalf("read released binding: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT status FROM queue_jobs WHERE workspace_id='ws_execution_store' AND id=$1`, queueJobID).Scan(&queueStatus); err != nil {
+		t.Fatalf("read acknowledged release Queue row: %v", err)
+	}
+	if operationState != "completed" || providerResourceID.Valid || queueStatus != queue.StatusAcknowledged {
+		t.Fatalf("release = state %q provider %v queue %q; want completed/NULL/acknowledged", operationState, providerResourceID, queueStatus)
+	}
+}
+
+func TestSandboxLifecycleExhaustionWakesParkedRelease(t *testing.T) {
+	t.Run("activation", func(t *testing.T) {
+		runtimeDB, adminDB := newSandboxServiceTestDB(t)
+		seedSandboxExecutionStoreFixture(t, adminDB)
+		ctx := sandboxTestQueueContext(t, runtimeDB)
+		now := time.Now().UTC()
+		client := dbconnect.NewClientForTesting(runtimeDB)
+		coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+		execution := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsCreation); err != nil {
+			t.Fatalf("WaitForActivation: %v", err)
+		}
+		store := NewPostgreSQLSandboxLifecycleStore(dbconnect.NewClientForTesting(runtimeDB), &fixedSandboxResourceSource{}, 30*time.Minute)
+		job := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_activation_operation_id")
+		if _, disposition, err := store.ClaimActivation(ctx, job, now); err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimActivation = %s, %v", disposition, err)
+		}
+		if err := client.WithWorkspaceTx(ctx, execution.Ref.WorkspaceID, "sandbox.release.activation_exhaustion_test", func(tx *dbconnect.Tx) error {
+			return settleSandboxExecutionTx(ctx, tx, execution.Ref, execution.AttemptGeneration, SandboxExecutionSettlement{
+				Kind: SandboxExecutionFailed, ErrorKind: "execution_cancelled", SafeMessage: "sandbox execution was cancelled",
+			}, now)
+		}); err != nil {
+			t.Fatalf("settle activation waiter: %v", err)
+		}
+		seedParkedSandboxRelease(t, adminDB, "sop_release_after_activation_exhaustion", job.SessionID, job.LogicalSandboxID, "provider_exhausted_activation", now)
+		finalizeLifecycleExhaustionForTest(ctx, t, store, job, queue.KindSandboxActivate, now.Add(time.Second))
+		assertSandboxReleaseQueued(t, adminDB, "sop_release_after_activation_exhaustion", true)
+	})
+
+	t.Run("materialization", func(t *testing.T) {
+		runtimeDB, adminDB := newSandboxServiceTestDB(t)
+		seedSandboxExecutionStoreFixture(t, adminDB)
+		ctx := sandboxTestQueueContext(t, runtimeDB)
+		now := time.Now().UTC()
+		client := dbconnect.NewClientForTesting(runtimeDB)
+		coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+		execution := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsCreation); err != nil {
+			t.Fatalf("WaitForActivation: %v", err)
+		}
+		store := NewPostgreSQLSandboxLifecycleStore(dbconnect.NewClientForTesting(runtimeDB), &fixedSandboxResourceSource{}, 30*time.Minute)
+		activationJob := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_activation_operation_id")
+		activation, disposition, err := store.ClaimActivation(ctx, activationJob, now)
+		if err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimActivation = %s, %v", disposition, err)
+		}
+		handle := sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_materialization_exhaustion"}
+		if _, err := store.CompleteActivation(ctx, activation, handle, now.Add(time.Second)); err != nil {
+			t.Fatalf("CompleteActivation: %v", err)
+		}
+		job := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_materialization_operation_id")
+		if _, disposition, err := store.ClaimMaterialization(ctx, job, now.Add(2*time.Second)); err != nil || disposition != SandboxLifecycleApplied {
+			t.Fatalf("ClaimMaterialization = %s, %v", disposition, err)
+		}
+		if err := client.WithWorkspaceTx(ctx, execution.Ref.WorkspaceID, "sandbox.release.materialization_exhaustion_test", func(tx *dbconnect.Tx) error {
+			return settleSandboxExecutionTx(ctx, tx, execution.Ref, execution.AttemptGeneration, SandboxExecutionSettlement{
+				Kind: SandboxExecutionFailed, ErrorKind: "execution_cancelled", SafeMessage: "sandbox execution was cancelled",
+			}, now.Add(2*time.Second))
+		}); err != nil {
+			t.Fatalf("settle materialization waiter: %v", err)
+		}
+		seedParkedSandboxRelease(t, adminDB, "sop_release_after_materialization_exhaustion", job.SessionID, job.LogicalSandboxID, handle.SandboxID, now)
+		finalizeLifecycleExhaustionForTest(ctx, t, store, job, queue.KindSandboxMaterialize, now.Add(3*time.Second))
+		assertSandboxReleaseQueued(t, adminDB, "sop_release_after_materialization_exhaustion", true)
+	})
+}
+
+func finalizeLifecycleExhaustionForTest(ctx context.Context, t *testing.T, store *PostgreSQLSandboxLifecycleStore, job SandboxLifecycleJob, kind string, now time.Time) {
+	t.Helper()
+	queueJob := &queuev1.QueueJob{
+		Id: job.JobID, WorkspaceId: job.WorkspaceID, Kind: kind,
+		PartitionKey: queue.FormatSandboxLifecyclePartitionKey(workspace.ID(job.WorkspaceID), job.LogicalSandboxID),
+		DedupeKey:    queue.FormatSandboxLifecycleDedupeKey(kind, workspace.ID(job.WorkspaceID), job.LogicalSandboxID, job.OperationID),
+		LeasedBy:     job.LeaseOwner, LeaseToken: job.LeaseToken,
+		LeasedUntil: job.LeaseExpiresAt.Format(time.RFC3339Nano), AttemptCount: int32(job.AttemptCount), MaxAttempts: int32(job.AttemptCount),
+	}
+	if disposition, err := store.FinalizeExhaustedLifecycle(ctx, queueJob, kind, now); err != nil || disposition != SandboxLifecycleApplied {
+		t.Fatalf("FinalizeExhaustedLifecycle(%s) = %s, %v", kind, disposition, err)
+	}
+}
+
+func TestSandboxReleaseRemainsParkedWhileAnotherBlockerRuns(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	now := time.Now().UTC()
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	execution := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	store := NewPostgreSQLSandboxLifecycleStore(dbconnect.NewClientForTesting(runtimeDB), &fixedSandboxResourceSource{}, 30*time.Minute)
+	job := readLifecycleJob(t, adminDB, "evt_execution_a", "waiting_activation_operation_id")
+	work, disposition, err := store.ClaimActivation(ctx, job, now)
+	if err != nil || disposition != SandboxLifecycleApplied {
+		t.Fatalf("ClaimActivation = %s,%v", disposition, err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+		SET execution_state='running', authorized_provider_resource_id='provider_other', authorized_binding_revision=1
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_b'`); err != nil {
+		t.Fatalf("seed second release blocker: %v", err)
+	}
+	seedParkedSandboxRelease(t, adminDB, "sop_release_still_blocked", job.SessionID, job.LogicalSandboxID, "provider_other", now)
+	if _, err := store.CompleteActivation(ctx, work, sandbox.ProviderHandle{Provider: "daytona", SandboxID: "provider_created"}, now.Add(time.Second)); err != nil {
+		t.Fatalf("CompleteActivation: %v", err)
+	}
+	assertSandboxReleaseQueued(t, adminDB, "sop_release_still_blocked", false)
+}
+
+func seedParkedSandboxRelease(t *testing.T, db *sql.DB, operationID string, sessionID string, logicalSandboxID string, targetHandle string, now time.Time) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		target_provider_resource_id, release_reason, created_at, updated_at
+	) VALUES (
+		'ws_execution_store', $1, $2, $3, 'release', 'pending', $4, 'replaced_handle', $5, $5
+	)`, operationID, sessionID, logicalSandboxID, targetHandle, now); err != nil {
+		t.Fatalf("seed parked Sandbox release: %v", err)
+	}
+}
+
+func assertSandboxReleaseQueued(t *testing.T, db *sql.DB, operationID string, wantQueued bool) {
+	t.Helper()
+	var jobID sql.NullString
+	if err := db.QueryRow(`SELECT queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&jobID); err != nil {
+		t.Fatalf("read Sandbox release queue identity: %v", err)
+	}
+	if jobID.Valid != wantQueued {
+		t.Fatalf("Sandbox release queued = %t; want %t", jobID.Valid, wantQueued)
+	}
+	if wantQueued {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM queue_jobs WHERE workspace_id='ws_execution_store' AND id=$1`, jobID.String).Scan(&status); err != nil {
+			t.Fatalf("read Sandbox release Queue row: %v", err)
+		}
+		if status != queue.StatusPending {
+			t.Fatalf("Sandbox release Queue status = %q; want pending", status)
+		}
 	}
 }
 

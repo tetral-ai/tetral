@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -87,6 +88,68 @@ func TestSandboxMemoryProjectionRunnerKeepsHeartbeatThroughLiveExhaustion(t *tes
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_memory_projection:sandbox_memory_projection_exhausted"}) {
 		t.Fatalf("transitions = %v; want dead letter after live finalizer", queueClient.transitions)
+	}
+}
+
+func TestSandboxMemoryProjectionRunnerAcknowledgesDetachedStoreOnFirstDelivery(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Date(2026, 8, 2, 11, 0, 0, 0, time.UTC)
+	const writeID = "evt_memory_projection_runner_detached"
+	if _, err := adminDB.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		memory_projection_state, created_at, updated_at
+	) VALUES (
+		'ws_execution_store', 'sesn_execution_store', 'thr_execution_store', $1,
+		'memory', 'hash_projection_runner_detached', 'memory',
+		'{"action":"create","path":"note.md","content":"x"}', 'committed',
+		'{"status":"completed","action":"create","path":"/note.md"}', 'pending', $2, $2
+	)`, writeID, now); err != nil {
+		t.Fatalf("seed detached memory projection: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	queueStore := queue.NewPostgreSQLStore(client)
+	jobID := queue.NewJobID()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: jobID, WorkspaceID: "ws_execution_store", Kind: queue.KindSandboxMemoryProjection,
+		PartitionKey:   queue.FormatSandboxMemoryPartitionKey("ws_execution_store", "memstore_detached"),
+		DedupeKey:      queue.FormatSandboxMemoryProjectionDedupeKey("ws_execution_store", "memstore_detached", writeID),
+		PayloadVersion: 1,
+		PayloadJSON:    []byte(`{"workspace_id":"ws_execution_store","session_id":"sesn_execution_store","memory_store_id":"memstore_detached","memory_write_id":"` + writeID + `"}`),
+		MaxAttempts:    queue.SandboxMemoryProjectionMaxAttempts, Now: now,
+	}); err != nil {
+		t.Fatalf("enqueue detached projection: %v", err)
+	}
+	providers, err := NewProviderRegistry(map[string]ProviderAdapter{"daytona": &recordingMemoryProjectionAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxMemoryProjectionJobRunner{
+		Queue:     sandboxProductionQueueClient(t, queueStore),
+		Store:     NewPostgreSQLSandboxMemoryProjectionStore(client),
+		Providers: providers,
+		Config: SandboxMemoryProjectionRunnerConfig{
+			WorkspaceID: "ws_execution_store", LeaseOwner: "memory-runner-test", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+		Clock: func() time.Time { return now.Add(time.Minute) },
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	var projectionState, queueStatus string
+	var attempts int
+	if err := adminDB.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id=$1`, writeID).Scan(&projectionState); err != nil {
+		t.Fatalf("read detached projection: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT status, attempt_count FROM queue_jobs
+		WHERE workspace_id='ws_execution_store' AND id=$1`, jobID).Scan(&queueStatus, &attempts); err != nil {
+		t.Fatalf("read detached projection Queue row: %v", err)
+	}
+	if projectionState != "failed" || queueStatus != queue.StatusAcknowledged || attempts != 1 {
+		t.Fatalf("detached projection = %q queue %q attempts %d; want failed/acknowledged/1", projectionState, queueStatus, attempts)
 	}
 }
 

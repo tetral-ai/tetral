@@ -63,7 +63,7 @@ func runMaintenanceTick(ctx context.Context, store MaintenanceStore, cfg Mainten
 		Limit: queue.SandboxMaintenanceBatchLimit,
 	})
 	logSandboxRetentionResult(cfg.Logger, "queue.sandbox_job_retention", "queue.jobs.deleted", deletedJobs, err, time.Since(started))
-	if err != nil {
+	if err != nil && !queue.IsIntegrityError(err) {
 		return
 	}
 

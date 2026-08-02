@@ -265,7 +265,7 @@ func TestPostgreSQLSandboxLifecycleActivationRecordsPostCallStaleCompletion(t *t
 	assertSandboxExecutionState(t, adminDB, "evt_execution_a", "pending", 2)
 }
 
-func TestPostgreSQLSandboxLifecycleReclaimsRunningActivationAcrossReleaseFence(t *testing.T) {
+func TestPostgreSQLSandboxLifecycleRejectsUnsubmittedRunningActivationAcrossReleaseFence(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
@@ -285,9 +285,63 @@ func TestPostgreSQLSandboxLifecycleReclaimsRunningActivationAcrossReleaseFence(t
 		WHERE workspace_id = $2 AND session_id = $3`, now, job.WorkspaceID, job.SessionID); err != nil {
 		t.Fatalf("set release fence: %v", err)
 	}
-	if _, current, err := lifecycle.ClaimActivation(ctx, job, now.Add(time.Second)); err != nil || current != SandboxLifecycleApplied {
-		t.Fatalf("ClaimActivation(redelivery) = current %s err %v; want running receipt reclaimed", current, err)
+	successor := job
+	successor.AttemptCount++
+	successor.LeaseOwner = "sandbox-activation-successor"
+	successor.LeaseToken = "lease_activation_successor"
+	successor.LeaseExpiresAt = time.Now().UTC().Add(time.Hour)
+	if work, current, err := lifecycle.ClaimActivation(ctx, successor, now.Add(time.Second)); err != nil || current == SandboxLifecycleApplied || work.Job.JobID != "" {
+		t.Fatalf("ClaimActivation(redelivery) = work %+v current %s err %v; want release-fenced no-op", work, current, err)
 	}
+	var state string
+	if err := adminDB.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id=$1 AND operation_id=$2`, job.WorkspaceID, job.OperationID).Scan(&state); err != nil {
+		t.Fatalf("read fenced activation: %v", err)
+	}
+	if state != "abandoned" {
+		t.Fatalf("fenced activation state = %q; want abandoned", state)
+	}
+}
+
+func TestSandboxActivationRunnerRejectsUnsubmittedRedeliveryAcrossReleaseFence(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(client)
+	first := leaseSandboxLifecycleJob(t, queueStore, queue.KindSandboxActivate, "sandbox-activation-first")
+	lifecycle := NewPostgreSQLSandboxLifecycleStore(client, &fixedSandboxResourceSource{}, 30*time.Minute)
+	if _, disposition, err := lifecycle.ClaimActivation(context.Background(), first, now); err != nil || disposition != SandboxLifecycleApplied {
+		t.Fatalf("ClaimActivation(first) = disposition %s err %v", disposition, err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings
+		SET release_requested_at=$1, release_reason='session_delete'
+		WHERE workspace_id=$2 AND session_id=$3`, now, first.WorkspaceID, first.SessionID); err != nil {
+		t.Fatalf("set release fence: %v", err)
+	}
+	reclaimSandboxLifecycleJob(t, queueStore, adminDB, first)
+	adapter := &recordingLifecycleAdapter{}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxActivationJobRunner{
+		Queue: sandboxProductionQueueClient(t, queueStore), Store: lifecycle, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{
+			WorkspaceID: first.WorkspaceID, LeaseOwner: "sandbox-activation-successor",
+			MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second,
+		},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertLifecycleRunnerReleaseFence(t, adminDB, first, adapter.calls)
 }
 
 func TestPostgreSQLSandboxLifecycleMaterializationRecordsPostCallStaleCompletion(t *testing.T) {
@@ -336,7 +390,7 @@ func TestPostgreSQLSandboxLifecycleMaterializationRecordsPostCallStaleCompletion
 	assertSandboxExecutionState(t, adminDB, "evt_execution_a", "pending", 2)
 }
 
-func TestPostgreSQLSandboxLifecycleReclaimsRunningMaterializationAcrossReleaseFence(t *testing.T) {
+func TestPostgreSQLSandboxLifecycleRejectsUnsubmittedRunningMaterializationAcrossReleaseFence(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	ctx := sandboxTestQueueContext(t, runtimeDB)
@@ -359,14 +413,84 @@ func TestPostgreSQLSandboxLifecycleReclaimsRunningMaterializationAcrossReleaseFe
 	if _, current, err := lifecycle.ClaimMaterialization(ctx, job, now.Add(time.Second)); err != nil || current != SandboxLifecycleApplied {
 		t.Fatalf("ClaimMaterialization(first) = current %s err %v", current, err)
 	}
+	var releaseOperationID string
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	if err := client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.lifecycle.redelivery_release", func(tx *dbconnect.Tx) error {
+		var err error
+		releaseOperationID, _, err = EnsureSandboxReleaseTx(ctx, tx, job.WorkspaceID, job.SessionID, SandboxReleaseSessionDelete, "provider_redelivered_materialization", now)
+		return err
+	}); err != nil {
+		t.Fatalf("establish release fence: %v", err)
+	}
+	successor := job
+	successor.AttemptCount++
+	successor.LeaseOwner = "sandbox-materialization-successor"
+	successor.LeaseToken = "lease_materialization_successor"
+	successor.LeaseExpiresAt = time.Now().UTC().Add(time.Hour)
+	if work, current, err := lifecycle.ClaimMaterialization(ctx, successor, now.Add(2*time.Second)); err != nil || current == SandboxLifecycleApplied || work.Job.JobID != "" {
+		t.Fatalf("ClaimMaterialization(redelivery) = work %+v current %s err %v; want release-fenced no-op", work, current, err)
+	}
+	var state string
+	if err := adminDB.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id=$1 AND operation_id=$2`, job.WorkspaceID, job.OperationID).Scan(&state); err != nil {
+		t.Fatalf("read fenced materialization: %v", err)
+	}
+	if state != "abandoned" {
+		t.Fatalf("fenced materialization state = %q; want abandoned", state)
+	}
+	assertSandboxReleaseQueued(t, adminDB, releaseOperationID, true)
+}
+
+func TestSandboxMaterializationRunnerRejectsUnsubmittedRedeliveryAcrossReleaseFence(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	lifecycle := NewPostgreSQLSandboxLifecycleStore(client, &fixedSandboxResourceSource{}, 30*time.Minute)
+	activationJob := readLifecycleJob(t, adminDB, "evt_execution_a", "waiting_activation_operation_id")
+	activation, disposition, err := lifecycle.ClaimActivation(ctx, activationJob, now)
+	if err != nil || disposition != SandboxLifecycleApplied {
+		t.Fatalf("ClaimActivation = disposition %s err %v", disposition, err)
+	}
+	if _, err := lifecycle.CompleteActivation(ctx, activation, sandbox.ProviderHandle{
+		Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_runner_redelivery",
+	}, now); err != nil {
+		t.Fatalf("CompleteActivation: %v", err)
+	}
+	acknowledgeSandboxLifecycleJobForTest(t, adminDB, activationJob)
+	queueStore := queue.NewPostgreSQLStore(client)
+	first := leaseSandboxLifecycleJob(t, queueStore, queue.KindSandboxMaterialize, "sandbox-materialization-first")
+	if _, disposition, err := lifecycle.ClaimMaterialization(context.Background(), first, now.Add(time.Second)); err != nil || disposition != SandboxLifecycleApplied {
+		t.Fatalf("ClaimMaterialization(first) = disposition %s err %v", disposition, err)
+	}
 	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings
-		SET release_requested_at = $1, release_reason = 'session_delete'
-		WHERE workspace_id = $2 AND session_id = $3`, now, job.WorkspaceID, job.SessionID); err != nil {
+		SET release_requested_at=$1, release_reason='session_delete'
+		WHERE workspace_id=$2 AND session_id=$3`, now, first.WorkspaceID, first.SessionID); err != nil {
 		t.Fatalf("set release fence: %v", err)
 	}
-	if _, current, err := lifecycle.ClaimMaterialization(ctx, job, now.Add(2*time.Second)); err != nil || current != SandboxLifecycleApplied {
-		t.Fatalf("ClaimMaterialization(redelivery) = current %s err %v; want running receipt reclaimed", current, err)
+	reclaimSandboxLifecycleJob(t, queueStore, adminDB, first)
+	adapter := &recordingLifecycleAdapter{}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
 	}
+	runner := &SandboxMaterializationJobRunner{
+		Queue: sandboxProductionQueueClient(t, queueStore), Store: lifecycle, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{
+			WorkspaceID: first.WorkspaceID, LeaseOwner: "sandbox-materialization-successor",
+			MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second,
+		},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertLifecycleRunnerReleaseFence(t, adminDB, first, adapter.calls)
 }
 
 func TestPostgreSQLSandboxLifecycleRejectsExpiredMaterializationWriterAfterLeaseTransfer(t *testing.T) {
@@ -523,6 +647,7 @@ func TestPostgreSQLSandboxMissingStartWaitsForCurrentEnvironmentArtifact(t *test
 	)`, now); err != nil {
 		t.Fatalf("seed building Environment artifact: %v", err)
 	}
+	seedParkedSandboxRelease(t, adminDB, "sop_release_after_artifact_wait", job.SessionID, job.LogicalSandboxID, activation.CurrentHandle.SandboxID, now)
 
 	replacement, current, err := lifecycle.ReplaceMissingActivation(ctx, activation, now.Add(time.Second))
 	if err != nil {
@@ -544,6 +669,46 @@ func TestPostgreSQLSandboxMissingStartWaitsForCurrentEnvironmentArtifact(t *test
 	if kind != "replace" || state != "waiting_artifact" || generation != 2 || queueJobID.Valid {
 		t.Fatalf("replacement = kind %q state %q generation %d queue %v; want replace/waiting_artifact/2/no queue", kind, state, generation, queueJobID)
 	}
+	assertSandboxReleaseQueued(t, adminDB, "sop_release_after_artifact_wait", true)
+}
+
+func TestPostgreSQLSandboxMissingStartAbandonsAfterReleaseFence(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	execution := loadReadySandboxExecutionWork(t, coordinator)
+	if err := coordinator.WaitForActivation(ctx, execution, ExecutionNeedsActivation); err != nil {
+		t.Fatalf("WaitForActivation(start): %v", err)
+	}
+	lifecycle := NewPostgreSQLSandboxLifecycleStore(dbconnect.NewClientForTesting(runtimeDB), &fixedSandboxResourceSource{}, 30*time.Minute)
+	job := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_activation_operation_id")
+	activation, disposition, err := lifecycle.ClaimActivation(ctx, job, now)
+	if err != nil || disposition != SandboxLifecycleApplied {
+		t.Fatalf("ClaimActivation = %s, %v", disposition, err)
+	}
+	seedParkedSandboxRelease(t, adminDB, "sop_release_after_missing_start_fence", job.SessionID, job.LogicalSandboxID, activation.CurrentHandle.SandboxID, now)
+	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings
+		SET release_requested_at=$1, release_reason='session_delete'
+		WHERE workspace_id=$2 AND session_id=$3`, now, job.WorkspaceID, job.SessionID); err != nil {
+		t.Fatalf("set release fence: %v", err)
+	}
+
+	replacement, disposition, err := lifecycle.ReplaceMissingActivation(ctx, activation, now.Add(time.Second))
+	if err != nil || disposition != SandboxLifecycleApplied || replacement.Kind != "" {
+		t.Fatalf("ReplaceMissingActivation = replacement %+v disposition %s err %v; want applied abandonment", replacement, disposition, err)
+	}
+	var state string
+	if err := adminDB.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id=$1 AND operation_id=$2`, job.WorkspaceID, job.OperationID).Scan(&state); err != nil {
+		t.Fatalf("read fenced activation: %v", err)
+	}
+	if state != "abandoned" {
+		t.Fatalf("fenced missing activation state = %q; want abandoned", state)
+	}
+	assertSandboxReleaseQueued(t, adminDB, "sop_release_after_missing_start_fence", true)
 }
 
 func TestPostgreSQLSandboxActivationFailurePropagatesThroughMaterialization(t *testing.T) {
@@ -687,6 +852,16 @@ func TestPostgreSQLSandboxActivationSuccessRequeuesWaitingMaterialization(t *tes
 	}
 	if predecessorStatus != "acknowledged" {
 		t.Fatalf("predecessor materialization notification = %q; want acknowledged with waiting state", predecessorStatus)
+	}
+	var parkedJobID, parkedKind, parkedPartition, parkedDedupe sql.NullString
+	if err := adminDB.QueryRow(`SELECT queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key
+		FROM sandbox_lifecycle_operations WHERE workspace_id=$1 AND operation_id=$2`,
+		materializationJob.WorkspaceID, materializationJob.OperationID,
+	).Scan(&parkedJobID, &parkedKind, &parkedPartition, &parkedDedupe); err != nil {
+		t.Fatalf("read parked materialization Queue identity: %v", err)
+	}
+	if parkedJobID.Valid || parkedKind.Valid || parkedPartition.Valid || parkedDedupe.Valid {
+		t.Fatalf("parked materialization retained Queue identity: %v/%v/%v/%v", parkedJobID, parkedKind, parkedPartition, parkedDedupe)
 	}
 	var activationID string
 	if err := adminDB.QueryRow(`SELECT waiting_activation_operation_id FROM sandbox_lifecycle_operations
@@ -1134,7 +1309,7 @@ func TestSandboxActivationFinalizersRejectDelayedAttemptAfterSuccessorClaim(t *t
 			successor.LeaseOwner = "sandbox-lifecycle-successor"
 			successor.LeaseToken = "lease_finalizer_successor"
 			successor.LeaseExpiresAt = now.Add(2 * time.Minute)
-			if _, disposition, err := store.SandboxLifecycleStore.ClaimActivation(ctx, successor, now.Add(time.Second)); err != nil || disposition != SandboxLifecycleApplied {
+			if _, disposition, err := store.ClaimActivation(ctx, successor, now.Add(time.Second)); err != nil || disposition != SandboxLifecycleApplied {
 				t.Fatalf("successor ClaimActivation = %s, %v; want applied", disposition, err)
 			}
 			close(store.release)
@@ -1471,6 +1646,63 @@ func readLifecycleJob(t *testing.T, db *sql.DB, eventID string, linkColumn strin
 	job.LeaseToken = "lease_" + job.JobID
 	job.LeaseExpiresAt = time.Now().UTC().Add(time.Hour)
 	return job
+}
+
+func leaseSandboxLifecycleJob(t *testing.T, store *queue.PostgreSQLQueueStore, kind string, owner string) SandboxLifecycleJob {
+	t.Helper()
+	jobs, err := store.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: "ws_execution_store", Kinds: []string{kind}, LeaseOwner: owner,
+		MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(jobs) != 1 || jobs[0].LeasedUntil == nil {
+		t.Fatalf("lease %s lifecycle job = %#v, %v", kind, jobs, err)
+	}
+	transport := &queuev1.QueueJob{
+		Id: jobs[0].ID, WorkspaceId: string(jobs[0].WorkspaceID), Kind: jobs[0].Kind,
+		PartitionKey: jobs[0].PartitionKey, DedupeKey: jobs[0].DedupeKey,
+		PayloadVersion: int32(jobs[0].PayloadVersion), PayloadJson: string(jobs[0].PayloadJSON),
+		LeasedBy: jobs[0].LeasedBy, LeaseToken: jobs[0].LeaseToken,
+		LeasedUntil:  jobs[0].LeasedUntil.UTC().Format(time.RFC3339Nano),
+		AttemptCount: int32(jobs[0].AttemptCount), MaxAttempts: int32(jobs[0].MaxAttempts),
+	}
+	job, err := DecodeSandboxLifecycleJob(transport, kind)
+	if err != nil {
+		t.Fatalf("DecodeSandboxLifecycleJob(%s): %v", kind, err)
+	}
+	return job
+}
+
+func reclaimSandboxLifecycleJob(t *testing.T, store *queue.PostgreSQLQueueStore, db *sql.DB, job SandboxLifecycleJob) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second'
+		WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.JobID); err != nil {
+		t.Fatalf("expire lifecycle Queue job: %v", err)
+	}
+	count, err := store.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), Limit: 1,
+	})
+	if err != nil || count != 1 {
+		t.Fatalf("reclaim lifecycle Queue job = %d, %v; want 1,nil", count, err)
+	}
+}
+
+func assertLifecycleRunnerReleaseFence(t *testing.T, db *sql.DB, job SandboxLifecycleJob, providerCalls []string) {
+	t.Helper()
+	if len(providerCalls) != 0 {
+		t.Fatalf("provider calls = %v; want none after release fence", providerCalls)
+	}
+	var operationState, queueStatus string
+	if err := db.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id=$1 AND operation_id=$2`, job.WorkspaceID, job.OperationID).Scan(&operationState); err != nil {
+		t.Fatalf("read lifecycle operation: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status FROM queue_jobs
+		WHERE workspace_id=$1 AND id=$2`, job.WorkspaceID, job.JobID).Scan(&queueStatus); err != nil {
+		t.Fatalf("read lifecycle Queue job: %v", err)
+	}
+	if operationState != "abandoned" || queueStatus != queue.StatusAcknowledged {
+		t.Fatalf("release-fenced redelivery = operation %q Queue %q; want abandoned/acknowledged", operationState, queueStatus)
+	}
 }
 
 func lifecycleJobByOperationID(t *testing.T, db *sql.DB, workspaceID string, operationID string) SandboxLifecycleJob {

@@ -654,7 +654,7 @@ func copyRuntimeScopeWithRequestID(scope *bridgev1.RuntimeScope, requestID strin
 
 func validBackgroundTaskTerminalStatus(status string) bool {
 	switch status {
-	case "completed", "failed", "cancelled", "expired", "unknown_outcome", "cancelled_by_cleanup", "stale":
+	case "completed", "failed", "cancelled", "expired", "unknown_outcome":
 		return true
 	default:
 		return false

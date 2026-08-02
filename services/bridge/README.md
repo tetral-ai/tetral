@@ -370,6 +370,9 @@ replacement must preserve, and the conformance suites that prove it.
   be split from commit by a crash. Persisted results carry text, metadata, and
   `attachment_ref` capabilities only, never raw or base64 media. Supersession
   keys on `manifest_generation` monotonicity, never on etag inequality.
+  Attachment GC preserves uploading and staged media while the source Sandbox
+  execution remains unconsumed, so expiry cannot race ahead of Tool Result
+  adoption.
 - **Conformance.** `bridge_api_mcp_test.go`, `mcp_manifest_continuity_test.go`,
   `mcp_collision_split_test.go`, `command_read_claim_test.go`,
   `TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly`.

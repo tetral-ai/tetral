@@ -43,6 +43,28 @@ type binding struct {
 // EnsureTx records one current-handle release fence and its durable provider
 // operation inside the caller's Session transaction.
 func EnsureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, reason Reason, targetHandle string, now time.Time) (string, bool, error) {
+	return ensureTx(ctx, tx, workspaceID, sessionID, reason, targetHandle, now, applyQueueChangesTx)
+}
+
+// DeclareTx records a release and returns its Queue changes without applying
+// them, so a caller with other outputs can preserve the transaction lock order.
+func DeclareTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, reason Reason, targetHandle string, now time.Time) (string, bool, []queue.EnqueueRequest, []queue.TargetedCancelRequest, error) {
+	var enqueueRequests []queue.EnqueueRequest
+	var cancelRequests []queue.TargetedCancelRequest
+	operationID, complete, err := ensureTx(
+		ctx, tx, workspaceID, sessionID, reason, targetHandle, now,
+		func(_ context.Context, _ *dbconnect.Tx, enqueues []queue.EnqueueRequest, cancels []queue.TargetedCancelRequest) error {
+			enqueueRequests = append(enqueueRequests, enqueues...)
+			cancelRequests = append(cancelRequests, cancels...)
+			return nil
+		},
+	)
+	return operationID, complete, enqueueRequests, cancelRequests, err
+}
+
+type queueChangeApplier func(context.Context, *dbconnect.Tx, []queue.EnqueueRequest, []queue.TargetedCancelRequest) error
+
+func ensureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, reason Reason, targetHandle string, now time.Time, applyQueueChanges queueChangeApplier) (string, bool, error) {
 	if tx == nil || workspaceID == "" || sessionID == "" || !validReason(reason) {
 		return "", false, errors.New("sandbox release identity is invalid")
 	}
@@ -84,7 +106,7 @@ func EnsureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, session
 		}
 	}
 	if targetHandle == "" {
-		if err := applyQueueChangesTx(ctx, tx, nil, cancelRequests); err != nil {
+		if err := applyQueueChanges(ctx, tx, nil, cancelRequests); err != nil {
 			return "", false, err
 		}
 		unresolved, err := hasUnresolvedProviderCreationTx(ctx, tx, workspaceID, currentBinding.logicalSandboxID)
@@ -116,21 +138,34 @@ func EnsureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, session
 					return "", false, err
 				}
 			}
+			var requests []queue.EnqueueRequest
 			if currentBindingRelease {
-				requests, err := ensureBackgroundCancelsTx(ctx, tx, workspaceID, sessionID, operationID, targetHandle, now)
+				backgroundRequests, err := ensureBackgroundCancelsTx(ctx, tx, workspaceID, sessionID, operationID, targetHandle, now)
 				if err != nil {
 					return "", false, err
 				}
-				if err := applyQueueChangesTx(ctx, tx, requests, cancelRequests); err != nil {
+				requests = append(requests, backgroundRequests...)
+			}
+			if state == "pending" {
+				releaseRequest, ready, err := pendingReleaseEnqueueRequestTx(
+					ctx, tx, workspaceID, sessionID, currentBinding.logicalSandboxID, operationID, targetHandle, now,
+				)
+				if err != nil {
 					return "", false, err
 				}
+				if ready {
+					requests = append(requests, releaseRequest)
+				}
+			}
+			if err := applyQueueChanges(ctx, tx, requests, cancelRequests); err != nil {
+				return "", false, err
 			}
 			return operationID, false, nil
 		case "completed":
 			if err := ApplyPostconditionTx(ctx, tx, workspaceID, sessionID, currentBinding.providerResourceID, targetHandle, strongest, now); err != nil {
 				return "", false, err
 			}
-			return operationID, true, applyQueueChangesTx(ctx, tx, nil, cancelRequests)
+			return operationID, true, applyQueueChanges(ctx, tx, nil, cancelRequests)
 		case "failed":
 			predecessorID := operationID
 			operationID, releaseRequest, err := insertOperationTx(ctx, tx, workspaceID, sessionID, currentBinding.logicalSandboxID, targetHandle, strongest, now)
@@ -152,7 +187,7 @@ func EnsureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, session
 				}
 				requests = append(requests, cancelRequests...)
 			}
-			if err := applyQueueChangesTx(ctx, tx, requests, cancelRequests); err != nil {
+			if err := applyQueueChanges(ctx, tx, requests, cancelRequests); err != nil {
 				return "", false, err
 			}
 			return operationID, false, nil
@@ -173,7 +208,7 @@ func EnsureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, session
 		}
 		requests = append(requests, cancelRequests...)
 	}
-	err = applyQueueChangesTx(ctx, tx, requests, cancelRequests)
+	err = applyQueueChanges(ctx, tx, requests, cancelRequests)
 	return operationID, false, err
 }
 
@@ -260,6 +295,87 @@ func ApplyPostconditionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID str
 	default:
 		return errors.New("sandbox release reason is invalid")
 	}
+}
+
+func pendingReleaseEnqueueRequestTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	logicalSandboxID string,
+	operationID string,
+	targetHandle string,
+	now time.Time,
+) (queue.EnqueueRequest, bool, error) {
+	var blocked bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM session_runtime_tool_results
+			 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
+			   AND execution_state IN ('preparing','running')
+			   AND authorized_provider_resource_id=$3
+			UNION ALL
+			SELECT 1 FROM session_background_tasks
+			 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
+			   AND provider_session_id=$3
+			UNION ALL
+			SELECT 1 FROM sandbox_lifecycle_operations
+			 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
+			   AND kind IN ('create','start','replace','materialize') AND state='running'
+		)`,
+		workspaceID, sessionID, targetHandle, logicalSandboxID, operationID,
+	).Scan(&blocked); err != nil || blocked {
+		return queue.EnqueueRequest{}, false, err
+	}
+
+	var currentJobID sql.NullString
+	if err := tx.QueryRow(ctx,
+		`SELECT queue_job_id FROM sandbox_lifecycle_operations
+		  WHERE workspace_id=$1 AND operation_id=$2 AND kind='release' AND state='pending'
+		  FOR UPDATE`,
+		workspaceID, operationID,
+	).Scan(&currentJobID); err != nil {
+		return queue.EnqueueRequest{}, false, err
+	}
+	if currentJobID.Valid {
+		var status string
+		err := tx.QueryRow(ctx,
+			`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`,
+			workspaceID, currentJobID.String,
+		).Scan(&status)
+		if err != nil && !dbconnect.IsNoRows(err) {
+			return queue.EnqueueRequest{}, false, err
+		}
+		if err == nil && (status == queue.StatusPending || status == queue.StatusLeased) {
+			return queue.EnqueueRequest{}, false, nil
+		}
+	}
+
+	jobID := queue.NewJobID()
+	partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(workspaceID), logicalSandboxID)
+	dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxRelease, workspace.ID(workspaceID), logicalSandboxID, operationID)
+	payload, err := json.Marshal(map[string]string{
+		"workspace_id": workspaceID, "session_id": sessionID,
+		"logical_sandbox_id": logicalSandboxID, "operation_id": operationID,
+	})
+	if err != nil {
+		return queue.EnqueueRequest{}, false, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE sandbox_lifecycle_operations
+		    SET queue_job_id=$3, queue_kind=$4, queue_partition_key=$5, queue_dedupe_key=$6,
+		        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+		        attempt_count=0, updated_at=$7
+		  WHERE workspace_id=$1 AND operation_id=$2 AND state='pending'`,
+		workspaceID, operationID, jobID, queue.KindSandboxRelease, partitionKey, dedupeKey, now.UTC(),
+	); err != nil {
+		return queue.EnqueueRequest{}, false, err
+	}
+	return queue.EnqueueRequest{
+		ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
+		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+		PayloadJSON: payload, MaxAttempts: releaseMaxAttempts, Now: now.UTC(),
+	}, true, nil
 }
 
 // CompleteTx reports whether Session-delete release custody is closed without

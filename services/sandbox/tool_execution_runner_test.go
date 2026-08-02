@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -320,6 +321,82 @@ func TestSandboxToolExecutionRunnerObservesRunningExecutionByStoredReference(t *
 	}
 }
 
+func TestSandboxToolExecutionRunnerSpacesForegroundObservationPolls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		work, firstObservation := foregroundObservationTestWork(t)
+		coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true}
+		adapter := &recordingProviderAdapter{observations: []ProviderOutcome[sandboxdriver.ToolExecution]{
+			{Value: sandboxdriver.ToolExecution{ForegroundObservation: &firstObservation}},
+			{Value: sandboxdriver.ToolExecution{ResultJSON: `{"status":"success"}`}},
+		}}
+		registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+		if err != nil {
+			t.Fatalf("NewProviderRegistry: %v", err)
+		}
+		var observationTimes []time.Time
+		adapter.onObserve = func() {
+			observationTimes = append(observationTimes, time.Now())
+		}
+		runner := &SandboxToolExecutionJobRunner{
+			Queue:       &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}},
+			Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
+			Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+		}
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if len(observationTimes) != 2 || observationTimes[1].Sub(observationTimes[0]) != sandboxForegroundObservationPollInterval {
+			t.Fatalf("observation times = %v; want two polls separated by %s", observationTimes, sandboxForegroundObservationPollInterval)
+		}
+		if !reflect.DeepEqual(adapter.calls, []string{"observe", "observe"}) {
+			t.Fatalf("provider calls = %v; want two spaced observations", adapter.calls)
+		}
+	})
+}
+
+func TestSandboxToolExecutionRunnerCancelsForegroundObservationWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		work, firstObservation := foregroundObservationTestWork(t)
+		coordinator := &recordingSandboxExecutionCoordinator{work: work, load: true}
+		adapter := &recordingProviderAdapter{observations: []ProviderOutcome[sandboxdriver.ToolExecution]{
+			{Value: sandboxdriver.ToolExecution{ForegroundObservation: &firstObservation}},
+		}}
+		registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+		if err != nil {
+			t.Fatalf("NewProviderRegistry: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		adapter.onObserve = cancel
+		runner := &SandboxToolExecutionJobRunner{
+			Queue:       &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxExecutionQueueJob()}},
+			Coordinator: coordinator, Providers: registry, Media: passthroughSandboxMedia{},
+			Config: SandboxToolExecutionRunnerConfig{WorkspaceID: "ws_execution", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second},
+		}
+		if err := runner.RunOnce(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation = %v; want context canceled", err)
+		}
+		if !reflect.DeepEqual(adapter.calls, []string{"observe"}) {
+			t.Fatalf("provider calls = %v; want no observation after cancellation", adapter.calls)
+		}
+	})
+}
+
+func foregroundObservationTestWork(t *testing.T) (SandboxExecutionWork, sandboxdriver.ForegroundCommandObservation) {
+	t.Helper()
+	work := sandboxExecutionTestWork(true)
+	work.State = "running"
+	observation := sandboxdriver.ForegroundCommandObservation{Reference: sandboxdriver.CommandReference{
+		Target: sandboxdriver.ToolTarget{ProviderSandboxID: "provider_execution"},
+		Task:   sandboxdriver.BackgroundTask{TaskID: "task_execution", ProviderSessionID: "provider_execution", ProviderCommandID: "command_execution"},
+	}}
+	encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, observation)
+	if err != nil {
+		t.Fatalf("encode command reference: %v", err)
+	}
+	work.ProviderCommandReference = encodedReference
+	return work, observation
+}
+
 func TestSandboxToolExecutionRunnerRejectsForegroundObservationAfterQueueTakeover(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
@@ -372,7 +449,7 @@ func TestSandboxToolExecutionRunnerRejectsForegroundObservationAfterQueueTakeove
 	}
 	firstRegistry := registryFor(firstAdapter)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
-	_, _, _, secondJob := supersedeSandboxQueueLeaseAfter(t, runtimeDB, adminDB, request, func(_ context.Context, firstJob *queuev1.QueueJob) {
+	_, _, _, secondJob := supersedeSandboxQueueLeaseAfter(t, runtimeDB, adminDB, request, func(runCtx context.Context, firstJob *queuev1.QueueJob) {
 		firstQueue.leased = []*queuev1.QueueJob{firstJob}
 		go func() {
 			firstResult <- (&SandboxToolExecutionJobRunner{
@@ -380,7 +457,7 @@ func TestSandboxToolExecutionRunnerRejectsForegroundObservationAfterQueueTakeove
 				Config: SandboxToolExecutionRunnerConfig{
 					WorkspaceID: ref.WorkspaceID, LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second, PreparationTimeout: 45 * time.Second,
 				},
-			}).RunOnce(context.Background())
+			}).RunOnce(runCtx)
 		}()
 		select {
 		case <-observeStarted:
@@ -639,13 +716,16 @@ func (c *recordingSandboxExecutionCoordinator) FinalizeInvalidExecution(context.
 }
 
 type recordingProviderAdapter struct {
-	inspection     ProviderOutcome[ExecutionReadiness]
-	preparation    ProviderOutcome[ToolPreparationResult]
-	execution      ProviderOutcome[sandboxdriver.ToolExecution]
-	observation    ProviderOutcome[sandboxdriver.ToolExecution]
-	observeStarted chan struct{}
-	observeRelease <-chan struct{}
-	calls          []string
+	inspection       ProviderOutcome[ExecutionReadiness]
+	preparation      ProviderOutcome[ToolPreparationResult]
+	execution        ProviderOutcome[sandboxdriver.ToolExecution]
+	observation      ProviderOutcome[sandboxdriver.ToolExecution]
+	observations     []ProviderOutcome[sandboxdriver.ToolExecution]
+	observationIndex int
+	observeStarted   chan struct{}
+	observeRelease   <-chan struct{}
+	onObserve        func()
+	calls            []string
 }
 
 func (a *recordingProviderAdapter) InspectForExecution(context.Context, string) ProviderOutcome[ExecutionReadiness] {
@@ -677,6 +757,9 @@ func (a *recordingProviderAdapter) ExecuteTool(context.Context, ToolExecutionReq
 }
 func (a *recordingProviderAdapter) ObserveTool(ctx context.Context, _ sandboxdriver.ForegroundCommandObservation) ProviderOutcome[sandboxdriver.ToolExecution] {
 	a.calls = append(a.calls, "observe")
+	if a.onObserve != nil {
+		a.onObserve()
+	}
 	if a.observeStarted != nil {
 		close(a.observeStarted)
 	}
@@ -688,6 +771,11 @@ func (a *recordingProviderAdapter) ObserveTool(ctx context.Context, _ sandboxdri
 				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_observation_cancelled",
 			}
 		}
+	}
+	if a.observationIndex < len(a.observations) {
+		outcome := a.observations[a.observationIndex]
+		a.observationIndex++
+		return outcome
 	}
 	return a.observation
 }

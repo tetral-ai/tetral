@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -37,6 +38,15 @@ func TestMaintenanceTickStopsAfterReclaimFailure(t *testing.T) {
 	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10}, time.Now())
 	if len(store.calls) != 1 || store.calls[0] != "reclaim:10" {
 		t.Fatalf("maintenance calls after reclaim failure = %v; want reclaim only", store.calls)
+	}
+}
+
+func TestMaintenanceTickContinuesCounterSweepAfterTerminalRowIntegritySignal(t *testing.T) {
+	store := &recordingMaintenanceStore{sandboxSweepErr: &queue.IntegrityError{Message: "terminal timestamp is missing"}}
+	runMaintenanceTick(context.Background(), store, MaintenanceConfig{Limit: 10}, time.Now())
+	wantCalls := []string{"reclaim:10", "sandbox-terminal:100", "empty-counters:100"}
+	if !reflect.DeepEqual(store.calls, wantCalls) {
+		t.Fatalf("maintenance calls after terminal integrity signal = %v; want %v", store.calls, wantCalls)
 	}
 }
 
@@ -104,6 +114,7 @@ type recordingMaintenanceStore struct {
 	calls           []string
 	sandboxSweepNow time.Time
 	reclaimErr      error
+	sandboxSweepErr error
 }
 
 func (s *recordingMaintenanceStore) ReclaimExpiredLeases(_ context.Context, request queue.ReclaimExpiredLeasesRequest) (int, error) {
@@ -114,7 +125,7 @@ func (s *recordingMaintenanceStore) ReclaimExpiredLeases(_ context.Context, requ
 func (s *recordingMaintenanceStore) SweepSandboxTerminalJobs(_ context.Context, request queue.SandboxTerminalSweepRequest) (int, error) {
 	s.calls = append(s.calls, "sandbox-terminal:"+strconv.Itoa(request.Limit))
 	s.sandboxSweepNow = request.Now
-	return 0, nil
+	return 0, s.sandboxSweepErr
 }
 
 func (s *recordingMaintenanceStore) SweepEmptyPartitionCounters(_ context.Context, request queue.EmptyPartitionCounterSweepRequest) (int, error) {

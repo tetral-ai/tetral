@@ -19,6 +19,9 @@ import (
 const (
 	SandboxToolExecuteMaxAttempts         = 5
 	SandboxBackgroundReconcileMaxAttempts = 5
+	// Foreground command observation is a privileged provider call. A bounded
+	// interval prevents a single execution from spinning against that API.
+	sandboxForegroundObservationPollInterval = 500 * time.Millisecond
 )
 
 type SandboxExecutionRef struct {
@@ -505,6 +508,20 @@ func (r *SandboxToolExecutionJobRunner) observeRunningExecution(ctx context.Cont
 			return nil
 		}
 		work.ProviderCommandReference = encodedReference
+		if err := r.waitForObservation(ctx, sandboxForegroundObservationPollInterval); err != nil {
+			return err
+		}
+	}
+}
+
+func (r *SandboxToolExecutionJobRunner) waitForObservation(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

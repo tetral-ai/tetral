@@ -51,6 +51,97 @@ func TestEnvironmentBuildRunnerMarksReadyEnqueuesFanoutAndAcks(t *testing.T) {
 	}
 }
 
+func TestEnvironmentBuildRunnerFinalizesBeforeCancellingWorkContext(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentBuildQueueJob()}}
+	store := &recordingEnvironmentBuildStore{
+		input: EnvironmentArtifactBuildInput{
+			WorkspaceID: workspace.ID("ws_env"), EnvironmentID: "env_build", Generation: 7,
+			Provider: sandboxdriver.DaytonaProviderName, ArtifactInputHash: "hash_packages",
+		},
+		claimed:                true,
+		rejectCancelledContext: true,
+	}
+	builder := &recordingArtifactBuilder{result: sandbox.BuildArtifactResult{ProviderArtifactRef: "snapshot_ref"}}
+	runner := &EnvironmentBuildJobRunner{
+		Queue: queueClient, Store: store, Providers: artifactProviderRegistry(t, builder),
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"claim", "ready:snapshot_ref"}) {
+		t.Fatalf("store calls = %v; want live-context finalization", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_env_build"}) {
+		t.Fatalf("transitions = %v; want ack", queueClient.transitions)
+	}
+}
+
+func TestEnvironmentBuildRunnerFinalizesInvalidAndExhaustedBudgetsBeforeProviderWork(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		attemptCount  int32
+		maxAttempts   int32
+		wantErrorKind string
+	}{
+		{name: "missing budget", attemptCount: 1, maxAttempts: 0, wantErrorKind: "sandbox_queue_integrity_error"},
+		{name: "past budget", attemptCount: 4, maxAttempts: 3, wantErrorKind: "environment_build_attempts_exhausted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := environmentBuildQueueJob()
+			job.AttemptCount = test.attemptCount
+			job.MaxAttempts = test.maxAttempts
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+			store := &recordingEnvironmentBuildStore{claimed: true}
+			builder := &recordingArtifactBuilder{}
+			runner := &EnvironmentBuildJobRunner{
+				Queue: queueClient, Store: store, Providers: artifactProviderRegistry(t, builder),
+				Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+				Clock:  fixedEnvironmentRunnerClock,
+			}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if !reflect.DeepEqual(store.calls, []string{"claim", "terminal:" + test.wantErrorKind}) {
+				t.Fatalf("store calls = %v; want fenced claim then terminal finalizer", store.calls)
+			}
+			if len(builder.requests) != 0 {
+				t.Fatalf("provider requests = %d; want none", len(builder.requests))
+			}
+			if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_build:" + test.wantErrorKind}) {
+				t.Fatalf("queue transitions = %v; want terminal dead letter", queueClient.transitions)
+			}
+		})
+	}
+}
+
+func TestEnvironmentBuildRunnerFinalizesMalformedPayloadBeforeDeadLetter(t *testing.T) {
+	job := environmentBuildQueueJob()
+	job.PayloadJson = `{"workspace_id":`
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+	store := &recordingEnvironmentBuildStore{claimed: true}
+	builder := &recordingArtifactBuilder{}
+	runner := &EnvironmentBuildJobRunner{
+		Queue: queueClient, Store: store, Providers: artifactProviderRegistry(t, builder),
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"claim", "terminal:invalid_environment_build_payload"}) {
+		t.Fatalf("store calls = %v; want fenced claim then payload finalizer", store.calls)
+	}
+	if len(builder.requests) != 0 {
+		t.Fatalf("provider requests = %d; want none", len(builder.requests))
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_build:invalid_environment_build_payload"}) {
+		t.Fatalf("queue transitions = %v; want terminal dead letter", queueClient.transitions)
+	}
+}
+
 func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhaustion(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -371,6 +462,9 @@ func environmentBuildQueueJob() *queuev1.QueueJob {
 		Kind:         "environment_build",
 		LeaseToken:   "lease_env_build",
 		AttemptCount: 1,
+		MaxAttempts:  3,
+		PartitionKey: queue.FormatEnvironmentPartitionKey("ws_env", "env_build"),
+		DedupeKey:    queue.FormatEnvironmentBuildDedupeKey("ws_env", "env_build", "7"),
 		PayloadJson:  `{"workspace_id":"ws_env","environment_id":"env_build","generation":"7"}`,
 	}
 }
@@ -414,9 +508,10 @@ func (a *recordingEnvironmentProviderAdapter) EnvironmentArtifactAdapter() Envir
 }
 
 type recordingEnvironmentBuildStore struct {
-	input   EnvironmentArtifactBuildInput
-	claimed bool
-	calls   []string
+	input                  EnvironmentArtifactBuildInput
+	claimed                bool
+	rejectCancelledContext bool
+	calls                  []string
 }
 
 func (s *recordingEnvironmentBuildStore) AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error) {
@@ -429,7 +524,10 @@ func (s *recordingEnvironmentBuildStore) ClaimEnvironmentBuild(context.Context, 
 	return s.input, s.claimed, nil
 }
 
-func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildReady(_ context.Context, _ EnvironmentBuildJob, providerArtifactRef string, _ time.Time) error {
+func (s *recordingEnvironmentBuildStore) MarkEnvironmentBuildReady(ctx context.Context, _ EnvironmentBuildJob, providerArtifactRef string, _ time.Time) error {
+	if s.rejectCancelledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	s.calls = append(s.calls, "ready:"+providerArtifactRef)
 	return nil
 }

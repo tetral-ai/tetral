@@ -340,9 +340,11 @@ func readFileAttachmentBlobRange(ctx context.Context, store blob.BlobStore, key 
 }
 
 // ReconcileTransientAttachments is the business GC for transient media. The
-// object bucket's lifecycle rule is only a safety net. GC deletes are ordered:
-// the index row leaves its readable state and commits before its Blob is
-// deleted, so a resolver cannot serve bytes after custody is released.
+// object bucket's lifecycle rule is only a safety net. Uploading and staged
+// media remain protected while their source execution is unconsumed. GC
+// deletes are ordered: the index row leaves its readable state and commits
+// before its Blob is deleted, so a resolver cannot serve bytes after custody
+// is released.
 func (s *PostgreSQLBridgeAPIStore) ReconcileTransientAttachments(ctx context.Context, limit int) (TransientAttachmentGCResult, error) {
 	if s == nil || s.AttachmentBlobStore == nil {
 		return TransientAttachmentGCResult{}, status.Error(codes.FailedPrecondition, "transient attachment blob store is unavailable")
@@ -386,7 +388,7 @@ func (s *PostgreSQLBridgeAPIStore) markTransientAttachmentsForDeletion(ctx conte
 				 WHERE status = 'deleting'
 				    OR status = 'consumed'
 				    OR (status IN ('uploading', 'staged', 'active') AND expires_at <= $1
-				        AND NOT (status = 'staged' AND EXISTS (
+				        AND NOT (status IN ('uploading', 'staged') AND EXISTS (
 				          SELECT 1
 				            FROM session_runtime_tool_results AS execution
 				           WHERE execution.workspace_id = session_transient_attachments.workspace_id
@@ -986,8 +988,8 @@ func validateTransientAttachmentsForConsumptionTx(
 //	failed      write failed                                  (never written)
 //
 // The GC sweep reclaims deleting and consumed rows, plus expired uploading,
-// staged, or active rows. A staged Sandbox attachment remains protected while
-// its execution result is still unconsumed.
+// staged, or active rows. Uploading and staged Sandbox attachments remain
+// protected while their execution result is still unconsumed.
 //
 // The UPDATE flips 'active' -> 'consumed' ONLY (WHERE status = 'active'). A ref
 // the caller already validated as present but in ANY non-active in-scope status

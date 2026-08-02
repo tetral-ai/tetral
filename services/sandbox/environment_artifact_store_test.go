@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +71,70 @@ func TestEnvironmentArtifactStoreAuthorizesProviderCreateOnlyOnce(t *testing.T) 
 	}
 	if !submittedAt.Valid {
 		t.Fatal("provider create fence was not persisted")
+	}
+}
+
+func TestEnvironmentArtifactStoreTerminalFailureSettlesIdenticalArtifactGenerations(t *testing.T) {
+	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
+	ctx := sandboxTestQueueContext(t, runtime)
+	seedEnvironmentArtifactStoreEnvironment(t, admin, "ws_env_finalize", "env_build")
+	seedEnvironmentArtifact(t, admin, "ws_env_finalize", "env_build", 7, "pending", "", `{"apt":["git"]}`)
+	seedEnvironmentArtifact(t, admin, "ws_env_finalize", "env_build", 8, "pending", "", `{"apt":["git"]}`)
+	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
+	job := leaseEnvironmentBuildJob(t, runtime, "ws_env_finalize", "env_build", 7, fixedEnvironmentStoreTime, 10*time.Minute)
+	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
+		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
+	}
+	if err := store.MarkEnvironmentBuildTerminalFailure(ctx, job, EnvironmentArtifactFailure{
+		Stage: "build_artifact", LastErrorKind: "environment_build_attempts_exhausted", Reason: "attempt budget exhausted",
+	}, fixedEnvironmentStoreTime); err != nil {
+		t.Fatalf("MarkEnvironmentBuildTerminalFailure: %v", err)
+	}
+	assertEnvironmentArtifactStatus(t, admin, "ws_env_finalize", "env_build", 7, "failed", "")
+	assertEnvironmentArtifactStatus(t, admin, "ws_env_finalize", "env_build", 8, "failed", "")
+}
+
+func TestEnvironmentArtifactStoreTerminalFailureSettlesWaitingActivation(t *testing.T) {
+	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
+	seedSandboxExecutionStoreFixture(t, admin)
+	ctx := sandboxTestQueueContext(t, runtime)
+	if _, err := admin.Exec(`UPDATE environment_artifacts
+		SET status = 'pending', provider_artifact_ref = NULL
+		WHERE workspace_id = 'ws_execution_store' AND environment_id = 'env_execution_store' AND generation = 1`); err != nil {
+		t.Fatalf("mark artifact pending: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	var operationID string
+	if err := admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(&operationID); err != nil {
+		t.Fatalf("read waiting activation: %v", err)
+	}
+	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
+	job := leaseEnvironmentBuildJob(t, runtime, "ws_execution_store", "env_execution_store", 1, fixedEnvironmentStoreTime, 10*time.Minute)
+	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
+		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
+	}
+	failure := EnvironmentArtifactFailure{
+		Stage: "build_artifact", LastErrorKind: "environment_build_attempts_exhausted", Reason: "attempt budget exhausted",
+	}
+	if err := store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, fixedEnvironmentStoreTime); err != nil {
+		t.Fatalf("MarkEnvironmentBuildTerminalFailure: %v", err)
+	}
+	var operationState, executionState, resultJSON string
+	if err := admin.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&operationState); err != nil {
+		t.Fatalf("read failed activation: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(&executionState, &resultJSON); err != nil {
+		t.Fatalf("read failed execution: %v", err)
+	}
+	if operationState != "failed" || executionState != "terminal_unconsumed" || !strings.Contains(resultJSON, failure.LastErrorKind) {
+		t.Fatalf("terminal states = %q/%q result=%s; want failed/terminal_unconsumed with %q", operationState, executionState, resultJSON, failure.LastErrorKind)
 	}
 }
 

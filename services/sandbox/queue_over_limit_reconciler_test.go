@@ -1,10 +1,12 @@
 package tetralsandbox
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,6 +43,39 @@ func TestSandboxQueueOverLimitReconcilerUsesBoundedCensusAndBusinessFinalizer(t 
 	}
 	if !reflect.DeepEqual(finalizer.times, []time.Time{now, now}) {
 		t.Fatalf("finalizer times = %v; want one DB-clock boundary per pass", finalizer.times)
+	}
+}
+
+func TestSandboxQueueOverLimitReconcilerContinuesAfterCandidateFailure(t *testing.T) {
+	now := time.Date(2026, 7, 31, 16, 15, 0, 0, time.UTC)
+	candidates := []queue.PendingAtOrOverBudgetJob{
+		{WorkspaceID: workspace.ID("ws_over_limit"), JobID: "qjob_poisoned", Kind: queue.KindSandboxToolExecute, AttemptCount: 5, MaxAttempts: 5},
+		{WorkspaceID: workspace.ID("ws_over_limit"), JobID: "qjob_healthy", Kind: queue.KindSandboxActivate, AttemptCount: 5, MaxAttempts: 5},
+	}
+	reader := &recordingOverLimitReader{candidates: candidates}
+	finalizer := &recordingOverLimitFinalizer{results: []bool{false, true}, errors: []error{errors.New("poisoned candidate"), nil}}
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	reconciler := &SandboxQueueOverLimitReconciler{
+		Queue: reader, Finalizer: finalizer, Clock: func() time.Time { return now },
+	}
+
+	processed, err := reconciler.RunOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "poisoned candidate") {
+		t.Fatalf("RunOnce error = %v; want aggregated poisoned-candidate error", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d; want healthy candidate finalized", processed)
+	}
+	if !reflect.DeepEqual(finalizer.candidates, candidates) {
+		t.Fatalf("finalized candidates = %#v; want both candidates", finalizer.candidates)
+	}
+	if !strings.Contains(logs.String(), `"msg":"sandbox.queue_over_limit.candidate_failed"`) ||
+		!strings.Contains(logs.String(), `"queue.job.id":"qjob_poisoned"`) ||
+		strings.Contains(logs.String(), "poisoned candidate") {
+		t.Fatalf("candidate failure log = %s; want identity-only safe failure", logs.String())
 	}
 }
 
@@ -529,6 +564,7 @@ func (r *recordingOverLimitReader) ListPendingAtOrOverBudget(_ context.Context, 
 
 type recordingOverLimitFinalizer struct {
 	results    []bool
+	errors     []error
 	candidates []queue.PendingAtOrOverBudgetJob
 	times      []time.Time
 }
@@ -538,5 +574,10 @@ func (f *recordingOverLimitFinalizer) FinalizePendingAtOrOverBudget(_ context.Co
 	f.times = append(f.times, now)
 	result := f.results[0]
 	f.results = f.results[1:]
-	return result, nil
+	var err error
+	if len(f.errors) > 0 {
+		err = f.errors[0]
+		f.errors = f.errors[1:]
+	}
+	return result, err
 }

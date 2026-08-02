@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/storage"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -64,6 +65,8 @@ func (s *PostgreSQLSandboxMemoryProjectionStore) LoadProjection(ctx context.Cont
 			return err
 		}
 		var resolvedStoreID string
+		// A projection belongs to the exact store named by its durable job. A
+		// different writable attachment cannot inherit or revive that work.
 		if err := tx.QueryRow(ctx,
 			`SELECT smr.memory_store_id
 			   FROM session_memory_store_resources smr
@@ -74,13 +77,14 @@ func (s *PostgreSQLSandboxMemoryProjectionStore) LoadProjection(ctx context.Cont
 			    AND sr.type = 'memory_store'
 			    AND sr.detached_at IS NULL
 			    AND sr.delete_requested_at IS NULL
-			  WHERE smr.workspace_id = $1 AND smr.session_id = $2 AND smr.access = 'read_write'`,
-			job.WorkspaceID, job.SessionID,
+			  WHERE smr.workspace_id = $1 AND smr.session_id = $2
+			    AND smr.memory_store_id = $3 AND smr.access = 'read_write'`,
+			job.WorkspaceID, job.SessionID, job.MemoryStoreID,
 		).Scan(&resolvedStoreID); err != nil {
+			if dbconnect.IsNoRows(err) {
+				return settleMemoryProjectionTx(ctx, tx, job.MemoryWriteID, "failed", "memory store is no longer attached", storage.Now())
+			}
 			return err
-		}
-		if resolvedStoreID != job.MemoryStoreID {
-			return errors.New("sandbox memory projection store identity changed")
 		}
 		paths := memoryProjectionPlanPaths(inputJSON, resultJSON)
 		if len(paths) == 0 {

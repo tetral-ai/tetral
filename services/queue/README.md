@@ -80,7 +80,9 @@ PostgreSQL clock time; consumer wall clocks control only local scheduling.
 Four in-process Queue boundaries support Sandbox business transactions without
 moving business state into Queue. `CancelTx` cancels only the exact pending row
 named by job id plus expected kind, partition, and dedupe key; a mismatch is an
-integrity error and a leased row is unchanged. `ListPendingAtOrOverBudget`
+integrity error and a leased row is unchanged. A row already removed by bounded
+terminal retention is equivalent to an already closed transport row and is a
+benign no-op. `ListPendingAtOrOverBudget`
 performs a nonlocking, cross-workspace census of reclaimed Sandbox jobs whose
 explicit attempt budget is spent. The Sandbox owner then settles its business
 row before calling `DeadLetterExhaustedTx`, which rechecks pending status and the
@@ -122,7 +124,9 @@ least 24 hours old, then in a separate transaction deletes at most 100 partition
 counters that have no job of any status. Other job families have no retention
 change. Both cross-workspace sweeps use the transaction-local
 `tetral.queue_maintenance` RLS policy; a terminal row missing its required status
-timestamp is reported as an integrity error and retained.
+timestamp is reported as an integrity error and retained without preventing
+eligible peers in the same bounded pass from being deleted or the subsequent
+empty-partition-counter sweep from running.
 
 ### Startup configuration
 

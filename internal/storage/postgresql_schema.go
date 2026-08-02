@@ -553,7 +553,7 @@ const (
 		PRIMARY KEY (workspace_id, session_id, task_id),
 		UNIQUE (workspace_id, session_id, source_tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'unknown_outcome', 'cancelled_by_cleanup', 'stale')),
+		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'unknown_outcome')),
 		CONSTRAINT session_background_tasks_stdin_write_sequence_shape CHECK (stdin_write_sequence >= 0),
 		CONSTRAINT session_background_tasks_binding_revision_shape CHECK (binding_revision > 0),
 		CONSTRAINT session_background_tasks_reconcile_generation_shape CHECK (reconcile_generation > 0),
@@ -903,7 +903,7 @@ const (
 					AND result_json IS NULL AND result_digest IS NULL
 					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
 				OR (execution_state = 'terminal_unconsumed'
-					AND result_json IS NOT NULL AND result_digest IS NOT NULL
+					AND result_json IS NOT NULL AND result_digest IS NOT NULL AND result_digest <> ''
 					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
 				OR (execution_state = 'consumed'
 					AND result_json IS NULL AND result_digest IS NOT NULL AND result_digest <> ''
@@ -1675,7 +1675,7 @@ END $$`
 	createPostgreSQLSessionEventsCompletionMailIndex        = `CREATE INDEX IF NOT EXISTS idx_session_events_completion_mail_reconciliation ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status, expires_at)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
-	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('delivering', 'accepted', 'parked')`
+	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('queued', 'delivering', 'accepted', 'parked', 'dead_lettered')`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`
 	createPostgreSQLRuntimeStatusCleanupDueIndex            = `CREATE INDEX IF NOT EXISTS idx_session_runtime_status_cleanup_due ON session_runtime_status(workspace_id, cleanup_after, cleanup_job_id) WHERE status = 'idle' AND binding_id IS NOT NULL`
 	createPostgreSQLBridgeOperationsRuntimeWriteIndex       = `CREATE INDEX IF NOT EXISTS idx_session_bridge_operations_runtime_write ON session_bridge_operations(workspace_id, session_id, runtime_write_id) WHERE runtime_write_id IS NOT NULL`

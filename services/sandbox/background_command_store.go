@@ -312,7 +312,7 @@ func finalizeExhaustedBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx,
 			hex.EncodeToString(inputDigest[:]), work.InputJSON, nextRequestID, identity.TaskID, now); err != nil {
 			return err
 		}
-		request, err := releaseBackgroundCancelEnqueueRequest(identity.WorkspaceID, identity.SessionID, identity.TaskID, nextRequestID, now)
+		request, err := releaseBackgroundCancelSuccessorEnqueueRequest(identity.WorkspaceID, identity.SessionID, identity.TaskID, nextRequestID, now)
 		if err != nil {
 			return err
 		}
@@ -518,10 +518,13 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 	if err != nil {
 		return err
 	}
-	if _, err = queue.EnqueueTx(ctx, tx, request); err != nil {
+	releaseRequests, err := readySandboxReleaseRequestsTx(ctx, tx, work.WorkspaceID, work.SessionID, now, nil)
+	if err != nil {
 		return err
 	}
-	return enqueueReadySandboxReleasesTx(ctx, tx, work.WorkspaceID, work.SessionID, now)
+	requests := append([]queue.EnqueueRequest{request}, releaseRequests...)
+	_, err = queue.EnqueueBatchTx(ctx, tx, requests)
+	return err
 }
 
 func enqueueBackgroundReconcileTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, taskID string, generation int64, now time.Time, availableAt time.Time) error {

@@ -50,7 +50,9 @@ another worker may resume from PostgreSQL without inheriting process state.
 Every kind has an explicit positive attempt budget. Queue attempt counts govern
 transport only; lifecycle-operation and execution generations govern business
 re-entry. A worker that receives an over-budget job settles the referenced
-business row before dead-lettering the Queue row.
+business row before dead-lettering the Queue row. The bounded reconciler safely
+logs a candidate that cannot be settled and continues through the rest of the
+batch.
 
 Provider authorization, Blob custody, terminal settlement, and live exhaustion
 remain under the source Queue lease. Workers keep heartbeating through the last
@@ -58,6 +60,9 @@ fenced business transaction, which locks the source Queue row after business
 rows and rejects an expired or replaced token before commit. The heartbeat is
 stopped before the final Queue transition, so stale workers cannot acknowledge,
 retry, or dead-letter work after losing execution authority.
+Environment artifact workers apply the same lease guard before budget checks,
+payload decoding, or business claims; malformed and exhausted work settles the
+addressed artifact generation before its Queue row is dead-lettered.
 
 ## Lifecycle
 
@@ -79,6 +84,10 @@ Activation is single-flight per logical Sandbox. Concurrent executions attach
 to the same unfinished operation. Completion records the provider handle and
 re-enqueues refs-only execution jobs; each released execution inspects the
 provider again before authorization.
+If a lifecycle notification is redelivered after a release fence but no
+provider submission was recorded, the worker abandons that operation without a
+provider call. Once a submission boundary exists, recovery continues by
+observation instead.
 
 Release uses a separate existence inspection: only a provider `not_found`
 response proves absence, while every successful Get is a present handle that
@@ -109,7 +118,14 @@ binding revision, exact provider handle, release and cancellation fences,
 materialized revisions, credential lifetime, helper receipt, and database
 clock. Only after that transaction commits may the adapter submit the command.
 A worker that recovers a `running` row observes the durable provider reference;
-it never blindly submits the command again.
+it never blindly submits the command again. Foreground observations are spaced
+by a cancellation-aware 500 ms wait so recovery cannot spin against the
+provider API.
+
+Memory projection stays bound to the exact attached writable store named by
+its durable job. Detaching that store terminalizes the projection even when a
+different writable store is attached later; projection work never crosses
+store identity.
 
 ## Provider Adapter
 
@@ -152,7 +168,10 @@ observation-only; it never causes a blind second release call.
 When a release is blocked by unfinished work, one transaction acknowledges the
 current Queue lease and clears the operation's Queue identity without spending
 a release attempt. The transaction that settles the final blocker creates the
-next release job. Provider failures use the finite Queue attempt budget; an
+next release job, including successful activation/materialization completion
+and execution reinspection back to pending. Provider failures use the finite
+Queue attempt budget; a pre-submission background-cancel exhaustion creates one
+backoff-delayed successor rather than a hot loop. An
 exhausted Session-deletion release becomes a named dead letter and preserves
 the binding, operation, and Blob pointers for operator inspection.
 

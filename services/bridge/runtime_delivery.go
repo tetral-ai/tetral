@@ -1345,9 +1345,9 @@ func runtimeTaskNotificationStatus(terminalStatus string) string {
 		return "completed"
 	case "failed", "unknown_outcome":
 		return "failed"
-	case "cancelled", "cancelled_by_cleanup":
+	case "cancelled":
 		return "cancelled"
-	case "expired", "stale":
+	case "expired":
 		return "expired"
 	default:
 		return ""

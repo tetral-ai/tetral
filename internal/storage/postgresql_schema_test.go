@@ -375,22 +375,51 @@ func TestSessionRuntimeInboxStatusShapeIncludesParkedDelivery(t *testing.T) {
 	db, schema := newIsolatedPostgreSQLSchemaDB(t)
 	definition := readCheckConstraintDefinition(t, db, schema, "session_runtime_inbox", "session_runtime_inbox_status_shape")
 	for _, required := range []string{
+		"queued",
 		"delivering",
 		"accepted",
 		"parked",
+		"dead_lettered",
 		"committed",
 		"cancelled",
-		"dead_lettered",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("session_runtime_inbox_status_shape missing status %q: %s", required, definition)
 		}
 	}
 	predicate := readIndexPredicate(t, db, schema, "idx_session_runtime_inbox_repair")
-	for _, required := range []string{"delivering", "accepted", "parked"} {
+	for _, required := range []string{"queued", "delivering", "accepted", "parked", "dead_lettered"} {
 		if !strings.Contains(predicate, required) {
 			t.Fatalf("runtime inbox repair predicate missing status %q: %s", required, predicate)
 		}
+	}
+}
+
+func TestSandboxToolTerminalResultRequiresNonemptyDigest(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_tool_digest", "sesn_tool_digest")
+	if _, err := admin.Exec(`INSERT INTO session_threads (
+		workspace_id, id, session_id, role, visibility, status,
+		created_at, last_active_at, updated_at
+	) VALUES (
+		'workspace_tool_digest', 'thr_tool_digest', 'sesn_tool_digest',
+		'main', 'public', 'idle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("seed tool digest thread: %v", err)
+	}
+	_, err := admin.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, model_tool_call_id,
+		execution_state, execution_attempt_generation, result_json, result_digest,
+		created_at, updated_at
+	) VALUES (
+		'workspace_tool_digest', 'sesn_tool_digest', 'thr_tool_digest', 'sevt_tool_digest', 'sandbox_tool',
+		'input_hash', 'bash', '{}', 'committed', 'call_tool_digest',
+		'terminal_unconsumed', 1, '{"status":"success"}', '',
+		CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`)
+	if err == nil {
+		t.Fatal("terminal sandbox result accepted an empty digest")
 	}
 }
 
@@ -403,11 +432,14 @@ func TestSessionBackgroundTaskStatusShapeIncludesTerminalFacts(t *testing.T) {
 		"failed",
 		"cancelled",
 		"expired",
-		"cancelled_by_cleanup",
-		"stale",
 	} {
 		if !strings.Contains(definition, "'"+required+"'::text") {
 			t.Fatalf("session_background_tasks_status_shape = %q; missing %q", definition, required)
+		}
+	}
+	for _, retired := range []string{"cancelled_by_cleanup", "stale"} {
+		if strings.Contains(definition, "'"+retired+"'::text") {
+			t.Fatalf("session_background_tasks_status_shape = %q; still admits retired %q", definition, retired)
 		}
 	}
 }

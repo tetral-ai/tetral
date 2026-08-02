@@ -222,7 +222,7 @@ func CancelTx(ctx context.Context, tx queueMutationTransaction, request Targeted
 		request.JobID,
 	).Scan(&kind, &partitionKey, &dedupeKey, &status)
 	if dbconnect.IsNoRows(err) {
-		return false, &IntegrityError{Message: "targeted queue job does not exist"}
+		return false, nil
 	}
 	if err != nil {
 		return false, err
@@ -294,8 +294,9 @@ type queuePartitionCounterKey struct {
 	partitionKey string
 }
 
-// EnqueueBatchTx validates the complete request set and locks every partition
-// counter in deterministic order before allocating jobs in caller order.
+// EnqueueBatchTx validates the complete request set, locks every partition
+// counter, and then acquires outgoing job locks in canonical order. Returned
+// jobs retain the caller's request association.
 func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []EnqueueRequest) ([]*Job, error) {
 	normalized := make([]EnqueueRequest, len(requests))
 	for index, request := range requests {
@@ -341,12 +342,35 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 		}
 	}
 
-	jobs := make([]*Job, 0, len(normalized))
-	for _, request := range normalized {
+	type orderedRequest struct {
+		request EnqueueRequest
+		index   int
+	}
+	ordered := make([]orderedRequest, len(normalized))
+	for index, request := range normalized {
+		ordered[index] = orderedRequest{request: request, index: index}
+	}
+	sort.SliceStable(ordered, func(left, right int) bool {
+		leftRequest := ordered[left].request
+		rightRequest := ordered[right].request
+		if leftRequest.WorkspaceID != rightRequest.WorkspaceID {
+			return leftRequest.WorkspaceID < rightRequest.WorkspaceID
+		}
+		if leftRequest.Kind != rightRequest.Kind {
+			return leftRequest.Kind < rightRequest.Kind
+		}
+		if leftRequest.PartitionKey != rightRequest.PartitionKey {
+			return leftRequest.PartitionKey < rightRequest.PartitionKey
+		}
+		return leftRequest.DedupeKey < rightRequest.DedupeKey
+	})
+	jobs := make([]*Job, len(normalized))
+	for _, item := range ordered {
+		request := item.request
 		if request.DedupeKey != "" {
 			existing, err := existingActiveDedupeJob(ctx, tx, request.WorkspaceID, request.DedupeKey)
 			if err == nil {
-				jobs = append(jobs, existing)
+				jobs[item.index] = existing
 				continue
 			}
 			if !dbconnect.IsNoRows(err) {
@@ -369,7 +393,7 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 		if err != nil {
 			return nil, err
 		}
-		jobs = append(jobs, job)
+		jobs[item.index] = job
 	}
 	return jobs, nil
 }
@@ -877,11 +901,11 @@ func (s *PostgreSQLQueueStore) SweepSandboxTerminalJobs(ctx context.Context, req
 	}
 	request.Limit = sandboxMaintenanceLimit(request.Limit)
 	deleted := 0
+	invalidTerminalTimestamp := false
 	err := s.client.WithTx(ctx, "queue.sweep_sandbox_terminal_jobs", nil, func(tx *dbconnect.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT set_config('tetral.queue_maintenance', 'true', true)"); err != nil {
 			return err
 		}
-		var invalidTerminalTimestamp bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (
 			    SELECT 1
@@ -895,9 +919,6 @@ func (s *PostgreSQLQueueStore) SweepSandboxTerminalJobs(ctx context.Context, req
 			)`,
 		).Scan(&invalidTerminalTimestamp); err != nil {
 			return err
-		}
-		if invalidTerminalTimestamp {
-			return &IntegrityError{Message: "sandbox terminal queue job is missing its status timestamp"}
 		}
 		rows, err := tx.Query(ctx,
 			`WITH candidates AS (
@@ -934,6 +955,9 @@ func (s *PostgreSQLQueueStore) SweepSandboxTerminalJobs(ctx context.Context, req
 	})
 	if err != nil {
 		return 0, err
+	}
+	if invalidTerminalTimestamp {
+		return deleted, &IntegrityError{Message: "sandbox terminal queue job is missing its status timestamp"}
 	}
 	return deleted, nil
 }
