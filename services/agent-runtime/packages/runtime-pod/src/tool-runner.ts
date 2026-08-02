@@ -439,6 +439,9 @@ export class RuntimePodToolRunner {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Memory tool execution was cancelled.");
         }
+        if (isDurableBridgeRejection(error)) {
+          return toolFailure(request, "Bridge rejected the memory tool call.", false);
+        }
         await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
     }

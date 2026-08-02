@@ -147,6 +147,14 @@ func commitInputDeclarationTx(
 			return nil, err
 		}
 		if inputKind == "interrupt_control" {
+			if err := validateInterruptCancellationDraftCoverageTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetDrafts(),
+			); err != nil {
+				return nil, err
+			}
 			if err := cancelInterruptedSandboxExecutionsTx(
 				ctx,
 				tx,
@@ -1115,50 +1123,47 @@ func abandonUnneededInterruptedLifecycleOperationsTx(
 	return cancelRequests, nil
 }
 
-func cancellationDraftNamesPendingTool(draft *bridgev1.RuntimeMessageDraft, toolUseEventID string) bool {
-	if draft == nil {
-		return false
-	}
-	for _, part := range draft.GetParts() {
-		if part == nil || part.GetPartKind() != "tool" {
-			continue
-		}
-		var payload struct {
-			Type           string `json:"type"`
-			ToolUseEventID string `json:"toolUseEventId"`
-			State          struct {
-				Status string `json:"status"`
-			} `json:"state"`
-		}
-		if err := json.Unmarshal([]byte(part.GetPartJson()), &payload); err != nil {
-			continue
-		}
-		if payload.Type == "tool" &&
-			payload.ToolUseEventID == toolUseEventID &&
-			payload.State.Status == "cancelled" {
-			return true
-		}
-	}
-	return false
-}
-
 func validatePendingToolCancellationDrafts(
 	interruptEventID string,
 	cancellations []*bridgev1.PendingToolCancellationDraft,
 	drafts []*bridgev1.RuntimeMessageDraft,
 ) error {
-	draftsByLocalID := make(map[string]*bridgev1.RuntimeMessageDraft, len(drafts))
+	draftsByLocalID := make(map[string]map[string]struct{}, len(drafts))
+	seenDraftTools := make(map[string]struct{})
 	for _, draft := range drafts {
-		if draft == nil || draft.GetRuntimeLocalId() == "" {
+		if draft == nil || draft.GetRuntimeLocalId() == "" ||
+			draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION ||
+			draft.GetSourceEventId() != interruptEventID || len(draft.GetParts()) == 0 {
 			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
 		}
 		if _, exists := draftsByLocalID[draft.GetRuntimeLocalId()]; exists {
 			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is duplicated")
 		}
-		draftsByLocalID[draft.GetRuntimeLocalId()] = draft
+		tools := make(map[string]struct{}, len(draft.GetParts()))
+		for _, part := range draft.GetParts() {
+			if part == nil || part.GetPartKind() != "tool" {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation draft is invalid")
+			}
+			var payload struct {
+				Type           string `json:"type"`
+				ToolUseEventID string `json:"toolUseEventId"`
+				State          struct {
+					Status string `json:"status"`
+				} `json:"state"`
+			}
+			if err := json.Unmarshal([]byte(part.GetPartJson()), &payload); err != nil ||
+				payload.Type != "tool" || payload.ToolUseEventID == "" || payload.State.Status != "cancelled" {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation draft is invalid")
+			}
+			if _, exists := seenDraftTools[payload.ToolUseEventID]; exists {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
+			}
+			seenDraftTools[payload.ToolUseEventID] = struct{}{}
+			tools[payload.ToolUseEventID] = struct{}{}
+		}
+		draftsByLocalID[draft.GetRuntimeLocalId()] = tools
 	}
 	seenTools := make(map[string]struct{}, len(cancellations))
-	referencedDrafts := make(map[string]struct{}, len(drafts))
 	for _, cancellation := range cancellations {
 		if cancellation == nil || cancellation.GetToolUseEventId() == "" || cancellation.GetRuntimeLocalId() == "" {
 			return status.Error(codes.InvalidArgument, "pending tool cancellation is invalid")
@@ -1167,17 +1172,102 @@ func validatePendingToolCancellationDrafts(
 			return status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
 		}
 		seenTools[cancellation.GetToolUseEventId()] = struct{}{}
-		draft, ok := draftsByLocalID[cancellation.GetRuntimeLocalId()]
-		if !ok ||
-			draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION ||
-			draft.GetSourceEventId() != interruptEventID ||
-			!cancellationDraftNamesPendingTool(draft, cancellation.GetToolUseEventId()) {
+		draftTools, ok := draftsByLocalID[cancellation.GetRuntimeLocalId()]
+		if !ok {
 			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
 		}
-		referencedDrafts[cancellation.GetRuntimeLocalId()] = struct{}{}
+		if _, ok := draftTools[cancellation.GetToolUseEventId()]; !ok {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
 	}
-	if len(referencedDrafts) != len(draftsByLocalID) {
-		return status.Error(codes.InvalidArgument, "pending tool cancellation draft is unmatched")
+	return nil
+}
+
+func validateInterruptCancellationDraftCoverageTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	drafts []*bridgev1.RuntimeMessageDraft,
+) error {
+	provided := make([]string, 0)
+	for _, draft := range drafts {
+		for _, part := range draft.GetParts() {
+			var payload struct {
+				ToolUseEventID string `json:"toolUseEventId"`
+			}
+			if err := json.Unmarshal([]byte(part.GetPartJson()), &payload); err != nil {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation draft is invalid")
+			}
+			provided = append(provided, payload.ToolUseEventID)
+		}
+	}
+	sort.Strings(provided)
+
+	rows, err := tx.Query(ctx,
+		`SELECT e.event_id
+		   FROM session_events e
+		  WHERE e.workspace_id = $1
+		    AND e.session_id = $2
+		    AND e.session_thread_id = $3
+		    AND e.type IN ('agent.tool_use', 'agent.mcp_tool_use')
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_events result
+		       WHERE result.workspace_id = e.workspace_id
+		         AND result.session_id = e.session_id
+		         AND result.session_thread_id = e.session_thread_id
+		         AND (
+		           (result.type = 'agent.tool_result' AND result.payload_json::jsonb ->> 'tool_use_id' = e.event_id)
+		           OR
+		           (result.type = 'agent.mcp_tool_result' AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = e.event_id)
+		         )
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1
+		        FROM session_messages message
+		        CROSS JOIN LATERAL jsonb_array_elements(
+		          CASE
+		            WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
+		              THEN message.data_json::jsonb -> 'parts'
+		            ELSE '[]'::jsonb
+		          END
+		        ) part
+		       WHERE message.workspace_id = e.workspace_id
+		         AND message.session_id = e.session_id
+		         AND message.session_thread_id = e.session_thread_id
+		         AND part ->> 'type' = 'tool'
+		         AND part ->> 'toolUseEventId' = e.event_id
+		         AND part #>> '{state,status}' IN ('completed', 'error', 'cancelled')
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_runtime_tool_results execution
+		       WHERE execution.workspace_id = e.workspace_id
+		         AND execution.session_id = e.session_id
+		         AND execution.session_thread_id = e.session_thread_id
+		         AND execution.tool_use_event_id = e.event_id
+		         AND execution.tool_kind = 'sandbox_tool'
+		         AND execution.execution_state <> 'consumed'
+		    )
+		  ORDER BY e.event_id
+		  FOR UPDATE OF e`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	expected := make([]string, 0)
+	for rows.Next() {
+		var toolUseEventID string
+		if err := rows.Scan(&toolUseEventID); err != nil {
+			return err
+		}
+		expected = append(expected, toolUseEventID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !sameBridgeStringSlice(expected, provided) {
+		return status.Error(codes.FailedPrecondition, "interrupt loop-owned tool coverage is incomplete")
 	}
 	return nil
 }

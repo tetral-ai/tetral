@@ -9752,6 +9752,106 @@ Previous anchored summary.
     expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
   });
 
+  test("provider closeout joins durable Sandbox acceptance before freezing execution ownership", async () => {
+    const session = new Session("sesn_1");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const acceptanceStarted = deferred<void>();
+    const releaseAcceptance = deferred<void>();
+    const requestEndStarted = deferred<void>();
+    const appended: SessionEvent[] = [];
+    let awaitCalls = 0;
+    const catalog = catalogForTest({ name: "Write", description: "Write file", inputSchema: { type: "object" } });
+    const baseWriter = writerFrom((envelope) => {
+      appended.push(envelope.event);
+      return {
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: envelope.event.type === "agent.tool_use" ? "sevt_provider_closeout" : `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+      };
+    });
+    const writer: SessionEventWriter = {
+      ...baseWriter,
+      writeRequestEnd: async (envelope) => {
+        requestEndStarted.resolve();
+        return await baseWriter.writeRequestEnd(envelope);
+      },
+    };
+    const runPromise = Effect.runPromise(
+      Effect.gen(function* () {
+        const agentLoop = yield* AgentLoop.Service;
+        return yield* agentLoop.run(session, testRunCustody());
+      }).pipe(Effect.provide(runtimeAgentLoopLayer(loader, {
+        writer,
+        llmService: {
+          stream() {
+            return Stream.fromAsyncIterable((async function* () {
+              yield {
+                type: "tool-call" as const,
+                id: "tool-provider-closeout",
+                toolName: "Write",
+                input: { file_path: "src/a.ts", content: "one" },
+                inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+              };
+              await acceptanceStarted.promise;
+              yield {
+                type: "provider-error" as const,
+                error: runtimeFailureFromProviderError(normalizeProviderError({
+                  code: "provider_stream_error",
+                  message: "provider failed during sandbox acceptance",
+                  retryable: false,
+                  providerId: "fake",
+                  modelId: "fake-chat",
+                })),
+              };
+            })(), (error): LLMServiceError => ({
+              type: "llm-service",
+              error: runtimeFailureFromProviderError(normalizeProviderError({
+                code: "provider_stream_error",
+                message: String(error),
+                retryable: false,
+              })),
+            }));
+          },
+        },
+        providerCallRuntime: {
+          systemInstructions: "sandbox acceptance provider closeout test",
+          toolCatalog: {
+            ...catalog,
+            entries: catalog.entries.map((entry) => ({
+              ...entry,
+              route: { kind: "sandbox" as const, operation: "RunTool" as const, helperSubcommand: "write" as const },
+            })),
+          },
+        },
+        acceptSandboxExecution: async () => {
+          acceptanceStarted.resolve();
+          await releaseAcceptance.promise;
+          return { type: "accepted" };
+        },
+        awaitSandboxExecution: () => {
+          awaitCalls += 1;
+          return { type: "completed", output: { text: "must not wait after closeout", truncated: false } };
+        },
+      }))),
+    );
+
+    await requestEndStarted.promise;
+    let settled = false;
+    void runPromise.finally(() => {
+      settled = true;
+    });
+    await flushMicrotasks(20);
+    expect(settled).toBe(false);
+
+    releaseAcceptance.resolve();
+    await expect(runPromise).resolves.toMatchObject({ type: "failed" });
+
+    expect(awaitCalls).toBe(0);
+    expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(1);
+    expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
+  });
+
   test("runtime shutdown aborts active ToolFiber route execution", async () => {
     const session = new Session("sesn_1");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });

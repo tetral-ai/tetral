@@ -178,6 +178,68 @@ func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t 
 	}
 }
 
+func TestPostgreSQLBackgroundCommandDuplicatePollPreservesConsumedReceipt(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
+	const terminalResult = `{"status":"completed","result":{"stdout":"done"}}`
+	const terminalEventID = "evt_background_poll_consumed"
+	now := time.Now().UTC()
+	if _, err := adminDB.Exec(`INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type,
+		payload_json, created_at, updated_at
+	) VALUES (
+		'ws_execution_store', 'sesn_execution_store', 'thr_execution_store', $1, 1,
+		'agent.tool_result', '{}', $2, $2
+	)`, terminalEventID, now); err != nil {
+		t.Fatalf("seed terminal event: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_background_tasks
+		SET status='completed', terminal_result_json=$1, terminal_result_digest=$2,
+		    terminal_at=$3, next_poll_at=NULL, updated_at=$3
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND task_id='task_execution'`, terminalResult, sha256Hex([]byte(terminalResult)), now); err != nil {
+		t.Fatalf("settle background task: %v", err)
+	}
+	if _, err := adminDB.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json, result_digest,
+		consumed_by_terminal_event_id, consumption_reason,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, created_at, updated_at
+	) VALUES (
+		'ws_execution_store', 'sesn_execution_store', 'thr_execution_store',
+		'evt_background_poll_receipt', 'sandbox_background', 'hash_background_poll',
+		'wait_agent', '{}', 'committed', NULL, $1, $2, 'conversation_tool_result',
+		'poll', 'terminal', 'request_background_poll', 'task_execution', 0, $3, $3
+	)`, sha256Hex([]byte(terminalResult)), terminalEventID, now); err != nil {
+		t.Fatalf("seed consumed poll receipt: %v", err)
+	}
+
+	store := NewPostgreSQLSandboxBackgroundCommandStore(dbconnect.NewClientForTesting(runtimeDB))
+	_, current, err := store.LoadCommand(sandboxTestQueueContext(t, runtimeDB), SandboxBackgroundCommandJob{
+		WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+		TaskID: "task_execution", RequestID: "request_background_poll",
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("LoadCommand duplicate consumed poll: %v", err)
+	}
+	if current {
+		t.Fatal("LoadCommand current=true; want duplicate consumed receipt")
+	}
+	var result sql.NullString
+	var state, consumedBy string
+	if err := adminDB.QueryRow(`SELECT background_operation_state, result_json, consumed_by_terminal_event_id
+		FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store'
+		  AND tool_use_event_id='evt_background_poll_receipt'`).Scan(&state, &result, &consumedBy); err != nil {
+		t.Fatalf("read consumed poll receipt: %v", err)
+	}
+	if state != "terminal" || result.Valid || consumedBy != terminalEventID {
+		t.Fatalf("consumed receipt = state %q result %+v event %q; want terminal/NULL/%q", state, result, consumedBy, terminalEventID)
+	}
+}
+
 func TestPostgreSQLBackgroundSettlementLocksLifecycleBeforeTask(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)

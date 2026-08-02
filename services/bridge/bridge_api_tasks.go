@@ -333,8 +333,15 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCommand(
 				return status.Error(codes.AlreadyExists, "background command idempotency conflict")
 			}
 			result.WriteSeq = existingWriteSeq.Int64
-			if existingState == "terminal" && existingResult.Valid {
-				result.ResultJSON = existingResult.String
+			if existingState == "terminal" {
+				switch {
+				case existingResult.Valid:
+					result.ResultJSON = existingResult.String
+				case terminalResult != "":
+					result.ResultJSON = terminalResult
+				default:
+					return status.Error(codes.Internal, "background command terminal result is missing")
+				}
 			}
 			return nil
 		}
@@ -436,8 +443,15 @@ func (s *PostgreSQLBridgeAPIStore) acceptAndAwaitBackgroundCancel(
 				existingInputHash != inputHash || existingInputJSON != canonicalInput {
 				return status.Error(codes.AlreadyExists, "background cancellation idempotency conflict")
 			}
-			if existingState == "terminal" && existingResult.Valid {
-				result.ResultJSON = existingResult.String
+			if existingState == "terminal" {
+				switch {
+				case existingResult.Valid:
+					result.ResultJSON = existingResult.String
+				case terminalResult != "":
+					result.ResultJSON = terminalResult
+				default:
+					return status.Error(codes.Internal, "background cancellation terminal result is missing")
+				}
 			}
 			return nil
 		}
@@ -561,16 +575,27 @@ func (s *PostgreSQLBridgeAPIStore) waitForBackgroundResult(ctx context.Context, 
 			var operationState string
 			var resultJSON sql.NullString
 			var writeSequence sql.NullInt64
-			err := tx.QueryRow(ctx, `SELECT background_operation_state, result_json, background_write_sequence
-				FROM session_runtime_tool_results
-				WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
-				  AND tool_kind='sandbox_background'`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID).Scan(
+			err := tx.QueryRow(ctx, `SELECT receipt.background_operation_state,
+				COALESCE(receipt.result_json, task.terminal_result_json),
+				receipt.background_write_sequence
+				FROM session_runtime_tool_results receipt
+				JOIN session_background_tasks task
+				  ON task.workspace_id=receipt.workspace_id
+				 AND task.session_id=receipt.session_id
+				 AND task.session_thread_id=receipt.session_thread_id
+				 AND task.task_id=receipt.background_task_id
+				WHERE receipt.workspace_id=$1 AND receipt.session_id=$2
+				  AND receipt.session_thread_id=$3 AND receipt.tool_use_event_id=$4
+				  AND receipt.tool_kind='sandbox_background'`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), receiptID).Scan(
 				&operationState, &resultJSON, &writeSequence)
 			if err != nil {
 				return err
 			}
 			result.WriteSeq = writeSequence.Int64
-			if operationState == "terminal" && resultJSON.Valid {
+			if operationState == "terminal" {
+				if !resultJSON.Valid || resultJSON.String == "" {
+					return status.Error(codes.Internal, "background command terminal result is missing")
+				}
 				result.ResultJSON = resultJSON.String
 				terminal = true
 			}

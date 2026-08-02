@@ -335,11 +335,11 @@ export class SessionProcessor {
   // provider-error / stream error after span start: the accumulator terminalizes the
   //   in-flight assistant draft and discards only UNCOMMITTED draft parts; COMPLETED
   //   committed tools and their anchored reasoning are already durable and carry
-  //   forward. This provider-error arm calls terminalFailure and terminalizes the
-  //   accumulator's active tool parts immediately. AgentLoop separately joins the
-  //   request ToolFiberSet before choosing backoff or terminal closeout; a re-issue
-  //   rebases on the durably-committed view. A divergent request close is rejected
-  //   by Bridge and the Runtime discards hot state before cold recovery.
+  //   forward. Active tools are closed only after AgentLoop joins durable acceptance
+  //   writes, because an accepted Sandbox execution remains owned by its durable
+  //   result path. A re-issue rebases on the durably-committed view. A divergent
+  //   request close is rejected by Bridge and the Runtime discards hot state before
+  //   cold recovery.
   // UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts,
   //              services/agent-runtime/packages/core/src/runtime/message-projection.ts
   async process(envelope: LLMEventEnvelope): Promise<SessionProcessorResult> {
@@ -377,19 +377,27 @@ export class SessionProcessor {
       case "finish":
         return await this.finish({ ...envelope, event });
       case "provider-error":
-        return await this.terminalFailure(envelope, "failed", event.error);
+        return await this.terminalFailure(envelope, "failed", event.error, new Set(), false);
     }
   }
 
-  async cancel(source: RuntimeProcessorSource, failure: RuntimeFailure): Promise<SessionProcessorResult> {
+  async cancel(
+    source: RuntimeProcessorSource,
+    failure: RuntimeFailure,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string> = new Set(),
+  ): Promise<SessionProcessorResult> {
     if (this.terminal) {
       return this.failWithoutWrites(protocolSequenceFailure());
     }
-    return await this.terminalFailure(source, "cancelled", failure);
+    return await this.terminalFailure(source, "cancelled", failure, sandboxExecutionToolUseEventIds);
   }
 
-  async cancelOpenTools(source: RuntimeProcessorSource, failure: RuntimeFailure): Promise<SessionProcessorResult> {
-    return await this.terminalizeActiveTools(source, "cancelled", failure);
+  async cancelOpenTools(
+    source: RuntimeProcessorSource,
+    failure: RuntimeFailure,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string> = new Set(),
+  ): Promise<SessionProcessorResult> {
+    return await this.terminalizeActiveTools(source, "cancelled", failure, sandboxExecutionToolUseEventIds);
   }
 
   /**
@@ -952,8 +960,16 @@ export class SessionProcessor {
     source: RuntimeProcessorSource,
     status: "failed" | "cancelled",
     failure: RuntimeFailure,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string> = new Set(),
+    terminalizeTools = true,
   ): Promise<SessionProcessorResult> {
-    const terminalized = await this.terminalizeActiveParts(source, status, failure);
+    const terminalized = await this.terminalizeActiveParts(
+      source,
+      status,
+      failure,
+      sandboxExecutionToolUseEventIds,
+      terminalizeTools,
+    );
     if (!terminalized.ok) {
       return terminalized;
     }
@@ -975,6 +991,8 @@ export class SessionProcessor {
     source: RuntimeProcessorSource,
     status: "failed" | "cancelled",
     failure: RuntimeFailure,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string>,
+    terminalizeTools: boolean,
   ): Promise<SessionProcessorResult> {
     const events: SessionEvent[] = [];
     if (this.activeTextPart !== undefined) {
@@ -1003,7 +1021,9 @@ export class SessionProcessor {
       }
       events.push(...written.events);
     }
-    const tools = await this.terminalizeActiveTools(source, status, failure);
+    const tools = terminalizeTools
+      ? await this.terminalizeActiveTools(source, status, failure, sandboxExecutionToolUseEventIds)
+      : { ok: true as const, events: [] };
     return this.withPriorEvents(events, tools);
   }
 
@@ -1011,10 +1031,15 @@ export class SessionProcessor {
     source: RuntimeProcessorSource,
     status: "failed" | "cancelled",
     failure: RuntimeFailure,
+    sandboxExecutionToolUseEventIds: ReadonlySet<string>,
   ): Promise<SessionProcessorResult> {
     const events: SessionEvent[] = [];
     for (const [toolCallId, part] of [...this.toolParts]) {
       if (part.state.status === "completed" || part.state.status === "error" || part.state.status === "cancelled") {
+        continue;
+      }
+      const toolUseEventId = this.toolUseEventIds.get(toolCallId) ?? part.toolUseEventId;
+      if (toolUseEventId !== undefined && sandboxExecutionToolUseEventIds.has(toolUseEventId)) {
         continue;
       }
       const terminalError = runtimeToolErrorFromFailure(failure);

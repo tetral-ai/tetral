@@ -1197,7 +1197,7 @@ describe("SessionProcessor", () => {
     expect(result.events.map((event) => event.type)).toEqual(["session.error"]);
   });
 
-  test("provider error terminalizes pending and running tools without losing Bridge ids", async () => {
+  test("provider error defers tool terminalization to the joined closeout without losing Bridge ids", async () => {
     const writes: string[] = [];
     const appended: SessionEvent[] = [];
     const processor = createProcessor({
@@ -1222,10 +1222,19 @@ describe("SessionProcessor", () => {
       inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "running-tool", { q: "x" }, "allow");
-    const result = await processor.process(envelope({
+    const providerResult = await processor.process(envelope({
       type: "provider-error",
       error: providerFailure({ code: "provider_stream_error", retryable: false, providerId: "fake", modelId: "fake-chat" }),
     }));
+
+    expect(providerResult.ok).toBe(true);
+    expect(writes).toEqual(["append-event:agent.tool_use"]);
+    expect(providerResult.events.map((event) => event.type)).toEqual(["session.error"]);
+
+    const result = await processor.cancelOpenTools(
+      source,
+      providerFailure({ code: "provider_stream_error", retryable: false, providerId: "fake", modelId: "fake-chat" }),
+    );
 
     expect(result.ok).toBe(true);
     expect(writes).toEqual([
@@ -1236,6 +1245,44 @@ describe("SessionProcessor", () => {
       expect.objectContaining({ type: "agent.tool_use", name: "search", evaluated_permission: "allow" }),
       expect.objectContaining({ type: "agent.tool_result", tool_use_id: "bridge-tool-running", is_error: true }),
     ]);
-    expect(result.events.map((event) => event.type)).toEqual(["agent.tool_result", "session.error"]);
+    expect(result.events.map((event) => event.type)).toEqual(["agent.tool_result"]);
+  });
+
+  test("closeout leaves an accepted sandbox execution for its durable result path", async () => {
+    const writes: string[] = [];
+    const appended: SessionEvent[] = [];
+    const processor = createProcessor({
+      writes,
+      appendEvent: async (event) => {
+        appended.push(event);
+        return {
+          ok: true,
+          writeId: `write-${appended.length}`,
+          eventId: event.type === "agent.tool_use" ? "bridge-tool-accepted" : `bridge-event-${appended.length}`,
+          processedAt: createdAt,
+        };
+      },
+    });
+
+    await processor.process(envelope({
+      type: "tool-call",
+      id: "accepted-tool",
+      toolName: "write",
+      input: { path: "a.txt" },
+      inputPreview: { value: { path: "a.txt" }, preview: "{\"path\":\"a.txt\"}", truncated: false },
+    }));
+    await processor.commitPublicToolUse(source, "accepted-tool", { path: "a.txt" }, "allow");
+
+    const result = await processor.cancelOpenTools(
+      source,
+      providerFailure({ code: "provider_cancelled", retryable: false, providerId: "fake", modelId: "fake-chat" }),
+      new Set(["bridge-tool-accepted"]),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(writes).toEqual(["append-event:agent.tool_use"]);
+    expect(appended).toEqual([
+      expect.objectContaining({ type: "agent.tool_use", name: "write" }),
+    ]);
   });
 });

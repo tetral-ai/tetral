@@ -1137,7 +1137,7 @@ func loadThreadSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, scope 
 		           AND result.session_id = r.session_id
 		           AND result.session_thread_id = r.session_thread_id
 		           AND result.type IN ('agent.tool_result', 'agent.mcp_tool_result')
-		           AND result.payload_json::jsonb ->> 'tool_use_event_id' = r.tool_use_event_id
+		           AND result.payload_json::jsonb ->> 'tool_use_id' = r.tool_use_event_id
 		    )
 		  ORDER BY e.sequence ASC, r.tool_use_event_id ASC`,
 		scope.GetWorkspaceId(),

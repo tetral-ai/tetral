@@ -366,7 +366,9 @@ func loadBackgroundCommandForUpdateTx(ctx context.Context, tx *dbconnect.Tx, job
 		digestBytes := sha256.Sum256([]byte(terminalResult))
 		_, err = tx.Exec(ctx, `UPDATE session_runtime_tool_results
 			SET background_operation_state='terminal', result_json=$5, result_digest=$6, updated_at=$7
-			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+			WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
+			  AND background_operation_state IN ('pending','submitted')
+			  AND consumed_by_terminal_event_id IS NULL`,
 			job.WorkspaceID, job.SessionID, threadID, toolUseEventID, terminalResult, hex.EncodeToString(digestBytes[:]), now)
 		return SandboxBackgroundOperationWork{}, false, err
 	}

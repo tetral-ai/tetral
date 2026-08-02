@@ -931,6 +931,26 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
   });
 
+  test("settles a typed Memory rejection without consuming the transport retry loop", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.runMemoryErrors.push(Object.assign(new Error("memory identity rejected"), {
+      code: GrpcStatus.FAILED_PRECONDITION,
+    }));
+    const sleep = new ControlledSleep();
+
+    const result = await makeRunner({
+      bridge,
+      sleep: sleep.sleep,
+    }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: { retryable: false },
+    });
+    expect(bridge.runMemoryRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(0);
+  });
+
   test("preserves model-visible Memory stale and refresh signals", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.runMemoryResultJson = JSON.stringify({

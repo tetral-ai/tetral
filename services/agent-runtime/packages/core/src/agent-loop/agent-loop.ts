@@ -2831,25 +2831,23 @@ function runProviderTurnEffect(
             );
           }
           const providerStream = options.llmService.stream(request, { abortSignal: providerAbortController.signal }).pipe(
-            Stream.runForEach((event) =>
-              ownHotDurableEffect(
-                durableOperations,
-                processProviderEventEffect(
-                  session,
-                  options,
-                  processor,
-                  source,
-                  request,
-                  spanStartAppend.eventId,
-                  streamState,
-                  event,
-                  turnRetryCounters,
-                  allowContextOverflowRecovery,
-                ),
-              ).pipe(
-                Effect.uninterruptible,
-              ),
-            ),
+            Stream.runForEach((event) => {
+              const processing = processProviderEventEffect(
+                session,
+                options,
+                processor,
+                source,
+                request,
+                spanStartAppend.eventId,
+                streamState,
+                event,
+                turnRetryCounters,
+                allowContextOverflowRecovery,
+              );
+              return (event.type === "provider-error"
+                ? processing
+                : ownHotDurableEffect(durableOperations, processing)).pipe(Effect.uninterruptible);
+            }),
           Effect.as({ type: "completed" as const }),
         );
         const streamStartedAt = options.runtime.monotonicMs();
@@ -2923,7 +2921,7 @@ function runProviderTurnEffect(
             ),
           );
           if (!spanEndAppend.ok) {
-            return yield* settleToolsAfterRequestEndFailureEffect(processor, source, streamState, spanEndAppend.error);
+            return yield* settleToolsAfterRequestEndFailureEffect(session, processor, source, streamState, spanEndAppend.error);
           }
           const sealApplication = applyRequestEndSeal(processor, terminalSeal, spanEndAppend);
           if (sealApplication.type === "stale_custody") {
@@ -2931,7 +2929,7 @@ function runProviderTurnEffect(
             return requestEndCommitted(providerTurnInterrupted(), "discard_hot_state");
           }
           if (sealApplication.type === "failed") {
-            return yield* settleToolsAfterRequestEndFailureEffect(processor, source, streamState, sealApplication.error);
+            return yield* settleToolsAfterRequestEndFailureEffect(session, processor, source, streamState, sealApplication.error);
           }
           // Agent and reviewer finishes arm their own thread's next proactive compaction check;
           // compaction sub-requests update this state only through checkpoint application.
@@ -3097,13 +3095,18 @@ function processProviderEventEffect(
     if (event.type === "attachment-rejections") {
       recordAttachmentRejections(session, options, request.attachments, state.rejectedAttachments, event.rejections);
     }
-    const processed = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
+    const processEvent = async (): Promise<SessionProcessorResult> => {
       const result = await processor.process({ ...source, event });
       if (result.ok) {
         commitProcessorProjectionWithoutStableReasoning(session, processor);
       }
       return result;
-    }));
+    };
+    const processed = yield* state.assistantProjectionGate.withPermit(Effect.promise(() =>
+      event.type === "provider-error"
+        ? state.durableOperations.run(processEvent)
+        : processEvent()
+    ));
     if (!processed.ok) {
       const result = yield* Effect.promise(() => closeStartedRequestAfterProcessorFailure(
         session,
@@ -4185,6 +4188,7 @@ function joinToolFibersEffect(
 }
 
 function settleToolsAfterRequestEndFailureEffect(
+  session: Session,
   processor: SessionProcessor,
   source: RuntimeProcessorSource,
   state: ProviderTurnStreamState,
@@ -4199,8 +4203,13 @@ function settleToolsAfterRequestEndFailureEffect(
       Effect.timeoutOption(`${RequestTurnScopeCloseTimeoutMs} millis`),
       Effect.asVoid,
     );
+    yield* Effect.promise(() => state.durableOperations.awaitIdle());
     const terminalized = yield* Effect.promise(() => state.durableOperations.run(
-      () => processor.cancelOpenTools(source, failure),
+      () => processor.cancelOpenTools(
+        source,
+        failure,
+        pendingSandboxExecutionToolUseEventIds(session),
+      ),
       true,
     ));
     yield* Effect.promise(() => state.durableOperations.awaitIdle());
@@ -4209,6 +4218,10 @@ function settleToolsAfterRequestEndFailureEffect(
     }
     return providerTurnFailed(failure, "event_write_failed");
   });
+}
+
+function pendingSandboxExecutionToolUseEventIds(session: Session): ReadonlySet<string> {
+  return new Set(session.state.pendingSandboxExecutionJobs().map((pending) => pending.toolUseEventId));
 }
 
 function pumpToolSchedulerEffect(
@@ -4801,8 +4814,13 @@ function settleProviderErrorToolsEffect(
 ): Effect.Effect<ProviderTurnResult | undefined, never> {
   return Effect.gen(function* () {
     yield* interruptAndJoinToolFibersEffect(state);
+    yield* Effect.promise(() => state.durableOperations.awaitIdle());
     const repaired = yield* Effect.promise(() =>
-      processor.cancelOpenTools(source, providerRescheduleInterruptFailure(session.sessionId, source))
+      processor.cancelOpenTools(
+        source,
+        providerRescheduleInterruptFailure(session.sessionId, source),
+        pendingSandboxExecutionToolUseEventIds(session),
+      )
     );
     if (!repaired.ok) {
       return providerTurnFailed(repaired.error, repaired.error.type === "message-store" ? "persistence_failed" : "event_write_failed");
@@ -5405,7 +5423,11 @@ function settleCooperativeCancellationEffect(
     yield* Effect.promise(() => durableOperations.awaitIdle());
     const cancelled = yield* Effect.sync(beginSettlementWrites).pipe(
       Effect.andThen(Effect.promise(() => durableOperations.run(
-        () => processor.cancel(source, cooperativeCancellationFailure(session.sessionId, source)),
+        () => processor.cancel(
+          source,
+          cooperativeCancellationFailure(session.sessionId, source),
+          pendingSandboxExecutionToolUseEventIds(session),
+        ),
         true,
       ))),
       Effect.ensuring(Effect.sync(endSettlementWrites)),
@@ -5457,8 +5479,13 @@ function settleCooperativeCancellationAfterRequestEndEffect(
 ): Effect.Effect<ProviderTurnResult, unknown> {
   return Effect.gen(function* () {
     yield* interruptAndJoinToolFibersEffect(streamState);
+    yield* Effect.promise(() => streamState.durableOperations.awaitIdle());
     const cancelled = yield* Effect.promise(() =>
-      processor.cancelOpenTools(source, cooperativeCancellationFailure(session.sessionId, source))
+      processor.cancelOpenTools(
+        source,
+        cooperativeCancellationFailure(session.sessionId, source),
+        pendingSandboxExecutionToolUseEventIds(session),
+      )
     );
     if (!cancelled.ok) {
       return requestEndCommitted(

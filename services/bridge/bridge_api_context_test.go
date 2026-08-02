@@ -139,7 +139,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecution
 	}
 
 	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_bridge_sandbox_terminal", 2, "agent.tool_result",
-		`{"type":"agent.tool_result","tool_use_event_id":"`+toolUseEventID+`","content":[{"type":"text","text":"already settled"}],"is_error":false}`)
+		`{"type":"agent.tool_result","tool_use_id":"`+toolUseEventID+`","content":[{"type":"text","text":"already settled"}],"is_error":false}`)
 	payload = load("rin_bridge_sandbox_recovery_terminal")
 	if len(payload.PendingSandboxExecutions) != 0 || len(payload.ColdCoverage.PendingSandboxExecutionIDs) != 0 {
 		t.Fatalf("terminal Tool Result left sandbox recovery visible: %#v", payload)

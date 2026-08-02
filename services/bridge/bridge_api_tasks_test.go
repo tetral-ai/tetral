@@ -107,6 +107,142 @@ func TestPostgreSQLBridgeAPIStoreSendCommandInputReplayReusesWriteSequence(t *te
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreReadCommandResultReplaysConsumedTerminalReceipt(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID     = "default"
+		sessionID       = "sesn_bridge_poll_consumed"
+		threadID        = "thr_bridge_poll_consumed"
+		bindingID       = "bind_bridge_poll_consumed"
+		taskID          = "task_bridge_poll_consumed"
+		toolUseEventID  = "evt_bridge_poll_consumed"
+		terminalEventID = "evt_bridge_poll_terminal"
+		terminalJSON    = `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_consumed")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
+	settleBridgeAPIBackgroundTask(t, admin, sessionID, taskID, "completed", terminalJSON)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, terminalEventID, 2, "agent.tool_result", `{"tool_use_id":"`+toolUseEventID+`"}`)
+	requestID, _, _ := readCommandResultOwnerIdentity(toolUseEventID, taskID, false, 0)
+	inputJSON, err := marshalBridgeJSON(map[string]any{
+		"task_id": taskID, "max_output_tokens": 0, "defer_terminal_settlement": false,
+	})
+	if err != nil {
+		t.Fatalf("marshal poll input: %v", err)
+	}
+	canonicalInput, inputHash, err := canonicalBackgroundCommandInput(inputJSON)
+	if err != nil {
+		t.Fatalf("canonical poll input: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_digest,
+		consumed_by_terminal_event_id, consumption_reason,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,'sandbox_background',$5,'write_stdin',$6,'committed',$7,$8,
+		'conversation_tool_result','poll','terminal',$9,$10,0,now(),now())`,
+		workspaceID, sessionID, threadID, toolUseEventID, inputHash, canonicalInput,
+		bridgeRequestHash(terminalJSON), terminalEventID, requestID, taskID); err != nil {
+		t.Fatalf("seed consumed terminal poll receipt: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).ReadCommandResult(ctx, &bridgev1.ReadCommandResultRequest{
+		Scope:  bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_consumed"),
+		TaskId: taskID, ToolUseEventId: toolUseEventID,
+	})
+	if err != nil || response.GetResultJson() != terminalJSON {
+		t.Fatalf("ReadCommandResult consumed replay = response %+v err %v; want stored terminal result", response, err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaiting(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID     = "default"
+		sessionID       = "sesn_bridge_poll_wait_consumed"
+		threadID        = "thr_bridge_poll_wait_consumed"
+		bindingID       = "bind_bridge_poll_wait_consumed"
+		taskID          = "task_bridge_poll_wait_consumed"
+		toolUseEventID  = "evt_bridge_poll_wait_consumed"
+		terminalEventID = "evt_bridge_poll_wait_terminal"
+		terminalJSON    = `{"status":"completed","stdout":{"text":"done","truncated":false},"stderr":{"text":"","truncated":false}}`
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_wait_consumed")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"name":"write_stdin","input":{},"evaluated_permission":"allow"}`)
+	seedBridgeAPIBackgroundTask(t, admin, workspaceID, sessionID, threadID, bindingID, taskID, toolUseEventID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	type callResult struct {
+		response *bridgev1.ReadCommandResultResponse
+		err      error
+	}
+	done := make(chan callResult, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go func() {
+		response, err := store.ReadCommandResult(ctx, &bridgev1.ReadCommandResultRequest{
+			Scope:  bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_wait_consumed"),
+			TaskId: taskID, ToolUseEventId: toolUseEventID,
+		})
+		done <- callResult{response: response, err: err}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var count int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3
+			  AND background_operation_state='pending'`, workspaceID, sessionID, toolUseEventID).Scan(&count); err != nil {
+			t.Fatalf("read pending poll receipt: %v", err)
+		}
+		if count == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("poll receipt was not accepted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tx, err := admin.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin terminal consumption: %v", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE session_background_tasks
+		SET status='completed', terminal_result_json=$4, terminal_result_digest=$5,
+		    terminal_at=now(), next_poll_at=NULL, updated_at=now()
+		WHERE workspace_id=$1 AND session_id=$2 AND task_id=$3`,
+		workspaceID, sessionID, taskID, terminalJSON, bridgeRequestHash(terminalJSON)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("settle background task: %v", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,2,'agent.tool_result',$5,now(),now())`,
+		workspaceID, sessionID, threadID, terminalEventID, `{"tool_use_id":"`+toolUseEventID+`"}`); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("seed terminal event: %v", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE session_runtime_tool_results
+		SET background_operation_state='terminal', result_json=NULL, result_digest=$4,
+		    consumed_by_terminal_event_id=$5, consumption_reason='conversation_tool_result', updated_at=now()
+		WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3`,
+		workspaceID, sessionID, toolUseEventID, bridgeRequestHash(terminalJSON), terminalEventID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("consume terminal poll receipt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit terminal consumption: %v", err)
+	}
+	result := <-done
+	if result.err != nil || result.response.GetResultJson() != terminalJSON {
+		t.Fatalf("ReadCommandResult waiting consumption = response %+v err %v; want stored terminal result", result.response, result.err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCancelCommandKeepsAnIndependentReceipt(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
