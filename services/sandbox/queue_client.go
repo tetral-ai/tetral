@@ -9,7 +9,7 @@ import (
 
 type SandboxQueueClient interface {
 	Lease(context.Context, *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error)
-	Heartbeat(context.Context, *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error)
+	Heartbeat(context.Context, *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error)
 	Ack(context.Context, *queuev1.AckRequest) (*queuev1.TransitionResponse, error)
 	Retry(context.Context, *queuev1.RetryRequest) (*queuev1.TransitionResponse, error)
 	Defer(context.Context, *queuev1.DeferRequest) (*queuev1.TransitionResponse, error)
@@ -28,7 +28,7 @@ func (a sandboxQueueClientAdapter) Lease(ctx context.Context, request *queuev1.L
 	return a.client.Lease(ctx, request)
 }
 
-func (a sandboxQueueClientAdapter) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error) {
+func (a sandboxQueueClientAdapter) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
 	return a.client.Heartbeat(ctx, request)
 }
 

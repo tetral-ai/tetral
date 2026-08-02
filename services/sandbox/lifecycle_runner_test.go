@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -349,6 +350,7 @@ func TestSandboxMaterializationRunnerRechecksReadinessBeforeProjection(t *testin
 		materialization ProviderOutcome[MaterializationResult]
 		wantAdapter     []string
 		wantStore       []string
+		wantTransitions []string
 	}{
 		{
 			name:       "ready projects resources",
@@ -359,6 +361,7 @@ func TestSandboxMaterializationRunnerRechecksReadinessBeforeProjection(t *testin
 				Resources:                         sandbox.ResourceSetup{ResourceRootsJSON: `[{"path":"/mnt/session/uploads/a","mode":"read"}]`},
 			}},
 			wantAdapter: []string{"inspect", "materialize"}, wantStore: []string{"claim-materialization", "complete-materialization"},
+			wantTransitions: []string{"ack:qjob_materialization"},
 		},
 		{
 			name:        "cold resource rejoins activation",
@@ -388,10 +391,57 @@ func TestSandboxMaterializationRunnerRechecksReadinessBeforeProjection(t *testin
 			if !reflect.DeepEqual(store.calls, test.wantStore) {
 				t.Fatalf("store calls = %v; want %v", store.calls, test.wantStore)
 			}
-			if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_materialization"}) {
-				t.Fatalf("queue transitions = %v; want ack", queueClient.transitions)
+			if !reflect.DeepEqual(queueClient.transitions, test.wantTransitions) {
+				t.Fatalf("queue transitions = %v; want %v", queueClient.transitions, test.wantTransitions)
 			}
 		})
+	}
+}
+
+func TestSandboxMaterializationRunnerMakesNoQueueTransitionWhenWaitLosesAuthority(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxMaterializationQueueJob()}}
+	store := &recordingSandboxLifecycleStore{
+		materialization: sandboxMaterializationTestWork(), current: true,
+		waitDisposition: SandboxLifecycleLostAuthority,
+	}
+	adapter := &recordingLifecycleAdapter{inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionNeedsActivation}}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxMaterializationJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("RunOnce error = %v; want lost authority", err)
+	}
+	if len(queueClient.transitions) != 0 {
+		t.Fatalf("Queue transitions = %v; want none after authority loss", queueClient.transitions)
+	}
+}
+
+func TestSandboxLifecycleRunnerRejectsLeaseResponseAfterLocalAuthorityWindow(t *testing.T) {
+	queueClient := &recordingSandboxQueue{
+		leased:     []*queuev1.QueueJob{sandboxActivationQueueJob()},
+		leaseDelay: 60 * time.Millisecond,
+	}
+	store := &recordingSandboxLifecycleStore{}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxActivationJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{
+			WorkspaceID: "ws_lifecycle", LeaseDuration: 40 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond,
+		},
+	}
+	if err := runner.RunOnce(context.Background()); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("RunOnce error = %v; want local lease authority loss", err)
+	}
+	if len(store.calls) != 0 || len(queueClient.transitions) != 0 {
+		t.Fatalf("delayed Lease response reached business/Queue work = %v/%v", store.calls, queueClient.transitions)
 	}
 }
 
@@ -692,6 +742,50 @@ func TestSandboxLifecycleRunnersFinalizeRetryFromLastPermittedAttempt(t *testing
 	}
 }
 
+func TestSandboxActivationRunnerMakesNoQueueTransitionAfterFinalizerLosesAuthority(t *testing.T) {
+	cases := map[string]func(*queuev1.QueueJob, *recordingSandboxLifecycleStore){
+		"invalid_budget": func(job *queuev1.QueueJob, _ *recordingSandboxLifecycleStore) {
+			job.MaxAttempts = 0
+		},
+		"over_budget": func(job *queuev1.QueueJob, _ *recordingSandboxLifecycleStore) {
+			job.AttemptCount = job.MaxAttempts + 1
+		},
+		"retry_at_budget": func(job *queuev1.QueueJob, store *recordingSandboxLifecycleStore) {
+			job.AttemptCount = job.MaxAttempts
+			store.current = true
+			store.activation = sandboxActivationTestWork(false)
+		},
+	}
+	for name, arrange := range cases {
+		t.Run(name, func(t *testing.T) {
+			job := sandboxActivationQueueJob()
+			store := &recordingSandboxLifecycleStore{finalizer: SandboxLifecycleLostAuthority}
+			arrange(job, store)
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+			adapter := &recordingLifecycleAdapter{
+				resolution: ProviderOutcome[ActivationResolution]{EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_transition_in_progress"},
+			}
+			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+			if err != nil {
+				t.Fatalf("NewProviderRegistry: %v", err)
+			}
+			runner := &SandboxActivationJobRunner{
+				Queue: queueClient, Store: store, Providers: registry,
+				Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second},
+			}
+			if err := runner.RunOnce(context.Background()); !errors.Is(err, errQueueLeaseLost) {
+				t.Fatalf("RunOnce error = %v; want lost authority", err)
+			}
+			if len(queueClient.transitions) != 0 {
+				t.Fatalf("Queue transitions = %v; want none after authority loss", queueClient.transitions)
+			}
+			if name != "retry_at_budget" && len(adapter.calls) != 0 {
+				t.Fatalf("provider calls = %v; want none before rejected finalizer", adapter.calls)
+			}
+		})
+	}
+}
+
 func sandboxActivationTestWork(mayCreate bool) SandboxActivationWork {
 	return SandboxActivationWork{
 		Job:  SandboxLifecycleJob{WorkspaceID: "ws_lifecycle", SessionID: "sesn_lifecycle", LogicalSandboxID: "sbox_lifecycle", OperationID: "sop_activation"},
@@ -749,37 +843,60 @@ type recordingSandboxLifecycleStore struct {
 	materialization SandboxMaterializationWork
 	release         SandboxReleaseWork
 	current         bool
+	disposition     SandboxLifecycleDisposition
+	finalizer       SandboxLifecycleDisposition
+	waitDisposition SandboxLifecycleDisposition
 	claimReleaseErr error
 	calls           []string
 }
 
-func (s *recordingSandboxLifecycleStore) ClaimActivation(context.Context, SandboxLifecycleJob, time.Time) (SandboxActivationWork, bool, error) {
+func (s *recordingSandboxLifecycleStore) finalizerDisposition() SandboxLifecycleDisposition {
+	if s.finalizer != "" {
+		return s.finalizer
+	}
+	return s.lifecycleDisposition()
+}
+
+func (s *recordingSandboxLifecycleStore) lifecycleDisposition() SandboxLifecycleDisposition {
+	if s.disposition != "" {
+		return s.disposition
+	}
+	if s.current {
+		return SandboxLifecycleApplied
+	}
+	return SandboxLifecycleNotApplicable
+}
+
+func (s *recordingSandboxLifecycleStore) ClaimActivation(context.Context, SandboxLifecycleJob, time.Time) (SandboxActivationWork, SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "claim")
-	return s.activation, s.current, nil
+	return s.activation, s.lifecycleDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) CompleteActivation(_ context.Context, _ SandboxActivationWork, handle sandbox.ProviderHandle, _ time.Time) error {
+func (s *recordingSandboxLifecycleStore) CompleteActivation(_ context.Context, _ SandboxActivationWork, handle sandbox.ProviderHandle, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "complete:"+handle.SandboxID)
-	return nil
+	return s.lifecycleDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) ReplaceMissingActivation(_ context.Context, _ SandboxActivationWork, _ time.Time) (SandboxActivationWork, bool, error) {
+func (s *recordingSandboxLifecycleStore) ReplaceMissingActivation(_ context.Context, _ SandboxActivationWork, _ time.Time) (SandboxActivationWork, SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "replace-missing")
-	return s.replacement, s.current, nil
+	return s.replacement, s.lifecycleDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) ObserveUnknownActivation(_ context.Context, _ SandboxActivationWork, kind string, _ time.Time) error {
+func (s *recordingSandboxLifecycleStore) ObserveUnknownActivation(_ context.Context, _ SandboxActivationWork, kind string, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "observe:"+kind)
-	return nil
+	return s.lifecycleDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) FailActivation(_ context.Context, _ SandboxActivationWork, boundary ProviderEffectBoundary, _ ProviderDisposition, kind string, _ string, _ time.Time) error {
+func (s *recordingSandboxLifecycleStore) FailActivation(_ context.Context, _ SandboxActivationWork, boundary ProviderEffectBoundary, _ ProviderDisposition, kind string, _ string, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "fail:"+string(boundary)+":"+kind)
-	return nil
+	return s.lifecycleDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) ClaimMaterialization(context.Context, SandboxLifecycleJob, time.Time) (SandboxMaterializationWork, bool, error) {
+func (s *recordingSandboxLifecycleStore) ClaimMaterialization(context.Context, SandboxLifecycleJob, time.Time) (SandboxMaterializationWork, SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "claim-materialization")
-	return s.materialization, s.current, nil
+	return s.materialization, s.lifecycleDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) WaitMaterializationForActivation(_ context.Context, _ SandboxMaterializationWork, readiness ExecutionReadiness, _ time.Time) error {
+func (s *recordingSandboxLifecycleStore) WaitMaterializationForActivation(_ context.Context, _ SandboxMaterializationWork, readiness ExecutionReadiness, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "materialization-activation:"+string(readiness))
-	return nil
+	if s.waitDisposition != "" {
+		return s.waitDisposition, nil
+	}
+	return s.lifecycleDisposition(), nil
 }
 func (s *recordingSandboxLifecycleStore) CompleteMaterialization(_ context.Context, _ SandboxMaterializationWork, _ MaterializationResult, _ time.Time) error {
 	s.calls = append(s.calls, "complete-materialization")
@@ -789,13 +906,13 @@ func (s *recordingSandboxLifecycleStore) FailMaterialization(_ context.Context, 
 	s.calls = append(s.calls, "fail-materialization:"+string(boundary)+":"+string(disposition)+":"+kind)
 	return nil
 }
-func (s *recordingSandboxLifecycleStore) ClaimRelease(context.Context, SandboxLifecycleJob, time.Time) (SandboxReleaseWork, bool, error) {
+func (s *recordingSandboxLifecycleStore) ClaimRelease(context.Context, SandboxLifecycleJob, time.Time) (SandboxReleaseWork, SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "claim-release")
-	return s.release, s.current, s.claimReleaseErr
+	return s.release, s.lifecycleDisposition(), s.claimReleaseErr
 }
-func (s *recordingSandboxLifecycleStore) ParkBlockedRelease(context.Context, SandboxLifecycleJob, time.Time) (bool, error) {
+func (s *recordingSandboxLifecycleStore) ParkBlockedRelease(context.Context, SandboxLifecycleJob, time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "park-release")
-	return true, nil
+	return SandboxLifecycleApplied, nil
 }
 func (s *recordingSandboxLifecycleStore) AuthorizeRelease(context.Context, SandboxReleaseWork, time.Time) (bool, error) {
 	s.calls = append(s.calls, "authorize-release")
@@ -817,13 +934,13 @@ func (s *recordingSandboxLifecycleStore) FailRelease(_ context.Context, _ Sandbo
 	s.calls = append(s.calls, "fail-release:"+string(boundary)+":"+kind)
 	return nil
 }
-func (s *recordingSandboxLifecycleStore) FinalizeExhaustedLifecycle(_ context.Context, _ *queuev1.QueueJob, kind string, _ time.Time) error {
+func (s *recordingSandboxLifecycleStore) FinalizeExhaustedLifecycle(_ context.Context, _ *queuev1.QueueJob, kind string, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "exhausted:"+kind)
-	return nil
+	return s.finalizerDisposition(), nil
 }
-func (s *recordingSandboxLifecycleStore) FinalizeInvalidLifecycle(_ context.Context, _ *queuev1.QueueJob, kind string, _ time.Time) error {
+func (s *recordingSandboxLifecycleStore) FinalizeInvalidLifecycle(_ context.Context, _ *queuev1.QueueJob, kind string, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "invalid:"+kind)
-	return nil
+	return s.finalizerDisposition(), nil
 }
 
 type recordingLifecycleAdapter struct {

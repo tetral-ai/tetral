@@ -51,7 +51,6 @@ func runMaintenanceTick(ctx context.Context, store MaintenanceStore, cfg Mainten
 		Limit:        cfg.Limit,
 		ErrorKind:    "lease_expired",
 		ErrorMessage: "queue lease expired",
-		Now:          now,
 	})
 	logLeaseReclaimResult(cfg.Logger, reclaimed, err, time.Since(started))
 	if err != nil {

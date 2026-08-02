@@ -95,7 +95,8 @@ func enqueueReadySandboxReleasesTx(ctx context.Context, tx *dbconnect.Tx, worksp
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE sandbox_lifecycle_operations
-			    SET queue_job_id=$3, queue_kind=$4, queue_partition_key=$5, queue_dedupe_key=$6, updated_at=$7
+			    SET queue_job_id=$3, queue_kind=$4, queue_partition_key=$5, queue_dedupe_key=$6,
+			        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, attempt_count=0, updated_at=$7
 			  WHERE workspace_id=$1 AND operation_id=$2 AND state='pending'`,
 			workspaceID, item.operationID, jobID, queue.KindSandboxRelease, partitionKey, dedupeKey, now.UTC(),
 		); err != nil {

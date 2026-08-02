@@ -43,7 +43,8 @@ func (m *PostgreSQLSandboxMediaMaterializer) RecoverResult(ctx context.Context, 
 	}
 	attachmentRef := sandboxAttachmentRef(ref)
 	var statusValue, storedSessionID, storedThreadID, storedSourceID, blobPointer, mime, metadataJSON string
-	err := m.client.WithWorkspaceReadOnlyTx(ctx, ref.WorkspaceID, "sandbox.media.recover", func(tx *dbconnect.Tx) error {
+	err := m.client.WithWorkspaceTx(ctx, ref.WorkspaceID, "sandbox.media.recover", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		return tx.QueryRow(ctx,
 			`SELECT session_id, session_thread_id, source_tool_use_event_id,
 			        blob_pointer, mime, metadata_json, status
@@ -149,7 +150,8 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 		return "", err
 	}
 	statusValue := ""
-	if err := m.client.WithWorkspaceTx(ctx, ref.WorkspaceID, "sandbox.media.ensure", func(tx *dbconnect.Tx) error {
+	if err := m.client.WithWorkspaceTx(ctx, ref.WorkspaceID, "sandbox.media.ensure", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_transient_attachments (
 				workspace_id, attachment_ref, session_id, session_thread_id,
@@ -195,7 +197,8 @@ func (m *PostgreSQLSandboxMediaMaterializer) MaterializeResult(ctx context.Conte
 				return "", errors.New("sandbox media Blob custody could not be verified")
 			}
 		}
-		if err := m.client.WithWorkspaceTx(ctx, ref.WorkspaceID, "sandbox.media.stage", func(tx *dbconnect.Tx) error {
+		if err := m.client.WithWorkspaceTx(ctx, ref.WorkspaceID, "sandbox.media.stage", func(tx *dbconnect.Tx) (txErr error) {
+			defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 			result, err := tx.Exec(ctx,
 				`UPDATE session_transient_attachments
 				    SET status='staged', updated_at=$3

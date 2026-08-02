@@ -82,6 +82,12 @@ func (s *PostgreSQLSandboxBackgroundCommandStore) SettleTask(ctx context.Context
 		if err := lockBackgroundSessionTx(ctx, tx, work.WorkspaceID, work.SessionID); err != nil {
 			return err
 		}
+		if _, _, err := lockSandboxBinding(ctx, tx, work.WorkspaceID, work.SessionID); err != nil {
+			return err
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.WorkspaceID, work.SessionID); err != nil {
+			return err
+		}
 		return settleBackgroundTaskResultTx(ctx, tx, work, result, now.UTC())
 	})
 }
@@ -141,6 +147,15 @@ func (s *PostgreSQLSandboxBackgroundCommandStore) SettleCommand(ctx context.Cont
 	result.ResultJSON = normalizeSandboxProviderResult(result.ResultJSON)
 	return s.withWorkspaceTx(ctx, work.Task.WorkspaceID, "sandbox.background.settle_command", func(tx *dbconnect.Tx) error {
 		if err := lockBackgroundSessionTx(ctx, tx, work.Task.WorkspaceID, work.Task.SessionID); err != nil {
+			return err
+		}
+		if err := lockBackgroundCommandReceiptTx(ctx, tx, work.Task.WorkspaceID, work.Task.SessionID, work.ToolUseEventID, work.RequestID); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, work.Task.WorkspaceID, work.Task.SessionID); err != nil {
+			return err
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Task.WorkspaceID, work.Task.SessionID); err != nil {
 			return err
 		}
 		return settleBackgroundCommandTx(ctx, tx, work, disposition, result, now.UTC())
@@ -243,6 +258,15 @@ func finalizeExhaustedBackgroundReconcileTx(ctx context.Context, tx *dbconnect.T
 
 func finalizeExhaustedBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, identity backgroundQueueIdentity, now time.Time) error {
 	if err := lockBackgroundSessionTx(ctx, tx, identity.WorkspaceID, identity.SessionID); err != nil {
+		return err
+	}
+	if err := lockBackgroundCommandReceiptByRequestTx(ctx, tx, identity.WorkspaceID, identity.SessionID, identity.TaskID, identity.RequestID); err != nil {
+		return err
+	}
+	if _, _, err := lockSandboxBinding(ctx, tx, identity.WorkspaceID, identity.SessionID); err != nil {
+		return err
+	}
+	if err := lockSandboxLifecycleOperationsForSession(ctx, tx, identity.WorkspaceID, identity.SessionID); err != nil {
 		return err
 	}
 	work, current, err := loadBackgroundCommandForUpdateTx(ctx, tx, SandboxBackgroundCommandJob{
@@ -354,6 +378,30 @@ func loadBackgroundCommandForUpdateTx(ctx context.Context, tx *dbconnect.Tx, job
 	return work, true, nil
 }
 
+func lockBackgroundCommandReceiptTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, toolUseEventID string, requestID string) error {
+	var locked string
+	err := tx.QueryRow(ctx, `SELECT tool_use_event_id FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3
+		  AND tool_kind='sandbox_background' AND background_request_id=$4
+		FOR UPDATE`, workspaceID, sessionID, toolUseEventID, requestID).Scan(&locked)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
+	return err
+}
+
+func lockBackgroundCommandReceiptByRequestTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, taskID string, requestID string) error {
+	var locked string
+	err := tx.QueryRow(ctx, `SELECT tool_use_event_id FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_background'
+		  AND background_task_id=$3 AND background_request_id=$4
+		FOR UPDATE`, workspaceID, sessionID, taskID, requestID).Scan(&locked)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
+	return err
+}
+
 func settleBackgroundCommandTx(ctx context.Context, tx *dbconnect.Tx, work SandboxBackgroundOperationWork, disposition string, result sandboxdriver.CommandResult, now time.Time) error {
 	if work.Kind == SandboxBackgroundOperationCancel && work.Task.ReleaseOperationID != "" && disposition != "completed" {
 		result.TerminalStatus = "unknown_outcome"
@@ -392,7 +440,10 @@ func (s *PostgreSQLSandboxBackgroundCommandStore) withWorkspaceTx(ctx context.Co
 	if s == nil || s.client == nil {
 		return errors.New("sandbox background store database is required")
 	}
-	return s.client.WithWorkspaceTx(ctx, workspaceID, operation, fn)
+	return s.client.WithWorkspaceTx(ctx, workspaceID, operation, func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		return fn(tx)
+	})
 }
 
 func loadBackgroundTaskForUpdateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, taskID string) (SandboxBackgroundTaskWork, bool, error) {

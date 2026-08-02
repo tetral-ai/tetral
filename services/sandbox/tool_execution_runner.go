@@ -151,6 +151,7 @@ func (r *SandboxToolExecutionJobRunner) RunOnceWithActivity(ctx context.Context)
 	if err != nil {
 		return false, err
 	}
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxToolExecute},
 		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -160,16 +161,29 @@ func (r *SandboxToolExecutionJobRunner) RunOnceWithActivity(ctx context.Context)
 	}
 	hadWork := len(lease.GetJobs()) > 0
 	for _, job := range lease.GetJobs() {
-		if err := r.processJob(ctx, job, cfg); err != nil {
+		if err := r.processJob(ctx, job, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return hadWork, err
 		}
 	}
 	return hadWork, nil
 }
 
-func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxToolExecutionRunnerConfig) error {
+func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxToolExecutionRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if leaseErr := finishLease(); resultErr == nil && leaseErr != nil {
+			resultErr = leaseErr
+		}
+	}()
+	ctx = workCtx
 	if queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Coordinator.FinalizeInvalidExecution(ctx, queueJob); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
@@ -179,6 +193,9 @@ func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob
 	}
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := r.Coordinator.FinalizeExhaustedExecution(ctx, queueJob); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
@@ -191,21 +208,26 @@ func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob
 		if err := r.Coordinator.FinalizeInvalidExecution(ctx, queueJob); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
 			ErrorKind: "invalid_sandbox_tool_execute_payload", ErrorMessage: "sandbox tool execution queue payload is invalid",
 		}))
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.Ref.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	err = r.handleExecution(workCtx, job, cfg)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-		return heartbeatErr
-	}
+	err = r.handleExecution(ctx, job, cfg)
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		var retry *sandboxExecutionRetry
 		if errors.As(err, &retry) {
 			if queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
 				if err := r.Coordinator.FinalizeExhaustedExecution(ctx, queueJob); err != nil {
+					return err
+				}
+				if err := stopQueueLeaseGuard(ctx); err != nil {
 					return err
 				}
 				return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
@@ -213,11 +235,17 @@ func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob
 					ErrorKind: "sandbox_execution_attempts_exhausted", ErrorMessage: "sandbox execution attempt budget exhausted",
 				}))
 			}
+			if err := stopQueueLeaseGuard(ctx); err != nil {
+				return err
+			}
 			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 				WorkspaceId: job.Ref.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
 				ErrorKind: retry.kind, ErrorMessage: retry.message,
 			}))
 		}
+		return err
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
@@ -228,7 +256,7 @@ func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob
 func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job SandboxExecutionJob, cfg SandboxToolExecutionRunnerConfig) error {
 	work, current, err := r.Coordinator.LoadExecution(ctx, job)
 	if err != nil {
-		return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox execution state could not be loaded")
+		return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_execution_store_error", "sandbox execution state could not be loaded")
 	}
 	if !current {
 		return nil
@@ -237,7 +265,7 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		if work.ProviderCommandReference == "" {
 			recovery, err := r.Media.RecoverResult(ctx, work.Ref)
 			if err != nil {
-				return newSandboxExecutionRetry("sandbox_media_recovery_error", "sandbox media custody could not be inspected")
+				return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_media_recovery_error", "sandbox media custody could not be inspected")
 			}
 			if recovery.Found {
 				if recovery.Ready {
@@ -296,7 +324,7 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		if errors.Is(err, errSandboxExecutionReinspection) {
 			return newSandboxExecutionRetry("sandbox_execution_reinspection", "sandbox execution state changed before preparation")
 		}
-		return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox execution preparation could not be recorded")
+		return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_execution_store_error", "sandbox execution preparation could not be recorded")
 	}
 	if !prepared {
 		return nil
@@ -332,7 +360,7 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		if errors.Is(err, errSandboxExecutionReinspection) {
 			return newSandboxExecutionRetry("sandbox_execution_reinspection", "sandbox execution state changed before submission")
 		}
-		return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox execution authorization could not be recorded")
+		return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_execution_store_error", "sandbox execution authorization could not be recorded")
 	}
 	if !authorized {
 		return nil
@@ -361,7 +389,7 @@ func (r *SandboxToolExecutionJobRunner) handleExecution(ctx context.Context, job
 		}
 		recorded, err := r.Coordinator.RecordProviderCommandReference(ctx, work, encodedReference)
 		if err != nil {
-			return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox command reference could not be recorded")
+			return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_execution_store_error", "sandbox command reference could not be recorded")
 		}
 		if !recorded {
 			return nil
@@ -447,7 +475,7 @@ func (r *SandboxToolExecutionJobRunner) observeRunningExecution(ctx context.Cont
 		}
 		recorded, err := r.Coordinator.RecordProviderCommandReference(ctx, work, encodedReference)
 		if err != nil {
-			return newSandboxExecutionRetry("sandbox_execution_store_error", "sandbox command observation could not be recorded")
+			return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_execution_store_error", "sandbox command observation could not be recorded")
 		}
 		if !recorded {
 			return nil
@@ -459,6 +487,9 @@ func (r *SandboxToolExecutionJobRunner) observeRunningExecution(ctx context.Cont
 func (r *SandboxToolExecutionJobRunner) settleCompletedExecution(ctx context.Context, work SandboxExecutionWork, resultJSON string, backgroundTask *sandboxdriver.BackgroundTask, providerCommandReference string) error {
 	materialized, err := r.Media.MaterializeResult(ctx, work.Ref, work.Invocation.ToolName, work.Invocation.InputJSON, resultJSON, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		return r.Coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
 			Kind: SandboxExecutionFailed, ErrorKind: "transient_attachment_unavailable",
 			SafeMessage: "sandbox media attachment handoff failed", ProviderCommandReference: providerCommandReference,
@@ -565,4 +596,11 @@ func (e *sandboxExecutionRetry) Error() string { return e.message }
 
 func newSandboxExecutionRetry(kind string, message string) error {
 	return &sandboxExecutionRetry{kind: kind, message: message}
+}
+
+func sandboxExecutionRetryUnlessAuthorityLost(err error, kind string, message string) error {
+	if errors.Is(err, errQueueLeaseLost) {
+		return err
+	}
+	return newSandboxExecutionRetry(kind, message)
 }

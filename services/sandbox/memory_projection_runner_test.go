@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -60,6 +61,35 @@ func TestSandboxMemoryProjectionRunnerNormalizesProviderState(t *testing.T) {
 	}
 }
 
+func TestSandboxMemoryProjectionRunnerKeepsHeartbeatThroughLiveExhaustion(t *testing.T) {
+	job := sandboxMemoryProjectionQueueJob()
+	job.AttemptCount = job.MaxAttempts
+	finalizing := make(chan struct{})
+	heartbeatObserved := make(chan struct{}, 1)
+	queueClient := &observingSandboxFinalizerQueue{
+		recordingSandboxQueue: recordingSandboxQueue{leased: []*queuev1.QueueJob{job}},
+		finalizing:            finalizing, heartbeatObserved: heartbeatObserved,
+	}
+	store := &recordingMemoryProjectionStore{
+		loadErr:         errors.New("memory projection store unavailable"),
+		finalizeStarted: finalizing, heartbeatObserved: heartbeatObserved,
+	}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingMemoryProjectionAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxMemoryProjectionJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxMemoryProjectionRunnerConfig{WorkspaceID: "ws_memory", LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_memory_projection:sandbox_memory_projection_exhausted"}) {
+		t.Fatalf("transitions = %v; want dead letter after live finalizer", queueClient.transitions)
+	}
+}
+
 func sandboxMemoryProjectionQueueJob() *queuev1.QueueJob {
 	return &queuev1.QueueJob{
 		Id: "qjob_memory_projection", WorkspaceId: "ws_memory", Kind: queue.KindSandboxMemoryProjection,
@@ -80,14 +110,17 @@ func sandboxMemoryProjectionWork() SandboxMemoryProjectionWork {
 }
 
 type recordingMemoryProjectionStore struct {
-	current bool
-	work    SandboxMemoryProjectionWork
-	calls   []string
+	current           bool
+	work              SandboxMemoryProjectionWork
+	calls             []string
+	loadErr           error
+	finalizeStarted   chan struct{}
+	heartbeatObserved <-chan struct{}
 }
 
 func (s *recordingMemoryProjectionStore) LoadProjection(context.Context, SandboxMemoryProjectionJob) (SandboxMemoryProjectionWork, bool, error) {
 	s.calls = append(s.calls, "load")
-	return s.work, s.current, nil
+	return s.work, s.current, s.loadErr
 }
 
 func (s *recordingMemoryProjectionStore) SettleProjection(_ context.Context, _ SandboxMemoryProjectionWork, state string, _ string, _ time.Time) error {
@@ -97,6 +130,9 @@ func (s *recordingMemoryProjectionStore) SettleProjection(_ context.Context, _ S
 
 func (s *recordingMemoryProjectionStore) FinalizeProjectionExhaustion(context.Context, *queuev1.QueueJob, time.Time) error {
 	s.calls = append(s.calls, "exhaust")
+	if s.finalizeStarted != nil {
+		return requireHeartbeatDuringFinalizer(s.finalizeStarted, s.heartbeatObserved)
+	}
 	return nil
 }
 

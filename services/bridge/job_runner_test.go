@@ -1213,7 +1213,7 @@ func (c *recordingQueueClient) Lease(_ context.Context, request *queuev1.LeaseRe
 	return &queuev1.LeaseResponse{Jobs: c.leased}, nil
 }
 
-func (c *recordingQueueClient) Heartbeat(_ context.Context, _ *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error) {
+func (c *recordingQueueClient) Heartbeat(_ context.Context, _ *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.heartbeats++
@@ -1226,7 +1226,7 @@ func (c *recordingQueueClient) Heartbeat(_ context.Context, _ *queuev1.Heartbeat
 	if c.heartbeatErr != nil {
 		return nil, c.heartbeatErr
 	}
-	return &queuev1.TransitionResponse{Updated: !c.heartbeatLost}, nil
+	return &queuev1.HeartbeatResponse{Updated: !c.heartbeatLost}, nil
 }
 
 func (c *recordingQueueClient) transitionSnapshot() []string {
@@ -1390,7 +1390,7 @@ func (c pollFailingQueueClient) Lease(context.Context, *queuev1.LeaseRequest) (*
 	return nil, c.err
 }
 
-func (c pollFailingQueueClient) Heartbeat(context.Context, *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error) {
+func (c pollFailingQueueClient) Heartbeat(context.Context, *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
 	return nil, errors.New("unexpected heartbeat")
 }
 

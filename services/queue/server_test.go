@@ -270,8 +270,8 @@ func (s *recordingStore) Lease(_ context.Context, request queue.LeaseRequest) ([
 	return s.leaseJobs, nil
 }
 
-func (s *recordingStore) Heartbeat(context.Context, queue.HeartbeatRequest) (bool, error) {
-	return true, nil
+func (s *recordingStore) Heartbeat(context.Context, queue.HeartbeatRequest) (queue.HeartbeatResult, error) {
+	return queue.HeartbeatResult{Updated: true, LeasedUntil: time.Now().UTC().Add(time.Minute)}, nil
 }
 
 func (s *recordingStore) Ack(_ context.Context, request queue.AckRequest) (bool, error) {

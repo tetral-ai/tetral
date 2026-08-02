@@ -27,7 +27,15 @@ func (s *PostgreSQLSandboxOutputCaptureStore) LoadCapture(ctx context.Context, j
 	}
 	work := SandboxOutputCaptureWork{SandboxOutputCaptureJob: job, Existing: map[string]SandboxOutputCaptureIndexEntry{}}
 	current := false
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.output_capture.load", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.output_capture.load", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		if err := lockOutputCaptureSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		binding, bindingExists, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID)
+		if err != nil {
+			return err
+		}
 		var state string
 		var capturedLogicalID, capturedProvider, capturedProviderResourceID sql.NullString
 		var capturedBindingRevision sql.NullInt64
@@ -54,32 +62,21 @@ func (s *PostgreSQLSandboxOutputCaptureStore) LoadCapture(ctx context.Context, j
 				return err
 			}
 		}
-		var logicalID, provider, providerResourceID string
-		var bindingRevision int64
-		err := tx.QueryRow(ctx,
-			`SELECT logical_sandbox_id, provider, COALESCE(provider_resource_id,''), binding_revision
-			   FROM session_sandbox_bindings
-			  WHERE workspace_id=$1 AND session_id=$2 AND release_requested_at IS NULL
-			  FOR UPDATE`,
-			job.WorkspaceID, job.SessionID,
-		).Scan(&logicalID, &provider, &providerResourceID, &bindingRevision)
-		if dbconnect.IsNoRows(err) || strings.TrimSpace(providerResourceID) == "" {
+		if !bindingExists || binding.ReleaseRequested() || strings.TrimSpace(binding.ProviderResourceID) == "" {
 			if capturedBindingRevision.Valid {
 				return failStaleOutputCaptureTx(ctx, tx, work, "sandbox binding is no longer current", now)
 			}
 			work.ProviderAvailable = false
-		} else if err != nil {
-			return err
 		} else if capturedBindingRevision.Valid {
 			if !capturedLogicalID.Valid || !capturedProvider.Valid || !capturedProviderResourceID.Valid ||
-				capturedLogicalID.String != logicalID || capturedProvider.String != provider ||
-				capturedProviderResourceID.String != providerResourceID || capturedBindingRevision.Int64 != bindingRevision {
+				capturedLogicalID.String != binding.LogicalSandboxID || capturedProvider.String != binding.Provider ||
+				capturedProviderResourceID.String != binding.ProviderResourceID || capturedBindingRevision.Int64 != binding.BindingRevision {
 				return failStaleOutputCaptureTx(ctx, tx, work, "sandbox binding changed before capture", now)
 			}
-			work.LogicalSandboxID = logicalID
-			work.Provider = provider
-			work.ProviderResourceID = providerResourceID
-			work.BindingRevision = bindingRevision
+			work.LogicalSandboxID = binding.LogicalSandboxID
+			work.Provider = binding.Provider
+			work.ProviderResourceID = binding.ProviderResourceID
+			work.BindingRevision = binding.BindingRevision
 			work.ProviderAvailable = true
 		} else {
 			if _, err := tx.Exec(ctx,
@@ -87,14 +84,14 @@ func (s *PostgreSQLSandboxOutputCaptureStore) LoadCapture(ctx context.Context, j
 				    SET logical_sandbox_id=$5, provider=$6, provider_resource_id=$7, sandbox_binding_revision=$8, updated_at=$9
 				  WHERE workspace_id=$1 AND session_id=$2 AND finish_idle_write_id=$3 AND capture_generation=$4 AND state='running'`,
 				work.WorkspaceID, work.SessionID, work.FinishIdleWriteID, work.CaptureGeneration,
-				logicalID, provider, providerResourceID, bindingRevision, now.UTC(),
+				binding.LogicalSandboxID, binding.Provider, binding.ProviderResourceID, binding.BindingRevision, now.UTC(),
 			); err != nil {
 				return err
 			}
-			work.LogicalSandboxID = logicalID
-			work.Provider = provider
-			work.ProviderResourceID = providerResourceID
-			work.BindingRevision = bindingRevision
+			work.LogicalSandboxID = binding.LogicalSandboxID
+			work.Provider = binding.Provider
+			work.ProviderResourceID = binding.ProviderResourceID
+			work.BindingRevision = binding.BindingRevision
 			work.ProviderAvailable = true
 		}
 		rows, err := tx.Query(ctx,
@@ -128,7 +125,8 @@ func (s *PostgreSQLSandboxOutputCaptureStore) EnsureBlobStage(ctx context.Contex
 		return "", errors.New("sandbox output capture database is required")
 	}
 	var state string
-	err := s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.ensure_blob", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.ensure_blob", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockRunningOutputCaptureTx(ctx, tx, work); err != nil {
 			return err
 		}
@@ -166,7 +164,8 @@ func (s *PostgreSQLSandboxOutputCaptureStore) MarkBlobUploaded(ctx context.Conte
 	if s == nil || s.client == nil {
 		return errors.New("sandbox output capture database is required")
 	}
-	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.mark_blob_uploaded", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.mark_blob_uploaded", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockRunningOutputCaptureTx(ctx, tx, work); err != nil {
 			return err
 		}
@@ -206,7 +205,8 @@ func (s *PostgreSQLSandboxOutputCaptureStore) StageCapture(ctx context.Context, 
 		state = "skipped_unavailable"
 	}
 	outcomeDigest := outputCaptureOutcomeDigest(state, manifestJSON, skippedJSON, recordsJSON, failureKind, failureDetail)
-	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.stage", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.stage", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockRunningOutputCaptureTx(ctx, tx, work); err != nil {
 			return err
 		}
@@ -273,7 +273,11 @@ func (s *PostgreSQLSandboxOutputCaptureStore) FailCapture(ctx context.Context, w
 	if s == nil || s.client == nil {
 		return errors.New("sandbox output capture database is required")
 	}
-	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.fail", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.fail", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		if err := lockRunningOutputCaptureTx(ctx, tx, work); err != nil {
+			return err
+		}
 		result, err := tx.Exec(ctx,
 			`UPDATE sandbox_output_capture_operations
 			    SET state='failed', failure_kind=$5, failure_detail=$6,
@@ -297,12 +301,26 @@ func (s *PostgreSQLSandboxOutputCaptureStore) FinalizeCaptureExhaustion(ctx cont
 	if err != nil {
 		return err
 	}
-	return s.client.WithWorkspaceTx(ctx, decoded.WorkspaceID, "sandbox.output_capture.finalize_exhaustion", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, decoded.WorkspaceID, "sandbox.output_capture.finalize_exhaustion", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		if err := lockOutputCaptureSessionTx(ctx, tx, decoded.WorkspaceID, decoded.SessionID); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, decoded.WorkspaceID, decoded.SessionID); err != nil {
+			return err
+		}
 		return finalizeOutputCaptureExhaustionTx(ctx, tx, decoded, now)
 	})
 }
 
 func lockRunningOutputCaptureTx(ctx context.Context, tx *dbconnect.Tx, work SandboxOutputCaptureWork) error {
+	if err := lockOutputCaptureSessionTx(ctx, tx, work.WorkspaceID, work.SessionID); err != nil {
+		return err
+	}
+	binding, bindingExists, err := lockSandboxBinding(ctx, tx, work.WorkspaceID, work.SessionID)
+	if err != nil {
+		return err
+	}
 	var state string
 	var logicalID, provider, providerResourceID sql.NullString
 	var bindingRevision sql.NullInt64
@@ -321,21 +339,18 @@ func lockRunningOutputCaptureTx(ctx context.Context, tx *dbconnect.Tx, work Sand
 	if !bindingRevision.Valid {
 		return nil
 	}
-	var currentRevision int64
-	var currentLogicalID, currentProvider, currentProviderResourceID string
-	if err := tx.QueryRow(ctx,
-		`SELECT logical_sandbox_id, provider, COALESCE(provider_resource_id,''), binding_revision
-		   FROM session_sandbox_bindings
-		  WHERE workspace_id=$1 AND session_id=$2 AND release_requested_at IS NULL
-		  FOR UPDATE`, work.WorkspaceID, work.SessionID,
-	).Scan(&currentLogicalID, &currentProvider, &currentProviderResourceID, &currentRevision); err != nil {
+	if !bindingExists || binding.ReleaseRequested() {
 		return errors.New("sandbox output capture binding is no longer current")
 	}
-	if !logicalID.Valid || !provider.Valid || !providerResourceID.Valid || logicalID.String != currentLogicalID ||
-		provider.String != currentProvider || providerResourceID.String != currentProviderResourceID || bindingRevision.Int64 != currentRevision {
+	if !logicalID.Valid || !provider.Valid || !providerResourceID.Valid || logicalID.String != binding.LogicalSandboxID ||
+		provider.String != binding.Provider || providerResourceID.String != binding.ProviderResourceID || bindingRevision.Int64 != binding.BindingRevision {
 		return errors.New("sandbox output capture binding changed during capture")
 	}
 	return nil
+}
+
+func lockOutputCaptureSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
+	return lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: workspaceID, SessionID: sessionID})
 }
 
 func failStaleOutputCaptureTx(ctx context.Context, tx *dbconnect.Tx, work SandboxOutputCaptureWork, detail string, now time.Time) error {

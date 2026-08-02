@@ -27,8 +27,8 @@ func TestMaintenanceTickReclaimsThenSweepsSandboxJobsAndCounters(t *testing.T) {
 			t.Fatalf("maintenance calls = %v; want %v", store.calls, wantCalls)
 		}
 	}
-	if !store.reclaimNow.Equal(now) || !store.sandboxSweepNow.Equal(now) {
-		t.Fatalf("maintenance times = reclaim %v sweep %v; want %v", store.reclaimNow, store.sandboxSweepNow, now)
+	if !store.sandboxSweepNow.Equal(now) {
+		t.Fatalf("sandbox sweep time = %v; want %v", store.sandboxSweepNow, now)
 	}
 }
 
@@ -102,14 +102,12 @@ func decodeJSONLogRecords(t *testing.T, body []byte) []map[string]any {
 
 type recordingMaintenanceStore struct {
 	calls           []string
-	reclaimNow      time.Time
 	sandboxSweepNow time.Time
 	reclaimErr      error
 }
 
 func (s *recordingMaintenanceStore) ReclaimExpiredLeases(_ context.Context, request queue.ReclaimExpiredLeasesRequest) (int, error) {
 	s.calls = append(s.calls, "reclaim:"+strconv.Itoa(request.Limit))
-	s.reclaimNow = request.Now
 	return 0, s.reclaimErr
 }
 

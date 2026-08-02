@@ -66,6 +66,7 @@ func (r *SandboxToolCancelJobRunner) RunOnceWithActivity(ctx context.Context) (b
 	if err != nil {
 		return false, err
 	}
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxToolCancel},
 		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -74,17 +75,30 @@ func (r *SandboxToolCancelJobRunner) RunOnceWithActivity(ctx context.Context) (b
 		return false, err
 	}
 	for _, job := range lease.GetJobs() {
-		if err := r.processJob(ctx, job, cfg); err != nil {
+		if err := r.processJob(ctx, job, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return len(lease.GetJobs()) > 0, err
 		}
 	}
 	return len(lease.GetJobs()) > 0, nil
 }
 
-func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxLifecycleRunnerConfig) error {
+func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxLifecycleRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if leaseErr := finishLease(); resultErr == nil && leaseErr != nil {
+			resultErr = leaseErr
+		}
+	}()
+	ctx = workCtx
 	transportJob, transportErr := decodeSandboxToolCancelQueueTransportIdentity(queueJob)
 	if transportErr == nil && queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
@@ -94,6 +108,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	}
 	if transportErr == nil && queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
@@ -108,6 +125,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 				return err
 			}
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
 			ErrorKind: "invalid_sandbox_tool_cancel_payload", ErrorMessage: "sandbox tool cancellation payload is invalid",
@@ -115,9 +135,15 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	}
 	work, current, err := r.Store.ClaimToolCancellation(ctx, job, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		return r.retry(ctx, queueJob, "sandbox_tool_cancel_store_error")
 	}
 	if !current {
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
 	}
 	adapter, ok := r.Providers.Resolve(work.Provider)
@@ -130,16 +156,18 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	}
 	submitted, err := r.Store.MarkToolCancellationSubmitted(ctx, work, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		return r.retry(ctx, queueJob, "sandbox_tool_cancel_store_error")
 	}
 	if !submitted {
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	outcome := canceller.CancelBackground(workCtx, sandboxdriver.CommandCancel{CommandReference: work.Reference, Reason: "user_interrupt"})
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-		return heartbeatErr
-	}
+	outcome := canceller.CancelBackground(ctx, sandboxdriver.CommandCancel{CommandReference: work.Reference, Reason: "user_interrupt"})
 	if outcome.Failed() || strings.TrimSpace(outcome.Value.ResultJSON) == "" || !json.Valid([]byte(outcome.Value.ResultJSON)) {
 		kind := valueOrDefault(outcome.ErrorKind, "sandbox_cancellation_outcome_unknown")
 		return r.settleUnknown(ctx, work, kind, "sandbox cancellation outcome is unknown")
@@ -151,11 +179,17 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	if err := r.Store.SettleToolCancellation(ctx, work, resultJSON, "cancelled", "sandbox execution was cancelled", r.now()); err != nil {
 		return err
 	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
+		return err
+	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
 }
 
 func (r *SandboxToolCancelJobRunner) settleUnknown(ctx context.Context, work SandboxToolCancellationWork, kind string, message string) error {
 	if err := r.Store.SettleToolCancellation(ctx, work, "", kind, message, r.now()); err != nil {
+		return err
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: work.Job.WorkspaceID, JobId: work.Job.JobID, LeaseToken: work.Job.LeaseToken}))
@@ -170,10 +204,16 @@ func (r *SandboxToolCancelJobRunner) retry(ctx context.Context, job *queuev1.Que
 		if err := r.Store.FinalizeToolCancellation(ctx, decoded, r.now()); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: job.GetWorkspaceId(), JobId: job.GetId(), LeaseToken: job.GetLeaseToken(),
 			ErrorKind: "sandbox_tool_cancel_attempts_exhausted", ErrorMessage: "sandbox tool cancellation attempt budget exhausted",
 		}))
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
+		return err
 	}
 	return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 		WorkspaceId: job.GetWorkspaceId(), JobId: job.GetId(), LeaseToken: job.GetLeaseToken(),
@@ -236,8 +276,15 @@ func decodeSandboxToolCancelQueueTransportIdentity(job *queuev1.QueueJob) (Sandb
 func (c *PostgreSQLSandboxExecutionCoordinator) ClaimToolCancellation(ctx context.Context, job SandboxToolCancelJob, now time.Time) (SandboxToolCancellationWork, bool, error) {
 	var work SandboxToolCancellationWork
 	var current bool
-	err := c.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.tool_cancel.claim", func(tx *dbconnect.Tx) error {
+	err := c.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.tool_cancel.claim", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 			return err
 		}
 		var state string
@@ -285,7 +332,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) ClaimToolCancellation(ctx contex
 
 func (c *PostgreSQLSandboxExecutionCoordinator) MarkToolCancellationSubmitted(ctx context.Context, work SandboxToolCancellationWork, now time.Time) (bool, error) {
 	var changed bool
-	err := c.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.tool_cancel.submit", func(tx *dbconnect.Tx) error {
+	err := c.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.tool_cancel.submit", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: work.Job.WorkspaceID, SessionID: work.Job.SessionID}); err != nil {
 			return err
 		}
@@ -307,8 +355,15 @@ func (c *PostgreSQLSandboxExecutionCoordinator) MarkToolCancellationSubmitted(ct
 }
 
 func (c *PostgreSQLSandboxExecutionCoordinator) SettleToolCancellation(ctx context.Context, work SandboxToolCancellationWork, resultJSON string, kind string, message string, now time.Time) error {
-	return c.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.tool_cancel.settle", func(tx *dbconnect.Tx) error {
+	return c.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.tool_cancel.settle", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: work.Job.WorkspaceID, SessionID: work.Job.SessionID}); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID); err != nil {
+			return err
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID); err != nil {
 			return err
 		}
 		settlementKind := SandboxExecutionFailed
@@ -325,13 +380,20 @@ func (c *PostgreSQLSandboxExecutionCoordinator) SettleToolCancellation(ctx conte
 }
 
 func (c *PostgreSQLSandboxExecutionCoordinator) FinalizeToolCancellation(ctx context.Context, job SandboxToolCancelJob, now time.Time) error {
-	return c.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.tool_cancel.finalize", func(tx *dbconnect.Tx) error {
+	return c.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.tool_cancel.finalize", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		return finalizeToolCancellationTx(ctx, tx, job, now)
 	})
 }
 
 func finalizeToolCancellationTx(ctx context.Context, tx *dbconnect.Tx, job SandboxToolCancelJob, now time.Time) error {
 	if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}); err != nil {
+		return err
+	}
+	if _, _, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+		return err
+	}
+	if err := lockSandboxLifecycleOperationsForSession(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 		return err
 	}
 	var generation int64

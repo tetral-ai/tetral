@@ -143,7 +143,8 @@ func (f *PostgreSQLSandboxQueueOverLimitFinalizer) FinalizePendingAtOrOverBudget
 			if err != nil || !found {
 				return err
 			}
-			return finalizeExhaustedSandboxLifecycleTx(ctx, tx, job, candidate.Kind, "", "", now)
+			_, err = finalizeExhaustedSandboxLifecycleTx(ctx, tx, job, candidate.Kind, "", "", now)
+			return err
 		}
 		switch candidate.Kind {
 		case queue.KindSandboxActivate:

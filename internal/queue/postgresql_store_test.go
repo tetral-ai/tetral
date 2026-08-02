@@ -94,6 +94,183 @@ func TestPostgreSQLStoreLeasePriorityPartitionBarrierAndAckFence(t *testing.T) {
 	assertLeasedIDs(t, next, []string{"qjob_low"})
 }
 
+func TestPostgreSQLStoreLeaseAndHeartbeatUseDatabaseClock(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_queue_database_clock")
+	now := time.Now().UTC()
+	request := sandboxToolExecuteRequest(t, ws, "sesn_database_clock", "thrd_database_clock", "evt_database_clock", "qjob_database_clock", 5, now.Add(-time.Minute))
+	job := mustEnqueue(t, store, request)
+
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID:   ws,
+		Kinds:         []string{KindSandboxToolExecute},
+		LeaseOwner:    "sandbox",
+		MaxJobs:       1,
+		LeaseDuration: time.Minute,
+		Now:           now.Add(24 * time.Hour),
+	})
+	if leased.ID != job.ID || leased.LeasedUntil == nil {
+		t.Fatalf("leased job = %+v; want %s with expiry", leased, job.ID)
+	}
+	if delta := leased.LeasedUntil.Sub(time.Now().UTC()); delta < 45*time.Second || delta > 75*time.Second {
+		t.Fatalf("database-authored lease residual = %s; want about one minute", delta)
+	}
+
+	if _, err := admin.ExecContext(ctx,
+		`UPDATE queue_jobs SET leased_until = clock_timestamp() - interval '1 second'
+		  WHERE workspace_id = $1 AND id = $2`, string(ws), job.ID,
+	); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	heartbeat, err := store.Heartbeat(ctx, HeartbeatRequest{
+		WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken,
+		LeaseDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("Heartbeat expired lease: %v", err)
+	}
+	if heartbeat.Updated {
+		t.Fatal("Heartbeat revived an expired lease")
+	}
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Limit: 1}); err != nil || reclaimed != 1 {
+		t.Fatalf("ReclaimExpiredLeases after rejected heartbeat = %d, %v; want 1,nil", reclaimed, err)
+	}
+	if status := queueJobStatus(t, admin, ws, job.ID); status != StatusPending {
+		t.Fatalf("status after heartbeat-versus-reclaim = %q; want pending", status)
+	}
+}
+
+func TestPostgreSQLStoreRejectsTerminalTransitionsAfterLeaseExpiry(t *testing.T) {
+	for _, transition := range []string{"ack", "retry", "dead_letter", "defer"} {
+		t.Run(transition, func(t *testing.T) {
+			store, admin := newPostgreSQLQueueStore(t)
+			ctx := context.Background()
+			ws := workspace.ID("ws_queue_expired_" + transition)
+			now := time.Now().UTC()
+			sessionID := "sesn_queue_expired_" + transition
+			jobID := map[string]string{"ack": "qjob_exp_ack", "retry": "qjob_exp_retry", "dead_letter": "qjob_exp_dead", "defer": "qjob_exp_defer"}[transition]
+			var request EnqueueRequest
+			if transition == "defer" {
+				request = EnqueueRequest{
+					ID: jobID, WorkspaceID: ws,
+					Kind: KindRuntimeConfigUpdate, PartitionKey: FormatSessionPartitionKey(ws, sessionID),
+					DedupeKey: FormatRuntimeConfigUpdateDedupeKey(ws, sessionID, "1"),
+					PayloadJSON: queuePayload(t, map[string]any{
+						"workspace_id": string(ws), "session_id": sessionID, "config_generation": 1,
+					}),
+					MaxAttempts: 3, Now: now,
+				}
+			} else {
+				request = sandboxToolExecuteRequest(t, ws, sessionID, "thrd_queue_expired", "evt_queue_expired", jobID, 3, now)
+			}
+			job := mustEnqueue(t, store, request)
+			leased := mustLeaseOne(t, store, LeaseRequest{
+				WorkspaceID: ws, Kinds: []string{request.Kind}, LeaseOwner: "expired-transition-test",
+				MaxJobs: 1, LeaseDuration: time.Minute,
+			})
+			expireQueueJobLease(t, admin, ws, job.ID)
+
+			var updated bool
+			var err error
+			switch transition {
+			case "ack":
+				updated, err = store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken, Now: now})
+			case "retry":
+				updated, err = store.Retry(ctx, RetryRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken, ErrorKind: "expired_test", Now: now})
+			case "dead_letter":
+				updated, err = store.DeadLetter(ctx, DeadLetterRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken, ErrorKind: "expired_test", Now: now})
+			case "defer":
+				updated, err = store.Defer(ctx, DeferRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken, Now: now})
+			}
+			if err != nil || updated {
+				t.Fatalf("expired %s = (%v,%v); want false,nil", transition, updated, err)
+			}
+			if status := queueJobStatus(t, admin, ws, job.ID); status != StatusLeased {
+				t.Fatalf("status after expired %s = %q; want leased", transition, status)
+			}
+		})
+	}
+}
+
+func TestAssertActiveLeaseTxRejectsExpiredAuthority(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx := context.Background()
+	ws := workspace.ID("ws_queue_active_fence")
+	now := time.Now().UTC()
+	job := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_active_fence", "thrd_active_fence", "evt_active_fence", "qjob_active_fence", 5, now))
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindSandboxToolExecute}, LeaseOwner: "sandbox",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: now.Add(time.Second),
+	})
+
+	assert := func(want bool) {
+		t.Helper()
+		if err := store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_active_lease", func(tx *dbconnect.Tx) error {
+			active, err := AssertActiveLeaseTx(ctx, tx, ActiveLeaseRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken})
+			if err != nil {
+				return err
+			}
+			if active != want {
+				t.Fatalf("active lease = %t; want %t", active, want)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("AssertActiveLeaseTx: %v", err)
+		}
+	}
+	assert(true)
+	expireQueueJobLease(t, admin, ws, job.ID)
+	assert(false)
+}
+
+func TestAssertActiveLeaseTxUsesClockAfterWaitingForQueueLock(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws := workspace.ID("ws_queue_active_fence_wait")
+	now := time.Now().UTC()
+	job := mustEnqueue(t, store, sandboxToolExecuteRequest(t, ws, "sesn_fence_wait", "thrd_fence_wait", "evt_fence_wait", "qjob_fence_wait", 5, now))
+	leased := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindSandboxToolExecute}, LeaseOwner: "sandbox",
+		MaxJobs: 1, LeaseDuration: 250 * time.Millisecond, Now: now,
+	})
+
+	blocker, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback() }()
+	var locked string
+	if err := blocker.QueryRowContext(ctx, `SELECT id FROM queue_jobs WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, string(ws), job.ID).Scan(&locked); err != nil {
+		t.Fatalf("lock Queue row: %v", err)
+	}
+
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- store.client.WithWorkspaceTx(ctx, string(ws), "queue.test_waiting_active_lease", func(tx *dbconnect.Tx) error {
+			close(started)
+			active, err := AssertActiveLeaseTx(ctx, tx, ActiveLeaseRequest{WorkspaceID: ws, JobID: job.ID, LeaseToken: leased.LeaseToken})
+			if err != nil {
+				return err
+			}
+			if active {
+				return errors.New("lease remained active after the lock wait crossed its expiry")
+			}
+			return nil
+		})
+	}()
+	<-started
+	time.Sleep(350 * time.Millisecond)
+	if err := blocker.Commit(); err != nil {
+		t.Fatalf("release Queue lock: %v", err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("AssertActiveLeaseTx after wait: %v", err)
+	}
+}
+
 func TestPostgreSQLStoreLeaseHonorsCrossKindSessionBarrier(t *testing.T) {
 	store, _ := newPostgreSQLQueueStore(t)
 	ctx := context.Background()
@@ -812,7 +989,8 @@ func TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases(t *testing.T) {
 		Now:          now,
 	})
 	mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Second, Now: now.Add(10 * time.Second)})
-	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Kind: KindCleanupSession, Now: now.Add(12 * time.Second)}); err != nil || reclaimed != 1 {
+	expireQueueJobLease(t, admin, ws, expiring.ID)
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Kind: KindCleanupSession}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases first = (%d,%v); want 1,nil", reclaimed, err)
 	}
 	if got := queueJobStatus(t, admin, ws, expiring.ID); got != StatusPending {
@@ -821,8 +999,9 @@ func TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases(t *testing.T) {
 	if got := queueJobPartitionSequence(t, admin, ws, expiring.ID); got != expiring.QueuePartitionSequence {
 		t.Fatalf("partition sequence after reclaim = %d; want original %d", got, expiring.QueuePartitionSequence)
 	}
-	mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Second, Now: now.Add(13 * time.Second)})
-	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Kind: KindCleanupSession, Now: now.Add(15 * time.Second)}); err != nil || reclaimed != 1 {
+	mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Second, Now: time.Now().UTC().Add(time.Second)})
+	expireQueueJobLease(t, admin, ws, expiring.ID)
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Kind: KindCleanupSession}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases second = (%d,%v); want 1,nil", reclaimed, err)
 	}
 	if got := queueJobStatus(t, admin, ws, expiring.ID); got != StatusPending {
@@ -1177,10 +1356,10 @@ func TestPostgreSQLStoreReclaimsExpiredLeasesAcrossWorkspacesWithQueueMaintenanc
 			LeaseDuration: time.Second,
 			Now:           now.Add(time.Second),
 		})
+		expireQueueJobLease(t, admin, ws, "qjob_"+string(ws))
 	}
 	reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{
 		Limit: 10,
-		Now:   now.Add(3 * time.Second),
 	})
 	if err != nil || reclaimed != 2 {
 		t.Fatalf("global ReclaimExpiredLeases = (%d,%v); want 2,nil", reclaimed, err)
@@ -1270,7 +1449,8 @@ func TestPostgreSQLStoreListsAndConditionallyDeadLettersPendingOverBudgetSandbox
 	if leased.AttemptCount != 1 || leased.MaxAttempts != 1 {
 		t.Fatalf("leased budget = %d/%d; want 1/1", leased.AttemptCount, leased.MaxAttempts)
 	}
-	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Limit: 1, Now: now.Add(2 * time.Second)}); err != nil || reclaimed != 1 {
+	expireQueueJobLease(t, admin, ws, job.ID)
+	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Limit: 1}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases = (%d,%v); want 1,nil", reclaimed, err)
 	}
 
@@ -1635,6 +1815,17 @@ func queueJobStatus(t testing.TB, db *sql.DB, ws workspace.ID, jobID string) str
 		t.Fatalf("read queue job status %s: %v", jobID, err)
 	}
 	return status
+}
+
+func expireQueueJobLease(t testing.TB, db *sql.DB, ws workspace.ID, jobID string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE queue_jobs SET leased_until = clock_timestamp() - interval '1 second'
+		  WHERE workspace_id = $1 AND id = $2 AND status = 'leased'`,
+		string(ws), jobID,
+	); err != nil {
+		t.Fatalf("expire queue job %s: %v", jobID, err)
+	}
 }
 
 func queueJobPartitionSequence(t testing.TB, db *sql.DB, ws workspace.ID, jobID string) int64 {

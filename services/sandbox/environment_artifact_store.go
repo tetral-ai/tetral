@@ -399,7 +399,8 @@ func (s *EnvironmentArtifactStore) FanoutReadyEnvironment(ctx context.Context, j
 		now = storage.Now()
 	}
 	var advanced int
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		err := tx.QueryRow(ctx,
 			`SELECT status
@@ -475,7 +476,10 @@ func requeueWaitingArtifactActivationsTx(ctx context.Context, tx *dbconnect.Tx, 
 		if _, err := tx.Exec(ctx,
 			`UPDATE sandbox_lifecycle_operations
 			    SET state = 'pending', queue_job_id = $3, queue_kind = $4,
-			        queue_partition_key = $5, queue_dedupe_key = $6, updated_at = $7
+			        queue_partition_key = $5, queue_dedupe_key = $6,
+			        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+			        attempt_count = 0,
+			        updated_at = $7
 			  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'waiting_artifact'`,
 			job.WorkspaceID, ref.operationID, queueJobID, queue.KindSandboxActivate,
 			partitionKey, dedupeKey, now,
@@ -510,7 +514,8 @@ func (s *EnvironmentArtifactStore) FinalizeReadyEnvironmentFanout(ctx context.Co
 	if now.IsZero() {
 		now = storage.Now()
 	}
-	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout.finalize", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout.finalize", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		if err := tx.QueryRow(ctx,
 			`SELECT status FROM environment_artifacts

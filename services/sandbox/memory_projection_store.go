@@ -31,7 +31,8 @@ func (s *PostgreSQLSandboxMemoryProjectionStore) LoadProjection(ctx context.Cont
 	}
 	var work SandboxMemoryProjectionWork
 	current := false
-	err := s.client.WithWorkspaceReadOnlyTx(ctx, job.WorkspaceID, "sandbox.memory_projection.load", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.memory_projection.load", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var inputJSON, resultJSON string
 		var projectionState sql.NullString
 		if err := tx.QueryRow(ctx,
@@ -138,7 +139,8 @@ func (s *PostgreSQLSandboxMemoryProjectionStore) SettleProjection(ctx context.Co
 	if state != "refreshed" && state != "skipped_cold" && state != "failed" {
 		return errors.New("sandbox memory projection terminal state is invalid")
 	}
-	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.memory_projection.settle", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.memory_projection.settle", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		return settleMemoryProjectionTx(ctx, tx, work.MemoryWriteID, state, message, now)
 	})
 }
@@ -151,7 +153,8 @@ func (s *PostgreSQLSandboxMemoryProjectionStore) FinalizeProjectionExhaustion(ct
 	if err != nil {
 		return err
 	}
-	return s.client.WithWorkspaceTx(ctx, workspaceID, "sandbox.memory_projection.exhaust", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, workspaceID, "sandbox.memory_projection.exhaust", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		return settleMemoryProjectionTx(ctx, tx, memoryWriteID, "failed", "memory projection attempt budget exhausted", now)
 	})
 }

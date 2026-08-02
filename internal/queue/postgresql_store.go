@@ -587,16 +587,15 @@ type leaseCandidateRow struct {
 
 func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest, candidate leaseCandidateRow, leaseToken string, defaultMaxAttempts int) (*Job, bool, error) {
 	leasedAt := request.Now
-	leasedUntil := request.Now.Add(request.LeaseDuration)
 	row := tx.QueryRow(ctx,
 		`UPDATE queue_jobs
 		    SET status = 'leased',
 		        leased_by = $5,
 		        lease_token = $6,
-		        leased_at = $7,
-		        leased_until = $8,
+		        leased_at = clock_timestamp(),
+		        leased_until = clock_timestamp() + ($8::bigint * interval '1 millisecond'),
 		        attempt_count = attempt_count + 1,
-		        updated_at = $7
+		        updated_at = clock_timestamp()
 		  WHERE workspace_id = $1
 		    AND id = $2
 		    AND kind = $3
@@ -678,7 +677,7 @@ func leaseCandidate(ctx context.Context, tx *dbconnect.Tx, request LeaseRequest,
 		request.LeaseOwner,
 		leaseToken,
 		leasedAt,
-		leasedUntil,
+		request.LeaseDuration.Milliseconds(),
 		candidate.availableAt,
 		candidate.partitionSequence,
 		candidate.priority,
@@ -704,13 +703,9 @@ func (s *PostgreSQLQueueStore) ReclaimExpiredLeases(ctx context.Context, request
 	if s == nil || s.client == nil {
 		return 0, &ValidationError{Message: "queue store is required"}
 	}
-	if request.Now.IsZero() {
-		request.Now = storage.Now()
-	}
 	if request.Limit == 0 {
 		request.Limit = 100
 	}
-	now := request.Now.UTC()
 	reclaimed := 0
 	reclaim := func(tx *dbconnect.Tx) error {
 		rows, err := tx.Query(ctx,
@@ -718,13 +713,12 @@ func (s *PostgreSQLQueueStore) ReclaimExpiredLeases(ctx context.Context, request
 			   FROM queue_jobs
 			  WHERE ($1 = '' OR workspace_id = $1)
 			    AND status = 'leased'
-			    AND leased_until <= $2
-			    AND ($3 = '' OR kind = $3)
+			    AND leased_until <= clock_timestamp()
+			    AND ($2 = '' OR kind = $2)
 			  ORDER BY leased_until ASC, id ASC
 			  FOR UPDATE SKIP LOCKED
-			  LIMIT $4`,
+			  LIMIT $3`,
 			string(request.WorkspaceID),
-			now,
 			request.Kind,
 			request.Limit,
 		)
@@ -751,20 +745,19 @@ func (s *PostgreSQLQueueStore) ReclaimExpiredLeases(ctx context.Context, request
 			result, err := tx.Exec(ctx,
 				`UPDATE queue_jobs
 				    SET status = 'pending',
-				        available_at = $3,
+				        available_at = clock_timestamp(),
 				        lease_token = NULL,
 				        leased_by = NULL,
 				        leased_at = NULL,
 				        leased_until = NULL,
-				        last_error_kind = $4,
-				        last_error_message = $5,
-				        updated_at = $3
+				        last_error_kind = $3,
+				        last_error_message = $4,
+				        updated_at = clock_timestamp()
 				  WHERE workspace_id = $1
 				    AND id = $2
 				    AND status = 'leased'`,
 				lease.workspaceID,
 				lease.id,
-				now,
 				nullableString(defaultString(request.ErrorKind, "lease_expired")),
 				nullableString(defaultString(request.ErrorMessage, "queue lease expired")),
 			)
@@ -1037,44 +1030,75 @@ func (s *PostgreSQLQueueStore) SweepEmptyPartitionCounters(ctx context.Context, 
 	return deleted, nil
 }
 
-func (s *PostgreSQLQueueStore) Heartbeat(ctx context.Context, request HeartbeatRequest) (bool, error) {
+func (s *PostgreSQLQueueStore) Heartbeat(ctx context.Context, request HeartbeatRequest) (HeartbeatResult, error) {
 	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
-		return false, err
+		return HeartbeatResult{}, err
 	}
 	if request.LeaseDuration <= 0 {
-		return false, &ValidationError{Message: "lease_duration must be positive"}
-	}
-	if request.Now.IsZero() {
-		request.Now = storage.Now()
+		return HeartbeatResult{}, &ValidationError{Message: "lease_duration must be positive"}
 	}
 	if s == nil || s.client == nil {
-		return false, &ValidationError{Message: "queue store is required"}
+		return HeartbeatResult{}, &ValidationError{Message: "queue store is required"}
 	}
-	var updated bool
+	var heartbeat HeartbeatResult
 	if err := s.client.WithWorkspaceTx(ctx, string(request.WorkspaceID), "queue.heartbeat", func(tx *dbconnect.Tx) error {
-		result, err := tx.Exec(ctx,
+		err := tx.QueryRow(ctx,
 			`UPDATE queue_jobs
-			    SET leased_until = $4,
-			        updated_at = $5
+			    SET leased_until = clock_timestamp() + ($4::bigint * interval '1 millisecond'),
+			        updated_at = clock_timestamp()
 			  WHERE workspace_id = $1
 			    AND id = $2
 			    AND lease_token = $3
-			    AND status = 'leased'`,
+			    AND status = 'leased'
+			    AND leased_until > clock_timestamp()
+			  RETURNING leased_until`,
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
-			request.Now.UTC().Add(request.LeaseDuration),
-			request.Now.UTC(),
-		)
+			request.LeaseDuration.Milliseconds(),
+		).Scan(&heartbeat.LeasedUntil)
+		if dbconnect.IsNoRows(err) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		updated = rowsAffected(result)
+		heartbeat.Updated = true
 		return nil
 	}); err != nil {
+		return HeartbeatResult{}, err
+	}
+	return heartbeat, nil
+}
+
+// AssertActiveLeaseTx locks the source Queue row after business locks and then
+// checks its expiry against a fresh database timestamp. Callers must treat a
+// false result as lost authority and roll back the surrounding transaction.
+func AssertActiveLeaseTx(ctx context.Context, tx *dbconnect.Tx, request ActiveLeaseRequest) (bool, error) {
+	if tx == nil {
+		return false, &ValidationError{Message: "queue transaction is required"}
+	}
+	if err := validateFencedRequest(request.WorkspaceID, request.JobID, request.LeaseToken); err != nil {
 		return false, err
 	}
-	return updated, nil
+	var leasedUntil time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT leased_until
+		   FROM queue_jobs
+		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'
+		  FOR UPDATE`,
+		string(request.WorkspaceID), request.JobID, request.LeaseToken,
+	).Scan(&leasedUntil); err != nil {
+		if dbconnect.IsNoRows(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT $1::timestamptz > clock_timestamp()`, leasedUntil).Scan(&active); err != nil {
+		return false, err
+	}
+	return active, nil
 }
 
 func (s *PostgreSQLQueueStore) Ack(ctx context.Context, request AckRequest) (bool, error) {
@@ -1115,7 +1139,8 @@ func AckTx(ctx context.Context, tx queueMutationTransaction, request AckRequest)
 		        lease_token = NULL, leased_by = NULL, leased_at = NULL,
 		        leased_until = NULL, last_error_kind = NULL,
 		        last_error_message = NULL, updated_at = $4
-		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'`,
+		  WHERE workspace_id = $1 AND id = $2 AND lease_token = $3 AND status = 'leased'
+		    AND leased_until > clock_timestamp()`,
 		string(request.WorkspaceID), request.JobID, request.LeaseToken, request.Now.UTC(),
 	)
 	if err != nil {
@@ -1145,6 +1170,7 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			    AND id = $2
 			    AND lease_token = $3
 			    AND status = 'leased'
+			    AND leased_until > clock_timestamp()
 			  FOR UPDATE`,
 			string(request.WorkspaceID),
 			request.JobID,
@@ -1174,7 +1200,8 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 				  WHERE workspace_id = $1
 				    AND id = $2
 				    AND lease_token = $3
-				    AND status = 'leased'`,
+				    AND status = 'leased'
+				    AND leased_until > clock_timestamp()`,
 				string(request.WorkspaceID),
 				request.JobID,
 				request.LeaseToken,
@@ -1203,7 +1230,8 @@ func (s *PostgreSQLQueueStore) Retry(ctx context.Context, request RetryRequest) 
 			  WHERE workspace_id = $1
 			    AND id = $2
 			    AND lease_token = $3
-			    AND status = 'leased'`,
+			    AND status = 'leased'
+			    AND leased_until > clock_timestamp()`,
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
@@ -1249,6 +1277,7 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 			    AND id = $2
 			    AND lease_token = $3
 			    AND status = 'leased'
+			    AND leased_until > clock_timestamp()
 			  FOR UPDATE`,
 			string(request.WorkspaceID),
 			request.JobID,
@@ -1284,7 +1313,8 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 				  WHERE workspace_id = $1
 				    AND id = $2
 				    AND lease_token = $3
-				    AND status = 'leased'`,
+				    AND status = 'leased'
+				    AND leased_until > clock_timestamp()`,
 				string(request.WorkspaceID),
 				request.JobID,
 				request.LeaseToken,
@@ -1306,7 +1336,8 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 				  WHERE workspace_id = $1
 				    AND id = $2
 				    AND lease_token = $3
-				    AND status = 'leased'`,
+				    AND status = 'leased'
+				    AND leased_until > clock_timestamp()`,
 				string(request.WorkspaceID),
 				request.JobID,
 				request.LeaseToken,
@@ -1333,7 +1364,8 @@ func (s *PostgreSQLQueueStore) Defer(ctx context.Context, request DeferRequest) 
 			  WHERE workspace_id = $1
 			    AND id = $2
 			    AND lease_token = $3
-			    AND status = 'leased'`,
+			    AND status = 'leased'
+			    AND leased_until > clock_timestamp()`,
 			string(request.WorkspaceID),
 			request.JobID,
 			request.LeaseToken,
@@ -1454,7 +1486,8 @@ func (s *PostgreSQLQueueStore) fencedTerminalUpdate(ctx context.Context, workspa
 	  WHERE workspace_id = $1
 	    AND id = $2
 	    AND lease_token = $3
-	    AND status = 'leased'`
+	    AND status = 'leased'
+	    AND leased_until > clock_timestamp()`
 	var updated bool
 	if err := s.client.WithWorkspaceTx(ctx, string(workspaceID), "queue."+status, func(tx *dbconnect.Tx) error {
 		result, err := tx.Exec(ctx,

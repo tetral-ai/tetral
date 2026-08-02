@@ -256,7 +256,7 @@ func TestQueueServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"package tetral.queue.v1;",
 		"github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1;queuev1",
 		"rpc Lease(LeaseRequest) returns (LeaseResponse);",
-		"rpc Heartbeat(HeartbeatRequest) returns (TransitionResponse);",
+		"rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);",
 		"rpc Ack(AckRequest) returns (TransitionResponse);",
 		"rpc Retry(RetryRequest) returns (TransitionResponse);",
 		"rpc Defer(DeferRequest) returns (TransitionResponse);",

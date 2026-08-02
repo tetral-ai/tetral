@@ -23,13 +23,61 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 // This file owns the Bridge tools protocol-family boundary.
+
+type bridgeMemoryProjectionProvider struct {
+	requests []sandboxdriver.MemoryProjectionRefresh
+}
+
+func (*bridgeMemoryProjectionProvider) InspectForExecution(context.Context, string) tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness]{Value: tetralsandbox.ExecutionReady}
+}
+
+func (*bridgeMemoryProjectionProvider) InspectForRelease(context.Context, string) tetralsandbox.ProviderOutcome[bool] {
+	return tetralsandbox.ProviderOutcome[bool]{Value: true}
+}
+
+func (*bridgeMemoryProjectionProvider) ResolveActivation(context.Context, tetralsandbox.ActivationResolutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ActivationResolution] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ActivationResolution]{}
+}
+
+func (*bridgeMemoryProjectionProvider) Activate(context.Context, tetralsandbox.ActivationRequest) tetralsandbox.ProviderOutcome[sandboxmodel.ProviderHandle] {
+	return tetralsandbox.ProviderOutcome[sandboxmodel.ProviderHandle]{}
+}
+
+func (*bridgeMemoryProjectionProvider) MaterializeResources(context.Context, tetralsandbox.MaterializationRequest) tetralsandbox.ProviderOutcome[tetralsandbox.MaterializationResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.MaterializationResult]{}
+}
+
+func (*bridgeMemoryProjectionProvider) PrepareTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult]{}
+}
+
+func (*bridgeMemoryProjectionProvider) ExecuteTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+	return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{}
+}
+
+func (*bridgeMemoryProjectionProvider) ObserveTool(context.Context, sandboxdriver.ForegroundCommandObservation) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+	return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{}
+}
+
+func (*bridgeMemoryProjectionProvider) Release(context.Context, tetralsandbox.ReleaseRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ReleaseResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ReleaseResult]{}
+}
+
+func (p *bridgeMemoryProjectionProvider) RefreshMemoryProjection(_ context.Context, request sandboxdriver.MemoryProjectionRefresh) tetralsandbox.ProviderOutcome[struct{}] {
+	p.requests = append(p.requests, request)
+	return tetralsandbox.ProviderOutcome[struct{}]{}
+}
 
 func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentWait(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -957,18 +1005,26 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *te
 	}
 
 	projectionStore := tetralsandbox.NewPostgreSQLSandboxMemoryProjectionStore(dbconnect.NewClientForTesting(runtime))
-	work, current, err := projectionStore.LoadProjection(context.Background(), tetralsandbox.SandboxMemoryProjectionJob{
-		WorkspaceID: workspaceID, SessionID: sessionID, MemoryStoreID: memoryStore, MemoryWriteID: memoryWrite,
-	})
+	provider := &bridgeMemoryProjectionProvider{}
+	providers, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{"daytona": provider})
 	if err != nil {
-		t.Fatalf("LoadProjection: %v", err)
+		t.Fatalf("NewProviderRegistry: %v", err)
 	}
-	if !current || work.Provider != "daytona" || work.ProviderResourceID != providerID || len(work.Ops) != 1 ||
-		work.Ops[0].Kind != "upsert" || work.Ops[0].RelativePath != "/notes/queue.md" || work.Ops[0].Content != "durable" {
-		t.Fatalf("projection work = %+v current=%t", work, current)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	runner := &tetralsandbox.SandboxMemoryProjectionJobRunner{
+		Queue: tetralqueue.NewServer(queueStore), Store: projectionStore, Providers: providers,
+		Config: tetralsandbox.SandboxMemoryProjectionRunnerConfig{
+			WorkspaceID: workspaceID, LeaseOwner: "bridge-memory-projection-test",
+			MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
 	}
-	if err := projectionStore.SettleProjection(context.Background(), work, memoryProjectionStateRefreshed, "", time.Now()); err != nil {
-		t.Fatalf("SettleProjection: %v", err)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("SandboxMemoryProjectionJobRunner.RunOnce: %v", err)
+	}
+	if len(provider.requests) != 1 || provider.requests[0].Target.ProviderSandboxID != providerID ||
+		len(provider.requests[0].Ops) != 1 || provider.requests[0].Ops[0].Kind != "upsert" ||
+		provider.requests[0].Ops[0].RelativePath != "/notes/queue.md" || provider.requests[0].Ops[0].Content != "durable" {
+		t.Fatalf("projection requests = %+v; want one durable memory upsert", provider.requests)
 	}
 	var settledState string
 	if err := admin.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results

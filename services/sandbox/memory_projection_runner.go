@@ -75,6 +75,7 @@ func (r *SandboxMemoryProjectionJobRunner) RunOnceWithActivity(ctx context.Conte
 	if cfg.WorkspaceID == "" || cfg.LeaseDuration <= cfg.HeartbeatInterval || cfg.HeartbeatInterval <= 0 {
 		return false, errors.New("sandbox memory projection runner configuration is invalid")
 	}
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxMemoryProjection},
 		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -83,16 +84,29 @@ func (r *SandboxMemoryProjectionJobRunner) RunOnceWithActivity(ctx context.Conte
 		return false, err
 	}
 	for _, job := range lease.GetJobs() {
-		if err := r.processJob(ctx, job, cfg); err != nil {
+		if err := r.processJob(ctx, job, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return len(lease.GetJobs()) > 0, err
 		}
 	}
 	return len(lease.GetJobs()) > 0, nil
 }
 
-func (r *SandboxMemoryProjectionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxMemoryProjectionRunnerConfig) error {
+func (r *SandboxMemoryProjectionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxMemoryProjectionRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if leaseErr := finishLease(); resultErr == nil && leaseErr != nil {
+			resultErr = leaseErr
+		}
+	}()
+	ctx = workCtx
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() || queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Store.FinalizeProjectionExhaustion(ctx, queueJob, r.now()); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_memory_projection_exhausted")
@@ -102,24 +116,35 @@ func (r *SandboxMemoryProjectionJobRunner) processJob(ctx context.Context, queue
 		if err := r.Store.FinalizeProjectionExhaustion(ctx, queueJob, r.now()); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "invalid_sandbox_memory_projection_payload")
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	err = r.project(workCtx, job)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-		return heartbeatErr
-	}
+	err = r.project(ctx, job)
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		var retry *sandboxExecutionRetry
 		if errors.As(err, &retry) {
 			if queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
 				if err := r.Store.FinalizeProjectionExhaustion(ctx, queueJob, r.now()); err != nil {
 					return err
 				}
+				if err := stopQueueLeaseGuard(ctx); err != nil {
+					return err
+				}
 				return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_memory_projection_exhausted")
+			}
+			if err := stopQueueLeaseGuard(ctx); err != nil {
+				return err
 			}
 			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken, ErrorKind: retry.kind, ErrorMessage: retry.message}))
 		}
+		return err
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
@@ -128,7 +153,7 @@ func (r *SandboxMemoryProjectionJobRunner) processJob(ctx context.Context, queue
 func (r *SandboxMemoryProjectionJobRunner) project(ctx context.Context, job SandboxMemoryProjectionJob) error {
 	work, current, err := r.Store.LoadProjection(ctx, job)
 	if err != nil {
-		return newSandboxExecutionRetry("sandbox_memory_projection_store_error", "memory projection could not be loaded")
+		return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_memory_projection_store_error", "memory projection could not be loaded")
 	}
 	if !current {
 		return nil

@@ -61,6 +61,7 @@ func (r *SandboxOutputCaptureCleanupRunner) RunOnceWithActivity(ctx context.Cont
 	if cfg.WorkspaceID == "" || cfg.LeaseDuration <= cfg.HeartbeatInterval || cfg.HeartbeatInterval <= 0 {
 		return false, errors.New("sandbox output capture cleanup runner configuration is invalid")
 	}
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxOutputCaptureCleanup},
 		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -69,16 +70,29 @@ func (r *SandboxOutputCaptureCleanupRunner) RunOnceWithActivity(ctx context.Cont
 		return false, err
 	}
 	for _, job := range lease.GetJobs() {
-		if err := r.processJob(ctx, job, cfg); err != nil {
+		if err := r.processJob(ctx, job, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return len(lease.GetJobs()) > 0, err
 		}
 	}
 	return len(lease.GetJobs()) > 0, nil
 }
 
-func (r *SandboxOutputCaptureCleanupRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxOutputCaptureRunnerConfig) error {
+func (r *SandboxOutputCaptureCleanupRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxOutputCaptureRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if leaseErr := finishLease(); resultErr == nil && leaseErr != nil {
+			resultErr = leaseErr
+		}
+	}()
+	ctx = workCtx
 	if queueJob.GetMaxAttempts() <= 0 || queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := r.Store.FinalizeCaptureCleanupExhaustion(ctx, queueJob, storage.Now()); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_output_capture_cleanup_exhausted")
@@ -88,24 +102,35 @@ func (r *SandboxOutputCaptureCleanupRunner) processJob(ctx context.Context, queu
 		if err := r.Store.FinalizeCaptureCleanupExhaustion(ctx, queueJob, storage.Now()); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "invalid_sandbox_output_capture_cleanup_payload")
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	err = r.cleanup(workCtx, job)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-		return heartbeatErr
-	}
+	err = r.cleanup(ctx, job)
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		if queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
 			if err := r.Store.FinalizeCaptureCleanupExhaustion(ctx, queueJob, storage.Now()); err != nil {
 				return err
 			}
+			if err := stopQueueLeaseGuard(ctx); err != nil {
+				return err
+			}
 			return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_output_capture_cleanup_exhausted")
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
 		}
 		return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 			WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
 			ErrorKind: "sandbox_output_capture_cleanup_retryable", ErrorMessage: "sandbox output capture cleanup will be retried",
 		}))
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
+		return err
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
 }
@@ -249,12 +274,20 @@ func (s *PostgreSQLSandboxOutputCaptureStore) SweepExpiredCaptures(ctx context.C
 func (s *PostgreSQLSandboxOutputCaptureStore) LoadCaptureCleanup(ctx context.Context, job SandboxOutputCaptureCleanupJob) (SandboxOutputCaptureCleanupWork, bool, error) {
 	work := SandboxOutputCaptureCleanupWork{SandboxOutputCaptureCleanupJob: job}
 	current := false
-	err := s.client.WithWorkspaceReadOnlyTx(ctx, job.WorkspaceID, "sandbox.output_capture.load_cleanup", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.output_capture.load_cleanup", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		if err := lockOutputCaptureSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
 		var state string
 		var generation int64
 		if err := tx.QueryRow(ctx,
 			`SELECT state, cleanup_generation FROM sandbox_output_capture_operations
-			  WHERE workspace_id=$1 AND session_id=$2 AND finish_idle_write_id=$3 AND capture_generation=$4`,
+			  WHERE workspace_id=$1 AND session_id=$2 AND finish_idle_write_id=$3 AND capture_generation=$4
+			  FOR UPDATE`,
 			job.WorkspaceID, job.SessionID, job.FinishIdleWriteID, job.CaptureGeneration).Scan(&state, &generation); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
@@ -266,7 +299,7 @@ func (s *PostgreSQLSandboxOutputCaptureStore) LoadCaptureCleanup(ctx context.Con
 		rows, err := tx.Query(ctx,
 			`SELECT blob_pointer FROM sandbox_output_capture_blobs
 			  WHERE workspace_id=$1 AND session_id=$2 AND finish_idle_write_id=$3 AND capture_generation=$4
-			  ORDER BY source_path`, job.WorkspaceID, job.SessionID, job.FinishIdleWriteID, job.CaptureGeneration)
+			  ORDER BY source_path FOR UPDATE`, job.WorkspaceID, job.SessionID, job.FinishIdleWriteID, job.CaptureGeneration)
 		if err != nil {
 			return err
 		}
@@ -288,7 +321,14 @@ func (s *PostgreSQLSandboxOutputCaptureStore) LoadCaptureCleanup(ctx context.Con
 }
 
 func (s *PostgreSQLSandboxOutputCaptureStore) CompleteCaptureCleanup(ctx context.Context, work SandboxOutputCaptureCleanupWork, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.complete_cleanup", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.WorkspaceID, "sandbox.output_capture.complete_cleanup", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		if err := lockOutputCaptureSessionTx(ctx, tx, work.WorkspaceID, work.SessionID); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, work.WorkspaceID, work.SessionID); err != nil {
+			return err
+		}
 		var state string
 		var cleanupGeneration int64
 		if err := tx.QueryRow(ctx,
@@ -329,7 +369,14 @@ func (s *PostgreSQLSandboxOutputCaptureStore) FinalizeCaptureCleanupExhaustion(c
 	if err != nil {
 		return err
 	}
-	return s.client.WithWorkspaceTx(ctx, identity.WorkspaceID, "sandbox.output_capture.advance_cleanup", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, identity.WorkspaceID, "sandbox.output_capture.advance_cleanup", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		if err := lockOutputCaptureSessionTx(ctx, tx, identity.WorkspaceID, identity.SessionID); err != nil {
+			return err
+		}
+		if _, _, err := lockSandboxBinding(ctx, tx, identity.WorkspaceID, identity.SessionID); err != nil {
+			return err
+		}
 		return advanceOutputCaptureCleanupTx(ctx, tx, identity, now)
 	})
 }

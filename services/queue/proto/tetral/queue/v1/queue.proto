@@ -6,7 +6,7 @@ option go_package = "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue
 
 service QueueService {
   rpc Lease(LeaseRequest) returns (LeaseResponse);
-  rpc Heartbeat(HeartbeatRequest) returns (TransitionResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc Ack(AckRequest) returns (TransitionResponse);
   rpc Retry(RetryRequest) returns (TransitionResponse);
   rpc Defer(DeferRequest) returns (TransitionResponse);
@@ -54,6 +54,11 @@ message HeartbeatRequest {
   string job_id = 2;
   string lease_token = 3;
   int64 lease_duration_ms = 4;
+}
+
+message HeartbeatResponse {
+  bool updated = 1;
+  string leased_until = 2;
 }
 
 message AckRequest {

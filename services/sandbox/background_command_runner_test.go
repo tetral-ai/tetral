@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -63,6 +64,62 @@ func TestSandboxBackgroundCommandRunnerDoesNotReplaySubmittedInput(t *testing.T)
 	}
 	if !reflect.DeepEqual(store.calls, []string{"load_command", "settle_command:unknown_outcome"}) {
 		t.Fatalf("store calls = %v; want unknown-outcome settlement", store.calls)
+	}
+}
+
+func TestSandboxBackgroundRunnersKeepHeartbeatThroughLiveExhaustion(t *testing.T) {
+	tests := []struct {
+		name           string
+		job            *queuev1.QueueJob
+		configureStore func(*recordingBackgroundCommandStore)
+		run            func(*observingSandboxFinalizerQueue, *recordingBackgroundCommandStore, *ProviderRegistry) error
+		wantTransition string
+	}{
+		{
+			name: "reconcile", job: sandboxBackgroundReconcileQueueJob(),
+			configureStore: func(store *recordingBackgroundCommandStore) {
+				store.reconcileErr = errors.New("background reconcile store unavailable")
+			},
+			run: func(queueClient *observingSandboxFinalizerQueue, store *recordingBackgroundCommandStore, registry *ProviderRegistry) error {
+				return (&SandboxBackgroundReconcileJobRunner{Queue: queueClient, Store: store, Providers: registry,
+					Config: SandboxBackgroundRunnerConfig{WorkspaceID: "ws_background", LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond}}).RunOnce(context.Background())
+			},
+			wantTransition: "dead:qjob_background_reconcile:sandbox_background_reconcile_exhausted",
+		},
+		{
+			name: "command", job: sandboxBackgroundCommandQueueJob("stdin"),
+			configureStore: func(store *recordingBackgroundCommandStore) {
+				store.commandErr = errors.New("background command store unavailable")
+			},
+			run: func(queueClient *observingSandboxFinalizerQueue, store *recordingBackgroundCommandStore, registry *ProviderRegistry) error {
+				return (&SandboxBackgroundCommandJobRunner{Queue: queueClient, Store: store, Providers: registry,
+					Config: SandboxBackgroundRunnerConfig{WorkspaceID: "ws_background", LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond}}).RunOnce(context.Background())
+			},
+			wantTransition: "dead:qjob_background_command:sandbox_background_command_exhausted",
+		},
+	}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingBackgroundProviderAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.job.AttemptCount = tc.job.MaxAttempts
+			finalizing := make(chan struct{})
+			heartbeatObserved := make(chan struct{}, 1)
+			queueClient := &observingSandboxFinalizerQueue{
+				recordingSandboxQueue: recordingSandboxQueue{leased: []*queuev1.QueueJob{tc.job}},
+				finalizing:            finalizing, heartbeatObserved: heartbeatObserved,
+			}
+			store := &recordingBackgroundCommandStore{finalizeStarted: finalizing, heartbeatObserved: heartbeatObserved}
+			tc.configureStore(store)
+			if err := tc.run(queueClient, store, registry); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if !reflect.DeepEqual(queueClient.transitions, []string{tc.wantTransition}) {
+				t.Fatalf("transitions = %v; want %s after live finalizer", queueClient.transitions, tc.wantTransition)
+			}
+		})
 	}
 }
 
@@ -160,16 +217,20 @@ func sandboxBackgroundCommandQueueJob(kind string) *queuev1.QueueJob {
 }
 
 type recordingBackgroundCommandStore struct {
-	reconcileCurrent bool
-	commandCurrent   bool
-	task             SandboxBackgroundTaskWork
-	operation        SandboxBackgroundOperationWork
-	calls            []string
+	reconcileCurrent  bool
+	commandCurrent    bool
+	task              SandboxBackgroundTaskWork
+	operation         SandboxBackgroundOperationWork
+	calls             []string
+	reconcileErr      error
+	commandErr        error
+	finalizeStarted   chan struct{}
+	heartbeatObserved <-chan struct{}
 }
 
 func (s *recordingBackgroundCommandStore) LoadReconcile(context.Context, SandboxBackgroundReconcileJob) (SandboxBackgroundTaskWork, bool, error) {
 	s.calls = append(s.calls, "load_reconcile")
-	return s.task, s.reconcileCurrent, nil
+	return s.task, s.reconcileCurrent, s.reconcileErr
 }
 func (s *recordingBackgroundCommandStore) AdvanceReconcile(context.Context, SandboxBackgroundTaskWork, sandboxdriver.CommandResult, time.Time, time.Time) error {
 	s.calls = append(s.calls, "advance_reconcile")
@@ -181,11 +242,14 @@ func (s *recordingBackgroundCommandStore) SettleTask(context.Context, SandboxBac
 }
 func (s *recordingBackgroundCommandStore) FinalizeReconcileExhaustion(context.Context, *queuev1.QueueJob, time.Time) error {
 	s.calls = append(s.calls, "exhaust_reconcile")
+	if s.finalizeStarted != nil {
+		return requireHeartbeatDuringFinalizer(s.finalizeStarted, s.heartbeatObserved)
+	}
 	return nil
 }
 func (s *recordingBackgroundCommandStore) LoadCommand(context.Context, SandboxBackgroundCommandJob, time.Time) (SandboxBackgroundOperationWork, bool, error) {
 	s.calls = append(s.calls, "load_command")
-	return s.operation, s.commandCurrent, nil
+	return s.operation, s.commandCurrent, s.commandErr
 }
 func (s *recordingBackgroundCommandStore) MarkCommandSubmitted(context.Context, SandboxBackgroundOperationWork, time.Time) (bool, error) {
 	s.calls = append(s.calls, "submit_command")
@@ -197,6 +261,9 @@ func (s *recordingBackgroundCommandStore) SettleCommand(_ context.Context, _ San
 }
 func (s *recordingBackgroundCommandStore) FinalizeCommandExhaustion(context.Context, *queuev1.QueueJob, time.Time) error {
 	s.calls = append(s.calls, "exhaust_command")
+	if s.finalizeStarted != nil {
+		return requireHeartbeatDuringFinalizer(s.finalizeStarted, s.heartbeatObserved)
+	}
 	return nil
 }
 

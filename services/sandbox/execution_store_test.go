@@ -11,13 +11,62 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
+	"github.com/tetral-ai/tetral/internal/workspace"
 )
+
+func TestPostgreSQLSandboxExecutionSettlementRollsBackAfterQueueAuthorityExpires(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	firstCtx, secondCtx, _, _ := supersedeSandboxQueueLease(t, runtimeDB, adminDB, queue.EnqueueRequest{
+		ID: "qjob_exec_fence", WorkspaceID: workspace.ID(work.Ref.WorkspaceID), Kind: queue.KindSandboxToolExecute,
+		PartitionKey: queue.FormatSandboxExecutionPartitionKey(workspace.ID(work.Ref.WorkspaceID), work.Ref.SessionID, work.Ref.SessionThreadID, work.Ref.ToolUseEventID),
+		DedupeKey:    queue.FormatSandboxToolExecuteDedupeKey(workspace.ID(work.Ref.WorkspaceID), work.Ref.SessionID, work.Ref.SessionThreadID, work.Ref.ToolUseEventID, 1), PayloadVersion: 1,
+		PayloadJSON: []byte(`{"workspace_id":"ws_execution_store","session_id":"sesn_execution_store","session_thread_id":"thr_execution_store","tool_use_event_id":"evt_execution_a"}`),
+		MaxAttempts: 5,
+	})
+	err := coordinator.SettleExecution(firstCtx, work, SandboxExecutionSettlement{
+		Kind: SandboxExecutionFailed, ErrorKind: "provider_failed", SafeMessage: "provider failed",
+	})
+	if !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("SettleExecution error = %v; want Queue authority loss", err)
+	}
+	var state string
+	var resultJSON sql.NullString
+	if err := adminDB.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+		work.Ref.WorkspaceID, work.Ref.SessionID, work.Ref.SessionThreadID, work.Ref.ToolUseEventID,
+	).Scan(&state, &resultJSON); err != nil {
+		t.Fatalf("read execution after rejected settlement: %v", err)
+	}
+	if state != "pending" || resultJSON.Valid {
+		t.Fatalf("execution after rejected settlement = %s/%v; want unchanged pending state", state, resultJSON)
+	}
+	if err := coordinator.SettleExecution(secondCtx, work, SandboxExecutionSettlement{
+		Kind: SandboxExecutionFailed, ErrorKind: "provider_failed", SafeMessage: "provider failed",
+	}); err != nil {
+		t.Fatalf("successor SettleExecution: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4`,
+		work.Ref.WorkspaceID, work.Ref.SessionID, work.Ref.SessionThreadID, work.Ref.ToolUseEventID,
+	).Scan(&state, &resultJSON); err != nil {
+		t.Fatalf("read successor settlement: %v", err)
+	}
+	if state != "terminal_unconsumed" || !resultJSON.Valid {
+		t.Fatalf("successor settlement = %s/%v; want terminal result", state, resultJSON)
+	}
+}
 
 func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 
 	works := []SandboxExecutionWork{
 		loadSandboxExecutionWork(t, coordinator, "evt_execution_a"),
@@ -32,7 +81,7 @@ func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *
 		go func() {
 			defer wait.Done()
 			<-start
-			errs <- coordinator.WaitForActivation(context.Background(), work, ExecutionNeedsCreation)
+			errs <- coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation)
 		}()
 	}
 	close(start)
@@ -119,8 +168,9 @@ func TestPostgreSQLSandboxActivationAttachmentLocksExecutionBeforeQueuePartition
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	work := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	assertExecutionBeforeQueueLockOrder(t, adminDB, partition, func() error {
-		return coordinator.WaitForActivation(context.Background(), work, ExecutionNeedsCreation)
+		return coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation)
 	})
 }
 
@@ -147,8 +197,35 @@ func TestPostgreSQLSandboxMaterializationAttachmentLocksExecutionBeforeQueuePart
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	work := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	assertExecutionBeforeQueueLockOrder(t, adminDB, partition, func() error {
-		return coordinator.WaitForMaterialization(context.Background(), work)
+		return coordinator.WaitForMaterialization(ctx, work)
+	})
+}
+
+func TestPostgreSQLSandboxBackgroundResultLocksExecutionBeforeOutgoingQueue(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	partition := queue.FormatSandboxBackgroundPartitionKey("ws_execution_store", "sesn_execution_store", "task_lock_order")
+	if _, err := adminDB.Exec(`INSERT INTO queue_partition_counters (
+		workspace_id, partition_key, last_sequence, created_at, updated_at
+	) VALUES ('ws_execution_store', $1, 0, $2, $2)`, partition, now); err != nil {
+		t.Fatalf("seed background Queue partition: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	work := loadReadySandboxExecutionWork(t, coordinator)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	assertExecutionBeforeQueueLockOrder(t, adminDB, partition, func() error {
+		return coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
+			Kind: SandboxExecutionCompleted, ResultJSON: `{"status":"running","result":{"task_id":"task_lock_order"}}`,
+			BackgroundTask: &sandboxdriver.BackgroundTask{
+				TaskID: "task_lock_order", SourceToolUseEventID: work.Ref.ToolUseEventID,
+				ProviderSessionID: "provider_execution_store", ProviderCommandID: "task_lock_order",
+				ProviderCommandMetadataJSON: `{}`,
+			},
+		})
 	})
 }
 
@@ -216,6 +293,7 @@ func TestPostgreSQLSandboxExecutionRequiresExactMaterializedRevision(t *testing.
 func TestPostgreSQLSandboxExecutionCannotAuthorizeAfterPreparationDeadline(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
@@ -228,7 +306,7 @@ func TestPostgreSQLSandboxExecutionCannotAuthorizeAfterPreparationDeadline(t *te
 		t.Fatalf("LoadExecution = current %t ready %t err %v", current, work.MaterializationReady, err)
 	}
 	deadline := now.Add(time.Minute)
-	prepared, err := coordinator.BeginPreparing(context.Background(), work, deadline)
+	prepared, err := coordinator.BeginPreparing(ctx, work, deadline)
 	if err != nil || !prepared {
 		t.Fatalf("BeginPreparing = prepared %t err %v", prepared, err)
 	}
@@ -237,7 +315,7 @@ func TestPostgreSQLSandboxExecutionCannotAuthorizeAfterPreparationDeadline(t *te
 		WHERE workspace_id = 'ws_execution_store' AND tool_use_event_id = 'evt_execution_a'`); err != nil {
 		t.Fatalf("expire preparation deadline: %v", err)
 	}
-	authorized, err := coordinator.AuthorizeRunning(context.Background(), work)
+	authorized, err := coordinator.AuthorizeRunning(ctx, work)
 	if err != nil {
 		t.Fatalf("AuthorizeRunning: %v", err)
 	}
@@ -250,14 +328,15 @@ func TestPostgreSQLSandboxExecutionCannotAuthorizeAfterPreparationDeadline(t *te
 func TestPostgreSQLSandboxExecutionReturnsPreSubmissionDisappearanceToActivation(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	work := loadReadySandboxExecutionWork(t, coordinator)
-	if prepared, err := coordinator.BeginPreparing(context.Background(), work, now.Add(time.Minute)); err != nil || !prepared {
+	if prepared, err := coordinator.BeginPreparing(ctx, work, now.Add(time.Minute)); err != nil || !prepared {
 		t.Fatalf("BeginPreparing = %t, %v", prepared, err)
 	}
-	if err := coordinator.WaitForActivation(context.Background(), work, ExecutionNeedsCreation); err != nil {
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsCreation); err != nil {
 		t.Fatalf("WaitForActivation after provider disappearance: %v", err)
 	}
 	var state string
@@ -341,18 +420,19 @@ func TestPostgreSQLSandboxExecutionAuthorizationRechecksDurableGates(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			runtimeDB, adminDB := newSandboxServiceTestDB(t)
 			seedSandboxExecutionStoreFixture(t, adminDB)
+			ctx := sandboxTestQueueContext(t, runtimeDB)
 			now := time.Now().UTC()
 			seedReadySandboxBinding(t, adminDB, now)
 			coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 			work := loadReadySandboxExecutionWork(t, coordinator)
-			prepared, err := coordinator.BeginPreparing(context.Background(), work, now.Add(time.Minute))
+			prepared, err := coordinator.BeginPreparing(ctx, work, now.Add(time.Minute))
 			if err != nil || !prepared {
 				t.Fatalf("BeginPreparing = %t, %v", prepared, err)
 			}
 			if _, err := adminDB.Exec(test.mutate); err != nil {
 				t.Fatalf("mutate gate: %v", err)
 			}
-			authorized, err := coordinator.AuthorizeRunning(context.Background(), work)
+			authorized, err := coordinator.AuthorizeRunning(ctx, work)
 			if test.name == "release fence" {
 				if err != nil {
 					t.Fatalf("AuthorizeRunning: %v", err)
@@ -422,11 +502,12 @@ func TestPostgreSQLSandboxExecutionRejectsStaleMissingBindingObservation(t *test
 func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningActivation(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	first := loadReadySandboxExecutionWork(t, coordinator)
-	if err := coordinator.WaitForActivation(context.Background(), first, ExecutionNeedsActivation); err != nil {
+	if err := coordinator.WaitForActivation(ctx, first, ExecutionNeedsActivation); err != nil {
 		t.Fatalf("create activation: %v", err)
 	}
 	if _, err := adminDB.Exec(`UPDATE sandbox_lifecycle_operations SET state = 'running'
@@ -439,7 +520,7 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningActivation(t *testing.
 		t.Fatalf("replace binding: %v", err)
 	}
 	second := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_b")
-	if err := coordinator.WaitForActivation(context.Background(), second, ExecutionNeedsActivation); !errors.Is(err, errSandboxExecutionReinspection) {
+	if err := coordinator.WaitForActivation(ctx, second, ExecutionNeedsActivation); !errors.Is(err, errSandboxExecutionReinspection) {
 		t.Fatalf("WaitForActivation error = %v; want reinspection instead of joining stale operation", err)
 	}
 	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "pending", 1)
@@ -448,6 +529,7 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningActivation(t *testing.
 func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
 	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings SET materialized_resource_revision = 0
@@ -456,7 +538,7 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *tes
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	first := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
-	if err := coordinator.WaitForMaterialization(context.Background(), first); err != nil {
+	if err := coordinator.WaitForMaterialization(ctx, first); err != nil {
 		t.Fatalf("create materialization: %v", err)
 	}
 	if _, err := adminDB.Exec(`UPDATE sandbox_lifecycle_operations SET state = 'running'
@@ -469,7 +551,7 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *tes
 		t.Fatalf("replace binding: %v", err)
 	}
 	second := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_b")
-	if err := coordinator.WaitForMaterialization(context.Background(), second); !errors.Is(err, errSandboxExecutionReinspection) {
+	if err := coordinator.WaitForMaterialization(ctx, second); !errors.Is(err, errSandboxExecutionReinspection) {
 		t.Fatalf("WaitForMaterialization error = %v; want reinspection instead of joining stale operation", err)
 	}
 	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "pending", 1)
@@ -478,6 +560,7 @@ func TestPostgreSQLSandboxExecutionDoesNotJoinStaleRunningMaterialization(t *tes
 func TestPostgreSQLSandboxExecutionJoinsInFlightEarlierResourceRevision(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
 	if _, err := adminDB.Exec(`UPDATE session_sandbox_bindings SET materialized_resource_revision = 0
@@ -486,7 +569,7 @@ func TestPostgreSQLSandboxExecutionJoinsInFlightEarlierResourceRevision(t *testi
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	first := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
-	if err := coordinator.WaitForMaterialization(context.Background(), first); err != nil {
+	if err := coordinator.WaitForMaterialization(ctx, first); err != nil {
 		t.Fatalf("create R1 materialization: %v", err)
 	}
 	if _, err := adminDB.Exec(`UPDATE sandbox_lifecycle_operations SET state = 'running'
@@ -499,7 +582,7 @@ func TestPostgreSQLSandboxExecutionJoinsInFlightEarlierResourceRevision(t *testi
 	}
 
 	second := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_b")
-	if err := coordinator.WaitForMaterialization(context.Background(), second); err != nil {
+	if err := coordinator.WaitForMaterialization(ctx, second); err != nil {
 		t.Fatalf("join R1 while R2 is desired: %v", err)
 	}
 	assertSandboxExecutionState(t, adminDB, "evt_execution_b", "waiting_materialization", 1)
@@ -508,17 +591,18 @@ func TestPostgreSQLSandboxExecutionJoinsInFlightEarlierResourceRevision(t *testi
 func TestPostgreSQLSandboxExecutionStartsBackgroundReconciliationAtomically(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	now := time.Now().UTC()
 	seedReadySandboxBinding(t, adminDB, now)
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	work := loadReadySandboxExecutionWork(t, coordinator)
-	if prepared, err := coordinator.BeginPreparing(context.Background(), work, now.Add(time.Minute)); err != nil || !prepared {
+	if prepared, err := coordinator.BeginPreparing(ctx, work, now.Add(time.Minute)); err != nil || !prepared {
 		t.Fatalf("BeginPreparing = %t, %v", prepared, err)
 	}
-	if authorized, err := coordinator.AuthorizeRunning(context.Background(), work); err != nil || !authorized {
+	if authorized, err := coordinator.AuthorizeRunning(ctx, work); err != nil || !authorized {
 		t.Fatalf("AuthorizeRunning = %t, %v", authorized, err)
 	}
-	if err := coordinator.SettleExecution(context.Background(), work, SandboxExecutionSettlement{
+	if err := coordinator.SettleExecution(ctx, work, SandboxExecutionSettlement{
 		Kind:       SandboxExecutionCompleted,
 		ResultJSON: `{"status":"running","result":{"task_id":"task_execution"}}`,
 		BackgroundTask: &sandboxdriver.BackgroundTask{
@@ -555,6 +639,7 @@ func TestPostgreSQLSandboxExecutionStartsBackgroundReconciliationAtomically(t *t
 func TestPostgreSQLSandboxStartActivationUsesBoundEnvironmentGenerationWithoutCurrentArtifact(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	seedReadySandboxBinding(t, adminDB, time.Now().UTC())
 	if _, err := adminDB.Exec(`UPDATE environments SET current_generation = 2
 		WHERE workspace_id = 'ws_execution_store' AND id = 'env_execution_store'`); err != nil {
@@ -562,7 +647,7 @@ func TestPostgreSQLSandboxStartActivationUsesBoundEnvironmentGenerationWithoutCu
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
 	work := loadReadySandboxExecutionWork(t, coordinator)
-	if err := coordinator.WaitForActivation(context.Background(), work, ExecutionNeedsActivation); err != nil {
+	if err := coordinator.WaitForActivation(ctx, work, ExecutionNeedsActivation); err != nil {
 		t.Fatalf("WaitForActivation(start): %v", err)
 	}
 	var kind, state, targetHandle string

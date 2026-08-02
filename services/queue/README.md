@@ -66,15 +66,18 @@ changes nothing.
 | Call | Fencing | Kinds | Effect |
 |---|---|---|---|
 | `Lease` | mints a fresh `lease_token` | any requested kind | selects `pending` candidates whose own `available_at` has arrived, ordered by priority/availability and partition sequence under `FOR UPDATE SKIP LOCKED`; leases only where the partition holds no `leased` job and no higher-ranked or causally earlier `pending` sibling; increments `attempt_count`; projects an "unset" `max_attempts = 0` to the effective default in the response |
-| `Heartbeat` | lease-token | any | pushes `leased_until` forward |
+| `Heartbeat` | lease-token | any | pushes an unexpired `leased_until` forward and returns the database-written expiry; an expired lease cannot be revived |
 | `Ack` | lease-token | any | → `acknowledged`; legal only after the consumer reconciled durable state and delivered/resolved the command |
 | `Retry` | lease-token | any | carries an error kind/message only, no delay authority. If `attempt_count` reached the effective `max_attempts`, dead-letters instead. Otherwise → `pending` with capped exponential backoff + full jitter |
 | `Defer` | lease-token | the two canonical `runtime_config_update` payload classes | → `pending` with Queue-owned capped backoff while decrementing `attempt_count`; the locked SDK config-generation or MCP manifest-generation row is revalidated from its refs-only payload, increments `defer_count`, and derives backoff from that counter without approaching `max_attempts` |
 | `DeadLetter` | lease-token | any | → `dead_lettered` straight, carrying the error, for terminal invariant failures |
 | `Cancel` | partition-scoped, **not** lease-fenced | `runtime_input` `input_kind = messages` only | requires `workspace_id`, `session_id`, `session_thread_id`, and a positive `interrupt_fence_sequence`; marks `cancelled` every `pending` matching row in that thread whose `sequence_to` is below the fence; touches no `leased`/terminal row and deletes no `session_events` |
-| `ReclaimExpiredLeases` | exempt (matches `workspace_id`/`id`/`status = 'leased'` without the stale token) | any | background loop only; clears lease bookkeeping on rows `leased` with `leased_until <= now` and returns them to `pending` at `available_at = now` with a `lease_expired` error stamp |
+| `ReclaimExpiredLeases` | exempt (matches `workspace_id`/`id`/`status = 'leased'` without the stale token) | any | background loop only; clears lease bookkeeping on rows `leased` with `leased_until <= PostgreSQL clock time` and returns them to `pending` at a database-written `available_at` with a `lease_expired` error stamp |
 
-Three in-process Queue boundaries support Sandbox business transactions without
+`Lease`, `Heartbeat`, and reclaim author durable lease timestamps from fresh
+PostgreSQL clock time; consumer wall clocks control only local scheduling.
+
+Four in-process Queue boundaries support Sandbox business transactions without
 moving business state into Queue. `CancelTx` cancels only the exact pending row
 named by job id plus expected kind, partition, and dedupe key; a mismatch is an
 integrity error and a leased row is unchanged. `ListPendingAtOrOverBudget`
@@ -82,6 +85,9 @@ performs a nonlocking, cross-workspace census of reclaimed Sandbox jobs whose
 explicit attempt budget is spent. The Sandbox owner then settles its business
 row before calling `DeadLetterExhaustedTx`, which rechecks pending status and the
 observed attempt count in that same transaction. None of these are Queue RPCs.
+`AssertActiveLeaseTx` is the final lock in a live Sandbox business transaction;
+it verifies the source job, token, leased status, and unexpired database time so
+loss of Queue authority rolls back the entire business write before settlement.
 
 Backoff is `delay = rand(0, min(cap, base * 2^(count-1)))`, where `count` is
 `attempt_count` for Retry, and `defer_count` for
@@ -246,6 +252,9 @@ lease_duration_ms)` returns up to `max_jobs` leased rows, each with a fresh
 `lease_token`. The consumer then drives exactly one terminal transition per job
 (`Ack` / `Retry` / `DeadLetter`, or an admitted `Defer` back to `pending`),
 calling `Heartbeat` to extend `leased_until` while it works.
+Heartbeat returns the new database-written expiry. Consumers derive a
+conservative monotonic deadline from the RPC send instant and never extend local
+authority from an independent wall-clock comparison.
 The gRPC surface is `QueueService` in
 `services/queue/proto/tetral/queue/v1`; the Go boundary is the `Store`
 interface in `services/queue/server.go`.

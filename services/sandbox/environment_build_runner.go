@@ -64,6 +64,7 @@ func (r *EnvironmentBuildJobRunner) RunOnceWithActivity(ctx context.Context) (bo
 		return false, errors.New("sandbox provider registry is required")
 	}
 	cfg := normalizedEnvironmentRunnerConfig(r.Config)
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId:     cfg.WorkspaceID,
 		Kinds:           []string{queue.KindEnvironmentBuild},
@@ -76,14 +77,14 @@ func (r *EnvironmentBuildJobRunner) RunOnceWithActivity(ctx context.Context) (bo
 	}
 	hadWork := len(lease.GetJobs()) > 0
 	for _, queueJob := range lease.GetJobs() {
-		if err := r.processJob(ctx, queueJob, cfg); err != nil {
+		if err := r.processJob(ctx, queueJob, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return hadWork, err
 		}
 	}
 	return hadWork, nil
 }
 
-func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg EnvironmentRunnerConfig) error {
+func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg EnvironmentRunnerConfig, localExpiry time.Time) error {
 	job, err := DecodeEnvironmentBuildJob(queueJob)
 	if err != nil {
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
@@ -110,7 +111,10 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	if !ok {
 		return r.retryEnvironmentBuild(ctx, job, cfg, "provider_configuration_invalid", "environment artifact provider is unavailable")
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	workCtx, stopHeartbeat, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
 	outcome := builder.BuildEnvironmentArtifact(workCtx, sandbox.BuildArtifactRequest{
 		WorkspaceID:        input.WorkspaceID,
 		EnvironmentID:      input.EnvironmentID,

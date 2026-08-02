@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -50,7 +51,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerCommitsBusinessResultWithDeadLe
 	now := time.Date(2026, 7, 31, 16, 30, 0, 0, time.UTC)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	queueStore := queue.NewPostgreSQLStore(client)
-	candidate := seedOverLimitSandboxExecution(t, queueStore, "evt_execution_a", now)
+	candidate := seedOverLimitSandboxExecution(t, adminDB, queueStore, "evt_execution_a", now)
 	candidate.PayloadJSON = []byte(`{"poison":`)
 
 	finalizer := NewPostgreSQLSandboxQueueOverLimitFinalizer(client)
@@ -85,18 +86,20 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerCommitsBusinessResultWithDeadLe
 func TestPostgreSQLSandboxExecutionExhaustionPreservesCommittedDependencyHandoff(t *testing.T) {
 	runtimeDB, adminDB := newSandboxServiceTestDB(t)
 	seedSandboxExecutionStoreFixture(t, adminDB)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
 	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
 		SET execution_state = 'waiting_activation'
 		WHERE workspace_id = 'ws_execution_store' AND tool_use_event_id = 'evt_execution_a'`); err != nil {
 		t.Fatalf("seed dependency handoff: %v", err)
 	}
 	job := &queuev1.QueueJob{
-		Id: "qjob_old_execution", WorkspaceId: "ws_execution_store", Kind: queue.KindSandboxToolExecute,
+		LeasedUntil: testSandboxLeaseExpiry(),
+		Id:          "qjob_old_execution", WorkspaceId: "ws_execution_store", Kind: queue.KindSandboxToolExecute,
 		PartitionKey: queue.FormatSandboxExecutionPartitionKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
 		DedupeKey:    queue.FormatSandboxToolExecuteDedupeKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a", 1),
 	}
 	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
-	if err := coordinator.FinalizeExhaustedExecution(context.Background(), job); err != nil {
+	if err := coordinator.FinalizeExhaustedExecution(ctx, job); err != nil {
 		t.Fatalf("FinalizeExhaustedExecution: %v", err)
 	}
 	assertSandboxExecutionState(t, adminDB, "evt_execution_a", "waiting_activation", 1)
@@ -125,6 +128,7 @@ func TestPostgreSQLSandboxExecutionExhaustionHonorsPreProviderFences(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			runtimeDB, adminDB := newSandboxServiceTestDB(t)
 			seedSandboxExecutionStoreFixture(t, adminDB)
+			ctx := sandboxTestQueueContext(t, runtimeDB)
 			now := time.Now().UTC()
 			seedReadySandboxBinding(t, adminDB, now)
 			if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
@@ -136,12 +140,13 @@ func TestPostgreSQLSandboxExecutionExhaustionHonorsPreProviderFences(t *testing.
 				t.Fatalf("seed fence: %v", err)
 			}
 			job := &queuev1.QueueJob{
-				Id: "qjob_execution_fenced", WorkspaceId: "ws_execution_store", Kind: queue.KindSandboxToolExecute,
+				LeasedUntil: testSandboxLeaseExpiry(),
+				Id:          "qjob_execution_fenced", WorkspaceId: "ws_execution_store", Kind: queue.KindSandboxToolExecute,
 				PartitionKey: queue.FormatSandboxExecutionPartitionKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
 				DedupeKey:    queue.FormatSandboxToolExecuteDedupeKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a", 1),
 			}
 			coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
-			if err := coordinator.FinalizeExhaustedExecution(context.Background(), job); err != nil {
+			if err := coordinator.FinalizeExhaustedExecution(ctx, job); err != nil {
 				t.Fatalf("FinalizeExhaustedExecution: %v", err)
 			}
 			var resultJSON string
@@ -172,7 +177,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerRollsBackWhenQueueObservationCh
 	now := time.Date(2026, 7, 31, 17, 0, 0, 0, time.UTC)
 	client := dbconnect.NewClientForTesting(runtimeDB)
 	queueStore := queue.NewPostgreSQLStore(client)
-	candidate := seedOverLimitSandboxExecution(t, queueStore, "evt_execution_b", now)
+	candidate := seedOverLimitSandboxExecution(t, adminDB, queueStore, "evt_execution_b", now)
 	if _, err := adminDB.Exec(`UPDATE queue_jobs SET attempt_count = attempt_count + 1
 		WHERE workspace_id = $1 AND id = $2`, candidate.WorkspaceID, candidate.JobID); err != nil {
 		t.Fatalf("advance Queue observation: %v", err)
@@ -263,7 +268,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesSubmittedBackgroundComma
 	if err != nil {
 		t.Fatalf("enqueue background command: %v", err)
 	}
-	candidate := reclaimQueueJobAtBudget(t, queueStore, job.ID, queue.KindSandboxBackgroundCommand, now)
+	candidate := reclaimQueueJobAtBudget(t, adminDB, queueStore, job.ID, queue.KindSandboxBackgroundCommand, now)
 
 	updated, err := NewPostgreSQLSandboxQueueOverLimitFinalizer(client).FinalizePendingAtOrOverBudget(context.Background(), candidate, now.Add(3*time.Second))
 	if err != nil || !updated {
@@ -330,7 +335,7 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesMemoryProjection(t *test
 	if err != nil {
 		t.Fatalf("enqueue projection: %v", err)
 	}
-	candidate := reclaimQueueJobAtBudget(t, queueStore, job.ID, queue.KindSandboxMemoryProjection, now)
+	candidate := reclaimQueueJobAtBudget(t, adminDB, queueStore, job.ID, queue.KindSandboxMemoryProjection, now)
 	updated, err := NewPostgreSQLSandboxQueueOverLimitFinalizer(client).FinalizePendingAtOrOverBudget(context.Background(), candidate, now.Add(3*time.Second))
 	if err != nil || !updated {
 		t.Fatalf("FinalizePendingAtOrOverBudget = (%t,%v); want true,nil", updated, err)
@@ -348,6 +353,65 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerSettlesMemoryProjection(t *test
 	}
 }
 
+func TestPostgreSQLSandboxMemoryProjectionRejectsSupersededSettlement(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	const (
+		workspaceID = "ws_execution_store"
+		sessionID   = "sesn_execution_store"
+		threadID    = "thr_execution_store"
+		storeID     = "memstore_projection_fence"
+		writeID     = "evt_memory_projection_fence"
+	)
+	if _, err := adminDB.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		memory_projection_state, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 'memory', 'hash_projection_fence', 'memory',
+		'{"action":"create","path":"note.md","content":"x"}', 'committed',
+		'{"status":"completed","action":"create","path":"/note.md"}', 'pending', $5, $5)`,
+		workspaceID, sessionID, threadID, writeID, now); err != nil {
+		t.Fatalf("seed memory projection: %v", err)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"workspace_id": workspaceID, "session_id": sessionID,
+		"memory_store_id": storeID, "memory_write_id": writeID,
+	})
+	if err != nil {
+		t.Fatalf("encode projection payload: %v", err)
+	}
+	firstCtx, secondCtx, _, _ := supersedeSandboxQueueLease(t, runtimeDB, adminDB, queue.EnqueueRequest{
+		ID: "qjob_mem_fence", WorkspaceID: workspaceID, Kind: queue.KindSandboxMemoryProjection,
+		PartitionKey:   queue.FormatSandboxMemoryPartitionKey(workspaceID, storeID),
+		DedupeKey:      queue.FormatSandboxMemoryProjectionDedupeKey(workspaceID, storeID, writeID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: 5,
+	})
+	store := NewPostgreSQLSandboxMemoryProjectionStore(dbconnect.NewClientForTesting(runtimeDB))
+	work := SandboxMemoryProjectionWork{WorkspaceID: workspaceID, SessionID: sessionID, MemoryStoreID: storeID, MemoryWriteID: writeID}
+	if err := store.SettleProjection(firstCtx, work, "refreshed", "", now); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("superseded SettleProjection error = %v; want Queue authority loss", err)
+	}
+	var state, resultJSON string
+	if err := adminDB.QueryRow(`SELECT memory_projection_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND tool_use_event_id=$2`, workspaceID, writeID).Scan(&state, &resultJSON); err != nil {
+		t.Fatalf("read projection after stale settlement: %v", err)
+	}
+	if state != "pending" || strings.Contains(resultJSON, "projection_refreshed") {
+		t.Fatalf("projection after stale settlement = %s/%s; want unchanged pending result", state, resultJSON)
+	}
+	if err := store.SettleProjection(secondCtx, work, "refreshed", "", now); err != nil {
+		t.Fatalf("successor SettleProjection: %v", err)
+	}
+	if err := adminDB.QueryRow(`SELECT memory_projection_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND tool_use_event_id=$2`, workspaceID, writeID).Scan(&state, &resultJSON); err != nil {
+		t.Fatalf("read successor projection: %v", err)
+	}
+	if state != "refreshed" || !strings.Contains(resultJSON, `"projection_refreshed":true`) {
+		t.Fatalf("successor projection = %s/%s; want refreshed result", state, resultJSON)
+	}
+}
+
 func reclaimBackgroundQueueJobAtBudget(t *testing.T, adminDB *sql.DB, queueStore *queue.PostgreSQLQueueStore, kind string, now time.Time) queue.PendingAtOrOverBudgetJob {
 	t.Helper()
 	var jobID string
@@ -355,10 +419,10 @@ func reclaimBackgroundQueueJobAtBudget(t *testing.T, adminDB *sql.DB, queueStore
 		WHERE workspace_id='ws_execution_store' AND kind=$1 RETURNING id`, kind, now).Scan(&jobID); err != nil {
 		t.Fatalf("prepare background Queue job: %v", err)
 	}
-	return reclaimQueueJobAtBudget(t, queueStore, jobID, kind, now)
+	return reclaimQueueJobAtBudget(t, adminDB, queueStore, jobID, kind, now)
 }
 
-func reclaimQueueJobAtBudget(t *testing.T, queueStore *queue.PostgreSQLQueueStore, jobID string, kind string, now time.Time) queue.PendingAtOrOverBudgetJob {
+func reclaimQueueJobAtBudget(t *testing.T, adminDB *sql.DB, queueStore *queue.PostgreSQLQueueStore, jobID string, kind string, now time.Time) queue.PendingAtOrOverBudgetJob {
 	t.Helper()
 	ctx := context.Background()
 	leased, err := queueStore.Lease(ctx, queue.LeaseRequest{
@@ -368,8 +432,11 @@ func reclaimQueueJobAtBudget(t *testing.T, queueStore *queue.PostgreSQLQueueStor
 	if err != nil || len(leased) != 1 || leased[0].ID != jobID {
 		t.Fatalf("Lease = %#v err %v; want %s", leased, err, jobID)
 	}
+	if _, err := adminDB.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND id=$2`, leased[0].WorkspaceID, jobID); err != nil {
+		t.Fatalf("expire Queue lease: %v", err)
+	}
 	if reclaimed, err := queueStore.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{
-		WorkspaceID: "ws_execution_store", Limit: 1, Now: now.Add(2 * time.Second),
+		WorkspaceID: "ws_execution_store", Limit: 1,
 	}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases = (%d,%v); want 1,nil", reclaimed, err)
 	}
@@ -401,7 +468,7 @@ func seedBackgroundCommandReceipt(t *testing.T, adminDB *sql.DB, requestID strin
 	}
 }
 
-func seedOverLimitSandboxExecution(t *testing.T, queueStore *queue.PostgreSQLQueueStore, eventID string, now time.Time) queue.PendingAtOrOverBudgetJob {
+func seedOverLimitSandboxExecution(t *testing.T, adminDB *sql.DB, queueStore *queue.PostgreSQLQueueStore, eventID string, now time.Time) queue.PendingAtOrOverBudgetJob {
 	t.Helper()
 	ctx := context.Background()
 	ws := workspace.ID("ws_execution_store")
@@ -429,8 +496,11 @@ func seedOverLimitSandboxExecution(t *testing.T, queueStore *queue.PostgreSQLQue
 	if err != nil || len(leased) != 1 || leased[0].ID != job.ID {
 		t.Fatalf("Lease = %#v err %v; want %s", leased, err, job.ID)
 	}
+	if _, err := adminDB.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND id=$2`, ws, job.ID); err != nil {
+		t.Fatalf("expire Queue lease: %v", err)
+	}
 	if reclaimed, err := queueStore.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{
-		WorkspaceID: ws, Limit: 1, Now: now.Add(2 * time.Second),
+		WorkspaceID: ws, Limit: 1,
 	}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases = (%d,%v); want 1,nil", reclaimed, err)
 	}

@@ -170,7 +170,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 	if c == nil || c.client == nil {
 		return errors.New("sandbox execution coordinator is required")
 	}
-	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.wait_activation", func(tx *dbconnect.Tx) error {
+	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.wait_activation", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		now := c.now()
 		var environmentID string
 		var resourceRevision int64
@@ -235,6 +236,9 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 			); err != nil {
 				return err
 			}
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
+			return err
 		}
 		if work.Binding != nil &&
 			(binding.BindingRevision != work.Binding.BindingRevision || binding.ProviderResourceID != work.Binding.ProviderResourceID) {
@@ -405,7 +409,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 	if work.Binding == nil {
 		return errors.New("sandbox materialization requires a binding")
 	}
-	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.wait_materialization", func(tx *dbconnect.Tx) error {
+	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.wait_materialization", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		now := c.now()
 		if err := lockSession(ctx, tx, work.Ref); err != nil {
 			return err
@@ -416,6 +421,9 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForMaterialization(ctx conte
 		}
 		if !exists || binding.BindingRevision != work.Binding.BindingRevision || binding.ProviderResourceID != work.Binding.ProviderResourceID {
 			return errSandboxExecutionReinspection
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
+			return err
 		}
 		if binding.ReleaseRequested() {
 			return settleSandboxExecutionTx(ctx, tx, work.Ref, work.AttemptGeneration, SandboxExecutionSettlement{
@@ -536,7 +544,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) RecordProviderCommandReference(c
 		return false, err
 	}
 	var recorded bool
-	err = c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.record_command_reference", func(tx *dbconnect.Tx) error {
+	err = c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.record_command_reference", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, work.Ref); err != nil {
 			return err
 		}
@@ -595,7 +604,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) RecordProviderCommandReference(c
 func (c *PostgreSQLSandboxExecutionCoordinator) transitionExecutionAuthorization(ctx context.Context, work SandboxExecutionWork, from string, to string, deadline time.Time) (bool, error) {
 	var changed bool
 	var reinspect bool
-	err := c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution."+to, func(tx *dbconnect.Tx) error {
+	err := c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution."+to, func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var resourceRevision int64
 		var databaseNow time.Time
 		if err := tx.QueryRow(ctx,
@@ -609,6 +619,9 @@ func (c *PostgreSQLSandboxExecutionCoordinator) transitionExecutionAuthorization
 		}
 		binding, exists, err := lockSandboxBinding(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID)
 		if err != nil {
+			return err
+		}
+		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Ref.WorkspaceID, work.Ref.SessionID); err != nil {
 			return err
 		}
 		var cancelRequestedAt, storedPreparationDeadline sql.NullTime
@@ -740,7 +753,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) SettleExecution(ctx context.Cont
 		settlement.BindingRevision = work.Binding.BindingRevision
 		settlement.ResourceRootsJSON = work.Binding.ResourceRootsJSON
 	}
-	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.settle", func(tx *dbconnect.Tx) error {
+	return c.client.WithWorkspaceTx(ctx, work.Ref.WorkspaceID, "sandbox.execution.settle", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, work.Ref); err != nil {
 			return err
 		}
@@ -791,7 +805,8 @@ func (c *PostgreSQLSandboxExecutionCoordinator) finalizeClosedExecution(ctx cont
 	if err != nil {
 		return err
 	}
-	return c.client.WithWorkspaceTx(ctx, decoded.Ref.WorkspaceID, operation, func(tx *dbconnect.Tx) error {
+	return c.client.WithWorkspaceTx(ctx, decoded.Ref.WorkspaceID, operation, func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		return finalizeExhaustedSandboxExecutionTx(ctx, tx, decoded, c.now())
 	})
 }
@@ -830,6 +845,9 @@ func finalizeExhaustedSandboxExecutionTx(ctx context.Context, tx *dbconnect.Tx, 
 	}
 	binding, bindingExists, err := lockSandboxBinding(ctx, tx, job.Ref.WorkspaceID, job.Ref.SessionID)
 	if err != nil {
+		return err
+	}
+	if err := lockSandboxLifecycleOperationsForSession(ctx, tx, job.Ref.WorkspaceID, job.Ref.SessionID); err != nil {
 		return err
 	}
 	var state string

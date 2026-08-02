@@ -52,6 +52,13 @@ transport only; lifecycle-operation and execution generations govern business
 re-entry. A worker that receives an over-budget job settles the referenced
 business row before dead-lettering the Queue row.
 
+Provider authorization, Blob custody, terminal settlement, and live exhaustion
+remain under the source Queue lease. Workers keep heartbeating through the last
+fenced business transaction, which locks the source Queue row after business
+rows and rejects an expired or replaced token before commit. The heartbeat is
+stopped before the final Queue transition, so stale workers cannot acknowledge,
+retry, or dead-letter work after losing execution authority.
+
 ## Lifecycle
 
 Sessions are admitted without creating a provider resource. The first approved

@@ -118,6 +118,7 @@ func (r *SandboxBackgroundReconcileJobRunner) RunOnceWithActivity(ctx context.Co
 	if err != nil {
 		return false, err
 	}
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxBackgroundReconcile},
 		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -126,16 +127,29 @@ func (r *SandboxBackgroundReconcileJobRunner) RunOnceWithActivity(ctx context.Co
 		return false, err
 	}
 	for _, job := range lease.GetJobs() {
-		if err := r.processJob(ctx, job, cfg); err != nil {
+		if err := r.processJob(ctx, job, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return len(lease.GetJobs()) > 0, err
 		}
 	}
 	return len(lease.GetJobs()) > 0, nil
 }
 
-func (r *SandboxBackgroundReconcileJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxBackgroundRunnerConfig) error {
+func (r *SandboxBackgroundReconcileJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxBackgroundRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if leaseErr := finishLease(); resultErr == nil && leaseErr != nil {
+			resultErr = leaseErr
+		}
+	}()
+	ctx = workCtx
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() || queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Store.FinalizeReconcileExhaustion(ctx, queueJob, r.now()); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_background_reconcile_exhausted")
@@ -145,24 +159,35 @@ func (r *SandboxBackgroundReconcileJobRunner) processJob(ctx context.Context, qu
 		if err := r.Store.FinalizeReconcileExhaustion(ctx, queueJob, r.now()); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "invalid_sandbox_background_reconcile_payload")
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	err = r.reconcile(workCtx, job)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-		return heartbeatErr
-	}
+	err = r.reconcile(ctx, job)
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		var retry *sandboxExecutionRetry
 		if errors.As(err, &retry) {
 			if queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
 				if err := r.Store.FinalizeReconcileExhaustion(ctx, queueJob, r.now()); err != nil {
 					return err
 				}
+				if err := stopQueueLeaseGuard(ctx); err != nil {
+					return err
+				}
 				return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_background_reconcile_exhausted")
+			}
+			if err := stopQueueLeaseGuard(ctx); err != nil {
+				return err
 			}
 			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken, ErrorKind: retry.kind, ErrorMessage: retry.message}))
 		}
+		return err
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
@@ -171,7 +196,7 @@ func (r *SandboxBackgroundReconcileJobRunner) processJob(ctx context.Context, qu
 func (r *SandboxBackgroundReconcileJobRunner) reconcile(ctx context.Context, job SandboxBackgroundReconcileJob) error {
 	task, current, err := r.Store.LoadReconcile(ctx, job)
 	if err != nil {
-		return newSandboxExecutionRetry("sandbox_background_store_error", "background task could not be loaded")
+		return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_background_store_error", "background task could not be loaded")
 	}
 	if !current {
 		return nil
@@ -226,6 +251,7 @@ func (r *SandboxBackgroundCommandJobRunner) RunOnceWithActivity(ctx context.Cont
 	if err != nil {
 		return false, err
 	}
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId: cfg.WorkspaceID, Kinds: []string{queue.KindSandboxBackgroundCommand},
 		LeaseOwner: cfg.LeaseOwner, MaxJobs: int32(cfg.MaxJobs), LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
@@ -234,16 +260,29 @@ func (r *SandboxBackgroundCommandJobRunner) RunOnceWithActivity(ctx context.Cont
 		return false, err
 	}
 	for _, job := range lease.GetJobs() {
-		if err := r.processJob(ctx, job, cfg); err != nil {
+		if err := r.processJob(ctx, job, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return len(lease.GetJobs()) > 0, err
 		}
 	}
 	return len(lease.GetJobs()) > 0, nil
 }
 
-func (r *SandboxBackgroundCommandJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxBackgroundRunnerConfig) error {
+func (r *SandboxBackgroundCommandJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxBackgroundRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, finishLease, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if leaseErr := finishLease(); resultErr == nil && leaseErr != nil {
+			resultErr = leaseErr
+		}
+	}()
+	ctx = workCtx
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() || queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Store.FinalizeCommandExhaustion(ctx, queueJob, r.now()); err != nil {
+			return err
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_background_command_exhausted")
@@ -253,24 +292,35 @@ func (r *SandboxBackgroundCommandJobRunner) processJob(ctx context.Context, queu
 		if err := r.Store.FinalizeCommandExhaustion(ctx, queueJob, r.now()); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "invalid_sandbox_background_command_payload")
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	err = r.execute(workCtx, job)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
-		return heartbeatErr
-	}
+	err = r.execute(ctx, job)
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return err
+		}
 		var retry *sandboxExecutionRetry
 		if errors.As(err, &retry) {
 			if queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
 				if err := r.Store.FinalizeCommandExhaustion(ctx, queueJob, r.now()); err != nil {
 					return err
 				}
+				if err := stopQueueLeaseGuard(ctx); err != nil {
+					return err
+				}
 				return deadLetterBackgroundJob(ctx, r.Queue, queueJob, "sandbox_background_command_exhausted")
+			}
+			if err := stopQueueLeaseGuard(ctx); err != nil {
+				return err
 			}
 			return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken, ErrorKind: retry.kind, ErrorMessage: retry.message}))
 		}
+		return err
+	}
+	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
@@ -279,7 +329,7 @@ func (r *SandboxBackgroundCommandJobRunner) processJob(ctx context.Context, queu
 func (r *SandboxBackgroundCommandJobRunner) execute(ctx context.Context, job SandboxBackgroundCommandJob) error {
 	work, current, err := r.Store.LoadCommand(ctx, job, r.now())
 	if err != nil {
-		return newSandboxExecutionRetry("sandbox_background_store_error", "background command could not be loaded")
+		return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_background_store_error", "background command could not be loaded")
 	}
 	if !current {
 		return nil
@@ -298,7 +348,7 @@ func (r *SandboxBackgroundCommandJobRunner) execute(ctx context.Context, job San
 	if work.Kind != SandboxBackgroundOperationPoll {
 		submitted, err := r.Store.MarkCommandSubmitted(ctx, work, r.now())
 		if err != nil {
-			return newSandboxExecutionRetry("sandbox_background_store_error", "background command submission could not be recorded")
+			return sandboxExecutionRetryUnlessAuthorityLost(err, "sandbox_background_store_error", "background command submission could not be recorded")
 		}
 		if !submitted {
 			return nil

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -32,7 +33,7 @@ func TestEnvironmentBuildRunnerMarksReadyEnqueuesFanoutAndAcks(t *testing.T) {
 		Queue:     queueClient,
 		Store:     store,
 		Providers: artifactProviderRegistry(t, builder),
-		Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 		Clock:     fixedEnvironmentRunnerClock,
 	}
 
@@ -103,7 +104,7 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 				Queue:     queueClient,
 				Store:     store,
 				Providers: artifactProviderRegistry(t, builder),
-				Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+				Config:    EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 				Clock:     fixedEnvironmentRunnerClock,
 			}
 
@@ -176,7 +177,7 @@ func TestEnvironmentReadyFanoutRunnerAcksAfterDurableFanout(t *testing.T) {
 	runner := &EnvironmentReadyFanoutJobRunner{
 		Queue:  queueClient,
 		Store:  store,
-		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 		Clock:  fixedEnvironmentRunnerClock,
 	}
 
@@ -196,7 +197,7 @@ func TestEnvironmentReadyFanoutRunnerRetriesStoreError(t *testing.T) {
 	runner := &EnvironmentReadyFanoutJobRunner{
 		Queue:  queueClient,
 		Store:  &recordingEnvironmentFanoutStore{err: errors.New("database unavailable")},
-		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 		Clock:  fixedEnvironmentRunnerClock,
 	}
 
@@ -208,6 +209,23 @@ func TestEnvironmentReadyFanoutRunnerRetriesStoreError(t *testing.T) {
 	}
 }
 
+func TestEnvironmentReadyFanoutRunnerDoesNotTransitionAfterStoreLosesAuthority(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentReadyFanoutQueueJob()}}
+	runner := &EnvironmentReadyFanoutJobRunner{
+		Queue:  queueClient,
+		Store:  &recordingEnvironmentFanoutStore{err: errQueueLeaseLost},
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+
+	if err := runner.RunOnce(context.Background()); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("RunOnce error = %v; want Queue authority loss", err)
+	}
+	if len(queueClient.transitions) != 0 {
+		t.Fatalf("transitions after store authority loss = %v; want none", queueClient.transitions)
+	}
+}
+
 func TestEnvironmentReadyFanoutRunnerFinalizesWaitingActivationsAtExhaustion(t *testing.T) {
 	job := environmentReadyFanoutQueueJob()
 	job.AttemptCount = 3
@@ -216,7 +234,7 @@ func TestEnvironmentReadyFanoutRunnerFinalizesWaitingActivationsAtExhaustion(t *
 	store := &recordingEnvironmentFanoutStore{err: errors.New("database unavailable")}
 	runner := &EnvironmentReadyFanoutJobRunner{
 		Queue: queueClient, Store: store,
-		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
 		Clock:  fixedEnvironmentRunnerClock,
 	}
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -227,6 +245,77 @@ func TestEnvironmentReadyFanoutRunnerFinalizesWaitingActivationsAtExhaustion(t *
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_fanout:environment_ready_fanout_attempts_exhausted"}) {
 		t.Fatalf("transitions = %v; want named dead letter", queueClient.transitions)
+	}
+}
+
+func TestEnvironmentReadyFanoutRunnerFinalizesBeforeRunningAReclaimedOverBudgetJob(t *testing.T) {
+	job := environmentReadyFanoutQueueJob()
+	job.AttemptCount = 4
+	job.MaxAttempts = 3
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+	store := &recordingEnvironmentFanoutStore{}
+	runner := &EnvironmentReadyFanoutJobRunner{
+		Queue: queueClient, Store: store,
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"finalize:env_build:7"}) {
+		t.Fatalf("store calls = %v; want finalization without fanout", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_fanout:environment_ready_fanout_attempts_exhausted"}) {
+		t.Fatalf("transitions = %v; want exhausted dead letter", queueClient.transitions)
+	}
+}
+
+func TestEnvironmentReadyFanoutRunnerFinalizesCanonicalJobWithInvalidPayload(t *testing.T) {
+	job := environmentReadyFanoutQueueJob()
+	job.PayloadJson = `{`
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+	store := &recordingEnvironmentFanoutStore{}
+	runner := &EnvironmentReadyFanoutJobRunner{
+		Queue: queueClient, Store: store,
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"finalize:env_build:7"}) {
+		t.Fatalf("store calls = %v; want dependency finalization from transport identity", store.calls)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_fanout:invalid_environment_ready_fanout_payload"}) {
+		t.Fatalf("transitions = %v; want invalid payload dead letter", queueClient.transitions)
+	}
+}
+
+func TestEnvironmentReadyFanoutRunnerKeepsHeartbeatThroughExhaustionFinalizer(t *testing.T) {
+	job := environmentReadyFanoutQueueJob()
+	job.AttemptCount = 3
+	job.MaxAttempts = 3
+	finalizeStarted := make(chan struct{})
+	heartbeatObserved := make(chan struct{}, 1)
+	queueClient := &observingEnvironmentFanoutQueue{
+		recordingSandboxQueue: recordingSandboxQueue{leased: []*queuev1.QueueJob{job}},
+		finalizing:            finalizeStarted,
+		heartbeatObserved:     heartbeatObserved,
+	}
+	store := &recordingEnvironmentFanoutStore{
+		err:             errors.New("database unavailable"),
+		finalizeStarted: finalizeStarted, heartbeatObserved: heartbeatObserved,
+	}
+	runner := &EnvironmentReadyFanoutJobRunner{
+		Queue: queueClient, Store: store,
+		Config: EnvironmentRunnerConfig{WorkspaceID: "ws_env", LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond},
+		Clock:  fixedEnvironmentRunnerClock,
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_env_fanout:environment_ready_fanout_attempts_exhausted"}) {
+		t.Fatalf("transitions = %v; want dead letter after fenced finalizer", queueClient.transitions)
 	}
 }
 
@@ -288,11 +377,15 @@ func environmentBuildQueueJob() *queuev1.QueueJob {
 
 func environmentReadyFanoutQueueJob() *queuev1.QueueJob {
 	return &queuev1.QueueJob{
-		Id:          "qjob_env_fanout",
-		WorkspaceId: "ws_env",
-		Kind:        "environment_ready_fanout",
-		LeaseToken:  "lease_env_fanout",
-		PayloadJson: `{"workspace_id":"ws_env","environment_id":"env_build","generation":"7"}`,
+		Id:           "qjob_env_fanout",
+		WorkspaceId:  "ws_env",
+		Kind:         "environment_ready_fanout",
+		PartitionKey: queue.FormatEnvironmentPartitionKey("ws_env", "env_build"),
+		DedupeKey:    queue.FormatEnvironmentReadyFanoutDedupeKey("ws_env", "env_build", "7"),
+		LeaseToken:   "lease_env_fanout",
+		AttemptCount: 1,
+		MaxAttempts:  3,
+		PayloadJson:  `{"workspace_id":"ws_env","environment_id":"env_build","generation":"7"}`,
 	}
 }
 
@@ -391,15 +484,25 @@ func (b *recordingArtifactBuilder) BuildEnvironmentArtifact(ctx context.Context,
 }
 
 type recordingEnvironmentFanoutStore struct {
-	advanced  int
-	err       error
-	calls     []string
-	block     <-chan struct{}
-	cancelled chan struct{}
+	advanced          int
+	err               error
+	calls             []string
+	block             <-chan struct{}
+	cancelled         chan struct{}
+	finalizeStarted   chan struct{}
+	heartbeatObserved <-chan struct{}
 }
 
 func (s *recordingEnvironmentFanoutStore) FinalizeReadyEnvironmentFanout(_ context.Context, job EnvironmentReadyFanoutJob, _ time.Time) error {
 	s.calls = append(s.calls, "finalize:"+job.EnvironmentID+":"+strconvInt64(job.Generation))
+	if s.finalizeStarted != nil {
+		close(s.finalizeStarted)
+		select {
+		case <-s.heartbeatObserved:
+		case <-time.After(time.Second):
+			return errors.New("queue heartbeat stopped before environment fanout finalization")
+		}
+	}
 	return nil
 }
 
@@ -416,6 +519,24 @@ func (s *recordingEnvironmentFanoutStore) FanoutReadyEnvironment(ctx context.Con
 		}
 	}
 	return s.advanced, s.err
+}
+
+type observingEnvironmentFanoutQueue struct {
+	recordingSandboxQueue
+	finalizing        <-chan struct{}
+	heartbeatObserved chan<- struct{}
+}
+
+func (q *observingEnvironmentFanoutQueue) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
+	select {
+	case <-q.finalizing:
+		select {
+		case q.heartbeatObserved <- struct{}{}:
+		default:
+		}
+	default:
+	}
+	return q.recordingSandboxQueue.Heartbeat(ctx, request)
 }
 
 func strconvInt64(value int64) string {

@@ -161,7 +161,7 @@ func QueueJobEnvelopeAllowance() int {
 // Queue job lifecycle state machine. These are the closed status values of a
 // queue_jobs row. Every transition is written by a PostgreSQLQueueStore method
 // in postgresql_store.go. Every caller-driven write off "leased"
-// (Ack/Retry/Defer/DeadLetter) matches on the row's lease_token, so a stale
+// (Ack/Retry/Defer/DeadLetter/Heartbeat) matches on the row's lease_token, so a stale
 // token affects no row. The maintenance path ReclaimExpiredLeases is the
 // exception: it reclaims an expired lease off "leased" without the now-stale
 // token, matching only on workspace_id/id/status='leased'.
@@ -193,10 +193,12 @@ func QueueJobEnvelopeAllowance() int {
 //   - At most one leased job per partition_key: the same-session serial-execution
 //     barrier. leaseCandidate's NOT EXISTS leased-in-partition guard and the
 //     partial-unique index run a partition's jobs one at a time.
-//   - Caller-driven transitions off leased (Ack/Retry/Defer/DeadLetter) are
+//   - Caller-driven transitions off leased (Ack/Retry/Defer/DeadLetter/Heartbeat) are
 //     lease-token fenced; a stale one carrying an old lease_token matches no
-//     row and is ignored. ReclaimExpiredLeases is exempt by design: it
-//     reclaims an expired lease off leased without the stale token.
+//     row and is ignored. Heartbeat cannot revive an expired lease. Lease,
+//     Heartbeat, and reclaim author durable lease times from PostgreSQL's
+//     clock. ReclaimExpiredLeases is exempt by design: it reclaims an expired
+//     lease off leased without the stale token.
 //   - Lease scans candidates FOR UPDATE SKIP LOCKED; runtime-facing consumers
 //     hold at most one leased job per session partition.
 //
@@ -288,7 +290,17 @@ type HeartbeatRequest struct {
 	JobID         string
 	LeaseToken    string
 	LeaseDuration time.Duration
-	Now           time.Time
+}
+
+type HeartbeatResult struct {
+	Updated     bool
+	LeasedUntil time.Time
+}
+
+type ActiveLeaseRequest struct {
+	WorkspaceID workspace.ID
+	JobID       string
+	LeaseToken  string
 }
 
 type AckRequest struct {
@@ -337,7 +349,6 @@ type ReclaimExpiredLeasesRequest struct {
 	Limit        int
 	ErrorKind    string
 	ErrorMessage string
-	Now          time.Time
 }
 
 type TargetedCancelRequest struct {

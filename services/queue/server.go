@@ -18,7 +18,7 @@ import (
 
 type Store interface {
 	Lease(context.Context, queue.LeaseRequest) ([]*queue.Job, error)
-	Heartbeat(context.Context, queue.HeartbeatRequest) (bool, error)
+	Heartbeat(context.Context, queue.HeartbeatRequest) (queue.HeartbeatResult, error)
 	Ack(context.Context, queue.AckRequest) (bool, error)
 	Retry(context.Context, queue.RetryRequest) (bool, error)
 	Defer(context.Context, queue.DeferRequest) (bool, error)
@@ -66,7 +66,7 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	return response, nil
 }
 
-func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error) {
+func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
 	if s == nil || s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "queue store is required")
 	}
@@ -74,14 +74,20 @@ func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatReques
 	if err != nil {
 		return nil, err
 	}
-	updated, err := s.store.Heartbeat(ctx, queue.HeartbeatRequest{
+	result, err := s.store.Heartbeat(ctx, queue.HeartbeatRequest{
 		WorkspaceID:   workspace.ID(request.GetWorkspaceId()),
 		JobID:         request.GetJobId(),
 		LeaseToken:    request.GetLeaseToken(),
 		LeaseDuration: leaseDuration,
-		Now:           s.nowUTC(),
 	})
-	return transitionResponse(updated, err)
+	if err != nil {
+		return nil, mapQueueError(err)
+	}
+	response := &queuev1.HeartbeatResponse{Updated: result.Updated}
+	if result.Updated {
+		response.LeasedUntil = result.LeasedUntil.UTC().Format(time.RFC3339Nano)
+	}
+	return response, nil
 }
 
 func (s *Server) Ack(ctx context.Context, request *queuev1.AckRequest) (*queuev1.TransitionResponse, error) {

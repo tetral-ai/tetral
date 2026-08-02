@@ -377,6 +377,58 @@ func (x *HeartbeatRequest) GetLeaseDurationMs() int64 {
 	return 0
 }
 
+type HeartbeatResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Updated       bool                   `protobuf:"varint,1,opt,name=updated,proto3" json:"updated,omitempty"`
+	LeasedUntil   string                 `protobuf:"bytes,2,opt,name=leased_until,json=leasedUntil,proto3" json:"leased_until,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HeartbeatResponse) Reset() {
+	*x = HeartbeatResponse{}
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HeartbeatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HeartbeatResponse) ProtoMessage() {}
+
+func (x *HeartbeatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HeartbeatResponse.ProtoReflect.Descriptor instead.
+func (*HeartbeatResponse) Descriptor() ([]byte, []int) {
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *HeartbeatResponse) GetUpdated() bool {
+	if x != nil {
+		return x.Updated
+	}
+	return false
+}
+
+func (x *HeartbeatResponse) GetLeasedUntil() string {
+	if x != nil {
+		return x.LeasedUntil
+	}
+	return ""
+}
+
 type AckRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
@@ -388,7 +440,7 @@ type AckRequest struct {
 
 func (x *AckRequest) Reset() {
 	*x = AckRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -400,7 +452,7 @@ func (x *AckRequest) String() string {
 func (*AckRequest) ProtoMessage() {}
 
 func (x *AckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[4]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -413,7 +465,7 @@ func (x *AckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckRequest.ProtoReflect.Descriptor instead.
 func (*AckRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{4}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *AckRequest) GetWorkspaceId() string {
@@ -450,7 +502,7 @@ type RetryRequest struct {
 
 func (x *RetryRequest) Reset() {
 	*x = RetryRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -462,7 +514,7 @@ func (x *RetryRequest) String() string {
 func (*RetryRequest) ProtoMessage() {}
 
 func (x *RetryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[5]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -475,7 +527,7 @@ func (x *RetryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryRequest.ProtoReflect.Descriptor instead.
 func (*RetryRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{5}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RetryRequest) GetWorkspaceId() string {
@@ -524,7 +576,7 @@ type DeferRequest struct {
 
 func (x *DeferRequest) Reset() {
 	*x = DeferRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -536,7 +588,7 @@ func (x *DeferRequest) String() string {
 func (*DeferRequest) ProtoMessage() {}
 
 func (x *DeferRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[6]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -549,7 +601,7 @@ func (x *DeferRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeferRequest.ProtoReflect.Descriptor instead.
 func (*DeferRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{6}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeferRequest) GetWorkspaceId() string {
@@ -586,7 +638,7 @@ type DeadLetterRequest struct {
 
 func (x *DeadLetterRequest) Reset() {
 	*x = DeadLetterRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -598,7 +650,7 @@ func (x *DeadLetterRequest) String() string {
 func (*DeadLetterRequest) ProtoMessage() {}
 
 func (x *DeadLetterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[7]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -611,7 +663,7 @@ func (x *DeadLetterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeadLetterRequest.ProtoReflect.Descriptor instead.
 func (*DeadLetterRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{7}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DeadLetterRequest) GetWorkspaceId() string {
@@ -661,7 +713,7 @@ type CancelRequest struct {
 
 func (x *CancelRequest) Reset() {
 	*x = CancelRequest{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -673,7 +725,7 @@ func (x *CancelRequest) String() string {
 func (*CancelRequest) ProtoMessage() {}
 
 func (x *CancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[8]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -686,7 +738,7 @@ func (x *CancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
 func (*CancelRequest) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{8}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CancelRequest) GetWorkspaceId() string {
@@ -726,7 +778,7 @@ type CancelResponse struct {
 
 func (x *CancelResponse) Reset() {
 	*x = CancelResponse{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -738,7 +790,7 @@ func (x *CancelResponse) String() string {
 func (*CancelResponse) ProtoMessage() {}
 
 func (x *CancelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[9]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -751,7 +803,7 @@ func (x *CancelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelResponse.ProtoReflect.Descriptor instead.
 func (*CancelResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{9}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CancelResponse) GetCancelledCount() int32 {
@@ -770,7 +822,7 @@ type TransitionResponse struct {
 
 func (x *TransitionResponse) Reset() {
 	*x = TransitionResponse{}
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -782,7 +834,7 @@ func (x *TransitionResponse) String() string {
 func (*TransitionResponse) ProtoMessage() {}
 
 func (x *TransitionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tetral_queue_v1_queue_proto_msgTypes[10]
+	mi := &file_tetral_queue_v1_queue_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -795,7 +847,7 @@ func (x *TransitionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TransitionResponse.ProtoReflect.Descriptor instead.
 func (*TransitionResponse) Descriptor() ([]byte, []int) {
-	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{10}
+	return file_tetral_queue_v1_queue_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *TransitionResponse) GetUpdated() bool {
@@ -844,7 +896,10 @@ const file_tetral_queue_v1_queue_proto_rawDesc = "" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vlease_token\x18\x03 \x01(\tR\n" +
 	"leaseToken\x12*\n" +
-	"\x11lease_duration_ms\x18\x04 \x01(\x03R\x0fleaseDurationMs\"g\n" +
+	"\x11lease_duration_ms\x18\x04 \x01(\x03R\x0fleaseDurationMs\"P\n" +
+	"\x11HeartbeatResponse\x12\x18\n" +
+	"\aupdated\x18\x01 \x01(\bR\aupdated\x12!\n" +
+	"\fleased_until\x18\x02 \x01(\tR\vleasedUntil\"g\n" +
 	"\n" +
 	"AckRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x15\n" +
@@ -881,10 +936,10 @@ const file_tetral_queue_v1_queue_proto_rawDesc = "" +
 	"\x0eCancelResponse\x12'\n" +
 	"\x0fcancelled_count\x18\x01 \x01(\x05R\x0ecancelledCount\".\n" +
 	"\x12TransitionResponse\x12\x18\n" +
-	"\aupdated\x18\x01 \x01(\bR\aupdated2\xb0\x04\n" +
+	"\aupdated\x18\x01 \x01(\bR\aupdated2\xaf\x04\n" +
 	"\fQueueService\x12F\n" +
-	"\x05Lease\x12\x1d.tetral.queue.v1.LeaseRequest\x1a\x1e.tetral.queue.v1.LeaseResponse\x12S\n" +
-	"\tHeartbeat\x12!.tetral.queue.v1.HeartbeatRequest\x1a#.tetral.queue.v1.TransitionResponse\x12G\n" +
+	"\x05Lease\x12\x1d.tetral.queue.v1.LeaseRequest\x1a\x1e.tetral.queue.v1.LeaseResponse\x12R\n" +
+	"\tHeartbeat\x12!.tetral.queue.v1.HeartbeatRequest\x1a\".tetral.queue.v1.HeartbeatResponse\x12G\n" +
 	"\x03Ack\x12\x1b.tetral.queue.v1.AckRequest\x1a#.tetral.queue.v1.TransitionResponse\x12K\n" +
 	"\x05Retry\x12\x1d.tetral.queue.v1.RetryRequest\x1a#.tetral.queue.v1.TransitionResponse\x12K\n" +
 	"\x05Defer\x12\x1d.tetral.queue.v1.DeferRequest\x1a#.tetral.queue.v1.TransitionResponse\x12U\n" +
@@ -904,36 +959,37 @@ func file_tetral_queue_v1_queue_proto_rawDescGZIP() []byte {
 	return file_tetral_queue_v1_queue_proto_rawDescData
 }
 
-var file_tetral_queue_v1_queue_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_tetral_queue_v1_queue_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_tetral_queue_v1_queue_proto_goTypes = []any{
 	(*QueueJob)(nil),           // 0: tetral.queue.v1.QueueJob
 	(*LeaseRequest)(nil),       // 1: tetral.queue.v1.LeaseRequest
 	(*LeaseResponse)(nil),      // 2: tetral.queue.v1.LeaseResponse
 	(*HeartbeatRequest)(nil),   // 3: tetral.queue.v1.HeartbeatRequest
-	(*AckRequest)(nil),         // 4: tetral.queue.v1.AckRequest
-	(*RetryRequest)(nil),       // 5: tetral.queue.v1.RetryRequest
-	(*DeferRequest)(nil),       // 6: tetral.queue.v1.DeferRequest
-	(*DeadLetterRequest)(nil),  // 7: tetral.queue.v1.DeadLetterRequest
-	(*CancelRequest)(nil),      // 8: tetral.queue.v1.CancelRequest
-	(*CancelResponse)(nil),     // 9: tetral.queue.v1.CancelResponse
-	(*TransitionResponse)(nil), // 10: tetral.queue.v1.TransitionResponse
+	(*HeartbeatResponse)(nil),  // 4: tetral.queue.v1.HeartbeatResponse
+	(*AckRequest)(nil),         // 5: tetral.queue.v1.AckRequest
+	(*RetryRequest)(nil),       // 6: tetral.queue.v1.RetryRequest
+	(*DeferRequest)(nil),       // 7: tetral.queue.v1.DeferRequest
+	(*DeadLetterRequest)(nil),  // 8: tetral.queue.v1.DeadLetterRequest
+	(*CancelRequest)(nil),      // 9: tetral.queue.v1.CancelRequest
+	(*CancelResponse)(nil),     // 10: tetral.queue.v1.CancelResponse
+	(*TransitionResponse)(nil), // 11: tetral.queue.v1.TransitionResponse
 }
 var file_tetral_queue_v1_queue_proto_depIdxs = []int32{
 	0,  // 0: tetral.queue.v1.LeaseResponse.jobs:type_name -> tetral.queue.v1.QueueJob
 	1,  // 1: tetral.queue.v1.QueueService.Lease:input_type -> tetral.queue.v1.LeaseRequest
 	3,  // 2: tetral.queue.v1.QueueService.Heartbeat:input_type -> tetral.queue.v1.HeartbeatRequest
-	4,  // 3: tetral.queue.v1.QueueService.Ack:input_type -> tetral.queue.v1.AckRequest
-	5,  // 4: tetral.queue.v1.QueueService.Retry:input_type -> tetral.queue.v1.RetryRequest
-	6,  // 5: tetral.queue.v1.QueueService.Defer:input_type -> tetral.queue.v1.DeferRequest
-	7,  // 6: tetral.queue.v1.QueueService.DeadLetter:input_type -> tetral.queue.v1.DeadLetterRequest
-	8,  // 7: tetral.queue.v1.QueueService.Cancel:input_type -> tetral.queue.v1.CancelRequest
+	5,  // 3: tetral.queue.v1.QueueService.Ack:input_type -> tetral.queue.v1.AckRequest
+	6,  // 4: tetral.queue.v1.QueueService.Retry:input_type -> tetral.queue.v1.RetryRequest
+	7,  // 5: tetral.queue.v1.QueueService.Defer:input_type -> tetral.queue.v1.DeferRequest
+	8,  // 6: tetral.queue.v1.QueueService.DeadLetter:input_type -> tetral.queue.v1.DeadLetterRequest
+	9,  // 7: tetral.queue.v1.QueueService.Cancel:input_type -> tetral.queue.v1.CancelRequest
 	2,  // 8: tetral.queue.v1.QueueService.Lease:output_type -> tetral.queue.v1.LeaseResponse
-	10, // 9: tetral.queue.v1.QueueService.Heartbeat:output_type -> tetral.queue.v1.TransitionResponse
-	10, // 10: tetral.queue.v1.QueueService.Ack:output_type -> tetral.queue.v1.TransitionResponse
-	10, // 11: tetral.queue.v1.QueueService.Retry:output_type -> tetral.queue.v1.TransitionResponse
-	10, // 12: tetral.queue.v1.QueueService.Defer:output_type -> tetral.queue.v1.TransitionResponse
-	10, // 13: tetral.queue.v1.QueueService.DeadLetter:output_type -> tetral.queue.v1.TransitionResponse
-	9,  // 14: tetral.queue.v1.QueueService.Cancel:output_type -> tetral.queue.v1.CancelResponse
+	4,  // 9: tetral.queue.v1.QueueService.Heartbeat:output_type -> tetral.queue.v1.HeartbeatResponse
+	11, // 10: tetral.queue.v1.QueueService.Ack:output_type -> tetral.queue.v1.TransitionResponse
+	11, // 11: tetral.queue.v1.QueueService.Retry:output_type -> tetral.queue.v1.TransitionResponse
+	11, // 12: tetral.queue.v1.QueueService.Defer:output_type -> tetral.queue.v1.TransitionResponse
+	11, // 13: tetral.queue.v1.QueueService.DeadLetter:output_type -> tetral.queue.v1.TransitionResponse
+	10, // 14: tetral.queue.v1.QueueService.Cancel:output_type -> tetral.queue.v1.CancelResponse
 	8,  // [8:15] is the sub-list for method output_type
 	1,  // [1:8] is the sub-list for method input_type
 	1,  // [1:1] is the sub-list for extension type_name
@@ -952,7 +1008,7 @@ func file_tetral_queue_v1_queue_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tetral_queue_v1_queue_proto_rawDesc), len(file_tetral_queue_v1_queue_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

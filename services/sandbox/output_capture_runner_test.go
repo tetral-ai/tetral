@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -114,6 +115,118 @@ func TestSandboxOutputCaptureCleanupDeletesStagedBlobsBeforeClosingCustody(t *te
 	}
 }
 
+func TestSandboxOutputCaptureCleanupTreatsMissingBlobAsAlreadyDeleted(t *testing.T) {
+	job := sandboxOutputCaptureCleanupQueueJob()
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{job}}
+	store := &recordingOutputCaptureCleanupStore{current: true, work: SandboxOutputCaptureCleanupWork{
+		SandboxOutputCaptureCleanupJob: SandboxOutputCaptureCleanupJob{WorkspaceID: "ws_capture", SessionID: "sesn_capture", FinishIdleWriteID: "rwrite_idle", CaptureGeneration: 1, CleanupGeneration: 1},
+		BlobPointers:                   []string{"output-captures/already-missing"},
+	}}
+	runner := &SandboxOutputCaptureCleanupRunner{
+		Queue: queueClient, Store: store, BlobStore: &missingDeleteBlobStore{FakeBlobStore: blob.NewFakeBlobStore()},
+		Config: SandboxOutputCaptureRunnerConfig{WorkspaceID: "ws_capture", LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if _, err := runner.RunOnceWithActivity(context.Background()); err != nil {
+		t.Fatalf("RunOnceWithActivity: %v", err)
+	}
+	if !store.completed || !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_capture_cleanup"}) {
+		t.Fatalf("missing-blob cleanup = completed %t transitions %v; want completed and acknowledged", store.completed, queueClient.transitions)
+	}
+}
+
+func TestSandboxOutputCaptureRunnersKeepHeartbeatThroughLiveExhaustion(t *testing.T) {
+	t.Run("capture", func(t *testing.T) {
+		job := sandboxOutputCaptureQueueJob()
+		job.AttemptCount = job.MaxAttempts
+		finalizing := make(chan struct{})
+		heartbeatObserved := make(chan struct{}, 1)
+		queueClient := &observingSandboxFinalizerQueue{
+			recordingSandboxQueue: recordingSandboxQueue{leased: []*queuev1.QueueJob{job}},
+			finalizing:            finalizing, heartbeatObserved: heartbeatObserved,
+		}
+		store := &recordingOutputCaptureStore{
+			current: true,
+			work:    SandboxOutputCaptureWork{SandboxOutputCaptureJob: SandboxOutputCaptureJob{WorkspaceID: "ws_capture", SessionID: "sesn_capture", FinishIdleWriteID: "rwrite_idle", CaptureGeneration: 1}, ProviderAvailable: true, Provider: sandboxdriver.DaytonaProviderName, ProviderResourceID: "provider_capture"},
+			loadErr: errors.New("capture store unavailable"), finalizeStarted: finalizing, heartbeatObserved: heartbeatObserved,
+		}
+		registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingOutputCaptureAdapter{}})
+		if err != nil {
+			t.Fatalf("NewProviderRegistry: %v", err)
+		}
+		runner := &SandboxOutputCaptureJobRunner{
+			Queue: queueClient, Store: store, Providers: registry, BlobStore: blob.NewFakeBlobStore(),
+			Config: SandboxOutputCaptureRunnerConfig{WorkspaceID: "ws_capture", LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond},
+		}
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_capture:sandbox_output_capture_exhausted"}) {
+			t.Fatalf("capture transitions = %v; want dead letter after live finalizer", queueClient.transitions)
+		}
+	})
+
+	t.Run("cleanup", func(t *testing.T) {
+		job := sandboxOutputCaptureCleanupQueueJob()
+		job.AttemptCount = job.MaxAttempts
+		finalizing := make(chan struct{})
+		heartbeatObserved := make(chan struct{}, 1)
+		queueClient := &observingSandboxFinalizerQueue{
+			recordingSandboxQueue: recordingSandboxQueue{leased: []*queuev1.QueueJob{job}},
+			finalizing:            finalizing, heartbeatObserved: heartbeatObserved,
+		}
+		store := &recordingOutputCaptureCleanupStore{
+			current: true, loadErr: errors.New("cleanup store unavailable"),
+			finalizeStarted: finalizing, heartbeatObserved: heartbeatObserved,
+		}
+		runner := &SandboxOutputCaptureCleanupRunner{
+			Queue: queueClient, Store: store, BlobStore: blob.NewFakeBlobStore(),
+			Config: SandboxOutputCaptureRunnerConfig{WorkspaceID: "ws_capture", LeaseDuration: 500 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond},
+		}
+		if _, err := runner.RunOnceWithActivity(context.Background()); err != nil {
+			t.Fatalf("RunOnceWithActivity: %v", err)
+		}
+		if !reflect.DeepEqual(queueClient.transitions, []string{"dead:qjob_capture_cleanup:sandbox_output_capture_cleanup_exhausted"}) {
+			t.Fatalf("cleanup transitions = %v; want dead letter after live finalizer", queueClient.transitions)
+		}
+	})
+}
+
+func sandboxOutputCaptureQueueJob() *queuev1.QueueJob {
+	return &queuev1.QueueJob{
+		Id: "qjob_capture", WorkspaceId: "ws_capture", Kind: queue.KindSandboxOutputCapture,
+		PartitionKey: queue.FormatSandboxCapturePartitionKey("ws_capture", "sesn_capture", "rwrite_idle"),
+		DedupeKey:    queue.FormatSandboxOutputCaptureDedupeKey("ws_capture", "sesn_capture", "rwrite_idle", 1),
+		PayloadJson:  `{"workspace_id":"ws_capture","session_id":"sesn_capture","finish_idle_write_id":"rwrite_idle","capture_generation":1}`,
+		LeaseToken:   "lease_capture", AttemptCount: 1, MaxAttempts: queue.SandboxOutputCaptureMaxAttempts,
+	}
+}
+
+func sandboxOutputCaptureCleanupQueueJob() *queuev1.QueueJob {
+	return &queuev1.QueueJob{
+		Id: "qjob_capture_cleanup", WorkspaceId: "ws_capture", Kind: queue.KindSandboxOutputCaptureCleanup,
+		PartitionKey: queue.FormatSandboxCapturePartitionKey("ws_capture", "sesn_capture", "rwrite_idle"),
+		DedupeKey:    queue.FormatSandboxOutputCaptureCleanupDedupeKey("ws_capture", "sesn_capture", "rwrite_idle", 1, 1),
+		PayloadJson:  `{"workspace_id":"ws_capture","session_id":"sesn_capture","finish_idle_write_id":"rwrite_idle","capture_generation":1,"cleanup_generation":1}`,
+		LeaseToken:   "lease_cleanup", AttemptCount: 1, MaxAttempts: queue.SandboxOutputCaptureCleanupMaxAttempts,
+	}
+}
+
+type missingDeleteBlobStore struct {
+	*blob.FakeBlobStore
+}
+
+func (s *missingDeleteBlobStore) Delete(context.Context, string) error {
+	return &blob.NotFoundError{}
+}
+
+type failingDeleteBlobStore struct {
+	*blob.FakeBlobStore
+}
+
+func (s *failingDeleteBlobStore) Delete(context.Context, string) error {
+	return errors.New("blob delete unavailable")
+}
+
 type recordingOutputCaptureAdapter struct {
 	recordingProviderAdapter
 	scan    sandboxdriver.OutputCaptureScan
@@ -135,15 +248,18 @@ func (a *recordingOutputCaptureAdapter) CaptureOutputs(context.Context, sandboxd
 }
 
 type recordingOutputCaptureStore struct {
-	current  bool
-	work     SandboxOutputCaptureWork
-	calls    []string
-	manifest []SandboxOutputCaptureManifestEntry
+	current           bool
+	work              SandboxOutputCaptureWork
+	calls             []string
+	manifest          []SandboxOutputCaptureManifestEntry
+	loadErr           error
+	finalizeStarted   chan struct{}
+	heartbeatObserved <-chan struct{}
 }
 
 func (s *recordingOutputCaptureStore) LoadCapture(context.Context, SandboxOutputCaptureJob, time.Time) (SandboxOutputCaptureWork, bool, error) {
 	s.calls = append(s.calls, "load")
-	return s.work, s.current, nil
+	return s.work, s.current, s.loadErr
 }
 func (s *recordingOutputCaptureStore) EnsureBlobStage(_ context.Context, _ SandboxOutputCaptureWork, entry SandboxOutputCaptureManifestEntry, _ time.Time) (string, error) {
 	s.calls = append(s.calls, "ensure")
@@ -165,26 +281,35 @@ func (s *recordingOutputCaptureStore) FailCapture(context.Context, SandboxOutput
 }
 func (s *recordingOutputCaptureStore) FinalizeCaptureExhaustion(context.Context, *queuev1.QueueJob, time.Time) error {
 	s.calls = append(s.calls, "exhausted")
+	if s.finalizeStarted != nil {
+		return requireHeartbeatDuringFinalizer(s.finalizeStarted, s.heartbeatObserved)
+	}
 	return nil
 }
 
 type recordingOutputCaptureCleanupStore struct {
-	current   bool
-	work      SandboxOutputCaptureCleanupWork
-	completed bool
+	current           bool
+	work              SandboxOutputCaptureCleanupWork
+	completed         bool
+	loadErr           error
+	finalizeStarted   chan struct{}
+	heartbeatObserved <-chan struct{}
 }
 
 func (s *recordingOutputCaptureCleanupStore) SweepExpiredCaptures(context.Context, string, time.Time, int) (int, error) {
 	return 0, nil
 }
 func (s *recordingOutputCaptureCleanupStore) LoadCaptureCleanup(context.Context, SandboxOutputCaptureCleanupJob) (SandboxOutputCaptureCleanupWork, bool, error) {
-	return s.work, s.current, nil
+	return s.work, s.current, s.loadErr
 }
 func (s *recordingOutputCaptureCleanupStore) CompleteCaptureCleanup(context.Context, SandboxOutputCaptureCleanupWork, time.Time) error {
 	s.completed = true
 	return nil
 }
 func (s *recordingOutputCaptureCleanupStore) FinalizeCaptureCleanupExhaustion(context.Context, *queuev1.QueueJob, time.Time) error {
+	if s.finalizeStarted != nil {
+		return requireHeartbeatDuringFinalizer(s.finalizeStarted, s.heartbeatObserved)
+	}
 	return nil
 }
 
