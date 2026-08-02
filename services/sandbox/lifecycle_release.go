@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	sandboxReleaseMaxAttempts                  = 5
 	releaseBackgroundCancelSuccessorBackoffCap = 30 * time.Second
 )
 
@@ -89,7 +88,7 @@ func readySandboxReleaseRequestsTx(ctx context.Context, tx *dbconnect.Tx, worksp
 	}
 	requests := make([]queue.EnqueueRequest, 0, len(pending))
 	for _, item := range pending {
-		blocked, err := sandboxReleaseBlockedTx(ctx, tx, workspaceID, sessionID, item.logicalSandboxID, item.operationID, item.targetHandle)
+		blocked, err := sandboxrelease.BlockedTx(ctx, tx, workspaceID, sessionID, item.logicalSandboxID, item.operationID, item.targetHandle)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +132,7 @@ func readySandboxReleaseRequestsTx(ctx context.Context, tx *dbconnect.Tx, worksp
 		requests = append(requests, queue.EnqueueRequest{
 			ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
 			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
-			PayloadJSON: payload, MaxAttempts: sandboxReleaseMaxAttempts, Now: now.UTC(),
+			PayloadJSON: payload, MaxAttempts: sandboxrelease.MaxAttempts, Now: now.UTC(),
 		})
 	}
 	return requests, nil

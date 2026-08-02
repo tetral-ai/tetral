@@ -14,13 +14,13 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 const (
 	sandboxToolCancelMaxAttempts = 5
-	sandboxReleaseMaxAttempts    = 5
 )
 
 // This file owns the Bridge inputs protocol-family boundary.
@@ -904,24 +904,10 @@ func interruptedSandboxReleaseRequestsTx(
 		if !release.targetProviderID.Valid || release.targetProviderID.String == "" {
 			return nil, status.Error(codes.FailedPrecondition, "sandbox release target is missing")
 		}
-		var blocked bool
-		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (
-				SELECT 1 FROM session_runtime_tool_results
-				 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
-				   AND execution_state IN ('preparing','running')
-				   AND authorized_provider_resource_id=$3
-				UNION ALL
-				SELECT 1 FROM session_background_tasks
-				 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
-				   AND provider_session_id=$3
-				UNION ALL
-				SELECT 1 FROM sandbox_lifecycle_operations
-				 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
-				   AND kind IN ('create','start','replace','materialize') AND state='running'
-			)`,
-			workspaceID, sessionID, release.targetProviderID.String, release.logicalSandboxID, release.operationID,
-		).Scan(&blocked); err != nil {
+		blocked, err := sandboxrelease.BlockedTx(
+			ctx, tx, workspaceID, sessionID, release.logicalSandboxID, release.operationID, release.targetProviderID.String,
+		)
+		if err != nil {
 			return nil, err
 		}
 		if blocked {
@@ -961,7 +947,7 @@ func interruptedSandboxReleaseRequestsTx(
 		requests = append(requests, queue.EnqueueRequest{
 			ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
 			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
-			PayloadJSON: []byte(payload), MaxAttempts: sandboxReleaseMaxAttempts, Now: now.UTC(),
+			PayloadJSON: []byte(payload), MaxAttempts: sandboxrelease.MaxAttempts, Now: now.UTC(),
 		})
 	}
 	return requests, nil

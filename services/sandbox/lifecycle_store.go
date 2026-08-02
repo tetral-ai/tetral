@@ -1266,7 +1266,7 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimRelease(ctx context.Context, job 
 			!sandboxLifecycleQueueIdentityMatches(job, queue.KindSandboxRelease, storedJobID, storedKind, storedPartition, storedDedupe) {
 			return nil
 		}
-		blocked, err := sandboxReleaseBlockedTx(ctx, tx, job.WorkspaceID, job.SessionID, job.LogicalSandboxID, job.OperationID, targetHandle)
+		blocked, err := sandboxrelease.BlockedTx(ctx, tx, job.WorkspaceID, job.SessionID, job.LogicalSandboxID, job.OperationID, targetHandle)
 		if err != nil {
 			return err
 		}
@@ -1325,7 +1325,7 @@ func (s *PostgreSQLSandboxLifecycleStore) ParkBlockedRelease(ctx context.Context
 			!sandboxLifecycleQueueIdentityMatches(job, queue.KindSandboxRelease, storedJobID, storedKind, storedPartition, storedDedupe) {
 			return nil
 		}
-		blocked, err := sandboxReleaseBlockedTx(ctx, tx, job.WorkspaceID, job.SessionID, job.LogicalSandboxID, job.OperationID, targetHandle)
+		blocked, err := sandboxrelease.BlockedTx(ctx, tx, job.WorkspaceID, job.SessionID, job.LogicalSandboxID, job.OperationID, targetHandle)
 		if err != nil || !blocked {
 			return err
 		}
@@ -1360,28 +1360,6 @@ func (s *PostgreSQLSandboxLifecycleStore) ParkBlockedRelease(ctx context.Context
 		return SandboxLifecycleLostAuthority, nil
 	}
 	return disposition, err
-}
-
-func sandboxReleaseBlockedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, logicalSandboxID string, operationID string, targetHandle string) (bool, error) {
-	var blocked bool
-	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM session_runtime_tool_results
-			 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
-			   AND execution_state IN ('preparing','running')
-			   AND authorized_provider_resource_id=$3
-			UNION ALL
-			SELECT 1 FROM session_background_tasks
-			 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
-			   AND provider_session_id=$3
-			UNION ALL
-			SELECT 1 FROM sandbox_lifecycle_operations
-			 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
-			   AND kind IN ('create','start','replace','materialize') AND state='running'
-		)`,
-		workspaceID, sessionID, targetHandle, logicalSandboxID, operationID,
-	).Scan(&blocked)
-	return blocked, err
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) AuthorizeRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) (bool, error) {

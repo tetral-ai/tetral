@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -240,6 +241,40 @@ func TestPostgreSQLBridgeAPIStoreReadCommandResultSurvivesConsumptionWhileWaitin
 	result := <-done
 	if result.err != nil || result.response.GetResultJson() != terminalJSON {
 		t.Fatalf("ReadCommandResult waiting consumption = response %+v err %v; want stored terminal result", result.response, result.err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreReadCommandResultRejectsReceiptWithoutTask(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID    = "default"
+		sessionID      = "sesn_bridge_poll_missing_task"
+		threadID       = "thr_bridge_poll_missing_task"
+		bindingID      = "bind_bridge_poll_missing_task"
+		toolUseEventID = "evt_bridge_poll_missing_task"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_poll_missing_task")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status,
+		background_operation_kind, background_operation_state, background_request_id,
+		background_task_id, background_max_output_tokens, created_at, updated_at
+	) VALUES ($1,$2,$3,$4,'sandbox_background','poll_hash','write_stdin','{}','committed',
+		'poll','pending','req_missing_task','task_missing',0,now(),now())`,
+		workspaceID, sessionID, threadID, toolUseEventID); err != nil {
+		t.Fatalf("seed background receipt without task: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).waitForBackgroundResult(
+		ctx,
+		bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_poll_missing_task"),
+		toolUseEventID,
+	)
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("waitForBackgroundResult missing task error = %T %v; want sql.ErrNoRows", err, err)
 	}
 }
 

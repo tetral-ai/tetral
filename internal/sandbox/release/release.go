@@ -23,9 +23,11 @@ import (
 
 const (
 	lifecycleOperationIDPrefix   = "sop_"
-	releaseMaxAttempts           = 5
 	backgroundCommandMaxAttempts = 5
 )
+
+// MaxAttempts is the bounded Queue delivery budget for provider release work.
+const MaxAttempts = 5
 
 type Reason string
 
@@ -307,24 +309,8 @@ func pendingReleaseEnqueueRequestTx(
 	targetHandle string,
 	now time.Time,
 ) (queue.EnqueueRequest, bool, error) {
-	var blocked bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM session_runtime_tool_results
-			 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
-			   AND execution_state IN ('preparing','running')
-			   AND authorized_provider_resource_id=$3
-			UNION ALL
-			SELECT 1 FROM session_background_tasks
-			 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
-			   AND provider_session_id=$3
-			UNION ALL
-			SELECT 1 FROM sandbox_lifecycle_operations
-			 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
-			   AND kind IN ('create','start','replace','materialize') AND state='running'
-		)`,
-		workspaceID, sessionID, targetHandle, logicalSandboxID, operationID,
-	).Scan(&blocked); err != nil || blocked {
+	blocked, err := BlockedTx(ctx, tx, workspaceID, sessionID, logicalSandboxID, operationID, targetHandle)
+	if err != nil || blocked {
 		return queue.EnqueueRequest{}, false, err
 	}
 
@@ -374,8 +360,33 @@ func pendingReleaseEnqueueRequestTx(
 	return queue.EnqueueRequest{
 		ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
 		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
-		PayloadJSON: payload, MaxAttempts: releaseMaxAttempts, Now: now.UTC(),
+		PayloadJSON: payload, MaxAttempts: MaxAttempts, Now: now.UTC(),
 	}, true, nil
+}
+
+// BlockedTx reports whether provider work still owns the handle targeted by a
+// release operation. Callers hold the Session and lifecycle locks that define
+// the snapshot before asking this shared predicate.
+func BlockedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, logicalSandboxID string, operationID string, targetHandle string) (bool, error) {
+	var blocked bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM session_runtime_tool_results
+			 WHERE workspace_id=$1 AND session_id=$2 AND tool_kind='sandbox_tool'
+			   AND execution_state IN ('preparing','running')
+			   AND authorized_provider_resource_id=$3
+			UNION ALL
+			SELECT 1 FROM session_background_tasks
+			 WHERE workspace_id=$1 AND session_id=$2 AND status='running'
+			   AND provider_session_id=$3
+			UNION ALL
+			SELECT 1 FROM sandbox_lifecycle_operations
+			 WHERE workspace_id=$1 AND logical_sandbox_id=$4 AND operation_id<>$5
+			   AND kind IN ('create','start','replace','materialize') AND state='running'
+		)`,
+		workspaceID, sessionID, targetHandle, logicalSandboxID, operationID,
+	).Scan(&blocked)
+	return blocked, err
 }
 
 // CompleteTx reports whether Session-delete release custody is closed without
@@ -584,7 +595,7 @@ func insertOperationTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string
 	return operationID, queue.EnqueueRequest{
 		ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
 		PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
-		PayloadJSON: payload, MaxAttempts: releaseMaxAttempts, Now: now.UTC(),
+		PayloadJSON: payload, MaxAttempts: MaxAttempts, Now: now.UTC(),
 	}, nil
 }
 

@@ -32,10 +32,16 @@ func newTestLogger(buffer *bytes.Buffer) *slog.Logger {
 const testMethod = "/tetral.test.v1.TestService/Call"
 
 func TestInternalGRPCRegistersCallbackAndHealthService(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
 	var called bool
 	server, err := NewServer(Config{
 		ServiceName:   "test-service",
 		Authenticator: &allowingAuthenticator{},
+		Listener:      listener,
 		Register: func(server *grpc.Server) {
 			called = true
 			registerTestService(server, func(context.Context) error { return nil })

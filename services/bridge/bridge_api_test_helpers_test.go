@@ -780,32 +780,38 @@ func testPostgreSQLAcceptSandboxExecutionIdentityFencing(t *testing.T) {
 		t.Fatalf("accept first/replay = %+v / %+v; want committed then duplicate", first, replay)
 	}
 
-	for name, mutate := range map[string]func(*bridgev1.AcceptSandboxExecutionRequest){
-		"hash": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+	for _, test := range []struct {
+		name     string
+		wantCode codes.Code
+		mutate   func(*bridgev1.AcceptSandboxExecutionRequest)
+	}{
+		{name: "hash", wantCode: codes.InvalidArgument, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.NormalizedInputHash = "different_hash"
-		},
-		"name": func(conflict *bridgev1.AcceptSandboxExecutionRequest) { conflict.ToolName = "Bash" },
-		"payload_reusing_hash": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+		}},
+		{name: "name", wantCode: codes.AlreadyExists, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+			conflict.ToolName = "Bash"
+		}},
+		{name: "payload_reusing_hash", wantCode: codes.InvalidArgument, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.InputJson = `{"cmd":"printf different","workdir":"/workspace"}`
-		},
-		"other_thread": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+		}},
+		{name: "other_thread", wantCode: codes.FailedPrecondition, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.Scope.SessionThreadId = "thr_bridge_tool_identity_other"
-		},
-		"other_session": func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
+		}},
+		{name: "other_session", wantCode: codes.FailedPrecondition, mutate: func(conflict *bridgev1.AcceptSandboxExecutionRequest) {
 			conflict.Scope.SessionId = "sesn_bridge_tool_identity_other"
 			conflict.Scope.SessionThreadId = "thr_bridge_tool_identity_foreign"
 			conflict.Scope.Binding = &bridgev1.RuntimeBindingRef{
 				BindingId: "bind_bridge_tool_identity_foreign", BindingGeneration: 1,
 				TargetPodUid: "pod_uid_tool_identity_foreign",
 			}
-		},
+		}},
 	} {
-		t.Run(name+" conflict", func(t *testing.T) {
+		t.Run(test.name+" conflict", func(t *testing.T) {
 			conflict := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
-			conflict.Scope.RequestId = "req_bridge_tool_identity_conflict_" + name
-			mutate(conflict)
-			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists && status.Code(err) != codes.InvalidArgument && status.Code(err) != codes.FailedPrecondition {
-				t.Fatalf("AcceptSandboxExecution %s conflict error = %v; want fatal identity rejection", name, err)
+			conflict.Scope.RequestId = "req_bridge_tool_identity_conflict_" + test.name
+			test.mutate(conflict)
+			if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != test.wantCode {
+				t.Fatalf("AcceptSandboxExecution %s conflict error = %v; want %s", test.name, err, test.wantCode)
 			}
 		})
 	}
