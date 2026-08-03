@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: tetral-ai/tetral-sdk-typescript
-          ref: 5c506ed76bfbcec221effb9bb2b304e9c9c147e7
+          ref: a8f5b9262e0d42fb571cb2ea8f902124bbb4f01d
           path: tetral-sdk-typescript
           persist-credentials: false
 
@@ -119,7 +119,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: tetral-ai/tetral-sdk-typescript
-          ref: 5c506ed76bfbcec221effb9bb2b304e9c9c147e7
+          ref: a8f5b9262e0d42fb571cb2ea8f902124bbb4f01d
           path: tetral-sdk-typescript
           persist-credentials: false
 
