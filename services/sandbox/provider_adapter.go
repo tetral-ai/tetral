@@ -210,7 +210,6 @@ type DaytonaLifecycle interface {
 	CreateSandbox(context.Context, sandbox.CreateSandboxRequest) (sandbox.ProviderHandle, error)
 	StartSandbox(context.Context, sandbox.ProviderHandle) error
 	CheckBaseTemplateHealth(context.Context, sandbox.ProviderHandle) error
-	ApplyNetworkPolicy(context.Context, sandbox.ProviderHandle, sandbox.NetworkSetup) error
 	PrepareBaseDirectories(context.Context, sandbox.ProviderHandle) error
 	InspectState(context.Context, string) (string, error)
 	ReleaseSandbox(context.Context, sandbox.ProviderHandle) error
@@ -452,9 +451,6 @@ func (a *DaytonaAdapter) MaterializeResources(ctx context.Context, request Mater
 	}
 	if err := a.Lifecycle.CheckBaseTemplateHealth(ctx, request.Handle); err != nil {
 		return outcomeFromProviderError[MaterializationResult](err, ProviderProvedNotStarted)
-	}
-	if err := a.Lifecycle.ApplyNetworkPolicy(ctx, request.Handle, request.Setup.Network); err != nil {
-		return materializationOutcomeFromProviderError[MaterializationResult](err)
 	}
 	if err := a.Lifecycle.PrepareBaseDirectories(ctx, request.Handle); err != nil {
 		return materializationOutcomeFromProviderError[MaterializationResult](err)

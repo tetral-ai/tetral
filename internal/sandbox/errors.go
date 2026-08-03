@@ -14,15 +14,14 @@ var credentialURLCandidatePattern = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`
 type ProviderStage string
 
 const (
-	StageCreateSandbox      ProviderStage = "create_sandbox"
-	StageBuildArtifact      ProviderStage = "build_artifact"
-	StageCheckBaseTemplate  ProviderStage = "check_base_template"
-	StageApplyNetworkPolicy ProviderStage = "apply_network_policy"
-	StageMountResources     ProviderStage = "mount_resources"
-	StageExecuteTool        ProviderStage = "execute_tool"
-	StageStatus             ProviderStage = "status"
-	StageStartSandbox       ProviderStage = "start_sandbox"
-	StageReleaseSandbox     ProviderStage = "release_sandbox"
+	StageCreateSandbox     ProviderStage = "create_sandbox"
+	StageBuildArtifact     ProviderStage = "build_artifact"
+	StageCheckBaseTemplate ProviderStage = "check_base_template"
+	StageMountResources    ProviderStage = "mount_resources"
+	StageExecuteTool       ProviderStage = "execute_tool"
+	StageStatus            ProviderStage = "status"
+	StageStartSandbox      ProviderStage = "start_sandbox"
+	StageReleaseSandbox    ProviderStage = "release_sandbox"
 )
 
 type ProviderErrorKind string

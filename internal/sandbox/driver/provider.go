@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	apiclient "github.com/daytonaio/daytona/libs/api-client-go"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
@@ -243,37 +242,6 @@ func providerErrorForHealthResponse(stdout string, exitCode int) error {
 	return nil
 }
 
-func (p *DaytonaLifecycleProvider) ApplyNetworkPolicy(ctx context.Context, handle sandbox.ProviderHandle, network sandbox.NetworkSetup) error {
-	if p == nil || p.client == nil {
-		return daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
-	}
-	if handle.SandboxID == "" {
-		return daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorInvalidRequest, false, 0, "provider sandbox id is required", nil)
-	}
-	networkBlockAll, networkAllowList, err := daytonaNetworkPolicy(network)
-	if err != nil {
-		return err
-	}
-	got, err := p.client.Get(ctx, handle.SandboxID)
-	if err != nil {
-		return mapDaytonaError(sandbox.StageApplyNetworkPolicy, err)
-	}
-	if got == nil {
-		return daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorNotFound, false, http.StatusNotFound, "daytona sandbox not found", nil)
-	}
-	settings := apiclient.UpdateSandboxNetworkSettings{}
-	settings.SetNetworkBlockAll(networkBlockAll)
-	if networkAllowList != nil {
-		settings.SetNetworkAllowList(*networkAllowList)
-	} else {
-		settings.SetNetworkAllowList("")
-	}
-	if err := got.UpdateNetworkSettings(ctx, settings); err != nil {
-		return mapDaytonaError(sandbox.StageApplyNetworkPolicy, err)
-	}
-	return nil
-}
-
 func (p *DaytonaLifecycleProvider) PrepareBaseDirectories(ctx context.Context, handle sandbox.ProviderHandle) error {
 	if p == nil || p.client == nil {
 		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
@@ -426,7 +394,7 @@ func daytonaNetworkPolicy(network sandbox.NetworkSetup) (bool, *string, error) {
 		return true, nil, nil
 	case "cidr_allow_list":
 		if network.NetworkAllowList == "" {
-			return false, nil, daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorInvalidRequest, false, 0, "network_allow_list is required for cidr_allow_list networking", nil)
+			return false, nil, daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "network_allow_list is required for cidr_allow_list networking", nil)
 		}
 		allowList, err := normalizeDaytonaCIDRAllowList(network.NetworkAllowList)
 		if err != nil {
@@ -434,7 +402,7 @@ func daytonaNetworkPolicy(network sandbox.NetworkSetup) (bool, *string, error) {
 		}
 		return false, &allowList, nil
 	default:
-		return false, nil, daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorInvalidRequest, false, 0, "unsupported network policy type", nil)
+		return false, nil, daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "unsupported network policy type", nil)
 	}
 }
 
@@ -444,11 +412,11 @@ func normalizeDaytonaCIDRAllowList(raw string) (string, error) {
 	for _, part := range parts {
 		value := strings.TrimSpace(part)
 		if value == "" {
-			return "", daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorInvalidRequest, false, 0, "network_allow_list must be a comma-separated CIDR list", nil)
+			return "", daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "network_allow_list must be a comma-separated CIDR list", nil)
 		}
 		prefix, err := netip.ParsePrefix(value)
 		if err != nil {
-			return "", daytonaProviderError(sandbox.StageApplyNetworkPolicy, sandbox.ProviderErrorInvalidRequest, false, 0, "network_allow_list entries must be CIDR prefixes", err)
+			return "", daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "network_allow_list entries must be CIDR prefixes", err)
 		}
 		normalized = append(normalized, prefix.String())
 	}

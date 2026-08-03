@@ -1237,7 +1237,7 @@ func TestProviderErrorForHealthResponseMapsHelperEnvelope(t *testing.T) {
 	}
 }
 
-func TestDaytonaCreateSandboxLowersRuntimeNetworkPolicy(t *testing.T) {
+func TestDaytonaCreateSandboxLowersNetworkPolicyAtCreation(t *testing.T) {
 	tests := []struct {
 		name          string
 		network       sandbox.NetworkSetup
@@ -1507,8 +1507,8 @@ func TestDaytonaCreateSandboxRejectsMalformedNetworkPolicy(t *testing.T) {
 			},
 		})
 		var providerErr *sandbox.ProviderError
-		if !errors.As(err, &providerErr) || providerErr.Stage != sandbox.StageApplyNetworkPolicy || providerErr.Kind != sandbox.ProviderErrorInvalidRequest {
-			t.Fatalf("CreateSandbox(%+v) error = %T %v; want apply_network_policy invalid_request", network, err, err)
+		if !errors.As(err, &providerErr) || providerErr.Stage != sandbox.StageCreateSandbox || providerErr.Kind != sandbox.ProviderErrorInvalidRequest {
+			t.Fatalf("CreateSandbox(%+v) error = %T %v; want create_sandbox invalid_request", network, err, err)
 		}
 		if !ProviderOperationWasNotSubmitted(err) {
 			t.Fatalf("CreateSandbox(%+v) error = %T %v; want pre-submission marker", network, err, err)

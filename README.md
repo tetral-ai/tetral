@@ -58,7 +58,8 @@ Tetral is self-hosted infrastructure for teams that operate their own
 Kubernetes. It deploys on any conformant cluster — from a single-node K3s
 machine to a full multi-node cluster, the same manifests and the same
 version. Prerequisites: a Kubernetes cluster, PostgreSQL 18, an
-S3-compatible bucket, and a sandbox provider credential.
+S3-compatible bucket, and a credential for a Daytona Tier 3 or higher account
+for the current Sandbox provider implementation.
 
 Two install paths, one platform version:
 

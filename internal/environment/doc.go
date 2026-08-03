@@ -4,8 +4,8 @@
 // The environments table holds the public template and current generation.
 // environment_artifacts holds one provider artifact state per Environment
 // generation. Package changes may enqueue environment_build in the same
-// transaction as admission; networking remains runtime policy and does not by
-// itself trigger an artifact build.
+// transaction as admission; networking is applied when a Sandbox is created
+// and does not by itself trigger an artifact build.
 //
 // Artifact states are pending, building, ready, and failed. A building row
 // records the current Queue job, lease token, and attempt number; a successor

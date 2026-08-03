@@ -471,7 +471,12 @@ never added through `POST /resources`) are covered above.
 - **Networking.** Networking accepts exactly the Daytona-backed shape —
   `unrestricted`, `blocked`, or `cidr_allow_list` with a comma-separated CIDR
   `network_allow_list`. Domain-name allow-lists are rejected; the backend never
-  resolves domains into CIDRs on the caller's behalf.
+  resolves domains into CIDRs on the caller's behalf. The selected policy is
+  applied when a Sandbox is created for an Environment generation. Updating an
+  Environment affects the next Sandbox created from that generation; it does
+  not mutate a running Sandbox.
+- **Operator prerequisite.** The current Daytona-backed deployment requires a
+  Daytona Tier 3 or higher account.
 - **Invariant.** Durable rows using retired networking shapes are a rollout
   blocker — a blocking preflight fails closed before serving until an operator
   remediates each row.

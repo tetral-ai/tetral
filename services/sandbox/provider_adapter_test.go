@@ -330,9 +330,6 @@ func (f *adapterLifecycleFake) CheckBaseTemplateHealth(context.Context, sandbox.
 	f.healthChecks++
 	return nil
 }
-func (f *adapterLifecycleFake) ApplyNetworkPolicy(context.Context, sandbox.ProviderHandle, sandbox.NetworkSetup) error {
-	return nil
-}
 func (f *adapterLifecycleFake) PrepareBaseDirectories(context.Context, sandbox.ProviderHandle) error {
 	return nil
 }

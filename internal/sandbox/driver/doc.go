@@ -4,10 +4,10 @@
 //
 // OWNS:
 //   - Sandbox lifecycle calls: DaytonaLifecycleProvider (provider.go) —
-//     CreateSandbox, StartSandbox, CheckBaseTemplateHealth, ApplyNetworkPolicy,
+//     CreateSandbox, StartSandbox, CheckBaseTemplateHealth,
 //     PrepareBaseDirectories, InspectState, ReleaseSandbox against the Daytona
-//     SDK; network-policy translation, auto stop/archive/delete interval policy,
-//     and the Daytona SDK error ->
+//     SDK; creation-time network-policy translation, auto stop/archive/delete
+//     interval policy, and the Daytona SDK error ->
 //     sandbox.ProviderError classification (mapDaytonaError).
 //   - Helper transport: DaytonaHelperExecutor (daytona.go) — PrepareTool,
 //     ExecutePreparedTool, SubmitPreparedTool, ReadCommandResult,

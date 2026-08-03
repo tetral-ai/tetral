@@ -103,6 +103,11 @@ credential, helper health, and resource-root receipt. A resource revision that
 changes during materialization creates a successor operation; waiters are
 released only by the operation matching the current revision.
 
+Network policy is applied once, when the provider Sandbox is created for the
+binding's Environment generation. Materialization does not reapply it, and an
+Environment update does not mutate a running Sandbox; the update takes effect
+when a later Sandbox is created from the new generation.
+
 Tool execution follows this durable state machine:
 
 ```text
@@ -195,14 +200,14 @@ retain a second permanent copy of the result body after that commit.
 
 ## Configuration
 
-The service requires PostgreSQL, Queue, Daytona, Blob/R2, and git-proxy
-configuration. `TETRAL_SANDBOX_WORKER_CONCURRENCY` is one process-wide slot
-budget shared by the Sandbox business Queue runners; each occupied slot leases
-at most one job. Environment build/fanout and maintenance loops retain their
-separate named limits. Queue lease duration, provider command timeout,
-late-command margin, credential lifetime, and artifact construction are also
-service-owned settings. The process listens only on
-`TETRAL_SANDBOX_HTTP_ADDR` for health and metrics.
+The service requires PostgreSQL, Queue, a Daytona Tier 3 or higher account,
+Blob/R2, and git-proxy configuration. `TETRAL_SANDBOX_WORKER_CONCURRENCY` is
+one process-wide slot budget shared by the Sandbox business Queue runners;
+each occupied slot leases at most one job. Environment build/fanout and
+maintenance loops retain their separate named limits. Queue lease duration,
+provider command timeout, late-command margin, credential lifetime, and
+artifact construction are also service-owned settings. The process listens
+only on `TETRAL_SANDBOX_HTTP_ADDR` for health and metrics.
 
 ## Testing
 
