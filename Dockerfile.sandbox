@@ -3,9 +3,9 @@
 # (internal/sandbox/driver/provider.go, defaultDaytonaImage).
 #
 # Its contents are not a matter of taste: the helper's health subcommand
-# (internal/sandbox/helper/internal/health) runs during sandbox preparation and
-# fails preparation unless every item below is present. That check list and this
-# recipe must move together.
+# (internal/sandbox/helper/internal/health) runs during resource materialization
+# and fails materialization unless every item below is present. That check list
+# and this recipe must move together.
 #
 #   sandbox         helper binary on PATH
 #   rg              ripgrep, on PATH and runnable

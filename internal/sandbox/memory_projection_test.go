@@ -83,12 +83,10 @@ func TestMaterializeMemoryProjectionsRemovesDeletedStoresUnderMutationLock(t *te
 	reader := &recordingMemorySnapshotReader{snapshots: map[string][]MemorySnapshotFile{"memstore_successor": nil}, eventsRef: &events}
 	locker := &recordingMemoryStoreMutationLocker{eventsRef: &events}
 	materializer := &recordingMemoryStoreMaterializer{eventsRef: &events}
-	cleanup := &recordingSessionResourceCleanupCoordinator{eventsRef: &events, pending: true}
 	err := MaterializeMemoryProjections(context.Background(), reader, materializer, MemoryProjectionMaterializationRequest{
 		WorkspaceID:       workspace.DefaultID,
 		ProviderSandboxID: "provider_memory_delete",
 		MutationLocker:    locker,
-		ResourceCleanup:   cleanup,
 		Resources: ResourceSetup{
 			DeletedMemoryStores: []MemoryStoreMount{{
 				ResourceID: "sesrsc_memory_deleted", MemoryStoreID: "memstore_deleted", MountPath: "/mnt/memory/replacement",
@@ -107,64 +105,9 @@ func TestMaterializeMemoryProjectionsRemovesDeletedStoresUnderMutationLock(t *te
 	if len(materializer.calls) != 1 || materializer.calls[0].MountPath != "/mnt/memory/replacement" {
 		t.Fatalf("memory materializations = %+v; want same-path successor through ordinary materializer", materializer.calls)
 	}
-	if want := []string{"lock:memstore_deleted,memstore_successor", "memory-remove", "resource-detach", "read:memstore_successor", "memory", "unlock"}; !slices.Equal(events, want) {
+	if want := []string{"lock:memstore_deleted,memstore_successor", "memory-remove", "read:memstore_successor", "memory", "unlock"}; !slices.Equal(events, want) {
 		t.Fatalf("events = %v; want %v", events, want)
 	}
-}
-
-func TestMaterializeMemoryProjectionsRemovalFailureRetriesBeforeDetachAndSuccessor(t *testing.T) {
-	var events []string
-	wantErr := errors.New("memory removal unavailable")
-	reader := &recordingMemorySnapshotReader{snapshots: map[string][]MemorySnapshotFile{"memstore_successor": nil}, eventsRef: &events}
-	locker := &recordingMemoryStoreMutationLocker{eventsRef: &events}
-	materializer := &recordingMemoryStoreMaterializer{eventsRef: &events, err: wantErr}
-	cleanup := &recordingSessionResourceCleanupCoordinator{eventsRef: &events, pending: true}
-	request := MemoryProjectionMaterializationRequest{
-		WorkspaceID: workspace.DefaultID, ProviderSandboxID: "provider_memory_retry", MutationLocker: locker, ResourceCleanup: cleanup,
-		Resources: ResourceSetup{
-			DeletedMemoryStores: []MemoryStoreMount{{ResourceID: "sesrsc_memory_deleted", MemoryStoreID: "memstore_deleted", MountPath: "/mnt/memory/project"}},
-			MemoryStores:        []MemoryStoreMount{{ResourceID: "sesrsc_memory_successor", MemoryStoreID: "memstore_successor", MountPath: "/mnt/memory/project"}},
-		},
-	}
-	if err := MaterializeMemoryProjections(context.Background(), reader, materializer, request); !errors.Is(err, wantErr) {
-		t.Fatalf("first removal error = %v; want %v", err, wantErr)
-	}
-	if want := []string{"lock:memstore_deleted,memstore_successor", "memory-remove", "unlock"}; !slices.Equal(events, want) {
-		t.Fatalf("failure events=%v; want %v with no detach/read/successor", events, want)
-	}
-	if len(reader.reads) != 0 || len(materializer.calls) != 0 || !cleanup.pending {
-		t.Fatalf("failure reads=%v successors=%d pending=%v; want blocked successor and durable pending", reader.reads, len(materializer.calls), cleanup.pending)
-	}
-	materializer.err = nil
-	if err := MaterializeMemoryProjections(context.Background(), reader, materializer, request); err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	if want := []string{"lock:memstore_deleted,memstore_successor", "memory-remove", "unlock", "lock:memstore_deleted,memstore_successor", "memory-remove", "resource-detach", "read:memstore_successor", "memory", "unlock"}; !slices.Equal(events, want) {
-		t.Fatalf("retry events=%v; want %v", events, want)
-	}
-}
-
-type recordingSessionResourceCleanupCoordinator struct {
-	eventsRef *[]string
-	pending   bool
-	err       error
-}
-
-func (c *recordingSessionResourceCleanupCoordinator) CleanupSessionResource(ctx context.Context, _ string, remove func(context.Context) error) error {
-	if c.err != nil {
-		return c.err
-	}
-	if !c.pending {
-		return nil
-	}
-	if err := remove(ctx); err != nil {
-		return err
-	}
-	if c.eventsRef != nil {
-		*c.eventsRef = append(*c.eventsRef, "resource-detach")
-	}
-	c.pending = false
-	return nil
 }
 
 func TestMaterializeMemoryProjectionsRejectsPrefixConflictingSnapshot(t *testing.T) {

@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -23,6 +24,7 @@ type EnvironmentArtifactBuildInput struct {
 	WorkspaceID        workspace.ID
 	EnvironmentID      string
 	Generation         int64
+	Provider           string
 	ArtifactInputHash  string
 	NormalizedPackages sandbox.PackageSetup
 }
@@ -50,18 +52,23 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.claim", func(tx *dbconnect.Tx) error {
 		var (
 			status            string
+			provider          string
 			packagesJSON      string
 			artifactInputHash string
+			leaseJobID        sql.NullString
+			leaseToken        sql.NullString
+			leaseAttemptCount sql.NullInt64
 		)
 		err := tx.QueryRow(ctx,
-			`SELECT status, packages_json, artifact_input_hash
+			`SELECT status, provider, packages_json, artifact_input_hash,
+			        lease_job_id, lease_token, lease_attempt_count
 			   FROM environment_artifacts
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			  FOR UPDATE`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-		).Scan(&status, &packagesJSON, &artifactInputHash)
+		).Scan(&status, &provider, &packagesJSON, &artifactInputHash, &leaseJobID, &leaseToken, &leaseAttemptCount)
 		if dbconnect.IsNoRows(err) {
 			return nil
 		}
@@ -71,6 +78,18 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 		if status == "ready" || status == "failed" {
 			return nil
 		}
+		if job.JobID == "" || job.LeaseToken == "" || job.AttemptCount <= 0 {
+			return errors.New("environment build lease identity is incomplete")
+		}
+		if status == "building" && leaseAttemptCount.Valid {
+			if int64(job.AttemptCount) < leaseAttemptCount.Int64 {
+				return nil
+			}
+			if int64(job.AttemptCount) == leaseAttemptCount.Int64 &&
+				(!leaseJobID.Valid || leaseJobID.String != job.JobID || !leaseToken.Valid || leaseToken.String != job.LeaseToken) {
+				return nil
+			}
+		}
 		packages, err := decodePackageSetupJSON(packagesJSON)
 		if err != nil {
 			return err
@@ -78,17 +97,20 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 		result, err := tx.Exec(ctx,
 			`UPDATE environment_artifacts
 			    SET status = 'building',
+			        lease_job_id = $4,
+			        lease_token = $5,
+			        lease_attempt_count = $6,
 			        provider_artifact_ref = NULL,
 			        failure_stage = NULL,
 			        last_error_kind = NULL,
 			        failure_reason = NULL,
 			        retryable = NULL,
-			        updated_at = $4
+			        updated_at = $7
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			    AND status IN ('pending', 'building')`,
-			job.WorkspaceID, job.EnvironmentID, job.Generation, now.UTC(),
+			job.WorkspaceID, job.EnvironmentID, job.Generation, job.JobID, job.LeaseToken, job.AttemptCount, now.UTC(),
 		)
 		if err != nil {
 			return err
@@ -100,6 +122,7 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 			WorkspaceID:        workspace.ID(job.WorkspaceID),
 			EnvironmentID:      job.EnvironmentID,
 			Generation:         job.Generation,
+			Provider:           provider,
 			ArtifactInputHash:  artifactInputHash,
 			NormalizedPackages: packages,
 		}
@@ -107,6 +130,54 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 		return nil
 	})
 	return input, claimed, err
+}
+
+func (s *EnvironmentArtifactStore) AuthorizeEnvironmentArtifactCreate(ctx context.Context, job EnvironmentBuildJob, now time.Time) (bool, error) {
+	if s == nil || s.client == nil {
+		return false, errors.New("environment artifact store is required")
+	}
+	if now.IsZero() {
+		now = storage.Now()
+	}
+	var authorized bool
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.authorize_create", func(tx *dbconnect.Tx) error {
+		var status string
+		var leaseJobID, leaseToken sql.NullString
+		var leaseAttemptCount sql.NullInt64
+		if err := tx.QueryRow(ctx,
+			`SELECT status, lease_job_id, lease_token, lease_attempt_count FROM environment_artifacts
+			  WHERE workspace_id = $1 AND environment_id = $2 AND generation = $3
+			  FOR UPDATE`,
+			job.WorkspaceID, job.EnvironmentID, job.Generation,
+		).Scan(&status, &leaseJobID, &leaseToken, &leaseAttemptCount); dbconnect.IsNoRows(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if status != "building" {
+			return nil
+		}
+		if !environmentBuildLeaseMatches(job, leaseJobID, leaseToken, leaseAttemptCount) {
+			return nil
+		}
+		result, err := tx.Exec(ctx,
+			`UPDATE environment_artifacts
+			    SET provider_create_submitted_at = $4,
+			        updated_at = $4
+			  WHERE workspace_id = $1
+			    AND environment_id = $2
+			    AND generation = $3
+			    AND status = 'building'
+			    AND provider_create_submitted_at IS NULL`,
+			job.WorkspaceID, job.EnvironmentID, job.Generation, now.UTC(),
+		)
+		if err != nil {
+			return err
+		}
+		authorized = transitionRowsAffected(result)
+		return nil
+	})
+	return authorized, err
 }
 
 func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context, job EnvironmentBuildJob, providerArtifactRef string, now time.Time) error {
@@ -122,20 +193,25 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.ready", func(tx *dbconnect.Tx) error {
 		var status string
 		var artifactInputHash string
+		var leaseJobID, leaseToken sql.NullString
+		var leaseAttemptCount sql.NullInt64
 		err := tx.QueryRow(ctx,
-			`SELECT status, artifact_input_hash
+			`SELECT status, artifact_input_hash, lease_job_id, lease_token, lease_attempt_count
 			   FROM environment_artifacts
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			  FOR UPDATE`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-		).Scan(&status, &artifactInputHash)
+		).Scan(&status, &artifactInputHash, &leaseJobID, &leaseToken, &leaseAttemptCount)
 		if dbconnect.IsNoRows(err) {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if !environmentBuildLeaseMatches(job, leaseJobID, leaseToken, leaseAttemptCount) {
+			return nil
 		}
 		generations := []int64{job.Generation}
 		if status != "ready" {
@@ -146,6 +222,9 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 				`UPDATE environment_artifacts
 				    SET status = 'ready',
 				        provider_artifact_ref = $4,
+				        lease_job_id = NULL,
+				        lease_token = NULL,
+				        lease_attempt_count = NULL,
 				        failure_stage = NULL,
 				        last_error_kind = NULL,
 				        failure_reason = NULL,
@@ -188,7 +267,7 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 	})
 }
 
-func (s *EnvironmentArtifactStore) MarkEnvironmentBuildRetryableFailure(ctx context.Context, job EnvironmentBuildJob, failure EnvironmentArtifactFailure, now time.Time) error {
+func (s *EnvironmentArtifactStore) MarkEnvironmentBuildRetryableFailure(ctx context.Context, job EnvironmentBuildJob, failure EnvironmentArtifactFailure, rearmCreate bool, now time.Time) error {
 	if s == nil || s.client == nil {
 		return errors.New("environment artifact store is required")
 	}
@@ -196,20 +275,43 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildRetryableFailure(ctx cont
 		now = storage.Now()
 	}
 	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.retryable_failure", func(tx *dbconnect.Tx) error {
+		var status string
+		var leaseJobID, leaseToken sql.NullString
+		var leaseAttemptCount sql.NullInt64
+		if err := tx.QueryRow(ctx,
+			`SELECT status, lease_job_id, lease_token, lease_attempt_count FROM environment_artifacts
+			  WHERE workspace_id = $1 AND environment_id = $2 AND generation = $3
+			  FOR UPDATE`,
+			job.WorkspaceID, job.EnvironmentID, job.Generation,
+		).Scan(&status, &leaseJobID, &leaseToken, &leaseAttemptCount); dbconnect.IsNoRows(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if status != "building" {
+			return nil
+		}
+		if !environmentBuildLeaseMatches(job, leaseJobID, leaseToken, leaseAttemptCount) {
+			return nil
+		}
 		_, err := tx.Exec(ctx,
 			`UPDATE environment_artifacts
 			    SET status = 'pending',
+			        lease_job_id = NULL,
+			        lease_token = NULL,
+			        lease_attempt_count = NULL,
+			        provider_create_submitted_at = CASE WHEN $7 THEN NULL ELSE provider_create_submitted_at END,
 			        failure_stage = $4,
 			        last_error_kind = $5,
 			        failure_reason = $6,
 			        retryable = TRUE,
-			        updated_at = $7
+			        updated_at = $8
 			  WHERE workspace_id = $1
 			    AND environment_id = $2
 			    AND generation = $3
 			    AND status = 'building'`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), now.UTC(),
+			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), rearmCreate, now.UTC(),
 		)
 		return err
 	})
@@ -225,20 +327,28 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildTerminalFailure(ctx conte
 	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.terminal_failure", func(tx *dbconnect.Tx) error {
 		timestamp := now.UTC()
 		var artifactInputHash string
+		var leaseJobID, leaseToken sql.NullString
+		var leaseAttemptCount sql.NullInt64
 		if err := tx.QueryRow(ctx,
-			`SELECT artifact_input_hash
+			`SELECT artifact_input_hash, lease_job_id, lease_token, lease_attempt_count
 			   FROM environment_artifacts
 			  WHERE workspace_id = $1 AND environment_id = $2 AND generation = $3
 			  FOR UPDATE`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-		).Scan(&artifactInputHash); dbconnect.IsNoRows(err) {
+		).Scan(&artifactInputHash, &leaseJobID, &leaseToken, &leaseAttemptCount); dbconnect.IsNoRows(err) {
 			return nil
 		} else if err != nil {
 			return err
 		}
+		if !environmentBuildLeaseMatches(job, leaseJobID, leaseToken, leaseAttemptCount) {
+			return nil
+		}
 		rows, err := tx.Query(ctx,
 			`UPDATE environment_artifacts
 			    SET status = 'failed',
+			        lease_job_id = NULL,
+			        lease_token = NULL,
+			        lease_attempt_count = NULL,
 			        failure_stage = $4,
 			        last_error_kind = $5,
 			        failure_reason = $6,
@@ -270,52 +380,15 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildTerminalFailure(ctx conte
 		if len(generations) == 0 {
 			return nil
 		}
-		rows, err = tx.Query(ctx,
-			`UPDATE session_preparations
-			    SET status = 'failed',
-			        failure_stage = $4,
-			        last_error_kind = $5,
-			        failure_reason = $6,
-			        retryable = FALSE,
-			        failed_at = $7,
-			        updated_at = $7
-			  WHERE workspace_id = $1
-			    AND environment_id = $2
-			    AND environment_generation = ANY($3)
-			    AND status = 'waiting_environment'
-			    AND superseded_at IS NULL
-			RETURNING environment_generation`,
-			job.WorkspaceID, job.EnvironmentID, generations,
-			nullIfEmpty(failure.Stage), nullIfEmpty(failure.LastErrorKind), nullIfEmpty(failure.Reason), timestamp,
-		)
-		if err != nil {
-			return err
-		}
-		failedGenerations := map[int64]struct{}{}
-		for rows.Next() {
-			var generation int64
-			if err := rows.Scan(&generation); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			failedGenerations[generation] = struct{}{}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for generation := range failedGenerations {
-			if err := enqueueEnvironmentFailedFanout(ctx, tx, EnvironmentBuildJob{
-				WorkspaceID: job.WorkspaceID, EnvironmentID: job.EnvironmentID, Generation: generation,
-			}, now.UTC()); err != nil {
-				return err
-			}
-		}
-		return nil
+		return failWaitingArtifactActivationsTx(ctx, tx, job.WorkspaceID, job.EnvironmentID, generations, failure, timestamp)
 	})
+}
+
+func environmentBuildLeaseMatches(job EnvironmentBuildJob, leaseJobID sql.NullString, leaseToken sql.NullString, leaseAttemptCount sql.NullInt64) bool {
+	return job.JobID != "" && job.LeaseToken != "" &&
+		leaseJobID.Valid && leaseJobID.String == job.JobID &&
+		leaseToken.Valid && leaseToken.String == job.LeaseToken &&
+		leaseAttemptCount.Valid && leaseAttemptCount.Int64 == int64(job.AttemptCount)
 }
 
 func (s *EnvironmentArtifactStore) FanoutReadyEnvironment(ctx context.Context, job EnvironmentReadyFanoutJob, now time.Time) (int, error) {
@@ -326,7 +399,8 @@ func (s *EnvironmentArtifactStore) FanoutReadyEnvironment(ctx context.Context, j
 		now = storage.Now()
 	}
 	var advanced int
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		err := tx.QueryRow(ctx,
 			`SELECT status
@@ -346,174 +420,186 @@ func (s *EnvironmentArtifactStore) FanoutReadyEnvironment(ctx context.Context, j
 		if status != "ready" {
 			return errors.New("environment artifact is not ready for fanout")
 		}
-		rows, err := tx.Query(ctx,
-			`UPDATE session_preparations
-			    SET status = 'pending',
-			        updated_at = $4
-			  WHERE workspace_id = $1
-			    AND environment_id = $2
-			    AND environment_generation = $3
-			    AND status = 'waiting_environment'
-			    AND superseded_at IS NULL
-			RETURNING session_id, preparation_attempt_id`,
-			job.WorkspaceID, job.EnvironmentID, job.Generation, now.UTC(),
-		)
+		activationCount, err := requeueWaitingArtifactActivationsTx(ctx, tx, job, now.UTC())
 		if err != nil {
 			return err
 		}
-		type preparationRef struct {
-			sessionID            string
-			preparationAttemptID string
-		}
-		var preparations []preparationRef
-		for rows.Next() {
-			var ref preparationRef
-			if err := rows.Scan(&ref.sessionID, &ref.preparationAttemptID); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			preparations = append(preparations, ref)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, ref := range preparations {
-			if err := enqueueSessionPrepareForFanout(ctx, tx, job.WorkspaceID, ref.sessionID, ref.preparationAttemptID, now.UTC()); err != nil {
-				return err
-			}
-			advanced++
-		}
+		advanced = activationCount
 		return nil
 	})
 	return advanced, err
 }
 
-// FanoutFailedEnvironment settles the gated inputs of every session whose
-// preparation failed for this environment generation. It lists the failed
-// preparations in one read transaction, then settles each session in its own
-// transaction:
-//
-//	step    lock                                  effect
-//	fence   sessions row FOR UPDATE               skip if lifecycle_state deleted
-//	verify  session_preparations row FOR UPDATE   skip unless still failed for
-//	                                              this environment + generation
-//	settle  (no further lock)                     load pending runtime-input
-//	                                              segments and enqueue them
-//
-// The loaded segments carry each event's own birth preparation_attempt_id:
-// LoadPendingRuntimeInputSegmentsThroughPreparationAttempt selects
-// still-unprocessed events whose recorded birth is at-or-before the failed
-// attempt, and EnqueueRuntimeInputSegments copies those births into the
-// runtime_input jobs and never reassigns them. Retry is idempotent: the load
-// step excludes events already referenced by a pending or leased runtime_input
-// job. UPDATE-WITH: internal/sandbox
-// (LoadPendingRuntimeInputSegmentsThroughPreparationAttempt,
-// EnqueueRuntimeInputSegments), environment_failed_fanout_runner.go.
-func (s *EnvironmentArtifactStore) FanoutFailedEnvironment(ctx context.Context, job EnvironmentFailedFanoutJob, now time.Time) (int, error) {
+func requeueWaitingArtifactActivationsTx(ctx context.Context, tx *dbconnect.Tx, job EnvironmentReadyFanoutJob, now time.Time) (int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT o.operation_id, o.session_id, o.logical_sandbox_id
+		   FROM sandbox_lifecycle_operations o
+		   JOIN sessions s
+		     ON s.workspace_id = o.workspace_id AND s.id = o.session_id
+		  WHERE o.workspace_id = $1
+		    AND s.environment_id = $2
+		    AND o.target_environment_generation = $3
+		    AND o.kind IN ('create', 'replace')
+		    AND o.state = 'waiting_artifact'
+		  ORDER BY o.operation_id
+		  FOR UPDATE OF o`,
+		job.WorkspaceID, job.EnvironmentID, job.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	type activationRef struct {
+		operationID      string
+		sessionID        string
+		logicalSandboxID string
+	}
+	var activations []activationRef
+	for rows.Next() {
+		var ref activationRef
+		if err := rows.Scan(&ref.operationID, &ref.sessionID, &ref.logicalSandboxID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		activations = append(activations, ref)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, ref := range activations {
+		queueJobID := queue.NewJobID()
+		partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(job.WorkspaceID), ref.logicalSandboxID)
+		dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxActivate, workspace.ID(job.WorkspaceID), ref.logicalSandboxID, ref.operationID)
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state = 'pending', queue_job_id = $3, queue_kind = $4,
+			        queue_partition_key = $5, queue_dedupe_key = $6,
+			        lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+			        attempt_count = 0,
+			        updated_at = $7
+			  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'waiting_artifact'`,
+			job.WorkspaceID, ref.operationID, queueJobID, queue.KindSandboxActivate,
+			partitionKey, dedupeKey, now,
+		); err != nil {
+			return 0, err
+		}
+		payload, err := sandboxLifecycleQueuePayload(SandboxExecutionRef{
+			WorkspaceID: job.WorkspaceID, SessionID: ref.sessionID,
+		}, ref.logicalSandboxID, ref.operationID)
+		if err != nil {
+			return 0, err
+		}
+		enqueued, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+			ID: queueJobID, WorkspaceID: workspace.ID(job.WorkspaceID), Kind: queue.KindSandboxActivate,
+			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+			PayloadJSON: payload, MaxAttempts: sandboxActivationMaxAttempts, Now: now,
+		})
+		if err != nil {
+			return 0, err
+		}
+		if enqueued.ID != queueJobID {
+			return 0, errors.New("sandbox activation predecessor notification is still active")
+		}
+	}
+	return len(activations), nil
+}
+
+func (s *EnvironmentArtifactStore) FinalizeReadyEnvironmentFanout(ctx context.Context, job EnvironmentReadyFanoutJob, now time.Time) error {
 	if s == nil || s.client == nil {
-		return 0, errors.New("environment artifact store is required")
+		return errors.New("environment artifact store is required")
 	}
 	if now.IsZero() {
 		now = storage.Now()
 	}
-	type preparationRef struct {
-		sessionID            string
-		preparationAttemptID string
-	}
-	var preparations []preparationRef
-	if err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_failed_fanout.list", func(tx *dbconnect.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT session_id, preparation_attempt_id
-			   FROM session_preparations
-			  WHERE workspace_id = $1
-			    AND environment_id = $2
-			    AND environment_generation = $3
-			    AND status = 'failed'
-			  ORDER BY session_id, preparation_attempt_id`,
+	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_ready_fanout.finalize", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
+		var status string
+		if err := tx.QueryRow(ctx,
+			`SELECT status FROM environment_artifacts
+			  WHERE workspace_id=$1 AND environment_id=$2 AND generation=$3
+			  FOR UPDATE`,
 			job.WorkspaceID, job.EnvironmentID, job.Generation,
-		)
+		).Scan(&status); err != nil {
+			return err
+		}
+		if status != "ready" {
+			return errors.New("environment artifact is not ready for fanout finalization")
+		}
+		return failWaitingArtifactActivationsTx(ctx, tx, job.WorkspaceID, job.EnvironmentID, []int64{job.Generation}, EnvironmentArtifactFailure{
+			Stage: "environment_ready_fanout", LastErrorKind: "environment_ready_fanout_failed",
+			Reason: "sandbox environment could not resume waiting tools", Retryable: false,
+		}, now.UTC())
+	})
+}
+
+func failWaitingArtifactActivationsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, environmentID string, generations []int64, failure EnvironmentArtifactFailure, now time.Time) error {
+	rows, err := tx.Query(ctx,
+		`SELECT o.operation_id
+		   FROM sandbox_lifecycle_operations o
+		   JOIN sessions s
+		     ON s.workspace_id = o.workspace_id AND s.id = o.session_id
+		  WHERE o.workspace_id = $1
+		    AND s.environment_id = $2
+		    AND o.target_environment_generation = ANY($3)
+		    AND o.kind IN ('create', 'replace')
+		    AND o.state = 'waiting_artifact'
+		  ORDER BY o.operation_id
+		  FOR UPDATE OF o`,
+		workspaceID, environmentID, generations,
+	)
+	if err != nil {
+		return err
+	}
+	var operationIDs []string
+	for rows.Next() {
+		var operationID string
+		if err := rows.Scan(&operationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		operationIDs = append(operationIDs, operationID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	kind := failure.LastErrorKind
+	if kind == "" {
+		kind = "environment_artifact_failed"
+	}
+	message := failure.Reason
+	if message == "" {
+		message = "sandbox environment artifact is unavailable"
+	}
+	for _, operationID := range operationIDs {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state = 'failed', outcome_effect_boundary = 'proved_not_started',
+			        outcome_disposition = 'terminal', error_kind = $3, safe_message = $4,
+			        completed_at = $5, updated_at = $5
+			  WHERE workspace_id = $1 AND operation_id = $2 AND state = 'waiting_artifact'`,
+			workspaceID, operationID, kind, message, now,
+		); err != nil {
+			return err
+		}
+		waiters, err := lockExecutionWaiters(ctx, tx, workspaceID, operationID, "waiting_activation_operation_id")
 		if err != nil {
 			return err
 		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var ref preparationRef
-			if err := rows.Scan(&ref.sessionID, &ref.preparationAttemptID); err != nil {
-				return err
-			}
-			preparations = append(preparations, ref)
+		if err := settleExecutionWaitersTx(ctx, tx, waiters, kind, message, now); err != nil {
+			return err
 		}
-		return rows.Err()
-	}); err != nil {
-		return 0, err
-	}
-	fannedOut := 0
-	for _, ref := range preparations {
-		err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_failed_fanout.session", func(tx *dbconnect.Tx) error {
-			var lifecycleState string
-			if err := tx.QueryRow(ctx,
-				`SELECT lifecycle_state
-				   FROM sessions
-				  WHERE workspace_id = $1
-				    AND id = $2
-				  FOR UPDATE`,
-				job.WorkspaceID, ref.sessionID,
-			).Scan(&lifecycleState); dbconnect.IsNoRows(err) {
-				return nil
-			} else if err != nil {
-				return err
-			}
-			if lifecycleState == "deleted" {
-				return nil
-			}
-			var failedStatus string
-			var failedEnvironmentID string
-			var failedEnvironmentGeneration int64
-			err := tx.QueryRow(ctx,
-				`SELECT status, environment_id, environment_generation
-				   FROM session_preparations
-				  WHERE workspace_id = $1
-				    AND session_id = $2
-				    AND preparation_attempt_id = $3
-				  FOR UPDATE`,
-				job.WorkspaceID, ref.sessionID, ref.preparationAttemptID,
-			).Scan(&failedStatus, &failedEnvironmentID, &failedEnvironmentGeneration)
-			if dbconnect.IsNoRows(err) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			if failedStatus != "failed" ||
-				failedEnvironmentID != job.EnvironmentID ||
-				failedEnvironmentGeneration != job.Generation {
-				return nil
-			}
-			segments, err := sandbox.LoadPendingRuntimeInputSegmentsThroughPreparationAttempt(
-				ctx,
-				tx,
-				workspace.ID(job.WorkspaceID),
-				ref.sessionID,
-				ref.preparationAttemptID,
-			)
-			if err != nil {
-				return err
-			}
-			if err := sandbox.EnqueueRuntimeInputSegments(ctx, tx, workspace.ID(job.WorkspaceID), ref.sessionID, segments, now.UTC()); err != nil {
-				return err
-			}
-			fannedOut++
-			return nil
-		})
-		if err != nil {
-			return fannedOut, err
+		if err := failActivationMaterializationDependentsTx(ctx, tx, workspaceID, operationID, kind, message, now); err != nil {
+			return err
 		}
 	}
-	return fannedOut, nil
+	return nil
 }
 
 func enqueueEnvironmentReadyFanout(ctx context.Context, tx *dbconnect.Tx, job EnvironmentBuildJob, now time.Time) error {
@@ -531,50 +617,6 @@ func enqueueEnvironmentReadyFanout(ctx context.Context, tx *dbconnect.Tx, job En
 		Kind:           queue.KindEnvironmentReadyFanout,
 		PartitionKey:   queue.FormatEnvironmentPartitionKey(ws, job.EnvironmentID),
 		DedupeKey:      queue.FormatEnvironmentReadyFanoutDedupeKey(ws, job.EnvironmentID, strconv.FormatInt(job.Generation, 10)),
-		PayloadVersion: 1,
-		PayloadJSON:    payload,
-		Now:            now,
-	})
-	return err
-}
-
-func enqueueEnvironmentFailedFanout(ctx context.Context, tx *dbconnect.Tx, job EnvironmentBuildJob, now time.Time) error {
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":   job.WorkspaceID,
-		"environment_id": job.EnvironmentID,
-		"generation":     strconv.FormatInt(job.Generation, 10),
-	})
-	if err != nil {
-		return err
-	}
-	ws := workspace.ID(job.WorkspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		WorkspaceID:    ws,
-		Kind:           queue.KindEnvironmentFailedFanout,
-		PartitionKey:   queue.FormatEnvironmentPartitionKey(ws, job.EnvironmentID),
-		DedupeKey:      queue.FormatEnvironmentFailedFanoutDedupeKey(ws, job.EnvironmentID, strconv.FormatInt(job.Generation, 10)),
-		PayloadVersion: 1,
-		PayloadJSON:    payload,
-		Now:            now,
-	})
-	return err
-}
-
-func enqueueSessionPrepareForFanout(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, preparationAttemptID string, now time.Time) error {
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":           workspaceID,
-		"session_id":             sessionID,
-		"preparation_attempt_id": preparationAttemptID,
-	})
-	if err != nil {
-		return err
-	}
-	ws := workspace.ID(workspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		WorkspaceID:    ws,
-		Kind:           queue.KindSessionPrepare,
-		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
-		DedupeKey:      queue.FormatSessionPrepareDedupeKey(ws, sessionID, preparationAttemptID),
 		PayloadVersion: 1,
 		PayloadJSON:    payload,
 		Now:            now,

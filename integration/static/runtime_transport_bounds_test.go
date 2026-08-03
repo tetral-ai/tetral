@@ -60,7 +60,6 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 	}
 	for _, required := range []string{
 		`export const MailFetchMaxEnvelopes\s*=\s*4;`,
-		`export const MailFetchMaxBodyBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024;`,
 	} {
 		if !regexp.MustCompile(required).Match(protocolBody) {
 			t.Fatalf("TypeScript completion-mail bounds missing %q", required)
@@ -68,7 +67,6 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 	}
 	for _, required := range []string{
 		`MailFetchMaxEnvelopes\s*=\s*4`,
-		`MailFetchMaxBodyBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024`,
 	} {
 		if !regexp.MustCompile(required).Match(completionMailBody) {
 			t.Fatalf("Go completion-mail bounds missing %q", required)

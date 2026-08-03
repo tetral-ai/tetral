@@ -30,10 +30,6 @@ func (largeMCPManifestTransportServer) ListMcpTools(context.Context, *providerga
 	}, nil
 }
 
-type largeTaskResultTransportServer struct {
-	bridgev1.UnimplementedAgentRuntimeBridgeServiceServer
-}
-
 type largeContextTransportServer struct {
 	bridgev1.UnimplementedAgentRuntimeBridgeServiceServer
 }
@@ -43,10 +39,6 @@ func (largeContextTransportServer) LoadContext(context.Context, *bridgev1.LoadCo
 		Ack:         committedAck("", ""),
 		ContextJson: strings.Repeat("c", 5*1024*1024),
 	}, nil
-}
-
-func (largeTaskResultTransportServer) ReadCommandResult(context.Context, *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {
-	return &bridgev1.ReadCommandResultResponse{ResultJson: strings.Repeat("r", 2*1024*1024)}, nil
 }
 
 func TestGatewayMCPManifestListerReceivesManifestAboveSharedSessionCap(t *testing.T) {
@@ -61,7 +53,7 @@ func TestGatewayMCPManifestListerReceivesManifestAboveSharedSessionCap(t *testin
 
 	lister := NewGatewayMCPManifestLister(
 		"passthrough:///mcp-manifest-capacity",
-		sandboxReleaseClientTestTokenSource{},
+		&countingRuntimeCommandTokenSource{},
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
 	)
 	result, err := lister.ListMCPTools(context.Background(), MCPManifestListRequest{WorkspaceID: "default", SessionID: "sesn_capacity", MCPServerName: "github"})
@@ -70,34 +62,6 @@ func TestGatewayMCPManifestListerReceivesManifestAboveSharedSessionCap(t *testin
 	}
 	if len(result.Tools) != 1 || len(result.Tools[0].Description) != 128*1024 {
 		t.Fatalf("manifest result = %+v; want one 128 KiB description", result)
-	}
-}
-
-func TestTaskNotificationReaderReceivesStoredResultAboveSharedSessionCap(t *testing.T) {
-	listener := bufconn.Listen(sessionrpc.MaxTaskResultGRPCMessageBytes * 2)
-	server := grpc.NewServer(
-		grpc.MaxRecvMsgSize(sessionrpc.MaxTaskResultGRPCMessageBytes),
-		grpc.MaxSendMsgSize(sessionrpc.MaxTaskResultGRPCMessageBytes),
-	)
-	bridgev1.RegisterAgentRuntimeBridgeServiceServer(server, largeTaskResultTransportServer{})
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(server.Stop)
-
-	reader, connection, err := DialBridgeAPITaskNotificationReader(
-		"passthrough:///task-result-capacity",
-		sandboxReleaseClientTestTokenSource{},
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
-	)
-	if err != nil {
-		t.Fatalf("dial task result reader: %v", err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	result, err := reader.ReadTaskNotificationResult(context.Background(), &bridgev1.RuntimeScope{}, "task_capacity", "sevt_capacity")
-	if err != nil {
-		t.Fatalf("ReadTaskNotificationResult above shared session cap: %v", err)
-	}
-	if len(result) != 2*1024*1024 {
-		t.Fatalf("task result bytes = %d; want 2 MiB", len(result))
 	}
 }
 

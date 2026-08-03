@@ -217,8 +217,7 @@ describe("Runtime Pod static boundaries", () => {
     expect(command).toContain("runTool");
     expect(command).toContain("createLLMService");
     expect(command).not.toContain("RuntimePodBridgeReleaseBinding");
-    expect(command).toContain("RuntimeHotMessageStore");
-    expect(command).not.toContain("FailClosedRuntimeMessageStore");
+    expect(command).not.toContain("FailClosedRuntimeInternalToolRepairStore");
     expect(command).not.toContain("Gateway provider stream client is not wired yet");
     expect(command).toContain('process.once("SIGTERM"');
     expect(command).toContain('process.once("SIGINT"');

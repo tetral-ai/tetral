@@ -22,7 +22,7 @@ const (
 	// Before the first release baseline is declared, schema-file edits replace
 	// that payload and digest together. After declaration, changes append a new
 	// migration and leave this digest immutable.
-	PostgreSQLSchemaVersionOneChecksum = "0e350b887454d95a13e54adf4251ad8ce5babbe52862204716a48227660f0ebe"
+	PostgreSQLSchemaVersionOneChecksum = "dadbef3087ae0d9a6657af237ba7f656cc18931844a39f8325bd024e3ed882ac"
 
 	createPostgreSQLSchemaMigrationsTable = `CREATE TABLE tetral_schema_migrations (
 		version BIGINT PRIMARY KEY,

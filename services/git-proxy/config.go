@@ -78,7 +78,7 @@ func ConfigFromEnv(env Env) (Config, error) {
 	// Default DefaultDrainGraceSeconds (1800s); DefaultTicketRotationGraceSeconds
 	// defaults equal to DrainGraceSeconds (ticket.go) so the accept window
 	// matches the drain window — a single git operation whose sequential
-	// requests (GET /info/refs then POST git-*-pack) straddle a re-preparation
+	// requests (GET /info/refs then POST git-*-pack) straddle a credential rotation
 	// ticket rotation during a rolling deploy completes instead of failing
 	// mid-way. This override moves both roles together.
 	// UPDATE-WITH: run.go (wires DrainGrace into RotationGrace and

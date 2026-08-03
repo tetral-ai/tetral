@@ -7,7 +7,6 @@ metadata:
     app.kubernetes.io/name: sandbox
     app.kubernetes.io/part-of: tetral
 data:
-  TETRAL_SANDBOX_DRIVER: daytona
   DAYTONA_API_URL: https://daytona.example.internal/api
   DAYTONA_TARGET: us
   # Environment artifact builds start FROM this image; it must be the same
@@ -17,22 +16,17 @@ data:
   TETRAL_QUEUE_GRPC_ADDR: queue.tetral-system.svc.cluster.local:9090
   TETRAL_GIT_PROXY_HOST: git.tetral.example
   TETRAL_SANDBOX_LEASE_HEARTBEAT_INTERVAL: 15s
-  TETRAL_SANDBOX_SESSION_PREPARE_LEASE_DURATION: 120s
-  TETRAL_SANDBOX_PREPARATION_COMMAND_TIMEOUT: 45s
+  TETRAL_SANDBOX_JOB_LEASE_DURATION: 120s
+  TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT: 45s
   TETRAL_SANDBOX_LATE_COMMAND_MARGIN: 30s
   TETRAL_SANDBOX_JOB_POLL_INTERVAL: 1s
   TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY: "1"
   TETRAL_SANDBOX_ENVIRONMENT_READY_FANOUT_CONCURRENCY: "1"
-  TETRAL_SANDBOX_SESSION_PREPARE_CONCURRENCY: "1"
+  TETRAL_SANDBOX_WORKER_CONCURRENCY: "1"
   TETRAL_SANDBOX_DAYTONA_STOP_TIMEOUT: 30s
-  TETRAL_SANDBOX_DAYTONA_STOP_FORCE_AFTER: 2m
   TETRAL_SANDBOX_AUTO_STOP_INTERVAL: 30m
   TETRAL_SANDBOX_AUTO_ARCHIVE_INTERVAL: 24h
   TETRAL_SANDBOX_AUTO_DELETE_INTERVAL: 720h
-  TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
-  TETRAL_SANDBOX_CLEANUP_RETRY_BACKOFF: 30s
-  TETRAL_SANDBOX_CLEANUP_LEASE_DURATION: 3m
-  SANDBOX_CLEANUP_MAX_ATTEMPTS: "20"
   TETRAL_BLOB_ENDPOINT: https://blob.example.internal
   TETRAL_BLOB_REGION: local
   TETRAL_BLOB_BUCKET: tetral-files
@@ -82,8 +76,6 @@ spec:
           env:
             - name: TETRAL_SANDBOX_HTTP_ADDR
               value: ":8080"
-            - name: TETRAL_SANDBOX_GRPC_ADDR
-              value: ":9090"
             - name: TETRAL_DEPLOYMENT_ENVIRONMENT
               value: local
             - name: TETRAL_SERVICE_VERSION
@@ -95,17 +87,6 @@ spec:
                 secretKeyRef:
                   name: tetral-database
                   key: TETRAL_POSTGRES_DSN
-            - name: TETRAL_INTERNAL_GRPC_AUDIENCE
-              value: tetral-internal-grpc
-            - name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS
-              value: tetral-system/bridge
-            - name: TETRAL_SANDBOX_GRPC_BEARER_TOKEN_PATH
-              value: /var/run/secrets/tetral-internal-grpc/sandbox/token
-            - name: TETRAL_SANDBOX_DRIVER
-              valueFrom:
-                configMapKeyRef:
-                  name: sandbox-config
-                  key: TETRAL_SANDBOX_DRIVER
             - name: DAYTONA_API_URL
               valueFrom:
                 configMapKeyRef:
@@ -142,16 +123,16 @@ spec:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_LEASE_HEARTBEAT_INTERVAL
-            - name: TETRAL_SANDBOX_SESSION_PREPARE_LEASE_DURATION
+            - name: TETRAL_SANDBOX_JOB_LEASE_DURATION
               valueFrom:
                 configMapKeyRef:
                   name: sandbox-config
-                  key: TETRAL_SANDBOX_SESSION_PREPARE_LEASE_DURATION
-            - name: TETRAL_SANDBOX_PREPARATION_COMMAND_TIMEOUT
+                  key: TETRAL_SANDBOX_JOB_LEASE_DURATION
+            - name: TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT
               valueFrom:
                 configMapKeyRef:
                   name: sandbox-config
-                  key: TETRAL_SANDBOX_PREPARATION_COMMAND_TIMEOUT
+                  key: TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT
             - name: TETRAL_SANDBOX_LATE_COMMAND_MARGIN
               valueFrom:
                 configMapKeyRef:
@@ -172,21 +153,16 @@ spec:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_ENVIRONMENT_READY_FANOUT_CONCURRENCY
-            - name: TETRAL_SANDBOX_SESSION_PREPARE_CONCURRENCY
+            - name: TETRAL_SANDBOX_WORKER_CONCURRENCY
               valueFrom:
                 configMapKeyRef:
                   name: sandbox-config
-                  key: TETRAL_SANDBOX_SESSION_PREPARE_CONCURRENCY
+                  key: TETRAL_SANDBOX_WORKER_CONCURRENCY
             - name: TETRAL_SANDBOX_DAYTONA_STOP_TIMEOUT
               valueFrom:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_DAYTONA_STOP_TIMEOUT
-            - name: TETRAL_SANDBOX_DAYTONA_STOP_FORCE_AFTER
-              valueFrom:
-                configMapKeyRef:
-                  name: sandbox-config
-                  key: TETRAL_SANDBOX_DAYTONA_STOP_FORCE_AFTER
             - name: TETRAL_SANDBOX_AUTO_STOP_INTERVAL
               valueFrom:
                 configMapKeyRef:
@@ -202,26 +178,6 @@ spec:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_AUTO_DELETE_INTERVAL
-            - name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-              valueFrom:
-                configMapKeyRef:
-                  name: sandbox-config
-                  key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-            - name: TETRAL_SANDBOX_CLEANUP_RETRY_BACKOFF
-              valueFrom:
-                configMapKeyRef:
-                  name: sandbox-config
-                  key: TETRAL_SANDBOX_CLEANUP_RETRY_BACKOFF
-            - name: TETRAL_SANDBOX_CLEANUP_LEASE_DURATION
-              valueFrom:
-                configMapKeyRef:
-                  name: sandbox-config
-                  key: TETRAL_SANDBOX_CLEANUP_LEASE_DURATION
-            - name: SANDBOX_CLEANUP_MAX_ATTEMPTS
-              valueFrom:
-                configMapKeyRef:
-                  name: sandbox-config
-                  key: SANDBOX_CLEANUP_MAX_ATTEMPTS
             - name: TETRAL_BLOB_ENDPOINT
               valueFrom:
                 configMapKeyRef:
@@ -285,8 +241,6 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-            - name: grpc
-              containerPort: 9090
           livenessProbe:
             httpGet:
               path: /health
@@ -311,17 +265,6 @@ spec:
             capabilities:
               drop:
                 - ALL
-          volumeMounts:
-            - name: sandbox-internal-grpc-token
-              mountPath: /var/run/secrets/tetral-internal-grpc/sandbox
-              readOnly: true
-      volumes:
-        - name: sandbox-internal-grpc-token
-          secret:
-            secretName: sandbox-internal-grpc
-            items:
-              - key: token
-                path: token
 ---
 apiVersion: v1
 kind: Service
@@ -339,9 +282,6 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-    - name: grpc
-      port: 9090
-      targetPort: grpc
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -364,13 +304,6 @@ spec:
     - Ingress
     - Egress
   ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: bridge
-      ports:
-        - protocol: TCP
-          port: 9090
     - from:
         - podSelector:
             matchLabels:

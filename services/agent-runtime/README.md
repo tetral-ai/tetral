@@ -125,8 +125,9 @@ state are awaited Effects, never detached background work.
 | --- | --- |
 | `CommitInputs` | append accepted messages to `ContextManager` |
 | `WriteEvent` | update hot assistant/tool state; open or resolve pending waits |
-| `WriteRequestEnd` | update `lastRequestUsage`; close the request turn |
+| `WriteRequestEnd` | validate current custody even when no assistant seal exists; otherwise apply the terminal message/part stamps. An interrupt during an open provider request also applies the identity-matched `CommitInputs` receipt returned by the same transaction before acknowledging the interrupt; only then update `lastRequestUsage` and close the request turn |
 | `FinishIdle` | enter local idle (after output capture / status) |
+| `CommitRuntimeTermination` | under the current durable-turn identity, persist loop-authored current-thread cancellations and any abnormal child completion envelope; validate every returned stamp before removing pending tools or releasing the turn |
 
 `Effect` is the shape of every operation with I/O, failure, or cancellation.
 `Fiber` exists only for owned lifetimes — the ThreadRun owner, the provider
@@ -185,9 +186,10 @@ Gateway owns all provider lowering and credential injection.
 - Skill guidance is a listing, not an embedding: the segment names each skill
   with its description, immutable version, and projected `/skills/<directory>/SKILL.md`
   path, and the model reads those projected files with ordinary tools; skill
-  bodies are never inlined. The segment is derived from the resolved skill index
-  persisted at preparation and is never re-derived by re-resolving `latest`, so it
-  always describes exactly the packages the sandbox mounted.
+  bodies are never inlined. Cold context derives the resolved skill index from
+  the Session's immutable Agent version and durable skill-version rows; Sandbox
+  materialization uses the same resolver, so prompt paths and mounted packages
+  describe the same pinned versions.
 - Lifecycle: a RequestTurn is born at the `span.model_request_start` ACK; before
   that ACK no request end is owed. After it, every terminal success, provider
   error, cancellation, or repairable failure closes with `WriteRequestEnd`.
@@ -202,7 +204,10 @@ Invariants a replacement must preserve:
 - The stable `tool-call` is the execution boundary; `tool-input` fragments start
   nothing.
 - The next request cannot start until the stream is terminal, the request end is
-  ACKed, and the per-turn tool-fiber set has settled.
+  ACKed, its terminal assistant projection is installed in hot context, and the
+  per-turn tool-fiber set has settled. A rescheduled request carries only parts
+  already proven durable; successful closeout adds the request's complete stable
+  reasoning set in the same settlement.
 - The pod is the only retry driver: a retryable failure parks in-run until the
   Bridge-effective deadline and re-issues the request rebuilt from committed
   context, or settles as retries-exhausted.
@@ -244,11 +249,17 @@ with separate anchors.
 
 | Route kind | Operation | Target |
 | --- | --- | --- |
-| `sandbox` | `RunTool` / `CommandIO` | Bridge (helper subcommand per tool) |
+| `sandbox` | `AcceptSandboxExecution` / `AwaitSandboxExecution`; `CommandIO` | Bridge durable acceptance/result read; Sandbox Service executes provider work |
 | `gateway` | `RunWeb` | web-connector container |
 | `gateway` | `RunMcpTool` | mcp-connector container |
 | `bridge` | `RunMemory` | Bridge |
 | `subagent` | `spawn_agent` … `list_agents` | in-process child thread |
+
+Sandbox dispatch accepts one exact durable Tool Use before waiting for its
+result. A cold Runtime rejoins that accepted execution after refreshing its
+binding token; a transient refresh failure does not invent a Tool Result or
+consume durable custody. The terminal result digest stays internal and is
+returned to Bridge with the loop-authored tool-result declaration.
 
 `RunWeb` reaches the web-connector through `TETRAL_WEB_CONNECTOR_GRPC_ADDR`,
 which boot config requires and gives no default: a Runtime Pod whose Deployment
@@ -308,31 +319,33 @@ specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
 - Interface: the `subagent` route operations dispatch in `tool-runner.ts`; child
-  threads are created through Bridge `CreateChildThread` with a fork seed;
+  threads are created through Bridge `CreateChildThread` with a thread context prefix;
   `fork_turns` partitioning is `core/src/runtime/conversation-turns.ts`.
-- Lifecycle: `spawn_agent` prepares a durable child row and fork seed before the
+- Lifecycle: `spawn_agent` prepares a durable child row and context prefix before the
   first message; `send_message` resolves the child by `task_name`, delivering
-  in-process when the child is co-resident and through Bridge when cold;
+  every instruction through the stored envelope and durable Runtime input rail;
   `wait_agent`, `interrupt_agent`, `close_agent`, `resume_agent`, and
   `list_agents` operate over durable `session_threads`.
 
 Invariants a replacement must preserve:
 
-- Child durable thread and fork seed exist before the initial message; a crash
-  after `CreateChildThread` ACK reuses the same child and seed.
-- Inter-agent delivery is exactly-once by a deterministic `delivery_id`, ordered
-  parent-sent → enqueue → child-received, and repaired by `delivery_id` on the
-  hot path and inside pod-loss repair on the cold path.
+- Child durable thread and context prefix exist before the initial message; a crash
+  after `CreateChildThread` ACK reuses the same child and prefix.
+- Inter-agent delivery is exactly-once by `delivery_id`, ordered
+  sent envelope → received source/inbox → Runtime command → stamped input
+  receipt. Inbox repair recreates only the queue wake and reuses that identity.
 - `task_name` is unique under the parent by durable constraint, never by
   serializing spawns in the scheduler.
-- Completion return rides the durable wake/receipt rail: the child settlement
-  writes completion mail plus a bare-poke wake job; the parent's `CommitInputs`
-  writes `agent.thread_message_received` (replay-deduped by `delivery_id`); a
-  `wait_agent` pull carries a settled child's outcome and writes the receipt in
-  the same step so the push copy dedups away.
-- `close_agent` cascades to the closed child's descendant subtree; a closed row
-  wins against any concurrent status flip; `resume_agent` reactivates only
-  `closed_for_runtime` rows.
+- Completion return rides the same durable wake/receipt rail: the child
+  settlement writes one sent envelope and wake, admission creates or reuses the
+  received source and inbox, and the parent's `CommitInputs` projects it once.
+  `wait_agent` returns the exact stored envelope immediately while ensuring the
+  same delivery remains recoverable for the parent's next legal run.
+- `close_agent` freezes the complete descendant subtree, closes its
+  non-terminal rows, preserves `failed` and `terminated` outcomes, and only
+  then releases resident hot state. `resume_agent` reactivates only
+  `closed_for_runtime` rows; terminal rows remain terminal and are never
+  installed into hot state.
 
 Conformance tests: `core/test/unit/session-manager.test.ts`,
 `core/test/unit/conversation-turns.test.ts`,

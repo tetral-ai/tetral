@@ -109,25 +109,6 @@ func TestTaskHelperDoesNotProduceHelperFailureKind(t *testing.T) {
 	}
 }
 
-func TestSandboxServicePreparesBaseDirectoriesBeforeResourceSteps(t *testing.T) {
-	serviceSource, err := os.ReadFile(filepath.Join(helperRoot(t), "..", "service.go")) //nolint:gosec // repository-local source path.
-	if err != nil {
-		t.Fatalf("read service.go: %v", err)
-	}
-	source := string(serviceSource)
-	health := strings.Index(source, "CheckBaseTemplateHealth(ctx, handle)")
-	prepareResources := strings.Index(source, "prepareResources(ctx, setup, handle)")
-	baseDirectories := strings.Index(source, "PrepareBaseDirectories(ctx, handle)")
-	prepareSessionResources := strings.Index(source, "prepareSessionResources(ctx, setup, handle)")
-	if health < 0 || prepareResources < 0 || baseDirectories < 0 || prepareSessionResources < 0 {
-		t.Fatalf("service.go missing health/base-directory/resource lifecycle calls")
-	}
-	if health >= prepareResources || prepareResources >= baseDirectories || baseDirectories >= prepareSessionResources {
-		t.Fatalf("base-template/base-directory order invalid: health=%d prepareResources=%d baseDirectories=%d prepareSessionResources=%d",
-			health, prepareResources, baseDirectories, prepareSessionResources)
-	}
-}
-
 func readRepoFile(t *testing.T, parts ...string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join(append([]string{helperRoot(t)}, parts...)...)) //nolint:gosec // repository-local source path.

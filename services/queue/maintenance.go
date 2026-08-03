@@ -8,8 +8,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 )
 
-type LeaseReclaimer interface {
+type MaintenanceStore interface {
 	ReclaimExpiredLeases(context.Context, queue.ReclaimExpiredLeasesRequest) (int, error)
+	SweepSandboxTerminalJobs(context.Context, queue.SandboxTerminalSweepRequest) (int, error)
+	SweepEmptyPartitionCounters(context.Context, queue.EmptyPartitionCounterSweepRequest) (int, error)
 }
 
 type MaintenanceConfig struct {
@@ -18,8 +20,8 @@ type MaintenanceConfig struct {
 	Logger   *slog.Logger
 }
 
-func RunStalledLeaseMaintenance(ctx context.Context, reclaimer LeaseReclaimer, cfg MaintenanceConfig) {
-	if reclaimer == nil {
+func RunStalledLeaseMaintenance(ctx context.Context, store MaintenanceStore, cfg MaintenanceConfig) {
+	if store == nil {
 		return
 	}
 	interval := cfg.Interval
@@ -37,16 +39,39 @@ func RunStalledLeaseMaintenance(ctx context.Context, reclaimer LeaseReclaimer, c
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			started := time.Now()
-			reclaimed, err := reclaimer.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{
-				Limit:        limit,
-				ErrorKind:    "lease_expired",
-				ErrorMessage: "queue lease expired",
-				Now:          now,
-			})
-			logLeaseReclaimResult(cfg.Logger, reclaimed, err, time.Since(started))
+			cfg.Limit = limit
+			runMaintenanceTick(ctx, store, cfg, now)
 		}
 	}
+}
+
+func runMaintenanceTick(ctx context.Context, store MaintenanceStore, cfg MaintenanceConfig, now time.Time) {
+	started := time.Now()
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, queue.ReclaimExpiredLeasesRequest{
+		Limit:        cfg.Limit,
+		ErrorKind:    "lease_expired",
+		ErrorMessage: "queue lease expired",
+	})
+	logLeaseReclaimResult(cfg.Logger, reclaimed, err, time.Since(started))
+	if err != nil {
+		return
+	}
+
+	started = time.Now()
+	deletedJobs, err := store.SweepSandboxTerminalJobs(ctx, queue.SandboxTerminalSweepRequest{
+		Now:   now,
+		Limit: queue.SandboxMaintenanceBatchLimit,
+	})
+	logSandboxRetentionResult(cfg.Logger, "queue.sandbox_job_retention", "queue.jobs.deleted", deletedJobs, err, time.Since(started))
+	if err != nil && !queue.IsIntegrityError(err) {
+		return
+	}
+
+	started = time.Now()
+	deletedCounters, err := store.SweepEmptyPartitionCounters(ctx, queue.EmptyPartitionCounterSweepRequest{
+		Limit: queue.SandboxMaintenanceBatchLimit,
+	})
+	logSandboxRetentionResult(cfg.Logger, "queue.partition_counter_retention", "queue.partition_counters.deleted", deletedCounters, err, time.Since(started))
 }
 
 func logLeaseReclaimResult(logger *slog.Logger, reclaimed int, err error, duration time.Duration) {
@@ -74,6 +99,35 @@ func logLeaseReclaimResult(logger *slog.Logger, reclaimed int, err error, durati
 			slog.String("component", "queue"),
 			slog.Int64("duration.ms", duration.Milliseconds()),
 			slog.Int("queue.jobs.reclaimed", reclaimed),
+		)
+	}
+}
+
+func logSandboxRetentionResult(logger *slog.Logger, operation string, countField string, deleted int, err error, duration time.Duration) {
+	if logger == nil {
+		return
+	}
+	if err != nil {
+		logger.Warn(operation+".failed",
+			slog.String("operation", operation),
+			slog.String("event.kind", operation+".failed"),
+			slog.String("component", "queue"),
+			slog.Int64("duration.ms", duration.Milliseconds()),
+			slog.Bool("retryable", true),
+			slog.Bool("terminal", false),
+			slog.String("error.class", "queue_maintenance_error"),
+			slog.String("error.code", "queue_retention_failed"),
+			slog.String("error.message_safe", "queue retention failed"),
+		)
+		return
+	}
+	if deleted > 0 {
+		logger.Info(operation+".completed",
+			slog.String("operation", operation),
+			slog.String("event.kind", operation+".completed"),
+			slog.String("component", "queue"),
+			slog.Int64("duration.ms", duration.Milliseconds()),
+			slog.Int(countField, deleted),
 		)
 	}
 }

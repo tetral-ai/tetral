@@ -226,7 +226,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	}
 
 	resultJSON := `{"response":{"status":1,"result_text":"created","attachments":[]},"content_items":1,"refresh_triggered":false}`
-	committed, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+	commitRequest := &bridgev1.CommitMcpToolResultRequest{
 		Scope:               scope,
 		ToolUseEventId:      claim.GetToolUseEventId(),
 		NormalizedInputHash: claim.GetNormalizedInputHash(),
@@ -234,13 +234,15 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 		ToolName:            claim.GetToolName(),
 		InputJson:           claim.GetInputJson(),
 		ResultJson:          resultJSON,
-	})
+	}
+	committed, err := store.CommitMcpToolResult(context.Background(), commitRequest)
 	if err != nil {
 		t.Fatalf("CommitMcpToolResult: %v", err)
 	}
 	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || committed.GetRefsOnlyResultJson() != resultJSON {
 		t.Fatalf("commit = %+v; want committed stored result", committed)
 	}
+	assertMCPMaterializationDeclaration(t, committed, commitRequest, scope)
 	var toolKind string
 	var toolName string
 	var storedResult string
@@ -261,6 +263,11 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	if replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replayed.GetResultJson() != resultJSON {
 		t.Fatalf("replay claim = %+v; want duplicate stored result", replayed)
 	}
+	if replayed.GetDeclaration() == nil ||
+		len(replayed.GetDeclaration().GetReceipts()) != 1 ||
+		!proto.Equal(replayed.GetDeclaration().GetReceipts()[0], committed.GetDeclaration().GetReceipts()[0]) {
+		t.Fatalf("replay declaration = %+v; want durable commit receipt %+v", replayed.GetDeclaration(), committed.GetDeclaration())
+	}
 	reorderedReplay, err := store.ClaimMcpToolResult(context.Background(), reorderedClaim)
 	if err != nil {
 		t.Fatalf("ClaimMcpToolResult replay with reordered raw JSON: %v", err)
@@ -268,7 +275,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 	if reorderedReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || reorderedReplay.GetResultJson() != resultJSON {
 		t.Fatalf("reordered replay claim = %+v; want duplicate stored result", reorderedReplay)
 	}
-	duplicateCommit, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+	duplicateRequest := &bridgev1.CommitMcpToolResultRequest{
 		Scope:               scope,
 		ToolUseEventId:      claim.GetToolUseEventId(),
 		NormalizedInputHash: claim.GetNormalizedInputHash(),
@@ -276,18 +283,109 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultDurableReplay(t *testing.T) {
 		ToolName:            claim.GetToolName(),
 		InputJson:           reorderedClaim.GetInputJson(),
 		ResultJson:          resultJSON,
-	})
+	}
+	duplicateCommit, err := store.CommitMcpToolResult(context.Background(), duplicateRequest)
 	if err != nil {
 		t.Fatalf("CommitMcpToolResult duplicate: %v", err)
 	}
 	if duplicateCommit.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || duplicateCommit.GetRefsOnlyResultJson() != resultJSON {
 		t.Fatalf("duplicate commit = %+v; want duplicate stored result", duplicateCommit)
 	}
+	assertMCPMaterializationDeclaration(t, duplicateCommit, duplicateRequest, scope)
+	if !proto.Equal(committed.GetDeclaration(), duplicateCommit.GetDeclaration()) {
+		t.Fatalf("duplicate declaration = %+v; want committed declaration %+v", duplicateCommit.GetDeclaration(), committed.GetDeclaration())
+	}
 
 	conflict := proto.Clone(claim).(*bridgev1.ClaimMcpToolResultRequest)
 	conflict.NormalizedInputHash = "hash_mcp_other"
 	if _, err := store.ClaimMcpToolResult(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting ClaimMcpToolResult err = %v; want AlreadyExists", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_bindings
+		    SET binding_id = 'bind_bridge_mcp_tool_replacement',
+		        binding_generation = 2,
+		        agent_runtime_pod_uid = 'pod_uid_mcp_tool_replacement',
+		        updated_at = '2026-01-01T00:00:31Z'
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_mcp_tool'`,
+	); err != nil {
+		t.Fatalf("replace MCP replay binding: %v", err)
+	}
+	staleReplay, err := store.ClaimMcpToolResult(context.Background(), claim)
+	if err != nil {
+		t.Fatalf("ClaimMcpToolResult stale replay: %v", err)
+	}
+	if staleReplay.GetResultJson() != resultJSON ||
+		staleReplay.GetDeclaration().GetApplicationDisposition() != bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY ||
+		staleReplay.GetDeclaration().GetObservedBindingId() != "bind_bridge_mcp_tool_replacement" ||
+		staleReplay.GetDeclaration().GetObservedBindingGeneration() != 2 {
+		t.Fatalf("stale replay = %+v; want exact result with replacement-binding observation", staleReplay)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMCPToolResultIdentityIncludesThread(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_mcp_thread_identity"
+		mainID    = "thr_bridge_mcp_thread_identity_main"
+		childID   = "thr_bridge_mcp_thread_identity_child"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_mcp_thread_identity", 1, "pod_uid_mcp_thread_identity")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
+	results := map[string]string{
+		mainID:  `{"response":{"status":1,"result_text":"main","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+		childID: `{"response":{"status":1,"result_text":"child","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+	}
+	for threadID, resultJSON := range results {
+		scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_mcp_thread_identity", 1, "pod_uid_mcp_thread_identity")
+		claim := &bridgev1.ClaimMcpToolResultRequest{
+			Scope:               scope,
+			ToolUseEventId:      "evt_shared_mcp_tool",
+			NormalizedInputHash: "hash_shared_mcp_tool",
+			McpServerName:       "github",
+			ToolName:            "create_issue",
+			InputJson:           `{"title":"shared"}`,
+		}
+		if _, err := store.ClaimMcpToolResult(context.Background(), claim); err != nil {
+			t.Fatalf("ClaimMcpToolResult thread %s: %v", threadID, err)
+		}
+		if _, err := store.CommitMcpToolResult(context.Background(), &bridgev1.CommitMcpToolResultRequest{
+			Scope:               scope,
+			ToolUseEventId:      claim.GetToolUseEventId(),
+			NormalizedInputHash: claim.GetNormalizedInputHash(),
+			McpServerName:       claim.GetMcpServerName(),
+			ToolName:            claim.GetToolName(),
+			InputJson:           claim.GetInputJson(),
+			ResultJson:          resultJSON,
+		}); err != nil {
+			t.Fatalf("CommitMcpToolResult thread %s: %v", threadID, err)
+		}
+		replay, err := store.ClaimMcpToolResult(context.Background(), claim)
+		if err != nil {
+			t.Fatalf("ClaimMcpToolResult replay thread %s: %v", threadID, err)
+		}
+		if replay.GetResultJson() != resultJSON {
+			t.Fatalf("thread %s replay = %q; want %q", threadID, replay.GetResultJson(), resultJSON)
+		}
+	}
+	var rowCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND tool_use_event_id = 'evt_shared_mcp_tool'`,
+		sessionID,
+	).Scan(&rowCount); err != nil {
+		t.Fatalf("count thread-scoped MCP results: %v", err)
+	}
+	if rowCount != 2 {
+		t.Fatalf("thread-scoped MCP result rows = %d; want 2", rowCount)
 	}
 }
 
@@ -301,9 +399,30 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	store.AttachmentBlobStore = blobStore
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
 	scope := bridgeAPIScope("sesn_bridge_mcp_media", "thr_bridge_mcp_media", "bind_bridge_mcp_media", 1, "pod_uid_mcp_media")
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_mcp_media_tool_use",
+		ModelRequestId: "mreq_mcp_media",
+		EventType:      "agent.mcp_tool_use",
+		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"get_file_contents","input":{"path":"plot.png"},"mcp_server_name":"github","evaluated_permission":"allow"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_mcp_media_tool_use",
+			"agent.mcp_tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_mcp_media","toolName":"get_file_contents","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"path":"plot.png"},"preview":"{\"path\":\"plot.png\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent MCP tool use: %v", err)
+	}
 	claim := &bridgev1.ClaimMcpToolResultRequest{
 		Scope:               scope,
-		ToolUseEventId:      "evt_mcp_media",
+		ToolUseEventId:      toolUse.GetEventId(),
 		NormalizedInputHash: "hash_mcp_media",
 		McpServerName:       "github",
 		ToolName:            "get_file_contents",
@@ -334,6 +453,10 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("commit ack = %+v; want committed", committed.GetAck())
 	}
+	assertMCPMaterializationDeclaration(t, committed, request, scope)
+	if committed.GetMaterializationHandle() != toolUse.GetEventId() {
+		t.Fatalf("materialization handle = %q; want %q", committed.GetMaterializationHandle(), toolUse.GetEventId())
+	}
 	refsOnlyJSON := committed.GetRefsOnlyResultJson()
 	if refsOnlyJSON == "" || strings.Contains(refsOnlyJSON, "data_base64") || strings.Contains(refsOnlyJSON, "AQID") {
 		t.Fatalf("refs-only result = %q; want non-empty result without media bytes", refsOnlyJSON)
@@ -362,7 +485,8 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	var storedResult string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT result_json FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_media' AND tool_use_event_id = 'evt_mcp_media'`).Scan(&storedResult); err != nil {
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_media' AND tool_use_event_id = $1`,
+		toolUse.GetEventId()).Scan(&storedResult); err != nil {
 		t.Fatalf("read stored MCP result: %v", err)
 	}
 	if storedResult != refsOnlyJSON {
@@ -376,8 +500,8 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		Scan(&workspaceID, &sessionID, &threadID, &sourceEventID, &blobPointer, &mime, &metadataJSON, &attachmentStatus); err != nil {
 		t.Fatalf("read committed MCP attachment: %v", err)
 	}
-	if workspaceID != "default" || sessionID != "sesn_bridge_mcp_media" || threadID != "thr_bridge_mcp_media" || sourceEventID != "evt_mcp_media" || mime != "image/png" || attachmentStatus != "active" {
-		t.Fatalf("attachment tenancy/status = %q/%q/%q/%q %q %q; want scoped active row", workspaceID, sessionID, threadID, sourceEventID, mime, attachmentStatus)
+	if workspaceID != "default" || sessionID != "sesn_bridge_mcp_media" || threadID != "thr_bridge_mcp_media" || sourceEventID != toolUse.GetEventId() || mime != "image/png" || attachmentStatus != "staged" {
+		t.Fatalf("attachment tenancy/status = %q/%q/%q/%q %q %q; want scoped staged row", workspaceID, sessionID, threadID, sourceEventID, mime, attachmentStatus)
 	}
 	if !strings.Contains(metadataJSON, `"filename":"plot.png"`) {
 		t.Fatalf("attachment metadata = %q; want suggested filename", metadataJSON)
@@ -390,11 +514,17 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if err != nil {
 		t.Fatalf("CommitMcpToolResult duplicate: %v", err)
 	}
-	if duplicate.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || duplicate.GetRefsOnlyResultJson() != refsOnlyJSON {
+	if duplicate.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		duplicate.GetRefsOnlyResultJson() != refsOnlyJSON ||
+		duplicate.GetMaterializationHandle() != toolUse.GetEventId() {
 		t.Fatalf("duplicate commit = %+v; want identical refs-only replay", duplicate)
 	}
+	assertMCPMaterializationDeclaration(t, duplicate, request, scope)
+	if !proto.Equal(committed.GetDeclaration(), duplicate.GetDeclaration()) {
+		t.Fatalf("duplicate declaration = %+v; want committed declaration %+v", duplicate.GetDeclaration(), committed.GetDeclaration())
+	}
 	var attachmentCount int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = 'evt_mcp_media'`).Scan(&attachmentCount); err != nil {
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_transient_attachments WHERE source_tool_use_event_id = $1`, toolUse.GetEventId()).Scan(&attachmentCount); err != nil {
 		t.Fatalf("count MCP attachments: %v", err)
 	}
 	if attachmentCount != 1 {
@@ -408,8 +538,92 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 	if activeReplay.GetResultJson() != refsOnlyJSON {
 		t.Fatalf("active attachment replay = %q; want byte-identical %q", activeReplay.GetResultJson(), refsOnlyJSON)
 	}
+	if activeReplay.GetMaterializationHandle() != toolUse.GetEventId() {
+		t.Fatalf("claim replay handle = %q; want %q", activeReplay.GetMaterializationHandle(), toolUse.GetEventId())
+	}
 
-	for _, terminal := range []struct {
+	materializationHandle := toolUse.GetEventId()
+	resultWrite := &bridgev1.WriteEventRequest{
+		Scope:                    scope,
+		RuntimeWriteId:           "rwrite_mcp_media_tool_result",
+		ModelRequestId:           "mreq_mcp_media",
+		EventType:                "agent.mcp_tool_result",
+		McpMaterializationHandle: &materializationHandle,
+		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"[MCP attachment: plot.png]"}]}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_mcp_media_tool_result",
+			"agent.mcp_tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_mcp_media","toolName":"get_file_contents","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"completed","input":{"value":{"path":"plot.png"},"preview":"{\"path\":\"plot.png\"}","truncated":false},"output":{"text":"[MCP attachment: plot.png]","truncated":false}}}`,
+			},
+		)},
+	}
+	resultEvent, err := store.WriteEvent(context.Background(), resultWrite)
+	if err != nil {
+		t.Fatalf("WriteEvent MCP tool result: %v", err)
+	}
+	if resultEvent.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("MCP result ack = %+v; want committed", resultEvent.GetAck())
+	}
+	var materializationStatus string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT mcp_claim_status
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_mcp_media'
+		    AND tool_use_event_id = $1`,
+		toolUse.GetEventId(),
+	).Scan(&materializationStatus); err != nil {
+		t.Fatalf("read consumed MCP materialization: %v", err)
+	}
+	if materializationStatus != "consumed" {
+		t.Fatalf("MCP materialization status = %q; want consumed", materializationStatus)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_transient_attachments WHERE attachment_ref = $1`,
+		attachment.AttachmentRef,
+	).Scan(&attachmentStatus); err != nil {
+		t.Fatalf("read activated MCP attachment: %v", err)
+	}
+	if attachmentStatus != "active" {
+		t.Fatalf("MCP attachment status = %q; want active", attachmentStatus)
+	}
+	replayedResult, err := store.WriteEvent(context.Background(), proto.Clone(resultWrite).(*bridgev1.WriteEventRequest))
+	if err != nil {
+		t.Fatalf("WriteEvent MCP tool result replay: %v", err)
+	}
+	if replayedResult.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		replayedResult.GetEventId() != resultEvent.GetEventId() {
+		t.Fatalf("MCP result replay = %+v; want duplicate original event", replayedResult)
+	}
+	var committedResultPayload string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND event_id=$1`,
+		resultEvent.GetEventId(),
+	).Scan(&committedResultPayload); err != nil {
+		t.Fatalf("read committed MCP result before changed replay: %v", err)
+	}
+	changedResultWrite := proto.Clone(resultWrite).(*bridgev1.WriteEventRequest)
+	changedResultWrite.PayloadJson = `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"changed after consumption"}]}`
+	if _, err := store.WriteEvent(context.Background(), changedResultWrite); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("WriteEvent consumed MCP result replay with changed body err = %v; want AlreadyExists", err)
+	}
+	var payloadAfterChangedReplay string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json FROM session_events WHERE workspace_id='default' AND event_id=$1`,
+		resultEvent.GetEventId(),
+	).Scan(&payloadAfterChangedReplay); err != nil {
+		t.Fatalf("read committed MCP result after changed replay: %v", err)
+	}
+	if payloadAfterChangedReplay != committedResultPayload {
+		t.Fatalf("committed MCP result changed during conflicting replay = %q; want %q", payloadAfterChangedReplay, committedResultPayload)
+	}
+
+	for _, lifecycle := range []struct {
 		name      string
 		status    string
 		expiresAt time.Time
@@ -417,41 +631,58 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		{name: "consumed", status: "consumed", expiresAt: store.Clock().Add(time.Hour)},
 		{name: "expired", status: "active", expiresAt: store.Clock().Add(-time.Second)},
 	} {
-		t.Run(terminal.name, func(t *testing.T) {
+		t.Run(lifecycle.name, func(t *testing.T) {
 			if _, err := admin.ExecContext(context.Background(),
 				`UPDATE session_transient_attachments SET status = $2, expires_at = $3 WHERE attachment_ref = $1`,
-				attachment.AttachmentRef, terminal.status, terminal.expiresAt); err != nil {
-				t.Fatalf("set attachment %s: %v", terminal.name, err)
+				attachment.AttachmentRef, lifecycle.status, lifecycle.expiresAt); err != nil {
+				t.Fatalf("set attachment %s: %v", lifecycle.name, err)
 			}
 			replay, err := store.ClaimMcpToolResult(context.Background(), claim)
 			if err != nil {
-				t.Fatalf("ClaimMcpToolResult %s replay: %v", terminal.name, err)
+				t.Fatalf("ClaimMcpToolResult %s replay: %v", lifecycle.name, err)
 			}
-			var replayed struct {
-				Response struct {
-					ResultText  string `json:"result_text"`
-					Attachments []any  `json:"attachments"`
-				} `json:"response"`
-			}
-			if err := json.Unmarshal([]byte(replay.GetResultJson()), &replayed); err != nil {
-				t.Fatalf("decode %s replay: %v", terminal.name, err)
-			}
-			if len(replayed.Response.Attachments) != 0 || !strings.Contains(replayed.Response.ResultText, "[MCP attachment unavailable: image/png (3)]") {
-				t.Fatalf("%s replay = %+v; want omission and no stale ref", terminal.name, replayed.Response)
-			}
-			if replay.GetResultJson() == storedResult {
-				t.Fatalf("%s replay returned stale stored capability", terminal.name)
+			if replay.GetResultJson() != refsOnlyJSON {
+				t.Fatalf("%s replay = %q; want exact durable result %q", lifecycle.name, replay.GetResultJson(), refsOnlyJSON)
 			}
 		})
 	}
 	var durableResultAfterReplay string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT result_json FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_media' AND tool_use_event_id = 'evt_mcp_media'`).Scan(&durableResultAfterReplay); err != nil {
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_mcp_media' AND tool_use_event_id = $1`,
+		toolUse.GetEventId()).Scan(&durableResultAfterReplay); err != nil {
 		t.Fatalf("read durable result after unavailable replay: %v", err)
 	}
 	if durableResultAfterReplay != storedResult {
 		t.Fatalf("durable MCP result changed during replay = %q; want %q", durableResultAfterReplay, storedResult)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_bridge_operations
+		    SET receipt_json = replace(receipt_json, $1, 'att_wrong')
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_mcp_media'
+		    AND session_thread_id = 'thr_bridge_mcp_media'
+		    AND operation = 'commit_mcp_tool_result'`,
+		attachment.AttachmentRef,
+	); err != nil {
+		t.Fatalf("corrupt MCP attachment receipt: %v", err)
+	}
+	if _, err := store.ClaimMcpToolResult(context.Background(), claim); status.Code(err) != codes.FailedPrecondition ||
+		status.Convert(err).Message() != "mcp materialization receipt is invalid" {
+		t.Fatalf("claim with mismatched attachment receipt err = %v; want invalid receipt", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`DELETE FROM session_bridge_operations
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_mcp_media'
+		    AND session_thread_id = 'thr_bridge_mcp_media'
+		    AND operation = 'commit_mcp_tool_result'`,
+	); err != nil {
+		t.Fatalf("delete MCP materialization receipt: %v", err)
+	}
+	if _, err := store.ClaimMcpToolResult(context.Background(), claim); status.Code(err) != codes.FailedPrecondition ||
+		status.Convert(err).Message() != "mcp materialization receipt is missing" {
+		t.Fatalf("claim without materialization receipt err = %v; want missing receipt", err)
 	}
 }
 
@@ -621,5 +852,58 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultClaimLease(t *testing.T) {
 	}
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetResultJson() != resultJSON {
 		t.Fatalf("replay after lease commit = %+v; want duplicate stored result", replay)
+	}
+}
+
+func assertMCPMaterializationDeclaration(
+	t *testing.T,
+	response *bridgev1.CommitMcpToolResultResponse,
+	request *bridgev1.CommitMcpToolResultRequest,
+	scope *bridgev1.RuntimeScope,
+) {
+	t.Helper()
+	declaration := response.GetDeclaration()
+	if declaration == nil {
+		t.Fatal("MCP materialization declaration is nil")
+	}
+	if declaration.GetObservedBindingId() != scope.GetBinding().GetBindingId() ||
+		declaration.GetObservedBindingGeneration() != scope.GetBinding().GetBindingGeneration() ||
+		declaration.GetApplicationDisposition() != bridgev1.ReceiptApplicationDisposition_RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY {
+		t.Fatalf("MCP declaration observation = %+v; want current binding %q/%d", declaration, scope.GetBinding().GetBindingId(), scope.GetBinding().GetBindingGeneration())
+	}
+	if len(declaration.GetReceipts()) != 1 {
+		t.Fatalf("MCP declaration receipts = %d; want one", len(declaration.GetReceipts()))
+	}
+	receipt := declaration.GetReceipts()[0]
+	digest, err := mcpMaterializationDeclarationDigest(request)
+	if err != nil {
+		t.Fatalf("compute MCP declaration digest: %v", err)
+	}
+	if receipt.GetSessionThreadId() != scope.GetSessionThreadId() ||
+		receipt.GetOperationKind() != bridgeOpCommitMcpToolResult ||
+		receipt.GetSourceKind() != "mcp_tool_execution" ||
+		receipt.GetSourceId() != mcpMaterializationSourceID(request) ||
+		receipt.GetDeclarationDigest() != digest {
+		t.Fatalf("MCP declaration receipt = %+v; want matching materialization identity", receipt)
+	}
+	if len(receipt.GetEvents()) != 0 ||
+		len(receipt.GetMessages()) != 0 ||
+		len(receipt.GetPendingAttachmentDeltaJson()) != len(request.GetInlineMedia()) ||
+		len(receipt.GetPendingToolDeltaJson()) != 0 ||
+		len(receipt.GetPrefixConsumptions()) != 0 ||
+		receipt.GetRequestReschedule() != nil ||
+		len(receipt.GetChildLifecycle()) != 0 ||
+		receipt.GetIdleCloseout() != nil ||
+		receipt.CompactedThroughMessageSequence != nil {
+		t.Fatalf("MCP declaration receipt deltas = %+v; want attachment-only delta", receipt)
+	}
+	if !validMCPMaterializationReceipt(
+		receipt,
+		request,
+		mcpMaterializationSourceID(request),
+		digest,
+		response.GetRefsOnlyResultJson(),
+	) {
+		t.Fatalf("MCP declaration receipt = %+v; want exact refs-only attachment delta", receipt)
 	}
 }

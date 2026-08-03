@@ -20,19 +20,24 @@ describe("MCP connector response bounds", () => {
     })).toEqual({ ok: false, message: "invalid internal request" });
   });
 
-  test("accepts internal runtime failures only without retry status", () => {
-    const response = {
-      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
-      resultText: "MCP connector failed.",
-      attachments: [],
-      errorKind: McpErrorKind.MCP_ERROR_KIND_INTERNAL,
-    };
+  test("accepts internal and custody runtime failures only without retry status", () => {
+    for (const errorKind of [
+      McpErrorKind.MCP_ERROR_KIND_INTERNAL,
+      McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST,
+    ]) {
+      const response = {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+        resultText: "MCP connector failed.",
+        attachments: [],
+        errorKind,
+      };
 
-    expect(validatePendingRunMcpToolResponse(response)).toEqual({ ok: true });
-    expect(validatePendingRunMcpToolResponse({
-      ...response,
-      retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
-    })).toEqual({ ok: false, message: "invalid internal request" });
+      expect(validatePendingRunMcpToolResponse(response)).toEqual({ ok: true });
+      expect(validatePendingRunMcpToolResponse({
+        ...response,
+        retryStatus: McpRetryStatus.MCP_RETRY_STATUS_EXHAUSTED,
+      })).toEqual({ ok: false, message: "invalid internal request" });
+    }
   });
 
   test("accepts only the literal platform-collision omission reason", () => {

@@ -221,6 +221,7 @@ func TestRuntimeCommandDataMarshalSitesAreExplicitAndComplete(t *testing.T) {
 		"services/bridge/bridge_api_events.go:userMessageDataJSON":                 true,
 		"services/bridge/bridge_api_mcp.go:runtimeMCPManifestCommandPayload":       true,
 		"services/bridge/runtime_delivery.go:acceptedMessageCommandPayloadTx":      true,
+		"services/bridge/runtime_delivery.go:runtimeCommandPayloadForJobTx":        true,
 		"services/bridge/runtime_delivery.go:runtimeSessionConfigCommandPayloadTx": true,
 	}
 	got := map[string]bool{}
@@ -476,7 +477,6 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		filepath.Join("k8s", "configmap.yaml"),
 		filepath.Join("k8s", "deployment.yaml"),
 		filepath.Join("k8s", "networkpolicy.yaml"),
-		filepath.Join("k8s", "secret.example.yaml"),
 		"api.go",
 		"job_runner.go",
 	} {
@@ -489,36 +489,17 @@ func TestFinalArchitectureBridgeServiceLayoutAndProtocolSource(t *testing.T) {
 		t.Fatalf("read Bridge proto: %v", err)
 	}
 	for _, required := range []string{
-		"message RunToolRequest",
+		"message AcceptSandboxExecutionRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
+		"string model_tool_call_id = 7;",
 		"message RunMemoryRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
 	} {
 		if !strings.Contains(string(protoBody), required) {
-			t.Fatalf("Bridge RunMemory proto must expose idempotency field %q", required)
+			t.Fatalf("Bridge tool protocols must expose durable execution identity field %q", required)
 		}
-	}
-	configBody, err := os.ReadFile(filepath.Join(bridgeRoot, "k8s", "configmap.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge k8s/configmap.yaml: %v", err)
-	}
-	for _, required := range []string{
-		"TETRAL_SANDBOX_DRIVER",
-		"DAYTONA_API_URL",
-		"DAYTONA_TARGET",
-	} {
-		if !strings.Contains(string(configBody), required) {
-			t.Fatalf("Bridge service-local ConfigMap missing %q", required)
-		}
-	}
-	secretBody, err := os.ReadFile(filepath.Join(bridgeRoot, "k8s", "secret.example.yaml")) //nolint:gosec // repository-local static test path.
-	if err != nil {
-		t.Fatalf("read Bridge k8s/secret.example.yaml: %v", err)
-	}
-	if !strings.Contains(string(secretBody), "DAYTONA_API_KEY") {
-		t.Fatal("Bridge service-local secret example must document DAYTONA_API_KEY")
 	}
 	apiBody, err := os.ReadFile(filepath.Join(bridgeRoot, "api.go")) //nolint:gosec // repository-local static test path.
 	if err != nil {

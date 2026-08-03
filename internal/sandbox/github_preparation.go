@@ -16,9 +16,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-// A GitHub re-clone failure is classified at the driver
-// (internal/sandbox/driver/github_repository.go CloneGitHubRepositories) into
-// three arms by the manifestation of the clone command output:
+// GitHub checkout failures are classified by the provider driver from the
+// clone command output:
 //
 //	arm                          reason (internal)               retry            capture
 //	---------------------------  ------------------------------  ---------------  ----------------------
@@ -27,18 +26,10 @@ import (
 //	every other failure          (error returned as-is)          retryable, then  captured on terminal settle
 //	                                                             settled terminal
 //
-// The two named reasons are terminal preparation outcomes: retryableSessionPreparationError
-// (session_prepare.go) returns false for them and sessionPreparationFailureForError
-// records the reason plus the failing repository's resource_id/url onto the
-// preparation row. This internal reason is NEVER what the caller sees: the driving
-// input settles through the terminal-preparation path carrying only upstream
-// vocabulary (unknown_error, a human-readable message, retry_status=exhausted).
-// GitHubPreparationFailure is the carrier; IsGitHubCredentialRequired /
-// IsGitHubRepositoryUnavailable are the classifiers the settle reads.
-//
-// UPDATE-WITH: internal/sandbox/driver/github_repository.go (gitHubCredentialFailure,
-// gitHubRepositoryUnavailable); internal/sandbox/session_prepare.go
-// (sessionPreparationFailureForError, retryableSessionPreparationError).
+// The named reasons are non-retryable materialization outcomes. The internal
+// reason and repository identity remain diagnostics; the tool-facing result is
+// normalized by Sandbox Service. GitHubMaterializationFailure carries that
+// classification across the provider boundary.
 const (
 	GitHubCredentialRequiredReason    = "github_credential_required" //nolint:gosec // Contract failure reason string, not credential material.
 	GitHubRepositoryUnavailableReason = "github_repository_unavailable"
@@ -72,14 +63,33 @@ type GitHubRepositoryPreparation struct {
 	Repositories      []GitHubRepositoryMount
 }
 
-type GitHubPreparationFailure struct {
+// GitHubRepositoryConverger owns the disposable sandbox checkout and its
+// bounded Git proxy credential. PostgreSQL tickets remain durable authority;
+// provider files and configuration are rebuilt from the requested snapshot.
+type GitHubRepositoryConverger struct {
+	Rotator      GitTicketRotator
+	Materializer GitHubRepositoryMaterializer
+	GitProxyHost string
+	Random       io.Reader
+	Clock        func() time.Time
+}
+
+func (c *GitHubRepositoryConverger) MaterializeGitHubRepositories(ctx context.Context, setup SandboxSetup, handle ProviderHandle) error {
+	return c.materialize(ctx, setup.WorkspaceID, setup.SessionID, handle, setup.Resources.GitHubRepositories)
+}
+
+func (c *GitHubRepositoryConverger) RemoveDeletedGitHubRepositories(ctx context.Context, setup SandboxSetup, handle ProviderHandle) error {
+	return c.removeDeleted(ctx, handle, setup.Resources.DeletedGitHubRepositories)
+}
+
+type GitHubMaterializationFailure struct {
 	Reason      string
 	ResourceID  string
 	ResourceURL string
 	Cause       error
 }
 
-func (e *GitHubPreparationFailure) Error() string {
+func (e *GitHubMaterializationFailure) Error() string {
 	if e == nil {
 		return "<nil>"
 	}
@@ -89,7 +99,7 @@ func (e *GitHubPreparationFailure) Error() string {
 	return "github_repository preparation failed"
 }
 
-func (e *GitHubPreparationFailure) Unwrap() error {
+func (e *GitHubMaterializationFailure) Unwrap() error {
 	if e == nil {
 		return nil
 	}
@@ -97,50 +107,42 @@ func (e *GitHubPreparationFailure) Unwrap() error {
 }
 
 func IsGitHubCredentialRequired(err error) bool {
-	var failure *GitHubPreparationFailure
+	var failure *GitHubMaterializationFailure
 	return errors.As(err, &failure) && failure.Reason == GitHubCredentialRequiredReason
 }
 
 func IsGitHubRepositoryUnavailable(err error) bool {
-	var failure *GitHubPreparationFailure
+	var failure *GitHubMaterializationFailure
 	return errors.As(err, &failure) && failure.Reason == GitHubRepositoryUnavailableReason
 }
 
-func gitHubPreparationFailureIdentity(err error) (string, string) {
-	var failure *GitHubPreparationFailure
-	if !errors.As(err, &failure) {
-		return "", ""
-	}
-	return failure.ResourceID, failure.ResourceURL
-}
-
-func (s *Service) prepareGitHubRepositories(ctx context.Context, ws workspace.ID, sessionID string, handle ProviderHandle, resources ResourceSetup) error {
-	if len(resources.GitHubRepositories) == 0 {
+func (c *GitHubRepositoryConverger) materialize(ctx context.Context, ws workspace.ID, sessionID string, handle ProviderHandle, requested []GitHubRepositoryMount) error {
+	if len(requested) == 0 {
 		return nil
 	}
-	if s.gitHubMaterializer == nil {
+	if c == nil || c.Materializer == nil {
 		return &ValidationError{Message: "github_repository materializer is required"}
 	}
 	if handle.SandboxID == "" {
 		return &ValidationError{Message: "provider sandbox id is required"}
 	}
-	if s.gitTicketRotator == nil {
+	if c.Rotator == nil {
 		return &ValidationError{Message: "git ticket rotator is required"}
 	}
-	gitProxyHost := strings.TrimSpace(s.gitProxyHost)
+	gitProxyHost := strings.TrimSpace(c.GitProxyHost)
 	if gitProxyHost == "" {
 		return &ValidationError{Message: "git proxy host is required"}
 	}
-	repositories, err := normalizeGitHubRepositoryMounts(resources.GitHubRepositories)
+	repositories, err := normalizeGitHubRepositoryMounts(requested)
 	if err != nil {
 		return err
 	}
-	if recovered, err := s.recoverInstalledGitTicket(ctx, ws, sessionID, handle.SandboxID, gitProxyHost, resources.PreparationAttemptCreatedAt, repositories); err != nil {
+	if recovered, err := c.recoverInstalledGitTicket(ctx, ws, sessionID, handle.SandboxID, gitProxyHost, repositories); err != nil {
 		return err
 	} else if recovered {
 		return nil
 	}
-	random := s.gitTicketRandom
+	random := c.Random
 	if random == nil {
 		random = rand.Reader
 	}
@@ -153,10 +155,14 @@ func (s *Service) prepareGitHubRepositories(ctx context.Context, ws workspace.ID
 		return err
 	}
 	ticketID := id.New("gitt_")
-	if _, err := s.gitTicketRotator.CreatePending(ctx, ws, sessionID, ticketID, hash, s.clock().UTC()); err != nil {
+	clock := c.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	if _, err := c.Rotator.CreatePending(ctx, ws, sessionID, ticketID, hash, clock().UTC()); err != nil {
 		return err
 	}
-	if err := s.gitHubMaterializer.InstallGitHubRepositoryConfiguration(ctx, GitHubRepositoryConfiguration{
+	if err := c.Materializer.InstallGitHubRepositoryConfiguration(ctx, GitHubRepositoryConfiguration{
 		WorkspaceID:       ws,
 		SessionID:         sessionID,
 		ProviderSandboxID: handle.SandboxID,
@@ -165,23 +171,20 @@ func (s *Service) prepareGitHubRepositories(ctx context.Context, ws workspace.ID
 	}); err != nil {
 		return err
 	}
-	if _, err := s.gitTicketRotator.ActivatePending(ctx, ws, sessionID, ticketID, s.clock().UTC()); err != nil {
+	if _, err := c.Rotator.ActivatePending(ctx, ws, sessionID, ticketID, clock().UTC()); err != nil {
 		return err
 	}
-	return s.gitHubMaterializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
+	return c.Materializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
 		WorkspaceID: ws, SessionID: sessionID, ProviderSandboxID: handle.SandboxID, Repositories: repositories,
 	})
 }
 
-func (s *Service) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID, sessionID, providerSandboxID, gitProxyHost string, attemptCreatedAt time.Time, repositories []GitHubRepositoryMount) (bool, error) {
-	if attemptCreatedAt.IsZero() {
-		return false, nil
-	}
-	hash, installed, err := s.gitHubMaterializer.InstalledGitTicketHash(ctx, providerSandboxID, gitProxyHost)
+func (c *GitHubRepositoryConverger) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID, sessionID, providerSandboxID, gitProxyHost string, repositories []GitHubRepositoryMount) (bool, error) {
+	hash, installed, err := c.Materializer.InstalledGitTicketHash(ctx, providerSandboxID, gitProxyHost)
 	if err != nil || !installed {
 		return false, err
 	}
-	ticket, err := s.gitTicketRotator.FindBySessionTokenHash(ctx, ws, sessionID, hash)
+	ticket, err := c.Rotator.FindBySessionTokenHash(ctx, ws, sessionID, hash)
 	if err != nil {
 		var notFound *gitticket.NotFoundError
 		if errors.As(err, &notFound) {
@@ -189,19 +192,20 @@ func (s *Service) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID
 		}
 		return false, err
 	}
-	if ticket.CreatedAt.Before(attemptCreatedAt) {
-		return false, nil
-	}
 	switch ticket.Status {
 	case gitticket.StatusPending:
-		if _, err := s.gitTicketRotator.ActivatePending(ctx, ws, sessionID, ticket.TicketID, s.clock().UTC()); err != nil {
+		clock := c.Clock
+		if clock == nil {
+			clock = time.Now
+		}
+		if _, err := c.Rotator.ActivatePending(ctx, ws, sessionID, ticket.TicketID, clock().UTC()); err != nil {
 			return false, err
 		}
 	case gitticket.StatusLive:
 	default:
 		return false, nil
 	}
-	if err := s.gitHubMaterializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
+	if err := c.Materializer.CloneGitHubRepositories(ctx, GitHubRepositoryPreparation{
 		WorkspaceID: ws, SessionID: sessionID, ProviderSandboxID: providerSandboxID, Repositories: repositories,
 	}); err != nil {
 		return false, err
@@ -209,11 +213,11 @@ func (s *Service) recoverInstalledGitTicket(ctx context.Context, ws workspace.ID
 	return true, nil
 }
 
-func (s *Service) removeDeletedGitHubRepositories(ctx context.Context, handle ProviderHandle, repositories []GitHubRepositoryMount, cleanup SessionResourceCleanupCoordinator) error {
+func (c *GitHubRepositoryConverger) removeDeleted(ctx context.Context, handle ProviderHandle, repositories []GitHubRepositoryMount) error {
 	if len(repositories) == 0 {
 		return nil
 	}
-	if s.gitHubMaterializer == nil {
+	if c == nil || c.Materializer == nil {
 		return &ValidationError{Message: "github_repository materializer is required"}
 	}
 	if handle.SandboxID == "" {
@@ -233,100 +237,11 @@ func (s *Service) removeDeletedGitHubRepositories(ctx context.Context, handle Pr
 	}
 	for _, repository := range normalized {
 		remove := func(ctx context.Context) error {
-			return s.gitHubMaterializer.RemoveGitHubRepository(ctx, handle.SandboxID, repository)
+			return c.Materializer.RemoveGitHubRepository(ctx, handle.SandboxID, repository)
 		}
-		if cleanup == nil {
-			if err := remove(ctx); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := cleanup.CleanupSessionResource(ctx, repository.ResourceID, remove); err != nil {
+		if err := remove(ctx); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func validateSessionResourceMountPaths(resources ResourceSetup) error {
-	repositories, err := normalizeGitHubRepositoryMounts(resources.GitHubRepositories)
-	if err != nil {
-		return err
-	}
-	filePaths := make([]string, 0, len(resources.Files))
-	for _, file := range resources.Files {
-		mountPath := file.MountPath
-		if mountPath == "" {
-			if file.SessionFileID == "" {
-				return &ValidationError{Message: "file resource mount_path is unresolved"}
-			}
-			mountPath = "/mnt/session/uploads/" + file.SessionFileID
-		}
-		if err := validateActiveFileMountPath(mountPath); err != nil {
-			return err
-		}
-		for _, existing := range filePaths {
-			if pathContains(existing, mountPath) || pathContains(mountPath, existing) {
-				return &ValidationError{Message: "file resource mount_path is duplicated or nested"}
-			}
-		}
-		for _, repository := range repositories {
-			if pathContains(repository.MountPath, mountPath) || pathContains(mountPath, repository.MountPath) {
-				return &ValidationError{Message: "file resource mount_path conflicts with github_repository mount_path"}
-			}
-		}
-		filePaths = append(filePaths, mountPath)
-	}
-	memoryPaths := make([]string, 0, len(resources.MemoryStores))
-	for _, memory := range resources.MemoryStores {
-		if err := validateActiveMemoryMountPath(memory.MountPath); err != nil {
-			return err
-		}
-		for _, existing := range memoryPaths {
-			if pathContains(existing, memory.MountPath) || pathContains(memory.MountPath, existing) {
-				return &ValidationError{Message: "memory_store mount_path is duplicated or nested"}
-			}
-		}
-		memoryPaths = append(memoryPaths, memory.MountPath)
-	}
-	skillPaths := make(map[string]struct{}, len(resources.Skills))
-	for _, skill := range resources.Skills {
-		if skill.Directory == "" || skill.Directory == "." || skill.Directory == ".." ||
-			path.Clean(skill.Directory) != skill.Directory || strings.Contains(skill.Directory, "/") ||
-			strings.Contains(skill.Directory, "\x00") {
-			return &ValidationError{Message: "skill directory must be one clean relative path segment"}
-		}
-		mountPath := "/skills/" + skill.Directory
-		if _, exists := skillPaths[mountPath]; exists {
-			return &ValidationError{Message: "multiple skill bundles claim the same /skills directory"}
-		}
-		skillPaths[mountPath] = struct{}{}
-	}
-	return nil
-}
-
-func validateActiveFileMountPath(mountPath string) error {
-	if !path.IsAbs(mountPath) || path.Clean(mountPath) != mountPath || mountPath == "/" || strings.Contains(mountPath, "\x00") {
-		return &ValidationError{Message: "file resource mount_path must be absolute and lexically clean"}
-	}
-	for _, reserved := range reservedGitHubRepositoryMountSubtrees() {
-		if pathContains(reserved, mountPath) || pathContains(mountPath, reserved) {
-			return &ValidationError{Message: "file resource mount_path overlaps a reserved path"}
-		}
-	}
-	if mountPath == "/workspace" || mountPath == "/mnt/session/uploads" {
-		return &ValidationError{Message: "file resource mount_path overlaps a reserved path"}
-	}
-	return nil
-}
-
-func validateActiveMemoryMountPath(mountPath string) error {
-	if !path.IsAbs(mountPath) || path.Clean(mountPath) != mountPath || strings.Contains(mountPath, "\x00") ||
-		mountPath == "/mnt/memory" || !pathContains("/mnt/memory", mountPath) {
-		return &ValidationError{Message: "memory_store mount_path must name a store below /mnt/memory"}
-	}
-	if pathContains("/mnt/memory/.staging", mountPath) {
-		return &ValidationError{Message: "memory_store mount_path overlaps memory projection staging"}
 	}
 	return nil
 }
@@ -401,7 +316,6 @@ func reservedGitHubRepositoryMountSubtrees() []string {
 		"/mnt/tetral/r2",
 		"/tmp/tetral-runtime",
 		"/dev/shm/tetral-runtime",
-		"/tmp/tetral/session-prepare",
 		"/mnt/memory",
 		"/skills",
 		"/mnt/session/outputs",
@@ -464,16 +378,4 @@ func pathContains(parent string, child string) bool {
 		return strings.HasPrefix(child, "/")
 	}
 	return strings.HasPrefix(child, parent+"/")
-}
-
-func WithGitHubRepositoryPreparation(rotator GitTicketRotator, materializer GitHubRepositoryMaterializer, gitProxyHost string) Option {
-	return func(s *Service) {
-		s.gitTicketRotator = rotator
-		s.gitHubMaterializer = materializer
-		s.gitProxyHost = gitProxyHost
-	}
-}
-
-func WithGitTicketRandomSource(random io.Reader) Option {
-	return func(s *Service) { s.gitTicketRandom = random }
 }

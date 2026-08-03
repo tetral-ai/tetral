@@ -124,8 +124,7 @@ func TestBridgeAPIServerWriteEventReturnsSupersededForEveryInitialCustodyEnd(t *
 			assertNoCloseoutBridgeOperation(t, fixture, "rwrite_"+fixture.sessionID)
 			idleResponse, err := fixture.server.FinishIdle(ctx, &bridgev1.FinishIdleRequest{
 				Scope:          scope,
-				RuntimeWriteId: "rwrite_idle_" + fixture.sessionID,
-				IdleSince:      "2026-01-01T00:00:00Z",
+				DurableTurnId:  "rwrite_start_" + fixture.sessionID,
 				StopReasonJson: `{"type":"end_turn"}`,
 			})
 			if err != nil {
@@ -192,8 +191,7 @@ func TestBridgeAPIServerCloseoutUnrepairableAndTransientArms(t *testing.T) {
 	}
 	missingIdle, err := fixture.server.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
 		Scope:          missingThreadScope,
-		RuntimeWriteId: "rwrite_missing_thread_idle",
-		IdleSince:      "2026-01-01T00:00:00Z",
+		DurableTurnId:  "rwrite_missing_thread_idle",
 		StopReasonJson: `{"type":"end_turn"}`,
 	})
 	if err != nil {
@@ -202,43 +200,11 @@ func TestBridgeAPIServerCloseoutUnrepairableAndTransientArms(t *testing.T) {
 	if missingIdle.GetAck().GetErrorCode() != closeoutUnrepairableCode {
 		t.Fatalf("missing-thread FinishIdle errorCode = %q; want %q", missingIdle.GetAck().GetErrorCode(), closeoutUnrepairableCode)
 	}
-
-	_, err = fixture.server.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
-		Scope:          bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
-		RuntimeWriteId: "rwrite_transient_capture",
-		IdleSince:      "2026-01-01T00:00:00Z",
-		StopReasonJson: `{"type":"end_turn"}`,
-	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("FinishIdle error = %v; want unsentineled FailedPrecondition", err)
-	}
 }
 
-func TestCloseoutPreparationAndTerminalChildSentinels(t *testing.T) {
+func TestCloseoutTerminalChildSentinel(t *testing.T) {
 	fixture := newCloseoutSentinelFixture(t, "lower_layers")
 	client := dbconnect.NewClientForTesting(fixture.runtime)
-
-	err := client.WithWorkspaceTx(context.Background(), "default", "closeout.preparation_fence", func(tx *dbconnect.Tx) error {
-		return lockSessionPreparationResetFenceTx(context.Background(), tx, "default", "sesn_missing_preparation_fence")
-	})
-	if code, ok := closeoutSentinelCode(err); !ok || code != closeoutScopeSupersededCode {
-		t.Fatalf("preparation fence error = %v; want %q sentinel", err, closeoutScopeSupersededCode)
-	}
-
-	err = client.WithWorkspaceTx(context.Background(), "default", "closeout.incomplete_preparation", func(tx *dbconnect.Tx) error {
-		return resetSessionPreparationAndEnqueuePrepareTx(
-			context.Background(),
-			tx,
-			"default",
-			fixture.sessionID,
-			sessionPreparationReadiness{},
-			fixture.store.now(),
-			false,
-		)
-	})
-	if code, ok := closeoutSentinelCode(err); !ok || code != closeoutUnrepairableCode {
-		t.Fatalf("incomplete preparation error = %v; want %q sentinel", err, closeoutUnrepairableCode)
-	}
 
 	childID := "thr_closeout_terminal_child"
 	if _, err := fixture.admin.ExecContext(context.Background(),
@@ -250,7 +216,7 @@ func TestCloseoutPreparationAndTerminalChildSentinels(t *testing.T) {
 		childID, fixture.sessionID, fixture.threadID); err != nil {
 		t.Fatalf("seed terminal child: %v", err)
 	}
-	err = client.WithWorkspaceTx(context.Background(), "default", "closeout.terminal_child", func(tx *dbconnect.Tx) error {
+	err := client.WithWorkspaceTx(context.Background(), "default", "closeout.terminal_child", func(tx *dbconnect.Tx) error {
 		return updateChildThreadStatusTx(
 			context.Background(),
 			tx,
@@ -304,7 +270,6 @@ func closeoutWriteEventRequest(scope *bridgev1.RuntimeScope, writeID string) *br
 		RuntimeWriteId: writeID,
 		EventType:      "session.status_running",
 		PayloadJson:    `{"type":"session.status_running"}`,
-		ProjectionJson: `{}`,
 	}
 }
 

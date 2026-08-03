@@ -7,13 +7,12 @@ is the TTL scheduler for idle sessions. It runs as a Kubernetes CronJob:
 each tick enumerates every workspace, finds sessions that have sat idle
 past their cleanup deadline, and enqueues one `cleanup_session` queue job
 per due session. It **produces** cleanup work and never **executes** it —
-releasing hot runtime state and checkpoint-archiving the sandbox machine
-belongs to Bridge (`services/bridge`,
-`runtime_session_cleanup.go`). The outcome it drives is sleep, not death:
-the cleanup a due session eventually receives stops the running machine
-but leaves its disk intact, and the next user input wakes the
-same machine with every file where it was left. Only an explicit session
-delete destroys a machine; TTL never does. Every process is a fresh
+releasing hot Runtime Pod state belongs to Bridge (`services/bridge`,
+`runtime_session_cleanup.go`). TTL cleanup does not stop, archive, or delete a
+Sandbox. Provider-native auto-stop, auto-archive, and auto-delete continue on
+their own lifecycle; a later Sandbox tool inspects and normalizes the provider
+resource before execution. Session deletion owns the durable Sandbox release
+request. Every process is a fresh
 CronJob invocation holding no state between ticks, and every read and
 write is scoped by `workspace_id` (a signed principal binding, with
 `workspace_id` in every primary key, isolates tenants).
@@ -40,11 +39,9 @@ The 30-minute delay is a fixed Bridge-side constant
 (`defaultIdleCleanupDelay`); no configuration surface wires it. The same constant
 serves both the initial idle re-arm and the busy reschedule, so the two delays
 cannot drift apart. Its length is the window a bound-but-idle session stays hot —
-and billable — before a due cleanup releases its sandbox (`reason="cleanup"`,
-`runtime_session_cleanup.go`) toward stop and checkpoint-archive. The
-post-release stop/archive/retention timing is governed separately by the sandbox
-auto-stop/auto-archive/auto-delete intervals and the 30-day retention floor in
-`services/sandbox/config.go`, not by this TTL.
+before a due cleanup releases its Runtime Pod binding. Sandbox
+auto-stop/auto-archive/auto-delete timing and the 30-day retention floor in
+`services/sandbox/config.go` are independent of this TTL.
 
 ### Due-scan predicate (per workspace, per tick)
 
@@ -80,7 +77,7 @@ in lockstep or the scan loses coverage.
 | 2 | scheduler `ClaimDueAcrossWorkspaces` | enumerates the `workspaces` catalog; runs the due-scan once per workspace, each in its own transaction |
 | 3 | scheduler `markCleanupEnqueuedTx` | mints a fresh `cleanup_job_id`, stamps `cleanup_enqueued_at`, resets stale `cleanup_claimed_at`; guarded re-check of the due predicate |
 | 4 | scheduler `queue.EnqueueTx` | writes one `queue_jobs(kind = cleanup_session)` row in the session partition, deduped by the minted `cleanup_job_id` |
-| 5 | Bridge Job Runner | leases the job, re-validates the fences, settles waits and background tasks, has Sandbox Service checkpoint-archive the machine, finalizes the binding |
+| 5 | Bridge Job Runner | leases the job, re-validates the fences, settles Runtime waits, and finalizes the Runtime binding |
 
 An error in one workspace aborts the rest of that tick; the next tick
 retries. Batch bound is per workspace, so a tick's total work scales with
@@ -164,12 +161,14 @@ target Runtime Pod, and the role-blind tree fence at **both** claim and
 finalize; a stale job (new input, changed binding, tombstoned session) is
 ACKed with no side effects; finalize nulls `binding_id` **and**
 `cleanup_after` together so the due predicate stops matching. A replacement
-executor must keep the finalize-time busy reschedule (never a bare ACK).
+executor must keep the finalize-time busy reschedule (never a bare ACK). This
+executor does not change Sandbox provider state; Session deletion uses its
+separate cleanup kind and durable Sandbox release operation.
 Conformance (Bridge suite `runtime_session_cleanup_test.go`):
 `TestPostgreSQLRuntimeDeliveryStoreCleanupSessionReschedulesWhileChildRuns`,
 `...ReschedulesWhenChildStartsBeforeFinalize`,
 `...TreeFenceClassifiesQuiescentAndBusyThreads`,
-`...CleanupActiveSessionClaimsSettlesReleasesAndFinalizes`,
+`...FinalizesWhenRuntimePodProvenGone`,
 `...KeepsResolvingConfirmationAfterClaim`,
 `...IgnoresPreIdleUnprocessedInputByStreamFence`,
 `...RejectsPostIdleChildInputByStreamFence`.
@@ -206,7 +205,7 @@ Conformance: `TestConfigFromEnvValidatesMetricsExporter`.
 | `scheduler_test.go` | the due predicate selects only due, bound, idle rows; markers stamped and one deduped job enqueued; the workload stays within its read/write boundary; metrics counters stay safe |
 | `workspace_fanout_test.go` | every discovered workspace is visited once per tick |
 | `metrics_exporter_test.go` | exported series carry no scope labels; config validation rejects a bad exporter endpoint |
-| `bridge/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, settle-before-release-then-finalize, stream-fence input rejection |
+| `bridge/runtime_session_cleanup_test.go` | the executor contract this scheduler depends on: role-blind tree fence and reschedule-at-both-points, stale-job ACK, Runtime settlement before finalization, stream-fence input rejection |
 
 If a PR changes the due predicate, the workspace fan-out, the marker
 writes, the enqueue shape, or the metrics/config surface in this folder,

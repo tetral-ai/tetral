@@ -33,7 +33,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type QueueServiceClient interface {
 	Lease(ctx context.Context, in *LeaseRequest, opts ...grpc.CallOption) (*LeaseResponse, error)
-	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*TransitionResponse, error)
+	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	Ack(ctx context.Context, in *AckRequest, opts ...grpc.CallOption) (*TransitionResponse, error)
 	Retry(ctx context.Context, in *RetryRequest, opts ...grpc.CallOption) (*TransitionResponse, error)
 	Defer(ctx context.Context, in *DeferRequest, opts ...grpc.CallOption) (*TransitionResponse, error)
@@ -59,9 +59,9 @@ func (c *queueServiceClient) Lease(ctx context.Context, in *LeaseRequest, opts .
 	return out, nil
 }
 
-func (c *queueServiceClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*TransitionResponse, error) {
+func (c *queueServiceClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TransitionResponse)
+	out := new(HeartbeatResponse)
 	err := c.cc.Invoke(ctx, QueueService_Heartbeat_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (c *queueServiceClient) Cancel(ctx context.Context, in *CancelRequest, opts
 // for forward compatibility.
 type QueueServiceServer interface {
 	Lease(context.Context, *LeaseRequest) (*LeaseResponse, error)
-	Heartbeat(context.Context, *HeartbeatRequest) (*TransitionResponse, error)
+	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	Ack(context.Context, *AckRequest) (*TransitionResponse, error)
 	Retry(context.Context, *RetryRequest) (*TransitionResponse, error)
 	Defer(context.Context, *DeferRequest) (*TransitionResponse, error)
@@ -143,7 +143,7 @@ type UnimplementedQueueServiceServer struct{}
 func (UnimplementedQueueServiceServer) Lease(context.Context, *LeaseRequest) (*LeaseResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Lease not implemented")
 }
-func (UnimplementedQueueServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*TransitionResponse, error) {
+func (UnimplementedQueueServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
 }
 func (UnimplementedQueueServiceServer) Ack(context.Context, *AckRequest) (*TransitionResponse, error) {

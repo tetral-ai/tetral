@@ -258,7 +258,10 @@ func TestPostgreSQLEnvironmentStoreNetworkingOnlyUpdateFollowsInFlightArtifact(t
 			}
 			if status == "building" {
 				if _, err := admin.ExecContext(ctx,
-					`UPDATE environment_artifacts SET status = 'building' WHERE workspace_id = $1 AND environment_id = $2 AND generation = 1`,
+					`UPDATE environment_artifacts
+					    SET status = 'building', lease_job_id = 'qjob_environment_test',
+					        lease_token = 'lease_environment_test', lease_attempt_count = 1
+					  WHERE workspace_id = $1 AND environment_id = $2 AND generation = 1`,
 					string(workspace.DefaultID), created.ID,
 				); err != nil {
 					t.Fatalf("mark building: %v", err)

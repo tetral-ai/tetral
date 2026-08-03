@@ -17,6 +17,15 @@ import type {
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimePodLifecycle } from "./lifecycle.js";
 
+/** Closed declaration-receipt outcomes exposed by Runtime Pod observability. */
+export type RuntimeReceiptEvidenceOutcome =
+  | "applied"
+  | "stale_custody"
+  | "binding_identity_mismatch"
+  | "receipt_shape_invalid"
+  | "declaration_digest_mismatch"
+  | "receipt_application_failed";
+
 interface Observation {
   count: number;
   sum: number;
@@ -30,11 +39,13 @@ export interface RuntimePodDomainMetricsSnapshot extends RuntimeHotStateMetrics 
   readonly contextLoadLatencyMs: ReadonlyMap<string, Observation>;
   readonly cleanupCommandOutcomes: ReadonlyMap<RuntimeCleanupCommandOutcome, number>;
   readonly closeoutEvents: ReadonlyMap<RuntimeCloseoutEvent["event"], number>;
+  readonly receiptEvidence: ReadonlyMap<RuntimeReceiptEvidenceOutcome, number>;
 }
 
 /** Combines the Runtime Core metrics sink with snapshot access for HTTP exposition. */
 export interface RuntimePodMetricsSource extends RuntimeMetricsSink {
   readonly recordCloseoutEvent: (event: RuntimeCloseoutEvent) => void;
+  readonly recordReceiptEvidence: (outcome: RuntimeReceiptEvidenceOutcome) => void;
   readonly snapshot: () => RuntimePodDomainMetricsSnapshot;
 }
 
@@ -55,6 +66,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
   private readonly contextLoadLatencyMs = new Map<string, Observation>();
   private readonly cleanupCommandOutcomes = new Map<RuntimeCleanupCommandOutcome, number>();
   private readonly closeoutEvents = new Map<RuntimeCloseoutEvent["event"], number>();
+  private readonly receiptEvidence = new Map<RuntimeReceiptEvidenceOutcome, number>();
 
   /** Replaces the hot-state gauges after normalizing every value to a finite non-negative number. */
   recordHotState(snapshot: RuntimeHotStateMetrics): void {
@@ -99,6 +111,11 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
     this.cleanupCommandOutcomes.set(outcome, (this.cleanupCommandOutcomes.get(outcome) ?? 0) + 1);
   }
 
+  /** Counts one declaration receipt application or closed discard outcome. */
+  recordReceiptEvidence(outcome: RuntimeReceiptEvidenceOutcome): void {
+    this.receiptEvidence.set(outcome, (this.receiptEvidence.get(outcome) ?? 0) + 1);
+  }
+
   /** Counts closeout alarms per affected thread and terminal closeout records per occurrence. */
   recordCloseoutEvent(event: RuntimeCloseoutEvent): void {
     const increment = event.event === "runtime_closeout_stalled" ? event.activeCloseouts : 1;
@@ -115,6 +132,7 @@ export class RuntimePodMetricsRegistry implements RuntimePodMetricsSource {
       contextLoadLatencyMs: new Map(this.contextLoadLatencyMs),
       cleanupCommandOutcomes: new Map(this.cleanupCommandOutcomes),
       closeoutEvents: new Map(this.closeoutEvents),
+      receiptEvidence: new Map(this.receiptEvidence),
     };
   }
 }
@@ -127,6 +145,7 @@ const EmptyRuntimePodMetrics: RuntimePodMetricsSource = {
   observeEventWriteLatency: () => undefined,
   observeContextLoadLatency: () => undefined,
   recordCleanupCommandOutcome: () => undefined,
+  recordReceiptEvidence: () => undefined,
   recordCloseoutEvent: () => undefined,
   snapshot: () => ({
     activeSessions: 0,
@@ -139,6 +158,7 @@ const EmptyRuntimePodMetrics: RuntimePodMetricsSource = {
     contextLoadLatencyMs: new Map(),
     cleanupCommandOutcomes: new Map(),
     closeoutEvents: new Map(),
+    receiptEvidence: new Map(),
   }),
 };
 
@@ -179,6 +199,7 @@ export function runtimePodMetricsText(
       runtimeSnapshot.contextLoadLatencyMs,
     ),
     cleanupOutcomeMetric(runtimeSnapshot.cleanupCommandOutcomes),
+    receiptEvidenceMetric(runtimeSnapshot.receiptEvidence),
     closeoutEventMetric(runtimeSnapshot.closeoutEvents),
     metric("process_heap_used_bytes", "JavaScript heap bytes currently used by the process.", "gauge", memory.heapUsed),
     metric("process_rss_bytes", "Resident set size bytes for the process.", "gauge", memory.rss),
@@ -216,6 +237,22 @@ function closeoutEventMetric(values: ReadonlyMap<RuntimeCloseoutEvent["event"], 
     "runtime_closeout_unrepairable",
   ] as const) {
     text += `${name}{event="${event}"} ${formatMetricValue(values.get(event) ?? 0)}\n`;
+  }
+  return text;
+}
+
+function receiptEvidenceMetric(values: ReadonlyMap<RuntimeReceiptEvidenceOutcome, number>): string {
+  const name = "runtimepod_receipt_evidence_total";
+  let text = `# HELP ${name} Runtime declaration receipt application outcomes.\n# TYPE ${name} counter\n`;
+  for (const outcome of [
+    "applied",
+    "stale_custody",
+    "binding_identity_mismatch",
+    "receipt_shape_invalid",
+    "declaration_digest_mismatch",
+    "receipt_application_failed",
+  ] as const) {
+    text += `${name}{outcome="${outcome}"} ${formatMetricValue(values.get(outcome) ?? 0)}\n`;
   }
   return text;
 }

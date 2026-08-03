@@ -5,14 +5,14 @@
 // OWNS:
 //   - Sandbox lifecycle calls: DaytonaLifecycleProvider (provider.go) —
 //     CreateSandbox, StartSandbox, CheckBaseTemplateHealth, ApplyNetworkPolicy,
-//     PrepareBaseDirectories, GetStatus, ReleaseSandbox against the Daytona SDK;
-//     the provider-state -> sandbox.Status mapping (daytonaSandboxStatus and its
-//     availability/retryable siblings), network-policy translation, auto
-//     stop/archive/delete interval policy, and the Daytona SDK error ->
+//     PrepareBaseDirectories, InspectState, ReleaseSandbox against the Daytona
+//     SDK; network-policy translation, auto stop/archive/delete interval policy,
+//     and the Daytona SDK error ->
 //     sandbox.ProviderError classification (mapDaytonaError).
-//   - Helper transport: DaytonaHelperExecutor (daytona.go) — RunTool,
-//     ReadCommandResult, SendCommandInput, CancelCommand, CheckHealth,
-//     RunPreparationCommand, StagePreparationFile. Each helper subcommand stages
+//   - Helper transport: DaytonaHelperExecutor (daytona.go) — PrepareTool,
+//     ExecutePreparedTool, SubmitPreparedTool, ReadCommandResult,
+//     SendCommandInput, CancelCommand, CheckHealth,
+//     RunDaytonaCommand, StageDaytonaFile. Each helper subcommand stages
 //     one payload file under payloadRootPath, chowns it root-owned and chmods it
 //     0600 (its directory 0700), then runs it via
 //     `sudo -n -u root <helperPath> <sub> --payload <path>`; the reply stdout is
@@ -49,9 +49,9 @@
 // decides whether an authoritative result exists. executeHelper returns a
 // HelperFailureError (helper_failure.go) before any envelope in two cases — a
 // non-zero helper exit code, and stdout that fails envelope validation — and the
-// caller (Bridge) maps that marker to a helper_failure tool result. An exit-0
-// envelope whose status is error is the opposite case: authoritative, not a
-// helper_failure.
+// caller (Sandbox Service) maps that marker to a helper_failure tool result. An
+// exit-0 envelope whose status is error is the opposite case: authoritative,
+// not a helper_failure.
 //
 // INVARIANTS:
 //   - The helper is invoked as root (helperUser) through sudo; the driver never
@@ -75,13 +75,13 @@
 //     poll rounds; on context cancellation or a poll failure it attempts a
 //     best-effort cancel and, if the task did not settle, surfaces it as a
 //     BackgroundTask rather than dropping it.
-//   - daytonaSandboxStatus is fail-closed: any provider state it does not name
-//     maps to sandbox.StatusFailed.
+//   - InspectState returns the provider-native state. DaytonaAdapter owns the
+//     single fail-closed conversion from that state to an execution outcome.
 //
 // UPDATE-WITH:
-//   - internal/sandbox/driver/provider.go (DaytonaLifecycleProvider methods;
-//     daytonaSandboxStatus/daytonaAvailability/daytonaStatusRetryable;
-//     mapDaytonaError).
+//   - internal/sandbox/driver/provider.go (DaytonaLifecycleProvider methods and
+//     mapDaytonaError) and services/sandbox/provider_adapter.go (the native
+//     Daytona-state to execution-outcome table).
 //   - internal/sandbox/driver/daytona.go (DaytonaHelperExecutor; executeHelper
 //     payload staging; pollForegroundTaskUntilTerminal; terminalStatusFromResult;
 //     synthesizeHelperBackgroundTask; runningTaskIDFromResult).
@@ -90,7 +90,6 @@
 //     status/tool/result shape and schema_version the driver parses).
 //   - internal/sandbox/helper/internal/task/exec.go and supervisor.go (the
 //     exit_code/signal/timed_out/cancelled result fields settlement reads).
-//   - services/bridge/sandbox_driver_executor.go and
-//     bridge_api_tools.go (consume BackgroundTask and TerminalStatus and
-//     synthesize the helper_failure tool result).
+//   - services/sandbox/tool_execution_runner.go (consumes BackgroundTask and
+//     TerminalStatus and synthesizes the helper_failure tool result).
 package driver

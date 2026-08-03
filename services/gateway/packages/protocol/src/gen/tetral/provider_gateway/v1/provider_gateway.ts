@@ -581,6 +581,7 @@ export enum McpErrorKind {
   MCP_ERROR_KIND_COMMIT_FAILED = 8,
   MCP_ERROR_KIND_CREDENTIAL_REQUIRED = 9,
   MCP_ERROR_KIND_INTERNAL = 10,
+  MCP_ERROR_KIND_CUSTODY_LOST = 11,
   UNRECOGNIZED = -1,
 }
 
@@ -619,6 +620,9 @@ export function mcpErrorKindFromJSON(object: any): McpErrorKind {
     case 10:
     case "MCP_ERROR_KIND_INTERNAL":
       return McpErrorKind.MCP_ERROR_KIND_INTERNAL;
+    case 11:
+    case "MCP_ERROR_KIND_CUSTODY_LOST":
+      return McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST;
     case -1:
     case "UNRECOGNIZED":
     default:
@@ -650,6 +654,8 @@ export function mcpErrorKindToJSON(object: McpErrorKind): string {
       return "MCP_ERROR_KIND_CREDENTIAL_REQUIRED";
     case McpErrorKind.MCP_ERROR_KIND_INTERNAL:
       return "MCP_ERROR_KIND_INTERNAL";
+    case McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST:
+      return "MCP_ERROR_KIND_CUSTODY_LOST";
     case McpErrorKind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
@@ -963,6 +969,7 @@ export interface RunMcpToolResponse {
   attachments: McpAttachmentRef[];
   errorKind?: McpErrorKind | undefined;
   retryStatus?: McpRetryStatus | undefined;
+  materializationHandle?: string | undefined;
 }
 
 export interface McpAttachmentRef {
@@ -5468,7 +5475,14 @@ export const RunMcpToolRequest: MessageFns<RunMcpToolRequest> = {
 };
 
 function createBaseRunMcpToolResponse(): RunMcpToolResponse {
-  return { status: 0, resultText: "", attachments: [], errorKind: undefined, retryStatus: undefined };
+  return {
+    status: 0,
+    resultText: "",
+    attachments: [],
+    errorKind: undefined,
+    retryStatus: undefined,
+    materializationHandle: undefined,
+  };
 }
 
 export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
@@ -5487,6 +5501,9 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
     }
     if (message.retryStatus !== undefined) {
       writer.uint32(40).int32(message.retryStatus);
+    }
+    if (message.materializationHandle !== undefined) {
+      writer.uint32(50).string(message.materializationHandle);
     }
     return writer;
   },
@@ -5538,6 +5555,14 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
           message.retryStatus = reader.int32() as any;
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.materializationHandle = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5568,6 +5593,11 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
         : isSet(object.retry_status)
         ? mcpRetryStatusFromJSON(object.retry_status)
         : undefined,
+      materializationHandle: isSet(object.materializationHandle)
+        ? globalThis.String(object.materializationHandle)
+        : isSet(object.materialization_handle)
+        ? globalThis.String(object.materialization_handle)
+        : undefined,
     };
   },
 
@@ -5588,6 +5618,9 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
     if (message.retryStatus !== undefined) {
       obj.retryStatus = mcpRetryStatusToJSON(message.retryStatus);
     }
+    if (message.materializationHandle !== undefined) {
+      obj.materializationHandle = message.materializationHandle;
+    }
     return obj;
   },
 
@@ -5601,6 +5634,7 @@ export const RunMcpToolResponse: MessageFns<RunMcpToolResponse> = {
     message.attachments = object.attachments?.map((e) => McpAttachmentRef.fromPartial(e)) || [];
     message.errorKind = object.errorKind ?? undefined;
     message.retryStatus = object.retryStatus ?? undefined;
+    message.materializationHandle = object.materializationHandle ?? undefined;
     return message;
   },
 };

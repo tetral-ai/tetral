@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,10 +11,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
-func TestIsGitHubCredentialRequiredDetectsWrappedPreparationFailure(t *testing.T) {
+func TestIsGitHubCredentialRequiredDetectsWrappedMaterializationFailure(t *testing.T) {
 	err := &SandboxError{
 		Code:  SandboxErrorMountFailed,
-		Cause: &GitHubPreparationFailure{Reason: GitHubCredentialRequiredReason, Cause: errors.New("no credential")},
+		Cause: &GitHubMaterializationFailure{Reason: GitHubCredentialRequiredReason, Cause: errors.New("no credential")},
 	}
 	if !IsGitHubCredentialRequired(err) {
 		t.Fatalf("IsGitHubCredentialRequired(%v) = false; want true", err)
@@ -25,7 +24,7 @@ func TestIsGitHubCredentialRequiredDetectsWrappedPreparationFailure(t *testing.T
 	}
 }
 
-func TestPrepareGitHubRepositoriesRejectsMountPathCollisionsBeforeTicketRotation(t *testing.T) {
+func TestGitHubRepositoryConvergerRejectsMountPathCollisionsBeforeTicketRotation(t *testing.T) {
 	tests := []struct {
 		name         string
 		repositories []GitHubRepositoryMount
@@ -86,13 +85,11 @@ func TestPrepareGitHubRepositoriesRejectsMountPathCollisionsBeforeTicketRotation
 		t.Run(tc.name, func(t *testing.T) {
 			rotator := &recordingGitTicketRotator{}
 			materializer := &recordingGitHubRepositoryMaterializer{}
-			service := NewService(nil, nil,
-				WithGitHubRepositoryPreparation(rotator, materializer, "git.tetral.test"),
-			)
+			converger := &GitHubRepositoryConverger{Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test"}
 
-			err := service.prepareGitHubRepositories(context.Background(), workspace.DefaultID, "sesn_git_preflight", ProviderHandle{SandboxID: "provider_sandbox"}, ResourceSetup{GitHubRepositories: tc.repositories})
+			err := converger.materialize(context.Background(), workspace.DefaultID, "sesn_git_preflight", ProviderHandle{SandboxID: "provider_sandbox"}, tc.repositories)
 			if err == nil {
-				t.Fatal("prepareGitHubRepositories succeeded; want mount-path validation error")
+				t.Fatal("MaterializeGitHubRepositories succeeded; want mount-path validation error")
 			}
 			var validation *ValidationError
 			if !errors.As(err, &validation) {
@@ -105,23 +102,21 @@ func TestPrepareGitHubRepositoriesRejectsMountPathCollisionsBeforeTicketRotation
 	}
 }
 
-func TestPrepareGitHubRepositoriesMaterializesExplicitMountPathUnderWorkspace(t *testing.T) {
+func TestGitHubRepositoryConvergerMaterializesExplicitMountPathUnderWorkspace(t *testing.T) {
 	rotator := &recordingGitTicketRotator{}
 	materializer := &recordingGitHubRepositoryMaterializer{}
-	service := NewService(nil, nil,
-		WithGitHubRepositoryPreparation(rotator, materializer, "git.tetral.test"),
-		WithClock(func() time.Time { return time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC) }),
-	)
+	converger := &GitHubRepositoryConverger{
+		Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test",
+		Clock: func() time.Time { return time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC) },
+	}
 
-	err := service.prepareGitHubRepositories(context.Background(), workspace.DefaultID, "sesn_git_explicit", ProviderHandle{SandboxID: "provider_sandbox"}, ResourceSetup{
-		GitHubRepositories: []GitHubRepositoryMount{{
-			ResourceID: "sesrsc_repo",
-			URL:        "https://github.com/tetral-ai/tetral",
-			MountPath:  "/workspace/repos/tetral",
-		}},
-	})
+	err := converger.materialize(context.Background(), workspace.DefaultID, "sesn_git_explicit", ProviderHandle{SandboxID: "provider_sandbox"}, []GitHubRepositoryMount{{
+		ResourceID: "sesrsc_repo",
+		URL:        "https://github.com/tetral-ai/tetral",
+		MountPath:  "/workspace/repos/tetral",
+	}})
 	if err != nil {
-		t.Fatalf("prepareGitHubRepositories: %v", err)
+		t.Fatalf("MaterializeGitHubRepositories: %v", err)
 	}
 	repositories := materializer.calls[0].Repositories
 	if len(repositories) != 1 || repositories[0].MountPath != "/workspace/repos/tetral" {
@@ -129,24 +124,22 @@ func TestPrepareGitHubRepositoriesMaterializesExplicitMountPathUnderWorkspace(t 
 	}
 }
 
-func TestPrepareGitHubRepositoriesMaterializesDefaultMountPath(t *testing.T) {
+func TestGitHubRepositoryConvergerMaterializesDefaultMountPath(t *testing.T) {
 	events := []string{}
 	rotator := &recordingGitTicketRotator{}
 	rotator.eventsRef = &events
 	materializer := &recordingGitHubRepositoryMaterializer{eventsRef: &events}
-	service := NewService(nil, nil,
-		WithGitHubRepositoryPreparation(rotator, materializer, "git.tetral.test"),
-		WithClock(func() time.Time { return time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC) }),
-	)
+	converger := &GitHubRepositoryConverger{
+		Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test",
+		Clock: func() time.Time { return time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC) },
+	}
 
-	err := service.prepareGitHubRepositories(context.Background(), workspace.DefaultID, "sesn_git_default", ProviderHandle{SandboxID: "provider_sandbox"}, ResourceSetup{
-		GitHubRepositories: []GitHubRepositoryMount{{
-			ResourceID: "sesrsc_repo",
-			URL:        "https://github.com/tetral-ai/tetral.git",
-		}},
-	})
+	err := converger.materialize(context.Background(), workspace.DefaultID, "sesn_git_default", ProviderHandle{SandboxID: "provider_sandbox"}, []GitHubRepositoryMount{{
+		ResourceID: "sesrsc_repo",
+		URL:        "https://github.com/tetral-ai/tetral.git",
+	}})
 	if err != nil {
-		t.Fatalf("prepareGitHubRepositories: %v", err)
+		t.Fatalf("MaterializeGitHubRepositories: %v", err)
 	}
 	if len(rotator.pendingCalls) != 1 || len(rotator.activationCalls) != 1 || len(materializer.installs) != 1 || len(materializer.calls) != 1 {
 		t.Fatalf("side effects pending=%d installs=%d activation=%d clones=%d", len(rotator.pendingCalls), len(materializer.installs), len(rotator.activationCalls), len(materializer.calls))
@@ -160,15 +153,51 @@ func TestPrepareGitHubRepositoriesMaterializesDefaultMountPath(t *testing.T) {
 	}
 }
 
-func TestPrepareGitHubRepositoriesRemovesDeletedCheckoutWithoutRotatingTicket(t *testing.T) {
+func TestGitHubRepositoryConvergerRecoversInstalledTicket(t *testing.T) {
+	events := []string{}
+	hash := []byte("installed-ticket-hash")
+	rotator := &recordingGitTicketRotator{
+		eventsRef: &events,
+		findTicket: &gitticket.Ticket{
+			WorkspaceID: workspace.DefaultID,
+			SessionID:   "sesn_git_converge",
+			TicketID:    "gitt_existing",
+			TokenHash:   hash,
+			Status:      gitticket.StatusPending,
+		},
+	}
+	materializer := &recordingGitHubRepositoryMaterializer{eventsRef: &events, installedHash: hash}
+	converger := &GitHubRepositoryConverger{
+		Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test",
+		Clock: func() time.Time { return time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC) },
+	}
+	err := converger.MaterializeGitHubRepositories(context.Background(), SandboxSetup{
+		WorkspaceID: workspace.DefaultID,
+		SessionID:   "sesn_git_converge",
+		Resources: ResourceSetup{GitHubRepositories: []GitHubRepositoryMount{{
+			ResourceID: "sesrsc_repo", URL: "https://github.com/tetral-ai/tetral",
+		}}},
+	}, ProviderHandle{SandboxID: "provider_sandbox"})
+	if err != nil {
+		t.Fatalf("MaterializeGitHubRepositories: %v", err)
+	}
+	if got := strings.Join(events, " -> "); got != "activate -> clone" {
+		t.Fatalf("phase order = %s; want activate -> clone", got)
+	}
+	if len(rotator.pendingCalls) != 0 || len(materializer.installs) != 0 {
+		t.Fatalf("recovery minted a replacement credential: pending=%d installs=%d", len(rotator.pendingCalls), len(materializer.installs))
+	}
+}
+
+func TestGitHubRepositoryConvergerRemovesDeletedCheckoutWithoutRotatingTicket(t *testing.T) {
 	rotator := &recordingGitTicketRotator{}
 	materializer := &recordingGitHubRepositoryMaterializer{}
-	service := NewService(nil, nil, WithGitHubRepositoryPreparation(rotator, materializer, "git.tetral.test"))
-	err := service.removeDeletedGitHubRepositories(context.Background(), ProviderHandle{SandboxID: "provider_sandbox"}, []GitHubRepositoryMount{{
+	converger := &GitHubRepositoryConverger{Rotator: rotator, Materializer: materializer, GitProxyHost: "git.tetral.test"}
+	err := converger.removeDeleted(context.Background(), ProviderHandle{SandboxID: "provider_sandbox"}, []GitHubRepositoryMount{{
 		ResourceID: "sesrsc_repo_deleted", URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral",
-	}}, nil)
+	}})
 	if err != nil {
-		t.Fatalf("prepareGitHubRepositories delete: %v", err)
+		t.Fatalf("RemoveDeletedGitHubRepositories: %v", err)
 	}
 	if len(materializer.removals) != 1 || materializer.removals[0].MountPath != "/workspace/tetral" {
 		t.Fatalf("GitHub removals = %+v; want deleted checkout", materializer.removals)
@@ -178,73 +207,18 @@ func TestPrepareGitHubRepositoriesRemovesDeletedCheckoutWithoutRotatingTicket(t 
 	}
 }
 
-func TestRemoveDeletedGitHubRepositoryFailureRetriesBeforeDurableDetach(t *testing.T) {
-	events := []string{}
-	wantErr := errors.New("github checkout removal unavailable")
-	materializer := &recordingGitHubRepositoryMaterializer{err: wantErr, eventsRef: &events}
-	cleanup := &recordingSessionResourceCleanupCoordinator{eventsRef: &events, pending: true}
-	service := NewService(nil, nil, WithGitHubRepositoryPreparation(nil, materializer, ""))
-	repositories := []GitHubRepositoryMount{{ResourceID: "sesrsc_repo_deleted", URL: "https://github.com/tetral-ai/old", MountPath: "/workspace/project"}}
-	if err := service.removeDeletedGitHubRepositories(context.Background(), ProviderHandle{SandboxID: "provider_git_retry"}, repositories, cleanup); !errors.Is(err, wantErr) {
-		t.Fatalf("first removal error=%v; want %v", err, wantErr)
-	}
-	if !reflect.DeepEqual(events, []string{"github_remove"}) || !cleanup.pending {
-		t.Fatalf("failure events=%v pending=%v; want removal only and durable pending", events, cleanup.pending)
-	}
-	materializer.err = nil
-	if err := service.removeDeletedGitHubRepositories(context.Background(), ProviderHandle{SandboxID: "provider_git_retry"}, repositories, cleanup); err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	if !reflect.DeepEqual(events, []string{"github_remove", "github_remove", "resource-detach"}) || cleanup.pending {
-		t.Fatalf("retry events=%v pending=%v; want removal ACK then detach", events, cleanup.pending)
-	}
-	if err := service.removeDeletedGitHubRepositories(context.Background(), ProviderHandle{SandboxID: "provider_git_retry"}, repositories, cleanup); err != nil {
-		t.Fatalf("post-detach replay: %v", err)
-	}
-	if len(materializer.removals) != 2 {
-		t.Fatalf("removals after post-detach replay=%d; want failed attempt plus successful retry only", len(materializer.removals))
-	}
-}
-
 func TestRemoveDeletedGitHubRepositoriesValidatesAllPathsBeforeRemoval(t *testing.T) {
 	materializer := &recordingGitHubRepositoryMaterializer{}
-	service := NewService(nil, nil, WithGitHubRepositoryPreparation(nil, materializer, ""))
-	err := service.removeDeletedGitHubRepositories(context.Background(), ProviderHandle{SandboxID: "provider_sandbox"}, []GitHubRepositoryMount{
+	converger := &GitHubRepositoryConverger{Materializer: materializer}
+	err := converger.removeDeleted(context.Background(), ProviderHandle{SandboxID: "provider_sandbox"}, []GitHubRepositoryMount{
 		{ResourceID: "sesrsc_repo_valid", URL: "https://github.com/tetral-ai/valid", MountPath: "/workspace/valid"},
 		{ResourceID: "sesrsc_repo_invalid", URL: "https://github.com/tetral-ai/invalid", MountPath: "/workspace"},
-	}, nil)
+	})
 	if err == nil {
 		t.Fatal("removeDeletedGitHubRepositories succeeded; want reserved-path error")
 	}
 	if len(materializer.removals) != 0 {
 		t.Fatalf("GitHub removals = %+v; want validation before the first removal", materializer.removals)
-	}
-}
-
-func TestPrepareResourcesValidatesActivePathsBeforeDeletedGitHubRemoval(t *testing.T) {
-	provider := newSuccessfulRecordingProvider()
-	materializer := &recordingGitHubRepositoryMaterializer{}
-	service := NewService(nil, provider, WithGitHubRepositoryPreparation(nil, materializer, ""))
-	_, err := service.prepareResources(context.Background(), SandboxSetup{
-		WorkspaceID: workspace.DefaultID,
-		SessionID:   "sesn_preflight",
-		Resources: ResourceSetup{
-			Files: []FileMount{{ResourceID: "sesrsc_file", SessionFileID: "file_session", MountPath: "/workspace/../invalid"}},
-			DeletedGitHubRepositories: []GitHubRepositoryMount{{
-				ResourceID: "sesrsc_repo_deleted",
-				URL:        "https://github.com/tetral-ai/project",
-				MountPath:  "/workspace/project",
-			}},
-		},
-	}, ProviderHandle{SandboxID: "provider_sandbox"})
-	if err == nil {
-		t.Fatal("prepareResources succeeded; want active mount-path validation error")
-	}
-	if len(materializer.removals) != 0 {
-		t.Fatalf("GitHub removals = %+v; want path preflight before deletion", materializer.removals)
-	}
-	if len(provider.baseDirectoryHandles) != 0 {
-		t.Fatalf("base-directory preparations = %d; want path preflight before filesystem writes", len(provider.baseDirectoryHandles))
 	}
 }
 

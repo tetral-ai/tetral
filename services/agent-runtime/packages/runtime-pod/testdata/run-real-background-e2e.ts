@@ -16,21 +16,6 @@ const runner = new RuntimePodToolRunner({
   mcpConnectorAddress: "127.0.0.1:1",
   tokenPath: "/dev/null",
   metadataFactory: async () => new Metadata(),
-  scopeForThread: (sessionId, sessionThreadId) => sessionId === "sesn_real_bash" && sessionThreadId === "thr_real_bash" ? {
-    requestId: "req_real_bash",
-    workspaceId: "default",
-    sessionId,
-    sessionThreadId,
-    bindingId: "bind_real_bash",
-    bindingGeneration: 1,
-    targetPodUid: "pod_real_bash",
-    runtimeInputId: "rin_real_bash",
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
-    kind: "messages",
-    payloadJson: "{}",
-  } : undefined,
 });
 
 const result = await runner.runTool({

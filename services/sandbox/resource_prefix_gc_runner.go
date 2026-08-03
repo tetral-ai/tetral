@@ -10,7 +10,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	"github.com/tetral-ai/tetral/services/sandbox/internal/resourceprojection"
 )
@@ -22,14 +21,14 @@ const (
 	resourcePrefixGCErrorInvalidFence = "invalid_prefix_fence"
 )
 
-type ResourcePrefixGCPreparer interface {
-	DeleteSessionResourceCopiesForGC(context.Context, sandbox.SandboxSetup) error
+type ResourcePrefixBlobCleaner interface {
+	DeletePrefix(context.Context, string) error
 }
 
 type ResourcePrefixGCRunner struct {
-	Client   *dbconnect.Client
-	Preparer ResourcePrefixGCPreparer
-	Config   ResourcePrefixGCRunnerConfig
+	Client *dbconnect.Client
+	Blobs  ResourcePrefixBlobCleaner
+	Config ResourcePrefixGCRunnerConfig
 }
 
 type ResourcePrefixGCRunnerConfig struct {
@@ -51,8 +50,8 @@ func (r *ResourcePrefixGCRunner) RunOnce(ctx context.Context) ([]ResourcePrefixG
 	if r == nil || r.Client == nil {
 		return nil, &ConfigError{Message: "resource prefix gc database client is required"}
 	}
-	if r.Preparer == nil {
-		return nil, &ConfigError{Message: "resource prefix gc preparer is required"}
+	if r.Blobs == nil {
+		return nil, &ConfigError{Message: "resource prefix gc blob cleaner is required"}
 	}
 	cfg := normalizedResourcePrefixGCConfig(r.Config)
 	if cfg.WorkspaceID == "" {
@@ -70,10 +69,7 @@ func (r *ResourcePrefixGCRunner) RunOnce(ctx context.Context) ([]ResourcePrefixG
 			}
 			continue
 		}
-		err := r.Preparer.DeleteSessionResourceCopiesForGC(ctx, sandbox.SandboxSetup{
-			WorkspaceID: job.WorkspaceID,
-			SessionID:   job.SessionID,
-		})
+		err := r.Blobs.DeletePrefix(ctx, job.Prefix)
 		if err != nil {
 			if markErr := r.markFailed(ctx, job, cfg, now, resourcePrefixGCErrorDeleteFailed); markErr != nil {
 				return claimed, markErr
@@ -128,10 +124,9 @@ func (r *ResourcePrefixGCRunner) claimDue(ctx context.Context, cfg ResourcePrefi
 				   )
 				   AND NOT EXISTS (
 					SELECT 1
-					  FROM sandboxes sb
-					 WHERE sb.workspace_id = g.workspace_id
-					   AND sb.session_id = g.session_id
-					   AND sb.status <> 'released'
+					  FROM session_sandbox_bindings b
+					 WHERE b.workspace_id = g.workspace_id
+					   AND b.session_id = g.session_id
 				   )
 				 ORDER BY COALESCE(g.next_attempt_at, g.created_at) ASC,
 				          g.created_at ASC,

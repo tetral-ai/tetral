@@ -107,16 +107,15 @@ type AppendRequest struct {
 }
 
 type Event struct {
-	ID                   string
-	WorkspaceID          workspace.ID
-	SessionID            string
-	ThreadID             string
-	Sequence             int64
-	Type                 string
-	Payload              json.RawMessage
-	PreparationAttemptID string
-	CreatedAt            time.Time
-	ProcessedAt          *time.Time
+	ID          string
+	WorkspaceID workspace.ID
+	SessionID   string
+	ThreadID    string
+	Sequence    int64
+	Type        string
+	Payload     json.RawMessage
+	CreatedAt   time.Time
+	ProcessedAt *time.Time
 }
 
 type AppendResult struct {

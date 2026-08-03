@@ -84,21 +84,18 @@ secrets:
   authBootstrap: auth-bootstrap
   authDatabase: auth-database
   authInternalPrincipal: auth-internal-principal
-  bridgeDaytona: bridge-daytona
   gatewayWebBlob: gateway-web-blob
   gatewayWebKeypool: gateway-web-keypool
   queueDatabase: queue-database
   runtimeBindingToken: runtime-binding-token
   sandboxBlob: sandbox-blob
   sandboxDaytona: sandbox-daytona
-  sandboxInternalGRPC: sandbox-internal-grpc
   sandboxR2Parent: sandbox-r2-parent
   tetralBlob: tetral-blob
   tetralDatabase: tetral-database
   eventStreamDatabase: tetral-event-stream-database
 
 daytona:
-  bridgeAPIURL: https://daytona.example.internal
   sandboxAPIURL: https://daytona.example.internal/api
   # Daytona region the platform creates sandboxes in. Daytona Cloud has no
   # region literally named "default" — asking for one answers "Region not

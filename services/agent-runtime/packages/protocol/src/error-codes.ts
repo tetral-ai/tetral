@@ -21,6 +21,7 @@ export const RuntimeInputErrorCodes = [
   "runtime_control_conflict",
   "runtime_context_load_failed",
   "runtime_control_not_accepted",
+  "control_busy",
 ] as const;
 
 /** Closed TypeScript name union for intentional in-band command rejections. */
@@ -37,6 +38,7 @@ const RuntimeInputErrorCodeValues: Record<RuntimeInputErrorCodeName, RuntimeInpu
   runtime_control_conflict: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_CONFLICT,
   runtime_context_load_failed: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED,
   runtime_control_not_accepted: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED,
+  control_busy: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
 };
 
 const RuntimeInputErrorCodeNames: Record<RuntimeInputErrorCode, RuntimeInputErrorCodeName | "runtime_rejected_input"> = {
@@ -51,6 +53,7 @@ const RuntimeInputErrorCodeNames: Record<RuntimeInputErrorCode, RuntimeInputErro
   [RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTEXT_LOAD_FAILED]: "runtime_context_load_failed",
   [RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_CONTROL_NOT_ACCEPTED]: "runtime_control_not_accepted",
   [RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT]: "runtime_rejected_input",
+  [RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY]: "control_busy",
   [RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_UNSPECIFIED]: "runtime_rejected_input",
   [RuntimeInputErrorCode.UNRECOGNIZED]: "runtime_rejected_input",
 };

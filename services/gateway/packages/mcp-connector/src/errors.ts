@@ -22,6 +22,7 @@ export type McpConnectorErrorCode =
   | "mcp_claim_conflict"
   | "mcp_in_flight"
   | "mcp_commit_failed"
+  | "mcp_custody_lost"
   | "mcp_internal_error";
 
 /** Maps a connector error code to the corresponding Gateway protocol value. */
@@ -45,6 +46,8 @@ export function mcpErrorKind(code: McpConnectorErrorCode): McpErrorKind {
       return McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT;
     case "mcp_commit_failed":
       return McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED;
+    case "mcp_custody_lost":
+      return McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST;
     case "mcp_internal_error":
       return McpErrorKind.MCP_ERROR_KIND_INTERNAL;
   }

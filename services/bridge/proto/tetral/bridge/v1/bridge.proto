@@ -18,7 +18,8 @@ service AgentRuntimeBridgeService {
   rpc ResolveInterAgentDelivery(ResolveInterAgentDeliveryRequest) returns (ResolveInterAgentDeliveryResponse);
   rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);
   rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);
-  rpc RunTool(RunToolRequest) returns (RunToolResponse);
+  rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);
+  rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);
   rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);
   rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);
   rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);
@@ -38,6 +39,169 @@ enum BridgeWriteStatus {
   BRIDGE_WRITE_STATUS_COMMITTED = 1;
   BRIDGE_WRITE_STATUS_DUPLICATE = 2;
   BRIDGE_WRITE_STATUS_REJECTED = 3;
+}
+
+enum RuntimeDraftKind {
+  RUNTIME_DRAFT_KIND_UNSPECIFIED = 0;
+  RUNTIME_DRAFT_KIND_USER_INPUT = 1;
+  RUNTIME_DRAFT_KIND_APPROVAL_INPUT = 2;
+  RUNTIME_DRAFT_KIND_REVIEWER_INPUT = 3;
+  RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT = 4;
+  RUNTIME_DRAFT_KIND_ASSISTANT_TEXT = 5;
+  RUNTIME_DRAFT_KIND_TOOL_USE = 6;
+  RUNTIME_DRAFT_KIND_TOOL_RESULT = 7;
+  RUNTIME_DRAFT_KIND_TASK_NOTIFICATION = 8;
+  RUNTIME_DRAFT_KIND_REJECTION = 9;
+  RUNTIME_DRAFT_KIND_CANCELLATION = 10;
+  RUNTIME_DRAFT_KIND_COMPLETION_MAIL = 11;
+  RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT = 12;
+  RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR = 13;
+  RUNTIME_DRAFT_KIND_TERMINATION = 14;
+}
+
+enum DurableEventDisposition {
+  DURABLE_EVENT_DISPOSITION_UNSPECIFIED = 0;
+  DURABLE_EVENT_DISPOSITION_EXISTING = 1;
+  DURABLE_EVENT_DISPOSITION_CREATED = 2;
+}
+
+enum DurableProjectionDisposition {
+  DURABLE_PROJECTION_DISPOSITION_UNSPECIFIED = 0;
+  DURABLE_PROJECTION_DISPOSITION_CREATED = 1;
+  DURABLE_PROJECTION_DISPOSITION_UPDATED = 2;
+}
+
+enum PrefixConsumptionDisposition {
+  PREFIX_CONSUMPTION_DISPOSITION_UNSPECIFIED = 0;
+  PREFIX_CONSUMPTION_DISPOSITION_CONSUMED = 1;
+}
+
+enum ReceiptApplicationDisposition {
+  RECEIPT_APPLICATION_DISPOSITION_UNSPECIFIED = 0;
+  RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY = 1;
+  RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY = 2;
+}
+
+enum RequestRescheduleDisposition {
+  REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED = 0;
+  REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED = 1;
+  REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH = 2;
+  REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED = 3;
+}
+
+enum ChildLifecycleDisposition {
+  CHILD_LIFECYCLE_DISPOSITION_UNSPECIFIED = 0;
+  CHILD_LIFECYCLE_DISPOSITION_CLOSED = 1;
+  CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED = 2;
+  CHILD_LIFECYCLE_DISPOSITION_RESUMED = 3;
+  CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE = 4;
+  CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED = 5;
+  CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED = 6;
+}
+
+message RuntimeMessageDraft {
+  string runtime_local_id = 1;
+  string source_kind = 2;
+  string source_id = 3;
+  string source_event_id = 4;
+  RuntimeDraftKind draft_kind = 5;
+  int32 ordinal = 6;
+  string message_info_json = 7;
+  repeated RuntimePartDraft parts = 8;
+}
+
+message RuntimePartDraft {
+  string runtime_local_part_id = 1;
+  string part_kind = 2;
+  int32 ordinal = 3;
+  string part_json = 4;
+}
+
+message DurableEventStamp {
+  string session_thread_id = 1;
+  string source_event_id = 2;
+  string event_id = 3;
+  int64 event_sequence = 4;
+  DurableEventDisposition disposition = 5;
+}
+
+message DurablePartStamp {
+  string runtime_local_part_id = 1;
+  string part_id = 2;
+  string message_id = 3;
+  int64 part_sequence = 4;
+  string created_at = 5;
+  string updated_at = 6;
+  DurableProjectionDisposition disposition = 7;
+}
+
+message DurableMessageStamp {
+  string runtime_local_id = 1;
+  string session_thread_id = 2;
+  string owning_event_id = 3;
+  string message_id = 4;
+  int64 message_sequence = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  DurableProjectionDisposition disposition = 8;
+  repeated DurablePartStamp parts = 9;
+}
+
+message PrefixConsumptionStamp {
+  string child_thread_id = 1;
+  string parent_boundary_event_id = 2;
+  string checkpoint_message_id = 3;
+  PrefixConsumptionDisposition disposition = 4;
+}
+
+message PrefixConsumptionDraft {
+  string child_thread_id = 1;
+  string parent_boundary_event_id = 2;
+  string checkpoint_runtime_local_id = 3;
+}
+
+message RequestRescheduleStamp {
+  RequestRescheduleDisposition disposition = 1;
+  string request_kind = 2;
+  int64 attempt = 3;
+  string effective_deadline = 4;
+}
+
+message ChildLifecycleStamp {
+  string child_thread_id = 1;
+  ChildLifecycleDisposition disposition = 2;
+  string effective_at = 3;
+}
+
+message IdleCloseoutStamp {
+  string durable_turn_id = 1;
+  string idle_event_id = 2;
+  int64 idle_event_sequence = 3;
+  string committed_idle_at = 4;
+}
+
+message DeclarationReceipt {
+  string session_thread_id = 1;
+  string operation_kind = 2;
+  string source_kind = 3;
+  string source_id = 4;
+  repeated DurableEventStamp events = 5;
+  repeated DurableMessageStamp messages = 6;
+  repeated string pending_attachment_delta_json = 7;
+  repeated string pending_tool_delta_json = 8;
+  repeated PrefixConsumptionStamp prefix_consumptions = 9;
+  string declaration_digest = 10;
+  RequestRescheduleStamp request_reschedule = 11;
+  repeated ChildLifecycleStamp child_lifecycle = 12;
+  IdleCloseoutStamp idle_closeout = 14;
+  optional int64 compacted_through_message_sequence = 15;
+}
+
+message DeclarationResponse {
+  repeated DeclarationReceipt receipts = 1;
+  string observed_binding_id = 2;
+  int64 observed_binding_generation = 3;
+  ReceiptApplicationDisposition application_disposition = 4;
 }
 
 message RuntimeBindingRef {
@@ -66,7 +230,8 @@ message LoadContextRequest {
   string runtime_input_id = 2;
   int64 sequence_from = 3;
   int64 sequence_to = 4;
-  string agent_mail_source_thread_id = 5;
+  reserved 5;
+  reserved "agent_mail_source_thread_id";
 }
 
 message LoadContextResponse {
@@ -84,19 +249,27 @@ message RefreshRuntimeBindingTokenResponse {
 }
 
 message CommitInputsRequest {
+  reserved 6, 8, 9;
+  reserved "hot_context_patch_json", "inter_agent_message_json", "approval_review_json";
   RuntimeScope scope = 1;
   string runtime_input_id = 2;
   repeated string event_ids = 3;
   int64 sequence_from = 4;
   int64 sequence_to = 5;
-  string hot_context_patch_json = 6;
   string input_kind = 7;
-  string inter_agent_message_json = 8;
-  string approval_review_json = 9;
+  repeated RuntimeMessageDraft drafts = 10;
+  repeated PendingToolCancellationDraft pending_tool_cancellations = 11;
+  repeated string sandbox_execution_tool_use_event_ids = 12;
 }
 
 message CommitInputsResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
+}
+
+message PendingToolCancellationDraft {
+  string tool_use_event_id = 1;
+  string runtime_local_id = 2;
 }
 
 message CommitTaskNotificationResultRequest {
@@ -104,11 +277,12 @@ message CommitTaskNotificationResultRequest {
   string runtime_input_id = 2;
   string task_id = 3;
   string result_json = 4;
+  RuntimeMessageDraft draft = 5;
 }
 
 message CommitTaskNotificationResultResponse {
   BridgeWriteAck ack = 1;
-  string runtime_message_json = 2;
+  DeclarationResponse declaration = 3;
 }
 
 message McpManifestChangedRequest {
@@ -134,6 +308,8 @@ message ClaimMcpToolResultRequest {
 message ClaimMcpToolResultResponse {
   BridgeWriteAck ack = 1;
   string result_json = 2;
+  optional string materialization_handle = 3;
+  DeclarationResponse declaration = 4;
 }
 
 message CommitMcpToolResultRequest {
@@ -156,6 +332,8 @@ message McpInlineMedia {
 message CommitMcpToolResultResponse {
   BridgeWriteAck ack = 1;
   string refs_only_result_json = 2;
+  optional string materialization_handle = 3;
+  DeclarationResponse declaration = 4;
 }
 
 message CommitInternalToolRepairRequest {
@@ -163,21 +341,26 @@ message CommitInternalToolRepairRequest {
   string model_request_id = 2;
   string model_tool_call_id = 3;
   string tool_name = 4;
-  string data_json = 5;
+  repeated RuntimeMessageDraft drafts = 5;
 }
 
 message CommitInternalToolRepairResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message CommitRuntimeTerminationRequest {
   RuntimeScope scope = 1;
   string runtime_write_id = 2;
   string failure_json = 3;
+  repeated RuntimeMessageDraft drafts = 4;
+  repeated PendingToolCancellationDraft pending_tool_cancellations = 5;
+  repeated string sandbox_execution_tool_use_event_ids = 6;
 }
 
 message CommitRuntimeTerminationResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message TransientAttachmentRef {
@@ -269,10 +452,13 @@ message WriteEventRequest {
   string model_request_id = 3;
   string event_type = 4;
   string payload_json = 5;
-  string projection_json = 6;
+  reserved 6;
   bool session_visible = 7;
   repeated StableReasoningPart stable_reasoning_parts = 8;
   ServerToolUseUsage server_tool_use = 9;
+  repeated RuntimeMessageDraft drafts = 10;
+  optional string mcp_materialization_handle = 11;
+  optional string sandbox_result_digest = 12;
 }
 
 message ServerToolUseUsage {
@@ -284,6 +470,7 @@ message WriteEventResponse {
   BridgeWriteAck ack = 1;
   string event_id = 2;
   int64 sequence = 3;
+  DeclarationResponse declaration = 4;
 }
 
 message WriteRequestEndRequest {
@@ -300,6 +487,20 @@ message WriteRequestEndRequest {
   RequestEndReschedule reschedule = 11;
   repeated StableReasoningPart stable_reasoning_parts = 12;
   repeated FileAttachmentPair consumed_file_attachments = 13;
+  repeated RuntimeMessageDraft drafts = 14;
+  PrefixConsumptionDraft prefix_consumption = 15;
+  optional int64 compacted_through_message_sequence = 16;
+  string compaction_event_payload_json = 17;
+  RequestEndInterruptSettlement interrupt_settlement = 18;
+}
+
+message RequestEndInterruptSettlement {
+  string runtime_input_id = 1;
+  repeated string event_ids = 2;
+  int64 sequence_from = 3;
+  int64 sequence_to = 4;
+  repeated PendingToolCancellationDraft pending_tool_cancellations = 5;
+  repeated string sandbox_execution_tool_use_event_ids = 6;
 }
 
 message StableReasoningPart {
@@ -313,7 +514,8 @@ message StableReasoningPart {
 
 message WriteRequestEndResponse {
   BridgeWriteAck ack = 1;
-  RequestEndRescheduleDisposition reschedule_disposition = 2;
+  reserved 2;
+  DeclarationResponse declaration = 3;
 }
 
 message RequestEndReschedule {
@@ -331,13 +533,15 @@ message RequestEndRescheduleDisposition {
 
 message FinishIdleRequest {
   RuntimeScope scope = 1;
-  string runtime_write_id = 2;
-  string idle_since = 3;
+  reserved 2, 3;
   string stop_reason_json = 4;
+  string durable_turn_id = 5;
+  repeated RuntimeMessageDraft drafts = 6;
 }
 
 message FinishIdleResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message CreateChildThreadRequest {
@@ -350,7 +554,7 @@ message CreateChildThreadRequest {
   string agent_type = 7;
   string source_tool_use_event_id = 8;
   string fork_turns = 9;
-  string fork_seed_json = 10;
+  string thread_context_prefix_json = 10;
   bool is_trunk = 11;
   string reviewer_review_id = 12;
 }
@@ -388,52 +592,82 @@ message ResolveInterAgentDeliveryRequest {
 
 message ResolveInterAgentDeliveryResponse {
   BridgeWriteAck ack = 1;
-  bool sent_exists = 2;
-  bool received_exists = 3;
-  bool child_receivable = 4;
-  string child_thread_json = 5;
+  reserved 2 to 5;
+  reserved "sent_exists", "received_exists", "child_receivable", "child_thread_json";
+  string delivery_id = 6;
+  string source_thread_id = 7;
+  string target_thread_id = 8;
+  string source_tool_use_event_id = 9;
+  string received_event_id = 10;
+  int64 received_sequence = 11;
+  string message_json = 12;
 }
 
 message MarkChildThreadClosedRequest {
   RuntimeScope scope = 1;
   string child_thread_id = 2;
   string closed_at = 3;
+  ChildLifecycleSource source = 4;
 }
 
 message MarkChildThreadClosedResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
 message MarkChildThreadActiveRequest {
   RuntimeScope scope = 1;
   string child_thread_id = 2;
   string active_at = 3;
+  ChildLifecycleSource source = 4;
 }
 
 message MarkChildThreadActiveResponse {
   BridgeWriteAck ack = 1;
+  DeclarationResponse declaration = 2;
 }
 
-message RunToolRequest {
+message ChildLifecycleSource {
+  oneof identity {
+    string source_tool_use_event_id = 1;
+    string reviewer_review_id = 2;
+  }
+}
+
+message AcceptSandboxExecutionRequest {
   RuntimeScope scope = 1;
   string tool_use_event_id = 2;
   string normalized_input_hash = 3;
   string tool_name = 4;
   string input_json = 5;
-  string approval_decision_json = 6;
+  reserved 6;
+  string model_tool_call_id = 7;
 }
 
-message RunToolResponse {
+message AcceptSandboxExecutionResponse {
   BridgeWriteAck ack = 1;
-  string result_json = 2;
-  bool background_task_started = 3;
-  string task_id = 4;
+}
+
+message AwaitSandboxExecutionRequest {
+  RuntimeScope scope = 1;
+  string tool_use_event_id = 2;
+  string normalized_input_hash = 3;
+  string tool_name = 4;
+  string input_json = 5;
+  reserved 6;
+  string model_tool_call_id = 7;
+}
+
+message AwaitSandboxExecutionResponse {
+  string result_json = 1;
+  bool background_task_started = 2;
+  string task_id = 3;
+  string result_digest = 4;
 }
 
 message ReadCommandResultRequest {
   RuntimeScope scope = 1;
   string task_id = 2;
-  bool defer_terminal_settlement = 3;
   int32 max_output_tokens = 4;
   string tool_use_event_id = 5;
 }

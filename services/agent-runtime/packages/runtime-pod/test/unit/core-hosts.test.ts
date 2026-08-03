@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { status } from "@grpc/grpc-js";
 import { Stream } from "effect";
-import { RuntimeMessageStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeInternalToolRepairStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
-  RuntimeMessageInfo,
-  RuntimeMessageStoreOperationControls,
-  RuntimePart,
   SessionEvent,
+  SessionEventEnvelope,
+  SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
@@ -15,10 +16,19 @@ import {
   buildCoreHostsUserMessage as userMessage,
   buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
   buildCoreHostsBridgeRuntimeMessage as bridgeRuntimeMessage,
+  buildRuntimeControlCommitResult,
 } from "../../../core/test/unit/runtime-message-builders.js";
+import { acceptedInputReceipt } from "../../../core/test/unit/runtime-declaration-fixtures.js";
+
+const emptyColdCoverage = {
+  pendingToolIds: [],
+  pendingSandboxExecutionIds: [],
+  pendingAttachmentIdentities: [],
+  undeliveredMailDeliveryIds: [],
+} as const;
 
 describe("Runtime core host production assembly", () => {
-  test("SessionRunHost and SessionManager keep command wakeup and cleanup local to Runtime Pod hot state", async () => {
+  test("resident threads admit stored completion envelopes through the local command channel", async () => {
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
@@ -27,237 +37,103 @@ describe("Runtime core host production assembly", () => {
     try {
       const accepted = await hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_1"));
       expect(accepted).toMatchObject({ ok: true, sessionId: "sesn_1" });
+      const mail = await hosts.commandRunHost.handleAgentMail?.({
+        ...commandScope("sesn_1"),
+        runtimeInputId: "agent_mail:delivery_warm_push",
+        eventIds: ["sevt_received_warm_push"],
+        sequenceFrom: 2,
+        sequenceTo: 2,
+        deliveryId: "delivery_warm_push",
+        sourceThreadId: "thrd_child",
+        sourceToolUseEventId: "sevt_child_spawn",
+        message: bridgeRuntimeMessage("sesn_1", "child result"),
+      });
+      expect(mail).toMatchObject({ ok: true, sessionId: "sesn_1", applied: true });
 
       const cleanup = await waitForCleanup(hosts.cleanupRunHost, "sesn_1");
-      expect(cleanup).toEqual({ ok: true, sessionId: "sesn_1", cleaned: true });
+      expect(cleanup).toMatchObject({ ok: true, sessionId: "sesn_1" });
     } finally {
       await hosts.close();
     }
   });
 
-  test("concurrent cold completion pulls both return the same durable envelope", async () => {
-    let commitAttempts = 0;
-    let durableReceipt = false;
-    let durableReceiptWrites = 0;
-    const loadFilters: Array<string | undefined> = [];
-    const sessionId = "sesn_cold_pull_race";
-    const childId = "thrd_cold_pull_child";
-    const message = bridgeRuntimeMessage(
-      sessionId,
-      "Message Type: FINAL_ANSWER\nTask name: main\nSender: child\nPayload:\nchild result",
-    );
-    const mail = {
-      deliveryId: "delivery_cold_pull",
-      sourceThreadId: childId,
-      sourceToolUseEventId: "sevt_cold_pull_spawn",
-      message,
-    };
-    const context = {
-      messages: [],
-      runtimeBindingToken: "runtime-binding-token-pull",
-    };
+  test("cold installation resolves pending mail in sent order before the triggering input", async () => {
+    const observations: string[] = [];
+    const descriptors = [
+      { deliveryId: "delivery_cold_1", sourceThreadId: "thrd_child_1", sourceToolUseEventId: "sevt_child_1" },
+      { deliveryId: "delivery_cold_2", sourceThreadId: "thrd_child_2", sourceToolUseEventId: "sevt_child_2" },
+    ] as const;
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
       ...testCoreDependencies({
         contextLoader: {
-          loadThreadContext: async (_command, options) => {
-            loadFilters.push(options?.agentMailSourceThreadId);
-            return {
-              ...context,
-              pendingAgentMail: options?.agentMailSourceThreadId !== undefined || !durableReceipt ? [mail] : [],
-            };
-          },
-          commitAcceptedInput: async (_input, options) => {
-            commitAttempts += 1;
-            expect(options).toEqual({ registerScope: false, hydrateContext: false });
-            const inputDisposition = durableReceipt ? "duplicate" as const : "committed" as const;
-            if (!durableReceipt) {
-              durableReceipt = true;
-              durableReceiptWrites += 1;
-            }
-            return {
-              type: "receipt" as const,
-              inputDisposition,
-            };
-          },
-        },
-      }),
-    });
-    try {
-      const scope = commandScope(sessionId);
-      const [first, second] = await Promise.all([
-        hosts.subAgentRunHost.pullAgentMail?.(scope, childId),
-        hosts.subAgentRunHost.pullAgentMail?.(scope, childId),
-      ]);
-      expect([first, second]).toEqual([
-        { deliveryId: "delivery_cold_pull", finalMessage: "Message Type: FINAL_ANSWER\nTask name: main\nSender: child\nPayload:\nchild result" },
-        { deliveryId: "delivery_cold_pull", finalMessage: "Message Type: FINAL_ANSWER\nTask name: main\nSender: child\nPayload:\nchild result" },
-      ]);
-      expect(commitAttempts).toBe(2);
-      expect(durableReceiptWrites).toBe(1);
-
-      expect(await hosts.commandRunHost.handleAgentMail?.({
-        ...scope,
-        runtimeInputId: "agent_mail:delivery_cold_pull",
-      })).toEqual({ ok: true, sessionId, applied: false });
-      expect(loadFilters).toEqual([childId, childId, undefined]);
-      expect(commitAttempts).toBe(2);
-    } finally {
-      await hosts.close();
-    }
-  });
-
-  test("pull retry re-reads and re-presents after the durable receipt response is lost", async () => {
-    let commitAttempts = 0;
-    let durableReceipt = false;
-    let durableReceiptWrites = 0;
-    const loadFilters: Array<string | undefined> = [];
-    const sessionId = "sesn_cold_pull_response_lost";
-    const childId = "thrd_cold_pull_response_lost_child";
-    const finalMessage = "Message Type: FINAL_ANSWER\nTask name: main\nSender: child\nPayload:\nresponse survived";
-    const mail = {
-      deliveryId: "delivery_cold_pull_response_lost",
-      sourceThreadId: childId,
-      sourceToolUseEventId: "sevt_cold_pull_response_lost_spawn",
-      message: bridgeRuntimeMessage(sessionId, finalMessage),
-    };
-    const hosts = await buildRuntimeCoreHosts({
-      maxLocalSessions: 4,
-      now: () => "2026-06-16T00:00:00.000Z",
-      ...testCoreDependencies({
-        contextLoader: {
-          loadThreadContext: async (_command, options) => {
-            loadFilters.push(options?.agentMailSourceThreadId);
+          loadThreadContext: async () => {
+            observations.push("load");
             return {
               messages: [],
-              runtimeBindingToken: "runtime-binding-token-pull-response-lost",
-              pendingAgentMail: options?.agentMailSourceThreadId === childId || !durableReceipt ? [mail] : [],
+              thread: {
+                role: "main",
+                visibility: "public",
+                agentType: "general",
+                status: "idle",
+              },
+              runtimeBindingToken: "runtime-binding-token-cold-mail",
+              pendingAgentMail: descriptors,
+              coldCoverage: {
+                ...emptyColdCoverage,
+                undeliveredMailDeliveryIds: descriptors.map((mail) => mail.deliveryId),
+              },
             };
           },
-          commitAcceptedInput: async (_input, options) => {
-            commitAttempts += 1;
-            expect(options).toEqual({ registerScope: false, hydrateContext: false });
-            if (!durableReceipt) {
-              durableReceipt = true;
-              durableReceiptWrites += 1;
-              throw new Error("receipt response lost");
+          resolveAgentMail: async (command, childThreadId, deliveryId) => {
+            observations.push(`resolve:${deliveryId}`);
+            const index = descriptors.findIndex((mail) =>
+              mail.deliveryId === deliveryId && mail.sourceThreadId === childThreadId
+            );
+            if (index < 0) {
+              throw new Error("unexpected cold agent-mail descriptor");
             }
+            const descriptor = descriptors[index]!;
             return {
-              type: "receipt" as const,
-              inputDisposition: "duplicate" as const,
+              ...descriptor,
+              targetThreadId: command.sessionThreadId,
+              receivedEventId: `sevt_received_${index + 1}`,
+              receivedSequence: index + 10,
+              message: bridgeRuntimeMessage(command.sessionId, `child result ${index + 1}`),
+              publicMessageJson: publicAgentMailJSON(
+                bridgeRuntimeMessage(command.sessionId, `child result ${index + 1}`),
+              ),
             };
+          },
+          commitAcceptedInput: async (input) => {
+            observations.push(`commit:${input.runtimeInputId}`);
+            return acceptedInputReceipt(input);
           },
         },
       }),
     });
     try {
-      const scope = commandScope(sessionId);
-      await expect(hosts.subAgentRunHost.pullAgentMail?.(scope, childId)).rejects.toThrow("receipt response lost");
-
-      expect(await hosts.subAgentRunHost.pullAgentMail?.(scope, childId)).toEqual({
-        deliveryId: "delivery_cold_pull_response_lost",
-        finalMessage,
+      expect(await hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_mail"))).toMatchObject({
+        ok: true,
+        sessionId: "sesn_cold_mail",
       });
-      expect(loadFilters).toEqual([childId, childId]);
-      expect(commitAttempts).toBe(2);
-      expect(durableReceiptWrites).toBe(1);
+      expect(observations.slice(0, 3)).toEqual([
+        "load",
+        "resolve:delivery_cold_1",
+        "resolve:delivery_cold_2",
+      ]);
     } finally {
       await hosts.close();
     }
   });
 
-  test("cold resume retry installs pending completion mail while an ordinary cold child stays idle", async () => {
-    const sessionId = "sesn_resume_cold_mail";
-    const parentId = "thrd_resume_cold_parent";
-    const childId = "thrd_resume_cold_child";
-    const idleChildId = "thrd_resume_cold_idle_child";
-    let childLoadAttempts = 0;
-    const mail = {
-      deliveryId: "delivery_resume_cold_mail",
-      sourceThreadId: "thrd_resume_cold_grandchild",
-      sourceToolUseEventId: "sevt_resume_cold_spawn",
-      message: bridgeRuntimeMessage(
-        sessionId,
-        "Message Type: FINAL_ANSWER\nTask name: child\nSender: grandchild\nPayload:\nfinished",
-      ),
-    };
-    const hosts = await buildRuntimeCoreHosts({
-      maxLocalSessions: 4,
-      now: () => "2026-06-16T00:00:00.000Z",
-      ...testCoreDependencies({
-        contextLoader: {
-          loadThreadContext: async (command) => {
-            if (command.sessionThreadId === childId) {
-              childLoadAttempts += 1;
-              if (childLoadAttempts === 1) {
-                throw new Error("injected first resume preload failure");
-              }
-              return {
-                messages: [],
-                runtimeBindingToken: "runtime-binding-token-resume-mail",
-                pendingAgentMail: [mail],
-              };
-            }
-            return {
-              messages: [],
-              runtimeBindingToken: "runtime-binding-token-resume-idle",
-              pendingAgentMail: [],
-            };
-          },
-        },
-      }),
-    });
-    const preload = (sessionThreadId: string) => hosts.subAgentRunHost.preloadThread({
-      ...commandScope(sessionId),
-      sessionThreadId,
-      runtimeInputId: `rin_resume_${sessionThreadId}`,
-      thread: {
-        parentThreadId: parentId,
-        role: "subagent" as const,
-        visibility: "public" as const,
-        taskName: sessionThreadId,
-        agentType: "general",
-        status: "idle" as const,
-      },
-    });
-    try {
-      await expect(preload(childId)).rejects.toThrow("injected first resume preload failure");
-      expect(await hosts.subAgentRunHost.inspectThread({
-        ...commandScope(sessionId),
-        sessionThreadId: childId,
-      })).toMatchObject({ ok: true, observed: false });
-
-      expect(await preload(childId)).toMatchObject({ ok: true, applied: true });
-      expect(await hosts.subAgentRunHost.inspectThread({
-        ...commandScope(sessionId),
-        sessionThreadId: childId,
-      })).toMatchObject({ ok: true, observed: true, status: "running" });
-
-      expect(await preload(idleChildId)).toMatchObject({ ok: true, applied: true });
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
-      expect(await hosts.subAgentRunHost.inspectThread({
-        ...commandScope(sessionId),
-        sessionThreadId: idleChildId,
-      })).toMatchObject({ ok: true, observed: true, status: "idle" });
-    } finally {
-      await hosts.close();
-    }
-  });
-
-  test("mail-head commit failure releases hot state and cold preload redelivers the same delivery", async () => {
-    const sessionId = "sesn_mail_commit_failure";
-    const threadId = "thrd_mail_commit_failure_main";
-    let commitAttempts = 0;
-    const mail = {
-      deliveryId: "delivery_mail_commit_failure",
-      sourceThreadId: "thrd_mail_commit_failure_child",
-      sourceToolUseEventId: "sevt_mail_commit_failure_spawn",
-      message: bridgeRuntimeMessage(
-        sessionId,
-        "Message Type: FINAL_ANSWER\nTask name: main\nSender: child\nPayload:\nretry me",
-      ),
-    };
+  test("cold child installation resolves a direct instruction under its parent scope", async () => {
+    const observations: string[] = [];
+    const deliveryId = "delivery_cold_direct";
+    const parentThreadId = "thrd_cold_direct_parent";
+    const childThreadId = "thrd_1";
+    const message = bridgeRuntimeMessage("sesn_cold_direct", "parent instruction");
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
@@ -265,143 +141,243 @@ describe("Runtime core host production assembly", () => {
         contextLoader: {
           loadThreadContext: async () => ({
             messages: [],
-            runtimeBindingToken: "runtime-binding-token-mail-failure",
-            pendingAgentMail: [mail],
+            thread: {
+              parentThreadId,
+              role: "subagent",
+              visibility: "public",
+              taskName: "child",
+              agentType: "general",
+              status: "idle",
+            },
+            runtimeBindingToken: "runtime-binding-token-cold-direct",
+            pendingAgentMail: [{
+              deliveryId,
+              sourceThreadId: parentThreadId,
+              sourceToolUseEventId: "sevt_cold_direct_source",
+            }],
+            coldCoverage: {
+              ...emptyColdCoverage,
+              undeliveredMailDeliveryIds: [deliveryId],
+            },
           }),
-          commitAcceptedInput: async (input) => {
-            commitAttempts += 1;
-            if (commitAttempts === 1) {
-              throw new Error("injected mail receipt persistence failure");
+          resolveAgentMail: async (command, peerThreadId, requestedDeliveryId) => {
+            observations.push(`resolve:${command.sessionThreadId}:${peerThreadId}:${requestedDeliveryId}`);
+            if (
+              command.sessionThreadId !== parentThreadId ||
+              peerThreadId !== childThreadId ||
+              requestedDeliveryId !== deliveryId
+            ) {
+              throw new Error("cold direct resolver orientation is invalid");
             }
             return {
-              type: "context" as const,
-              messages: [input.kind === "inter_agent_message" ? input.message : mail.message],
-              runtimeBindingToken: "runtime-binding-token-mail-failure",
-              inputDisposition: "committed" as const,
+              deliveryId,
+              sourceThreadId: parentThreadId,
+              sourceToolUseEventId: "sevt_cold_direct_source",
+              targetThreadId: childThreadId,
+              receivedEventId: "sevt_cold_direct_received",
+              receivedSequence: 7,
+              message,
+              publicMessageJson: publicAgentMailJSON(message),
             };
           },
+          commitAcceptedInput: async (input) => acceptedInputReceipt(input),
         },
       }),
     });
-    const preload = () => hosts.subAgentRunHost.preloadThread({
-      ...commandScope(sessionId),
-      sessionThreadId: threadId,
-      runtimeInputId: `rin_mail_commit_failure_${commitAttempts}`,
-      thread: {
-        role: "main" as const,
-        visibility: "public" as const,
-        agentType: "general",
-        status: "idle" as const,
-      },
-    });
     try {
-      expect(await preload()).toMatchObject({ ok: true, applied: true });
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const inspected = await hosts.subAgentRunHost.inspectThread({
-          ...commandScope(sessionId),
-          sessionThreadId: threadId,
-        });
-        if (inspected.ok && !inspected.observed) {
-          break;
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 1));
-      }
-      expect(await hosts.subAgentRunHost.inspectThread({
-        ...commandScope(sessionId),
-        sessionThreadId: threadId,
-      })).toMatchObject({ ok: true, observed: false });
-      expect(commitAttempts).toBe(1);
-
-      expect(await preload()).toMatchObject({ ok: true, applied: true });
-      for (let attempt = 0; attempt < 100 && commitAttempts < 2; attempt += 1) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 1));
-      }
-      expect(commitAttempts).toBe(2);
-      expect(await hosts.subAgentRunHost.inspectThread({
-        ...commandScope(sessionId),
-        sessionThreadId: threadId,
-      })).toMatchObject({ ok: true, observed: true });
+      expect(await hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_direct"))).toMatchObject({
+        ok: true,
+        sessionId: "sesn_cold_direct",
+      });
+      expect(observations).toEqual([
+        `resolve:${parentThreadId}:${childThreadId}:${deliveryId}`,
+      ]);
     } finally {
       await hosts.close();
     }
   });
 
-  test("agent mail retries when its inspected hot thread is released during context load", async () => {
-    const sessionId = "sesn_agent_mail_release_race";
-    const childId = "thrd_agent_mail_release_child";
-    let loadCalls = 0;
-    let continueAgentMailLoad: (() => void) | undefined;
-    let markAgentMailLoadStarted: (() => void) | undefined;
-    const agentMailLoadStarted = new Promise<void>((resolve) => {
-      markAgentMailLoadStarted = resolve;
+  test("cold mail fails before resolution when durable thread lineage is absent", async () => {
+    let resolveCalls = 0;
+    const message = bridgeRuntimeMessage("sesn_cold_mail_no_lineage", "parent instruction");
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            runtimeBindingToken: "runtime-binding-token-cold-no-lineage",
+            pendingAgentMail: [{
+              deliveryId: "delivery_cold_no_lineage",
+              sourceThreadId: "thrd_parent",
+              sourceToolUseEventId: "sevt_cold_no_lineage_source",
+            }],
+            coldCoverage: {
+              ...emptyColdCoverage,
+              undeliveredMailDeliveryIds: ["delivery_cold_no_lineage"],
+            },
+          }),
+          resolveAgentMail: async (command) => {
+            resolveCalls += 1;
+            return {
+              deliveryId: "delivery_cold_no_lineage",
+              sourceThreadId: "thrd_parent",
+              sourceToolUseEventId: "sevt_cold_no_lineage_source",
+              targetThreadId: command.sessionThreadId,
+              receivedEventId: "sevt_cold_no_lineage_received",
+              receivedSequence: 7,
+              message,
+              publicMessageJson: publicAgentMailJSON(message),
+            };
+          },
+        },
+      }),
     });
-    const context = {
-      messages: [],
-      runtimeBindingToken: "runtime-binding-token-release-race",
-      pendingAgentMail: [{
-        deliveryId: "delivery_agent_mail_release_race",
-        sourceThreadId: childId,
-        sourceToolUseEventId: "sevt_agent_mail_release_spawn",
-        message: bridgeRuntimeMessage(
-          sessionId,
-          "Message Type: FINAL_ANSWER\nTask name: main\nSender: child\nPayload:\nchild result",
-        ),
-      }],
-    };
+    try {
+      await expect(
+        hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold_mail_no_lineage")),
+      ).resolves.toMatchObject({ ok: false });
+      expect(resolveCalls).toBe(0);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("cold agent-mail trigger starts the resolver-seeded input instead of ACKing it idle", async () => {
+    const deliveryId = "delivery_cold_trigger";
+    const sourceThreadId = "thrd_cold_trigger_child";
+    const message = bridgeRuntimeMessage("sesn_cold_trigger", "stored completion");
+    const committed = deferred<void>();
+    const commits: string[] = [];
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            thread: {
+              role: "main",
+              visibility: "public",
+              agentType: "general",
+              status: "idle",
+            },
+            runtimeBindingToken: "runtime-binding-token-cold-trigger",
+            pendingAgentMail: [{
+              deliveryId,
+              sourceThreadId,
+              sourceToolUseEventId: "sevt_cold_trigger_source",
+            }],
+            coldCoverage: {
+              ...emptyColdCoverage,
+              undeliveredMailDeliveryIds: [deliveryId],
+            },
+          }),
+          resolveAgentMail: async (command) => ({
+            deliveryId,
+            sourceThreadId,
+            sourceToolUseEventId: "sevt_cold_trigger_source",
+            targetThreadId: command.sessionThreadId,
+            receivedEventId: "sevt_cold_trigger_received",
+            receivedSequence: 9,
+            message,
+            publicMessageJson: publicAgentMailJSON(message),
+          }),
+          commitAcceptedInput: async (input) => {
+            commits.push(input.runtimeInputId);
+            committed.resolve();
+            return acceptedInputReceipt(input);
+          },
+        },
+      }),
+    });
+    try {
+      expect(await hosts.commandRunHost.handleAgentMail?.({
+        ...commandScope("sesn_cold_trigger"),
+        runtimeInputId: `agent_mail:${deliveryId}`,
+        eventIds: ["sevt_cold_trigger_received"],
+        sequenceFrom: 9,
+        sequenceTo: 9,
+        deliveryId,
+        sourceThreadId,
+        sourceToolUseEventId: "sevt_cold_trigger_source",
+        message,
+      })).toMatchObject({ ok: true, applied: true });
+      await committed.promise;
+      expect(commits).toEqual([`agent_mail:${deliveryId}`]);
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("completion pull resolves the stored envelope without loading context", async () => {
+    const observations: string[] = [];
+    const message = bridgeRuntimeMessage("sesn_pull", "stored completion");
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
       now: () => "2026-06-16T00:00:00.000Z",
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async () => {
-            loadCalls += 1;
-            if (loadCalls === 1) {
-              return { messages: [], runtimeBindingToken: context.runtimeBindingToken };
-            }
-            markAgentMailLoadStarted?.();
-            await new Promise<void>((resolve) => {
-              continueAgentMailLoad = resolve;
-            });
-            return context;
+            observations.push("load");
+            return {
+              messages: [],
+              runtimeBindingToken: "runtime-binding-token-pull",
+              coldCoverage: emptyColdCoverage,
+            };
+          },
+          resolveAgentMail: async (command, childThreadId, deliveryId) => {
+            observations.push(`resolve:${childThreadId}:${deliveryId ?? "oldest"}`);
+            return {
+              deliveryId: "delivery_pull",
+              sourceThreadId: childThreadId,
+              sourceToolUseEventId: "sevt_pull",
+              targetThreadId: command.sessionThreadId,
+              receivedEventId: "sevt_received_pull",
+              receivedSequence: 12,
+              message,
+              publicMessageJson: publicAgentMailJSON(message),
+            };
           },
         },
       }),
     });
     try {
-      expect(await hosts.commandRunHost.handleAcceptInput(acceptedInput(sessionId))).toMatchObject({
-        ok: true,
-        sessionId,
+      expect(await hosts.subAgentRunHost.pullAgentMail?.(commandScope("sesn_pull"), "thrd_child")).toEqual({
+        deliveryId: "delivery_pull",
+        finalMessage: "stored completion",
       });
-
-      const mailDelivery = hosts.commandRunHost.handleAgentMail?.({
-        ...commandScope(sessionId),
-        runtimeInputId: "agent_mail:delivery_agent_mail_release_race",
-      });
-      await agentMailLoadStarted;
-      expect(await waitForCleanup(hosts.cleanupRunHost, sessionId)).toEqual({
-        ok: true,
-        sessionId,
-        cleaned: true,
-      });
-      continueAgentMailLoad?.();
-
-      expect(await mailDelivery).toEqual({
-        ok: false,
-        sessionId,
-        reason: "context_load_failed",
-      });
-      expect(await hosts.subAgentRunHost.inspectThread(commandScope(sessionId))).toMatchObject({
-        ok: true,
-        observed: false,
-      });
+      expect(observations).toEqual(["resolve:thrd_child:oldest"]);
     } finally {
-      continueAgentMailLoad?.();
       await hosts.close();
     }
   });
 
-  test("message command cold-load completes before ThreadEntry is inserted into hot state", async () => {
+  test("completion pull returns no message when the durable resolver has no uncommitted mail", async () => {
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          resolveAgentMail: async () => {
+            throw Object.assign(new Error("not found"), { code: status.NOT_FOUND });
+          },
+        },
+      }),
+    });
+    try {
+      await expect(
+        hosts.subAgentRunHost.pullAgentMail?.(commandScope("sesn_pull_empty"), "thrd_child"),
+      ).resolves.toBeUndefined();
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("message command exposes an installing ThreadEntry during its sole cold load", async () => {
     const observations: string[] = [];
+    let loadCount = 0;
     let hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>> | undefined;
     hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -409,12 +385,14 @@ describe("Runtime core host production assembly", () => {
       ...testCoreDependencies({
         contextLoader: {
           loadThreadContext: async (command) => {
+            loadCount += 1;
             observations.push("loadThreadContext");
             const inspected = await hosts?.subAgentRunHost.inspectThread(command);
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [],
               runtimeBindingToken: "runtime-binding-token-cold",
+              coldCoverage: emptyColdCoverage,
             };
           },
         },
@@ -424,15 +402,23 @@ describe("Runtime core host production assembly", () => {
       const accepted = await hosts.commandRunHost.handleAcceptInput(acceptedInput("sesn_cold"));
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold"));
 
-      expect(accepted).toMatchObject({ ok: true, sessionId: "sesn_cold", created: false });
-      expect(observations).toEqual(["loadThreadContext", "observed:false"]);
+      expect(accepted).toMatchObject({ ok: true, sessionId: "sesn_cold", created: true });
+      expect(observations).toEqual(["loadThreadContext", "observed:true"]);
       expect(inspected).toMatchObject({ ok: true, sessionId: "sesn_cold", sessionThreadId: "thrd_1", observed: true });
+      expect(await hosts.commandRunHost.handleAcceptInput({
+        ...acceptedInput("sesn_cold"),
+        runtimeInputId: "rin_warm",
+        eventIds: ["sevt_warm"],
+        sequenceFrom: 2,
+        sequenceTo: 2,
+      })).toMatchObject({ ok: true, sessionId: "sesn_cold" });
+      expect(loadCount).toBe(1);
     } finally {
       await hosts.close();
     }
   });
 
-  test("cold interrupt stays residency-free while message config and task commands join one complete preload", async () => {
+  test("cold interrupt and sibling commands join one complete preload", async () => {
     const loadStarted = deferred<void>();
     const releaseLoad = deferred<void>();
     let loadCount = 0;
@@ -449,30 +435,36 @@ describe("Runtime core host production assembly", () => {
               messages: [],
               runtimeBindingToken: "runtime-binding-token-singleflight",
               backgroundTools: [{ taskId: "task_singleflight", sourceToolUseEventId: "sevt_tool_singleflight" }],
+              coldCoverage: emptyColdCoverage,
             };
           },
         },
       }),
     });
     try {
+      let taskCommitCalls = 0;
       const scope = commandScope("sesn_singleflight");
-      const interrupt = await hosts.commandRunHost.handleInterruptControl("sesn_singleflight", {
+      const interruptCommand = {
         ...scope,
         runtimeInputId: "rin_interrupt_singleflight",
         eventIds: ["sevt_interrupt_singleflight"],
         sequenceFrom: 1,
         sequenceTo: 1,
-      });
-      expect(interrupt).toEqual({ ok: true, sessionId: "sesn_singleflight", created: false, interrupted: false, idleInterrupt: true });
-      expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: false });
-
+      };
+      const interrupt = hosts.commandRunHost.handleInterruptControl(
+        "sesn_singleflight",
+        interruptCommand,
+        async (declaration) => buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration),
+      );
+      await loadStarted.promise;
       const message = hosts.commandRunHost.handleAcceptInput({
         ...acceptedInput("sesn_singleflight"),
         runtimeInputId: "rin_message_singleflight",
       });
-      await loadStarted.promise;
       const config = hosts.commandRunHost.handleRuntimeConfigPatch("sesn_singleflight", {
         ...scope,
+        bindingId: "bind_singleflight_replacement",
+        bindingGeneration: 2,
         runtimeInputId: "rin_config_singleflight",
         generation: 2,
         payloadJson: "{\"config_generation\":2}",
@@ -484,21 +476,28 @@ describe("Runtime core host production assembly", () => {
         sourceToolUseEventId: "sevt_tool_singleflight",
         status: "completed",
         payloadJson: "{\"task_id\":\"task_singleflight\",\"source_tool_use_event_id\":\"sevt_tool_singleflight\",\"status\":\"completed\"}",
-        bridgeProjection: bridgeRuntimeMessage("sesn_singleflight", "task completed"),
+      }, async () => {
+        taskCommitCalls += 1;
+        return {
+          ok: true,
+          committedMessage: bridgeRuntimeMessage("sesn_singleflight", "task completed"),
+        };
       });
       await Promise.resolve();
-      expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: false });
+      expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({ ok: true, observed: true });
 
       releaseLoad.resolve();
-      const [messageResult, configResult, taskResult] = await Promise.all([message, config, task]);
+      const [interruptResult, messageResult, configResult, taskResult] = await Promise.all([interrupt, message, config, task]);
+      expect(interruptResult).toEqual({ ok: true, sessionId: "sesn_singleflight", created: false, interrupted: false, idleInterrupt: true });
       expect(messageResult).toMatchObject({ ok: true, sessionId: "sesn_singleflight" });
       expect(configResult).toEqual({ ok: false, sessionId: "sesn_singleflight", reason: "control_busy" });
       expect(taskResult).toMatchObject({ ok: true, sessionId: "sesn_singleflight", applied: true });
       expect(loadCount).toBe(1);
+      expect(taskCommitCalls).toBe(0);
       expect(await hosts.subAgentRunHost.inspectThread(scope)).toMatchObject({
         ok: true,
         observed: true,
-        messages: expect.arrayContaining([expect.objectContaining({ id: "msg_sesn_singleflight_task_notification" })]),
+        messages: [],
       });
     } finally {
       await hosts.close();
@@ -511,12 +510,19 @@ describe("Runtime core host production assembly", () => {
     const appended: SessionEvent[] = [];
     const terminalResultAppended = deferred<void>();
     const pendingInput = { query: "tetral" };
-    const {
-      providerId: _providerId,
-      modelId: _modelId,
-      ...loadedMessage
-    } = userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello", "receipt-only", "receipt-only");
-    const loadedMessages = [loadedMessage];
+    const loadedMessages = [
+      userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello"),
+      assistantRunningToolMessage(
+        "sesn_cold_confirm",
+        "assistant-cold-confirm",
+        1,
+        "tool-1",
+        "github_search",
+        "sevt_tool_1",
+        pendingInput,
+        { kind: "mcp", mcpServerName: "github" },
+      ),
+    ];
     const replacementScope = {
       ...commandScope("sesn_cold_confirm"),
       bindingId: "bind_2",
@@ -575,6 +581,10 @@ describe("Runtime core host production assembly", () => {
                   expiresAt: "2026-06-16T00:30:00.000Z",
                 },
               ],
+              coldCoverage: {
+                ...emptyColdCoverage,
+                pendingToolIds: ["sevt_tool_1"],
+              },
             };
           },
         },
@@ -584,14 +594,14 @@ describe("Runtime core host production assembly", () => {
           },
           runtimeModel: (session) => runtimeModelForThread(
             session.identity.threadRole,
-            session.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
+            session.configuration.patches().map((patch) => patch.payloadJson),
             { providerId: "anthropic", modelId: "claude-opus-4-8" },
           ),
           runtimePolicy: (session) => {
             const policy = runtimeToolPolicyForThread(
               session.identity.threadRole,
-              session.state.runtimeConfigPatches().map((patch) => patch.payloadJson),
-              session.state.installedBuiltinFamily(),
+              session.configuration.patches().map((patch) => patch.payloadJson),
+              session.configuration.installedBuiltinFamily(),
             );
             if (lookupToolEntry(policy.toolCatalog, "github_search") !== undefined) {
               observations.push("manifest:installed");
@@ -604,10 +614,15 @@ describe("Runtime core host production assembly", () => {
               if (envelope.event.type === "agent.mcp_tool_result") {
                 terminalResultAppended.resolve();
               }
-              return { ok: true, writeId: envelope.writeId, eventId: `evt_${envelope.writeId}`, processedAt: "2026-06-16T00:00:00.000Z" };
+              return successfulEventAppend(envelope);
             },
             writeRequestEnd: async (envelope) => ({ ok: true, writeId: envelope.writeId, eventId: `evt_${envelope.writeId}`, processedAt: "2026-06-16T00:00:00.000Z" }),
-            finishIdle: async (envelope) => ({ ok: true, writeId: envelope.writeId, eventId: `evt_${envelope.writeId}`, processedAt: "2026-06-16T00:00:00.000Z" }),
+            finishIdle: async (envelope) => ({
+              ok: true,
+              writeId: envelope.durableTurnId,
+              eventId: `evt_${envelope.durableTurnId}`,
+              processedAt: "2026-06-16T00:00:00.000Z",
+            }),
           },
           runTool: (request) => {
             observations.push("tool:invoked");
@@ -623,7 +638,7 @@ describe("Runtime core host production assembly", () => {
       }),
     });
     try {
-      const result = await hosts.commandRunHost.handleToolConfirmation("sesn_cold_confirm", {
+      const confirmationCommand = {
         ...replacementScope,
         requestId: "req_confirm_cold",
         runtimeInputId: "rin_confirm_cold",
@@ -633,7 +648,12 @@ describe("Runtime core host production assembly", () => {
         sourceEventId: "sevt_confirm_cold",
         toolUseEventId: "sevt_tool_1",
         decision: "allow",
-      });
+      } as const;
+      const result = await hosts.commandRunHost.handleToolConfirmation(
+        "sesn_cold_confirm",
+        confirmationCommand,
+        async (declaration) => buildRuntimeControlCommitResult(confirmationCommand, "tool_confirmation", declaration),
+      );
 
       expect(result).toMatchObject({ ok: true, sessionId: "sesn_cold_confirm", applied: false });
       await terminalResultAppended.promise;
@@ -658,13 +678,11 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
-  test("tool confirmation cold-loads after a residency-free idle interrupt", async () => {
+  test("cold interrupt installs pending tools before committing their cancellation", async () => {
     const observations: string[] = [];
-    const runToolCalls: string[] = [];
-    const toolExecuted = deferred<void>();
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
-      userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 0, "hello", "fake", "fake-chat"),
+      userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 0, "hello"),
       assistantRunningToolMessage("sesn_interrupt_confirm", "assistant-interrupt-confirm", 1, "tool-1", "Write", "sevt_tool_1", pendingInput),
     ];
 
@@ -678,6 +696,19 @@ describe("Runtime core host production assembly", () => {
             return {
               messages: loadedMessages,
               runtimeBindingToken: "runtime-binding-token-interrupt-confirm",
+              runtimeConfigPatch: {
+                ...command,
+                generation: 3,
+                coldLoad: true,
+                installedBuiltinFamily: "claude",
+                payloadJson: JSON.stringify({
+                  config_generation: 3,
+                  runtime_config: {
+                    agent: { config: { model: "fake/fake-chat" } },
+                    installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+                  },
+                }),
+              },
               pendingToolUses: [
                 {
                   toolUseEventId: "sevt_tool_1",
@@ -691,60 +722,72 @@ describe("Runtime core host production assembly", () => {
                   expiresAt: "2026-06-16T00:30:00.000Z",
                 },
               ],
+              coldCoverage: {
+                ...emptyColdCoverage,
+                pendingToolIds: ["sevt_tool_1"],
+              },
             };
-          },
-        },
-        agentLoop: {
-          providerCallRuntime: {
-            systemInstructions: "cold confirmation system",
-            toolCatalog: createToolCatalog({ family: "claude", configs: [{ name: "Write", enabled: true, permissionPolicy: "always_ask" }] }),
-          },
-          runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
-          runTool: (request) => {
-            runToolCalls.push(`${request.modelRequestId}:${request.modelToolCallId}:${request.toolUseEventId}`);
-            expect(request.input).toEqual(pendingInput);
-            toolExecuted.resolve();
-            return { type: "completed", output: { text: "approved", truncated: false } };
           },
         },
       }),
     });
     try {
-      const interrupt = await hosts.commandRunHost.handleInterruptControl("sesn_interrupt_confirm", {
+      const interruptCommand = {
         ...commandScope("sesn_interrupt_confirm"),
         requestId: "req_interrupt_before_confirm",
         runtimeInputId: "rin_interrupt_before_confirm",
         eventIds: ["sevt_interrupt_before_confirm"],
         sequenceFrom: 2,
         sequenceTo: 2,
-      });
+      };
+      let committedDeclaration: RuntimeControlInputDeclaration | undefined;
+      const interrupt = await hosts.commandRunHost.handleInterruptControl(
+        "sesn_interrupt_confirm",
+        interruptCommand,
+        async (declaration) => {
+          committedDeclaration = declaration;
+          return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+        },
+      );
       const shell = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_interrupt_confirm"));
 
       expect(interrupt).toEqual({ ok: true, sessionId: "sesn_interrupt_confirm", created: false, interrupted: false, idleInterrupt: true });
-      expect(shell).toMatchObject({ ok: true, observed: false });
-
-      const result = await hosts.commandRunHost.handleToolConfirmation("sesn_interrupt_confirm", {
-        ...commandScope("sesn_interrupt_confirm"),
-        requestId: "req_confirm_after_interrupt",
-        runtimeInputId: "rin_confirm_after_interrupt",
-        eventIds: ["sevt_confirm_after_interrupt"],
-        sequenceFrom: 3,
-        sequenceTo: 3,
-        sourceEventId: "sevt_confirm_after_interrupt",
-        toolUseEventId: "sevt_tool_1",
-        decision: "allow",
+      expect(observations).toEqual(["load:rin_interrupt_before_confirm"]);
+      expect(committedDeclaration).toMatchObject({
+        drafts: [{
+          sourceKind: "interrupt_control",
+          sourceId: "rin_interrupt_before_confirm",
+          sourceEventId: "sevt_interrupt_before_confirm",
+          draftKind: "cancellation",
+          parts: [{
+            type: "tool",
+            toolUseEventId: "sevt_tool_1",
+            state: { status: "cancelled" },
+          }],
+        }],
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_tool_1",
+        }],
       });
-
-      expect(result).toMatchObject({ ok: true, sessionId: "sesn_interrupt_confirm", applied: false });
-      expect(observations).toEqual(["load:rin_confirm_after_interrupt"]);
-      await toolExecuted.promise;
-      expect(runToolCalls).toEqual(["mrq_interrupt_confirm:tool-1:sevt_tool_1"]);
+      expect(shell).toMatchObject({
+        ok: true,
+        observed: true,
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            parts: [expect.objectContaining({
+              type: "tool",
+              toolUseEventId: "sevt_tool_1",
+              state: expect.objectContaining({ status: "cancelled" }),
+            })],
+          }),
+        ]),
+      });
     } finally {
       await hosts.close();
     }
   });
 
-  test("runtime config command cold-loads before acknowledging hot install", async () => {
+  test("runtime config acknowledges without creating thread residency", async () => {
     const observations: string[] = [];
     let hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>> | undefined;
     hosts = await buildRuntimeCoreHosts({
@@ -759,11 +802,8 @@ describe("Runtime core host production assembly", () => {
             return {
               messages: [],
               runtimeBindingToken: "runtime-binding-token-config",
+              coldCoverage: emptyColdCoverage,
             };
-          },
-          refreshRuntimeBindingToken: async (identity, options) => {
-            observations.push(`refresh:${identity.sessionThreadId}:${options?.force === true}`);
-            return "runtime-binding-token-after-config";
           },
         },
       }),
@@ -778,9 +818,15 @@ describe("Runtime core host production assembly", () => {
       });
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_config"));
 
-      expect(result).toEqual({ ok: true, sessionId: "sesn_cold_config", created: false, applied: true });
-      expect(observations).toEqual(["load:rin_config_cold", "observed:false", "refresh:thrd_1:true"]);
-      expect(inspected).toMatchObject({ ok: true, observed: true });
+      expect(result).toEqual({
+        ok: true,
+        sessionId: "sesn_cold_config",
+        created: false,
+        applied: false,
+        noResidency: true,
+      });
+      expect(observations).toEqual([]);
+      expect(inspected).toMatchObject({ ok: true, observed: false });
     } finally {
       await hosts?.close();
     }
@@ -788,6 +834,7 @@ describe("Runtime core host production assembly", () => {
 
   test("task notification cold-loads thread context before hot settlement", async () => {
     const observations: string[] = [];
+    const committedMessage = bridgeRuntimeMessage("sesn_cold_task", "task completed");
     let hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>> | undefined;
     hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -799,8 +846,9 @@ describe("Runtime core host production assembly", () => {
             const inspected = await hosts?.subAgentRunHost.inspectThread(command);
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
-              messages: [],
+              messages: [committedMessage],
               runtimeBindingToken: "runtime-binding-token-task",
+              coldCoverage: emptyColdCoverage,
             };
           },
         },
@@ -815,13 +863,12 @@ describe("Runtime core host production assembly", () => {
         sourceToolUseEventId: "sevt_tool_1",
         status: "completed",
         payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
-        bridgeProjection: bridgeRuntimeMessage("sesn_cold_task", "task completed"),
-      });
+      }, async () => ({ ok: true, committedMessage }));
       const inspected = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_cold_task"));
 
-      expect(result).toEqual({ ok: true, sessionId: "sesn_cold_task", created: false, applied: true });
-      expect(observations).toEqual(["load:rin_task_cold", "observed:false"]);
-      expect(inspected).toMatchObject({ ok: true, observed: true });
+      expect(result).toEqual({ ok: true, sessionId: "sesn_cold_task", created: true, applied: true });
+      expect(observations).toEqual(["load:rin_task_cold", "observed:true"]);
+      expect(inspected).toMatchObject({ ok: true, observed: true, messages: [committedMessage] });
     } finally {
       await hosts?.close();
     }
@@ -862,6 +909,7 @@ function commandScope(sessionId: string) {
 
 function acceptedInput(sessionId: string) {
   return {
+    kind: "messages" as const,
     requestId: "req_1",
     workspaceId: "wksp_1",
     sessionId,
@@ -873,7 +921,9 @@ function acceptedInput(sessionId: string) {
     eventIds: ["sevt_1"],
     sequenceFrom: 1,
     sequenceTo: 1,
-    payloadJson: "{}",
+    payloadJson: JSON.stringify({
+      messages: [userMessage(sessionId, "msg_rin_1", 1, "test input")],
+    }),
   };
 }
 
@@ -885,6 +935,18 @@ function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value
   return { promise, resolve };
 }
 
+function publicAgentMailJSON(message: ReturnType<typeof bridgeRuntimeMessage>): string {
+  return JSON.stringify({
+    ...message,
+    content: message.parts.map((part) => {
+      if (part.type !== "text") {
+        throw new Error("agent-mail fixture requires text parts");
+      }
+      return { type: "text", text: part.text };
+    }),
+  });
+}
+
 function testCoreDependencies(
   overrides: {
     readonly contextLoader?: Partial<RuntimeCoreHostsOptions["contextLoader"]>;
@@ -893,23 +955,18 @@ function testCoreDependencies(
 ): Pick<RuntimeCoreHostsOptions, "contextLoader" | "agentLoop"> {
   return {
     contextLoader: {
-      buildContext: async () => [],
-      loadPendingInput: async () => ({ type: "empty" }),
       loadThreadContext: async () => ({
         messages: [],
         runtimeBindingToken: "runtime-binding-token-test",
+        coldCoverage: emptyColdCoverage,
       }),
+      commitAcceptedInput: async (input) => acceptedInputReceipt(input),
       ...overrides.contextLoader,
     },
     agentLoop: {
-      messageStore: new RecordingMessageStore(),
+      internalToolRepairStore: new RecordingMessageStore(),
       sessionEventWriter: {
-        append: async (envelope) => ({
-          ok: true,
-          writeId: envelope.writeId,
-          eventId: `evt_${envelope.writeId}`,
-          processedAt: "2026-06-16T00:00:00.000Z",
-        }),
+        append: async (envelope) => successfulEventAppend(envelope),
         writeRequestEnd: async (envelope) => ({
           ok: true,
           writeId: envelope.writeId,
@@ -918,8 +975,8 @@ function testCoreDependencies(
         }),
         finishIdle: async (envelope) => ({
           ok: true,
-          writeId: envelope.writeId,
-          eventId: `evt_${envelope.writeId}`,
+          writeId: envelope.durableTurnId,
+          eventId: `evt_${envelope.durableTurnId}`,
           processedAt: "2026-06-16T00:00:00.000Z",
         }),
       },
@@ -940,12 +997,62 @@ function testCoreDependencies(
   };
 }
 
-class RecordingMessageStore extends RuntimeMessageStore {
-  protected async writeMessageRecord(message: RuntimeMessageInfo, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-    return { ok: true, messageId: message.id, operation: "writeMessage" };
+class RecordingMessageStore extends RuntimeInternalToolRepairStore {
+  protected async commitInternalToolRepairRecord(): Promise<never> {
+    throw new Error("internal tool repair is not exercised by this host test");
   }
+}
 
-  protected async writePartRecord(part: RuntimePart, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-    return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
-  }
+function successfulEventAppend(envelope: SessionEventEnvelope): SessionEventWriterAppendResult {
+  const committedAt = "2026-06-16T00:00:00.000Z";
+  const eventId = `evt_${envelope.writeId}`;
+  return {
+    ok: true,
+    writeId: envelope.writeId,
+    eventId,
+    processedAt: committedAt,
+    declaration: {
+      applicationDisposition: "current_custody",
+      observedBindingId: envelope.bindingId,
+      observedBindingGeneration: envelope.bindingGeneration,
+      receipt: {
+        sessionThreadId: envelope.sessionThreadId,
+        operationKind: "write_event",
+        sourceKind: envelope.event.type,
+        sourceId: envelope.writeId,
+        declarationDigest: `digest_${envelope.writeId}`,
+        pendingAttachmentDelta: [],
+        pendingToolDelta: [],
+        prefixConsumptions: [],
+
+        childLifecycle: [],
+        events: [{
+          sessionThreadId: envelope.sessionThreadId,
+          sourceEventId: envelope.writeId,
+          eventId,
+          eventSequence: 1,
+          disposition: "created",
+        }],
+        messages: envelope.drafts.map((draft, messageIndex) => ({
+          runtimeLocalId: draft.runtimeLocalId,
+          sessionThreadId: envelope.sessionThreadId,
+          owningEventId: eventId,
+          messageId: `msg_${draft.runtimeLocalId}`,
+          messageSequence: messageIndex + 1,
+          createdAt: committedAt,
+          updatedAt: committedAt,
+          disposition: "created",
+          parts: draft.parts.map((part, partIndex) => ({
+            runtimeLocalPartId: part.runtimeLocalPartId,
+            partId: `part_${part.runtimeLocalPartId}`,
+            messageId: `msg_${draft.runtimeLocalId}`,
+            partSequence: partIndex,
+            createdAt: committedAt,
+            updatedAt: committedAt,
+            disposition: "created",
+          })),
+        })),
+      },
+    },
+  };
 }

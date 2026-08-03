@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -55,8 +58,7 @@ func runTransportAdmissionTraversal(t *testing.T, suffix string, bodyText func(i
 	threadID := "thr_transport_" + suffix
 	bindingID := "bind_transport_" + suffix
 	podUID := "uid-a"
-	preparationID := "prep_transport_" + suffix
-	seedTransportSession(t, adminDB, sessionID, threadID, bindingID, podUID, preparationID)
+	seedTransportSession(t, adminDB, sessionID, threadID, bindingID, podUID)
 
 	eventService := sessionevent.NewService(
 		sessionevent.NewPostgreSQLStore(client),
@@ -183,6 +185,20 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 	if err != nil {
 		return nil, err
 	}
+	var payload struct {
+		Messages []struct {
+			Parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(request.GetPayloadJson()), &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Messages) != 1 || len(payload.Messages[0].Parts) != 1 || payload.Messages[0].Parts[0].Type != "text" {
+		return nil, fmt.Errorf("runtime input payload does not contain one text message")
+	}
 	scope := &bridgev1.RuntimeScope{
 		RequestId:       "req_transport_" + s.suffix,
 		WorkspaceId:     request.GetWorkspaceId(),
@@ -194,13 +210,35 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 			TargetPodUid:      s.podUID,
 		},
 	}
+	runtimeLocalID := transportStableRuntimeID(
+		"runtime_message_draft",
+		request.GetWorkspaceId(),
+		request.GetSessionId(),
+		s.threadID,
+		"messages",
+		request.GetRuntimeInputId(),
+		"user_input",
+		"0",
+	)
 	if _, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
-		Scope:               scope,
-		RuntimeInputId:      request.GetRuntimeInputId(),
-		EventIds:            request.GetEventIds(),
-		SequenceFrom:        request.GetSequenceFrom(),
-		SequenceTo:          request.GetSequenceTo(),
-		HotContextPatchJson: request.GetPayloadJson(),
+		Scope:          scope,
+		RuntimeInputId: request.GetRuntimeInputId(),
+		EventIds:       request.GetEventIds(),
+		SequenceFrom:   request.GetSequenceFrom(),
+		SequenceTo:     request.GetSequenceTo(),
+		Drafts: []*bridgev1.RuntimeMessageDraft{{
+			RuntimeLocalId:  runtimeLocalID,
+			SourceKind:      "messages",
+			SourceId:        request.GetRuntimeInputId(),
+			SourceEventId:   request.GetEventIds()[0],
+			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
+			MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
+			Parts: []*bridgev1.RuntimePartDraft{{
+				RuntimeLocalPartId: transportStableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
+				PartKind:           "text",
+				PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, payload.Messages[0].Parts[0].Text),
+			}},
+		}},
 	}); err != nil {
 		return nil, err
 	}
@@ -228,11 +266,21 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 	return response, nil
 }
 
-func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID string, bindingID string, podUID string, preparationID string) {
+func transportStableRuntimeID(parts ...string) string {
+	hasher := sha256.New()
+	var length [4]byte
+	for _, part := range parts {
+		binary.BigEndian.PutUint32(length[:], uint32(len([]byte(part)))) // #nosec G115 -- test identifiers are bounded below uint32.
+		_, _ = hasher.Write(length[:])
+		_, _ = hasher.Write([]byte(part))
+	}
+	return "stid_" + hex.EncodeToString(hasher.Sum(nil))
+}
+
+func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID string, bindingID string, podUID string) {
 	t.Helper()
 	agentID := "agent_" + sessionID
 	environmentID := "env_" + sessionID
-	sandboxID := "sandbox_" + sessionID
 	statements := []struct {
 		query string
 		args  []any
@@ -244,8 +292,6 @@ func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID s
 		{`INSERT INTO sessions (workspace_id, id, main_thread_id, type, status, lifecycle_state, agent_id, agent_version, environment_id, installed_tools_json, created_at, updated_at) VALUES ('default', $1, $2, 'session', 'idle', 'active', $3, 1, $4, '{"tools":[{"type":"tetral_agent_toolset","family":"claude"}]}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, threadID, agentID, environmentID}},
 		{`INSERT INTO session_threads (workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at) VALUES ('default', $1, $2, 'main', 'public', 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{threadID, sessionID}},
 		{`INSERT INTO session_runtime_status (workspace_id, session_id, status, idle_since, created_at, updated_at) VALUES ('default', $1, 'idle', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID}},
-		{`INSERT INTO session_preparations (workspace_id, session_id, preparation_attempt_id, environment_id, environment_generation, sandbox_id, status, created_at, updated_at, ready_at) VALUES ('default', $1, $2, $3, 1, $4, 'ready', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, preparationID, environmentID, sandboxID}},
-		{`INSERT INTO sandboxes (workspace_id, id, session_id, status, provider, provider_sandbox_id, machine_was_usable, created_at, updated_at, status_refreshed_at) VALUES ('default', $1, $2, 'active', 'tetral', $3, TRUE, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sandboxID, sessionID, "provider_" + sessionID}},
 		{`INSERT INTO session_runtime_bindings (workspace_id, session_id, binding_id, binding_generation, agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid, agent_runtime_pod_ip, bound_at, updated_at) VALUES ('default', $1, $2, 1, 'engine', 'runtime-pod-a', $3, '127.0.0.1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, []any{sessionID, bindingID, podUID}},
 	}
 	for _, statement := range statements {
@@ -272,34 +318,32 @@ func readTransportRuntimeJob(t *testing.T, db *sql.DB, sessionID string) agentru
 		t.Fatalf("read runtime input job: %v", err)
 	}
 	var payload struct {
-		WorkspaceID          string   `json:"workspace_id"`
-		SessionID            string   `json:"session_id"`
-		SessionThreadID      string   `json:"session_thread_id"`
-		RuntimeInputID       string   `json:"runtime_input_id"`
-		EventIDs             []string `json:"event_ids"`
-		SequenceFrom         int64    `json:"sequence_from"`
-		SequenceTo           int64    `json:"sequence_to"`
-		InputKind            string   `json:"input_kind"`
-		PreparationAttemptID string   `json:"preparation_attempt_id"`
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+		InputKind       string   `json:"input_kind"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		t.Fatalf("decode runtime input job: %v", err)
 	}
 	return agentruntimebridge.RuntimeJob{
-		JobID:                jobID,
-		LeaseToken:           "lease_transport",
-		Kind:                 queue.KindRuntimeInput,
-		WorkspaceID:          payload.WorkspaceID,
-		SessionID:            payload.SessionID,
-		SessionThreadID:      payload.SessionThreadID,
-		RuntimeInputID:       payload.RuntimeInputID,
-		PreparationAttemptID: payload.PreparationAttemptID,
-		EventIDs:             payload.EventIDs,
-		SequenceFrom:         payload.SequenceFrom,
-		SequenceTo:           payload.SequenceTo,
-		InputKind:            payload.InputKind,
-		CommandKind:          agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-		PayloadJSON:          payloadJSON,
+		JobID:           jobID,
+		LeaseToken:      "lease_transport",
+		Kind:            queue.KindRuntimeInput,
+		WorkspaceID:     payload.WorkspaceID,
+		SessionID:       payload.SessionID,
+		SessionThreadID: payload.SessionThreadID,
+		RuntimeInputID:  payload.RuntimeInputID,
+		EventIDs:        payload.EventIDs,
+		SequenceFrom:    payload.SequenceFrom,
+		SequenceTo:      payload.SequenceTo,
+		InputKind:       payload.InputKind,
+		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
+		PayloadJSON:     payloadJSON,
 	}
 }
 

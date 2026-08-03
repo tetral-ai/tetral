@@ -4,6 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/gitticket"
@@ -16,37 +19,51 @@ func EnvironmentQueueLeaseDuration(cfg Config) time.Duration {
 	return cfg.LeaseHeartbeatInterval * 4
 }
 
-func SessionPrepareQueueLeaseDuration(cfg Config) time.Duration {
-	return cfg.SessionPrepareLeaseDuration
-}
-
-func NewSandboxLifecycleProvider(cfg Config) (sandbox.LifecycleProvider, error) {
-	switch cfg.SandboxDriver {
-	case driver.DaytonaProviderName:
-		return driver.NewDaytonaLifecycleProvider(cfg.Daytona)
-	default:
-		return nil, &ConfigError{Message: EnvSandboxDriver + " must be daytona"}
+func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client) (*DaytonaAdapter, error) {
+	if client == nil {
+		return nil, &ConfigError{Message: "sandbox database client is required"}
 	}
-}
-
-func SandboxServiceOptions(cfg Config) []sandbox.Option {
-	return []sandbox.Option{
-		sandbox.WithProviderName(internalSandboxProviderName),
-		sandbox.WithStatusFreshnessTTL(cfg.StatusFreshnessWindow),
-		sandbox.WithStaleStartupThreshold(cfg.StatusFreshnessWindow),
-		sandbox.WithCleanupRetryBackoff(cfg.CleanupRetryBackoff),
-		sandbox.WithCleanupLeaseDuration(cfg.CleanupLeaseDuration),
-		sandbox.WithCleanupMaxAttempts(cfg.CleanupMaxAttempts),
+	daytonaClient, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
+		APIKey: cfg.Daytona.DaytonaAPIKey, APIUrl: cfg.Daytona.DaytonaAPIURL, Target: cfg.Daytona.DaytonaTarget,
+	})
+	if err != nil {
+		return nil, err
 	}
+	lifecycle, err := driver.NewDaytonaLifecycleProviderForSDKClient(daytonaClient, cfg.Daytona)
+	if err != nil {
+		return nil, err
+	}
+	helper, err := driver.NewDaytonaHelperExecutorForSDKClient(daytonaClient, cfg.Daytona.CommandTimeout)
+	if err != nil {
+		return nil, err
+	}
+	artifacts := driver.NewDaytonaArtifactBuilderForClient(daytonaClient.Snapshot, cfg.Daytona.ArtifactBaseImage)
+	projection, err := NewDaytonaFileResourceMaterializerFromConfig(ctx, cfg, helper)
+	if err != nil {
+		return nil, err
+	}
+	store := sandbox.NewPostgreSQLStore(client)
+	resources := &DaytonaResourceMaterializer{
+		Projection: projection,
+		Memory: &DaytonaMemoryMaterializer{
+			Reader: store, Locker: store, Materializer: helper,
+		},
+		GitHub: &sandbox.GitHubRepositoryConverger{
+			Rotator: gitticket.NewPostgreSQLStore(client), Materializer: helper,
+			GitProxyHost: cfg.GitProxyHost,
+		},
+	}
+	return &DaytonaAdapter{
+		Lifecycle: lifecycle,
+		Resolver:  lifecycle,
+		Tools:     helper,
+		Resources: resources,
+		Artifacts: artifacts,
+		BlobStore: projection.blob,
+	}, nil
 }
 
-func SandboxServiceOptionsWithDatabase(cfg Config, client *dbconnect.Client, materializer sandbox.GitHubRepositoryMaterializer) []sandbox.Option {
-	options := SandboxServiceOptions(cfg)
-	options = append(options, sandbox.WithGitHubRepositoryPreparation(gitticket.NewPostgreSQLStore(client), materializer, cfg.GitProxyHost))
-	return options
-}
-
-func NewResourceProjectionPreparerFromConfig(ctx context.Context, cfg Config, runner driver.PreparationCommandRunner) (*ResourceProjectionPreparer, error) {
+func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Config, runner driver.DaytonaCommandRunner) (*DaytonaFileResourceMaterializer, error) {
 	blobStore, err := blob.NewS3BlobStore(ctx, &blob.Config{
 		Endpoint:  cfg.BlobEndpoint,
 		Region:    cfg.BlobRegion,
@@ -66,7 +83,7 @@ func NewResourceProjectionPreparerFromConfig(ctx context.Context, cfg Config, ru
 	if err != nil {
 		return nil, err
 	}
-	return NewResourceProjectionPreparer(ResourceProjectionPreparerConfig{
+	return NewDaytonaFileResourceMaterializer(DaytonaFileResourceMaterializerConfig{
 		Blob:                    blobStore,
 		CredentialMinter:        minter,
 		CommandRunner:           runner,
@@ -74,7 +91,7 @@ func NewResourceProjectionPreparerFromConfig(ctx context.Context, cfg Config, ru
 		AccountID:               cfg.R2AccountID,
 		CredentialTTL:           cfg.ResourceCredentialTTL,
 		CredentialRefreshMargin: cfg.ResourceCredentialRefreshMargin,
-		CommandTimeout:          cfg.PreparationCommandTimeout,
+		CommandTimeout:          cfg.ProviderCommandTimeout,
 		RcloneVFSCacheMaxSize:   cfg.RcloneVFSCacheMaxSize,
 		RcloneVFSMinFree:        cfg.RcloneVFSMinFree,
 	})

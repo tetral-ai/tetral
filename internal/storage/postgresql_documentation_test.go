@@ -22,7 +22,7 @@ func TestPostgreSQLMissingConfigMessagesExplainTestPath(t *testing.T) {
 		message string
 	}{
 		{
-			surface: "storage.requirePostgreSQLTestDSN (Unit 1+2 in-package helper)",
+			surface: "storage.requirePostgreSQLTestDSN in-package helper",
 			message: missingPostgreSQLTestDSNHelperMessage(),
 		},
 		{

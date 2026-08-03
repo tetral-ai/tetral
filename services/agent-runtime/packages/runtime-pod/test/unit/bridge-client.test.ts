@@ -2,8 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Metadata, status } from "@grpc/grpc-js";
+import type { CallOptions } from "@grpc/grpc-js";
 import {
   BridgeWriteStatus,
+  ChildLifecycleDisposition,
+  DurableEventDisposition,
+  DurableProjectionDisposition,
+  ReceiptApplicationDisposition,
+  RequestRescheduleDisposition,
+  RuntimeDraftKind,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceClient,
@@ -15,19 +22,47 @@ import type {
   LoadContextRequest,
   MarkChildThreadClosedRequest,
   RefreshRuntimeBindingTokenRequest,
+  ResolveInterAgentDeliveryRequest,
   WriteEventRequest,
   WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
 import { ProviderMetadataSchema } from "@tetral/agent-runtime-core/src/contracts/provider.js";
+import {
+  RuntimeMessageDraftSchema,
+  RuntimeMessageSchema,
+  SessionEventWriterRetryPolicy,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type {
+  RuntimeMessage,
+  RuntimeMessageDraft,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
+import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import type { RuntimeSessionIdentity } from "@tetral/agent-runtime-core/src/session/session.js";
+import {
+  acceptedInputDrafts,
+  runtimeOutputDraft,
+  runtimeWorkingDraftFromDurable,
+} from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { BridgeAPIApprovalReviewerThreadCreator, BridgeAPIContextLoader, BridgeAPIControlInputCommitter, BridgeAPIEventWriter, BridgeAPIInternalToolRepairCommitter } from "../../src/bridge-client.js";
 import {
+  childLifecycleDeclarationDigest,
+  commitInputsDeclarationDigest,
+  finishIdleDeclarationDigest,
+  internalToolRepairDeclarationDigest,
+  runtimeTerminationDeclarationDigest,
+  writeEventDeclarationDigest,
+  writeRequestEndDeclarationDigest,
+} from "../../src/runtime-declaration-wire.js";
+import {
+  buildBridgeClientDurableRuntimeMessage as durableRuntimeMessage,
   buildBridgeClientRuntimeMessage as runtimeMessage,
   buildBridgeClientRuntimeRepairMessage as runtimeRepairMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
+import { createJsonLogger } from "../../src/logger.js";
+import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 
 describe("BridgeAPIContextLoader", () => {
   test("rejects missing message arrays and accepts an explicit empty context", async () => {
@@ -51,6 +86,12 @@ describe("BridgeAPIContextLoader", () => {
     const bridge = new RecordingBridgeClient();
     bridge.loadContextJSON = JSON.stringify({
       messages: [],
+      coldCoverage: {
+        pendingToolIds: [],
+        pendingSandboxExecutionIds: [],
+        pendingAttachmentIdentities: [],
+        undeliveredMailDeliveryIds: [],
+      },
       thread: {
         parentThreadId: null,
         role: "main",
@@ -106,12 +147,9 @@ describe("BridgeAPIContextLoader", () => {
     });
   });
 
-  test("retries stale-generation refresh failures with a bounded policy", async () => {
+  test("classifies a stale-generation refresh as lost Runtime custody", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.refreshErrors.push(
-      Object.assign(new Error("stale binding"), { code: status.FAILED_PRECONDITION }),
-      Object.assign(new Error("stale binding"), { code: status.FAILED_PRECONDITION }),
-    );
+    bridge.refreshErrors.push(Object.assign(new Error("stale binding"), { code: status.FAILED_PRECONDITION }));
     const sleeps: number[] = [];
     const loader = new BridgeAPIContextLoader({
       address: "bridge.test:9090",
@@ -123,56 +161,105 @@ describe("BridgeAPIContextLoader", () => {
       },
     });
 
-    await expect(loader.refreshRuntimeBindingToken(bindingIdentity("opaque-token"), { force: true })).resolves.toBe("runtime-binding-token-refreshed");
-    expect(bridge.refreshRuntimeBindingTokenRequests).toHaveLength(3);
-    expect(sleeps).toEqual([100, 300]);
-  });
-
-  test("stacks short-lived reviewer commit scopes without replacing the durable active input", () => {
-    const loader = new BridgeAPIContextLoader({
-      address: "bridge.test:9090",
-      tokenPath: "/var/run/token",
-      client: new RecordingBridgeClient().client(),
-      metadataFactory: async () => new Metadata(),
+    await expect(loader.refreshRuntimeBindingToken(bindingIdentity("opaque-token"), { force: true })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "superseded",
+      retryable: false,
     });
-    const durable: RuntimeAcceptedInputState = {
-      ...control("thr_reviewer", "rin_durable", 1),
-      kind: "messages",
-      payloadJson: "{}",
-    };
-    const first: RuntimeAcceptedInputState = {
-      ...control("thr_reviewer", "rin_first_review", 2),
-      kind: "messages",
-      payloadJson: "{}",
-    };
-    const second: RuntimeAcceptedInputState = {
-      ...control("thr_reviewer", "rin_second_review", 3),
-      kind: "messages",
-      payloadJson: "{}",
-    };
-    loader.registerAcceptedInput(durable);
-    const unregisterFirst = loader.registerScopedAcceptedInput(first);
-    const unregisterSecond = loader.registerScopedAcceptedInput(second);
-
-    expect(loader.acceptedInputForThread("sesn_1", "thr_reviewer")?.runtimeInputId).toBe("rin_second_review");
-    unregisterFirst();
-    expect(loader.acceptedInputForThread("sesn_1", "thr_reviewer")?.runtimeInputId).toBe("rin_second_review");
-    unregisterSecond();
-    expect(loader.acceptedInputForThread("sesn_1", "thr_reviewer")?.runtimeInputId).toBe("rin_durable");
+    expect(bridge.refreshRuntimeBindingTokenRequests).toHaveLength(1);
+    expect(sleeps).toEqual([]);
   });
 
-  test("commits accepted input by thread and preserves inter-agent delivery payloads", async () => {
+  test("resolves the exact public agent-mail envelope and rejects derived-content drift", async () => {
     const bridge = new RecordingBridgeClient();
+    const storedMessage = runtimeMessage("msg_agent_mail_resolved", "stored completion");
+    bridge.resolveInterAgentDeliveryMessageJSON = JSON.stringify({
+      ...storedMessage,
+      content: [{ type: "text", text: "stored completion" }],
+    });
     const loader = new BridgeAPIContextLoader({
       address: "bridge.test:9090",
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
     });
+
+    await expect(loader.resolveAgentMail(
+      control("thr_parent", "rin_agent_mail_resolve", 4),
+      "thr_child",
+      "delivery_resolved",
+    )).resolves.toEqual({
+      deliveryId: "delivery_resolved",
+      sourceThreadId: "thr_parent",
+      targetThreadId: "thr_child",
+      sourceToolUseEventId: "sevt_agent_mail_source",
+      receivedEventId: "sevt_agent_mail_received",
+      receivedSequence: 8,
+      message: storedMessage,
+      publicMessageJson: bridge.resolveInterAgentDeliveryMessageJSON,
+    });
+    expect(bridge.resolveInterAgentDeliveryRequests).toEqual([
+      expect.objectContaining({
+        childThreadId: "thr_child",
+        deliveryId: "delivery_resolved",
+      }),
+    ]);
+
+    bridge.resolveInterAgentDeliveryMessageJSON = JSON.stringify({
+      ...storedMessage,
+      content: [{ type: "text", text: "different derived text" }],
+    });
+    await expect(loader.resolveAgentMail(
+      control("thr_parent", "rin_agent_mail_resolve_bad", 5),
+      "thr_child",
+      "delivery_resolved",
+    )).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      fatal: true,
+    });
+
+    bridge.resolveInterAgentDeliveryMessageJSON = JSON.stringify({
+      ...storedMessage,
+      content: [{ type: "text", text: "stored completion", unsupported: "silently dropped" }],
+    });
+    await expect(loader.resolveAgentMail(
+      control("thr_parent", "rin_agent_mail_resolve_extra", 6),
+      "thr_child",
+      "delivery_resolved",
+    )).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      fatal: true,
+    });
+  });
+
+  test("commits accepted input by thread and preserves inter-agent delivery payloads", async () => {
+    const bridge = new RecordingBridgeClient();
+    const lifecycleLogs: string[] = [];
+    const metrics = new RuntimePodMetricsRegistry();
+    bridge.pendingAttachmentDeltaJson = [JSON.stringify({
+      origin: {
+        fileBacked: {
+          sourceEventId: "sevt_1",
+          fileId: "file_first_turn",
+        },
+      },
+      mime: "image/png",
+      filename: "first-turn.png",
+    })];
+    const loader = new BridgeAPIContextLoader({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+      logger: createJsonLogger({ write: (line) => lifecycleLogs.push(line) }),
+      metrics,
+    });
     const mainInput: RuntimeAcceptedInputState = {
       ...control("thr_main", "rin_main", 1),
       kind: "messages",
-      payloadJson: '{"messages":["user"]}',
+      payloadJson: JSON.stringify({ messages: [runtimeMessage("msg_main_input", "main input")] }),
     };
     const childInput: RuntimeAcceptedInputState = {
       ...control("thr_child", "rin_child", 2),
@@ -191,12 +278,48 @@ describe("BridgeAPIContextLoader", () => {
       },
     };
 
-    await loader.commitAcceptedInput(mainInput);
-    await loader.commitAcceptedInput(childInput);
+    const loadCountBeforeCommit = bridge.loadContextRequests.length;
+    const mainCommit = await loader.commitAcceptedInput(mainInput, { drafts: acceptedInputDrafts(mainInput) });
+    expect(mainCommit).toMatchObject({
+      type: "receipt",
+      inputDisposition: "committed",
+      applicationDisposition: "current_custody",
+    });
+    expect(mainCommit.receipt.pendingAttachmentDelta).toEqual([{
+      transient: undefined,
+      fileBacked: {
+        sourceEventId: "sevt_1",
+        fileId: "file_first_turn",
+      },
+      mime: "image/png",
+      filename: "first-turn.png",
+    }]);
+    expect(await loader.commitAcceptedInput(childInput, { drafts: acceptedInputDrafts(childInput) })).toMatchObject({
+      type: "receipt",
+      inputDisposition: "committed",
+      applicationDisposition: "current_custody",
+    });
+    expect(bridge.loadContextRequests).toHaveLength(loadCountBeforeCommit);
+    expect(lifecycleLogs.map((line) => JSON.parse(line))).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "runtime_receipt_applied",
+        "declaration.source.kind": "messages",
+        "declaration.source.id": "rin_main",
+      }),
+      expect.objectContaining({
+        event: "runtime_receipt_applied",
+        "declaration.source.kind": "agent_mail",
+        "declaration.source.id": "rin_child",
+      }),
+    ]));
+    expect(metrics.snapshot().receiptEvidence.get("applied")).toBe(2);
 
     expect(bridge.commitInputsRequests.find((request) => request.runtimeInputId === "rin_main")).toMatchObject({
       inputKind: "messages",
-      hotContextPatchJson: mainInput.payloadJson,
+      drafts: [expect.objectContaining({
+        sourceKind: "messages",
+        sourceId: "rin_main",
+      })],
     });
 
     const childCommit = bridge.commitInputsRequests.find((request) => request.runtimeInputId === "rin_child");
@@ -204,7 +327,7 @@ describe("BridgeAPIContextLoader", () => {
       throw new Error("missing child commit request");
     }
     expect(childCommit).toMatchObject({
-      inputKind: "inter_agent_message",
+      inputKind: "agent_mail",
       scope: {
         sessionId: "sesn_1",
         sessionThreadId: "thr_child",
@@ -213,35 +336,13 @@ describe("BridgeAPIContextLoader", () => {
       eventIds: ["sevt_2"],
       sequenceFrom: 2,
       sequenceTo: 2,
-      hotContextPatchJson: "{}",
-      approvalReviewJson: "",
+      drafts: [expect.objectContaining({
+        sourceKind: "agent_mail",
+        sourceId: "rin_child",
+      })],
     });
-    expect(JSON.parse(childCommit.interAgentMessageJson)).toMatchObject({
-      delivery_id: "iam_thr_main_sevt_spawn_thr_child",
-      source_thread_id: "thr_main",
-      source_tool_use_event_id: "sevt_spawn",
-      message: {
-        id: "msg_child_input",
-        origin: "runtime",
-        role: "user",
-      },
-    });
-    expect(loader.acceptedInputForSession("sesn_1")).toBeUndefined();
-    expect(loader.acceptedInputForThread("sesn_1", "thr_main")?.runtimeInputId).toBe("rin_main");
-    expect(loader.acceptedInputForThread("sesn_1", "thr_child")?.runtimeInputId).toBe("rin_child");
-
-    const childContext = await loader.buildThreadContext({
-      workspaceId: "wksp_1",
-      sessionId: "sesn_1",
-      sessionThreadId: "thr_child",
-      bindingId: "bind_1",
-      bindingGeneration: 7,
-      runtimeBindingToken: "token_thr_child",
-      targetPodUid: "pod_thr_child",
-    });
-
-    expect(childContext.map((message) => message.id)).toEqual(["msg_context_thr_child"]);
     const loadedContext = await loader.loadThreadContext(control("thr_child", "rin_child_reload", 3));
+    expect(loadedContext.messages.map((message) => message.id)).toEqual(["msg_context_thr_child"]);
     expect(loadedContext.runtimeConfigPatch?.generation).toBe(11);
     expect(loadedContext.runtimeConfigPatch?.installedBuiltinFamily).toBe("claude");
     expect(loadedContext.mcpManifests).toEqual([{
@@ -311,6 +412,14 @@ describe("BridgeAPIContextLoader", () => {
       status: "resolving",
       expiresAt: "2026-01-01T00:30:00Z",
     }]);
+    expect(loadedContext.pendingSandboxExecutions).toEqual([{
+      toolUseEventId: "evt_pending_sandbox",
+      modelRequestId: "mrq_pending_sandbox",
+      modelToolCallId: "toolu_pending_sandbox",
+      toolName: "Bash",
+      input: { command: "pwd" },
+      executionState: "running",
+    }]);
     expect(loadedContext.backgroundTools).toEqual([{
       taskId: "task_loaded",
       sourceToolUseEventId: "evt_background_tool",
@@ -336,14 +445,39 @@ describe("BridgeAPIContextLoader", () => {
       filename: "brief.pdf",
     }]);
     expect(bridge.loadContextRequests.map((request) => request.scope?.sessionThreadId)).toEqual([
-      "thr_main",
-      "thr_child",
-      "thr_child",
       "thr_child",
     ]);
   });
 
-  test("pull receipt commits without replacing the parent run's active scope", async () => {
+  test("classifies an unknown CommitInputs transport result as retryable", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.commitErrors.push(Object.assign(new Error("response lost"), { code: status.UNAVAILABLE }));
+    const loader = new BridgeAPIContextLoader({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+    const input: RuntimeAcceptedInputState = {
+      ...control("thr_main", "rin_lost_commit_response", 1),
+      kind: "messages",
+      payloadJson: JSON.stringify({ messages: [runtimeMessage("msg_lost_commit_response", "hello")] }),
+    };
+
+    await expect(loader.commitAcceptedInput(input, { drafts: acceptedInputDrafts(input) })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "unavailable",
+      retryable: true,
+      fatal: false,
+    });
+  });
+
+  test("rejects incomplete receipts and current-custody responses for another binding", async () => {
+    const input: RuntimeAcceptedInputState = {
+      ...control("thr_main", "rin_receipt_fence", 1),
+      kind: "messages",
+      payloadJson: JSON.stringify({ messages: [runtimeMessage("msg_receipt_fence", "hello")] }),
+    };
     const bridge = new RecordingBridgeClient();
     const loader = new BridgeAPIContextLoader({
       address: "bridge.test:9090",
@@ -351,40 +485,27 @@ describe("BridgeAPIContextLoader", () => {
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
     });
-    const active: RuntimeAcceptedInputState = {
-      ...control("thr_main", "rin_active_parent", 1),
-      kind: "messages",
-      payloadJson: '{"messages":["active"]}',
-    };
-    const pulled: RuntimeAcceptedInputState = {
-      ...control("thr_main", "agent_mail:delivery_pull", 0),
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
-      kind: "inter_agent_message",
-      deliveryId: "delivery_pull",
-      sourceThreadId: "thr_child",
-      sourceToolUseEventId: "sevt_spawn_pull",
-      message: runtimeMessage("msg_pull", "completion"),
-      presentation: "pull",
-    };
-    loader.registerAcceptedInput(active);
 
-    const loadCountBeforeReceipt = bridge.loadContextRequests.length;
-    const result = await loader.commitAcceptedInput(pulled, { registerScope: false, hydrateContext: false });
+    bridge.commitInputsResponseMutator = (response) => {
+      response.declaration.receipts.push(response.declaration.receipts[0]);
+    };
+    await expect(loader.commitAcceptedInput(input, { drafts: acceptedInputDrafts(input) })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+    });
 
-    expect(result).toEqual({ type: "receipt", inputDisposition: "committed" });
-    expect(bridge.loadContextRequests).toHaveLength(loadCountBeforeReceipt);
-    expect(loader.acceptedInputForThread("sesn_1", "thr_main")?.runtimeInputId).toBe("rin_active_parent");
-    expect(JSON.parse(bridge.commitInputsRequests.at(-1)?.interAgentMessageJson ?? "{}")).toMatchObject({
-      delivery_id: "delivery_pull",
-      presentation: "pull",
+    bridge.commitInputsResponseMutator = (response) => {
+      response.declaration.observedBindingId = "bind_other";
+    };
+    await expect(loader.commitAcceptedInput(input, { drafts: acceptedInputDrafts(input) })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
     });
   });
 });
 
 describe("BridgeAPIControlInputCommitter", () => {
-  test("commits interrupt and tool-confirmation control inputs without message projection payloads", async () => {
+  test("commits frozen interrupt and tool-confirmation declarations", async () => {
     const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
     const committer = new BridgeAPIControlInputCommitter({
       address: "bridge.test:9090",
@@ -393,15 +514,70 @@ describe("BridgeAPIControlInputCommitter", () => {
       metadataFactory: async () => new Metadata(),
     });
     const scope = control("thr_main", "rin_interrupt", 7);
+    const cancellationDraft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId: "stid_interrupt_message",
+      sourceKind: "interrupt_control",
+      sourceId: "rin_interrupt",
+      sourceEventId: "sevt_7",
+      draftKind: "cancellation",
+      ordinal: 0,
+      role: "assistant",
+      origin: "agent",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: "stid_interrupt_part",
+        type: "tool",
+        ordinal: 0,
+        toolCallId: "call_interrupt",
+        toolName: "Bash",
+        toolUseEventId: "sevt_tool",
+        state: {
+          status: "cancelled",
+          error: { type: "runtime", message: "The tool was cancelled.", retryable: false },
+        },
+        completedAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+    const approvalDraft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId: "stid_approval_message",
+      sourceKind: "tool_confirmation",
+      sourceId: "rin_confirm",
+      sourceEventId: "sevt_confirm",
+      draftKind: "approval_input",
+      ordinal: 0,
+      role: "user",
+      origin: "user",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: "stid_approval_part",
+        type: "text",
+        ordinal: 0,
+        text: "Approval allowed",
+        truncated: false,
+        status: "completed",
+      }],
+    });
 
-    const interrupt = await committer.commitControlInput({ scope, inputKind: "interrupt_control" });
+    const interrupt = await committer.commitControlInput({
+      scope,
+      inputKind: "interrupt_control",
+      drafts: [cancellationDraft],
+      pendingToolCancellations: [{
+        toolUseEventId: "sevt_tool",
+        runtimeLocalId: cancellationDraft.runtimeLocalId,
+      }],
+      sandboxExecutionToolUseEventIds: [],
+    });
     const confirmation = await committer.commitControlInput({
       scope: { ...scope, runtimeInputId: "rin_confirm", eventIds: ["sevt_confirm"] },
       inputKind: "tool_confirmation",
+      drafts: [approvalDraft],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
-    expect(interrupt).toEqual({ ok: true });
-    expect(confirmation).toEqual({ ok: true });
+    expect(interrupt).toEqual({ ok: true, receipt: expect.objectContaining({ messages: [expect.any(Object)] }) });
+    expect(confirmation).toEqual({ ok: true, receipt: expect.objectContaining({ messages: [expect.any(Object)] }) });
     expect(bridge.commitInputsRequests).toEqual([
       expect.objectContaining({
         runtimeInputId: "rin_interrupt",
@@ -409,9 +585,11 @@ describe("BridgeAPIControlInputCommitter", () => {
         eventIds: ["sevt_7"],
         sequenceFrom: 7,
         sequenceTo: 7,
-        hotContextPatchJson: "{}",
-        interAgentMessageJson: "",
-        approvalReviewJson: "",
+        drafts: [expect.objectContaining({ runtimeLocalId: cancellationDraft.runtimeLocalId })],
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_tool",
+          runtimeLocalId: cancellationDraft.runtimeLocalId,
+        }],
       }),
       expect.objectContaining({
         runtimeInputId: "rin_confirm",
@@ -419,9 +597,8 @@ describe("BridgeAPIControlInputCommitter", () => {
         eventIds: ["sevt_confirm"],
         sequenceFrom: 7,
         sequenceTo: 7,
-        hotContextPatchJson: "{}",
-        interAgentMessageJson: "",
-        approvalReviewJson: "",
+        drafts: [expect.objectContaining({ runtimeLocalId: approvalDraft.runtimeLocalId })],
+        pendingToolCancellations: [],
       }),
     ]);
   });
@@ -439,6 +616,9 @@ describe("BridgeAPIControlInputCommitter", () => {
     const result = await committer.commitControlInput({
       scope: control("thr_main", "rin_stale", 9),
       inputKind: "tool_confirmation",
+      drafts: [],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(result).toMatchObject({
@@ -447,9 +627,138 @@ describe("BridgeAPIControlInputCommitter", () => {
       errorCode: "bridge_commit_unavailable",
     });
   });
+
+  test("replays the identical frozen control declaration after an unknown transport result", async () => {
+    const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
+    bridge.commitErrors.push(Object.assign(new Error("response lost"), { code: status.INTERNAL }));
+    const committer = new BridgeAPIControlInputCommitter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+      sleep: async () => {},
+    });
+    const scope = control("thr_main", "rin_replay_control", 11);
+
+    await expect(committer.commitControlInput({
+      scope,
+      inputKind: "interrupt_control",
+      drafts: [],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
+    })).resolves.toEqual({ ok: true, receipt: expect.any(Object) });
+
+    expect(bridge.commitInputsRequests).toHaveLength(2);
+    expect(bridge.commitInputsRequests[1]).toEqual(bridge.commitInputsRequests[0]);
+  });
+
+  test("returns retryable after the bounded exact-declaration transport replay window", async () => {
+    const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
+    bridge.commitErrors.push(
+      Object.assign(new Error("response lost one"), { code: status.UNAVAILABLE }),
+      Object.assign(new Error("response lost two"), { code: status.DEADLINE_EXCEEDED }),
+      Object.assign(new Error("response lost three"), { code: status.INTERNAL }),
+    );
+    const sleeps: number[] = [];
+    const committer = new BridgeAPIControlInputCommitter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+      sleep: async (durationMs) => {
+        sleeps.push(durationMs);
+      },
+    });
+    const scope = control("thr_main", "rin_bounded_replay_control", 11);
+
+    const startedAt = Date.now();
+    await expect(committer.commitControlInput({
+      scope,
+      inputKind: "interrupt_control",
+      drafts: [],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
+    })).resolves.toMatchObject({
+      ok: false,
+      retryable: true,
+      errorCode: "bridge_commit_unavailable",
+    });
+    const finishedAt = Date.now();
+
+    expect(bridge.commitInputsRequests).toHaveLength(3);
+    expect(bridge.commitInputsRequests[1]).toEqual(bridge.commitInputsRequests[0]);
+    expect(bridge.commitInputsRequests[2]).toEqual(bridge.commitInputsRequests[0]);
+    expect(bridge.commitInputsCallOptions).toHaveLength(3);
+    for (const options of bridge.commitInputsCallOptions) {
+      expect(options.deadline).toBeNumber();
+      expect(options.deadline as number).toBeGreaterThanOrEqual(
+        startedAt + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+      );
+      expect(options.deadline as number).toBeLessThanOrEqual(
+        finishedAt + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+      );
+    }
+    expect(sleeps).toEqual([100, 300]);
+  });
+
+  test("returns a typed stale-custody result without applying a replayed control receipt", async () => {
+    const bridge = new RecordingBridgeClient(BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE);
+    bridge.commitInputsResponseMutator = (response) => {
+      response.declaration.applicationDisposition =
+        ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY;
+      response.declaration.observedBindingId = "bind_replacement";
+      response.declaration.observedBindingGeneration = 10;
+    };
+    const committer = new BridgeAPIControlInputCommitter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(committer.commitControlInput({
+      scope: control("thr_main", "rin_stale_receipt", 9),
+      inputKind: "tool_confirmation",
+      drafts: [],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
+    })).resolves.toEqual({ ok: true, stale: true });
+  });
 });
 
 describe("BridgeAPIEventWriter", () => {
+  test("rejects a compaction boundary on an ordinary WriteEvent receipt", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.eventWriterCompactedThroughMessageSequence = 0;
+    const writer = new BridgeAPIEventWriter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(writer.append({
+      ...writerScope(),
+      writeId: "rwrite_unsolicited_compaction",
+      event: {
+        type: "session.error",
+        error: {
+          type: "provider",
+          code: "provider_rate_limited",
+          message: "provider unavailable",
+          retryable: true,
+          fatal: false,
+          retryStatus: { type: "retrying", attempt: 1 },
+        },
+      },
+    })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "schema_mismatch",
+      },
+    });
+  });
+
   test("maps internal provider failures to fork-SDK session errors before WriteEvent", async () => {
     const bridge = new RecordingBridgeClient();
     const writer = new BridgeAPIEventWriter({
@@ -457,14 +766,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
 
     await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_error",
@@ -491,56 +797,7 @@ describe("BridgeAPIEventWriter", () => {
     });
   });
 
-  test("writes pre-commit running status with a registered accepted input scope", async () => {
-    const bridge = new RecordingBridgeClient();
-    const loader = new BridgeAPIContextLoader({
-      address: "bridge.test:9090",
-      tokenPath: "/var/run/token",
-      client: bridge.client(),
-      metadataFactory: async () => new Metadata(),
-    });
-    const input: RuntimeAcceptedInputState = {
-      ...control("thr_main", "rin_main", 1),
-      kind: "messages",
-      payloadJson: "{}",
-    };
-    const unregister = loader.registerAcceptedInput(input);
-    const writer = new BridgeAPIEventWriter({
-      address: "bridge.test:9090",
-      tokenPath: "/var/run/token",
-      client: bridge.client(),
-      metadataFactory: async () => new Metadata(),
-      scopeForThread: (sessionId, sessionThreadId) => loader.acceptedInputForThread(sessionId, sessionThreadId),
-    });
-
-    const result = await writer.append({
-      sessionId: "sesn_1",
-      sessionThreadId: "thr_main",
-      writeId: "rwrite_running",
-      event: { type: "session.status_running" },
-    });
-
-    expect(result).toMatchObject({ ok: true, writeId: "rwrite_running" });
-    expect(bridge.commitInputsRequests).toEqual([]);
-    expect(bridge.writeEventRequests[0]).toMatchObject({
-      runtimeWriteId: "rwrite_running",
-      scope: {
-        requestId: "req_1",
-        workspaceId: "wksp_1",
-        sessionId: "sesn_1",
-        sessionThreadId: "thr_main",
-        binding: {
-          bindingId: "bind_1",
-          bindingGeneration: 7,
-          targetPodUid: "pod_1",
-        },
-      },
-    });
-    unregister();
-    expect(loader.acceptedInputForThread("sesn_1", "thr_main")).toBeUndefined();
-  });
-
-  test("passes internal projection JSON to Bridge WriteEvent without changing public payload", async () => {
+  test("passes loop-authored drafts to Bridge WriteEvent without changing public payload", async () => {
     const fixture = JSON.parse(readFileSync(resolve(import.meta.dir, "../../../../../../testdata/stable-reasoning-anchor-vector.json"), "utf8")) as {
       readonly model_request_id: string;
       readonly event: {
@@ -549,7 +806,6 @@ describe("BridgeAPIEventWriter", () => {
         readonly input: Record<string, string>;
         readonly evaluated_permission: "allow";
       };
-      readonly projection_json: string;
       readonly stable_reasoning_parts: readonly {
         readonly reasoning_part_id: string;
         readonly provider_part_id: string;
@@ -565,19 +821,21 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
 
     const result = await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_tool",
       event: fixture.event,
-      projectionJson: fixture.projection_json,
+      drafts: [outputDraft(
+        "rwrite_tool",
+        "agent.tool_use",
+        "tool_use",
+        assistantToolMessage("running", { kind: "tool" }),
+      )],
       modelRequestId: fixture.model_request_id,
       stableReasoningParts: fixture.stable_reasoning_parts.map((part) => ({
         reasoningPartId: part.reasoning_part_id,
@@ -597,7 +855,11 @@ describe("BridgeAPIEventWriter", () => {
       input: { path: "a.txt" },
       evaluated_permission: "allow",
     });
-    expect(bridge.writeEventRequests[0]?.projectionJson).toBe(fixture.projection_json);
+    expect(bridge.writeEventRequests[0]?.drafts).toHaveLength(1);
+    expect(JSON.parse(bridge.writeEventRequests[0]?.drafts[0]?.messageInfoJson ?? "{}")).toMatchObject({
+      role: "assistant",
+      origin: "agent",
+    });
     expect(bridge.writeEventRequests[0]?.modelRequestId).toBe(fixture.model_request_id);
     expect(bridge.writeEventRequests[0]?.stableReasoningParts).toEqual(fixture.stable_reasoning_parts.map((part) => ({
       reasoningPartId: part.reasoning_part_id,
@@ -609,22 +871,25 @@ describe("BridgeAPIEventWriter", () => {
     })));
 
     await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_text_projection",
       event: { type: "agent.message", content: [{ type: "text", text: "answer" }] },
-      projectionJson: JSON.stringify({
-        type: "runtime_text_projection",
-        message_id: "msg_1",
-        part_id: "part_text_1",
-        part_sequence: 2,
-        truncated: false,
-      }),
+      drafts: [outputDraft(
+        "rwrite_text_projection",
+        "agent.message",
+        "assistant_text",
+        assistantTextMessage("answer"),
+      )],
       modelRequestId: fixture.model_request_id,
     });
     expect(bridge.writeEventRequests[1]?.modelRequestId).toBe(fixture.model_request_id);
 
     await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_tool_result",
@@ -633,30 +898,37 @@ describe("BridgeAPIEventWriter", () => {
         tool_use_id: "sevt_tool_use_1",
         content: [{ type: "text", text: "done" }],
       },
-      projectionJson: JSON.stringify({
-        type: "runtime_tool_projection",
-        message_id: "msg_1",
-        part_id: "part_tool_1",
-        part_sequence: 3,
-        model_tool_call_id: "call_1",
-        tool_name: "Read",
-        input: { path: "a.txt" },
-        state: "completed",
-        output: { text: "done", truncated: false },
-      }),
+      drafts: [outputDraft(
+        "rwrite_tool_result",
+        "agent.tool_result",
+        "tool_result",
+        assistantToolMessage("completed", { kind: "tool" }),
+      )],
       modelRequestId: fixture.model_request_id,
     });
     expect(bridge.writeEventRequests[2]?.modelRequestId).toBe(fixture.model_request_id);
 
     await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
-      writeId: "rwrite_tool_without_anchor",
-      event: fixture.event,
-      projectionJson: fixture.projection_json,
+      writeId: "rwrite_mcp_tool_result",
+      event: {
+        type: "agent.mcp_tool_result",
+        mcp_tool_use_id: "evt_mcp_use",
+        content: [{ type: "text", text: "mcp result" }],
+      },
+      drafts: [outputDraft(
+        "rwrite_mcp_tool_result",
+        "agent.mcp_tool_result",
+        "tool_result",
+        assistantToolMessage("completed", { kind: "mcp", mcpServerName: "github" }, "github_search", "call_mcp"),
+      )],
+      modelRequestId: fixture.model_request_id,
+      mcpMaterializationHandle: "evt_mcp_use",
     });
-    expect(bridge.writeEventRequests[3]?.modelRequestId).toBe("");
-    expect(bridge.writeEventRequests[3]?.stableReasoningParts).toEqual([]);
+    expect(bridge.writeEventRequests[3]?.mcpMaterializationHandle).toBe("evt_mcp_use");
   });
 
   test("attaches web server-tool usage only on the durable tool-result request", async () => {
@@ -666,14 +938,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
 
     await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_web_result",
@@ -682,17 +951,13 @@ describe("BridgeAPIEventWriter", () => {
         tool_use_id: "evt_web_use",
         content: [{ type: "text", text: "web result" }],
       },
-      projectionJson: JSON.stringify({
-        type: "runtime_tool_projection",
-        message_id: "msg_web",
-        part_id: "part_web",
-        part_sequence: 0,
-        model_tool_call_id: "call_web",
-        tool_name: "web",
-        input: { search_query: [{ q: "tetral" }] },
-        state: "completed",
-        output: { text: "web result", truncated: false },
-      }),
+      drafts: [outputDraft(
+        "rwrite_web_result",
+        "agent.tool_result",
+        "tool_result",
+        assistantToolMessage("completed", { kind: "tool" }, "web", "call_web"),
+      )],
+      modelRequestId: "mreq_web",
       serverToolUse: { webSearchRequests: 2, webFetchRequests: 1 },
     });
 
@@ -729,11 +994,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: (sessionId, sessionThreadId) =>
-        sessionId === "sesn_1" && sessionThreadId === "thr_reviewer" ? reviewerInput : undefined,
     });
 
     const result = await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_reviewer",
       writeId: "rwrite_arvw_1_decision",
@@ -794,11 +1059,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: (sessionId, sessionThreadId) =>
-        sessionId === "sesn_1" && sessionThreadId === "thr_reviewer" ? reviewerInput : undefined,
     });
 
     const result = await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_reviewer",
       writeId: "rwrite_arvw_1_failure",
@@ -833,13 +1098,11 @@ describe("BridgeAPIEventWriter", () => {
 
   test("ensures approval reviewer trunk through durable child-thread creation", async () => {
     const bridge = new RecordingBridgeClient();
-    const releasedScopes: string[] = [];
     const creator = new BridgeAPIApprovalReviewerThreadCreator({
       address: "bridge.test:9090",
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      releaseThreadScope: (sessionId, sessionThreadId) => releasedScopes.push(`${sessionId}/${sessionThreadId}`),
     });
     const reviewRequest: RuntimeApprovalReviewRequest = {
       workspaceId: "wksp_1",
@@ -865,7 +1128,7 @@ describe("BridgeAPIEventWriter", () => {
       reviewId: "arvw_1",
       reviewerThreadId: "thr_reviewer",
       isTrunk: true,
-      forkSeedJson: "",
+      threadContextPrefixJson: "",
     })).resolves.toEqual({ ok: true });
 
     expect(bridge.createChildThreadRequests).toHaveLength(1);
@@ -886,12 +1149,12 @@ describe("BridgeAPIEventWriter", () => {
       role: "approval_reviewer",
       agentType: "approval_reviewer",
       forkTurns: "none",
-      forkSeedJson: "",
+      threadContextPrefixJson: "",
       isTrunk: true,
       reviewerReviewId: "",
     });
 
-    const forkSeedJson = JSON.stringify({
+    const threadContextPrefixJson = JSON.stringify({
       source_parent_thread_id: "thr_main",
       review_id: "arvw_sidecar",
       fork_turns: "all",
@@ -902,24 +1165,22 @@ describe("BridgeAPIEventWriter", () => {
       reviewId: "arvw_sidecar",
       reviewerThreadId: "thr_reviewer_sidecar",
       isTrunk: false,
-      forkSeedJson,
+      threadContextPrefixJson,
     })).resolves.toEqual({ ok: true });
     expect(bridge.createChildThreadRequests[1]).toMatchObject({
       childThreadId: "thr_reviewer_sidecar",
       role: "approval_reviewer",
       forkTurns: "all",
-      forkSeedJson,
+      threadContextPrefixJson,
       isTrunk: false,
       reviewerReviewId: "arvw_sidecar",
     });
-    expect(releasedScopes).toEqual([]);
-
     await expect(creator.closeApprovalReviewerThread({
       request: reviewRequest,
       reviewId: "arvw_sidecar",
       reviewerThreadId: "thr_reviewer_sidecar",
       isTrunk: false,
-      forkSeedJson,
+      threadContextPrefixJson,
     })).resolves.toEqual({ ok: true });
     expect(bridge.markChildThreadClosedRequests).toEqual([
       expect.objectContaining({
@@ -927,7 +1188,6 @@ describe("BridgeAPIEventWriter", () => {
         scope: expect.objectContaining({ sessionThreadId: "thr_main" }),
       }),
     ]);
-    expect(releasedScopes).toEqual(["sesn_1/thr_reviewer_sidecar"]);
   });
 
   test("serializes request-end usage with total input tokens for Bridge normalization", async () => {
@@ -937,14 +1197,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
 
     const result = await writer.writeRequestEnd({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_end",
@@ -952,6 +1209,7 @@ describe("BridgeAPIEventWriter", () => {
       modelRequestStartEventId: "sevt_start",
       isError: false,
       finishReason: "stop",
+      drafts: [outputDraft("mreq_1", "model_request", "assistant_text", assistantTextMessage("sealed answer"))],
       consumedAttachmentRefs: ["att_1"],
       consumedFileAttachments: [{
         sourceEventId: "sevt_user_file",
@@ -968,7 +1226,18 @@ describe("BridgeAPIEventWriter", () => {
       },
     });
 
-    expect(result).toMatchObject({ ok: true, writeId: "rwrite_end" });
+    expect(result).toMatchObject({
+      ok: true,
+      writeId: "rwrite_end",
+      declaration: {
+        receipt: {
+          messages: [{
+            messageId: "msg_request_end_0",
+            parts: [{ partId: "part_request_end_0_0" }],
+          }],
+        },
+      },
+    });
     const usage = JSON.parse(bridge.writeRequestEndRequests[0]?.usageJson ?? "{}");
     expect(usage).toEqual({
       input_tokens: 5,
@@ -985,9 +1254,11 @@ describe("BridgeAPIEventWriter", () => {
       sourceEventId: "sevt_user_file",
       fileId: "file_1",
     }]);
-    expect(bridge.writeRequestEndRequests[0]?.requestKind).toBe("");
+    expect(bridge.writeRequestEndRequests[0]?.requestKind).toBe("agent_provider_request");
 
     const errorResult = await writer.writeRequestEnd({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_error_end",
@@ -1019,19 +1290,21 @@ describe("BridgeAPIEventWriter", () => {
       backoffMs: 30_000,
     });
 
-    const staleTerminalResult = await writer.writeRequestEnd({
+    bridge.eventWriterTransportError = Object.assign(new Error("divergent close"), { code: status.ALREADY_EXISTS });
+    expect(await writer.writeRequestEnd({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
-      writeId: "rwrite_stale_terminal",
-      modelRequestId: "mreq_stale_terminal",
-      modelRequestStartEventId: "sevt_stale_terminal_start",
+      writeId: "rwrite_divergent_end",
+      modelRequestId: "mreq_error",
+      modelRequestStartEventId: "sevt_error_start",
       isError: true,
       errorKind: "gateway_stream_error",
       finishReason: "error",
-    });
-    expect(staleTerminalResult).toMatchObject({
-      ok: true,
-      rescheduleDisposition: { status: "denied", reason: "stale_terminal", attempt: 0 },
+    })).toMatchObject({
+      ok: false,
+      error: { code: "superseded", retryable: false },
     });
   });
 
@@ -1042,27 +1315,27 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
     const operations = [
       () => writer.append({
-        sessionId: "sesn_1",
+        ...writerScope(),
+        workspaceId: "wksp_1",
+      sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: "rwrite_error",
         event: { type: "session.status_running" as const },
       }),
       () => writer.finishIdle!({
+        ...writerScope(),
+        workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thr_main",
-        writeId: "rwrite_idle",
-        idleSince: "2026-01-01T00:00:00.000Z",
+        durableTurnId: "evt_turn_idle",
         stopReason: { type: "end_turn" as const },
       }),
       () => writer.writeRequestEnd!({
+        ...writerScope(),
+        workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: "rwrite_request_end",
@@ -1073,7 +1346,9 @@ describe("BridgeAPIEventWriter", () => {
         finishReason: "error",
       }),
       () => writer.commitRuntimeTermination!({
-        sessionId: "sesn_1",
+        ...writerScope(),
+        workspaceId: "wksp_1",
+      sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: "rwrite_termination",
         failure: {
@@ -1084,6 +1359,8 @@ describe("BridgeAPIEventWriter", () => {
           fatal: true,
           reason: "runtime_contract_validation" as const,
         },
+        pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       }),
     ];
 
@@ -1115,14 +1392,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
 
     const result = await writer.commitRuntimeTermination!({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_termination_superseded",
@@ -1134,6 +1408,8 @@ describe("BridgeAPIEventWriter", () => {
         fatal: true,
         reason: "runtime_contract_validation",
       },
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(result).toMatchObject({
@@ -1153,27 +1429,27 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
     const operations = [
       () => writer.append({
-        sessionId: "sesn_1",
+        ...writerScope(),
+        workspaceId: "wksp_1",
+      sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: "rwrite_requested_append",
         event: { type: "session.status_running" as const },
       }),
       () => writer.finishIdle!({
+        ...writerScope(),
+        workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thr_main",
-        writeId: "rwrite_requested_idle",
-        idleSince: "2026-01-01T00:00:00.000Z",
+        durableTurnId: "evt_turn_requested_idle",
         stopReason: { type: "end_turn" as const },
       }),
       () => writer.writeRequestEnd!({
+        ...writerScope(),
+        workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: "rwrite_requested_end",
@@ -1183,7 +1459,9 @@ describe("BridgeAPIEventWriter", () => {
         finishReason: "stop",
       }),
       () => writer.commitRuntimeTermination!({
-        sessionId: "sesn_1",
+        ...writerScope(),
+        workspaceId: "wksp_1",
+      sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: "rwrite_requested_termination",
         failure: {
@@ -1194,6 +1472,8 @@ describe("BridgeAPIEventWriter", () => {
           fatal: true,
           reason: "runtime_contract_validation" as const,
         },
+        pendingToolCancellations: [],
+        sandboxExecutionToolUseEventIds: [],
       }),
     ];
 
@@ -1215,14 +1495,50 @@ describe("BridgeAPIEventWriter", () => {
         _metadata: Metadata,
         callback: (error: Error | null, response: unknown) => void,
       ) {
-        release = () => callback(null, {
-          ack: {
-            status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
-            runtimeInputId: "",
-            runtimeWriteId: request.runtimeWriteId,
-            errorCode: "",
-          },
-        });
+        release = () => {
+          const now = "2026-01-01T00:00:00.000Z";
+          const idleEventId = `evt_idle_${request.durableTurnId}`;
+          callback(null, {
+            ack: {
+              status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
+              runtimeInputId: "",
+              runtimeWriteId: request.durableTurnId,
+              errorCode: "",
+            },
+            declaration: {
+              observedBindingId: request.scope?.binding?.bindingId ?? "",
+              observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+              applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+              receipts: [{
+                sessionThreadId: request.scope?.sessionThreadId ?? "",
+                operationKind: "finish_idle",
+                sourceKind: "turn_closeout",
+                sourceId: request.durableTurnId,
+                declarationDigest: finishIdleDeclarationDigest(request),
+                pendingAttachmentDeltaJson: [],
+                pendingToolDeltaJson: [],
+                prefixConsumptions: [],
+                childLifecycle: [],
+                events: [{
+                  sessionThreadId: request.scope?.sessionThreadId ?? "",
+                  sourceEventId: request.durableTurnId,
+                  eventId: idleEventId,
+                  eventSequence: 1,
+                  disposition: 2,
+                }],
+                messages: [],
+                requestReschedule: undefined,
+                idleCloseout: {
+                  durableTurnId: request.durableTurnId,
+                  idleEventId,
+                  idleEventSequence: 1,
+                  committedIdleAt: now,
+                },
+                compactedThroughMessageSequence: undefined,
+              }],
+            },
+          });
+        };
         return grpcCall();
       },
     } as unknown as AgentRuntimeBridgeServiceClient;
@@ -1231,18 +1547,14 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client,
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
     let settled = false;
     const result = writer.finishIdle!({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
-      writeId: "rwrite_direct_await",
-      idleSince: "2026-01-01T00:00:00.000Z",
+      durableTurnId: "evt_turn_direct_await",
       stopReason: { type: "end_turn" },
     }).finally(() => {
       settled = true;
@@ -1252,7 +1564,7 @@ describe("BridgeAPIEventWriter", () => {
     expect(release).toBeDefined();
 
     release?.();
-    expect(await result).toMatchObject({ ok: true, writeId: "rwrite_direct_await" });
+    expect(await result).toMatchObject({ ok: true, writeId: "evt_turn_direct_await" });
   });
 
   test("normalizes retryable closeout transport statuses without collapsing unknown failures", async () => {
@@ -1262,11 +1574,6 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
 
     for (const [grpcCode, writerCode] of [
@@ -1277,7 +1584,9 @@ describe("BridgeAPIEventWriter", () => {
     ] as const) {
       bridge.eventWriterTransportError = Object.assign(new Error("transport failed"), { code: grpcCode });
       expect(await writer.append({
-        sessionId: "sesn_1",
+        ...writerScope(),
+        workspaceId: "wksp_1",
+      sessionId: "sesn_1",
         sessionThreadId: "thr_main",
         writeId: `rwrite_transport_${grpcCode}`,
         event: { type: "session.status_running" },
@@ -1288,6 +1597,8 @@ describe("BridgeAPIEventWriter", () => {
     }
     bridge.eventWriterTransportError = new Error("unclassified transport failure");
     expect(await writer.append({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_transport_unknown",
@@ -1310,10 +1621,11 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => input,
     });
 
     const result = await writer.writeRequestEnd({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_reasoning_1",
@@ -1344,6 +1656,94 @@ describe("BridgeAPIEventWriter", () => {
     })]);
   });
 
+  test("matches joined request-end and interrupt receipts by operation identity", async () => {
+    const bridge = new RecordingBridgeClient();
+    const writer = new BridgeAPIEventWriter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+    const cancellationDraft = RuntimeMessageDraftSchema.parse({
+      runtimeLocalId: "stid_interrupt_message",
+      sourceKind: "interrupt_control",
+      sourceId: "rin_interrupt_1",
+      sourceEventId: "sevt_interrupt_1",
+      draftKind: "cancellation",
+      ordinal: 0,
+      role: "assistant",
+      origin: "agent",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: "stid_interrupt_part",
+        type: "tool",
+        ordinal: 0,
+        toolCallId: "call_interrupt_1",
+        toolName: "Bash",
+        toolUseEventId: "sevt_tool_use_1",
+        state: {
+          status: "cancelled",
+          error: {
+            type: "runtime",
+            message: "The tool was cancelled.",
+            retryable: false,
+          },
+        },
+        completedAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    const result = await writer.writeRequestEnd({
+      ...writerScope(),
+      writeId: "rwrite_interrupt_1",
+      modelRequestId: "mreq_interrupt_1",
+      modelRequestStartEventId: "sevt_request_start_1",
+      isError: true,
+      errorKind: "runtime_interrupted",
+      finishReason: "cancelled",
+      drafts: [cancellationDraft],
+      interruptSettlement: {
+        runtimeInputId: "rin_interrupt_1",
+        eventIds: ["sevt_interrupt_1"],
+        sequenceFrom: 9,
+        sequenceTo: 9,
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_tool_use_1",
+          runtimeLocalId: cancellationDraft.runtimeLocalId,
+        }],
+        sandboxExecutionToolUseEventIds: [],
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      declaration: {
+        receipt: {
+          operationKind: "write_request_end",
+          sourceKind: "model_request",
+          sourceId: "mreq_interrupt_1",
+        },
+        relatedReceipts: [{
+          operationKind: "commit_inputs",
+          sourceKind: "interrupt_control",
+          sourceId: "rin_interrupt_1",
+        }],
+      },
+    });
+    expect(bridge.writeRequestEndRequests[0]).toMatchObject({
+      interruptSettlement: {
+        runtimeInputId: "rin_interrupt_1",
+        eventIds: ["sevt_interrupt_1"],
+        sequenceFrom: 9,
+        sequenceTo: 9,
+        pendingToolCancellations: [{
+          toolUseEventId: "sevt_tool_use_1",
+          runtimeLocalId: cancellationDraft.runtimeLocalId,
+        }],
+      },
+    });
+  });
+
   test("commits normalized terminal failure through the atomic Bridge closeout", async () => {
     const bridge = new RecordingBridgeClient();
     const writer = new BridgeAPIEventWriter({
@@ -1351,7 +1751,6 @@ describe("BridgeAPIEventWriter", () => {
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({ ...control("thr_main", "rin_terminate", 3), kind: "messages", payloadJson: "{}" }),
     });
     const failure = {
       type: "provider",
@@ -1363,52 +1762,88 @@ describe("BridgeAPIEventWriter", () => {
     } as const;
 
     const result = await writer.commitRuntimeTermination?.({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       writeId: "rwrite_terminate",
       failure,
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
     });
 
     expect(result).toMatchObject({ ok: true, writeId: "rwrite_terminate" });
     expect(bridge.commitRuntimeTerminationRequests).toEqual([expect.objectContaining({
       runtimeWriteId: "rwrite_terminate",
       failureJson: JSON.stringify(failure),
+      drafts: [],
+      pendingToolCancellations: [],
       scope: expect.objectContaining({ sessionId: "sesn_1", sessionThreadId: "thr_main" }),
     })]);
   });
 });
 
 describe("BridgeAPIInternalToolRepairCommitter", () => {
-  test("commits event-less internal invalid-tool repair through the Bridge scope fence", async () => {
+  test("commits an unstamped internal repair and returns only database-assigned projection identity", async () => {
     const bridge = new RecordingBridgeClient();
     const committer = new BridgeAPIInternalToolRepairCommitter({
       address: "bridge.test:9090",
       tokenPath: "/var/run/token",
       client: bridge.client(),
       metadataFactory: async () => new Metadata(),
-      scopeForThread: () => ({
-        ...control("thr_main", "rin_main", 1),
-        kind: "messages",
-        payloadJson: "{}",
-      }),
     });
     const repairMessage = runtimeRepairMessage();
+    const repairKey = "internal_invalid_tool:mreq_1:call_1:unknown_tool";
+    const draft = runtimeOutputDraft({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_main",
+      runtimeWriteId: repairKey,
+      eventType: "internal_tool_repair",
+      draftKind: "internal_tool_repair",
+      message: runtimeWorkingDraftFromDurable({
+        workspaceId: "wksp_1",
+        sessionThreadId: "thr_main",
+        modelRequestId: "mreq_1",
+        message: {
+          ...repairMessage,
+          owningEventId: "evt_repair_seed",
+          eventSequence: 1,
+        },
+      }),
+    });
 
     const result = await committer.commitInternalToolRepair({
+      ...writerScope(),
+      workspaceId: "wksp_1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_main",
       modelRequestId: "mreq_1",
       modelToolCallId: "call_1",
       toolName: "unknown_tool",
-      repairKey: "internal_invalid_tool:mreq_1:call_1:unknown_tool",
-      message: repairMessage,
+      repairKey,
+      draft,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: true,
-      messageId: "msg_repair",
-      partId: "part_repair",
-      operation: "writePart",
+      eventId: "evt_internal_repair",
+      declaration: {
+        receipt: {
+          operationKind: "commit_internal_tool_repair",
+          sourceKind: "internal_tool_repair",
+          sourceId: repairKey,
+          messages: [{
+            runtimeLocalId: draft.runtimeLocalId,
+            messageId: "msg_durable_repair",
+            parts: [{
+              runtimeLocalPartId: draft.parts[0]?.runtimeLocalPartId,
+              partId: "part_durable_repair",
+            }],
+          }],
+        },
+        applicationDisposition: "current_custody",
+      },
     });
     expect(bridge.commitInternalToolRepairRequests).toHaveLength(1);
     expect(bridge.commitInternalToolRepairRequests[0]).toMatchObject({
@@ -1421,8 +1856,14 @@ describe("BridgeAPIInternalToolRepairCommitter", () => {
         sessionId: "sesn_1",
         sessionThreadId: "thr_main",
       },
+      drafts: [expect.objectContaining({
+        runtimeLocalId: draft.runtimeLocalId,
+        sourceKind: "internal_tool_repair",
+        sourceId: repairKey,
+        draftKind: RuntimeDraftKind.RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR,
+      })],
     });
-    expect(JSON.parse(bridge.commitInternalToolRepairRequests[0]?.dataJson ?? "{}")).toEqual(repairMessage);
+    expect(bridge.commitInternalToolRepairRequests[0]).not.toHaveProperty("dataJson");
     expect(bridge.commitInputsRequests).toEqual([]);
     expect(bridge.writeEventRequests).toEqual([]);
   });
@@ -1448,6 +1889,116 @@ function control(
   };
 }
 
+function writerScope(): Pick<
+  RuntimeThreadControlState,
+  "requestId" | "workspaceId" | "sessionId" | "sessionThreadId" | "bindingId" | "bindingGeneration" | "targetPodUid"
+> & { readonly drafts: RuntimeMessageDraft[] } {
+  const scope = control("thr_main", "rin_main", 1);
+  return {
+    requestId: scope.requestId,
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    sessionThreadId: scope.sessionThreadId,
+    bindingId: scope.bindingId,
+    bindingGeneration: scope.bindingGeneration,
+    targetPodUid: scope.targetPodUid,
+    drafts: [],
+  };
+}
+
+function outputDraft(
+  runtimeWriteId: string,
+  eventType: string,
+  draftKind: RuntimeMessageDraft["draftKind"],
+  message: RuntimeMessage,
+): RuntimeMessageDraft {
+  return runtimeOutputDraft({
+    workspaceId: "wksp_1",
+    sessionId: "sesn_1",
+    sessionThreadId: "thr_main",
+    runtimeWriteId,
+    eventType,
+    draftKind,
+    message: runtimeWorkingDraftFromDurable({
+      workspaceId: "wksp_1",
+      sessionThreadId: "thr_main",
+      modelRequestId: "mreq_output",
+      message: {
+        ...message,
+        owningEventId: "evt_output_seed",
+        eventSequence: 1,
+      },
+    }),
+  });
+}
+
+function assistantTextMessage(text: string): RuntimeMessage {
+  return RuntimeMessageSchema.parse({
+    id: "msg_output",
+    sessionId: "sesn_1",
+    role: "assistant",
+    origin: "agent",
+    sequence: 1,
+    status: "completed",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    parts: [{
+      id: "part_output_text",
+      sessionId: "sesn_1",
+      messageId: "msg_output",
+      sequence: 0,
+      type: "text",
+      text,
+      truncated: false,
+      status: "completed",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:00.000Z",
+    }],
+  });
+}
+
+function assistantToolMessage(
+  statusValue: "running" | "completed",
+  toolEvent: { readonly kind: "tool" } | { readonly kind: "mcp"; readonly mcpServerName: string },
+  toolName = "Read",
+  toolCallId = "call_1",
+): RuntimeMessage {
+  const input = {
+    value: toolName === "web" ? { search_query: [{ q: "tetral" }] } : { path: "a.txt" },
+    preview: toolName === "web"
+      ? "{\"search_query\":[{\"q\":\"tetral\"}]}"
+      : "{\"path\":\"a.txt\"}",
+    truncated: false,
+  };
+  return RuntimeMessageSchema.parse({
+    id: "msg_output",
+    sessionId: "sesn_1",
+    role: "assistant",
+    origin: "agent",
+    sequence: 1,
+    status: "completed",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    parts: [{
+      id: "part_output_tool",
+      sessionId: "sesn_1",
+      messageId: "msg_output",
+      sequence: 0,
+      type: "tool",
+      toolCallId,
+      toolName,
+      toolEvent,
+      state: statusValue === "running"
+        ? { status: "running", input }
+        : {
+            status: "completed",
+            input,
+            output: { text: toolName === "web" ? "web result" : "done", truncated: false },
+          },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      completedAt: statusValue === "completed" ? "2026-01-01T00:00:00.000Z" : undefined,
+    }],
+  });
+}
+
 function bindingIdentity(runtimeBindingToken: string): RuntimeSessionIdentity {
   return {
     workspaceId: "wksp_1",
@@ -1467,6 +2018,7 @@ function jwtWithExpiry(exp: number): string {
 
 class RecordingBridgeClient {
   readonly commitInputsRequests: CommitInputsRequest[] = [];
+  readonly commitInputsCallOptions: CallOptions[] = [];
   readonly commitInternalToolRepairRequests: CommitInternalToolRepairRequest[] = [];
   readonly commitRuntimeTerminationRequests: CommitRuntimeTerminationRequest[] = [];
   readonly createChildThreadRequests: CreateChildThreadRequest[] = [];
@@ -1474,14 +2026,29 @@ class RecordingBridgeClient {
   readonly loadContextRequests: LoadContextRequest[] = [];
   readonly markChildThreadClosedRequests: MarkChildThreadClosedRequest[] = [];
   readonly refreshRuntimeBindingTokenRequests: RefreshRuntimeBindingTokenRequest[] = [];
+  readonly resolveInterAgentDeliveryRequests: ResolveInterAgentDeliveryRequest[] = [];
   readonly refreshErrors: Error[] = [];
   readonly writeEventRequests: WriteEventRequest[] = [];
   readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
   loadContextJSON: string | undefined;
+  resolveInterAgentDeliveryMessageJSON = "";
   eventWriterAckStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   eventWriterErrorCode = "";
   eventWriterAckWriteId: string | undefined;
+  eventWriterCompactedThroughMessageSequence: number | undefined;
   eventWriterTransportError: Error | null = null;
+  pendingAttachmentDeltaJson: string[] = [];
+  readonly commitErrors: Error[] = [];
+  commitInputsResponseMutator:
+    | ((response: {
+      declaration: {
+        receipts: unknown[];
+        observedBindingId: string;
+        observedBindingGeneration: number;
+        applicationDisposition: ReceiptApplicationDisposition;
+      };
+    }) => void)
+    | undefined;
 
   constructor(
     private readonly commitStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
@@ -1498,36 +2065,172 @@ class RecordingBridgeClient {
       loadContext: this.loadContext.bind(this),
       markChildThreadClosed: this.markChildThreadClosed.bind(this),
       refreshRuntimeBindingToken: this.refreshRuntimeBindingToken.bind(this),
+      resolveInterAgentDelivery: this.resolveInterAgentDelivery.bind(this),
       writeEvent: this.writeEvent.bind(this),
       writeRequestEnd: this.writeRequestEnd.bind(this),
     } as unknown as AgentRuntimeBridgeServiceClient;
   }
 
-  private commitInputs(request: CommitInputsRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+  private resolveInterAgentDelivery(
+    request: ResolveInterAgentDeliveryRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    this.resolveInterAgentDeliveryRequests.push(request);
+    const completionPull = request.deliveryId.length === 0;
+    callback(null, {
+      ack: {
+        status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
+        runtimeInputId: "",
+        runtimeWriteId: "",
+        errorCode: "",
+      },
+      deliveryId: completionPull ? "delivery_resolved" : request.deliveryId,
+      sourceThreadId: completionPull ? request.childThreadId : request.scope?.sessionThreadId ?? "",
+      targetThreadId: completionPull ? request.scope?.sessionThreadId ?? "" : request.childThreadId,
+      sourceToolUseEventId: "sevt_agent_mail_source",
+      receivedEventId: "sevt_agent_mail_received",
+      receivedSequence: 8,
+      messageJson: this.resolveInterAgentDeliveryMessageJSON,
+    });
+    return grpcCall();
+  }
+
+  private commitInputs(
+    request: CommitInputsRequest,
+    _metadata: Metadata,
+    options: CallOptions,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
     this.commitInputsRequests.push(request);
+    this.commitInputsCallOptions.push(options);
+    const queuedError = this.commitErrors.shift();
+    if (queuedError !== undefined) {
+      callback(queuedError, null);
+      return grpcCall();
+    }
     if (this.commitError !== null) {
       callback(this.commitError, null);
       return grpcCall();
     }
-    callback(null, {
+    const response = {
       ack: {
         status: this.commitStatus,
         runtimeInputId: request.runtimeInputId,
         runtimeWriteId: "",
         errorCode: "",
       },
-    });
+      declaration: {
+        receipts: [{
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "commit_inputs",
+          sourceKind: request.inputKind,
+          sourceId: request.runtimeInputId,
+          events: request.eventIds.map((eventId, index) => ({
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            sourceEventId: eventId,
+            eventId,
+            eventSequence: request.sequenceFrom + index,
+            disposition: 1,
+          })),
+          messages: request.drafts.map((draft, messageIndex) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            owningEventId: draft.sourceEventId,
+            messageId: `msg_${draft.runtimeLocalId}`,
+            messageSequence: request.sequenceFrom + messageIndex,
+            createdAt: "2026-07-28T00:00:00.000Z",
+            updatedAt: "2026-07-28T00:00:00.000Z",
+            disposition: 1,
+            parts: draft.parts.map((part, partIndex) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part_${part.runtimeLocalPartId}`,
+              messageId: `msg_${draft.runtimeLocalId}`,
+              partSequence: partIndex,
+              createdAt: "2026-07-28T00:00:00.000Z",
+              updatedAt: "2026-07-28T00:00:00.000Z",
+              disposition: 1,
+            })),
+          })),
+          pendingAttachmentDeltaJson: this.pendingAttachmentDeltaJson,
+          pendingToolDeltaJson: request.pendingToolCancellations.map((cancellation) => JSON.stringify({
+            runtime_local_id: cancellation.runtimeLocalId,
+            tool_use_event_id: cancellation.toolUseEventId,
+            status: "cancelled",
+            result_event_id: request.eventIds[0],
+          })),
+          prefixConsumptions: [],
+          declarationDigest: commitInputsDeclarationDigest(request),
+          requestReschedule: undefined,
+          childLifecycle: [],
+          idleCloseout: undefined,
+          compactedThroughMessageSequence: undefined,
+        }],
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+      },
+    };
+    this.commitInputsResponseMutator?.(response);
+    callback(null, response);
     return grpcCall();
   }
 
   private commitInternalToolRepair(request: CommitInternalToolRepairRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.commitInternalToolRepairRequests.push(request);
+    const draft = request.drafts[0];
+    const part = draft?.parts[0];
     callback(null, {
       ack: {
         status: this.commitStatus,
         runtimeInputId: "",
         runtimeWriteId: request.modelToolCallId,
         errorCode: "",
+      },
+      declaration: {
+        receipts: [{
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "commit_internal_tool_repair",
+          sourceKind: "internal_tool_repair",
+          sourceId: draft?.sourceId ?? "",
+          events: [{
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            sourceEventId: draft?.sourceId ?? "",
+            eventId: "evt_internal_repair",
+            eventSequence: 12,
+            disposition: 2,
+          }],
+          messages: [{
+            runtimeLocalId: draft?.runtimeLocalId ?? "",
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            owningEventId: "evt_internal_repair",
+            messageId: "msg_durable_repair",
+            messageSequence: 3,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            disposition: 1,
+            parts: [{
+              runtimeLocalPartId: part?.runtimeLocalPartId ?? "",
+              partId: "part_durable_repair",
+              messageId: "msg_durable_repair",
+              partSequence: 0,
+              createdAt: "2026-01-01T00:00:00Z",
+              updatedAt: "2026-01-01T00:00:00Z",
+              disposition: 1,
+            }],
+          }],
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          declarationDigest: internalToolRepairDeclarationDigest(request),
+          requestReschedule: undefined,
+          childLifecycle: [],
+          idleCloseout: undefined,
+          compactedThroughMessageSequence: undefined,
+        }],
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
       },
     });
     return grpcCall();
@@ -1539,12 +2242,63 @@ class RecordingBridgeClient {
       callback(this.eventWriterTransportError, null);
       return grpcCall();
     }
+    const now = "2026-01-01T00:00:00.000Z";
+    const events = request.drafts.map((draft, index) => ({
+      sessionThreadId: request.scope?.sessionThreadId ?? "",
+      sourceEventId: request.runtimeWriteId,
+      eventId: `evt_termination_${request.runtimeWriteId}_${index}`,
+      eventSequence: index + 1,
+      disposition: DurableEventDisposition.DURABLE_EVENT_DISPOSITION_CREATED,
+    }));
+    const messages = request.drafts.map((draft, index) => ({
+      runtimeLocalId: draft.runtimeLocalId,
+      sessionThreadId: request.scope?.sessionThreadId ?? "",
+      owningEventId: events[index]!.eventId,
+      messageId: `msg_termination_${request.runtimeWriteId}_${index}`,
+      messageSequence: index + 1,
+      createdAt: now,
+      updatedAt: now,
+      disposition: DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_CREATED,
+      parts: draft.parts.map((part, partIndex) => ({
+        runtimeLocalPartId: part.runtimeLocalPartId,
+        partId: `part_termination_${request.runtimeWriteId}_${index}_${partIndex}`,
+        messageId: `msg_termination_${request.runtimeWriteId}_${index}`,
+        partSequence: partIndex,
+        createdAt: now,
+        updatedAt: now,
+        disposition: DurableProjectionDisposition.DURABLE_PROJECTION_DISPOSITION_CREATED,
+      })),
+    }));
     callback(null, {
       ack: {
         status: this.eventWriterAckStatus,
         runtimeInputId: "",
         runtimeWriteId: this.eventWriterAckWriteId ?? request.runtimeWriteId,
         errorCode: this.eventWriterErrorCode,
+      },
+      declaration: {
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        receipts: [{
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "commit_runtime_termination",
+          sourceKind: "runtime_termination",
+          sourceId: request.runtimeWriteId,
+          events,
+          messages,
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: request.pendingToolCancellations.map((pending) => JSON.stringify({
+            status: "cancelled",
+            tool_use_event_id: pending.toolUseEventId,
+          })),
+          prefixConsumptions: [],
+          declarationDigest: runtimeTerminationDeclarationDigest(request),
+          requestReschedule: undefined,
+          childLifecycle: [],
+          idleCloseout: undefined,
+          compactedThroughMessageSequence: undefined,
+        }],
       },
     });
     return grpcCall();
@@ -1556,12 +2310,74 @@ class RecordingBridgeClient {
       callback(this.eventWriterTransportError, null);
       return grpcCall();
     }
+    const now = "2026-01-01T00:00:00.000Z";
+    const idleEventId = `evt_idle_${request.durableTurnId}`;
+    const completionEventId = `evt_mail_${request.durableTurnId}`;
     callback(null, {
       ack: {
         status: this.eventWriterAckStatus,
         runtimeInputId: "",
-        runtimeWriteId: this.eventWriterAckWriteId ?? request.runtimeWriteId,
+        runtimeWriteId: this.eventWriterAckWriteId ?? request.durableTurnId,
         errorCode: this.eventWriterErrorCode,
+      },
+      declaration: {
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        receipts: [{
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "finish_idle",
+          sourceKind: "turn_closeout",
+          sourceId: request.durableTurnId,
+          declarationDigest: finishIdleDeclarationDigest(request),
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          childLifecycle: [],
+          events: [
+            {
+              sessionThreadId: request.scope?.sessionThreadId ?? "",
+              sourceEventId: request.durableTurnId,
+              eventId: idleEventId,
+              eventSequence: 1,
+              disposition: 2,
+            },
+            ...request.drafts.map((draft) => ({
+              sessionThreadId: request.scope?.sessionThreadId ?? "",
+              sourceEventId: request.durableTurnId,
+              eventId: completionEventId,
+              eventSequence: 2,
+              disposition: 2,
+            })),
+          ],
+          messages: request.drafts.map((draft, messageIndex) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            owningEventId: completionEventId,
+            messageId: `msg_finish_idle_${messageIndex}`,
+            messageSequence: messageIndex + 1,
+            createdAt: now,
+            updatedAt: now,
+            disposition: 1,
+            parts: draft.parts.map((part, partIndex) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part_finish_idle_${messageIndex}_${partIndex}`,
+              messageId: `msg_finish_idle_${messageIndex}`,
+              partSequence: partIndex,
+              createdAt: now,
+              updatedAt: now,
+              disposition: 1,
+            })),
+          })),
+          requestReschedule: undefined,
+          idleCloseout: {
+            durableTurnId: request.durableTurnId,
+            idleEventId,
+            idleEventSequence: 1,
+            committedIdleAt: now,
+          },
+          compactedThroughMessageSequence: undefined,
+        }],
       },
     });
     return grpcCall();
@@ -1591,7 +2407,7 @@ class RecordingBridgeClient {
         errorCode: "",
       },
       contextJson: this.loadContextJSON ?? JSON.stringify({
-        messages: [runtimeMessage(`msg_context_${request.scope?.sessionThreadId ?? "unknown"}`, "context")],
+        messages: [durableRuntimeMessage(`msg_context_${request.scope?.sessionThreadId ?? "unknown"}`, "context")],
         thread: request.scope?.sessionThreadId === "thr_child"
           ? {
               parentThreadId: "thr_main",
@@ -1658,6 +2474,14 @@ class RecordingBridgeClient {
           status: "resolving",
           expiresAt: "2026-01-01T00:30:00Z",
         }],
+        pendingSandboxExecutions: [{
+          toolUseEventId: "evt_pending_sandbox",
+          modelRequestId: "mrq_pending_sandbox",
+          modelToolCallId: "toolu_pending_sandbox",
+          toolName: "Bash",
+          input: { command: "pwd" },
+          executionState: "running",
+        }],
         backgroundTools: [{
           taskId: "task_loaded",
           sourceToolUseEventId: "evt_background_tool",
@@ -1684,6 +2508,15 @@ class RecordingBridgeClient {
           mime: "application/pdf",
           filename: "brief.pdf",
         }],
+        coldCoverage: {
+          pendingToolIds: ["evt_pending_tool"],
+          pendingSandboxExecutionIds: ["evt_pending_sandbox"],
+          pendingAttachmentIdentities: [
+            "transient:evt_loaded_tool:att_loaded",
+            "file:evt_loaded_user:file_loaded_pdf",
+          ],
+          undeliveredMailDeliveryIds: [],
+        },
       }),
       runtimeBindingToken: `token_${request.scope?.sessionThreadId ?? "unknown"}`,
     });
@@ -1692,12 +2525,45 @@ class RecordingBridgeClient {
 
   private markChildThreadClosed(request: MarkChildThreadClosedRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.markChildThreadClosedRequests.push(request);
+    const sourceKind = request.source?.reviewerReviewId === undefined ? "tool_use" : "approval_review";
+    const sourceCommandId = request.source?.reviewerReviewId ?? request.source?.sourceToolUseEventId ?? "";
+    const operationId = stableRuntimeID("child_tree_close", sourceCommandId, request.childThreadId);
     callback(null, {
       ack: {
         status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED,
         runtimeInputId: "",
-        runtimeWriteId: "",
+        runtimeWriteId: operationId,
         errorCode: "",
+      },
+      declaration: {
+        receipts: [{
+          sessionThreadId: request.childThreadId,
+          operationKind: "mark_child_thread_closed",
+          sourceKind: "child_close_command",
+          sourceId: operationId,
+          events: [],
+          messages: [],
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          declarationDigest: childLifecycleDeclarationDigest({
+            operationKind: "mark_child_thread_closed",
+            action: "close",
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            childThreadId: request.childThreadId,
+            sourceKind,
+            sourceCommandId,
+            requestedAt: request.closedAt,
+          }),
+          childLifecycle: [{
+            childThreadId: request.childThreadId,
+            disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+            effectiveAt: request.closedAt,
+          }],
+        }],
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
       },
     });
     return grpcCall();
@@ -1720,6 +2586,8 @@ class RecordingBridgeClient {
       callback(this.eventWriterTransportError, null);
       return grpcCall();
     }
+    const eventId = `evt_${request.runtimeWriteId}`;
+    const now = "2026-01-01T00:00:00.000Z";
     callback(null, {
       ack: {
         status: this.eventWriterAckStatus,
@@ -1727,8 +2595,51 @@ class RecordingBridgeClient {
         runtimeWriteId: this.eventWriterAckWriteId ?? request.runtimeWriteId,
         errorCode: this.eventWriterErrorCode,
       },
-      eventId: `evt_${request.runtimeWriteId}`,
+      eventId,
       sequence: 1,
+      declaration: {
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        receipts: [{
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "write_event",
+          sourceKind: request.eventType,
+          sourceId: request.runtimeWriteId,
+          declarationDigest: writeEventDeclarationDigest(request),
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          compactedThroughMessageSequence: this.eventWriterCompactedThroughMessageSequence,
+          childLifecycle: [],
+          events: [{
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            sourceEventId: request.runtimeWriteId,
+            eventId,
+            eventSequence: 1,
+            disposition: 2,
+          }],
+          messages: request.drafts.map((draft, messageIndex) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            owningEventId: eventId,
+            messageId: `msg_committed_${messageIndex}`,
+            messageSequence: messageIndex + 1,
+            createdAt: now,
+            updatedAt: now,
+            disposition: 1,
+            parts: draft.parts.map((part, partIndex) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part_committed_${messageIndex}_${partIndex}`,
+              messageId: `msg_committed_${messageIndex}`,
+              partSequence: partIndex,
+              createdAt: now,
+              updatedAt: now,
+              disposition: 1,
+            })),
+          })),
+        }],
+      },
     });
     return grpcCall();
   }
@@ -1739,7 +2650,65 @@ class RecordingBridgeClient {
       callback(this.eventWriterTransportError, null);
       return grpcCall();
     }
-    const staleTerminal = request.modelRequestId === "mreq_stale_terminal";
+    const now = "2026-01-01T00:00:00.000Z";
+    const eventId = `evt_${request.runtimeWriteId}`;
+    const interruptRequest = request.interruptSettlement === undefined
+      ? undefined
+      : {
+          scope: request.scope,
+          runtimeInputId: request.interruptSettlement.runtimeInputId,
+          eventIds: request.interruptSettlement.eventIds,
+          sequenceFrom: request.interruptSettlement.sequenceFrom,
+          sequenceTo: request.interruptSettlement.sequenceTo,
+          inputKind: "interrupt_control",
+          drafts: request.drafts.filter(
+            (draft) => draft.draftKind === RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION,
+          ),
+          pendingToolCancellations: request.interruptSettlement.pendingToolCancellations,
+          sandboxExecutionToolUseEventIds: request.interruptSettlement.sandboxExecutionToolUseEventIds,
+        };
+    const interruptReceipt = interruptRequest === undefined
+      ? undefined
+      : {
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "commit_inputs",
+          sourceKind: "interrupt_control",
+          sourceId: interruptRequest.runtimeInputId,
+          declarationDigest: commitInputsDeclarationDigest(interruptRequest),
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          childLifecycle: [],
+          events: [{
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            sourceEventId: interruptRequest.runtimeInputId,
+            eventId: interruptRequest.eventIds[0] ?? "",
+            eventSequence: interruptRequest.sequenceFrom,
+            disposition: 1,
+          }],
+          messages: interruptRequest.drafts.map((draft, messageIndex) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            owningEventId: draft.sourceEventId,
+            messageId: `msg_interrupt_${messageIndex}`,
+            messageSequence: messageIndex + 1,
+            createdAt: now,
+            updatedAt: now,
+            disposition: 1,
+            parts: draft.parts.map((part, partIndex) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part_interrupt_${messageIndex}_${partIndex}`,
+              messageId: `msg_interrupt_${messageIndex}`,
+              partSequence: partIndex,
+              createdAt: now,
+              updatedAt: now,
+              disposition: 1,
+            })),
+          })),
+          requestReschedule: undefined,
+          idleCloseout: undefined,
+          compactedThroughMessageSequence: undefined,
+        };
     callback(null, {
       ack: {
         status: this.eventWriterAckStatus,
@@ -1747,16 +2716,66 @@ class RecordingBridgeClient {
         runtimeWriteId: this.eventWriterAckWriteId ?? request.runtimeWriteId,
         errorCode: this.eventWriterErrorCode,
       },
-      rescheduleDisposition: staleTerminal ? {
-        status: "denied",
-        denialReason: "stale_terminal",
-        attempt: 0,
-        effectiveDeadline: "",
-      } : request.reschedule === undefined ? undefined : {
+      rescheduleDisposition: request.reschedule === undefined ? undefined : {
         status: "accepted",
         denialReason: "",
         attempt: request.reschedule.attempt,
         effectiveDeadline: request.reschedule.deadline,
+      },
+      declaration: {
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        receipts: [
+          ...(interruptReceipt === undefined ? [] : [interruptReceipt]),
+          {
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "write_request_end",
+          sourceKind: "model_request",
+          sourceId: request.modelRequestId,
+          declarationDigest: writeRequestEndDeclarationDigest(request),
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          childLifecycle: [],
+          events: [{
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            sourceEventId: request.modelRequestId,
+            eventId,
+            eventSequence: 1,
+            disposition: 2,
+          }],
+          messages: request.drafts.map((draft, messageIndex) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            owningEventId: eventId,
+            messageId: `msg_request_end_${messageIndex}`,
+            messageSequence: messageIndex + 1,
+            createdAt: now,
+            updatedAt: now,
+            disposition: 1,
+            parts: draft.parts.map((part, partIndex) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part_request_end_${messageIndex}_${partIndex}`,
+              messageId: `msg_request_end_${messageIndex}`,
+              partSequence: partIndex,
+              createdAt: now,
+              updatedAt: now,
+              disposition: 1,
+            })),
+          })),
+          requestReschedule: request.reschedule === undefined
+            ? undefined
+            : {
+                disposition: RequestRescheduleDisposition.REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED,
+                requestKind: request.requestKind,
+                attempt: request.reschedule.attempt,
+                effectiveDeadline: request.reschedule.deadline,
+              },
+          idleCloseout: undefined,
+          compactedThroughMessageSequence: request.compactedThroughMessageSequence,
+          },
+        ],
       },
     });
     return grpcCall();

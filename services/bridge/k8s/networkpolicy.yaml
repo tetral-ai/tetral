@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
   annotations:
-    tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"
+    tetral.ai/egress-intent: "blob.example.internal"
 spec:
   podSelector:
     matchLabels:
@@ -72,13 +72,6 @@ spec:
       ports:
         - protocol: TCP
           port: 9091
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: sandbox
-      ports:
-        - protocol: TCP
-          port: 9090
     - to:
         - namespaceSelector:
             matchLabels:

@@ -274,6 +274,53 @@ func TestRuntimePodDirectDelivererRecordsNonRetryableRejectedRuntimeInput(t *tes
 	}
 }
 
+func TestRuntimePodDirectDelivererRedeliversBoundedRejectionToTheLoop(t *testing.T) {
+	originalRequest := &agentruntimev1.RuntimeInputCommandRequest{
+		RequestId:      "qjob_1:lease_1",
+		WorkspaceId:    "ws_bridge",
+		SessionId:      "sesn_1",
+		RuntimeInputId: "rin_1",
+		CommandKind:    agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
+		PayloadJson:    strings.Repeat("x", 1024),
+	}
+	rejectionRequest := proto.Clone(originalRequest).(*agentruntimev1.RuntimeInputCommandRequest)
+	rejectionRequest.PayloadJson = `{"input_kind":"rejection","reason_code":"runtime_command_rejected"}`
+	store := &recordingRuntimeDeliveryStore{
+		plan: RuntimeCommandPlan{
+			Target:  RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090, PodName: "runtime-a", PodUID: "uid-a", Namespace: "tetral-agent-runtime"},
+			Request: originalRequest,
+		},
+		rejectionPlan: &RuntimeCommandPlan{
+			Target:  RuntimePodTarget{PodIP: "10.0.0.1", Port: 9090, PodName: "runtime-a", PodUID: "uid-a", Namespace: "tetral-agent-runtime"},
+			Request: rejectionRequest,
+		},
+		convertRejection: true,
+	}
+	sender := &recordingRuntimeCommandSender{responses: []*agentruntimev1.RuntimeInputCommandResponse{{
+		Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
+		Retryable: false,
+		ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_RUNTIME_REJECTED_INPUT,
+	}, {
+		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+	}}}
+
+	result, err := (RuntimePodDirectDeliverer{Store: store, Sender: sender}).DeliverRuntimeJob(context.Background(), runtimeInputRuntimeJob())
+	if err != nil {
+		t.Fatalf("DeliverRuntimeJob: %v", err)
+	}
+	if result.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("delivery result = %#v; want bounded rejection accepted by loop", result)
+	}
+	if len(sender.requests) != 2 ||
+		sender.requests[0].GetPayloadJson() != originalRequest.GetPayloadJson() ||
+		sender.requests[1].GetPayloadJson() != rejectionRequest.GetPayloadJson() {
+		t.Fatalf("runtime requests = %#v; want original then bounded rejection", sender.requests)
+	}
+	if len(store.acceptedJobs) != 1 {
+		t.Fatalf("accepted jobs = %#v; want bounded rejection inbox acceptance", store.acceptedJobs)
+	}
+}
+
 func TestRuntimePodDirectDelivererFinalizesCleanupWhenTargetIsProvenGone(t *testing.T) {
 	store := &recordingRuntimeDeliveryStore{
 		plan:          RuntimeCommandPlan{CleanupTargetGone: true},
@@ -329,7 +376,7 @@ func TestRuntimePodDirectDelivererSendsTaskNotificationRuntimeCommand(t *testing
 		t.Fatalf("delivery status = %s; want accepted", result.Status)
 	}
 	if len(sender.requests) != 1 || sender.requests[0].GetPayloadJson() != prepared.PayloadJson {
-		t.Fatalf("sent task notification payload = %#v; want committed payload", sender.requests)
+		t.Fatalf("sent task notification payload = %#v; want prepared transport payload", sender.requests)
 	}
 	if len(store.acceptedJobs) != 1 || store.acceptedJobs[0].RuntimeInputID != "task_notification:task_1" {
 		t.Fatalf("accepted jobs = %#v; want task notification marked accepted", store.acceptedJobs)
@@ -503,19 +550,24 @@ func cleanupRuntimeJob() RuntimeJob {
 }
 
 type recordingRuntimeDeliveryStore struct {
-	plan            RuntimeCommandPlan
-	cleanupResult   RuntimeDeliveryResult
-	err             error
-	acceptedErr     error
-	jobs            []RuntimeJob
-	acceptedJobs    []RuntimeJob
-	rejectedJobs    []RuntimeJob
-	rejectedResults []RuntimeDeliveryResult
-	cleanupJobs     []RuntimeJob
+	plan             RuntimeCommandPlan
+	rejectionPlan    *RuntimeCommandPlan
+	cleanupResult    RuntimeDeliveryResult
+	err              error
+	acceptedErr      error
+	jobs             []RuntimeJob
+	acceptedJobs     []RuntimeJob
+	rejectedJobs     []RuntimeJob
+	rejectedResults  []RuntimeDeliveryResult
+	cleanupJobs      []RuntimeJob
+	convertRejection bool
 }
 
 func (s *recordingRuntimeDeliveryStore) PrepareRuntimeCommand(_ context.Context, job RuntimeJob) (RuntimeCommandPlan, error) {
 	s.jobs = append(s.jobs, job)
+	if len(s.jobs) > 1 && s.rejectionPlan != nil {
+		return *s.rejectionPlan, s.err
+	}
 	return s.plan, s.err
 }
 
@@ -524,10 +576,12 @@ func (s *recordingRuntimeDeliveryStore) MarkRuntimeInputAccepted(_ context.Conte
 	return s.acceptedErr
 }
 
-func (s *recordingRuntimeDeliveryStore) RecordRuntimeInputRejected(_ context.Context, job RuntimeJob, result RuntimeDeliveryResult) error {
+func (s *recordingRuntimeDeliveryStore) PrepareRuntimeInputRejection(_ context.Context, job RuntimeJob, result RuntimeDeliveryResult) (bool, error) {
 	s.rejectedJobs = append(s.rejectedJobs, job)
 	s.rejectedResults = append(s.rejectedResults, result)
-	return nil
+	converted := s.convertRejection
+	s.convertRejection = false
+	return converted, nil
 }
 
 func (s *recordingRuntimeDeliveryStore) FinalizeRuntimeCleanup(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
@@ -539,10 +593,11 @@ func (s *recordingRuntimeDeliveryStore) FinalizeRuntimeCleanup(_ context.Context
 }
 
 type recordingRuntimeCommandSender struct {
-	response *agentruntimev1.RuntimeInputCommandResponse
-	err      error
-	targets  []RuntimePodTarget
-	requests []*agentruntimev1.RuntimeInputCommandRequest
+	response  *agentruntimev1.RuntimeInputCommandResponse
+	responses []*agentruntimev1.RuntimeInputCommandResponse
+	err       error
+	targets   []RuntimePodTarget
+	requests  []*agentruntimev1.RuntimeInputCommandRequest
 }
 
 type countingRuntimeCommandTokenSource struct {
@@ -559,6 +614,23 @@ func (s *recordingRuntimeCommandSender) SendRuntimeCommand(_ context.Context, ta
 	s.requests = append(s.requests, request)
 	if s.err != nil {
 		return nil, s.err
+	}
+	if len(s.responses) > 0 {
+		response := proto.Clone(s.responses[0]).(*agentruntimev1.RuntimeInputCommandResponse)
+		s.responses = s.responses[1:]
+		if response.SessionId == "" {
+			response.SessionId = request.GetSessionId()
+		}
+		if response.RuntimeInputId == "" {
+			response.RuntimeInputId = request.GetRuntimeInputId()
+		}
+		if response.BindingId == "" {
+			response.BindingId = request.GetBindingId()
+		}
+		if response.BindingGeneration == 0 {
+			response.BindingGeneration = request.GetBindingGeneration()
+		}
+		return response, nil
 	}
 	if s.response == nil {
 		return nil, nil

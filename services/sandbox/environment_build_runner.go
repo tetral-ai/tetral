@@ -12,22 +12,24 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
 type EnvironmentBuildStore interface {
 	ClaimEnvironmentBuild(context.Context, EnvironmentBuildJob, time.Time) (EnvironmentArtifactBuildInput, bool, error)
+	AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error)
 	MarkEnvironmentBuildReady(context.Context, EnvironmentBuildJob, string, time.Time) error
-	MarkEnvironmentBuildRetryableFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, time.Time) error
+	MarkEnvironmentBuildRetryableFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, bool, time.Time) error
 	MarkEnvironmentBuildTerminalFailure(context.Context, EnvironmentBuildJob, EnvironmentArtifactFailure, time.Time) error
 }
 
 type EnvironmentBuildJobRunner struct {
-	Queue   SessionPrepareQueueClient
-	Store   EnvironmentBuildStore
-	Builder sandbox.ArtifactBuilder
-	Config  EnvironmentRunnerConfig
-	Clock   func() time.Time
+	Queue     SandboxQueueClient
+	Store     EnvironmentBuildStore
+	Providers *ProviderRegistry
+	Config    EnvironmentRunnerConfig
+	Clock     func() time.Time
 }
 
 type EnvironmentRunnerConfig struct {
@@ -41,6 +43,7 @@ type EnvironmentRunnerConfig struct {
 type EnvironmentBuildJob struct {
 	JobID         string
 	LeaseToken    string
+	AttemptCount  int
 	WorkspaceID   string
 	EnvironmentID string
 	Generation    int64
@@ -58,10 +61,11 @@ func (r *EnvironmentBuildJobRunner) RunOnceWithActivity(ctx context.Context) (bo
 	if r.Store == nil {
 		return false, errors.New("sandbox environment_build store is required")
 	}
-	if r.Builder == nil {
-		return false, errors.New("sandbox environment artifact builder is required")
+	if r.Providers == nil {
+		return false, errors.New("sandbox provider registry is required")
 	}
 	cfg := normalizedEnvironmentRunnerConfig(r.Config)
+	leaseSentAt := time.Now()
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
 		WorkspaceId:     cfg.WorkspaceID,
 		Kinds:           []string{queue.KindEnvironmentBuild},
@@ -74,16 +78,61 @@ func (r *EnvironmentBuildJobRunner) RunOnceWithActivity(ctx context.Context) (bo
 	}
 	hadWork := len(lease.GetJobs()) > 0
 	for _, queueJob := range lease.GetJobs() {
-		if err := r.processJob(ctx, queueJob, cfg); err != nil {
+		if err := r.processJob(ctx, queueJob, cfg, leaseSentAt.Add(wireRoundedQueueLeaseDuration(cfg.LeaseDuration))); err != nil {
 			return hadWork, err
 		}
 	}
 	return hadWork, nil
 }
 
-func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg EnvironmentRunnerConfig) error {
+func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg EnvironmentRunnerConfig, localExpiry time.Time) (resultErr error) {
+	workCtx, stopHeartbeat, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if heartbeatErr := stopHeartbeat(); resultErr == nil && heartbeatErr != nil {
+			resultErr = heartbeatErr
+		}
+	}()
+	ctx = workCtx
+	if queueJob.GetMaxAttempts() <= 0 || queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
+		if transportJob, identityErr := decodeEnvironmentBuildTransportIdentity(queueJob); identityErr == nil {
+			failure := EnvironmentArtifactFailure{Stage: "build_artifact", LastErrorKind: "environment_build_attempts_exhausted", Reason: "environment build attempt budget exhausted"}
+			if queueJob.GetMaxAttempts() <= 0 {
+				failure.LastErrorKind = "sandbox_queue_integrity_error"
+				failure.Reason = "environment build job has no attempt budget"
+			}
+			if err := r.finalizePrecheckedEnvironmentBuild(ctx, transportJob, failure); err != nil {
+				return err
+			}
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
+		errorKind := "environment_build_attempts_exhausted"
+		errorMessage := "environment build attempt budget exhausted"
+		if queueJob.GetMaxAttempts() <= 0 {
+			errorKind = "sandbox_queue_integrity_error"
+			errorMessage = "environment build job has no attempt budget"
+		}
+		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
+			ErrorKind: errorKind, ErrorMessage: errorMessage,
+		}))
+	}
 	job, err := DecodeEnvironmentBuildJob(queueJob)
 	if err != nil {
+		if transportJob, identityErr := decodeEnvironmentBuildTransportIdentity(queueJob); identityErr == nil {
+			if err := r.finalizePrecheckedEnvironmentBuild(ctx, transportJob, EnvironmentArtifactFailure{
+				Stage: "build_artifact", LastErrorKind: "invalid_environment_build_payload", Reason: "environment_build queue payload is invalid",
+			}); err != nil {
+				return err
+			}
+		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  queueJob.GetWorkspaceId(),
 			JobId:        queueJob.GetId(),
@@ -95,30 +144,45 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	now := r.now()
 	input, claimed, err := r.Store.ClaimEnvironmentBuild(ctx, job, now)
 	if err != nil {
+		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
+			return heartbeatErr
+		}
 		return r.retryEnvironmentBuild(ctx, job, cfg, "environment_build_store_error", "environment build store claim failed")
 	}
 	if !claimed {
+		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
+			return heartbeatErr
+		}
 		return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
 			WorkspaceId: job.WorkspaceID,
 			JobId:       job.JobID,
 			LeaseToken:  job.LeaseToken,
 		}))
 	}
-	workCtx, stopHeartbeat := startQueueLeaseGuard(ctx, r.Queue, job.WorkspaceID, job.JobID, job.LeaseToken, cfg.HeartbeatInterval, cfg.LeaseDuration)
-	result, buildErr := r.Builder.BuildArtifact(workCtx, sandbox.BuildArtifactRequest{
+	builder, ok := r.Providers.ResolveEnvironmentArtifacts(input.Provider)
+	if !ok {
+		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
+			return heartbeatErr
+		}
+		return r.retryEnvironmentBuild(ctx, job, cfg, "provider_configuration_invalid", "environment artifact provider is unavailable")
+	}
+	outcome := builder.BuildEnvironmentArtifact(ctx, sandbox.BuildArtifactRequest{
 		WorkspaceID:        input.WorkspaceID,
 		EnvironmentID:      input.EnvironmentID,
 		Generation:         input.Generation,
 		ArtifactInputHash:  input.ArtifactInputHash,
 		NormalizedPackages: input.NormalizedPackages,
+		AuthorizeProviderCreate: func(ctx context.Context) (bool, error) {
+			return r.Store.AuthorizeEnvironmentArtifactCreate(ctx, job, r.now())
+		},
 	})
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+	if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
 		return heartbeatErr
 	}
-	if buildErr != nil {
-		return r.handleBuildError(ctx, queueJob, job, cfg, buildErr)
+	if outcome.Failed() {
+		return r.handleBuildFailure(ctx, queueJob, job, cfg, outcome)
 	}
-	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, result.ProviderArtifactRef, r.now()); err != nil {
+	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value.ProviderArtifactRef, r.now()); err != nil {
 		return r.retryEnvironmentBuild(ctx, job, cfg, "environment_build_store_error", "environment build ready commit failed")
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
@@ -128,9 +192,50 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 	}))
 }
 
-func (r *EnvironmentBuildJobRunner) handleBuildError(ctx context.Context, queueJob *queuev1.QueueJob, job EnvironmentBuildJob, cfg EnvironmentRunnerConfig, buildErr error) error {
-	failure := environmentArtifactFailureForError(buildErr)
-	if !retryableEnvironmentBuildError(buildErr) {
+func (r *EnvironmentBuildJobRunner) finalizePrecheckedEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob, failure EnvironmentArtifactFailure) error {
+	now := r.now()
+	_, claimed, err := r.Store.ClaimEnvironmentBuild(ctx, job, now)
+	if err != nil || !claimed {
+		return err
+	}
+	return r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, now)
+}
+
+func decodeEnvironmentBuildTransportIdentity(queueJob *queuev1.QueueJob) (EnvironmentBuildJob, error) {
+	if queueJob == nil || queueJob.GetKind() != queue.KindEnvironmentBuild ||
+		queueJob.GetWorkspaceId() == "" || queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" || queueJob.GetAttemptCount() <= 0 {
+		return EnvironmentBuildJob{}, errors.New("environment_build Queue identity is incomplete")
+	}
+	ws := workspace.ID(queueJob.GetWorkspaceId())
+	partitionPrefix := strings.TrimSuffix(queue.FormatEnvironmentPartitionKey(ws, "identity"), "identity")
+	if !strings.HasPrefix(queueJob.GetPartitionKey(), partitionPrefix) {
+		return EnvironmentBuildJob{}, errors.New("environment_build partition identity is invalid")
+	}
+	environmentID := strings.TrimPrefix(queueJob.GetPartitionKey(), partitionPrefix)
+	if environmentID == "" {
+		return EnvironmentBuildJob{}, errors.New("environment_build environment identity is missing")
+	}
+	dedupePrefix := strings.TrimSuffix(queue.FormatEnvironmentBuildDedupeKey(ws, environmentID, "identity"), "identity")
+	if !strings.HasPrefix(queueJob.GetDedupeKey(), dedupePrefix) {
+		return EnvironmentBuildJob{}, errors.New("environment_build dedupe identity is invalid")
+	}
+	generationText := strings.TrimPrefix(queueJob.GetDedupeKey(), dedupePrefix)
+	generation, err := strconv.ParseInt(generationText, 10, 64)
+	if err != nil || generation <= 0 || queueJob.GetDedupeKey() != queue.FormatEnvironmentBuildDedupeKey(ws, environmentID, generationText) {
+		return EnvironmentBuildJob{}, errors.New("environment_build generation identity is invalid")
+	}
+	return EnvironmentBuildJob{
+		JobID: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(), AttemptCount: int(queueJob.GetAttemptCount()),
+		WorkspaceID: queueJob.GetWorkspaceId(), EnvironmentID: environmentID, Generation: generation,
+	}, nil
+}
+
+func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, queueJob *queuev1.QueueJob, job EnvironmentBuildJob, cfg EnvironmentRunnerConfig, outcome ProviderOutcome[sandbox.BuildArtifactResult]) error {
+	failure := EnvironmentArtifactFailure{
+		Stage: "build_artifact", LastErrorKind: valueOrDefault(outcome.ErrorKind, "environment_build_error"),
+		Reason: valueOrDefault(outcome.SafeMessage, "environment build failed"), Retryable: outcome.Disposition == ProviderRetryable,
+	}
+	if outcome.Disposition != ProviderRetryable {
 		failure.Retryable = false
 		if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
 			return err
@@ -150,7 +255,8 @@ func (r *EnvironmentBuildJobRunner) handleBuildError(ctx context.Context, queueJ
 		}
 	} else {
 		failure.Retryable = true
-		if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, r.now()); err != nil {
+		rearmCreate := outcome.EffectBoundary == ProviderProvedNotStarted
+		if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, rearmCreate, r.now()); err != nil {
 			return err
 		}
 	}
@@ -178,12 +284,13 @@ func DecodeEnvironmentBuildJob(queueJob *queuev1.QueueJob) (EnvironmentBuildJob,
 	if err != nil {
 		return EnvironmentBuildJob{}, err
 	}
-	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" {
+	if queueJob.GetId() == "" || queueJob.GetLeaseToken() == "" || queueJob.GetAttemptCount() <= 0 {
 		return EnvironmentBuildJob{}, errors.New("environment_build queue identity is incomplete")
 	}
 	return EnvironmentBuildJob{
 		JobID:         queueJob.GetId(),
 		LeaseToken:    queueJob.GetLeaseToken(),
+		AttemptCount:  int(queueJob.GetAttemptCount()),
 		WorkspaceID:   workspaceID,
 		EnvironmentID: environmentID,
 		Generation:    generation,
@@ -236,39 +343,4 @@ func normalizedEnvironmentRunnerConfig(cfg EnvironmentRunnerConfig) EnvironmentR
 
 func environmentRetryWillExhaust(queueJob *queuev1.QueueJob) bool {
 	return queueJob != nil && queueJob.GetMaxAttempts() > 0 && queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts()
-}
-
-func retryableEnvironmentBuildError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var providerErr *sandbox.ProviderError
-	if errors.As(err, &providerErr) {
-		return providerErr.Retryable || providerErr.Kind == sandbox.ProviderErrorTimeout || providerErr.Kind == sandbox.ProviderErrorUnavailable
-	}
-	var validation *sandbox.ValidationError
-	if errors.As(err, &validation) {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	return true
-}
-
-func environmentArtifactFailureForError(err error) EnvironmentArtifactFailure {
-	failure := EnvironmentArtifactFailure{
-		Stage:         "environment_build",
-		LastErrorKind: "environment_build_error",
-		Reason:        "environment_build_error",
-		Retryable:     retryableEnvironmentBuildError(err),
-	}
-	var providerErr *sandbox.ProviderError
-	if errors.As(err, &providerErr) {
-		failure.Stage = string(providerErr.Stage)
-		failure.LastErrorKind = string(providerErr.Kind)
-		failure.Reason = valueOrDefault(providerErr.SafeMessage, string(providerErr.Kind))
-		failure.Retryable = providerErr.Retryable
-	}
-	return failure
 }

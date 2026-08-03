@@ -3,8 +3,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Metadata, status as GrpcStatus } from "@grpc/grpc-js";
+import type { CallOptions } from "@grpc/grpc-js";
 import {
   BridgeWriteStatus,
+  ChildLifecycleDisposition,
+  ReceiptApplicationDisposition,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceClient,
@@ -17,7 +20,8 @@ import type {
   ResolveChildThreadRequest,
   ResolveInterAgentDeliveryRequest,
   RunMemoryRequest,
-  RunToolRequest,
+  AcceptSandboxExecutionRequest,
+  AwaitSandboxExecutionRequest,
   SendCommandInputRequest,
   WriteEventRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
@@ -38,9 +42,12 @@ import type {
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
-import { canonicalRunToolJSON } from "../../src/run-tool-canonical-json.js";
+import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import { childLifecycleDeclarationDigest } from "../../src/runtime-declaration-wire.js";
 import type { RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
 import {
   buildToolRunnerCompletedToolMessage as completedToolMessage,
@@ -63,9 +70,10 @@ describe("RuntimePodToolRunner", () => {
     expect(() => canonicalRunToolJSON(`{"unterminated":`)).toThrow();
   });
 
-  test("routes sandbox tools through Bridge RunTool with stable input identity", async () => {
+  test("accepts one durable sandbox execution before independently awaiting its result", async () => {
+    const startedAt = Date.now();
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         summary: "created notes/a.txt",
@@ -74,6 +82,7 @@ describe("RuntimePodToolRunner", () => {
         sandbox_process_id: "pid-secret",
       },
     });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
     const runner = makeRunner({ bridge });
 
     const result = await runner.runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }));
@@ -84,12 +93,24 @@ describe("RuntimePodToolRunner", () => {
         text: "status: success\nsummary: created notes/a.txt",
         truncated: false,
       },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
     expect(JSON.stringify(result)).not.toContain("payload");
     expect(JSON.stringify(result)).not.toContain("provider-secret");
     expect(JSON.stringify(result)).not.toContain("sandbox_process");
-    expect(bridge.runToolRequests).toHaveLength(1);
-    expect(bridge.runToolRequests[0]).toMatchObject({
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionOptions).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionOptions[0]?.deadline).toBeNumber();
+    expect(bridge.acceptSandboxExecutionOptions[0]?.deadline as number).toBeGreaterThanOrEqual(
+      startedAt + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    );
+    expect(bridge.acceptSandboxExecutionOptions[0]?.deadline as number).toBeLessThanOrEqual(
+      Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+    );
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests[0]).toEqual(bridge.acceptSandboxExecutionRequests[0]);
+    expect(bridge.acceptSandboxExecutionRequests[0]).toMatchObject({
+      modelToolCallId: "tool_call_1",
       toolUseEventId: "sevt_tool_1",
       toolName: "Write",
       inputJson: '{"content":"hello","file_path":"notes/a.txt"}',
@@ -107,10 +128,131 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
+  test("preserves explicit non-retryable sandbox failures", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
+      status: "runtime_error",
+      error_code: "projection_refresh_failed",
+      message: "memory projection failed",
+      retryable: false,
+    });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
+
+    const result = await makeRunner({ bridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        code: "runtime_invalid_sequence",
+        retryable: false,
+      },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
+    });
+  });
+
+  test("rejects non-boolean sandbox retryability instead of deriving it from status", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
+      status: "runtime_error",
+      message: "bad retry marker",
+      retryable: "yes",
+    });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
+
+    const result = await makeRunner({ bridge }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Tool route returned malformed retryability.",
+        retryable: false,
+      },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
+    });
+  });
+
+  test("retries the exact durable acceptance before beginning the result wait", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.acceptSandboxExecutionErrors.push(Object.assign(new Error("connection reset"), { code: GrpcStatus.UNAVAILABLE }));
+    const sleep = new ControlledSleep();
+    const runner = makeRunner({ bridge, sleep: sleep.sleep });
+
+    const pending = runner.runTool(toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }));
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(0);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+    const result = await pending;
+
+    expect(result.type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(2);
+    expect(bridge.acceptSandboxExecutionRequests[1]!).toEqual(bridge.acceptSandboxExecutionRequests[0]!);
+    expect(bridge.awaitSandboxExecutionRequests).toEqual([bridge.acceptSandboxExecutionRequests[0]!]);
+  });
+
+  test("does not turn an acceptance authentication failure into a tool result", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.acceptSandboxExecutionErrors.push(Object.assign(new Error("token rejected"), { code: GrpcStatus.UNAUTHENTICATED }));
+    const sleep = new ControlledSleep();
+    const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(0);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+
+    expect((await pending).type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(2);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+  });
+
+  test("retries only the result wait after durable sandbox acceptance", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionErrors.push(Object.assign(new Error("connection reset"), { code: GrpcStatus.UNAVAILABLE }));
+    const sleep = new ControlledSleep();
+    const pending = makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+    await Bun.sleep(0);
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(1);
+    sleep.releaseNext();
+
+    expect((await pending).type).toBe("completed");
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(2);
+    expect(bridge.awaitSandboxExecutionRequests[1]).toEqual(bridge.awaitSandboxExecutionRequests[0]);
+  });
+
+  test("returns stale custody when Bridge permanently rejects the result wait", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionErrors.push(Object.assign(new Error("binding moved"), { code: GrpcStatus.FAILED_PRECONDITION }));
+    const sleep = new ControlledSleep();
+    const result = await makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Write", { content: "hello", file_path: "notes/a.txt" }),
+    );
+
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(0);
+    expect(result).toEqual({ type: "stale_custody" });
+  });
+
   test("numbers only the requested Read range with true file line numbers", async () => {
     const allLines = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`);
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: `${allLines.slice(9, 14).join("\n")}\n`,
@@ -139,7 +281,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("uses the helper start_line when a Read request offset is zero", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "first\nsecond\n",
@@ -164,7 +306,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("does not number a spurious empty line for trailing-newline Read content", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "one\n\nthree\n",
@@ -184,7 +326,7 @@ describe("RuntimePodToolRunner", () => {
     expect(result.output.text).not.toMatch(/(?:^|\n) {5}7\t(?:\n|$)/u);
 
     const blankBridge = new RecordingBridgeClient();
-    blankBridge.runToolResultJson = JSON.stringify({
+    blankBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "\n",
@@ -212,7 +354,7 @@ describe("RuntimePodToolRunner", () => {
 
     for (const testCase of cases) {
       const bridge = new RecordingBridgeClient();
-      bridge.runToolResultJson = JSON.stringify({
+      bridge.awaitSandboxExecutionResultJson = JSON.stringify({
         status: "success",
         result: { content: "alpha\nbeta\n", start_line: 7 },
       });
@@ -228,7 +370,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("renders truncation without hiding result bodies and never rebuilds expected guards", async () => {
     const truncatedReadBridge = new RecordingBridgeClient();
-    truncatedReadBridge.runToolResultJson = JSON.stringify({
+    truncatedReadBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "long line… [line truncated]\n",
@@ -248,7 +390,7 @@ describe("RuntimePodToolRunner", () => {
     expect(truncatedRead.output.truncated).toBe(true);
 
     const completeReadBridge = new RecordingBridgeClient();
-    completeReadBridge.runToolResultJson = JSON.stringify({
+    completeReadBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "complete\n",
@@ -274,19 +416,19 @@ describe("RuntimePodToolRunner", () => {
       truncatedRead.output.text,
     );
     const editBridge = new RecordingBridgeClient();
-    editBridge.runToolResultJson = JSON.stringify({ status: "success", result: { replacements: 1 } });
+    editBridge.awaitSandboxExecutionResultJson = JSON.stringify({ status: "success", result: { replacements: 1 } });
     await makeRunner({ bridge: editBridge }).runTool({
       ...toolRequest("Edit", { file_path: "notes/a.txt", old_string: "line", new_string: "row" }),
       committedMessages: [readMessage],
     });
-    expect(JSON.parse(editBridge.runToolRequests[0]?.inputJson ?? "{}")).toEqual({
+    expect(JSON.parse(editBridge.acceptSandboxExecutionRequests[0]?.inputJson ?? "{}")).toEqual({
       file_path: "notes/a.txt",
       old_string: "line",
       new_string: "row",
     });
 
     const writeBridge = new RecordingBridgeClient();
-    writeBridge.runToolResultJson = JSON.stringify({
+    writeBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       truncated: true,
       result: { created: true, bytes_written: 12 },
@@ -306,7 +448,7 @@ describe("RuntimePodToolRunner", () => {
     const content = `${Array.from({ length: 2000 }, () => "x".repeat(99)).join("\n")}\n`;
     for (const startLine of [1, 1_000_000, 1_000_000_000, Number.MAX_SAFE_INTEGER]) {
       const bridge = new RecordingBridgeClient();
-      bridge.runToolResultJson = JSON.stringify({
+      bridge.awaitSandboxExecutionResultJson = JSON.stringify({
         status: "success",
         result: {
           content,
@@ -342,7 +484,7 @@ describe("RuntimePodToolRunner", () => {
     }
 
     const unsafeStartBridge = new RecordingBridgeClient();
-    unsafeStartBridge.runToolResultJson = JSON.stringify({
+    unsafeStartBridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         content: "alpha\nbeta\n",
@@ -363,7 +505,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("formats failed Read envelopes without content or start_line", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "tool_error",
       error: { kind: "not_found", message: "path does not exist" },
       result: {},
@@ -392,12 +534,12 @@ describe("RuntimePodToolRunner", () => {
 
     for (const testCase of cases) {
       const bridge = new RecordingBridgeClient();
-      bridge.runToolResultJson = JSON.stringify({ status: "success", result: {} });
+      bridge.awaitSandboxExecutionResultJson = JSON.stringify({ status: "success", result: {} });
       await makeRunner({ bridge }).runTool({
         ...toolRequest(testCase.tool, testCase.input),
         committedMessages: [readMessage],
       });
-      expect(JSON.parse(bridge.runToolRequests[0]?.inputJson ?? "{}"), testCase.tool).not.toHaveProperty("expected");
+      expect(JSON.parse(bridge.acceptSandboxExecutionRequests[0]?.inputJson ?? "{}"), testCase.tool).not.toHaveProperty("expected");
     }
 
     const stdinBridge = new RecordingBridgeClient();
@@ -410,15 +552,15 @@ describe("RuntimePodToolRunner", () => {
 
   test("returns background task metadata for sandbox running results", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "running",
       result: {
         task_id: "task_bridge_1",
         stdout: { text: "started", truncated: false },
       },
     });
-    bridge.runToolBackgroundTaskStarted = true;
-    bridge.runToolTaskId = "task_bridge_1";
+    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
+    bridge.awaitSandboxExecutionTaskId = "task_bridge_1";
     const runner = makeRunner({ bridge });
 
     const result = await runner.runTool(toolRequest("exec_command", { cmd: "sleep 10" }));
@@ -430,17 +572,18 @@ describe("RuntimePodToolRunner", () => {
         truncated: false,
       },
       backgroundTask: { taskId: "task_bridge_1" },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
   });
 
   test("provider Bash background execution reaches detached helper after privilege drop", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "running",
       result: { task_id: "sevt_tool_1" },
     });
-    bridge.runToolBackgroundTaskStarted = true;
-    bridge.runToolTaskId = "sevt_tool_1";
+    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
+    bridge.awaitSandboxExecutionTaskId = "sevt_tool_1";
 
     const result = await makeRunner({ bridge }).runTool(toolRequest("Bash", {
       command: "sleep 60",
@@ -449,8 +592,8 @@ describe("RuntimePodToolRunner", () => {
       run_in_background: true,
     }));
 
-    expect(bridge.runToolRequests).toHaveLength(1);
-    expect(bridge.runToolRequests[0]).toMatchObject({
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionRequests[0]).toMatchObject({
       toolUseEventId: "sevt_tool_1",
       toolName: "Bash",
       inputJson: '{"command":"sleep 60","cwd":"/workspace","run_in_background":true,"timeout":120000}',
@@ -464,7 +607,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("turns Bridge view_image attachment refs into pending provider attachments", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "image/png",
@@ -475,6 +618,7 @@ describe("RuntimePodToolRunner", () => {
         source_path: "plot.png",
         page_range: "",
         detail: "auto",
+        data_base64: "AAEC",
       },
     });
     const runner = makeRunner({ bridge });
@@ -502,12 +646,12 @@ describe("RuntimePodToolRunner", () => {
     });
     expect(JSON.stringify(result)).not.toContain("AAEC");
     expect(JSON.stringify(result)).not.toContain("data_base64");
-    expect(bridge.runToolRequests).toHaveLength(1);
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
   });
 
   test("turns Bridge Read PDF attachment refs into pending provider attachments with page range", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "application/pdf",
@@ -518,6 +662,7 @@ describe("RuntimePodToolRunner", () => {
         source_path: "docs/report.pdf",
         page_range: "2-6",
         detail: "auto",
+        data_base64: "JVBERi0=",
       },
     });
     const runner = makeRunner({ bridge });
@@ -549,7 +694,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("does not re-derive missing PDF page range from the original tool input", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "application/pdf",
@@ -573,7 +718,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("rejects raw sandbox media bytes at the Runtime boundary", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "image/png",
@@ -597,7 +742,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("filters transport-only base64 fields out of visible non-media sandbox tool JSON", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         mime: "image/png",
@@ -644,11 +789,41 @@ describe("RuntimePodToolRunner", () => {
           requestId: stableTestId("req", "command-followup:sevt_tool_poll"),
         }),
         taskId: "task_1",
-        deferTerminalSettlement: false,
         maxOutputTokens: 123,
         toolUseEventId: "sevt_tool_poll",
       }),
     ]);
+  });
+
+  test("rejoins write_stdin send and poll after transport loss with the same request identity", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.sendCommandInputErrors.push(new Error("send disconnected"));
+    bridge.readCommandResultErrors.push(new Error("poll disconnected"));
+    const sleep = new ControlledSleep();
+    const runner = makeRunner({ bridge, sleep: sleep.sleep });
+
+    const sendPending = runner.runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "hello" },
+      "sevt_tool_send",
+    ));
+    await waitForCondition(() => sleep.calls.length === 1, "command send rejoin wait");
+    sleep.releaseNext();
+    expect((await sendPending).type).toBe("completed");
+
+    const pollPending = runner.runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "" },
+      "sevt_tool_poll",
+    ));
+    await waitForCondition(() => sleep.calls.length === 2, "command poll rejoin wait");
+    sleep.releaseNext();
+    expect((await pollPending).type).toBe("completed");
+
+    expect(bridge.sendCommandInputRequests).toHaveLength(2);
+    expect(bridge.sendCommandInputRequests[1]).toEqual(bridge.sendCommandInputRequests[0]);
+    expect(bridge.readCommandResultRequests).toHaveLength(2);
+    expect(bridge.readCommandResultRequests[1]).toEqual(bridge.readCommandResultRequests[0]);
   });
 
   test("write_stdin ignores undeclared task and camel-case token aliases", async () => {
@@ -681,7 +856,7 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.sendCommandInputRequests.every((request) => !("stdinWriteSequence" in request))).toBe(true);
   });
 
-  test("cancels background command tasks through Bridge CancelCommand on tool abort", async () => {
+  test("cancels only the local command wait when its tool fiber aborts", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.deferReadCommandResult = true;
     const runner = makeRunner({ bridge });
@@ -698,13 +873,28 @@ describe("RuntimePodToolRunner", () => {
     const result = await resultPromise;
 
     expect(result.type).toBe("cancelled");
-    expect(bridge.cancelCommandRequests).toEqual([
-      expect.objectContaining({
-        taskId: "task_1",
-        reason: "runtime_interrupted",
-        toolUseEventId: "sevt_tool_poll",
-      }),
-    ]);
+    expect(bridge.cancelCommandRequests).toEqual([]);
+  });
+
+  test.each([
+    ["missing task", GrpcStatus.NOT_FOUND],
+    ["stale task", GrpcStatus.FAILED_PRECONDITION],
+  ])("does not retry typed command rejection: %s", async (_name, code) => {
+    const bridge = new RecordingBridgeClient();
+    bridge.readCommandResultErrors.push(Object.assign(new Error("typed rejection"), { code }));
+    const sleep = new ControlledSleep();
+    const result = await makeRunner({ bridge, sleep: sleep.sleep }).runTool(toolRequest(
+      "write_stdin",
+      { session_id: "task_1", chars: "" },
+      "sevt_tool_poll",
+    ));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: { retryable: false, message: "Bridge rejected the command operation." },
+    });
+    expect(bridge.readCommandResultRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(0);
   });
 
   test("routes memory through Bridge RunMemory", async () => {
@@ -724,342 +914,42 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
-  test("parks for 300 ms before an identical same-ID Memory replay and refreshes metadata only after release", async () => {
+  test("rejoins Memory after transport loss with the same request identity", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" })];
-    bridge.deferRunMemoryCall = 2;
-    const controlledSleep = new ControlledSleep();
-    let tokenGeneration = 0;
-    const runner = makeRunner({
+    bridge.runMemoryErrors.push(new Error("bridge unavailable"));
+    const sleep = new ControlledSleep();
+
+    const pending = makeRunner({
       bridge,
-      sleep: controlledSleep.sleep,
-      metadataFactory: async () => {
-        tokenGeneration++;
-        const metadata = new Metadata();
-        metadata.set("authorization", `Bearer rotated-token-${tokenGeneration}`);
-        return metadata;
-      },
-    });
-    let settlements = 0;
-    const request = toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" });
-
-    const resultPromise = runner.runTool(request);
-    void resultPromise.then(() => {
-      settlements++;
-    });
-    await waitForCondition(() => controlledSleep.calls.length === 1, "same-ID Memory projection replay wait");
-
-    expect(controlledSleep.calls[0]).toMatchObject({ delayMs: 300, abortSignal: request.abortSignal });
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-    expect(tokenGeneration).toBe(1);
-    expect(settlements).toBe(0);
-
-    controlledSleep.releaseNext();
-    await waitForCondition(() => bridge.runMemoryRequests.length === 2, "same-ID Memory projection replay");
-    expect(settlements).toBe(0);
-    expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
-    expect(bridge.runMemoryMetadata.map((metadata) => metadata.get("authorization"))).toEqual([
-      ["Bearer rotated-token-1"],
-      ["Bearer rotated-token-2"],
-    ]);
-    expect(tokenGeneration).toBe(2);
-
-    bridge.completeDeferredRunMemory();
-    const result = await resultPromise;
-    expect(result.type).toBe("completed");
-    expect(settlements).toBe(1);
-    expect(controlledSleep.calls).toHaveLength(1);
-  });
-
-  test("refreshes Runtime Bridge metadata for every same-ID Memory replay", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" })];
-    let tokenGeneration = 0;
-    const runner = makeRunner({
-      bridge,
-      sleep: immediateSleep,
-      metadataFactory: async () => {
-        tokenGeneration++;
-        const metadata = new Metadata();
-        metadata.set("authorization", `Bearer rotated-token-${tokenGeneration}`);
-        return metadata;
-      },
-    });
-
-    const result = await runner.runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+      sleep: sleep.sleep,
+    }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
+    await waitForCondition(() => sleep.calls.length === 1, "Memory transport rejoin wait");
+    sleep.releaseNext();
+    const result = await pending;
 
     expect(result.type).toBe("completed");
     expect(bridge.runMemoryRequests).toHaveLength(2);
     expect(bridge.runMemoryRequests[1]).toEqual(bridge.runMemoryRequests[0]);
-    expect(bridge.runMemoryMetadata.map((metadata) => metadata.get("authorization"))).toEqual([
-      ["Bearer rotated-token-1"],
-      ["Bearer rotated-token-2"],
-    ]);
-    expect(tokenGeneration).toBe(2);
   });
 
-  test("keeps retrying the exact Memory projection envelope without a retry-count ceiling", async () => {
+  test("settles a typed Memory rejection without consuming the transport retry loop", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [
-      memoryProjectionRetryResult(),
-      memoryProjectionRetryResult(),
-      memoryProjectionRetryResult(),
-      memoryProjectionRetryResult(),
-      JSON.stringify({ status: "completed", action: "create", path: "notes/todo.md" }),
-    ];
-
-    const sleepCalls: Array<{ readonly delayMs: number; readonly abortSignal: AbortSignal }> = [];
-    const request = toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" });
-    const result = await makeRunner({
-      bridge,
-      sleep: async (delayMs, abortSignal) => {
-        sleepCalls.push({ delayMs, abortSignal });
-      },
-    }).runTool(request);
-
-    expect(result.type).toBe("completed");
-    expect(bridge.runMemoryRequests).toHaveLength(5);
-    expect(bridge.runMemoryRequests.every((request) => JSON.stringify(request) === JSON.stringify(bridge.runMemoryRequests[0]))).toBe(true);
-    expect(sleepCalls).toEqual([
-      { delayMs: 300, abortSignal: request.abortSignal },
-      { delayMs: 300, abortSignal: request.abortSignal },
-      { delayMs: 300, abortSignal: request.abortSignal },
-      { delayMs: 300, abortSignal: request.abortSignal },
-    ]);
-  });
-
-  test("cancellation after a projection failure prevents another Memory replay", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    const abortController = new AbortController();
-    bridge.afterRunMemoryResponse = (callNumber) => {
-      if (callNumber === 1) {
-        abortController.abort();
-      }
-    };
-
-    let sleepCalls = 0;
-    const result = await makeRunner({
-      bridge,
-      sleep: async () => {
-        sleepCalls++;
-      },
-    }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-
-    expect(result.type).toBe("cancelled");
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-    expect(sleepCalls).toBe(0);
-  });
-
-  test("cancelling a parked Memory replay settles before release and cannot resume later", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    const controlledSleep = new ControlledSleep();
-    const abortController = new AbortController();
-    let settlements = 0;
-    const resultPromise = makeRunner({ bridge, sleep: controlledSleep.sleep }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-    void resultPromise.then(() => {
-      settlements++;
-    });
-    await waitForCondition(() => controlledSleep.calls.length === 1, "parked Memory projection replay");
-
-    abortController.abort();
-    const result = await resultPromise;
-    expect(result.type).toBe("cancelled");
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-
-    controlledSleep.releaseNext();
-    await Promise.resolve();
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-  });
-
-  test("post-wait abort fence prevents metadata refresh and Memory replay", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    const abortController = new AbortController();
-    let metadataCalls = 0;
-    const result = await makeRunner({
-      bridge,
-      metadataFactory: async () => {
-        metadataCalls++;
-        return new Metadata();
-      },
-      sleep: async (_delayMs, abortSignal) => {
-        expect(abortSignal).toBe(abortController.signal);
-        abortController.abort();
-      },
-    }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-
-    expect(result.type).toBe("cancelled");
-    expect(metadataCalls).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(1);
-  });
-
-  test("cancelling an in-flight Memory replay has no orphan call or duplicate settlement", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-    bridge.deferRunMemoryCall = 2;
-    const abortController = new AbortController();
-    let settlements = 0;
-    const resultPromise = makeRunner({ bridge, sleep: immediateSleep }).runTool(toolRequest(
-      "memory",
-      { action: "create", path: "notes/todo.md", content: "one" },
-      "sevt_tool_1",
-      abortController.signal,
-    ));
-    void resultPromise.then(() => {
-      settlements++;
-    });
-    await waitForCondition(() => bridge.runMemoryRequests.length === 2, "in-flight Memory projection replay");
-
-    abortController.abort();
-    const result = await resultPromise;
-    expect(result.type).toBe("cancelled");
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(2);
-
-    bridge.completeDeferredRunMemory();
-    await Promise.resolve();
-    expect(settlements).toBe(1);
-    expect(bridge.runMemoryRequests).toHaveLength(2);
-  });
-
-  test("production replay sleep removes its abort listener after timer completion", async () => {
-    jest.useFakeTimers();
-    try {
-      const bridge = new RecordingBridgeClient();
-      bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-      const abortController = new AbortController();
-      const addListener = jest.spyOn(abortController.signal, "addEventListener");
-      const removeListener = jest.spyOn(abortController.signal, "removeEventListener");
-      const resultPromise = makeRunner({ bridge }).runTool(toolRequest(
-        "memory",
-        { action: "create", path: "notes/todo.md", content: "one" },
-        "sevt_tool_1",
-        abortController.signal,
-      ));
-      await flushMicrotasks();
-
-      expect(bridge.runMemoryRequests).toHaveLength(1);
-      expect(jest.getTimerCount()).toBe(1);
-      const sleepAbortListener = addListener.mock.calls.at(-1)?.[1];
-      expect(sleepAbortListener).toBeDefined();
-
-      jest.advanceTimersByTime(300);
-      await flushMicrotasks();
-      const result = await resultPromise;
-
-      expect(result.type).toBe("completed");
-      expect(bridge.runMemoryRequests).toHaveLength(2);
-      expect(removeListener).toHaveBeenCalledWith("abort", sleepAbortListener);
-      expect(jest.getTimerCount()).toBe(0);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  test("production replay sleep clears its timer and listener when aborted", async () => {
-    jest.useFakeTimers();
-    try {
-      const bridge = new RecordingBridgeClient();
-      bridge.runMemoryResultJsons = [memoryProjectionRetryResult(), JSON.stringify({ status: "completed" })];
-      const abortController = new AbortController();
-      const addListener = jest.spyOn(abortController.signal, "addEventListener");
-      const removeListener = jest.spyOn(abortController.signal, "removeEventListener");
-      const resultPromise = makeRunner({ bridge }).runTool(toolRequest(
-        "memory",
-        { action: "create", path: "notes/todo.md", content: "one" },
-        "sevt_tool_1",
-        abortController.signal,
-      ));
-      await flushMicrotasks();
-
-      expect(bridge.runMemoryRequests).toHaveLength(1);
-      expect(jest.getTimerCount()).toBe(1);
-      const sleepAbortListener = addListener.mock.calls.at(-1)?.[1];
-      expect(sleepAbortListener).toBeDefined();
-      abortController.abort();
-      await flushMicrotasks();
-      const result = await resultPromise;
-
-      expect(result.type).toBe("cancelled");
-      expect(removeListener).toHaveBeenCalledWith("abort", sleepAbortListener);
-      expect(jest.getTimerCount()).toBe(0);
-
-      jest.advanceTimersByTime(300);
-      await flushMicrotasks();
-      expect(bridge.runMemoryRequests).toHaveLength(1);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  test("does not sleep for nonqualifying Memory results or non-Memory routes", async () => {
-    let sleepCalls = 0;
-    const sleep = async (): Promise<void> => {
-      sleepCalls++;
-    };
-    const terminalMemoryResults = [
-      { name: "validation tool error", result: { status: "tool_error", error_code: "invalid_input", retryable: false } },
-      { name: "projection error not retryable", result: { status: "runtime_error", error_code: "projection_refresh_failed", retryable: false } },
-      { name: "different retryable Runtime code", result: { status: "runtime_error", error_code: "database_unavailable", retryable: true } },
-      { name: "missing retryable flag", result: { status: "runtime_error", error_code: "projection_refresh_failed" } },
-    ];
-    for (const testCase of terminalMemoryResults) {
-      const bridge = new RecordingBridgeClient();
-      bridge.runMemoryResultJson = JSON.stringify(testCase.result);
-      const result = await makeRunner({ bridge, sleep }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
-      expect(result.type, testCase.name).toBe("error");
-      expect(bridge.runMemoryRequests, testCase.name).toHaveLength(1);
-    }
-
-    const nonMemoryBridge = new RecordingBridgeClient();
-    nonMemoryBridge.runToolResultJson = memoryProjectionRetryResult();
-    const nonMemoryResult = await makeRunner({ bridge: nonMemoryBridge, sleep }).runTool(toolRequest("Write", { file_path: "notes/todo.md", content: "one" }));
-    expect(nonMemoryResult.type).toBe("error");
-    expect(nonMemoryBridge.runToolRequests).toHaveLength(1);
-    expect(nonMemoryBridge.runMemoryRequests).toHaveLength(0);
-    expect(sleepCalls).toBe(0);
-  });
-
-  test("Memory transport errors preserve retryable failure mapping without replay sleep", async () => {
-    const bridge = new RecordingBridgeClient();
-    bridge.runMemoryError = new Error("bridge unavailable");
-    let sleepCalls = 0;
+    bridge.runMemoryErrors.push(Object.assign(new Error("memory identity rejected"), {
+      code: GrpcStatus.FAILED_PRECONDITION,
+    }));
+    const sleep = new ControlledSleep();
 
     const result = await makeRunner({
       bridge,
-      sleep: async () => {
-        sleepCalls++;
-      },
+      sleep: sleep.sleep,
     }).runTool(toolRequest("memory", { action: "create", path: "notes/todo.md", content: "one" }));
 
     expect(result).toMatchObject({
       type: "error",
-      error: {
-        message: "Bridge memory tool execution is unavailable.",
-        retryable: true,
-      },
+      error: { retryable: false },
     });
     expect(bridge.runMemoryRequests).toHaveLength(1);
-    expect(sleepCalls).toBe(0);
+    expect(sleep.calls).toHaveLength(0);
   });
 
   test("preserves model-visible Memory stale and refresh signals", async () => {
@@ -1087,7 +977,7 @@ describe("RuntimePodToolRunner", () => {
 
   test("recursively removes formatter-declared forbidden result fields", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: {
         raw_bytes: "top-secret-bytes",
@@ -1104,7 +994,7 @@ describe("RuntimePodToolRunner", () => {
   test("does not replace a route-bounded Read result with a universal text prefix", async () => {
     const bridge = new RecordingBridgeClient();
     const content = "x".repeat(60 * 1024);
-    bridge.runToolResultJson = JSON.stringify({
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
       status: "success",
       result: { content, next_offset: 61440, total_lines: 2000 },
     });
@@ -1228,15 +1118,20 @@ describe("RuntimePodToolRunner", () => {
       resultText: "mcp result",
       attachments: [],
       errorKind: undefined,
+      materializationHandle: "evt_mcp_materialized",
     };
     const runner = makeRunner({ mcp });
 
     const result = await runner.runTool(mcpToolRequest({ query: "issues" }));
 
-    expect(result).toEqual({ type: "completed", output: { text: "mcp result", truncated: false } });
+    expect(result).toEqual({
+      type: "completed",
+      output: { text: "mcp result", truncated: false },
+      mcpMaterializationHandle: "evt_mcp_materialized",
+    });
     expect(mcp.runMcpToolRequests).toEqual([
       {
-        requestId: "req_1",
+        requestId: `req_${sha256("tool:mreq_1:tool_call_1").slice(0, 32)}`,
         workspaceId: "wksp_1",
         sessionId: "sesn_1",
         sessionThreadId: "thrd_1",
@@ -1402,6 +1297,22 @@ describe("RuntimePodToolRunner", () => {
     expect(result).not.toHaveProperty("publicErrorEvent");
   });
 
+  test("returns stale custody without projecting a model-visible MCP failure", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_RUNTIME_ERROR,
+      resultText: "MCP tool execution lost runtime custody.",
+      attachments: [],
+      errorKind: McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST,
+      retryStatus: undefined,
+    };
+    const runner = makeRunner({ mcp });
+
+    await expect(runner.runTool(mcpToolRequest({ repo: "tetral" }))).resolves.toEqual({
+      type: "stale_custody",
+    });
+  });
+
   test("returns MCP attachment refs without a Runtime-side byte handoff", async () => {
     const bridge = new RecordingBridgeClient();
     const mcp = new RecordingMcpConnectorClient();
@@ -1433,7 +1344,7 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
-  test("spawns a sub-agent by creating the child, writing parent sent event, and enqueueing child input", async () => {
+  test("spawns a sub-agent by creating the child and handing its stored instruction to durable delivery", async () => {
     const bridge = new RecordingBridgeClient();
     const subAgentHost = new RecordingSubAgentHost();
     const runner = makeRunner({ bridge, subAgentHost });
@@ -1467,7 +1378,7 @@ describe("RuntimePodToolRunner", () => {
         childThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
       }),
     ]);
-    expect(subAgentHost.actions).toEqual(["preload", "enqueue"]);
+    expect(subAgentHost.actions).toEqual(["preload"]);
     expect(subAgentHost.preloaded).toEqual([
       expect.objectContaining({
         sessionThreadId: bridge.createChildThreadRequests[0]?.childThreadId,
@@ -1478,23 +1389,7 @@ describe("RuntimePodToolRunner", () => {
         }),
       }),
     ]);
-    expect(subAgentHost.enqueued).toEqual([
-      expect.objectContaining({
-        kind: "inter_agent_message",
-        sourceThreadId: "thrd_1",
-        sourceToolUseEventId: "sevt_tool_1",
-        message: expect.objectContaining({
-          origin: "runtime",
-          role: "user",
-        }),
-        thread: expect.objectContaining({
-          parentThreadId: "thrd_1",
-          role: "subagent",
-          taskName: "researcher",
-          agentType: "research",
-        }),
-      }),
-    ]);
+    expect(subAgentHost.enqueued).toEqual([]);
     expect(JSON.stringify(result)).not.toContain("delivery");
     expect(JSON.stringify(result)).not.toContain("binding-token");
   });
@@ -1524,9 +1419,8 @@ describe("RuntimePodToolRunner", () => {
     expect(send).toMatchObject({ type: "error", error: { retryable: false, message: "send_message requires task_name and message." } });
   });
 
-  test("replayed sub-agent delivery returns existing delivered result without enqueueing child input", async () => {
+  test("durable sub-agent delivery returns delivered without enqueueing child input", async () => {
     const bridge = new RecordingBridgeClient();
-    bridge.deliveryReceived = true;
     const subAgentHost = new RecordingSubAgentHost();
     const runner = makeRunner({ bridge, subAgentHost });
 
@@ -1546,6 +1440,29 @@ describe("RuntimePodToolRunner", () => {
     expect(bridge.writeEventRequests).toHaveLength(1);
     expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
     expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("send_message finishes durable admission after its sent event commits despite caller cancellation", async () => {
+    const bridge = new RecordingBridgeClient();
+    const abort = new AbortController();
+    bridge.afterWriteEventResponse = () => abort.abort();
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest(
+      "send_message",
+      { task_name: "worker", message: "keep going" },
+      "sevt_tool_send_cancel_after_sent",
+      abort.signal,
+    ));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: delivered"),
+      }),
+    });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+    expect(bridge.resolveInterAgentDeliveryRequests).toHaveLength(1);
   });
 
   test("duplicate spawn_agent task names return a non-retryable tool error", async () => {
@@ -1569,7 +1486,7 @@ describe("RuntimePodToolRunner", () => {
     });
   });
 
-  test("send_message serializes child enqueue before a concurrent close releases hot state", async () => {
+  test("send_message serializes delivery resolution before a concurrent close releases hot state", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.deferResolveInterAgentDelivery = true;
     const subAgentHost = new RecordingSubAgentHost();
@@ -1579,7 +1496,7 @@ describe("RuntimePodToolRunner", () => {
       task_name: "worker",
       message: "keep going",
     }, "sevt_tool_send"));
-    await waitForCondition(() => bridge.resolveInterAgentDeliveryRequests.length === 1, "send delivery repair check");
+    await waitForCondition(() => bridge.resolveInterAgentDeliveryRequests.length === 1, "send delivery resolution");
 
     const close = runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1590,7 +1507,7 @@ describe("RuntimePodToolRunner", () => {
     expect(await send).toEqual({
       type: "completed",
       output: expect.objectContaining({
-        text: expect.stringContaining("status: accepted"),
+        text: expect.stringContaining("status: delivered"),
       }),
     });
     expect(await close).toEqual({
@@ -1599,11 +1516,12 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: closed_for_runtime"),
       }),
     });
-    expect(subAgentHost.actions).toEqual(["preload", "enqueue", "close"]);
+    expect(subAgentHost.actions).toEqual(["preload", "close"]);
   });
 
   test("close_agent commits durable closed projection before releasing hot child state", async () => {
     const bridge = new RecordingBridgeClient();
+    bridge.closeReceiptTargetIds = ["thr_child_1", "thr_grandchild_1"];
     const subAgentHost = new RecordingSubAgentHost();
     subAgentHost.onClose = () => {
       expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
@@ -1618,8 +1536,59 @@ describe("RuntimePodToolRunner", () => {
         text: expect.stringContaining("status: closed_for_runtime"),
       }),
     });
-    expect(subAgentHost.actions).toEqual(["close"]);
+    expect(subAgentHost.actions).toEqual(["close", "close"]);
+    expect(subAgentHost.closedThreadIds).toEqual(["thr_child_1", "thr_grandchild_1"]);
     expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+  });
+
+  test("close_agent preserves the root terminal status while releasing every stamped hot subtree target", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "failed";
+    bridge.closeReceiptTargetIds = ["thr_child_1", "thr_terminated_1", "thr_running_1"];
+    bridge.closeReceiptDispositions.set(
+      "thr_child_1",
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED,
+    );
+    bridge.closeReceiptDispositions.set(
+      "thr_terminated_1",
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED,
+    );
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: failed"),
+      }),
+    });
+    expect(subAgentHost.closedThreadIds).toEqual([
+      "thr_child_1",
+      "thr_terminated_1",
+      "thr_running_1",
+    ]);
+  });
+
+  test("close_agent rejects a lifecycle receipt from another Runtime binding", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childLifecycleObservedBindingId = "bind_other";
+    const subAgentHost = new RecordingSubAgentHost();
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    const replay = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+
+    expect(result).toEqual({ type: "stale_custody" });
+    expect(replay).toEqual({ type: "stale_custody" });
+    const firstClosedAt = bridge.markChildThreadClosedRequests[0]?.closedAt;
+    expect(firstClosedAt).toBeDefined();
+    expect(bridge.markChildThreadClosedRequests.map((request) => request.closedAt)).toEqual([
+      firstClosedAt!,
+      firstClosedAt!,
+    ]);
+    expect(subAgentHost.actions).toEqual([]);
   });
 
   test("close_agent does not release hot child state when durable close is rejected", async () => {
@@ -1645,25 +1614,31 @@ describe("RuntimePodToolRunner", () => {
   test("close_agent reports retryable failure when hot close fails after durable close", async () => {
     const bridge = new RecordingBridgeClient();
     const subAgentHost = new RecordingSubAgentHost();
-    subAgentHost.closeResult = {
+    subAgentHost.closeResults.push({
       ok: false,
       sessionId: "sesn_1",
       sessionThreadId: "thr_child_1",
       reason: "thread_busy",
-    };
+    });
     const runner = makeRunner({ bridge, subAgentHost });
 
-    const result = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    const first = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
+    await Bun.sleep(5);
+    const second = await runner.runTool(toolRequest("close_agent", { task_name: "worker" }, "sevt_tool_close"));
 
-    expect(result).toEqual({
+    expect(first).toEqual({
       type: "error",
       error: expect.objectContaining({
         message: expect.stringContaining("thread_busy"),
         retryable: true,
       }),
     });
-    expect(subAgentHost.actions).toEqual(["close"]);
-    expect(bridge.markChildThreadClosedRequests).toHaveLength(1);
+    expect(second).toMatchObject({ type: "completed" });
+    expect(subAgentHost.actions).toEqual(["close", "close"]);
+    expect(bridge.markChildThreadClosedRequests).toHaveLength(2);
+    expect(bridge.markChildThreadClosedRequests[1]?.closedAt).toBe(
+      bridge.markChildThreadClosedRequests[0]?.closedAt,
+    );
   });
 
   test("send_message keeps same-child inputs in model order when the first child lookup is slow", async () => {
@@ -1689,10 +1664,7 @@ describe("RuntimePodToolRunner", () => {
     bridge.completeDeferredListChildThreads();
     await Promise.all([first, second]);
 
-    expect(subAgentHost.enqueued.map((input) => input.kind === "inter_agent_message" ? input.sourceToolUseEventId : undefined)).toEqual([
-      "sevt_tool_send_1",
-      "sevt_tool_send_2",
-    ]);
+    expect(subAgentHost.enqueued).toEqual([]);
     expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
       "sevt_tool_send_1",
       "sevt_tool_send_2",
@@ -1731,7 +1703,7 @@ describe("RuntimePodToolRunner", () => {
     bridge.completeDeferredListChildThreads();
     await first;
 
-    expect(subAgentHost.enqueued).toHaveLength(1);
+    expect(subAgentHost.enqueued).toHaveLength(0);
     expect(bridge.writeEventRequests.map((request) => sourceToolUseEventIdFromPayload(request.payloadJson))).toEqual([
       "sevt_tool_send_1",
     ]);
@@ -1757,9 +1729,11 @@ describe("RuntimePodToolRunner", () => {
     const result = await runner.runTool(request);
 
     expect(result.type).toBe("completed");
-    const seed = JSON.parse(bridge.createChildThreadRequests[0]?.forkSeedJson ?? "{}") as {
+    const seed = JSON.parse(bridge.createChildThreadRequests[0]?.threadContextPrefixJson ?? "{}") as {
+      readonly parent_boundary_event_id?: string;
       readonly runtime_messages_snapshot?: readonly RuntimeMessage[];
     };
+    expect(seed.parent_boundary_event_id).toBe(request.toolUseEventId);
     expect(seed.runtime_messages_snapshot?.map((message) => message.id)).toEqual(["user-latest", "assistant-latest"]);
   });
 
@@ -2005,7 +1979,7 @@ describe("RuntimePodToolRunner", () => {
     expect(subAgentHost.enqueued).toEqual([]);
   });
 
-  test("resume_agent is a benign no-op for a child that is not closed", async () => {
+  test("resume_agent records an already-active declaration without reloading the observed child", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.childStatus = "running";
     const subAgentHost = new RecordingSubAgentHost();
@@ -2017,13 +1991,41 @@ describe("RuntimePodToolRunner", () => {
     expect(result).toEqual({
       type: "completed",
       output: expect.objectContaining({
-        text: expect.stringContaining("status: running"),
+        text: expect.stringContaining("status: idle"),
       }),
     });
-    expect(bridge.markChildThreadActiveRequests).toEqual([]);
+    expect(bridge.markChildThreadActiveRequests).toEqual([
+      expect.objectContaining({ childThreadId: "thr_child_1" }),
+    ]);
     expect(subAgentHost.actions).toEqual(["inspect"]);
     expect(subAgentHost.preloaded).toEqual([]);
     expect(subAgentHost.enqueued).toEqual([]);
+  });
+
+  test("resume_agent rechecks hot residency after an already-active receipt before reporting success", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    bridge.deferMarkChildThreadActive = true;
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.inspectObserved = true;
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const resuming = runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+    await waitForCondition(
+      () => bridge.markChildThreadActiveRequests.length === 1,
+      "durable already-active declaration",
+    );
+    subAgentHost.inspectObserved = false;
+    bridge.completeDeferredMarkChildThreadActive();
+
+    expect(await resuming).toEqual({
+      type: "completed",
+      output: expect.objectContaining({
+        text: expect.stringContaining("status: running"),
+      }),
+    });
+    expect(subAgentHost.actions).toEqual(["inspect", "preload"]);
+    expect(subAgentHost.preloaded).toHaveLength(1);
   });
 
   test("resume_agent retries preload for a non-closed cold child after the durable reopen already committed", async () => {
@@ -2038,14 +2040,53 @@ describe("RuntimePodToolRunner", () => {
 
     const first = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
     bridge.childStatus = "idle";
+    await Bun.sleep(5);
     const second = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
 
     expect(first).toMatchObject({ type: "error" });
     expect(second).toMatchObject({ type: "completed" });
-    expect(bridge.markChildThreadActiveRequests).toHaveLength(1);
+    expect(bridge.markChildThreadActiveRequests).toHaveLength(2);
+    expect(bridge.markChildThreadActiveRequests[1]?.activeAt).toBe(
+      bridge.markChildThreadActiveRequests[0]?.activeAt,
+    );
     expect(subAgentHost.preloaded).toHaveLength(2);
     expect(subAgentHost.actions.filter((action) => action === "resume")).toHaveLength(0);
+    expect(bridge.activeReceiptDispositions).toEqual([
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED,
+      ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED,
+    ]);
   });
+
+  for (const testCase of [
+    {
+      status: "failed",
+      disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED,
+    },
+    {
+      status: "terminated",
+      disposition: ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED,
+    },
+  ]) {
+    test(`resume_agent preserves a cold ${testCase.status} child without loading context`, async () => {
+      const bridge = new RecordingBridgeClient();
+      bridge.childStatus = testCase.status;
+      bridge.activeReceiptDisposition = testCase.disposition;
+      const subAgentHost = new RecordingSubAgentHost();
+      const runner = makeRunner({ bridge, subAgentHost });
+
+      const result = await runner.runTool(toolRequest("resume_agent", { task_name: "worker" }));
+
+      expect(result).toEqual({
+        type: "completed",
+        output: expect.objectContaining({
+          text: expect.stringContaining(`status: ${testCase.status}`),
+        }),
+      });
+      expect(bridge.markChildThreadActiveRequests).toHaveLength(1);
+      expect(subAgentHost.actions).toEqual([]);
+      expect(subAgentHost.preloaded).toEqual([]);
+    });
+  }
 });
 
 function makeRunner(options: {
@@ -2066,23 +2107,6 @@ function makeRunner(options: {
     mcpConnectorClient: (options.mcp ?? new RecordingMcpConnectorClient()).client(),
     metadataFactory: options.metadataFactory ?? (async () => new Metadata()),
     ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
-    scopeForThread: (sessionId: string, sessionThreadId: string) => sessionId === "sesn_1" && sessionThreadId === "thrd_1"
-      ? {
-        requestId: "req_1",
-        workspaceId: "wksp_1",
-        sessionId: "sesn_1",
-        sessionThreadId: "thrd_1",
-        bindingId: "bind_1",
-        bindingGeneration: 42,
-        targetPodUid: "pod_1",
-        runtimeInputId: "rin_1",
-        eventIds: ["sevt_user_1"],
-        sequenceFrom: 1,
-        sequenceTo: 1,
-        kind: "messages",
-        payloadJson: "{}",
-      }
-      : undefined,
     subAgentRunHost: () => options.subAgentHost,
   });
 }
@@ -2150,15 +2174,6 @@ function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
-function memoryProjectionRetryResult(): string {
-  return JSON.stringify({
-    status: "runtime_error",
-    error_code: "projection_refresh_failed",
-    retryable: true,
-    message: "projection refresh failed",
-  });
-}
-
 const immediateSleep = async (): Promise<void> => undefined;
 
 class ControlledSleep {
@@ -2214,7 +2229,11 @@ function sourceToolUseEventIdFromPayload(payloadJson: string): string | undefine
 }
 
 class RecordingBridgeClient {
-  readonly runToolRequests: RunToolRequest[] = [];
+  readonly acceptSandboxExecutionRequests: AcceptSandboxExecutionRequest[] = [];
+  readonly acceptSandboxExecutionOptions: CallOptions[] = [];
+  readonly acceptSandboxExecutionErrors: Error[] = [];
+  readonly awaitSandboxExecutionRequests: AwaitSandboxExecutionRequest[] = [];
+  readonly awaitSandboxExecutionErrors: Error[] = [];
   readonly runMemoryRequests: RunMemoryRequest[] = [];
   readonly runMemoryMetadata: Metadata[] = [];
   readonly sendCommandInputRequests: SendCommandInputRequest[] = [];
@@ -2230,26 +2249,37 @@ class RecordingBridgeClient {
   private deferredListChildThreads: ((response: unknown) => void) | undefined;
   private deferredResolveInterAgentDelivery: ((response: unknown) => void) | undefined;
   private deferredRunMemory: (() => void) | undefined;
+  private deferredMarkChildThreadActive: (() => void) | undefined;
   deferReadCommandResult = false;
   deferFirstListChildThreads = false;
   deferResolveInterAgentDelivery = false;
   createChildThreadErrorCode: GrpcStatus | undefined;
-  deliveryReceived = false;
-  childReceivable = true;
   childStatus = "idle";
-  runToolResultJson = '{"status":"success","result":{"text":"ok"}}';
-  runToolBackgroundTaskStarted = false;
-  runToolTaskId = "";
+  awaitSandboxExecutionResultJson = '{"status":"success","result":{"text":"ok"}}';
+  awaitSandboxExecutionResultDigest = sha256(this.awaitSandboxExecutionResultJson);
+  awaitSandboxExecutionBackgroundTaskStarted = false;
+  awaitSandboxExecutionTaskId = "";
   runMemoryResultJson = '{"status":"completed","summary":"created"}';
   runMemoryResultJsons: string[] = [];
-  runMemoryError: Error | undefined;
+  readonly runMemoryErrors: Error[] = [];
+  readonly sendCommandInputErrors: Error[] = [];
+  readonly readCommandResultErrors: Error[] = [];
   deferRunMemoryCall = 0;
   afterRunMemoryResponse: ((callNumber: number) => void) | undefined;
   markChildThreadClosedStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED;
   markChildThreadClosedErrorCode = "";
+  closeReceiptTargetIds: string[] = [];
+  readonly closeReceiptDispositions = new Map<string, ChildLifecycleDisposition>();
+  activeReceiptDisposition: ChildLifecycleDisposition | undefined;
+  readonly activeReceiptDispositions: ChildLifecycleDisposition[] = [];
+  deferMarkChildThreadActive = false;
+  private readonly activeReceiptDispositionByOperationId = new Map<string, ChildLifecycleDisposition>();
+  childLifecycleObservedBindingId: string | undefined;
+  afterWriteEventResponse: (() => void) | undefined;
 
   client(): Pick<AgentRuntimeBridgeServiceClient,
-    | "runTool"
+    | "acceptSandboxExecution"
+    | "awaitSandboxExecution"
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
@@ -2263,7 +2293,8 @@ class RecordingBridgeClient {
     | "writeEvent"
   > {
     return {
-      runTool: this.runTool.bind(this),
+      acceptSandboxExecution: this.acceptSandboxExecution.bind(this),
+      awaitSandboxExecution: this.awaitSandboxExecution.bind(this),
       runMemory: this.runMemory.bind(this),
       sendCommandInput: this.sendCommandInput.bind(this),
       readCommandResult: this.readCommandResult.bind(this),
@@ -2276,7 +2307,8 @@ class RecordingBridgeClient {
       markChildThreadActive: this.markChildThreadActive.bind(this),
       writeEvent: this.writeEvent.bind(this),
     } as unknown as Pick<AgentRuntimeBridgeServiceClient,
-      | "runTool"
+      | "acceptSandboxExecution"
+      | "awaitSandboxExecution"
       | "runMemory"
       | "sendCommandInput"
       | "readCommandResult"
@@ -2291,13 +2323,37 @@ class RecordingBridgeClient {
     >;
   }
 
-  private runTool(request: RunToolRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
-    this.runToolRequests.push(request);
+  private acceptSandboxExecution(
+    request: AcceptSandboxExecutionRequest,
+    _metadata: Metadata,
+    options: CallOptions,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    this.acceptSandboxExecutionRequests.push(request);
+    this.acceptSandboxExecutionOptions.push(options);
+    const error = this.acceptSandboxExecutionErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: this.runToolResultJson,
-      backgroundTaskStarted: this.runToolBackgroundTaskStarted,
-      taskId: this.runToolTaskId,
+    });
+    return grpcCall();
+  }
+
+  private awaitSandboxExecution(request: AwaitSandboxExecutionRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
+    this.awaitSandboxExecutionRequests.push(request);
+    const error = this.awaitSandboxExecutionErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
+    callback(null, {
+      resultJson: this.awaitSandboxExecutionResultJson,
+      resultDigest: this.awaitSandboxExecutionResultDigest,
+      backgroundTaskStarted: this.awaitSandboxExecutionBackgroundTaskStarted,
+      taskId: this.awaitSandboxExecutionTaskId,
     });
     return grpcCall();
   }
@@ -2305,8 +2361,9 @@ class RecordingBridgeClient {
   private runMemory(request: RunMemoryRequest, metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.runMemoryRequests.push(request);
     this.runMemoryMetadata.push(metadata);
-    if (this.runMemoryError !== undefined) {
-      callback(this.runMemoryError, undefined);
+    const error = this.runMemoryErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
       return grpcCall();
     }
     const resultJson = this.runMemoryResultJsons.shift() ?? this.runMemoryResultJson;
@@ -2336,6 +2393,11 @@ class RecordingBridgeClient {
 
   private sendCommandInput(request: SendCommandInputRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.sendCommandInputRequests.push(request);
+    const error = this.sendCommandInputErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
       resultJson: '{"status":"accepted"}',
@@ -2346,6 +2408,11 @@ class RecordingBridgeClient {
 
   private readCommandResult(request: ReadCommandResultRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.readCommandResultRequests.push(request);
+    const error = this.readCommandResultErrors.shift();
+    if (error !== undefined) {
+      callback(error, undefined);
+      return grpcCall();
+    }
     if (this.deferReadCommandResult) {
       return grpcCall();
     }
@@ -2416,13 +2483,7 @@ class RecordingBridgeClient {
 
   private resolveInterAgentDelivery(request: ResolveInterAgentDeliveryRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.resolveInterAgentDeliveryRequests.push(request);
-    const response = {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      sentExists: this.writeEventRequests.some((event) => event.eventType === "agent.thread_message_sent"),
-      receivedExists: this.deliveryReceived,
-      childReceivable: this.childReceivable,
-      childThreadJson: childThreadJson("worker", this.childStatus),
-    };
+    const response = this.resolvedInterAgentDelivery(request);
     if (this.deferResolveInterAgentDelivery) {
       this.deferredResolveInterAgentDelivery = (deferredResponse) => callback(null, deferredResponse);
       return grpcCall();
@@ -2438,29 +2499,162 @@ class RecordingBridgeClient {
     }
     this.deferResolveInterAgentDelivery = false;
     this.deferredResolveInterAgentDelivery = undefined;
-    complete({
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      sentExists: true,
-      receivedExists: this.deliveryReceived,
-      childReceivable: this.childReceivable,
-      childThreadJson: childThreadJson("worker", this.childStatus),
+    const request = this.resolveInterAgentDeliveryRequests.at(-1);
+    if (request === undefined) {
+      throw new Error("no deferred resolveInterAgentDelivery request");
+    }
+    complete(this.resolvedInterAgentDelivery(request));
+  }
+
+  private resolvedInterAgentDelivery(request: ResolveInterAgentDeliveryRequest): unknown {
+    const sent = this.writeEventRequests.find((event) => {
+      if (event.eventType !== "agent.thread_message_sent") {
+        return false;
+      }
+      const payload = JSON.parse(event.payloadJson) as { readonly delivery_id?: string };
+      return payload.delivery_id === request.deliveryId;
     });
+    const payload = sent === undefined
+      ? undefined
+      : JSON.parse(sent.payloadJson) as {
+          readonly delivery_id: string;
+          readonly source_thread_id: string;
+          readonly target_thread_id: string;
+          readonly source_tool_use_event_id: string;
+          readonly message: RuntimeMessage;
+        };
+    const message = payload?.message;
+    const publicMessage = message === undefined
+      ? ""
+      : JSON.stringify({
+          ...message,
+          content: message.parts.map((part) => {
+            if (part.type !== "text") {
+              throw new Error("agent mail fixture requires text parts");
+            }
+            return { type: "text", text: part.text };
+          }),
+        });
+    return {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      deliveryId: payload?.delivery_id ?? "",
+      sourceThreadId: payload?.source_thread_id ?? "",
+      targetThreadId: payload?.target_thread_id ?? "",
+      sourceToolUseEventId: payload?.source_tool_use_event_id ?? "",
+      receivedEventId: payload === undefined ? "" : `evt_received_${payload.delivery_id}`,
+      receivedSequence: payload === undefined ? 0 : 1,
+      messageJson: publicMessage,
+    };
   }
 
   private markChildThreadClosed(request: MarkChildThreadClosedRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.markChildThreadClosedRequests.push(request);
+    const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
+    const operationId = stableRuntimeID("child_tree_close", sourceCommandId, request.childThreadId);
+    const targetIds = this.closeReceiptTargetIds.length > 0
+      ? this.closeReceiptTargetIds
+      : [request.childThreadId];
     callback(null, {
-      ack: { status: this.markChildThreadClosedStatus, runtimeInputId: "", runtimeWriteId: "", errorCode: this.markChildThreadClosedErrorCode },
+      ack: { status: this.markChildThreadClosedStatus, runtimeInputId: "", runtimeWriteId: operationId, errorCode: this.markChildThreadClosedErrorCode },
+      ...(this.markChildThreadClosedStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED
+        ? {}
+        : {
+            declaration: {
+              receipts: targetIds.map((targetId) => ({
+                sessionThreadId: targetId,
+                operationKind: "mark_child_thread_closed",
+                sourceKind: "child_close_command",
+                sourceId: operationId,
+                events: [],
+                messages: [],
+                pendingAttachmentDeltaJson: [],
+                pendingToolDeltaJson: [],
+                prefixConsumptions: [],
+                declarationDigest: childLifecycleDeclarationDigest({
+                  operationKind: "mark_child_thread_closed",
+                  action: "close",
+                  sessionThreadId: request.scope?.sessionThreadId ?? "",
+                  childThreadId: request.childThreadId,
+                  sourceKind: "tool_use",
+                  sourceCommandId,
+                  requestedAt: request.closedAt,
+                }),
+                childLifecycle: [{
+                  childThreadId: targetId,
+                  disposition: this.closeReceiptDispositions.get(targetId)
+                    ?? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+                  effectiveAt: request.closedAt,
+                }],
+              })),
+              applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+              observedBindingId: this.childLifecycleObservedBindingId ?? request.scope?.binding?.bindingId ?? "",
+              observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+            },
+          }),
     });
     return grpcCall();
   }
 
   private markChildThreadActive(request: MarkChildThreadActiveRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
     this.markChildThreadActiveRequests.push(request);
-    callback(null, {
-      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+    const sourceCommandId = request.source?.sourceToolUseEventId ?? "";
+    const operationId = stableRuntimeID("child_resume", sourceCommandId, request.childThreadId);
+    const disposition = this.activeReceiptDispositionByOperationId.get(operationId)
+      ?? this.activeReceiptDisposition
+      ?? (this.childStatus === "closed_for_runtime"
+        ? ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_RESUMED
+        : ChildLifecycleDisposition.CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE);
+    this.activeReceiptDispositionByOperationId.set(operationId, disposition);
+    this.activeReceiptDispositions.push(disposition);
+    const respond = (): void => callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: operationId, errorCode: "" },
+      declaration: {
+        receipts: [{
+          sessionThreadId: request.childThreadId,
+          operationKind: "mark_child_thread_active",
+          sourceKind: "child_resume_command",
+          sourceId: operationId,
+          events: [],
+          messages: [],
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          declarationDigest: childLifecycleDeclarationDigest({
+            operationKind: "mark_child_thread_active",
+            action: "resume",
+            sessionThreadId: request.scope?.sessionThreadId ?? "",
+            childThreadId: request.childThreadId,
+            sourceKind: "tool_use",
+            sourceCommandId,
+            requestedAt: request.activeAt,
+          }),
+          childLifecycle: [{
+            childThreadId: request.childThreadId,
+            disposition,
+            effectiveAt: request.activeAt,
+          }],
+        }],
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+        observedBindingId: request.scope?.binding?.bindingId ?? "",
+        observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+      },
     });
+    if (this.deferMarkChildThreadActive) {
+      this.deferredMarkChildThreadActive = respond;
+      return grpcCall();
+    }
+    respond();
     return grpcCall();
+  }
+
+  completeDeferredMarkChildThreadActive(): void {
+    const complete = this.deferredMarkChildThreadActive;
+    if (complete === undefined) {
+      throw new Error("no deferred markChildThreadActive call");
+    }
+    this.deferMarkChildThreadActive = false;
+    this.deferredMarkChildThreadActive = undefined;
+    complete();
   }
 
   private writeEvent(request: WriteEventRequest, _metadata: Metadata, callback: (error: Error | null, response: unknown) => void): unknown {
@@ -2470,18 +2664,20 @@ class RecordingBridgeClient {
       eventId: "evt_thread_message_sent",
       sequence: 1,
     });
+    this.afterWriteEventResponse?.();
     return grpcCall();
   }
 }
 
 class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
   readonly actions: string[] = [];
+  readonly closedThreadIds: string[] = [];
   readonly enqueued: Parameters<RuntimeSubAgentRunHost["enqueueThreadInput"]>[0][] = [];
   readonly preloaded: Parameters<RuntimeSubAgentRunHost["preloadThread"]>[0][] = [];
   waitResult: Awaited<ReturnType<RuntimeSubAgentRunHost["waitThread"]>> | undefined;
   pulledAgentMail: Awaited<ReturnType<NonNullable<RuntimeSubAgentRunHost["pullAgentMail"]>>> | undefined;
   readonly pullAgentMailCalls: Array<{ readonly sessionThreadId: string; readonly sourceThreadId: string }> = [];
-  closeResult: Awaited<ReturnType<RuntimeSubAgentRunHost["markThreadClosed"]>> | undefined;
+  readonly closeResults: Array<Awaited<ReturnType<RuntimeSubAgentRunHost["markThreadClosed"]>>> = [];
   interruptApplied = true;
   interruptRunExitOutcome: "completed_clean" | "interrupt_applied" | "failed_closeout" | undefined;
   onClose: (() => void) | undefined;
@@ -2530,8 +2726,9 @@ class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
 
   async markThreadClosed(command: Parameters<RuntimeSubAgentRunHost["markThreadClosed"]>[0]) {
     this.actions.push("close");
+    this.closedThreadIds.push(command.sessionThreadId);
     this.onClose?.();
-    return this.closeResult ?? { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
+    return this.closeResults.shift() ?? { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
   }
 
   async markThreadActive(command: Parameters<RuntimeSubAgentRunHost["markThreadActive"]>[0]) {

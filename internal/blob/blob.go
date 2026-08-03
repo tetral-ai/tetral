@@ -1,6 +1,6 @@
 // Package blob defines the object-storage boundary Engine uses for
 // Skill archive blobs and runtime resource projection objects. The
-// interface is consumed by domain stores and sandbox preparation code, and is
+// interface is consumed by domain stores and Sandbox materialization code, and is
 // implemented by an S3-compatible production adapter. A test fake
 // (FakeBlobStore in fake.go) exercises create-only writes, copy/head, and
 // bounded cleanup without a real bucket.

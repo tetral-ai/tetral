@@ -68,8 +68,8 @@ type Source struct {
 	Open     func(ctx context.Context) (io.ReadCloser, error)
 }
 
-// MountSource is the internal resolver output for sandbox mount
-// preparation. ObjectKey is storage-internal and must never appear in
+// MountSource is the internal resolver output for Sandbox resource
+// materialization. ObjectKey is storage-internal and must never appear in
 // public HTTP DTOs.
 type MountSource struct {
 	WorkspaceID workspace.ID

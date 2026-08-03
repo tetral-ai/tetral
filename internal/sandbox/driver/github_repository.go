@@ -27,7 +27,7 @@ func (e *DaytonaHelperExecutor) InstalledGitTicketHash(ctx context.Context, prov
 	if err != nil {
 		return nil, false, err
 	}
-	output, err := e.executeGitHubPreparationCommand(ctx, sandboxHandle, "git config --global --get-regexp '^http\\.https://"+regexp.QuoteMeta(gitProxyHost)+"/\\.extraheader$' || true")
+	output, err := e.executeGitHubCommand(ctx, sandboxHandle, "git config --global --get-regexp '^http\\.https://"+regexp.QuoteMeta(gitProxyHost)+"/\\.extraheader$' || true")
 	if err != nil {
 		return nil, false, err
 	}
@@ -57,7 +57,7 @@ func (e *DaytonaHelperExecutor) InstallGitHubRepositoryConfiguration(ctx context
 	if err != nil {
 		return err
 	}
-	_, err = e.executeGitHubPreparationCommand(ctx, sandboxHandle, configCommand)
+	_, err = e.executeGitHubCommand(ctx, sandboxHandle, configCommand)
 	return err
 }
 
@@ -71,10 +71,10 @@ func (e *DaytonaHelperExecutor) CloneGitHubRepositories(ctx context.Context, pre
 		if err != nil {
 			return err
 		}
-		output, err := e.executeGitHubPreparationCommand(ctx, sandboxHandle, command)
+		output, err := e.executeGitHubCommand(ctx, sandboxHandle, command)
 		if err != nil {
 			if gitHubCredentialFailure(output) {
-				return &sandbox.GitHubPreparationFailure{
+				return &sandbox.GitHubMaterializationFailure{
 					Reason:      sandbox.GitHubCredentialRequiredReason,
 					ResourceID:  repo.ResourceID,
 					ResourceURL: repo.URL,
@@ -82,7 +82,7 @@ func (e *DaytonaHelperExecutor) CloneGitHubRepositories(ctx context.Context, pre
 				}
 			}
 			if gitHubRepositoryUnavailable(output) {
-				return &sandbox.GitHubPreparationFailure{
+				return &sandbox.GitHubMaterializationFailure{
 					Reason:      sandbox.GitHubRepositoryUnavailableReason,
 					ResourceID:  repo.ResourceID,
 					ResourceURL: repo.URL,
@@ -104,7 +104,7 @@ func (e *DaytonaHelperExecutor) RemoveGitHubRepository(ctx context.Context, prov
 	if mountPath == "" || !path.IsAbs(mountPath) || hasUnsafeGitHubMountPathCharacter(mountPath) || path.Clean(mountPath) != mountPath || mountPath == "/workspace" || !strings.HasPrefix(mountPath, "/workspace/") {
 		return errors.New("github_repository mount_path must be under /workspace")
 	}
-	_, err = e.executeGitHubPreparationCommand(ctx, sandboxHandle, "rm -rf -- "+shellQuote(mountPath))
+	_, err = e.executeGitHubCommand(ctx, sandboxHandle, "rm -rf -- "+shellQuote(mountPath))
 	return err
 }
 
@@ -184,19 +184,19 @@ func githubRepositoryCloneCommand(repo sandbox.GitHubRepositoryMount) (string, e
 	return strings.Join(lines, "\n"), nil
 }
 
-func (e *DaytonaHelperExecutor) executeGitHubPreparationCommand(ctx context.Context, sandboxHandle daytonaSandboxHandle, command string) (string, error) {
-	if e.preparationCommandTimeout <= 0 {
-		return "", errors.New("preparation command timeout is required")
+func (e *DaytonaHelperExecutor) executeGitHubCommand(ctx context.Context, sandboxHandle daytonaSandboxHandle, command string) (string, error) {
+	if e.commandTimeout <= 0 {
+		return "", errors.New("daytona command timeout is required")
 	}
-	response, err := sandboxHandle.Process.ExecuteCommand(ctx, runtimeUserShellCommand(command), options.WithExecuteTimeout(e.preparationCommandTimeout))
+	response, err := sandboxHandle.Process.ExecuteCommand(ctx, runtimeUserShellCommand(command), options.WithExecuteTimeout(e.commandTimeout))
 	if err != nil {
 		return "", err
 	}
 	if response == nil {
-		return "", errors.New("github_repository preparation command returned no response")
+		return "", errors.New("github_repository daytona command returned no response")
 	}
 	if response.ExitCode != 0 {
-		return responseResult(response), fmt.Errorf("github_repository preparation command exited with code %d", response.ExitCode)
+		return responseResult(response), fmt.Errorf("github_repository daytona command exited with code %d", response.ExitCode)
 	}
 	return responseResult(response), nil
 }

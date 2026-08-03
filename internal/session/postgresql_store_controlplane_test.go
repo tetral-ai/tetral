@@ -14,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 func newControlPlaneSessionStoreTestDB(t *testing.T) (runtime *sql.DB, admin *sql.DB) {
@@ -29,7 +30,93 @@ func newControlPlaneSessionStore(t *testing.T, runtime *sql.DB) *session.Postgre
 	return session.NewPostgreSQLSessionStore(
 		dbconnect.NewClientForTesting(runtime),
 		session.WithPageTokenSecret([]byte("0123456789abcdef0123456789abcdef")),
+		session.WithSessionDeleteSandboxRelease(func(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, now time.Time) error {
+			_, _, err := tetralsandbox.EnsureSandboxReleaseTx(ctx, tx, string(workspaceID), sessionID, tetralsandbox.SandboxReleaseSessionDelete, "", now)
+			return err
+		}),
 	)
+}
+
+func TestPostgreSQLSessionStoreDeleteRecordsSandboxReleaseBeforeCommit(t *testing.T) {
+	runtime, admin := newControlPlaneSessionStoreTestDB(t)
+	ctx := context.Background()
+	store := newControlPlaneSessionStore(t, runtime)
+	seedSessionStoreReferences(t, admin, workspace.DefaultID, "agent_delete_release", 1, "env_delete_release")
+	now := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	sessionID := "sesn_delete_release"
+	threadID := "thr_delete_release"
+	createStoreSessionWithPrimaryThread(t, store, sessionID, threadID, "agent_delete_release", "env_delete_release", now)
+
+	if _, err := admin.ExecContext(ctx, `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		created_at, updated_at
+	) VALUES ($1,$2,'sbox_delete_release','env_delete_release',1,'daytona','provider_delete_release',1,$3,$3)`,
+		string(workspace.DefaultID), sessionID, now); err != nil {
+		t.Fatalf("seed sandbox binding: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `INSERT INTO session_background_tasks (
+		workspace_id, session_id, session_thread_id, task_id, source_tool_use_event_id,
+		sandbox_id, provider, binding_revision, provider_session_id, provider_command_id,
+		provider_command_metadata_json, resource_roots_json, status, reconcile_generation,
+		next_poll_at, created_at, updated_at
+	) VALUES ($1,$2,$3,'task_delete_release','evt_delete_release','sbox_delete_release',
+		'daytona',1,'provider_delete_release','provider_command','{}','[]','running',1,$4,$4,$4)`,
+		string(workspace.DefaultID), sessionID, threadID, now); err != nil {
+		t.Fatalf("seed background task: %v", err)
+	}
+
+	if err := store.WithWorkspaceTx(ctx, workspace.DefaultID, func(tx session.Transaction) error {
+		return tx.DeleteSession(ctx, sessionID)
+	}); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	checks := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{
+			name: "release fence",
+			query: `SELECT count(*) FROM session_sandbox_bindings
+				WHERE workspace_id = 'default' AND session_id = 'sesn_delete_release'
+				  AND release_requested_at IS NOT NULL AND release_reason = 'session_delete'`,
+			want: 1,
+		},
+		{
+			name: "release operation",
+			query: `SELECT count(*) FROM sandbox_lifecycle_operations
+				WHERE workspace_id = 'default' AND session_id = 'sesn_delete_release'
+				  AND kind = 'release' AND state = 'pending' AND release_reason = 'session_delete'`,
+			want: 1,
+		},
+		{
+			name: "release queue job",
+			query: `SELECT count(*) FROM queue_jobs
+				WHERE workspace_id = 'default' AND kind = 'sandbox_release' AND status = 'pending'`,
+			want: 1,
+		},
+		{
+			name: "background cancel receipt",
+			query: `SELECT count(*) FROM session_runtime_tool_results
+				WHERE workspace_id = 'default' AND session_id = 'sesn_delete_release'
+				  AND tool_kind = 'sandbox_background' AND background_operation_kind = 'cancel'
+				  AND background_operation_state = 'pending'`,
+			want: 1,
+		},
+		{
+			name: "background cancel queue job",
+			query: `SELECT count(*) FROM queue_jobs
+				WHERE workspace_id = 'default' AND kind = 'sandbox_background_command' AND status = 'pending'`,
+			want: 1,
+		},
+	}
+	for _, check := range checks {
+		if got := sessionStoreRowCount(t, admin, check.query); got != check.want {
+			t.Fatalf("%s count = %d; want %d", check.name, got, check.want)
+		}
+	}
 }
 
 func TestPostgreSQLSessionStoreArchiveAndDeleteRejectRunningSessions(t *testing.T) {
@@ -1183,9 +1270,10 @@ func seedThreadRuntimeInputQueueJob(t *testing.T, db *sql.DB, ws workspace.ID, s
 	}
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, payload_version, status, payload_json,
-			priority, attempt_count, max_attempts, available_at, created_at, updated_at
-		) VALUES ($1, $2, 'runtime_input', $3, $4, 1, $5, $6, 0, 0, 10, $7, $7, $7)`,
+			id, workspace_id, kind, partition_key, queue_partition_sequence, dedupe_key,
+			payload_version, status, payload_json, priority, attempt_count, max_attempts,
+			available_at, created_at, updated_at
+		) VALUES ($1, $2, 'runtime_input', $3, 1, $4, 1, $5, $6, 0, 0, 10, $7, $7, $7)`,
 		"qjob_"+runtimeInputID,
 		string(ws),
 		"session:"+string(ws)+":"+sessionID,

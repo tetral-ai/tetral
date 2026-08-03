@@ -9,9 +9,6 @@ import type {
   PendingInputResult,
   RuntimeDependencies,
   RuntimeMessage,
-  RuntimeMessageInfo,
-  RuntimeMessageStoreOperationControls,
-  RuntimePart,
   SessionEvent,
   SessionEventEnvelope,
   SessionEventWriter,
@@ -19,7 +16,7 @@ import type {
   SessionEventWriterFinishIdleEnvelope,
   SessionEventWriterRequestEndEnvelope,
 } from "../../src/contracts/runtime.js";
-import { RuntimeMessageSchema, RuntimeMessageStore, normalizeRuntimeMessageStoreError } from "../../src/contracts/runtime.js";
+import { RuntimeInternalToolRepairStore } from "../../src/contracts/runtime.js";
 import type { AcceptedInputCommitResult, ContextLoader } from "../../src/context/context-loader.js";
 import type { LLMEvent } from "../../src/llm/llm-event.js";
 import type { Interface as LLMServiceInterface, LLMRequest } from "../../src/llm/llm-service.js";
@@ -30,9 +27,17 @@ import * as SessionRunHost from "../../src/session-run-host/session-run-host.js"
 import {
   buildSessionRunHostUserMessage as userMessage,
   buildSessionRunHostRuntimeNotificationMessage as runtimeNotificationMessage,
+  buildRuntimeControlCommitResult,
 } from "./runtime-message-builders.js";
+import { acceptedInputReceipt } from "./runtime-declaration-fixtures.js";
 
 const createdAt = "2026-06-14T00:00:00.000Z";
+const emptyColdCoverage = {
+  pendingToolIds: [],
+  pendingSandboxExecutionIds: [],
+  pendingAttachmentIdentities: [],
+  undeliveredMailDeliveryIds: [],
+} as const;
 
 function acceptedInput(sessionId: string, runtimeInputId = `rin_${sessionId}`): RuntimeAcceptedInputState {
   return {
@@ -48,7 +53,9 @@ function acceptedInput(sessionId: string, runtimeInputId = `rin_${sessionId}`): 
     sequenceFrom: 1,
     sequenceTo: 1,
     kind: "messages",
-    payloadJson: "{}",
+    payloadJson: JSON.stringify({
+      messages: [userMessage(`msg_${runtimeInputId}`, 1, "test input")],
+    }),
   };
 }
 
@@ -80,11 +87,11 @@ interface ManagerCall {
     | "applyRuntimeConfigPatch"
     | "cleanupSession"
     | "preloadThread"
+    | "ensureThreadInstalled"
     | "interruptThread"
     | "interruptReviewerExecution"
     | "markThreadClosed"
     | "markThreadActive"
-    | "markAgentMailPulled"
     | "waitThread"
     | "waitReviewerExecution"
     | "inspectThread"
@@ -115,7 +122,12 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
           const sessionId = args[0];
           return { ok: true as const, sessionId, created: false, applied: true };
         }),
-      commitTaskNotification: (...args: readonly [string, Parameters<SessionManager.Interface["commitTaskNotification"]>[1], ...unknown[]]) =>
+      commitTaskNotification: (...args: readonly [
+        string,
+        Parameters<SessionManager.Interface["commitTaskNotification"]>[1],
+        Parameters<SessionManager.Interface["commitTaskNotification"]>[2],
+        ...unknown[],
+      ]) =>
         Effect.sync(() => {
           calls.push({ method: "commitTaskNotification", args });
           const sessionId = args[0];
@@ -139,6 +151,12 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
         }),
+      ensureThreadInstalled: (...args: readonly [Parameters<SessionManager.Interface["ensureThreadInstalled"]>[0], ...unknown[]]) =>
+        Effect.sync(() => {
+          calls.push({ method: "ensureThreadInstalled", args });
+          const command = args[0];
+          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
+        }),
       interruptThread: (...args: readonly [Parameters<SessionManager.Interface["interruptThread"]>[0], ...unknown[]]) =>
         Effect.sync(() => {
           calls.push({ method: "interruptThread", args });
@@ -160,12 +178,6 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
       markThreadActive: (...args: readonly [Parameters<SessionManager.Interface["markThreadActive"]>[0], ...unknown[]]) =>
         Effect.sync(() => {
           calls.push({ method: "markThreadActive", args });
-          const command = args[0];
-          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
-        }),
-      markAgentMailPulled: (...args: readonly [Parameters<SessionManager.Interface["markAgentMailPulled"]>[0], string, ...unknown[]]) =>
-        Effect.sync(() => {
-          calls.push({ method: "markAgentMailPulled", args });
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
         }),
@@ -209,7 +221,7 @@ class QueuedContextLoader implements ContextLoader {
   constructor(
     private readonly history: readonly RuntimeMessage[],
     private readonly pendingResults: PendingInputResult[],
-    private readonly acceptedResults: Array<AcceptedInputCommitResult | ((input: RuntimeAcceptedInputState) => AcceptedInputCommitResult)> = [],
+    private readonly acceptedResults: Array<unknown | ((input: RuntimeAcceptedInputState) => unknown)> = [],
   ) {}
 
   async buildContext(sessionId: string): Promise<readonly RuntimeMessage[]> {
@@ -226,46 +238,15 @@ class QueuedContextLoader implements ContextLoader {
     this.commitCalls.push(input);
     const result = this.acceptedResults.shift();
     if (typeof result === "function") {
-      return result(input);
+      return result(input) as AcceptedInputCommitResult;
     }
-    return result ?? { type: "empty" };
+    return (result ?? acceptedInputReceipt(input)) as AcceptedInputCommitResult;
   }
 }
 
-class HostRuntimeStore extends RuntimeMessageStore {
-  readonly messages = new Map<string, RuntimeMessage>();
-  readonly writes: string[] = [];
-
-  protected async writeMessageRecord(message: RuntimeMessageInfo, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-    this.writes.push(`message:${message.status}`);
-    const existing = this.messages.get(message.id);
-    this.messages.set(message.id, RuntimeMessageSchema.parse({ ...message, parts: existing?.parts ?? [] }));
-    return { ok: true, messageId: message.id, operation: "writeMessage" };
-  }
-
-  protected async writePartRecord(part: RuntimePart, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-    this.writes.push(`part:${part.type}`);
-    const existing = this.messages.get(part.messageId);
-    if (existing === undefined) {
-      return {
-        ok: false,
-        error: normalizeRuntimeMessageStoreError({
-          code: "not_found",
-          operation: "writePart",
-          sessionId: part.sessionId,
-          messageId: part.messageId,
-          partId: part.id,
-        }),
-      };
-    }
-    this.messages.set(
-      existing.id,
-      RuntimeMessageSchema.parse({
-        ...existing,
-        parts: [...existing.parts.filter((current) => current.id !== part.id), part].sort((left, right) => left.sequence - right.sequence),
-      }),
-    );
-    return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" };
+class HostRuntimeStore extends RuntimeInternalToolRepairStore {
+  protected async commitInternalToolRepairRecord(): Promise<never> {
+    throw new Error("internal tool repair is not exercised by this host test");
   }
 }
 
@@ -274,7 +255,56 @@ class RecordingWriter implements SessionEventWriter {
 
   async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
     this.events.push(envelope.event);
-    return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    const eventId = `bridge-${envelope.writeId}`;
+    return {
+      ok: true,
+      writeId: envelope.writeId,
+      eventId,
+      processedAt: createdAt,
+      declaration: {
+        applicationDisposition: "current_custody",
+        observedBindingId: envelope.bindingId,
+        observedBindingGeneration: envelope.bindingGeneration,
+        receipt: {
+          sessionThreadId: envelope.sessionThreadId,
+          operationKind: "write_event",
+          sourceKind: envelope.event.type,
+          sourceId: envelope.writeId,
+          declarationDigest: `digest_${envelope.writeId}`,
+          pendingAttachmentDelta: [],
+          pendingToolDelta: [],
+          prefixConsumptions: [],
+
+          childLifecycle: [],
+          events: [{
+            sessionThreadId: envelope.sessionThreadId,
+            sourceEventId: envelope.writeId,
+            eventId,
+            eventSequence: this.events.length,
+            disposition: "created",
+          }],
+          messages: envelope.drafts.map((draft) => ({
+            runtimeLocalId: draft.runtimeLocalId,
+            sessionThreadId: envelope.sessionThreadId,
+            owningEventId: eventId,
+            messageId: `msg_${draft.runtimeLocalId}`,
+            messageSequence: 2,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created",
+            parts: draft.parts.map((part, index) => ({
+              runtimeLocalPartId: part.runtimeLocalPartId,
+              partId: `part_${part.runtimeLocalPartId}`,
+              messageId: `msg_${draft.runtimeLocalId}`,
+              partSequence: index,
+              createdAt,
+              updatedAt: createdAt,
+              disposition: "created",
+            })),
+          })),
+        },
+      },
+    };
   }
 
   async writeRequestEnd(envelope: SessionEventWriterRequestEndEnvelope): Promise<SessionEventWriterAppendResult> {
@@ -296,7 +326,12 @@ class RecordingWriter implements SessionEventWriter {
 
   async finishIdle(envelope: SessionEventWriterFinishIdleEnvelope): Promise<SessionEventWriterAppendResult> {
     this.events.push({ type: "session.status_idle", stop_reason: envelope.stopReason });
-    return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    return {
+      ok: true,
+      writeId: envelope.durableTurnId,
+      eventId: `bridge-${envelope.durableTurnId}`,
+      processedAt: createdAt,
+    };
   }
 }
 
@@ -365,7 +400,7 @@ function fullHostLayer(options: {
   readonly llmService: LLMServiceInterface;
 }): Layer.Layer<SessionRunHost.Service> {
   const agentLoopLayer = AgentLoop.layer({
-    messageStore: options.store,
+    internalToolRepairStore: options.store,
     sessionEventWriter: options.writer,
     runtime: runtime(),
     llmService: options.llmService,
@@ -379,6 +414,12 @@ function fullHostLayer(options: {
   const managerLayer = SessionManager.layer({
     maxLocalSessions: 10,
     now: () => createdAt,
+    loadThreadContext: async (command) => ({
+      ...command,
+      messages: [],
+      runtimeBindingToken: `rtbt_${command.sessionId}`,
+      coldCoverage: emptyColdCoverage,
+    }),
   }).pipe(Layer.provide(agentLoopLayer));
   return SessionRunHost.layer.pipe(Layer.provide(managerLayer));
 }
@@ -414,20 +455,38 @@ async function waitForCondition(predicate: () => boolean, label: string): Promis
 describe("SessionRunHost", () => {
   test("handlers route to the exact SessionManager command boundary", async () => {
     const calls: ManagerCall[] = [];
-    const bridgeProjection = runtimeNotificationMessage("sesn_5");
+    const committedMessage = runtimeNotificationMessage("sesn_5");
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const host = yield* SessionRunHost.Service;
         const accepted = yield* host.handleAcceptInput(acceptedInput("sesn_2"));
-        const interrupt = yield* host.handleInterruptControl("sesn_3", { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 });
-        const confirmation = yield* host.handleToolConfirmation("sesn_4", {
+        const interruptCommand = { ...threadControl("sesn_3"), runtimeInputId: "rin_interrupt", sequenceTo: 3 };
+        const interrupt = yield* host.handleInterruptControl(
+          "sesn_3",
+          interruptCommand,
+          async (declaration) => buildRuntimeControlCommitResult(
+            interruptCommand,
+            "interrupt_control",
+            declaration,
+          ),
+        );
+        const confirmationCommand = {
           ...threadControl("sesn_4"),
           runtimeInputId: "rin_confirm",
           sourceEventId: "sevt_confirm_1",
           toolUseEventId: "sevt_tool_1",
           decision: "allow",
-        });
+        } as const;
+        const confirmation = yield* host.handleToolConfirmation(
+          "sesn_4",
+          confirmationCommand,
+          async (declaration) => buildRuntimeControlCommitResult(
+            confirmationCommand,
+            "tool_confirmation",
+            declaration,
+          ),
+        );
         const task = yield* host.handleTaskNotification("sesn_5", {
           ...threadControl("sesn_5"),
           runtimeInputId: "rin_task",
@@ -435,8 +494,7 @@ describe("SessionRunHost", () => {
           sourceToolUseEventId: "sevt_tool_1",
           status: "completed",
           payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
-          bridgeProjection,
-        });
+        }, async () => ({ ok: true, committedMessage }));
         const config = yield* host.handleRuntimeConfigPatch("sesn_6", {
           ...threadControl("sesn_6"),
           runtimeInputId: "rin_config",
@@ -464,6 +522,7 @@ describe("SessionRunHost", () => {
         args: [
           "sesn_4",
           { ...threadControl("sesn_4"), runtimeInputId: "rin_confirm", sourceEventId: "sevt_confirm_1", toolUseEventId: "sevt_tool_1", decision: "allow" },
+          expect.any(Function),
         ],
       },
       {
@@ -477,8 +536,8 @@ describe("SessionRunHost", () => {
             sourceToolUseEventId: "sevt_tool_1",
             status: "completed",
             payloadJson: "{\"task_id\":\"task_1\",\"source_tool_use_event_id\":\"sevt_tool_1\",\"status\":\"completed\"}",
-            bridgeProjection,
           },
+          expect.any(Function),
         ],
       },
       { method: "applyRuntimeConfigPatch", args: ["sesn_6", { ...threadControl("sesn_6"), runtimeInputId: "rin_config", generation: 3, payloadJson: "{\"config_generation\":3}" }] },
@@ -519,12 +578,12 @@ describe("SessionRunHost", () => {
     expect(keys).toEqual([
       "handleAcceptInput",
       "handleCleanupSession",
+      "handleEnsureThreadInstalled",
       "handleInspectReviewerExecution",
       "handleInspectThread",
       "handleInterruptControl",
       "handleInterruptReviewerExecution",
       "handleInterruptThread",
-      "handleMarkAgentMailPulled",
       "handleMarkThreadActive",
       "handleMarkThreadClosed",
       "handlePreloadThread",
@@ -538,16 +597,21 @@ describe("SessionRunHost", () => {
   });
 
   test("handleAcceptInput drives the real manager and agent loop through the fake runtime path", async () => {
-    const loader = new QueuedContextLoader([], [], [{ type: "context", messages: [userMessage("user-1", 0, "hello")], runtimeBindingToken: "rtbt_sesn_1" }]);
+    const loader = new QueuedContextLoader([], []);
     const store = new HostRuntimeStore();
     const writer = new RecordingWriter();
     const llmService = new ControlledLLMService();
 
     await withHost(fullHostLayer({ loader, store, writer, llmService }), async (host) => {
+      expect(await Effect.runPromise(host.handleEnsureThreadInstalled(acceptedInput("sesn_1")))).toMatchObject({
+        ok: true,
+        sessionId: "sesn_1",
+        applied: true,
+      });
       expect(await Effect.runPromise(host.handleAcceptInput(acceptedInput("sesn_1")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
-        created: true,
+        created: false,
         started: true,
         pendingWake: false,
       });
@@ -561,7 +625,6 @@ describe("SessionRunHost", () => {
     expect(loader.commitCalls).toEqual([expect.objectContaining({ sessionId: "sesn_1", runtimeInputId: "rin_sesn_1" })]);
     expect(llmService.requests).toHaveLength(1);
     expect(llmService.requests[0]?.runtimeBindingToken).toBe("rtbt_sesn_1");
-    expect(store.writes).toEqual(["message:streaming", "part:text", "message:completed"]);
     expect(writer.events.map((event) => event.type)).toEqual([
       "session.status_running",
       "span.model_request_start",

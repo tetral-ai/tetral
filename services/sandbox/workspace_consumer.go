@@ -3,6 +3,7 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
@@ -14,6 +15,33 @@ type WorkspaceLister interface {
 }
 
 type WorkspaceConsumer func(context.Context, workspace.ID) (bool, error)
+
+// WorkspaceConsumerPool bounds aggregate work across every Queue consumer that
+// shares it. A contender acquires a slot before it can lease a Queue job and
+// holds that slot through the job's durable disposition.
+type WorkspaceConsumerPool struct {
+	slots chan struct{}
+}
+
+func NewWorkspaceConsumerPool(size int) (*WorkspaceConsumerPool, error) {
+	if size <= 0 {
+		return nil, errors.New("sandbox workspace consumer pool size must be positive")
+	}
+	return &WorkspaceConsumerPool{slots: make(chan struct{}, size)}, nil
+}
+
+func (p *WorkspaceConsumerPool) run(ctx context.Context, consume WorkspaceConsumer, workspaceID workspace.ID) (bool, error) {
+	if p == nil {
+		return false, errors.New("sandbox workspace consumer pool is required")
+	}
+	select {
+	case p.slots <- struct{}{}:
+		defer func() { <-p.slots }()
+		return consume(ctx, workspaceID)
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
 
 func RunWorkspaceConsumerCycle(ctx context.Context, lister WorkspaceLister, consume WorkspaceConsumer) (bool, error) {
 	if lister == nil {
@@ -42,6 +70,44 @@ func RunWorkspaceConsumerCycle(ctx context.Context, lister WorkspaceLister, cons
 
 func RunWorkspaceConsumerLoop(ctx context.Context, lister WorkspaceLister, pollInterval time.Duration, consume WorkspaceConsumer) error {
 	return runWorkspaceConsumerLoop(ctx, lister, pollInterval, consume, waitForWorkspacePoll)
+}
+
+// RunWorkspaceConsumerGroup starts enough long-lived contenders to expose the
+// shared pool's capacity. Contenders blocked on the pool hold no Queue lease.
+func RunWorkspaceConsumerGroup(
+	ctx context.Context,
+	contenders int,
+	pool *WorkspaceConsumerPool,
+	lister WorkspaceLister,
+	pollInterval time.Duration,
+	consume WorkspaceConsumer,
+) error {
+	if contenders <= 0 {
+		return errors.New("sandbox workspace contender count must be positive")
+	}
+	if pool == nil {
+		return errors.New("sandbox workspace consumer pool is required")
+	}
+	if consume == nil {
+		return errors.New("sandbox workspace consumer is required")
+	}
+	groupCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errorsByContender := make(chan error, contenders)
+	var contendersDone sync.WaitGroup
+	contendersDone.Add(contenders)
+	for range contenders {
+		go func() {
+			defer contendersDone.Done()
+			errorsByContender <- RunWorkspaceConsumerLoop(groupCtx, lister, pollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
+				return pool.run(cycleCtx, consume, workspaceID)
+			})
+		}()
+	}
+	firstErr := <-errorsByContender
+	cancel()
+	contendersDone.Wait()
+	return firstErr
 }
 
 func runWorkspaceConsumerLoop(

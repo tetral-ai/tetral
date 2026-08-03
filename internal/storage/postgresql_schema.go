@@ -63,6 +63,7 @@ const (
 		status TEXT NOT NULL,
 		lifecycle_state TEXT NOT NULL DEFAULT 'admitted',
 		config_generation BIGINT NOT NULL DEFAULT 1,
+		sandbox_resource_revision BIGINT NOT NULL DEFAULT 1,
 		approval_mode TEXT NOT NULL DEFAULT 'ask_for_approval',
 		usage_json TEXT NOT NULL DEFAULT '{}',
 		archived_at TIMESTAMPTZ,
@@ -74,6 +75,7 @@ const (
 		vault_ids_json TEXT NOT NULL DEFAULT '[]',
 		provider_access_json TEXT NOT NULL DEFAULT '{}',
 		installed_tools_json TEXT NOT NULL DEFAULT '[]',
+		delete_cleanup_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, id),
@@ -89,6 +91,7 @@ const (
 		CONSTRAINT sessions_status_shape CHECK (status IN ('idle', 'running', 'rescheduling', 'terminated')),
 		CONSTRAINT sessions_lifecycle_state_shape CHECK (lifecycle_state IN ('admitted', 'active', 'archiving', 'archived', 'deleted')),
 		CONSTRAINT sessions_config_generation_shape CHECK (config_generation > 0),
+		CONSTRAINT sessions_sandbox_resource_revision_shape CHECK (sandbox_resource_revision > 0),
 		CONSTRAINT sessions_approval_mode_shape CHECK (approval_mode IN ('full_access', 'ask_for_approval', 'approve_for_me'))
 	)`
 
@@ -162,57 +165,140 @@ const (
 		)
 	)`
 
-	createPostgreSQLSandboxesTable = `CREATE TABLE IF NOT EXISTS sandboxes (
-		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+	createPostgreSQLSessionSandboxBindingsTable = `CREATE TABLE IF NOT EXISTS session_sandbox_bindings (
 		workspace_id TEXT NOT NULL,
-		id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
-		status TEXT NOT NULL,
+		logical_sandbox_id TEXT NOT NULL,
+		environment_id TEXT NOT NULL,
+		environment_generation BIGINT NOT NULL,
 		provider TEXT NOT NULL,
-		provider_sandbox_id TEXT,
+		provider_resource_id TEXT,
+		binding_revision BIGINT NOT NULL,
+		release_requested_at TIMESTAMPTZ,
+		materialized_resource_revision BIGINT NOT NULL DEFAULT 0,
+		resource_credential_expires_at TIMESTAMPTZ,
+		resource_roots_json TEXT NOT NULL DEFAULT '[]',
+		helper_verified_at TIMESTAMPTZ,
 		provider_metadata_json TEXT NOT NULL DEFAULT '{}',
+		release_reason TEXT,
+		released_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		released_at TIMESTAMPTZ,
-		failed_at TIMESTAMPTZ,
-		startup_failure_reason TEXT,
-		cleanup_status TEXT NOT NULL DEFAULT 'none',
-		cleanup_method TEXT,
-		cleanup_error_kind TEXT,
-		cleanup_retryable BOOLEAN NOT NULL DEFAULT FALSE,
-		cleanup_last_attempt_at TIMESTAMPTZ,
-		cleanup_next_attempt_at TIMESTAMPTZ,
-		cleanup_attempt_count INTEGER NOT NULL DEFAULT 0,
-		status_refreshed_at TIMESTAMPTZ,
-		PRIMARY KEY (id),
-		UNIQUE (workspace_id, id),
+		PRIMARY KEY (workspace_id, session_id),
+		UNIQUE (workspace_id, logical_sandbox_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
-		CONSTRAINT sandboxes_provider_shape CHECK (provider = 'tetral'),
-		CONSTRAINT sandboxes_status_shape CHECK (status IN ('creating', 'active', 'stopped', 'archived', 'resuming', 'releasing', 'released', 'failed')),
-		CONSTRAINT sandboxes_cleanup_status_shape CHECK (cleanup_status IN ('none', 'pending', 'released', 'not_found', 'no_handle', 'retryable_failed', 'permanent_failed')),
-		CONSTRAINT sandboxes_cleanup_attempt_count_nonnegative CHECK (cleanup_attempt_count >= 0)
+		FOREIGN KEY (workspace_id, environment_id) REFERENCES environments(workspace_id, id) ON DELETE RESTRICT,
+		CONSTRAINT session_sandbox_bindings_provider_shape CHECK (provider = 'daytona'),
+		CONSTRAINT session_sandbox_bindings_generation_shape CHECK (environment_generation > 0),
+		CONSTRAINT session_sandbox_bindings_revision_shape CHECK (binding_revision > 0),
+		CONSTRAINT session_sandbox_bindings_resource_revision_shape CHECK (materialized_resource_revision >= 0),
+		CONSTRAINT session_sandbox_bindings_roots_shape CHECK (jsonb_typeof(resource_roots_json::jsonb) = 'array'),
+		CONSTRAINT session_sandbox_bindings_metadata_shape CHECK (jsonb_typeof(provider_metadata_json::jsonb) = 'object'),
+		CONSTRAINT session_sandbox_bindings_release_shape CHECK (
+			(release_requested_at IS NULL AND release_reason IS NULL)
+			OR (release_requested_at IS NOT NULL AND release_reason = 'session_delete')
+		)
 	)`
 
-	createPostgreSQLSandboxReleaseIdempotencyKeysTable = `CREATE TABLE IF NOT EXISTS sandbox_release_idempotency_keys (
+	createPostgreSQLSandboxLifecycleOperationsTable = `CREATE TABLE IF NOT EXISTS sandbox_lifecycle_operations (
 		workspace_id TEXT NOT NULL,
-		idempotency_key TEXT NOT NULL,
+		operation_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
-		sandbox_id TEXT NOT NULL,
-		binding_id TEXT NOT NULL,
-		binding_generation BIGINT NOT NULL,
-		status TEXT NOT NULL,
-		response_status TEXT,
-		sandbox_status TEXT,
+		logical_sandbox_id TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		state TEXT NOT NULL,
+		observed_binding_revision BIGINT,
+		target_environment_generation BIGINT,
+		target_resource_revision BIGINT,
+		target_provider_resource_id TEXT,
+		materialization_resources_json TEXT,
+		waiting_activation_operation_id TEXT,
+		provider_create_name TEXT,
+		provider_request_labels_json TEXT,
+		adopted_provider_resource_id TEXT,
+		release_reason TEXT,
+		superseded_by_operation_id TEXT,
+		outcome_effect_boundary TEXT,
+		outcome_disposition TEXT,
+		error_kind TEXT,
+		safe_message TEXT,
+		queue_job_id TEXT,
+		queue_kind TEXT,
+		queue_partition_key TEXT,
+		queue_dedupe_key TEXT,
+		lease_owner TEXT,
+		lease_token TEXT,
+		lease_expires_at TIMESTAMPTZ,
+		attempt_count INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (workspace_id, idempotency_key),
-		UNIQUE (workspace_id, session_id, sandbox_id, binding_id, binding_generation),
+		completed_at TIMESTAMPTZ,
+		PRIMARY KEY (workspace_id, operation_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
-		FOREIGN KEY (workspace_id, sandbox_id) REFERENCES sandboxes(workspace_id, id) ON DELETE CASCADE,
-		CONSTRAINT sandbox_release_idempotency_generation_shape CHECK (binding_generation > 0),
-		CONSTRAINT sandbox_release_idempotency_status_shape CHECK (status IN ('running', 'provider_release_started', 'provider_released', 'completed')),
-		CONSTRAINT sandbox_release_idempotency_response_shape CHECK (
-			response_status IS NULL OR response_status IN ('released', 'already_released', 'retry_later', 'failed')
+		FOREIGN KEY (workspace_id, session_id) REFERENCES session_sandbox_bindings(workspace_id, session_id) ON DELETE CASCADE,
+		CONSTRAINT sandbox_lifecycle_operations_kind_shape CHECK (kind IN ('create', 'start', 'replace', 'materialize', 'release')),
+		CONSTRAINT sandbox_lifecycle_operations_state_shape CHECK (state IN ('pending', 'waiting_artifact', 'waiting_activation', 'running', 'completed', 'failed', 'skipped_cold', 'abandoned')),
+		CONSTRAINT sandbox_lifecycle_operations_kind_state_shape CHECK (
+			(kind IN ('create', 'start', 'replace') AND state IN ('pending', 'waiting_artifact', 'running', 'completed', 'failed', 'abandoned'))
+			OR (kind = 'materialize' AND state IN ('pending', 'waiting_activation', 'running', 'completed', 'failed', 'skipped_cold', 'abandoned'))
+			OR (kind = 'release' AND state IN ('pending', 'running', 'completed', 'failed'))
+		),
+		CONSTRAINT sandbox_lifecycle_operations_attempt_shape CHECK (attempt_count >= 0),
+		CONSTRAINT sandbox_lifecycle_operations_queue_shape CHECK (
+			(queue_job_id IS NULL AND queue_kind IS NULL AND queue_partition_key IS NULL AND queue_dedupe_key IS NULL)
+			OR (
+				queue_job_id IS NOT NULL AND queue_job_id <> ''
+				AND queue_partition_key IS NOT NULL AND queue_partition_key <> ''
+				AND queue_dedupe_key IS NOT NULL AND queue_dedupe_key <> ''
+				AND (
+				(kind IN ('create', 'start', 'replace') AND queue_kind = 'sandbox_activate')
+				OR (kind = 'materialize' AND queue_kind = 'sandbox_materialize')
+				OR (kind = 'release' AND queue_kind = 'sandbox_release')
+				)
+			)
+		),
+		CONSTRAINT sandbox_lifecycle_operations_target_shape CHECK (
+			(kind IN ('create', 'replace')
+				AND observed_binding_revision > 0
+				AND target_environment_generation > 0
+				AND provider_create_name IS NOT NULL AND provider_create_name <> ''
+				AND provider_request_labels_json IS NOT NULL
+				AND jsonb_typeof(provider_request_labels_json::jsonb) = 'object'
+				AND materialization_resources_json IS NULL
+				AND target_resource_revision IS NULL
+				AND release_reason IS NULL)
+			OR (kind = 'start'
+				AND observed_binding_revision > 0
+				AND target_provider_resource_id IS NOT NULL AND target_provider_resource_id <> ''
+				AND target_environment_generation IS NULL
+				AND target_resource_revision IS NULL
+				AND materialization_resources_json IS NULL
+				AND release_reason IS NULL)
+			OR (kind = 'materialize'
+				AND observed_binding_revision > 0
+				AND target_provider_resource_id IS NOT NULL AND target_provider_resource_id <> ''
+				AND target_environment_generation > 0
+				AND target_resource_revision >= 0
+				AND materialization_resources_json IS NOT NULL
+				AND jsonb_typeof(materialization_resources_json::jsonb) = 'object'
+				AND release_reason IS NULL)
+			OR (kind = 'release'
+				AND target_provider_resource_id IS NOT NULL AND target_provider_resource_id <> ''
+				AND release_reason IN ('session_delete', 'replaced_handle')
+				AND target_environment_generation IS NULL
+				AND target_resource_revision IS NULL
+				AND materialization_resources_json IS NULL)
+		),
+		CONSTRAINT sandbox_lifecycle_operations_outcome_shape CHECK (
+			(outcome_effect_boundary IS NULL AND outcome_disposition IS NULL)
+			OR (
+				outcome_effect_boundary IN ('proved_not_started', 'submitted', 'outcome_unknown')
+				AND outcome_disposition IN ('retryable', 'terminal')
+			)
+		),
+		CONSTRAINT sandbox_lifecycle_operations_lease_shape CHECK (
+			(lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+			OR (lease_owner IS NOT NULL AND lease_owner <> '' AND lease_token IS NOT NULL AND lease_token <> '' AND lease_expires_at IS NOT NULL)
 		)
 	)`
 
@@ -254,6 +340,7 @@ const (
 		PRIMARY KEY (event_id),
 		UNIQUE (workspace_id, event_id),
 		CONSTRAINT session_events_thread_sequence_key UNIQUE NULLS NOT DISTINCT (workspace_id, session_id, session_thread_id, sequence),
+		CONSTRAINT session_events_attachment_scope_key UNIQUE (workspace_id, session_id, session_thread_id, event_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_events_revision_shape CHECK (revision > 0),
@@ -290,10 +377,6 @@ const (
 	//   runtime_notification   an internal, model-visible runtime notice (e.g.
 	//                          background command completion); NOT a public
 	//                          user.message and NOT a second tool result
-	//   fork_seed              the parent RuntimeMessage snapshot that seeds a
-	//                          forked child (subagent child or approval-reviewer
-	//                          sidecar); LoadContext(child) loads the child's own
-	//                          fork_seed and resume never re-forks the parent
 	//   compaction             the active context-window boundary; LoadContext
 	//                          starts at the latest compaction row and loads
 	//                          later rows by sequence
@@ -314,13 +397,66 @@ const (
 		source_event_id TEXT,
 		last_event_id TEXT,
 		repair_key TEXT,
+		model_request_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, message_id),
 		UNIQUE (workspace_id, session_id, session_thread_id, sequence),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_messages_sequence_shape CHECK (sequence > 0),
-		CONSTRAINT session_messages_kind_shape CHECK (kind IN ('user', 'assistant', 'runtime_notification', 'fork_seed', 'compaction'))
+		CONSTRAINT session_messages_kind_shape CHECK (kind IN ('user', 'assistant', 'runtime_notification', 'compaction')),
+		CONSTRAINT session_messages_model_request_id_shape CHECK (
+			model_request_id IS NULL OR (kind = 'assistant' AND model_request_id <> '')
+		)
+	)`
+
+	createPostgreSQLSessionFileAttachmentConsumptionsTable = `CREATE TABLE IF NOT EXISTS session_file_attachment_consumptions (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		request_end_event_id TEXT NOT NULL,
+		source_event_id TEXT NOT NULL,
+		file_id TEXT NOT NULL,
+		UNIQUE (
+			workspace_id, session_id, session_thread_id,
+			request_end_event_id, source_event_id, file_id
+		),
+		FOREIGN KEY (workspace_id, session_id)
+			REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, session_id, session_thread_id)
+			REFERENCES session_threads(workspace_id, session_id, id),
+		FOREIGN KEY (
+			workspace_id, session_id, session_thread_id, request_end_event_id
+		) REFERENCES session_events(
+			workspace_id, session_id, session_thread_id, event_id
+		),
+		FOREIGN KEY (
+			workspace_id, session_id, session_thread_id, source_event_id
+		) REFERENCES session_events(
+			workspace_id, session_id, session_thread_id, event_id
+		)
+	)`
+
+	// A child thread's parent transcript is durable context material, not a
+	// child message. It remains outside child message sequencing until a
+	// successful compaction checkpoint atomically consumes it.
+	createPostgreSQLSessionThreadContextPrefixesTable = `CREATE TABLE IF NOT EXISTS session_thread_context_prefixes (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		child_thread_id TEXT NOT NULL,
+		parent_thread_id TEXT NOT NULL,
+		parent_boundary_event_id TEXT NOT NULL,
+		entries_json TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		consumed_by_checkpoint_message_id TEXT,
+		PRIMARY KEY (workspace_id, session_id, child_thread_id),
+		FOREIGN KEY (workspace_id, session_id, child_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, session_id, parent_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, parent_boundary_event_id) REFERENCES session_events(workspace_id, event_id) ON DELETE RESTRICT,
+		FOREIGN KEY (workspace_id, consumed_by_checkpoint_message_id) REFERENCES session_messages(workspace_id, message_id) ON DELETE RESTRICT,
+		CONSTRAINT session_thread_context_prefixes_identity_shape CHECK (
+			child_thread_id <> '' AND parent_thread_id <> '' AND parent_boundary_event_id <> ''
+		)
 	)`
 
 	// session_pending_tool_uses tracks public tool calls whose result waits on an
@@ -376,7 +512,7 @@ const (
 	//   - provider_command_metadata_json is driver-written and never
 	//     model-visible; it is a JSON object bounded to 4096 bytes (4 KiB) of
 	//     UTF-8. The provider_metadata_shape CHECK enforces both the object
-	//     shape and the byte cap, and Bridge validates the same before write.
+	//     shape and the byte cap, and Sandbox Service validates the same before write.
 	//   - The active driver's recovery identity lives in provider_session_id and
 	//     provider_command_id: for the Daytona helper driver these hold the
 	//     provider sandbox id and the helper task_id, and that helper task
@@ -387,30 +523,41 @@ const (
 	//   - None of these identifiers appear in model-visible tool output, public
 	//     events, or provider requests.
 	//
-	// UPDATE-WITH: services/bridge background-task settlement and
-	// the sandbox driver recovery path; the provider_metadata_shape CHECK below.
+	// UPDATE-WITH: services/sandbox background-task settlement and recovery;
+	// the provider_metadata_shape CHECK below.
 	createPostgreSQLSessionBackgroundTasksTable = `CREATE TABLE IF NOT EXISTS session_background_tasks (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		session_thread_id TEXT NOT NULL,
 		task_id TEXT NOT NULL,
 		source_tool_use_event_id TEXT NOT NULL,
-		binding_id TEXT NOT NULL,
+		binding_id TEXT,
 		sandbox_id TEXT NOT NULL,
+		provider TEXT NOT NULL DEFAULT 'daytona',
+		binding_revision BIGINT NOT NULL DEFAULT 1,
 		provider_session_id TEXT NOT NULL,
 		provider_command_id TEXT NOT NULL,
 		provider_command_metadata_json TEXT NOT NULL DEFAULT '{}',
+		resource_roots_json TEXT NOT NULL DEFAULT '[]',
 		stdin_write_sequence BIGINT NOT NULL DEFAULT 0,
 		status TEXT NOT NULL,
+		terminal_result_json TEXT,
+		terminal_result_digest TEXT,
 		terminal_event_id TEXT,
+		reconcile_generation BIGINT NOT NULL DEFAULT 1,
+		next_poll_at TIMESTAMPTZ,
+		release_operation_id TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		terminal_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, session_id, task_id),
 		UNIQUE (workspace_id, session_id, source_tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'cancelled_by_cleanup', 'stale')),
+		CONSTRAINT session_background_tasks_status_shape CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'expired', 'unknown_outcome')),
 		CONSTRAINT session_background_tasks_stdin_write_sequence_shape CHECK (stdin_write_sequence >= 0),
+		CONSTRAINT session_background_tasks_binding_revision_shape CHECK (binding_revision > 0),
+		CONSTRAINT session_background_tasks_reconcile_generation_shape CHECK (reconcile_generation > 0),
+		CONSTRAINT session_background_tasks_resource_roots_shape CHECK (jsonb_typeof(resource_roots_json::jsonb) = 'array'),
 		CONSTRAINT session_background_tasks_provider_metadata_shape CHECK (
 			jsonb_typeof(provider_command_metadata_json::jsonb) = 'object'
 			AND octet_length(convert_to(provider_command_metadata_json, 'UTF8')) <= 4096
@@ -423,25 +570,38 @@ const (
 		session_thread_id TEXT NOT NULL,
 		runtime_input_id TEXT NOT NULL,
 		input_kind TEXT NOT NULL,
+		rejection_reason_code TEXT,
 		event_ids_json TEXT NOT NULL DEFAULT '[]',
 		sequence_from BIGINT,
 		sequence_to BIGINT,
 		status TEXT NOT NULL,
-		binding_id TEXT NOT NULL,
-		binding_generation BIGINT NOT NULL,
-		target_pod_uid TEXT NOT NULL,
+		binding_id TEXT,
+		binding_generation BIGINT,
+		target_pod_uid TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		committed_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, runtime_input_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification')),
-		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('delivering', 'accepted', 'committed', 'cancelled', 'dead_lettered')),
+		CONSTRAINT session_runtime_inbox_kind_shape CHECK (input_kind IN ('messages', 'interrupt_control', 'tool_confirmation', 'task_notification', 'agent_mail', 'approval_review', 'rejection')),
+		CONSTRAINT session_runtime_inbox_status_shape CHECK (status IN ('queued', 'delivering', 'accepted', 'parked', 'committed', 'cancelled', 'dead_lettered')),
 		CONSTRAINT session_runtime_inbox_sequence_shape CHECK (
 			(sequence_from IS NULL AND sequence_to IS NULL)
 			OR (sequence_from IS NOT NULL AND sequence_to IS NOT NULL AND sequence_from <= sequence_to)
 		),
-		CONSTRAINT session_runtime_inbox_generation_shape CHECK (binding_generation > 0)
+		CONSTRAINT session_runtime_inbox_binding_shape CHECK (
+			(status = 'queued' AND binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+			OR (status IN ('delivering', 'accepted', 'parked', 'committed')
+				AND binding_id IS NOT NULL AND binding_id <> ''
+				AND binding_generation IS NOT NULL AND binding_generation > 0
+				AND target_pod_uid IS NOT NULL AND target_pod_uid <> '')
+			OR (status IN ('cancelled', 'dead_lettered') AND (
+				(binding_id IS NULL AND binding_generation IS NULL AND target_pod_uid IS NULL)
+				OR (binding_id IS NOT NULL AND binding_id <> ''
+					AND binding_generation IS NOT NULL AND binding_generation > 0
+					AND target_pod_uid IS NOT NULL AND target_pod_uid <> '')
+			))
+		)
 	)`
 
 	// session_event_idempotency_keys stores hashed idempotency state for accepted
@@ -500,19 +660,41 @@ const (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
 		mcp_server_name TEXT NOT NULL,
-		tools_json TEXT NOT NULL,
-		manifest_etag TEXT NOT NULL,
+		tools_json TEXT,
+		manifest_etag TEXT,
 		manifest_generation BIGINT NOT NULL,
+		readiness TEXT NOT NULL DEFAULT 'ready',
+		diagnostic TEXT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, mcp_server_name),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_mcp_manifests_identity_shape CHECK (mcp_server_name <> '' AND manifest_etag <> ''),
-		CONSTRAINT session_mcp_manifests_tools_json_shape CHECK (
-			octet_length(tools_json) <= 262144
-			AND jsonb_typeof(tools_json::jsonb) = 'array'
+		CONSTRAINT session_mcp_manifests_identity_shape CHECK (
+			mcp_server_name <> '' AND (manifest_etag IS NULL OR manifest_etag <> '')
 		),
-		CONSTRAINT session_mcp_manifests_generation_shape CHECK (manifest_generation > 0)
+		CONSTRAINT session_mcp_manifests_tools_json_shape CHECK (
+			tools_json IS NULL OR (
+				octet_length(tools_json) <= 262144
+				AND jsonb_typeof(tools_json::jsonb) = 'array'
+			)
+		),
+		CONSTRAINT session_mcp_manifests_generation_shape CHECK (manifest_generation > 0),
+		CONSTRAINT session_mcp_manifests_readiness_shape CHECK (
+			(
+				readiness = 'ready'
+				AND diagnostic IS NULL
+				AND tools_json IS NOT NULL
+				AND manifest_etag IS NOT NULL
+			) OR (
+				readiness = 'unready'
+				AND diagnostic IS NOT NULL
+				AND diagnostic <> ''
+				AND (
+					(tools_json IS NULL AND manifest_etag IS NULL)
+					OR (tools_json IS NOT NULL AND manifest_etag IS NOT NULL)
+				)
+			)
+		)
 	)`
 
 	createPostgreSQLSessionRuntimeStatusTable = `CREATE TABLE IF NOT EXISTS session_runtime_status (
@@ -521,6 +703,8 @@ const (
 		status TEXT NOT NULL,
 		status_event_id TEXT,
 		idle_since TIMESTAMPTZ,
+		running_since TIMESTAMPTZ,
+		active_seconds_total DOUBLE PRECISION NOT NULL DEFAULT 0,
 		cleanup_after TIMESTAMPTZ,
 		cleanup_enqueued_at TIMESTAMPTZ,
 		cleanup_claimed_at TIMESTAMPTZ,
@@ -532,7 +716,21 @@ const (
 		PRIMARY KEY (workspace_id, session_id),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_runtime_status_status_shape CHECK (status IN ('running', 'idle')),
-		CONSTRAINT session_runtime_status_binding_generation_shape CHECK (binding_generation IS NULL OR binding_generation > 0)
+		CONSTRAINT session_runtime_status_binding_generation_shape CHECK (binding_generation IS NULL OR binding_generation > 0),
+		CONSTRAINT session_runtime_status_active_seconds_shape CHECK (active_seconds_total >= 0)
+	)`
+
+	createPostgreSQLSessionTurnRetriesTable = `CREATE TABLE IF NOT EXISTS session_turn_retries (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		provider_attempts BIGINT NOT NULL DEFAULT 0,
+		compaction_attempts BIGINT NOT NULL DEFAULT 0,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, session_id, session_thread_id),
+		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT session_turn_retries_provider_attempts_shape CHECK (provider_attempts >= 0),
+		CONSTRAINT session_turn_retries_compaction_attempts_shape CHECK (compaction_attempts >= 0)
 	)`
 
 	createPostgreSQLSessionBridgeOperationsTable = `CREATE TABLE IF NOT EXISTS session_bridge_operations (
@@ -541,7 +739,10 @@ const (
 		session_thread_id TEXT NOT NULL,
 		operation TEXT NOT NULL,
 		idempotency_key TEXT NOT NULL,
+		source_kind TEXT NOT NULL,
 		request_hash TEXT NOT NULL,
+		declaration_digest TEXT,
+		receipt_json TEXT,
 		ack_status TEXT NOT NULL,
 		runtime_input_id TEXT,
 		runtime_write_id TEXT,
@@ -550,10 +751,9 @@ const (
 		stdin_write_seq BIGINT,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (workspace_id, session_id, operation, idempotency_key),
+		PRIMARY KEY (workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
 		CONSTRAINT session_bridge_operations_operation_shape CHECK (operation IN (
-			'load_context',
 			'commit_inputs',
 			'commit_task_notification_result',
 			'write_event',
@@ -564,15 +764,14 @@ const (
 			'list_child_threads',
 			'mark_child_thread_closed',
 			'mark_child_thread_active',
-			'run_tool',
 			'read_command_result',
 			'send_command_input',
 			'cancel_command',
 			'run_memory',
 			'create_transient_attachment',
 			'mcp_manifest_changed',
+			'commit_mcp_tool_result',
 			'commit_internal_tool_repair',
-			'commit_stable_reasoning_part',
 			'commit_runtime_termination'
 		)),
 		CONSTRAINT session_bridge_operations_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
@@ -590,61 +789,163 @@ const (
 		tool_name TEXT NOT NULL,
 		input_json TEXT NOT NULL,
 		ack_status TEXT NOT NULL,
-		result_json TEXT NOT NULL,
+		result_json TEXT,
+		model_tool_call_id TEXT,
+		execution_state TEXT,
+		execution_attempt_generation BIGINT,
+		waiting_activation_operation_id TEXT,
+		waiting_materialization_operation_id TEXT,
+		authorized_binding_revision BIGINT,
+		authorized_provider_resource_id TEXT,
+		preparation_deadline TIMESTAMPTZ,
+		result_digest TEXT,
+		provider_command_reference_json TEXT,
+		cancel_requested_at TIMESTAMPTZ,
+		cancel_state TEXT,
+		cancel_submitted_at TIMESTAMPTZ,
+		consumed_by_terminal_event_id TEXT,
+		consumption_reason TEXT,
+		helper_recovery_count INTEGER NOT NULL DEFAULT 0,
 		background_task_started BOOLEAN NOT NULL DEFAULT FALSE,
 		task_id TEXT,
+		background_operation_kind TEXT,
+		background_operation_state TEXT,
+		background_request_id TEXT,
+		background_task_id TEXT,
+		background_max_output_tokens INTEGER,
+		background_write_sequence BIGINT,
 		memory_projection_state TEXT,
-		mcp_claim_status TEXT NOT NULL DEFAULT 'stored',
+		mcp_claim_status TEXT,
 		mcp_claim_owner_request_id TEXT,
 		mcp_claim_lease_expires_at TIMESTAMPTZ,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (workspace_id, session_id, tool_use_event_id),
+		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'memory', 'mcp')),
+		FOREIGN KEY (workspace_id, consumed_by_terminal_event_id) REFERENCES session_events(workspace_id, event_id),
+		CONSTRAINT session_runtime_tool_results_kind_shape CHECK (tool_kind IN ('sandbox_tool', 'sandbox_background', 'memory', 'mcp')),
 		CONSTRAINT session_runtime_tool_results_ack_shape CHECK (ack_status IN ('committed', 'rejected')),
-		CONSTRAINT session_runtime_tool_results_memory_projection_state_shape CHECK (
-			memory_projection_state IS NULL
-			OR memory_projection_state IN ('pending', 'refreshed', 'skipped_cold')
+		CONSTRAINT session_runtime_tool_results_execution_state_shape CHECK (
+			execution_state IS NULL OR execution_state IN (
+				'pending', 'preparing', 'running', 'waiting_activation',
+				'waiting_materialization', 'terminal_unconsumed', 'consumed'
+			)
 		),
-		CONSTRAINT session_runtime_tool_results_mcp_claim_status_shape CHECK (mcp_claim_status IN ('stored', 'in_flight')),
+		CONSTRAINT session_runtime_tool_results_execution_generation_shape CHECK (
+			execution_attempt_generation IS NULL OR execution_attempt_generation > 0
+		),
+		CONSTRAINT session_runtime_tool_results_sandbox_execution_shape CHECK (
+			(tool_kind = 'sandbox_tool'
+				AND model_tool_call_id IS NOT NULL AND model_tool_call_id <> ''
+				AND execution_state IS NOT NULL
+				AND execution_attempt_generation IS NOT NULL)
+			OR (tool_kind = 'sandbox_background'
+				AND model_tool_call_id IS NULL
+				AND execution_state IS NULL
+				AND execution_attempt_generation IS NULL
+				AND waiting_activation_operation_id IS NULL
+				AND waiting_materialization_operation_id IS NULL
+				AND authorized_binding_revision IS NULL
+				AND authorized_provider_resource_id IS NULL
+				AND preparation_deadline IS NULL
+				AND provider_command_reference_json IS NULL
+				AND helper_recovery_count = 0
+				AND background_task_started = FALSE
+				AND task_id IS NULL)
+			OR (tool_kind IN ('memory', 'mcp')
+				AND result_json IS NOT NULL
+				AND model_tool_call_id IS NULL
+				AND execution_state IS NULL
+				AND execution_attempt_generation IS NULL
+				AND waiting_activation_operation_id IS NULL
+				AND waiting_materialization_operation_id IS NULL
+				AND authorized_binding_revision IS NULL
+				AND authorized_provider_resource_id IS NULL
+				AND preparation_deadline IS NULL
+				AND result_digest IS NULL
+				AND provider_command_reference_json IS NULL
+				AND cancel_requested_at IS NULL
+				AND cancel_state IS NULL
+				AND cancel_submitted_at IS NULL
+				AND consumed_by_terminal_event_id IS NULL
+				AND consumption_reason IS NULL
+				AND helper_recovery_count = 0
+				AND background_task_started = FALSE
+				AND task_id IS NULL)
+		),
+		CONSTRAINT session_runtime_tool_results_background_operation_shape CHECK (
+			(tool_kind = 'sandbox_background'
+				AND background_operation_kind IN ('poll', 'stdin', 'cancel')
+				AND background_operation_state IN ('pending', 'submitted', 'terminal')
+				AND background_request_id IS NOT NULL AND background_request_id <> ''
+				AND background_task_id IS NOT NULL AND background_task_id <> ''
+				AND background_max_output_tokens IS NOT NULL AND background_max_output_tokens >= 0
+				AND (background_write_sequence IS NULL OR background_write_sequence > 0))
+			OR (tool_kind <> 'sandbox_background'
+				AND background_operation_kind IS NULL
+				AND background_operation_state IS NULL
+				AND background_request_id IS NULL
+				AND background_task_id IS NULL
+				AND background_max_output_tokens IS NULL
+				AND background_write_sequence IS NULL)
+		),
+		CONSTRAINT session_runtime_tool_results_cancellation_shape CHECK (
+			(cancel_requested_at IS NULL AND cancel_state IS NULL AND cancel_submitted_at IS NULL)
+			OR (tool_kind = 'sandbox_tool' AND cancel_requested_at IS NOT NULL
+				AND cancel_state = 'pending' AND cancel_submitted_at IS NULL)
+			OR (tool_kind = 'sandbox_tool' AND cancel_requested_at IS NOT NULL
+				AND cancel_state = 'submitted' AND cancel_submitted_at IS NOT NULL)
+		),
+		CONSTRAINT session_runtime_tool_results_consumption_shape CHECK (
+			(tool_kind NOT IN ('sandbox_tool', 'sandbox_background')) OR (
+			tool_kind = 'sandbox_tool' AND (
+				(execution_state IN ('pending', 'preparing', 'running', 'waiting_activation', 'waiting_materialization')
+					AND result_json IS NULL AND result_digest IS NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (execution_state = 'terminal_unconsumed'
+					AND result_json IS NOT NULL AND result_digest IS NOT NULL AND result_digest <> ''
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (execution_state = 'consumed'
+					AND result_json IS NULL AND result_digest IS NOT NULL AND result_digest <> ''
+					AND consumed_by_terminal_event_id IS NOT NULL
+					AND consumption_reason IN (
+						'conversation_tool_result', 'pod_lost', 'runtime_terminated', 'cleanup_wait_expired'
+					))
+			)) OR (tool_kind = 'sandbox_background' AND (
+				(background_operation_state IN ('pending', 'submitted')
+					AND result_json IS NULL AND result_digest IS NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (background_operation_state = 'terminal' AND result_json IS NOT NULL
+					AND result_digest IS NOT NULL
+					AND consumed_by_terminal_event_id IS NULL AND consumption_reason IS NULL)
+				OR (background_operation_state = 'terminal' AND result_json IS NULL
+					AND result_digest IS NOT NULL
+					AND consumed_by_terminal_event_id IS NOT NULL
+					AND consumption_reason IN (
+						'conversation_tool_result', 'pod_lost', 'runtime_terminated', 'cleanup_wait_expired'
+					))
+			))
+		),
+		CONSTRAINT session_runtime_tool_results_helper_recovery_shape CHECK (helper_recovery_count >= 0 AND helper_recovery_count <= 1),
+		CONSTRAINT session_runtime_tool_results_memory_projection_state_shape CHECK (
+			(tool_kind = 'memory' AND (
+				memory_projection_state IS NULL
+				OR memory_projection_state IN ('pending', 'refreshed', 'skipped_cold', 'failed')
+			))
+			OR (tool_kind <> 'memory' AND memory_projection_state IS NULL)
+		),
+		CONSTRAINT session_runtime_tool_results_mcp_claim_status_shape CHECK (
+			mcp_claim_status IS NULL OR mcp_claim_status IN ('stored', 'in_flight', 'consumed')
+		),
 		CONSTRAINT session_runtime_tool_results_mcp_claim_shape CHECK (
-			(tool_kind <> 'mcp' AND mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-			OR (tool_kind = 'mcp' AND (
+			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+			OR (tool_kind = 'mcp' AND mcp_claim_status IS NOT NULL AND (
 				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
+				OR (mcp_claim_status = 'consumed' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
 				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
 			))
 		),
 		CONSTRAINT session_runtime_tool_results_input_shape CHECK (normalized_input_hash <> '' AND tool_name <> '' AND input_json <> '')
-	)`
-
-	createPostgreSQLSessionPreparationsTable = `CREATE TABLE IF NOT EXISTS session_preparations (
-		workspace_id TEXT NOT NULL,
-		session_id TEXT NOT NULL,
-		preparation_attempt_id TEXT NOT NULL,
-		environment_id TEXT NOT NULL,
-		environment_generation BIGINT NOT NULL,
-		sandbox_id TEXT NOT NULL,
-		status TEXT NOT NULL,
-		resource_cred_expires_at TIMESTAMPTZ,
-		resource_roots_json TEXT,
-		skills_index_json TEXT,
-		resource_helper_recovery_count INTEGER NOT NULL DEFAULT 0,
-		failure_stage TEXT,
-		last_error_kind TEXT,
-		failure_reason TEXT,
-		retryable BOOLEAN,
-		superseded_at TIMESTAMPTZ,
-		created_at TIMESTAMPTZ NOT NULL,
-		updated_at TIMESTAMPTZ NOT NULL,
-		ready_at TIMESTAMPTZ,
-		failed_at TIMESTAMPTZ,
-		PRIMARY KEY (workspace_id, session_id, preparation_attempt_id),
-		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
-		FOREIGN KEY (workspace_id, environment_id) REFERENCES environments(workspace_id, id) ON DELETE RESTRICT,
-		CONSTRAINT session_preparations_generation_shape CHECK (environment_generation > 0),
-		CONSTRAINT session_preparations_resource_helper_recovery_count_shape CHECK (resource_helper_recovery_count >= 0),
-		CONSTRAINT session_preparations_status_shape CHECK (status IN ('pending', 'waiting_environment', 'preparing', 'ready', 'failed'))
 	)`
 
 	createPostgreSQLSessionOutputCapturesTable = `CREATE TABLE IF NOT EXISTS session_output_captures (
@@ -660,6 +961,69 @@ const (
 		PRIMARY KEY (workspace_id, session_id, source_path),
 		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (workspace_id, last_file_id) REFERENCES files(workspace_id, file_id)
+	)`
+
+	createPostgreSQLSandboxOutputCaptureOperationsTable = `CREATE TABLE IF NOT EXISTS sandbox_output_capture_operations (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		session_thread_id TEXT NOT NULL,
+		finish_idle_write_id TEXT NOT NULL,
+		capture_generation BIGINT NOT NULL,
+		state TEXT NOT NULL,
+		binding_id TEXT NOT NULL,
+		binding_generation BIGINT NOT NULL,
+		logical_sandbox_id TEXT,
+		provider TEXT,
+		provider_resource_id TEXT,
+		sandbox_binding_revision BIGINT,
+		manifest_json TEXT NOT NULL DEFAULT '[]',
+		skipped_json TEXT NOT NULL DEFAULT '[]',
+		scan_records_json TEXT NOT NULL DEFAULT '[]',
+		failure_kind TEXT,
+		failure_detail TEXT,
+		outcome_state TEXT,
+		outcome_digest TEXT,
+		retain_until TIMESTAMPTZ NOT NULL,
+		cleanup_generation BIGINT NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		staged_at TIMESTAMPTZ,
+		adopted_at TIMESTAMPTZ,
+		cleaned_at TIMESTAMPTZ,
+		PRIMARY KEY (workspace_id, session_id, finish_idle_write_id, capture_generation),
+		FOREIGN KEY (workspace_id, session_id) REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
+		CONSTRAINT sandbox_output_capture_generation_shape CHECK (capture_generation > 0 AND binding_generation > 0 AND cleanup_generation >= 0 AND (sandbox_binding_revision IS NULL OR sandbox_binding_revision > 0)),
+		CONSTRAINT sandbox_output_capture_state_shape CHECK (state IN ('pending', 'running', 'staged', 'skipped_unavailable', 'failed', 'cleanup_pending', 'cleaned', 'adopted')),
+		CONSTRAINT sandbox_output_capture_outcome_shape CHECK (
+			(outcome_state IS NULL AND outcome_digest IS NULL)
+			OR (outcome_state IN ('staged', 'skipped_unavailable', 'failed') AND outcome_digest IS NOT NULL AND outcome_digest <> '')
+		),
+		CONSTRAINT sandbox_output_capture_provider_shape CHECK ((provider IS NULL) = (provider_resource_id IS NULL) AND (provider IS NULL) = (logical_sandbox_id IS NULL) AND (provider IS NULL) = (sandbox_binding_revision IS NULL))
+	)`
+
+	createPostgreSQLSandboxOutputCaptureBlobsTable = `CREATE TABLE IF NOT EXISTS sandbox_output_capture_blobs (
+		workspace_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		finish_idle_write_id TEXT NOT NULL,
+		capture_generation BIGINT NOT NULL,
+		source_path TEXT NOT NULL,
+		blob_pointer TEXT NOT NULL,
+		size_bytes BIGINT NOT NULL,
+		sha256 TEXT NOT NULL,
+		state TEXT NOT NULL,
+		file_id TEXT,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		uploaded_at TIMESTAMPTZ,
+		adopted_at TIMESTAMPTZ,
+		PRIMARY KEY (workspace_id, session_id, finish_idle_write_id, capture_generation, source_path),
+		UNIQUE (blob_pointer),
+		FOREIGN KEY (workspace_id, session_id, finish_idle_write_id, capture_generation)
+			REFERENCES sandbox_output_capture_operations(workspace_id, session_id, finish_idle_write_id, capture_generation) ON DELETE CASCADE,
+		FOREIGN KEY (workspace_id, file_id) REFERENCES files(workspace_id, file_id),
+		CONSTRAINT sandbox_output_capture_blob_size_shape CHECK (size_bytes >= 0),
+		CONSTRAINT sandbox_output_capture_blob_state_shape CHECK (state IN ('pending', 'uploaded', 'adopted'))
 	)`
 
 	createPostgreSQLSessionTransientAttachmentsTable = `CREATE TABLE IF NOT EXISTS session_transient_attachments (
@@ -678,7 +1042,7 @@ const (
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (workspace_id, attachment_ref),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_transient_attachments_status_shape CHECK (status IN ('uploading', 'active', 'consumed', 'expired', 'deleting', 'deleted', 'failed')),
+		CONSTRAINT session_transient_attachments_status_shape CHECK (status IN ('uploading', 'staged', 'active', 'consumed', 'expired', 'deleting', 'deleted', 'failed')),
 		CONSTRAINT session_transient_attachments_mime_shape CHECK (mime IN ('application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'))
 	)`
 
@@ -752,6 +1116,7 @@ const (
 		workspace_id TEXT NOT NULL,
 		kind TEXT NOT NULL,
 		partition_key TEXT NOT NULL,
+		queue_partition_sequence BIGINT NOT NULL,
 		dedupe_key TEXT,
 		payload_version INTEGER NOT NULL DEFAULT 1,
 		status TEXT NOT NULL,
@@ -762,6 +1127,7 @@ const (
 		leased_at TIMESTAMPTZ,
 		leased_until TIMESTAMPTZ,
 		attempt_count INTEGER NOT NULL DEFAULT 0,
+		defer_count INTEGER NOT NULL DEFAULT 0,
 		max_attempts INTEGER NOT NULL DEFAULT 10,
 		available_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
@@ -773,15 +1139,28 @@ const (
 		last_error_message TEXT,
 		PRIMARY KEY (id),
 		UNIQUE (workspace_id, id),
-		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_prepare', 'environment_build', 'environment_ready_fanout')),
+		CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'environment_build', 'environment_ready_fanout', 'sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')),
 		CONSTRAINT queue_jobs_status_shape CHECK (status IN ('pending', 'leased', 'acknowledged', 'cancelled', 'dead_lettered')),
 		CONSTRAINT queue_jobs_payload_version_shape CHECK (payload_version > 0),
+		CONSTRAINT queue_jobs_partition_sequence_shape CHECK (queue_partition_sequence > 0),
 		CONSTRAINT queue_jobs_attempt_count_shape CHECK (attempt_count >= 0),
+		CONSTRAINT queue_jobs_defer_count_shape CHECK (defer_count >= 0),
 		CONSTRAINT queue_jobs_max_attempts_shape CHECK (max_attempts >= 0),
 		CONSTRAINT queue_jobs_lease_shape CHECK (
 			(status = 'leased' AND lease_token IS NOT NULL AND leased_by IS NOT NULL AND leased_at IS NOT NULL AND leased_until IS NOT NULL)
 			OR (status <> 'leased')
 		)
+	)`
+
+	createPostgreSQLQueuePartitionCountersTable = `CREATE TABLE IF NOT EXISTS queue_partition_counters (
+		workspace_id TEXT NOT NULL,
+		partition_key TEXT NOT NULL,
+		last_sequence BIGINT NOT NULL DEFAULT 0,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, partition_key),
+		CONSTRAINT queue_partition_counters_partition_shape CHECK (partition_key <> ''),
+		CONSTRAINT queue_partition_counters_sequence_shape CHECK (last_sequence >= 0)
 	)`
 
 	createPostgreSQLSessionResourcesTable = `CREATE TABLE IF NOT EXISTS session_resources (
@@ -855,11 +1234,15 @@ const (
 		mount_path TEXT,
 		checkout_type TEXT,
 		checkout_ref TEXT,
+		authorization_token_encrypted BYTEA NOT NULL,
 		PRIMARY KEY (workspace_id, session_id, resource_id),
 		FOREIGN KEY (workspace_id, session_id, resource_id) REFERENCES session_resources(workspace_id, session_id, resource_id) ON DELETE CASCADE,
 		CONSTRAINT session_github_repository_checkout_shape CHECK (
 			(checkout_type IS NULL AND checkout_ref IS NULL)
 			OR (checkout_type IS NOT NULL AND checkout_type IN ('branch', 'commit') AND checkout_ref IS NOT NULL AND checkout_ref <> '')
+		),
+		CONSTRAINT session_github_repository_authorization_token_required CHECK (
+			authorization_token_encrypted IS NOT NULL
 		)
 	)`
 
@@ -936,6 +1319,10 @@ const (
 		status TEXT NOT NULL,
 		provider TEXT NOT NULL,
 		provider_artifact_ref TEXT,
+		provider_create_submitted_at TIMESTAMPTZ,
+		lease_job_id TEXT,
+		lease_token TEXT,
+		lease_attempt_count BIGINT,
 		normalized_config_hash TEXT NOT NULL,
 		artifact_input_hash TEXT NOT NULL,
 		runtime_network_policy_json TEXT NOT NULL,
@@ -950,13 +1337,16 @@ const (
 		FOREIGN KEY (workspace_id, environment_id) REFERENCES environments(workspace_id, id) ON DELETE CASCADE,
 		CONSTRAINT environment_artifacts_generation_shape CHECK (generation > 0),
 		CONSTRAINT environment_artifacts_status_shape CHECK (status IN ('pending', 'building', 'ready', 'failed')),
-		CONSTRAINT environment_artifacts_provider_shape CHECK (provider = 'tetral')
+		CONSTRAINT environment_artifacts_lease_shape CHECK (
+			(status = 'building' AND lease_job_id IS NOT NULL AND lease_token IS NOT NULL AND lease_attempt_count > 0)
+			OR (status <> 'building' AND lease_job_id IS NULL AND lease_token IS NULL AND lease_attempt_count IS NULL)
+		),
+		CONSTRAINT environment_artifacts_provider_shape CHECK (provider = 'daytona')
 	)`
 
 	//nolint:gosec // Schema credential identity constraint, not a secret value.
 	//nolint:gosec // Schema credential auth type constraint, not a secret value.
 	//nolint:gosec // Schema credential provider constraint, not a secret value.
-	alterPostgreSQLSessionsDeleteCleanupID         = `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS delete_cleanup_id TEXT`
 	createPostgreSQLSessionsAgentVersionIDFunction = `CREATE OR REPLACE FUNCTION tetral_sessions_fill_agent_version_id()
 RETURNS trigger AS $$
 BEGIN
@@ -987,27 +1377,7 @@ BEGIN
 		EXECUTE FUNCTION tetral_sessions_fill_agent_version_id();
 	END IF;
 END $$`
-	alterPostgreSQLQueueJobsKindConstraint = `ALTER TABLE queue_jobs
-		DROP CONSTRAINT IF EXISTS queue_jobs_kind_shape,
-		ADD CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'session_prepare', 'environment_build', 'environment_ready_fanout'))`
-
-	alterPostgreSQLQueueJobsEnvironmentFailedFanout = `ALTER TABLE queue_jobs
-		DROP CONSTRAINT IF EXISTS queue_jobs_kind_shape,
-		ADD CONSTRAINT queue_jobs_kind_shape CHECK (kind IN ('runtime_input', 'runtime_config_update', 'cleanup_session', 'session_delete_cleanup', 'session_prepare', 'environment_build', 'environment_ready_fanout', 'environment_failed_fanout'))`
-
-	alterPostgreSQLSandboxesMachineWasUsable     = `ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS machine_was_usable BOOLEAN`
-	alterPostgreSQLSandboxesActiveUsabilityCheck = `UPDATE sandboxes
-		SET machine_was_usable = TRUE
-		WHERE status = 'active' AND machine_was_usable IS NULL;
-	ALTER TABLE sandboxes
-		DROP CONSTRAINT IF EXISTS sandboxes_active_machine_was_usable;
-	ALTER TABLE sandboxes
-		ADD CONSTRAINT sandboxes_active_machine_was_usable
-		CHECK (status <> 'active' OR machine_was_usable IS TRUE) NOT VALID`
-	alterPostgreSQLSessionPreparationsFailureResourceID  = `ALTER TABLE session_preparations ADD COLUMN IF NOT EXISTS failure_resource_id TEXT`
-	alterPostgreSQLSessionPreparationsFailureResourceURL = `ALTER TABLE session_preparations ADD COLUMN IF NOT EXISTS failure_resource_url TEXT`
-	alterPostgreSQLSessionEventsPreparationAttemptID     = `ALTER TABLE session_events ADD COLUMN IF NOT EXISTS preparation_attempt_id TEXT`
-	createPostgreSQLVaultsTable                          = `CREATE TABLE IF NOT EXISTS vaults (
+	createPostgreSQLVaultsTable = `CREATE TABLE IF NOT EXISTS vaults (
 		storage_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
 		workspace_id TEXT NOT NULL,
 		id TEXT NOT NULL,
@@ -1092,10 +1462,14 @@ END $$`
 		blob_key TEXT NOT NULL,
 		size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
 		sha256 TEXT NOT NULL,
+		pdf_page_count BIGINT,
 		created_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (object_id),
 		UNIQUE (workspace_id, object_id),
-		UNIQUE (blob_key)
+		UNIQUE (blob_key),
+		CONSTRAINT file_objects_pdf_page_count_shape CHECK (
+			pdf_page_count IS NULL OR pdf_page_count >= -1
+		)
 	)`
 
 	// files is the API-visible Files identity. Multiple files rows may
@@ -1281,7 +1655,9 @@ END $$`
 	createPostgreSQLSessionThreadsParentIndex               = `CREATE INDEX IF NOT EXISTS idx_session_threads_parent ON session_threads(workspace_id, session_id, parent_thread_id)`
 	createPostgreSQLSessionThreadsSubAgentTaskIndex         = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_threads_subagent_task_unique ON session_threads(workspace_id, session_id, parent_thread_id, task_name) WHERE role = 'subagent'`
 	createPostgreSQLSessionThreadsReviewerTrunkIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_threads_reviewer_trunk_unique ON session_threads(workspace_id, session_id, parent_thread_id) WHERE role = 'approval_reviewer' AND is_trunk`
-	createPostgreSQLSandboxesSessionUniqueIndex             = `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandboxes_session_unique ON sandboxes(workspace_id, session_id)`
+	createPostgreSQLSandboxBindingsProviderResourceIndex    = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_sandbox_bindings_provider_resource_unique ON session_sandbox_bindings(provider, provider_resource_id) WHERE provider_resource_id IS NOT NULL`
+	createPostgreSQLSandboxActivationUnfinishedIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_lifecycle_activation_unfinished ON sandbox_lifecycle_operations(workspace_id, logical_sandbox_id) WHERE kind IN ('create', 'start', 'replace') AND state IN ('pending', 'waiting_artifact', 'running')`
+	createPostgreSQLSandboxMaterializationUnfinishedIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_lifecycle_materialization_unfinished ON sandbox_lifecycle_operations(workspace_id, logical_sandbox_id) WHERE kind = 'materialize' AND state IN ('pending', 'waiting_activation', 'running')`
 	createPostgreSQLSessionEventsSessionSequenceIndex       = `CREATE INDEX IF NOT EXISTS idx_session_events_session_sequence ON session_events(workspace_id, session_id, sequence)`
 	createPostgreSQLSessionEventsInsertStreamPositionIndex  = `CREATE INDEX IF NOT EXISTS idx_session_events_insert_stream_position ON session_events(workspace_id, session_id, insert_stream_position)`
 	createPostgreSQLSessionEventsPendingClientIndex         = `CREATE INDEX IF NOT EXISTS idx_session_events_pending_client ON session_events(workspace_id, session_id, sequence) WHERE processed_at IS NULL`
@@ -1293,23 +1669,31 @@ END $$`
 	createPostgreSQLSessionMessagesSourceEventUniqueIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_source_event_unique ON session_messages(workspace_id, session_id, session_thread_id, source_event_id) WHERE source_event_id IS NOT NULL`
 	createPostgreSQLSessionMessagesLastEventIndex           = `CREATE INDEX IF NOT EXISTS idx_session_messages_last_event ON session_messages(workspace_id, last_event_id)`
 	createPostgreSQLSessionMessagesRepairKeyIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_repair_key_unique ON session_messages(workspace_id, session_id, session_thread_id, repair_key) WHERE repair_key IS NOT NULL`
+	createPostgreSQLSessionMessagesModelRequestIndex        = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique ON session_messages(workspace_id, session_id, session_thread_id, model_request_id) WHERE model_request_id IS NOT NULL`
+	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
+	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
+	createPostgreSQLSessionEventsCompletionMailIndex        = `CREATE INDEX IF NOT EXISTS idx_session_events_completion_mail_reconciliation ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
 	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status, expires_at)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
-	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('delivering', 'accepted')`
+	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('queued', 'delivering', 'accepted', 'parked', 'dead_lettered')`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`
 	createPostgreSQLRuntimeStatusCleanupDueIndex            = `CREATE INDEX IF NOT EXISTS idx_session_runtime_status_cleanup_due ON session_runtime_status(workspace_id, cleanup_after, cleanup_job_id) WHERE status = 'idle' AND binding_id IS NOT NULL`
 	createPostgreSQLBridgeOperationsRuntimeWriteIndex       = `CREATE INDEX IF NOT EXISTS idx_session_bridge_operations_runtime_write ON session_bridge_operations(workspace_id, session_id, runtime_write_id) WHERE runtime_write_id IS NOT NULL`
 	createPostgreSQLRuntimeToolResultsKindIndex             = `CREATE INDEX IF NOT EXISTS idx_session_runtime_tool_results_kind ON session_runtime_tool_results(workspace_id, session_id, tool_kind, updated_at)`
 	createPostgreSQLSessionResourcePrefixGCDueIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resource_prefix_gc_due ON session_resource_prefix_gc(workspace_id, next_attempt_at, created_at) WHERE status IN ('pending', 'retryable_failed')`
-	createPostgreSQLSessionPreparationsActiveIndex          = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_preparations_active ON session_preparations(workspace_id, session_id) WHERE superseded_at IS NULL AND status IN ('pending', 'waiting_environment', 'preparing', 'ready')`
 	createPostgreSQLSessionOutputCapturesIndex              = `CREATE INDEX IF NOT EXISTS idx_session_output_captures_session ON session_output_captures(workspace_id, session_id, updated_at)`
+	createPostgreSQLSandboxOutputCaptureOpenIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_output_capture_open ON sandbox_output_capture_operations(workspace_id, session_id, finish_idle_write_id) WHERE state IN ('pending', 'running', 'staged', 'skipped_unavailable')`
+	createPostgreSQLSandboxOutputCaptureExpiryIndex         = `CREATE INDEX IF NOT EXISTS idx_sandbox_output_capture_expiry ON sandbox_output_capture_operations(workspace_id, retain_until) WHERE state IN ('staged', 'skipped_unavailable', 'failed')`
 	createPostgreSQLRequestUsageDetailsThreadIndex          = `CREATE INDEX IF NOT EXISTS idx_request_usage_details_thread ON request_usage_details(workspace_id, session_id, session_thread_id, created_at)`
 	createPostgreSQLSessionProviderAuthCredentialIndex      = `CREATE INDEX IF NOT EXISTS idx_session_provider_auth_credential ON session_provider_auth(workspace_id, vault_id, credential_id) WHERE deleted_at IS NULL` //nolint:gosec // Credential id index name, not a secret value.
 	createPostgreSQLSessionProviderAuthActiveSessionIndex   = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_provider_auth_active_session ON session_provider_auth(workspace_id, session_id) WHERE deleted_at IS NULL`
 	createPostgreSQLPlatformProviderKeysProviderStatusIndex = `CREATE INDEX IF NOT EXISTS idx_platform_provider_keys_provider_status ON platform_provider_keys(provider_id, status, priority, key_id)` //nolint:gosec // Provider key-pool index name, not a secret value.
 	createPostgreSQLQueueJobsActiveDedupeIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_active_dedupe ON queue_jobs(workspace_id, dedupe_key) WHERE status IN ('pending', 'leased')`
 	createPostgreSQLQueueJobsLeasedPartitionIndex           = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_leased_partition ON queue_jobs(workspace_id, partition_key) WHERE status = 'leased'`
-	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, partition_key, priority DESC, available_at, created_at, id) WHERE status = 'pending'`
+	createPostgreSQLQueueJobsPartitionSequenceIndex         = `CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_jobs_partition_sequence ON queue_jobs(workspace_id, partition_key, queue_partition_sequence)`
+	createPostgreSQLQueueJobsAvailableIndex                 = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_available ON queue_jobs(workspace_id, kind, status, partition_key, priority DESC, available_at, queue_partition_sequence) WHERE status = 'pending'`
+	createPostgreSQLQueueJobsSandboxTerminalRetentionIndex  = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_sandbox_terminal_retention ON queue_jobs(COALESCE(acknowledged_at, cancelled_at, dead_lettered_at), id) WHERE kind IN ('sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile') AND status IN ('acknowledged', 'cancelled', 'dead_lettered')`
+	createPostgreSQLQueueJobsSandboxSessionCleanupIndex     = `CREATE INDEX IF NOT EXISTS idx_queue_jobs_sandbox_session_cleanup ON queue_jobs(workspace_id, (payload_json::jsonb ->> 'session_id'), status) WHERE kind IN ('sandbox_tool_execute', 'sandbox_activate', 'sandbox_materialize', 'sandbox_release', 'sandbox_tool_cancel', 'sandbox_output_capture', 'sandbox_output_capture_cleanup', 'sandbox_memory_projection', 'sandbox_background_command', 'sandbox_background_reconcile')`
 	createPostgreSQLSessionResourcesSessionSeqIndex         = `CREATE INDEX IF NOT EXISTS idx_session_resources_session_seq ON session_resources(workspace_id, session_id, storage_sequence)`
 	createPostgreSQLSessionResourcesTypeIndex               = `CREATE INDEX IF NOT EXISTS idx_session_resources_type ON session_resources(workspace_id, session_id, type, detached_at)`
 	createPostgreSQLSessionGitTicketsLiveIndex              = `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_git_tickets_live ON session_git_tickets(workspace_id, session_id) WHERE status = 'live'`
@@ -1343,53 +1727,6 @@ BEGIN
 	END IF;
 END $$`
 
-	alterPostgreSQLRuntimeToolResultsNonMCPClaimIsolation = `DO $$
-BEGIN
-	ALTER TABLE session_runtime_tool_results
-		DROP CONSTRAINT IF EXISTS session_runtime_tool_results_mcp_claim_status_shape;
-	ALTER TABLE session_runtime_tool_results
-		DROP CONSTRAINT IF EXISTS session_runtime_tool_results_mcp_claim_shape;
-	ALTER TABLE session_runtime_tool_results
-		ALTER COLUMN mcp_claim_status DROP DEFAULT,
-		ALTER COLUMN mcp_claim_status DROP NOT NULL;
-	UPDATE session_runtime_tool_results
-	   SET mcp_claim_status = NULL,
-	       mcp_claim_owner_request_id = NULL,
-	       mcp_claim_lease_expires_at = NULL
-	 WHERE tool_kind <> 'mcp';
-	UPDATE session_runtime_tool_results
-	   SET mcp_claim_status = 'stored'
-	 WHERE tool_kind = 'mcp'
-	   AND mcp_claim_status IS NULL;
-	ALTER TABLE session_runtime_tool_results
-		ADD CONSTRAINT session_runtime_tool_results_mcp_claim_status_shape
-		CHECK (mcp_claim_status IS NULL OR mcp_claim_status IN ('stored', 'in_flight'));
-	ALTER TABLE session_runtime_tool_results
-		ADD CONSTRAINT session_runtime_tool_results_mcp_claim_shape
-		CHECK (
-			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-			OR (tool_kind = 'mcp' AND (
-				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
-			))
-		);
-END $$`
-
-	alterPostgreSQLRuntimeToolResultsMCPClaimNonNull = `DO $$
-BEGIN
-	ALTER TABLE session_runtime_tool_results
-		DROP CONSTRAINT IF EXISTS session_runtime_tool_results_mcp_claim_shape;
-	ALTER TABLE session_runtime_tool_results
-		ADD CONSTRAINT session_runtime_tool_results_mcp_claim_shape
-		CHECK (
-			(tool_kind <> 'mcp' AND mcp_claim_status IS NULL AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-			OR (tool_kind = 'mcp' AND mcp_claim_status IS NOT NULL AND (
-				(mcp_claim_status = 'stored' AND mcp_claim_owner_request_id IS NULL AND mcp_claim_lease_expires_at IS NULL)
-				OR (mcp_claim_status = 'in_flight' AND mcp_claim_owner_request_id IS NOT NULL AND mcp_claim_lease_expires_at IS NOT NULL)
-			))
-		);
-END $$`
-
 	// Skill list pagination: ordered by storage_sequence within a
 	// workspace mirrors the agents/sessions/api_keys list path.
 	createPostgreSQLSkillsWorkspaceSeqIndex      = `CREATE INDEX IF NOT EXISTS idx_skills_workspace_seq ON skills(workspace_id, storage_sequence)`
@@ -1416,8 +1753,8 @@ END $$`
 var rlsTargets = []string{
 	"sessions",
 	"session_threads",
-	"sandboxes",
-	"sandbox_release_idempotency_keys",
+	"session_sandbox_bindings",
+	"sandbox_lifecycle_operations",
 	"environment_artifacts",
 	"session_resources",
 	"session_file_resources",
@@ -1429,6 +1766,9 @@ var rlsTargets = []string{
 	"session_event_stream_changes",
 	"session_event_idempotency_keys",
 	"session_messages",
+	"session_mcp_manifests",
+	"session_thread_context_prefixes",
+	"session_turn_retries",
 	"session_pending_tool_uses",
 	"session_transient_attachments",
 	"session_background_tasks",
@@ -1437,10 +1777,12 @@ var rlsTargets = []string{
 	"session_runtime_bindings",
 	"session_bridge_operations",
 	"session_runtime_tool_results",
-	"session_preparations",
 	"session_output_captures",
+	"sandbox_output_capture_operations",
+	"sandbox_output_capture_blobs",
 	"request_usage_details",
 	"session_provider_auth",
+	"queue_partition_counters",
 	"queue_jobs",
 	"agents",
 	"agent_versions",
@@ -1510,9 +1852,9 @@ func executePostgreSQLSchemaSteps(ctx context.Context, executor postgresqlSchema
 }
 
 // postgresqlBaselineSteps is the single ordered payload used by both the
-// preserved low-level initializer and migration version 1. Keep every
-// statement byte-for-byte stable after version 1 is stamped; later schema
-// changes belong in a new migration version.
+// low-level initializer and migration version 1. Before the first release,
+// schema edits replace this clean baseline and its checksum together. After
+// that release, later schema changes belong in new migration versions.
 func postgresqlBaselineSteps() []postgresqlSchemaStep {
 	steps := []postgresqlSchemaStep{
 		// Tables. Order follows foreign-key ownership: workspaces before
@@ -1534,22 +1876,27 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_memory_stores", createPostgreSQLMemoryStoresTable},
 		{"create_sessions", createPostgreSQLSessionsTable},
 		{"create_session_threads", createPostgreSQLSessionThreadsTable},
-		{"create_sandboxes", createPostgreSQLSandboxesTable},
-		{"create_sandbox_release_idempotency_keys", createPostgreSQLSandboxReleaseIdempotencyKeysTable},
+		{"create_session_sandbox_bindings", createPostgreSQLSessionSandboxBindingsTable},
+		{"create_sandbox_lifecycle_operations", createPostgreSQLSandboxLifecycleOperationsTable},
 		{"create_session_events", createPostgreSQLSessionEventsTable},
 		{"create_session_event_stream_changes", createPostgreSQLSessionEventStreamChangesTable},
 		{"create_session_event_idempotency_keys", createPostgreSQLSessionEventIdempotencyKeysTable},
 		{"create_session_messages", createPostgreSQLSessionMessagesTable},
+		{"create_session_file_attachment_consumptions", createPostgreSQLSessionFileAttachmentConsumptionsTable},
+		{"create_session_thread_context_prefixes", createPostgreSQLSessionThreadContextPrefixesTable},
+		{"create_session_turn_retries", createPostgreSQLSessionTurnRetriesTable},
 		{"create_session_pending_tool_uses", createPostgreSQLSessionPendingToolUsesTable},
 		{"create_session_background_tasks", createPostgreSQLSessionBackgroundTasksTable},
 		{"create_session_runtime_inbox", createPostgreSQLSessionRuntimeInboxTable},
 		{"create_session_runtime_binding_generation_sequence", createPostgreSQLSessionRuntimeBindingGenerationSequence},
 		{"create_session_runtime_bindings", createPostgreSQLSessionRuntimeBindingsTable},
+		{"create_session_mcp_manifests", createPostgreSQLSessionMCPManifestsTable},
 		{"create_session_runtime_status", createPostgreSQLSessionRuntimeStatusTable},
 		{"create_session_bridge_operations", createPostgreSQLSessionBridgeOperationsTable},
 		{"create_session_runtime_tool_results", createPostgreSQLSessionRuntimeToolResultsTable},
-		{"create_session_preparations", createPostgreSQLSessionPreparationsTable},
 		{"create_session_output_captures", createPostgreSQLSessionOutputCapturesTable},
+		{"create_sandbox_output_capture_operations", createPostgreSQLSandboxOutputCaptureOperationsTable},
+		{"create_sandbox_output_capture_blobs", createPostgreSQLSandboxOutputCaptureBlobsTable},
 		{"create_session_transient_attachments", createPostgreSQLSessionTransientAttachmentsTable},
 		{"create_session_resources", createPostgreSQLSessionResourcesTable},
 		{"create_session_resource_prefix_gc", createPostgreSQLSessionResourcePrefixGCTable},
@@ -1563,6 +1910,7 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"create_request_usage_details", createPostgreSQLRequestUsageDetailsTable},
 		{"create_session_provider_auth", createPostgreSQLSessionProviderAuthTable},
 		{"create_platform_provider_keys", createPostgreSQLPlatformProviderKeysTable},
+		{"create_queue_partition_counters", createPostgreSQLQueuePartitionCountersTable},
 		{"create_queue_jobs", createPostgreSQLQueueJobsTable},
 
 		// Environment shape cleanup. The service has no migration-compatibility
@@ -1580,7 +1928,9 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_threads_parent", createPostgreSQLSessionThreadsParentIndex},
 		{"index_session_threads_subagent_task_unique", createPostgreSQLSessionThreadsSubAgentTaskIndex},
 		{"index_session_threads_reviewer_trunk_unique", createPostgreSQLSessionThreadsReviewerTrunkIndex},
-		{"index_sandboxes_session_unique", createPostgreSQLSandboxesSessionUniqueIndex},
+		{"index_session_sandbox_bindings_provider_resource_unique", createPostgreSQLSandboxBindingsProviderResourceIndex},
+		{"index_sandbox_lifecycle_activation_unfinished", createPostgreSQLSandboxActivationUnfinishedIndex},
+		{"index_sandbox_lifecycle_materialization_unfinished", createPostgreSQLSandboxMaterializationUnfinishedIndex},
 		{"index_session_events_session_sequence", createPostgreSQLSessionEventsSessionSequenceIndex},
 		{"index_session_events_insert_stream_position", createPostgreSQLSessionEventsInsertStreamPositionIndex},
 		{"index_session_events_pending_client", createPostgreSQLSessionEventsPendingClientIndex},
@@ -1592,21 +1942,30 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		{"index_session_messages_source_event_unique", createPostgreSQLSessionMessagesSourceEventUniqueIndex},
 		{"index_session_messages_last_event", createPostgreSQLSessionMessagesLastEventIndex},
 		{"index_session_messages_repair_key", createPostgreSQLSessionMessagesRepairKeyIndex},
+		{"index_session_messages_model_request_unique", createPostgreSQLSessionMessagesModelRequestIndex},
+		{"index_session_events_pending_media", createPostgreSQLSessionEventsPendingMediaIndex},
+		{"index_session_file_attachment_consumptions_pending", createPostgreSQLSessionFileAttachmentPendingIndex},
+		{"index_session_events_completion_mail_reconciliation", createPostgreSQLSessionEventsCompletionMailIndex},
 		{"index_session_pending_tool_uses_status", createPostgreSQLPendingToolUsesStatusIndex},
 		{"index_session_background_tasks_status", createPostgreSQLBackgroundTasksStatusIndex},
 		{"index_session_runtime_inbox_repair", createPostgreSQLRuntimeInboxRepairIndex},
+		{"index_session_mcp_manifests_generation", createPostgreSQLSessionMCPManifestsGenerationIndex},
 		{"index_session_runtime_status_cleanup_due", createPostgreSQLRuntimeStatusCleanupDueIndex},
 		{"index_session_bridge_operations_runtime_write", createPostgreSQLBridgeOperationsRuntimeWriteIndex},
 		{"index_session_runtime_tool_results_kind", createPostgreSQLRuntimeToolResultsKindIndex},
-		{"index_session_preparations_active", createPostgreSQLSessionPreparationsActiveIndex},
 		{"index_session_output_captures_session", createPostgreSQLSessionOutputCapturesIndex},
+		{"index_sandbox_output_capture_open", createPostgreSQLSandboxOutputCaptureOpenIndex},
+		{"index_sandbox_output_capture_expiry", createPostgreSQLSandboxOutputCaptureExpiryIndex},
 		{"index_request_usage_details_thread", createPostgreSQLRequestUsageDetailsThreadIndex},
 		{"index_session_provider_auth_credential", createPostgreSQLSessionProviderAuthCredentialIndex},
 		{"index_session_provider_auth_active_session", createPostgreSQLSessionProviderAuthActiveSessionIndex},
 		{"index_platform_provider_keys_provider_status", createPostgreSQLPlatformProviderKeysProviderStatusIndex},
 		{"index_queue_jobs_active_dedupe", createPostgreSQLQueueJobsActiveDedupeIndex},
 		{"index_queue_jobs_leased_partition", createPostgreSQLQueueJobsLeasedPartitionIndex},
+		{"index_queue_jobs_partition_sequence", createPostgreSQLQueueJobsPartitionSequenceIndex},
 		{"index_queue_jobs_available", createPostgreSQLQueueJobsAvailableIndex},
+		{"index_queue_jobs_sandbox_terminal_retention", createPostgreSQLQueueJobsSandboxTerminalRetentionIndex},
+		{"index_queue_jobs_sandbox_session_cleanup", createPostgreSQLQueueJobsSandboxSessionCleanupIndex},
 		{"index_session_resources_session_seq", createPostgreSQLSessionResourcesSessionSeqIndex},
 		{"index_session_resources_type", createPostgreSQLSessionResourcesTypeIndex},
 		{"index_session_resource_prefix_gc_due", createPostgreSQLSessionResourcePrefixGCDueIndex},
@@ -1663,6 +2022,22 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 		)
 	}
 
+	// Attachment-consumption rows are append-only accounting: Runtime may
+	// read and insert rows in its workspace, but no serving path may update or
+	// delete them.
+	steps = append(steps,
+		postgresqlSchemaStep{name: "rls_enable_session_file_attachment_consumptions", ddl: `ALTER TABLE session_file_attachment_consumptions ENABLE ROW LEVEL SECURITY`},
+		postgresqlSchemaStep{name: "rls_force_session_file_attachment_consumptions", ddl: `ALTER TABLE session_file_attachment_consumptions FORCE ROW LEVEL SECURITY`},
+		postgresqlSchemaStep{name: "rls_policy_workspace_select_session_file_attachment_consumptions_drop", ddl: `DROP POLICY IF EXISTS workspace_select ON session_file_attachment_consumptions`},
+		postgresqlSchemaStep{name: "rls_policy_workspace_insert_session_file_attachment_consumptions_drop", ddl: `DROP POLICY IF EXISTS workspace_insert ON session_file_attachment_consumptions`},
+		postgresqlSchemaStep{name: "rls_policy_workspace_select_session_file_attachment_consumptions", ddl: `CREATE POLICY workspace_select ON session_file_attachment_consumptions
+		FOR SELECT
+		USING (workspace_id = current_setting('tetral.workspace_id', true))`},
+		postgresqlSchemaStep{name: "rls_policy_workspace_insert_session_file_attachment_consumptions", ddl: `CREATE POLICY workspace_insert ON session_file_attachment_consumptions
+		FOR INSERT
+		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
+	)
+
 	// Narrow auth-lookup policy on api_keys: when
 	// `tetral.auth_lookup` is set to 'true' for the current
 	// transaction, SELECTs see every workspace's api_keys row. Used
@@ -1710,6 +2085,16 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 			USING (current_setting('tetral.queue_maintenance', true) = 'true')
 			WITH CHECK (current_setting('tetral.queue_maintenance', true) = 'true')`,
 		},
+		postgresqlSchemaStep{
+			name: "rls_policy_queue_counter_maintenance_drop",
+			ddl:  "DROP POLICY IF EXISTS queue_maintenance ON queue_partition_counters",
+		},
+		postgresqlSchemaStep{
+			name: "rls_policy_queue_counter_maintenance",
+			ddl: `CREATE POLICY queue_maintenance ON queue_partition_counters
+			USING (current_setting('tetral.queue_maintenance', true) = 'true')
+			WITH CHECK (current_setting('tetral.queue_maintenance', true) = 'true')`,
+		},
 		// Narrow transient-attachment sweep policy: the blob garbage
 		// collector reclaims expired and consumed attachments across every
 		// workspace, so it cannot carry a workspace predicate. The policy is
@@ -1734,376 +2119,16 @@ func postgresqlBaselineSteps() []postgresqlSchemaStep {
 			USING (current_setting('tetral.transient_attachment_gc', true) = 'true')
 			WITH CHECK (current_setting('tetral.transient_attachment_gc', true) = 'true')`,
 		},
-	)
-
-	// Pre-release schema edits fold into this baseline. The statements below
-	// were formerly appended migration versions 2..16; each version's ordered
-	// steps are folded in here, in version order, so a fresh database reaches
-	// the same schema through a single stamped baseline.
-
-	// Formerly version 2: runtime retry counters and active-seconds stats.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_runtime_status_running_since", ddl: `ALTER TABLE session_runtime_status ADD COLUMN IF NOT EXISTS running_since TIMESTAMPTZ`},
-		postgresqlSchemaStep{name: "session_runtime_status_active_seconds", ddl: `ALTER TABLE session_runtime_status ADD COLUMN IF NOT EXISTS active_seconds_total DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (active_seconds_total >= 0)`},
-		postgresqlSchemaStep{name: "session_turn_retries", ddl: `CREATE TABLE IF NOT EXISTS session_turn_retries (
-		workspace_id TEXT NOT NULL,
-		session_id TEXT NOT NULL,
-		session_thread_id TEXT NOT NULL,
-		provider_attempts BIGINT NOT NULL DEFAULT 0,
-		compaction_attempts BIGINT NOT NULL DEFAULT 0,
-		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (workspace_id, session_id, session_thread_id),
-		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_turn_retries_provider_attempts_shape CHECK (provider_attempts >= 0),
-		CONSTRAINT session_turn_retries_compaction_attempts_shape CHECK (compaction_attempts >= 0)
-	)`},
-		postgresqlSchemaStep{name: "session_turn_retries_rls_enable", ddl: `ALTER TABLE session_turn_retries ENABLE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "session_turn_retries_rls_force", ddl: `ALTER TABLE session_turn_retries FORCE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "session_turn_retries_rls_drop", ddl: `DROP POLICY IF EXISTS workspace_isolation ON session_turn_retries`},
-		postgresqlSchemaStep{name: "session_turn_retries_rls_policy", ddl: `CREATE POLICY workspace_isolation ON session_turn_retries
-		USING (workspace_id = current_setting('tetral.workspace_id', true))
-		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
-	)
-
-	// Formerly version 3: hard-delete lifecycle for sessions and sandboxes.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "sessions_delete_cleanup_id", ddl: alterPostgreSQLSessionsDeleteCleanupID},
-		postgresqlSchemaStep{name: "queue_jobs_kind_session_delete_cleanup", ddl: alterPostgreSQLQueueJobsKindConstraint},
-		postgresqlSchemaStep{name: "sandboxes_environment_identity", ddl: `ALTER TABLE sandboxes
-			ADD COLUMN IF NOT EXISTS environment_id TEXT,
-			ADD COLUMN IF NOT EXISTS environment_generation BIGINT`},
-		postgresqlSchemaStep{name: "sandboxes_environment_generation_shape", ddl: `ALTER TABLE sandboxes
-			DROP CONSTRAINT IF EXISTS sandboxes_environment_generation_shape,
-			ADD CONSTRAINT sandboxes_environment_generation_shape CHECK (environment_generation > 0)`},
-		postgresqlSchemaStep{name: "sandbox_release_identity_columns", ddl: `ALTER TABLE sandbox_release_idempotency_keys
-			ALTER COLUMN binding_id DROP NOT NULL,
-			ALTER COLUMN binding_generation DROP NOT NULL,
-			ADD COLUMN IF NOT EXISTS preparation_attempt_id TEXT,
-			ADD COLUMN IF NOT EXISTS delete_cleanup_id TEXT,
-			ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT 'cleanup'`},
-		postgresqlSchemaStep{name: "sandbox_release_runtime_pod_lost_reason", ddl: `UPDATE sandbox_release_idempotency_keys
-			SET reason = 'runtime_pod_lost'
-			WHERE idempotency_key LIKE 'runtime_pod_lost:%'`},
-		postgresqlSchemaStep{name: "sandbox_release_drop_legacy_fence", ddl: `ALTER TABLE sandbox_release_idempotency_keys
-			DROP CONSTRAINT IF EXISTS sandbox_release_idempotency_keys_workspace_id_session_id_sand_key`},
-		postgresqlSchemaStep{name: "sandbox_release_identity_shape", ddl: `ALTER TABLE sandbox_release_idempotency_keys
-			DROP CONSTRAINT IF EXISTS sandbox_release_idempotency_identity_shape,
-			ADD CONSTRAINT sandbox_release_idempotency_identity_shape CHECK (
-				(binding_id IS NOT NULL AND binding_generation IS NOT NULL AND preparation_attempt_id IS NULL AND delete_cleanup_id IS NULL)
-				OR (binding_id IS NULL AND binding_generation IS NULL AND preparation_attempt_id IS NOT NULL AND delete_cleanup_id IS NOT NULL)
-			)`},
-		postgresqlSchemaStep{name: "sandbox_release_reason_shape", ddl: `ALTER TABLE sandbox_release_idempotency_keys
-			DROP CONSTRAINT IF EXISTS sandbox_release_idempotency_reason_shape,
-			ADD CONSTRAINT sandbox_release_idempotency_reason_shape CHECK (reason IN ('cleanup', 'runtime_pod_lost', 'delete'))`},
-		postgresqlSchemaStep{name: "sandbox_release_response_shape", ddl: `ALTER TABLE sandbox_release_idempotency_keys
-			DROP CONSTRAINT IF EXISTS sandbox_release_idempotency_response_shape,
-			ADD CONSTRAINT sandbox_release_idempotency_response_shape CHECK (
-				response_status IS NULL OR response_status IN ('released', 'archived', 'already_released', 'retry_later', 'failed')
-			)`},
-		postgresqlSchemaStep{name: "sandbox_release_binding_fence", ddl: `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_release_binding_fence
-			ON sandbox_release_idempotency_keys(workspace_id, session_id, sandbox_id, binding_id, binding_generation)
-			WHERE binding_id IS NOT NULL`},
-		postgresqlSchemaStep{name: "sandbox_release_preparation_fence", ddl: `CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_release_preparation_fence
-			ON sandbox_release_idempotency_keys(workspace_id, session_id, sandbox_id, preparation_attempt_id, delete_cleanup_id)
-			WHERE preparation_attempt_id IS NOT NULL`},
-	)
-
-	// Formerly version 4: RunTool non-MCP claim isolation.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_runtime_tool_results_non_mcp_claim_isolation", ddl: alterPostgreSQLRuntimeToolResultsNonMCPClaimIsolation},
-	)
-
-	// Formerly version 5: RunTool MCP claim non-null.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_runtime_tool_results_mcp_claim_non_null", ddl: alterPostgreSQLRuntimeToolResultsMCPClaimNonNull},
-	)
-
-	// Formerly version 6: session MCP manifests table, index, and RLS.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_mcp_manifests", ddl: createPostgreSQLSessionMCPManifestsTable},
-		postgresqlSchemaStep{name: "session_mcp_manifests_generation_index", ddl: createPostgreSQLSessionMCPManifestsGenerationIndex},
-		postgresqlSchemaStep{name: "session_mcp_manifests_rls_enable", ddl: `ALTER TABLE session_mcp_manifests ENABLE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_rls_force", ddl: `ALTER TABLE session_mcp_manifests FORCE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_rls_policy_drop", ddl: `DROP POLICY IF EXISTS workspace_isolation ON session_mcp_manifests`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_rls_policy", ddl: `CREATE POLICY workspace_isolation ON session_mcp_manifests
-		USING (workspace_id = current_setting('tetral.workspace_id', true))
-		WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
-	)
-
-	// Formerly version 7: stable-reasoning message association and Bridge
-	// operation constraint retiring the standalone reasoning operation.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_messages_model_request_id", ddl: `ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS model_request_id TEXT`},
-		postgresqlSchemaStep{name: "session_messages_model_request_id_shape", ddl: `ALTER TABLE session_messages
-			DROP CONSTRAINT IF EXISTS session_messages_model_request_id_shape,
-			ADD CONSTRAINT session_messages_model_request_id_shape CHECK (
-				model_request_id IS NULL OR (kind = 'assistant' AND model_request_id <> '')
-			)`},
-		postgresqlSchemaStep{name: "session_messages_model_request_unique", ddl: `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_model_request_unique
-			ON session_messages(workspace_id, session_id, session_thread_id, model_request_id)
-			WHERE model_request_id IS NOT NULL`},
-		postgresqlSchemaStep{name: "session_bridge_operations_retire_standalone_reasoning", ddl: `ALTER TABLE session_bridge_operations
-			DROP CONSTRAINT IF EXISTS session_bridge_operations_operation_shape,
-			ADD CONSTRAINT session_bridge_operations_operation_shape CHECK (operation IN (
-				'load_context',
-				'commit_inputs',
-				'commit_task_notification_result',
-				'write_event',
-				'write_request_end',
-				'finish_idle',
-				'create_child_thread',
-				'resolve_child_thread',
-				'list_child_threads',
-				'mark_child_thread_closed',
-				'mark_child_thread_active',
-				'run_tool',
-				'read_command_result',
-				'send_command_input',
-				'cancel_command',
-				'run_memory',
-				'create_transient_attachment',
-				'mcp_manifest_changed',
-				'commit_internal_tool_repair',
-				'commit_runtime_termination'
-			)) NOT VALID`},
-	)
-
-	// Formerly version 8: MCP manifest readiness columns and shape.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_mcp_manifests_readiness_columns", ddl: `ALTER TABLE session_mcp_manifests
-			ADD COLUMN IF NOT EXISTS readiness TEXT NOT NULL DEFAULT 'ready',
-			ADD COLUMN IF NOT EXISTS diagnostic TEXT`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_nullable_content", ddl: `ALTER TABLE session_mcp_manifests
-			ALTER COLUMN tools_json DROP NOT NULL,
-			ALTER COLUMN manifest_etag DROP NOT NULL`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_identity_shape", ddl: `ALTER TABLE session_mcp_manifests
-			DROP CONSTRAINT IF EXISTS session_mcp_manifests_identity_shape,
-			ADD CONSTRAINT session_mcp_manifests_identity_shape CHECK (
-				mcp_server_name <> '' AND (manifest_etag IS NULL OR manifest_etag <> '')
-			)`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_tools_json_shape", ddl: `ALTER TABLE session_mcp_manifests
-			DROP CONSTRAINT IF EXISTS session_mcp_manifests_tools_json_shape,
-			ADD CONSTRAINT session_mcp_manifests_tools_json_shape CHECK (
-				tools_json IS NULL OR (
-					octet_length(tools_json) <= 262144
-					AND jsonb_typeof(tools_json::jsonb) = 'array'
-				)
-			)`},
-		postgresqlSchemaStep{name: "session_mcp_manifests_readiness_shape", ddl: `ALTER TABLE session_mcp_manifests
-			DROP CONSTRAINT IF EXISTS session_mcp_manifests_readiness_shape,
-			ADD CONSTRAINT session_mcp_manifests_readiness_shape CHECK (
-				(
-					readiness = 'ready'
-					AND diagnostic IS NULL
-					AND tools_json IS NOT NULL
-					AND manifest_etag IS NOT NULL
-				) OR (
-					readiness = 'unready'
-					AND diagnostic IS NOT NULL
-					AND diagnostic <> ''
-					AND (
-						(tools_json IS NULL AND manifest_etag IS NULL)
-						OR (tools_json IS NOT NULL AND manifest_etag IS NOT NULL)
-					)
-				)
-			)`},
-	)
-
-	// Formerly version 9: nullable GitHub resource credential column.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_github_repository_resources_authorization_token", ddl: `ALTER TABLE session_github_repository_resources
-			ADD COLUMN IF NOT EXISTS authorization_token_encrypted BYTEA`},
-		postgresqlSchemaStep{name: "session_github_repository_resources_authorization_token_required", ddl: `ALTER TABLE session_github_repository_resources
-			DROP CONSTRAINT IF EXISTS session_github_repository_authorization_token_required,
-			ADD CONSTRAINT session_github_repository_authorization_token_required
-			CHECK (authorization_token_encrypted IS NOT NULL) NOT VALID`},
-	)
-
-	// Formerly version 10: preparation-failure settlement facts.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "sandboxes_machine_was_usable", ddl: alterPostgreSQLSandboxesMachineWasUsable},
-		postgresqlSchemaStep{name: "session_preparations_failure_resource_id", ddl: alterPostgreSQLSessionPreparationsFailureResourceID},
-		postgresqlSchemaStep{name: "session_preparations_failure_resource_url", ddl: alterPostgreSQLSessionPreparationsFailureResourceURL},
-		postgresqlSchemaStep{name: "queue_jobs_environment_failed_fanout", ddl: alterPostgreSQLQueueJobsEnvironmentFailedFanout},
-	)
-
-	// Formerly version 11: active-sandbox usability enforcement.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "sandboxes_active_machine_was_usable", ddl: alterPostgreSQLSandboxesActiveUsabilityCheck},
-	)
-
-	// Formerly version 12: session-event birth column and backfill.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_events_preparation_attempt_id", ddl: alterPostgreSQLSessionEventsPreparationAttemptID},
-		postgresqlSchemaStep{name: "session_events_preparation_attempt_id_backfill", ddl: `UPDATE session_events event
-			SET preparation_attempt_id = (
-				SELECT preparation.preparation_attempt_id
-				FROM session_preparations preparation
-				WHERE preparation.workspace_id = event.workspace_id
-				  AND preparation.session_id = event.session_id
-				  AND preparation.superseded_at IS NULL
-				ORDER BY preparation.created_at DESC, preparation.preparation_attempt_id DESC
-				LIMIT 1
-			)
-			WHERE event.preparation_attempt_id IS NULL
-			  AND event.processed_at IS NULL
-			  AND event.type IN ('user.message', 'user.interrupt', 'user.tool_confirmation')
-			  AND EXISTS (
-				SELECT 1
-				FROM session_preparations preparation
-				WHERE preparation.workspace_id = event.workspace_id
-				  AND preparation.session_id = event.session_id
-				  AND preparation.superseded_at IS NULL
-			)`},
-	)
-
-	// Formerly version 13: exclusive startup-cleanup lease shape.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "sandboxes_startup_cleanup_lease_columns", ddl: `ALTER TABLE sandboxes
-			ADD COLUMN IF NOT EXISTS cleanup_lease_token TEXT,
-			ADD COLUMN IF NOT EXISTS cleanup_lease_expires_at TIMESTAMPTZ`},
-		postgresqlSchemaStep{name: "sandboxes_startup_cleanup_legacy_status_normalization", ddl: `UPDATE sandboxes
-			SET status = CASE WHEN cleanup_status = 'not_found' THEN 'released' ELSE status END,
-			    released_at = CASE
-			        WHEN cleanup_status = 'not_found' THEN COALESCE(released_at, updated_at)
-			        ELSE released_at
-			    END,
-			    cleanup_status = CASE
-			        WHEN cleanup_status = 'not_found' THEN 'released'
-			        WHEN cleanup_status = 'no_handle' THEN 'pending'
-			        ELSE cleanup_status
-			    END,
-			    cleanup_error_kind = CASE
-			        WHEN cleanup_status = 'not_found' THEN COALESCE(cleanup_error_kind, 'not_found')
-			        ELSE cleanup_error_kind
-			    END,
-			    cleanup_retryable = FALSE,
-			    cleanup_next_attempt_at = NULL,
-			    cleanup_lease_token = NULL,
-			    cleanup_lease_expires_at = NULL
-			WHERE cleanup_status IN ('not_found', 'no_handle')`},
-		postgresqlSchemaStep{name: "sandboxes_startup_cleanup_lease_shape", ddl: `ALTER TABLE sandboxes
-			DROP CONSTRAINT IF EXISTS sandboxes_cleanup_status_shape,
-			DROP CONSTRAINT IF EXISTS sandboxes_cleanup_lease_shape,
-			ADD CONSTRAINT sandboxes_cleanup_status_shape CHECK (
-				cleanup_status IN (
-					'none', 'pending', 'in_progress', 'released',
-					'retryable_failed', 'permanent_failed'
-				)
-			),
-			ADD CONSTRAINT sandboxes_cleanup_lease_shape CHECK (
-				(
-					cleanup_status = 'in_progress'
-					AND cleanup_lease_token IS NOT NULL
-					AND cleanup_lease_token <> ''
-					AND cleanup_lease_expires_at IS NOT NULL
-				) OR (
-					cleanup_status <> 'in_progress'
-					AND cleanup_lease_token IS NULL
-					AND cleanup_lease_expires_at IS NULL
-				)
-			)`},
-	)
-
-	// Formerly version 14: multimodal file-attachment state.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "file_objects_pdf_page_count", ddl: `ALTER TABLE file_objects
-			ADD COLUMN IF NOT EXISTS pdf_page_count BIGINT`},
-		postgresqlSchemaStep{name: "file_objects_pdf_page_count_shape", ddl: `ALTER TABLE file_objects
-			DROP CONSTRAINT IF EXISTS file_objects_pdf_page_count_shape,
-			ADD CONSTRAINT file_objects_pdf_page_count_shape
-			CHECK (pdf_page_count IS NULL OR pdf_page_count >= -1)`},
-		postgresqlSchemaStep{name: "session_events_attachment_scope_key", ddl: `CREATE UNIQUE INDEX IF NOT EXISTS session_events_attachment_scope_key
-			ON session_events (
-				workspace_id, session_id, session_thread_id, event_id
-			)`},
-		postgresqlSchemaStep{name: "session_events_pending_media_lookup", ddl: `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup
-			ON session_events (
-				workspace_id, session_id, session_thread_id, sequence, event_id
-			)
-			WHERE type = 'user.message'
-			  AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions", ddl: `CREATE TABLE IF NOT EXISTS session_file_attachment_consumptions (
-			workspace_id TEXT NOT NULL,
-			session_id TEXT NOT NULL,
-			session_thread_id TEXT NOT NULL,
-			request_end_event_id TEXT NOT NULL,
-			source_event_id TEXT NOT NULL,
-			file_id TEXT NOT NULL,
-			UNIQUE (
-				workspace_id, session_id, session_thread_id,
-				request_end_event_id, source_event_id, file_id
-			),
-			FOREIGN KEY (workspace_id, session_id)
-				REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
-			FOREIGN KEY (workspace_id, session_id, session_thread_id)
-				REFERENCES session_threads(workspace_id, session_id, id),
-			FOREIGN KEY (
-				workspace_id, session_id, session_thread_id, request_end_event_id
-			) REFERENCES session_events(
-				workspace_id, session_id, session_thread_id, event_id
-			),
-			FOREIGN KEY (
-				workspace_id, session_id, session_thread_id, source_event_id
-			) REFERENCES session_events(
-				workspace_id, session_id, session_thread_id, event_id
-			)
-		)`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_pending_lookup", ddl: `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup
-			ON session_file_attachment_consumptions (
-				workspace_id, session_id, session_thread_id, source_event_id, file_id
-			)`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_enable", ddl: `ALTER TABLE session_file_attachment_consumptions ENABLE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_force", ddl: `ALTER TABLE session_file_attachment_consumptions FORCE ROW LEVEL SECURITY`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_policy_drop", ddl: `DROP POLICY IF EXISTS workspace_isolation ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_select_drop", ddl: `DROP POLICY IF EXISTS workspace_select ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_insert_drop", ddl: `DROP POLICY IF EXISTS workspace_insert ON session_file_attachment_consumptions`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_select", ddl: `CREATE POLICY workspace_select ON session_file_attachment_consumptions
+		postgresqlSchemaStep{
+			name: "rls_policy_transient_attachment_gc_execution_drop",
+			ddl:  "DROP POLICY IF EXISTS transient_attachment_gc_select ON session_runtime_tool_results",
+		},
+		postgresqlSchemaStep{
+			name: "rls_policy_transient_attachment_gc_execution_select",
+			ddl: `CREATE POLICY transient_attachment_gc_select ON session_runtime_tool_results
 			FOR SELECT
-			USING (workspace_id = current_setting('tetral.workspace_id', true))`},
-		postgresqlSchemaStep{name: "session_file_attachment_consumptions_rls_insert", ddl: `CREATE POLICY workspace_insert ON session_file_attachment_consumptions
-			FOR INSERT
-			WITH CHECK (workspace_id = current_setting('tetral.workspace_id', true))`},
-	)
-
-	// Formerly version 15: sealed agent-mail settlement Bridge operation.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_bridge_operations_agent_mail_settlement", ddl: `ALTER TABLE session_bridge_operations
-			DROP CONSTRAINT IF EXISTS session_bridge_operations_operation_shape,
-			ADD CONSTRAINT session_bridge_operations_operation_shape CHECK (operation IN (
-				'load_context',
-				'commit_inputs',
-				'commit_task_notification_result',
-				'write_event',
-				'write_request_end',
-				'finish_idle',
-				'create_child_thread',
-				'resolve_child_thread',
-				'list_child_threads',
-				'mark_child_thread_closed',
-				'mark_child_thread_active',
-				'run_tool',
-				'read_command_result',
-				'send_command_input',
-				'cancel_command',
-				'run_memory',
-				'create_transient_attachment',
-				'mcp_manifest_changed',
-				'commit_internal_tool_repair',
-				'commit_runtime_termination',
-				'settle_sealed_agent_mail'
-			)) NOT VALID`},
-	)
-
-	// Formerly version 16: completion-mail reconciliation index.
-	steps = append(steps,
-		postgresqlSchemaStep{name: "session_events_completion_mail_reconciliation", ddl: `CREATE INDEX IF NOT EXISTS idx_session_events_completion_mail_reconciliation
-			ON session_events (
-				workspace_id,
-				session_id,
-				((payload_json::jsonb ->> 'delivery_id'))
-			)
-			WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`},
+			USING (current_setting('tetral.transient_attachment_gc', true) = 'true')`,
+		},
 	)
 
 	return steps

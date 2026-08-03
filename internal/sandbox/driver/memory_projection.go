@@ -34,10 +34,10 @@ import (
 const memoryProjectionStagingRoot = "/mnt/memory/.staging"
 
 // Memory projection driver — two command sequences, one DaytonaHelperExecutor
-// surface, serving MaterializeMemoryStore (prepare time) and RefreshMemoryProjection
-// (live, post-mutation).
+// surface, serving MaterializeMemoryStore (resource convergence) and
+// RefreshMemoryProjection (live, post-mutation).
 //
-// SEQUENCE CHOICE (mid-read safety is the coupling): prepare-time materialization
+// SEQUENCE CHOICE (mid-read safety is the coupling): activation-time materialization
 // pushes a WHOLE-STORE swap — build a staged tree, then rm -rf MOUNT and mv it into
 // place. Live refresh instead pushes PER-FILE mv -f operations. Live refresh must
 // never whole-swap, because a running model may be mid-read: per-file rename keeps
@@ -61,7 +61,7 @@ const memoryProjectionStagingRoot = "/mnt/memory/.staging"
 //     active descendant memories, so the projection already matches truth. Live
 //     refresh never does recursive deletes.
 //
-// UPDATE-WITH: internal/sandbox/memory_projection.go (the prepare-time orchestrator
+// UPDATE-WITH: internal/sandbox/memory_projection.go (the materialization orchestrator
 // and the prefix-freeness invariant the remove no-op depends on).
 
 func (e *DaytonaHelperExecutor) MaterializeMemoryStore(ctx context.Context, materialization sandbox.MemoryStoreMaterialization) error {
@@ -260,7 +260,7 @@ func (e *DaytonaHelperExecutor) memoryProjectionSandbox(ctx context.Context, pro
 	}
 	sandboxHandle, err := e.client.Get(ctx, providerSandboxID)
 	if err != nil {
-		return daytonaSandboxHandle{}, err
+		return daytonaSandboxHandle{}, MarkProviderOperationNotSubmitted(mapDaytonaError(sandbox.StageMountResources, err))
 	}
 	if sandboxHandle.Process == nil || sandboxHandle.FileSystem == nil {
 		return daytonaSandboxHandle{}, errors.New("daytona sandbox is missing process or filesystem service")
@@ -362,10 +362,10 @@ func memoryProjectionEmptyAncestorDirs(mountPath string, finalPath string) []str
 }
 
 func (e *DaytonaHelperExecutor) executeMemoryProjectionCommand(ctx context.Context, sandboxHandle daytonaSandboxHandle, command string) error {
-	if e.preparationCommandTimeout <= 0 {
-		return errors.New("preparation command timeout is required")
+	if e.commandTimeout <= 0 {
+		return errors.New("daytona command timeout is required")
 	}
-	opts := []func(*options.ExecuteCommand){options.WithExecuteTimeout(e.preparationCommandTimeout)}
+	opts := []func(*options.ExecuteCommand){options.WithExecuteTimeout(e.commandTimeout)}
 	response, err := sandboxHandle.Process.ExecuteCommand(ctx, command, opts...)
 	if err != nil {
 		return err

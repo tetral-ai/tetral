@@ -12,6 +12,7 @@ name: engine-vulncheck
 # The same gate runs locally through the Makefile's vulncheck target.
 
 on:
+  pull_request:
   schedule:
     - cron: '23 6 * * *'
   workflow_dispatch:

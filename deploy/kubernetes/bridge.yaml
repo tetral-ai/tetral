@@ -7,12 +7,6 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
 data:
-  TETRAL_SANDBOX_DRIVER: daytona
-  DAYTONA_API_URL: https://daytona.example.internal
-  DAYTONA_TARGET: us
-  TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s
-  TETRAL_RESOURCE_CRED_REFRESH_MARGIN: 30m
-  TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT: 30s
   TETRAL_PROVIDER_RESCHEDULE_BUDGET: "3"
   TETRAL_COMPACTION_RESCHEDULE_BUDGET: "2"
 ---
@@ -82,21 +76,6 @@ spec:
                 secretKeyRef:
                   name: runtime-binding-token
                   key: hmac-key
-            - name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
-            - name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-            - name: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT
             - name: TETRAL_PROVIDER_RESCHEDULE_BUDGET
               valueFrom:
                 configMapKeyRef:
@@ -138,26 +117,6 @@ spec:
                 secretKeyRef:
                   name: tetral-blob
                   key: secret-key
-            - name: TETRAL_SANDBOX_DRIVER
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_SANDBOX_DRIVER
-            - name: DAYTONA_API_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: DAYTONA_API_URL
-            - name: DAYTONA_TARGET
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: DAYTONA_TARGET
-            - name: DAYTONA_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: bridge-daytona
-                  key: DAYTONA_API_KEY
           ports:
             - name: http
               containerPort: 8080
@@ -215,8 +174,6 @@ spec:
                   key: bridge-url
             - name: TETRAL_QUEUE_GRPC_ADDR
               value: queue.tetral-system.svc.cluster.local:9090
-            - name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_GRPC_ADDR
-              value: 127.0.0.1:9090
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_OWNER
               value: bridge-job-runner
             - name: TETRAL_BRIDGE_JOB_RUNNER_LEASE_DURATION_MS
@@ -227,16 +184,6 @@ spec:
               value: "1"
             - name: TETRAL_BRIDGE_JOB_RUNNER_POLL_INTERVAL_MS
               value: "1000"
-            - name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_RESOURCE_CRED_REFRESH_MARGIN
-            - name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
-              valueFrom:
-                configMapKeyRef:
-                  name: bridge-config
-                  key: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW
             - name: TETRAL_KUBERNETES_NAMESPACE
               value: tetral-agent-runtime
             - name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR
@@ -245,16 +192,35 @@ spec:
               value: "9090"
             - name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token
-            - name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_TOKEN_PATH
-              value: /var/run/secrets/tetral-internal-grpc/bridge-api/token
             - name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR
               value: gateway.tetral-system.svc.cluster.local:9091
             - name: TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH
               value: /var/run/secrets/tetral-internal-grpc/gateway/token
-            - name: TETRAL_SANDBOX_GRPC_ADDR
-              value: sandbox.tetral-system.svc.cluster.local:9090
-            - name: TETRAL_BRIDGE_SANDBOX_TOKEN_PATH
-              value: /var/run/secrets/tetral-internal-grpc/sandbox/token
+            - name: TETRAL_BLOB_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: endpoint
+            - name: TETRAL_BLOB_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: region
+            - name: TETRAL_BLOB_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: bucket
+            - name: TETRAL_BLOB_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: access-key
+            - name: TETRAL_BLOB_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tetral-blob
+                  key: secret-key
           ports:
             - name: http-job
               containerPort: 8081
@@ -286,14 +252,8 @@ spec:
             - name: bridge-runtime-pod-token
               mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime
               readOnly: true
-            - name: bridge-job-runner-bridge-api-token
-              mountPath: /var/run/secrets/tetral-internal-grpc/bridge-api
-              readOnly: true
             - name: bridge-job-runner-gateway-token
               mountPath: /var/run/secrets/tetral-internal-grpc/gateway
-              readOnly: true
-            - name: bridge-sandbox-token
-              mountPath: /var/run/secrets/tetral-internal-grpc/sandbox
               readOnly: true
             - name: job-runner-kubernetes-api
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
@@ -324,13 +284,6 @@ spec:
                   audience: tetral-internal-grpc
                   expirationSeconds: 600
                   path: token
-        - name: bridge-job-runner-bridge-api-token
-          projected:
-            sources:
-              - serviceAccountToken:
-                  audience: tetral-internal-grpc
-                  expirationSeconds: 600
-                  path: token
         - name: bridge-job-runner-gateway-token
           projected:
             sources:
@@ -338,12 +291,6 @@ spec:
                   audience: tetral-internal-grpc
                   expirationSeconds: 600
                   path: token
-        - name: bridge-sandbox-token
-          secret:
-            secretName: sandbox-internal-grpc
-            items:
-              - key: token
-                path: token
         - name: job-runner-kubernetes-api
           projected:
             sources:
@@ -388,7 +335,7 @@ metadata:
     app.kubernetes.io/name: bridge
     app.kubernetes.io/part-of: tetral
   annotations:
-    tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"
+    tetral.ai/egress-intent: "blob.example.internal"
 spec:
   podSelector:
     matchLabels:
@@ -453,13 +400,6 @@ spec:
       ports:
         - protocol: TCP
           port: 9091
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: sandbox
-      ports:
-        - protocol: TCP
-          port: 9090
     - to:
         - namespaceSelector:
             matchLabels:

@@ -3,22 +3,25 @@
  * Owns the scoped Effect runtime that backs Runtime Pod command, sub-agent, cleanup, and shutdown
  * operations. The process composition root builds these hosts, the gRPC runtime service and tool
  * orchestration call them, and each adapter runs the corresponding SessionRunHost effect. The
- * module keeps one layer scope for the host lifetime, coalesces identical cold-thread preloads,
- * and hydrates thread state before control operations that require it. It exposes active-run
+ * module keeps one layer scope for the host lifetime and delegates cold-install single-flight
+ * ownership to SessionManager before control operations that require resident state. It exposes active-run
  * shutdown and scope release as separate operations that the process composition root orders.
  */
+import { status } from "@grpc/grpc-js";
+import type { ServiceError } from "@grpc/grpc-js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import * as AgentLoop from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
 import * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host/session-run-host.js";
 import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/session/session-state.js";
-import type { RuntimeLoadedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
+import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
-import type { RuntimeSessionRunHost } from "./runtime-service.js";
+import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
+import { runtimeAgentMailText, runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
 /**
  * Groups the promise-based Runtime Core host surfaces and the two operations that end their shared
@@ -38,7 +41,7 @@ export interface RuntimeCoreHosts {
  */
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
-  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail">) => Promise<SessionManager.ThreadLifecycleResult>;
+  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptThread: (command: Parameters<SessionRunHost.Interface["handleInterruptThread"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
@@ -61,7 +64,6 @@ export interface RuntimeCoreHostsOptions {
   readonly maxConcurrentTools?: number | undefined;
   readonly now: () => string;
   readonly contextLoader: ContextLoader.ContextLoader;
-  readonly registerAcceptedInput?: (input: RuntimeAcceptedInputState) => () => void;
   readonly agentLoop: AgentLoop.AgentLoopRuntimeOptions;
   readonly metrics?: RuntimeMetricsSink | undefined;
   readonly recordCloseoutEvent?: ((event: RuntimeCloseoutEvent) => void) | undefined;
@@ -69,12 +71,11 @@ export interface RuntimeCoreHostsOptions {
 
 /**
  * Builds the Agent Loop, Session Manager, and SessionRunHost layers in one explicit Effect scope and
- * returns promise adapters for network commands and in-process tools. Cold preloads are shared per
- * binding identity, accepted messages are converted to Runtime Core input only after preload, and
+ * returns promise adapters for network commands and in-process tools. Cold installation is owned by
+ * SessionManager, accepted messages are converted to Runtime Core input only after installation, and
  * callers close the returned hosts to release the layer scope.
  */
 export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): Promise<RuntimeCoreHosts> {
-  const coldThreadPreloads = new Map<string, Promise<ColdThreadPreloadResult>>();
   const agentLoopLayer = AgentLoop.layer({
     ...options.agentLoop,
     ...(options.contextLoader.refreshRuntimeBindingToken !== undefined
@@ -88,19 +89,53 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
     now: options.now,
     ...(options.contextLoader.loadThreadContext !== undefined
       ? {
-          loadPendingAgentMail: async (command: RuntimeThreadControlState) => {
+          loadThreadContext: async (command: RuntimeThreadControlState): Promise<RuntimeThreadPreloadState> => {
             const context = await options.contextLoader.loadThreadContext!(command);
-            return (context.pendingAgentMail ?? []).map((mail) => acceptedAgentMail(command, mail, context.thread));
+            const pendingAgentMail: Array<Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }>> = [];
+            if ((context.pendingAgentMail?.length ?? 0) > 0 && context.thread === undefined) {
+              throw new Error("pending agent mail requires durable thread lineage");
+            }
+            for (const descriptor of context.pendingAgentMail ?? []) {
+              if (options.contextLoader.resolveAgentMail === undefined) {
+                throw new Error("agent mail resolver is unavailable");
+              }
+              // Resolver authority is parent-scoped even when the cold target is the child.
+              const currentIsChild = context.thread?.parentThreadId === descriptor.sourceThreadId;
+              const resolverCommand = currentIsChild
+                ? { ...command, sessionThreadId: descriptor.sourceThreadId }
+                : command;
+              const childThreadId = currentIsChild
+                ? command.sessionThreadId
+                : descriptor.sourceThreadId;
+              const resolved = await options.contextLoader.resolveAgentMail(
+                resolverCommand,
+                childThreadId,
+                descriptor.deliveryId,
+              );
+              pendingAgentMail.push(acceptedResolvedAgentMail(command, resolved, context.thread));
+            }
+            return {
+              ...command,
+              ...(context.thread !== undefined ? { thread: context.thread } : {}),
+              messages: context.messages,
+              ...(context.threadContextPrefix !== undefined ? { threadContextPrefix: context.threadContextPrefix } : {}),
+              ...(context.durableTurnId !== undefined ? { durableTurnId: context.durableTurnId } : {}),
+              runtimeBindingToken: context.runtimeBindingToken,
+              ...(context.runtimeConfigPatch !== undefined ? { runtimeConfigPatch: context.runtimeConfigPatch } : {}),
+              ...(context.mcpManifests !== undefined ? { mcpManifests: context.mcpManifests } : {}),
+              ...(context.pendingToolUses !== undefined ? { pendingToolUses: context.pendingToolUses } : {}),
+              ...(context.pendingSandboxExecutions !== undefined ? { pendingSandboxExecutions: context.pendingSandboxExecutions } : {}),
+              ...(context.backgroundTools !== undefined ? { backgroundTools: context.backgroundTools } : {}),
+              ...(context.pendingAttachments !== undefined ? { pendingAttachments: context.pendingAttachments } : {}),
+              pendingAgentMail,
+              coldCoverage: context.coldCoverage,
+            };
           },
         }
-      : {}),
-    ...(options.contextLoader.loadThreadContext !== undefined
-      ? { loadThreadMessages: async (command: RuntimeThreadControlState) => (await options.contextLoader.loadThreadContext!(command)).messages }
       : {}),
     ...(options.contextLoader.refreshRuntimeBindingToken !== undefined
       ? { refreshRuntimeBindingToken: (identity, refreshOptions) => options.contextLoader.refreshRuntimeBindingToken?.(identity, refreshOptions) ?? Promise.resolve(identity.runtimeBindingToken) }
       : {}),
-    ...(options.registerAcceptedInput !== undefined ? { registerAcceptedInput: options.registerAcceptedInput } : {}),
     ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
     closeoutMonotonicMs: options.agentLoop.runtime.monotonicMs,
     closeoutSleep: options.agentLoop.runtime.sleep,
@@ -117,57 +152,33 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
   return {
     commandRunHost: {
       handleAcceptInput: async (command) => {
-        const preload = await preloadColdThreadForCommand(host, options.contextLoader, coldThreadPreloads, command);
-        if (!preload.ok) {
-          if (preload.reason === "local_session_capacity_exceeded") {
-            return { ok: false, sessionId: preload.sessionId, reason: "local_session_capacity_exceeded" };
-          }
-          throw new Error(`cold thread preload failed: ${preload.reason}`);
-        }
         const acceptedInput = runtimeAcceptedInputFromCommand(command);
         const result = await Effect.runPromise(host.handleAcceptInput(acceptedInput));
         if (result.ok) {
           return result;
         }
+        if (result.reason === "context_load_failed") {
+          throw new Error("cold thread preload failed");
+        }
         return { ok: false, sessionId: result.sessionId, reason: "local_session_capacity_exceeded" };
       },
       handleAgentMail: async (command) => {
-        if (options.contextLoader.loadThreadContext === undefined) {
-          return { ok: false, sessionId: command.sessionId, reason: "context_load_failed" };
-        }
         try {
-          const inspected = await Effect.runPromise(host.handleInspectThread(command));
-          const context = await options.contextLoader.loadThreadContext(command);
-          if (!inspected.ok || !inspected.observed) {
-            const preloaded = await Effect.runPromise(host.handlePreloadThread({
-              ...command,
-              ...(context.thread !== undefined ? { thread: context.thread } : {}),
-              messages: context.messages,
-              runtimeBindingToken: context.runtimeBindingToken,
-              ...(context.runtimeConfigPatch !== undefined ? { runtimeConfigPatch: context.runtimeConfigPatch } : {}),
-              ...(context.mcpManifests !== undefined ? { mcpManifests: context.mcpManifests } : {}),
-              ...(context.pendingToolUses !== undefined ? { pendingToolUses: context.pendingToolUses } : {}),
-              ...(context.backgroundTools !== undefined ? { backgroundTools: context.backgroundTools } : {}),
-              ...(context.pendingAttachments !== undefined ? { pendingAttachments: context.pendingAttachments } : {}),
-              pendingAgentMail: (context.pendingAgentMail ?? []).map((mail) => acceptedAgentMail(command, mail, context.thread)),
-            }));
-            if (!preloaded.ok) {
-              return { ok: false, sessionId: command.sessionId, reason: preloaded.reason === "local_session_capacity_exceeded" ? "local_session_capacity_exceeded" : "context_load_failed" };
-            }
-            return { ok: true, sessionId: command.sessionId, applied: (context.pendingAgentMail?.length ?? 0) > 0 };
+          const result = await Effect.runPromise(host.handleAcceptInput(acceptedAgentMailCommand(command)));
+          if (!result.ok) {
+            return {
+              ok: false,
+              sessionId: command.sessionId,
+              reason: result.reason === "local_session_capacity_exceeded"
+                ? "local_session_capacity_exceeded"
+                : "thread_not_receivable",
+            } as const;
           }
-          let applied = false;
-          for (const mail of context.pendingAgentMail ?? []) {
-            const input = acceptedAgentMail(command, mail, context.thread);
-            const unregister = options.registerAcceptedInput?.(input);
-            const result = await Effect.runPromise(host.handleAcceptInput(input));
-            if (!result.ok) {
-              unregister?.();
-              return { ok: false, sessionId: command.sessionId, reason: result.reason === "local_session_capacity_exceeded" ? "local_session_capacity_exceeded" : "context_load_failed" };
-            }
-            applied = applied || result.started || result.pendingWake;
-          }
-          return { ok: true, sessionId: command.sessionId, applied };
+          return {
+            ok: true,
+            sessionId: command.sessionId,
+            applied: result.started || result.pendingWake,
+          };
         } catch {
           return { ok: false, sessionId: command.sessionId, reason: "context_load_failed" };
         }
@@ -175,49 +186,20 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       handleInterruptControl: async (sessionId, command, commitInput) => await Effect.runPromise(host.handleInterruptControl(
         sessionId,
         command,
-        commitInput ?? (async () => ({ ok: false, retryable: true, errorCode: "interrupt_commit_unavailable" })),
+        commitInput,
       )),
-      handleToolConfirmation: async (sessionId, command) => {
-        const preload = await preloadColdThreadForCommand(host, options.contextLoader, coldThreadPreloads, command, { requirePendingApprovalToolJobs: true });
-        if (!preload.ok) {
-          return { ok: false, sessionId, reason: preload.reason };
-        }
-        return await Effect.runPromise(host.handleToolConfirmation(sessionId, command));
-      },
-      handleTaskNotification: async (sessionId, command) => {
-        const preload = await preloadColdThreadForCommand(host, options.contextLoader, coldThreadPreloads, command);
-        if (!preload.ok) {
-          return { ok: false, sessionId, reason: preload.reason };
-        }
-        return await Effect.runPromise(host.handleTaskNotification(sessionId, command));
-      },
+      handleToolConfirmation: async (sessionId, command, commit) =>
+        await Effect.runPromise(host.handleToolConfirmation(sessionId, command, commit)),
+      handleTaskNotification: async (sessionId, command, commit) =>
+        await Effect.runPromise(host.handleTaskNotification(sessionId, command, commit)),
       handleRuntimeConfigPatch: async (sessionId, command) => {
-        const preload = await preloadColdThreadForCommand(host, options.contextLoader, coldThreadPreloads, command);
-        if (!preload.ok) {
-          return { ok: false, sessionId, reason: preload.reason };
-        }
         return await Effect.runPromise(host.handleRuntimeConfigPatch(sessionId, command));
       },
     },
     subAgentRunHost: {
       enqueueThreadInput: async (input) => await Effect.runPromise(host.handleAcceptInput(input)),
       preloadThread: async (input) => {
-        if (options.contextLoader.loadThreadContext === undefined) {
-          return { ok: false, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, reason: "local_session_capacity_exceeded" };
-        }
-        const context = await options.contextLoader.loadThreadContext(input);
-        return await Effect.runPromise(host.handlePreloadThread({
-          ...input,
-          ...(context.thread !== undefined || input.thread !== undefined ? { thread: context.thread ?? input.thread } : {}),
-          messages: context.messages,
-          runtimeBindingToken: context.runtimeBindingToken,
-          ...(context.runtimeConfigPatch !== undefined ? { runtimeConfigPatch: context.runtimeConfigPatch } : {}),
-          ...(context.mcpManifests !== undefined ? { mcpManifests: context.mcpManifests } : {}),
-          ...(context.pendingToolUses !== undefined ? { pendingToolUses: context.pendingToolUses } : {}),
-          ...(context.backgroundTools !== undefined ? { backgroundTools: context.backgroundTools } : {}),
-          ...(context.pendingAttachments !== undefined ? { pendingAttachments: context.pendingAttachments } : {}),
-          pendingAgentMail: (context.pendingAgentMail ?? []).map((mail) => acceptedAgentMail(input, mail, context.thread)),
-        }));
+        return await Effect.runPromise(host.handleEnsureThreadInstalled(input));
       },
       interruptThread: async (command) => await Effect.runPromise(host.handleInterruptThread(command)),
       interruptReviewerExecution: async (command, token) => await Effect.runPromise(host.handleInterruptReviewerExecution(command, token)),
@@ -228,24 +210,22 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         abortSignal === undefined ? undefined : { signal: abortSignal },
       ),
       pullAgentMail: async (command, sourceThreadId) => {
-        if (options.contextLoader.loadThreadContext === undefined || options.contextLoader.commitAcceptedInput === undefined) {
-          return undefined;
+        if (options.contextLoader.resolveAgentMail === undefined) {
+          throw new Error("agent mail resolver is unavailable");
         }
-        const context = await options.contextLoader.loadThreadContext(command, { agentMailSourceThreadId: sourceThreadId });
-        const mail = context.pendingAgentMail?.find((candidate) => candidate.sourceThreadId === sourceThreadId);
-        if (mail === undefined) {
-          return undefined;
+        let resolved: RuntimeResolvedAgentMail;
+        try {
+          resolved = await options.contextLoader.resolveAgentMail(command, sourceThreadId);
+        } catch (error) {
+          if (isGrpcStatus(error, status.NOT_FOUND)) {
+            return undefined;
+          }
+          throw error;
         }
-        const input = { ...acceptedAgentMail(command, mail, context.thread), presentation: "pull" as const };
-        const committed = await options.contextLoader.commitAcceptedInput(input, {
-          registerScope: false,
-          hydrateContext: false,
-        });
-        await Effect.runPromise(host.handleMarkAgentMailPulled(command, mail.deliveryId));
-        if (committed.type !== "receipt") {
-          throw new Error("pulled agent mail receipt commit returned hydrated context");
-        }
-        return { deliveryId: mail.deliveryId, finalMessage: completionMessageText(mail.message) };
+        return {
+          deliveryId: resolved.deliveryId,
+          finalMessage: runtimeAgentMailText(runtimeMessageFromPublicAgentMail(resolved.publicMessageJson)),
+        };
       },
       waitReviewerExecution: async (command, token, timeoutMs, abortSignal) => await Effect.runPromise(
         host.handleWaitReviewerExecution(command, token, timeoutMs),
@@ -254,16 +234,28 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       inspectThread: async (command) => await Effect.runPromise(host.handleInspectThread(command)),
       inspectReviewerExecution: async (command, token) => await Effect.runPromise(host.handleInspectReviewerExecution(command, token)),
       commitApprovalReviewDecision: async (command, event) => await options.agentLoop.sessionEventWriter.append({
+        requestId: command.requestId,
+        workspaceId: command.workspaceId,
         sessionId: command.sessionId,
         sessionThreadId: command.sessionThreadId,
+        bindingId: command.bindingId,
+        bindingGeneration: command.bindingGeneration,
+        targetPodUid: command.targetPodUid,
         writeId: `rwrite_${event.review_id}_decision`,
         event,
+        drafts: [],
       }),
       commitApprovalReviewFailure: async (command, event) => await options.agentLoop.sessionEventWriter.append({
+        requestId: command.requestId,
+        workspaceId: command.workspaceId,
         sessionId: command.sessionId,
         sessionThreadId: command.sessionThreadId,
+        bindingId: command.bindingId,
+        bindingGeneration: command.bindingGeneration,
+        targetPodUid: command.targetPodUid,
         writeId: `rwrite_${event.review_id}_failure`,
         event,
+        drafts: [],
       }),
     },
     cleanupRunHost: {
@@ -278,103 +270,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
   };
 }
 
-function completionMessageText(message: RuntimeLoadedAgentMail["message"]): string {
-  return message.parts
-    .map((part) => part.type === "text" ? part.text : "")
-    .join("");
-}
-
-type ColdThreadPreloadResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly sessionId: string; readonly reason: "local_session_capacity_exceeded" | "context_load_failed" };
-
-function preloadColdThreadForCommand(
-  host: SessionRunHost.Interface,
-  contextLoader: ContextLoader.ContextLoader,
-  inFlight: Map<string, Promise<ColdThreadPreloadResult>>,
+function acceptedResolvedAgentMail(
   command: RuntimeThreadControlState,
-  options: { readonly requirePendingApprovalToolJobs?: boolean | undefined } = {},
-): Promise<ColdThreadPreloadResult> {
-  const key = [
-    command.workspaceId,
-    command.sessionId,
-    command.sessionThreadId,
-    command.bindingId,
-    command.bindingGeneration,
-    command.targetPodUid,
-    options.requirePendingApprovalToolJobs === true ? "approval" : "general",
-  ].join("\u0000");
-  const existing = inFlight.get(key);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const pending = preloadColdThreadForCommandOnce(host, contextLoader, command, options);
-  inFlight.set(key, pending);
-  const clear = (): void => {
-    if (inFlight.get(key) === pending) {
-      inFlight.delete(key);
-    }
-  };
-  void pending.then(clear, clear);
-  return pending;
-}
-
-async function preloadColdThreadForCommandOnce(
-  host: SessionRunHost.Interface,
-  contextLoader: ContextLoader.ContextLoader,
-  command: RuntimeThreadControlState,
-  options: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
-): Promise<ColdThreadPreloadResult> {
-  const inspected = await Effect.runPromise(host.handleInspectThread(command));
-  if (!inspected.ok) {
-    if (inspected.reason === "local_session_capacity_exceeded") {
-      return { ok: false, sessionId: command.sessionId, reason: "local_session_capacity_exceeded" };
-    }
-    return { ok: true };
-  }
-  if (inspected.observed && (options.requirePendingApprovalToolJobs !== true || inspected.hasPendingApprovalToolJobs === true)) {
-    return { ok: true };
-  }
-  if (contextLoader.loadThreadContext === undefined) {
-    return { ok: false, sessionId: command.sessionId, reason: "local_session_capacity_exceeded" };
-  }
-  const context = await contextLoader.loadThreadContext(command);
-  const preloaded = await Effect.runPromise(host.handlePreloadThread({
-    ...command,
-    ...(context.thread !== undefined ? { thread: context.thread } : {}),
-    messages: context.messages,
-    runtimeBindingToken: context.runtimeBindingToken,
-    ...(context.runtimeConfigPatch !== undefined ? { runtimeConfigPatch: context.runtimeConfigPatch } : {}),
-    ...(context.mcpManifests !== undefined ? { mcpManifests: context.mcpManifests } : {}),
-    ...(context.pendingToolUses !== undefined ? { pendingToolUses: context.pendingToolUses } : {}),
-    ...(context.backgroundTools !== undefined ? { backgroundTools: context.backgroundTools } : {}),
-    ...(context.pendingAttachments !== undefined ? { pendingAttachments: context.pendingAttachments } : {}),
-    pendingAgentMail: (context.pendingAgentMail ?? []).map((mail) => acceptedAgentMail(command, mail, context.thread)),
-  }));
-  if (!preloaded.ok) {
-    if (preloaded.reason === "local_session_capacity_exceeded") {
-      return { ok: false, sessionId: command.sessionId, reason: "local_session_capacity_exceeded" };
-    }
-    if (preloaded.reason === "context_load_failed") {
-      return { ok: false, sessionId: command.sessionId, reason: "context_load_failed" };
-    }
-    return { ok: true };
-  }
-  return { ok: true };
-}
-
-function acceptedAgentMail(
-  command: RuntimeThreadControlState,
-  mail: RuntimeLoadedAgentMail,
+  mail: RuntimeResolvedAgentMail,
   thread: RuntimeThreadPreloadState["thread"],
 ): Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }> {
   return {
     ...command,
     requestId: `agent_mail:${mail.deliveryId}`,
     runtimeInputId: `agent_mail:${mail.deliveryId}`,
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
+    eventIds: [mail.receivedEventId],
+    sequenceFrom: mail.receivedSequence,
+    sequenceTo: mail.receivedSequence,
     kind: "inter_agent_message",
     deliveryId: mail.deliveryId,
     sourceThreadId: mail.sourceThreadId,
@@ -384,7 +291,23 @@ function acceptedAgentMail(
   };
 }
 
+function acceptedAgentMailCommand(
+  command: RuntimeAgentMailCommand,
+): Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }> {
+  return {
+    ...command,
+    kind: "inter_agent_message",
+  };
+}
+
+function isGrpcStatus(error: unknown, code: status): boolean {
+  return typeof error === "object" && error !== null && (error as Partial<ServiceError>).code === code;
+}
+
 function runtimeAcceptedInputFromCommand(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]): RuntimeAcceptedInputState {
+  if (command.kind === "rejection") {
+    return { ...command };
+  }
   return {
     requestId: command.requestId,
     workspaceId: command.workspaceId,

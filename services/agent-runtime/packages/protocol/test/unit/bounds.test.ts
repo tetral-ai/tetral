@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MailFetchMaxBodyBytes,
   MailFetchMaxEnvelopes,
   MaxBindingGeneration,
   MaxIdBytes,
@@ -18,7 +17,6 @@ describe("protocol bounds", () => {
 
   test("pins bounded completion-mail context batches", () => {
     expect(MailFetchMaxEnvelopes).toBe(4);
-    expect(MailFetchMaxBodyBytes).toBe(4 * 1024 * 1024);
   });
 
   test("rejects invalid Runtime Pod command envelope fields before side effects", () => {

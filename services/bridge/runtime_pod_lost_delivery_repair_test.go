@@ -24,6 +24,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 		withTerminal    bool
 		withRequestEnd  bool
 		wantReceived    int
+		wantWake        int
 		wantResultError bool
 		wantResultText  string
 	}{
@@ -35,6 +36,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			withReceived:   true,
 			withRequestEnd: true,
 			wantReceived:   1,
+			wantWake:       1,
 			wantResultText: "status: delivered",
 		},
 		{
@@ -42,7 +44,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			toolName:       "spawn_agent",
 			childStatus:    "idle",
 			withSent:       true,
-			wantReceived:   1,
+			wantWake:       1,
 			wantResultText: "status: delivered",
 		},
 		{
@@ -50,7 +52,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			toolName:       "send_message",
 			childStatus:    "running",
 			withSent:       true,
-			wantReceived:   1,
+			wantWake:       1,
 			wantResultText: "status: delivered",
 		},
 		{
@@ -92,6 +94,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			var sentCount int
 			var receivedCount int
 			var childCount int
+			var wakeCount int
 			if err := admin.QueryRowContext(context.Background(),
 				`SELECT count(*) FROM session_events
 				  WHERE workspace_id = 'default' AND session_id = $1
@@ -112,8 +115,21 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 				fixture.sessionID, fixture.parentThreadID).Scan(&childCount); err != nil {
 				t.Fatalf("count child threads: %v", err)
 			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*)
+				   FROM queue_jobs
+				  WHERE workspace_id = 'default'
+				    AND kind = 'runtime_input'
+				    AND payload_json::jsonb ->> 'runtime_input_id' = $1`,
+				completionRuntimeInputID(fixture.deliveryID),
+			).Scan(&wakeCount); err != nil {
+				t.Fatalf("count durable agent-mail wakes: %v", err)
+			}
 			if sentCount != boolCount(tc.withSent) || receivedCount != tc.wantReceived || childCount != 1 {
 				t.Fatalf("delivery facts sent=%d received=%d children=%d; want %d/%d/1", sentCount, receivedCount, childCount, boolCount(tc.withSent), tc.wantReceived)
+			}
+			if wakeCount != tc.wantWake {
+				t.Fatalf("durable agent-mail wakes = %d; want %d", wakeCount, tc.wantWake)
 			}
 
 			var resultCount int
@@ -144,8 +160,8 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 					fixture.sessionID, fixture.childThreadID).Scan(&messageCount); err != nil {
 					t.Fatalf("count re-driven child messages: %v", err)
 				}
-				if messageCount != 1 {
-					t.Fatalf("re-driven child messages = %d; want exactly one", messageCount)
+				if messageCount != 0 {
+					t.Fatalf("pre-delivery child messages = %d; want none before the child commits input", messageCount)
 				}
 			}
 		})
@@ -181,54 +197,14 @@ func TestPostgreSQLRuntimePodLossAllowsErroredRequestWithDeliveredSpawn(t *testi
 	}
 }
 
-func TestPostgreSQLRuntimePodLossDeliverySettlementFailurePreventsRelease(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 21, "spawn_agent", "idle", true, true, false, true, false)
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_events SET projection_json = '{}'
-		  WHERE workspace_id = 'default' AND session_id = $1 AND event_id = $2`, fixture.sessionID, fixture.toolUseEventID); err != nil {
-		t.Fatalf("break spawn projection: %v", err)
-	}
-	releaser := &recordingSandboxReleaseClient{}
-	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
-	err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, fixture.now)
-	if err == nil {
-		t.Fatal("repair with invalid delivery settlement succeeded; want failure")
-	}
-	if len(releaser.requests) != 0 {
-		t.Fatalf("sandbox releases = %d; want none before settlement commits", len(releaser.requests))
-	}
-	var bindingCount int
-	var resultCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_runtime_bindings
-		  WHERE workspace_id = 'default' AND session_id = $1 AND binding_id = $2 AND binding_generation = $3`,
-		fixture.sessionID, fixture.binding.BindingID, fixture.binding.BindingGeneration).Scan(&bindingCount); err != nil {
-		t.Fatalf("count binding after failed settlement: %v", err)
-	}
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events
-		  WHERE workspace_id = 'default' AND session_id = $1 AND type = 'agent.tool_result'
-		    AND payload_json::jsonb ->> 'tool_use_event_id' = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount); err != nil {
-		t.Fatalf("count result after failed settlement: %v", err)
-	}
-	if bindingCount != 1 || resultCount != 0 {
-		t.Fatalf("failed settlement binding=%d results=%d; want rollback 1/0", bindingCount, resultCount)
-	}
-}
-
 func TestPostgreSQLRuntimePodLossDeliveryStaleBindingFencePreventsSettlement(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 22, "send_message", "idle", true, true, false, true, false)
 	stale := fixture.binding
 	stale.BindingGeneration--
-	releaser := &recordingSandboxReleaseClient{}
-	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
+	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
 	err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, stale, fixture.now)
 	assertRuntimePodLostRetryableError(t, err, "runtime_pod_lost_claim_stale")
-	if len(releaser.requests) != 0 {
-		t.Fatalf("stale binding releases = %d; want none", len(releaser.requests))
-	}
 	var resultCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_events
@@ -246,7 +222,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 25, "wait_agent", "idle", false, false, false, false, true)
 	const completionDeliveryID = "delivery_pod_loss_wait_completion"
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_opener", 1,
-		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, `{"type":"agent.thread_message_received"}`, "public", true)
+		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
 	messageJSON := bridgeRuntimeNotificationMessageJSON(
 		t,
 		fixture.sessionID,
@@ -263,7 +239,7 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 		messageJSON,
 	)
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_completion", 2,
-		"agent.thread_message_sent", sentPayload, sentPayload, "public", true)
+		"agent.thread_message_sent", sentPayload, "public", true)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("pod-loss-wait-currency-key")
@@ -274,12 +250,16 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 		fixture.binding.BindingGeneration,
 		fixture.binding.PodUID,
 	)
-	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-		Scope:                 scope,
-		RuntimeInputId:        "agent_mail:" + completionDeliveryID,
-		InputKind:             "inter_agent_message",
-		InterAgentMessageJson: bridgeInterAgentMessageJSON(t, completionDeliveryID, fixture.childThreadID, "sevt_pod_loss_wait_spawn", messageJSON),
-	}); err != nil {
+	if _, err := store.CommitInputs(context.Background(), bridgeAgentMailCommitRequestForTest(
+		t,
+		admin,
+		scope,
+		"agent_mail:"+completionDeliveryID,
+		completionDeliveryID,
+		fixture.childThreadID,
+		"sevt_pod_loss_wait_spawn",
+		messageJSON,
+	)); err != nil {
 		t.Fatalf("commit pre-loss wait receipt: %v", err)
 	}
 	if _, err := runRuntimePodLostRepairTransaction(context.Background(), runtime, fixture.sessionID, fixture.binding, fixture.now); err != nil {
@@ -301,9 +281,8 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 
 	current, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_pod_loss_wait_current",
-		AgentMailSourceThreadId: fixture.childThreadID,
+		Scope:          scope,
+		RuntimeInputId: "rin_pod_loss_wait_current",
 	})
 	if err != nil {
 		t.Fatalf("load current completion after pod loss: %v", err)
@@ -312,16 +291,15 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	if err := json.Unmarshal([]byte(current.GetContextJson()), &currentPayload); err != nil {
 		t.Fatalf("decode current completion after pod loss: %v", err)
 	}
-	if len(currentPayload.PendingAgentMail) != 1 || currentPayload.PendingAgentMail[0].DeliveryID != completionDeliveryID {
-		t.Fatalf("current completion after pod loss = %#v; want %s", currentPayload.PendingAgentMail, completionDeliveryID)
+	if len(currentPayload.PendingAgentMail) != 0 {
+		t.Fatalf("current completion after committed receipt = %#v; want none", currentPayload.PendingAgentMail)
 	}
 
 	seedRuntimePodLostDeliveryEvent(t, admin, fixture, fixture.childThreadID, "evt_pod_loss_wait_newer_opener", 3,
-		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, `{"type":"agent.thread_message_received"}`, "public", true)
+		"agent.thread_message_received", `{"type":"agent.thread_message_received"}`, "public", true)
 	superseded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
-		Scope:                   scope,
-		RuntimeInputId:          "rin_pod_loss_wait_superseded",
-		AgentMailSourceThreadId: fixture.childThreadID,
+		Scope:          scope,
+		RuntimeInputId: "rin_pod_loss_wait_superseded",
 	})
 	if err != nil {
 		t.Fatalf("load superseded completion after pod loss: %v", err)
@@ -347,49 +325,6 @@ func TestPostgreSQLRuntimePodLossReexecutedWaitReservesCurrentCompletionAndRefus
 	}
 	if receiptCount != 1 {
 		t.Fatalf("wait completion receipts after repair and reads = %d; want original receipt only", receiptCount)
-	}
-}
-
-func TestPostgreSQLRuntimePodLossDeliverySettlementCommitsBeforeRelease(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 23, "spawn_agent", "idle", true, false, false, true, false)
-	releaser := &recordingSandboxReleaseClient{
-		beforeRelease: func(SandboxReleaseRequest) error {
-			var receivedCount int
-			var resultCount int
-			var bindingCount int
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_events
-				  WHERE workspace_id = 'default' AND session_id = $1
-				    AND type = 'agent.thread_message_received'
-				    AND payload_json::jsonb ->> 'delivery_id' = $2`, fixture.sessionID, fixture.deliveryID).Scan(&receivedCount); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_events
-				  WHERE workspace_id = 'default' AND session_id = $1
-				    AND type = 'agent.tool_result'
-				    AND payload_json::jsonb ->> 'tool_use_event_id' = $2`, fixture.sessionID, fixture.toolUseEventID).Scan(&resultCount); err != nil {
-				return err
-			}
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT count(*) FROM session_runtime_bindings
-				  WHERE workspace_id = 'default' AND session_id = $1 AND binding_id = $2 AND binding_generation = $3`,
-				fixture.sessionID, fixture.binding.BindingID, fixture.binding.BindingGeneration).Scan(&bindingCount); err != nil {
-				return err
-			}
-			if receivedCount != 1 || resultCount != 1 || bindingCount != 1 {
-				return fmt.Errorf("release observed received=%d results=%d binding=%d; want 1/1/1", receivedCount, resultCount, bindingCount)
-			}
-			return nil
-		},
-	}
-	store := newRuntimePodLostReleaseFenceStore(runtime, releaser)
-	if err := store.repairLostRuntimeBinding(context.Background(), "default", fixture.sessionID, fixture.binding, fixture.now); err != nil {
-		t.Fatalf("repair with delivery release fence: %v", err)
-	}
-	if len(releaser.requests) != 1 {
-		t.Fatalf("sandbox releases = %d; want one after settlement", len(releaser.requests))
 	}
 }
 
@@ -482,11 +417,9 @@ func seedRuntimePodLostDeliveryFixture(
 		now:            time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
 	}
 	bindingID := fmt.Sprintf("bind_pod_loss_delivery_%d", index)
-	fixture.binding = runtimePodLostReleaseFenceBinding(fixture.sessionID, bindingID, int64(index+2))
+	fixture.binding = runtimePodLostBinding(fixture.sessionID, bindingID, int64(index+2))
 	seedBridgeAPISession(t, db, "default", fixture.sessionID, fixture.parentThreadID)
 	seedBridgeAPIRuntimeBinding(t, db, "default", fixture.sessionID, bindingID, fixture.binding.BindingGeneration, fixture.binding.PodUID)
-	seedBridgeAPIPreparationReady(t, db, "default", fixture.sessionID, "prep_"+fixture.sessionID)
-	seedBridgeAPIActiveSandbox(t, db, "default", fixture.sessionID, "2026-01-01T00:04:59Z")
 	seedRuntimePodLostStatusFence(t, db, fixture.sessionID, bindingID, fixture.binding.BindingGeneration)
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_threads (
@@ -502,45 +435,54 @@ func seedRuntimePodLostDeliveryFixture(
 	if withOpenRequest || withRequestEnd {
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_start_"+fixture.toolUseEventID, sequence, "span.model_request_start",
 			fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q,"request_kind":"agent_provider_request"}`, fixture.modelRequestID),
-			fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q,"request_kind":"agent_provider_request"}`, fixture.modelRequestID), "internal", false)
+			"internal", false)
 		sequence++
 	}
 	toolPayload := fmt.Sprintf(`{"type":"agent.tool_use","name":%q,"input":{"task_name":"worker"},"evaluated_permission":"allow"}`, toolName)
-	toolProjection := fmt.Sprintf(`{"type":"runtime_tool_projection","model_tool_call_id":%q,"tool_name":%q,"input":{"task_name":"worker"},"state":"running"}`, "call_"+fixture.toolUseEventID, toolName)
-	seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, fixture.toolUseEventID, sequence, "agent.tool_use", toolPayload, toolProjection, "public", true)
+	seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, fixture.toolUseEventID, sequence, "agent.tool_use", toolPayload, "public", true)
+	seedBridgeAPIDurableToolMessage(
+		t,
+		db,
+		"default",
+		fixture.sessionID,
+		fixture.parentThreadID,
+		fixture.modelRequestID,
+		fixture.toolUseEventID,
+		"call_"+fixture.toolUseEventID,
+		toolName,
+	)
 	sequence++
 	if withSent {
 		messageJSON := bridgeRuntimeUserMessageJSON(t, fixture.sessionID, "msg_"+fixture.deliveryID, "hello worker")
 		sentPayload := bridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
-		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, sentPayload, "public", true)
+		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, "public", true)
 		sequence++
 		if withReceived {
 			receivedPayload := bridgeInterAgentMessageJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.toolUseEventID, messageJSON)
-			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, "evt_received_"+fixture.toolUseEventID, 1, "agent.thread_message_received", receivedPayload, receivedPayload, "public", true)
+			seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.childThreadID, "evt_received_"+fixture.toolUseEventID, 1, "agent.thread_message_received", receivedPayload, "public", true)
 		}
 	}
 	if withTerminal {
 		payload := fmt.Sprintf(`{"type":"agent.tool_result","tool_use_event_id":%q,"content":[{"type":"text","text":"existing terminal"}],"is_error":false}`, fixture.toolUseEventID)
-		projection := fmt.Sprintf(`{"type":"runtime_tool_projection","model_tool_call_id":%q,"tool_name":%q,"input":{"task_name":"worker"},"state":"completed","output":{"text":"existing terminal","truncated":false}}`, "call_"+fixture.toolUseEventID, toolName)
-		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_result_"+fixture.toolUseEventID, sequence, "agent.tool_result", payload, projection, "public", true)
+		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_result_"+fixture.toolUseEventID, sequence, "agent.tool_result", payload, "public", true)
 		sequence++
 	}
 	if withRequestEnd {
 		payload := fmt.Sprintf(`{"type":"span.model_request_end","model_request_id":%q,"request_kind":"agent_provider_request","is_error":false,"finish_reason":"stop","usage":{}}`, fixture.modelRequestID)
-		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_end_"+fixture.toolUseEventID, sequence, "span.model_request_end", payload, payload, "internal", false)
+		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_end_"+fixture.toolUseEventID, sequence, "span.model_request_end", payload, "internal", false)
 	}
 	return fixture
 }
 
-func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture, threadID string, eventID string, sequence int64, eventType string, payloadJSON string, projectionJSON string, visibility string, sessionVisible bool) {
+func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture, threadID string, eventID string, sequence int64, eventType string, payloadJSON string, visibility string, sessionVisible bool) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, '{}',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON); err != nil {
+		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID); err != nil {
 		t.Fatalf("seed %s event %s: %v", eventType, eventID, err)
 	}
 }

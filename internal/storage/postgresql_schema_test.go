@@ -131,6 +131,14 @@ func TestInitializePostgreSQLSchemaCreatesVersionOneTables(t *testing.T) {
 	if !equalStringSlices(got, expected) {
 		t.Errorf("tables in isolated schema = %v; want exactly %v", got, expected)
 	}
+	assertPrimaryKeyColumns(t, db, schema, "session_bridge_operations", []string{
+		"workspace_id",
+		"session_id",
+		"session_thread_id",
+		"operation",
+		"source_kind",
+		"idempotency_key",
+	})
 }
 
 func TestWorkspaceIDColumnsHaveNoDefault(t *testing.T) {
@@ -345,6 +353,9 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 		"interrupt_control",
 		"tool_confirmation",
 		"task_notification",
+		"agent_mail",
+		"approval_review",
+		"rejection",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("session_runtime_inbox_kind_shape missing runtime input kind %q: %s", required, definition)
@@ -360,6 +371,143 @@ func TestSessionRuntimeInboxKindShapeOnlyAllowsRuntimeInputKinds(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeInboxStatusShapeIncludesParkedDelivery(t *testing.T) {
+	db, schema := newIsolatedPostgreSQLSchemaDB(t)
+	definition := readCheckConstraintDefinition(t, db, schema, "session_runtime_inbox", "session_runtime_inbox_status_shape")
+	for _, required := range []string{
+		"queued",
+		"delivering",
+		"accepted",
+		"parked",
+		"dead_lettered",
+		"committed",
+		"cancelled",
+	} {
+		if !strings.Contains(definition, required) {
+			t.Fatalf("session_runtime_inbox_status_shape missing status %q: %s", required, definition)
+		}
+	}
+	predicate := readIndexPredicate(t, db, schema, "idx_session_runtime_inbox_repair")
+	for _, required := range []string{"queued", "delivering", "accepted", "parked", "dead_lettered"} {
+		if !strings.Contains(predicate, required) {
+			t.Fatalf("runtime inbox repair predicate missing status %q: %s", required, predicate)
+		}
+	}
+}
+
+func TestSessionRuntimeInboxBindingShapeRequiresCompleteDeliveryIdentity(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_inbox_binding", "sesn_inbox_binding")
+	if _, err := admin.Exec(`INSERT INTO session_threads (
+		workspace_id, id, session_id, role, visibility, status,
+		created_at, last_active_at, updated_at
+	) VALUES (
+		'workspace_inbox_binding', 'thr_inbox_binding', 'sesn_inbox_binding',
+		'main', 'public', 'idle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("seed inbox binding thread: %v", err)
+	}
+	insert := func(id string, statusValue string, bindingID any, generation any, podUID any) error {
+		_, err := admin.Exec(`INSERT INTO session_runtime_inbox (
+			workspace_id, session_id, session_thread_id, runtime_input_id,
+			input_kind, event_ids_json, status, binding_id, binding_generation,
+			target_pod_uid, created_at, updated_at
+		) VALUES (
+			'workspace_inbox_binding', 'sesn_inbox_binding', 'thr_inbox_binding', $1,
+			'messages', '[]', $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+		)`, id, statusValue, bindingID, generation, podUID)
+		return err
+	}
+	if err := insert("rin_inbox_queued_unbound", "queued", nil, nil, nil); err != nil {
+		t.Fatalf("insert unbound queued inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_delivering_bound", "delivering", "bind_inbox", int64(1), "pod_inbox"); err != nil {
+		t.Fatalf("insert bound delivering inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_cancelled_unbound", "cancelled", nil, nil, nil); err != nil {
+		t.Fatalf("insert unbound cancelled inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_cancelled_bound", "cancelled", "bind_inbox", int64(1), "pod_inbox"); err != nil {
+		t.Fatalf("insert bound cancelled inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_dead_lettered_unbound", "dead_lettered", nil, nil, nil); err != nil {
+		t.Fatalf("insert unbound dead-lettered inbox row: %v", err)
+	}
+	if err := insert("rin_inbox_dead_lettered_bound", "dead_lettered", "bind_inbox", int64(1), "pod_inbox"); err != nil {
+		t.Fatalf("insert bound dead-lettered inbox row: %v", err)
+	}
+	invalidShapes := []struct {
+		name       string
+		status     string
+		bindingID  any
+		generation any
+		podUID     any
+	}{
+		{name: "queued cannot carry binding", status: "queued", bindingID: "bind_inbox", generation: int64(1), podUID: "pod_inbox"},
+		{name: "delivering requires binding", status: "delivering"},
+	}
+	for _, statusValue := range []string{"parked", "cancelled", "dead_lettered"} {
+		invalidShapes = append(invalidShapes,
+			struct {
+				name       string
+				status     string
+				bindingID  any
+				generation any
+				podUID     any
+			}{name: statusValue + " identity without pod", status: statusValue, bindingID: "bind_inbox", generation: int64(1)},
+			struct {
+				name       string
+				status     string
+				bindingID  any
+				generation any
+				podUID     any
+			}{name: statusValue + " identity without generation", status: statusValue, bindingID: "bind_inbox", podUID: "pod_inbox"},
+			struct {
+				name       string
+				status     string
+				bindingID  any
+				generation any
+				podUID     any
+			}{name: statusValue + " identity without binding", status: statusValue, generation: int64(1), podUID: "pod_inbox"},
+		)
+	}
+	for _, test := range invalidShapes {
+		t.Run(test.name, func(t *testing.T) {
+			if err := insert("rin_inbox_invalid_"+strings.ReplaceAll(test.name, " ", "_"), test.status, test.bindingID, test.generation, test.podUID); err == nil {
+				t.Fatal("invalid inbox binding shape was accepted")
+			}
+		})
+	}
+}
+
+func TestSandboxToolTerminalResultRequiresNonemptyDigest(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_tool_digest", "sesn_tool_digest")
+	if _, err := admin.Exec(`INSERT INTO session_threads (
+		workspace_id, id, session_id, role, visibility, status,
+		created_at, last_active_at, updated_at
+	) VALUES (
+		'workspace_tool_digest', 'thr_tool_digest', 'sesn_tool_digest',
+		'main', 'public', 'idle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("seed tool digest thread: %v", err)
+	}
+	_, err := admin.Exec(`INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, model_tool_call_id,
+		execution_state, execution_attempt_generation, result_json, result_digest,
+		created_at, updated_at
+	) VALUES (
+		'workspace_tool_digest', 'sesn_tool_digest', 'thr_tool_digest', 'sevt_tool_digest', 'sandbox_tool',
+		'input_hash', 'bash', '{}', 'committed', 'call_tool_digest',
+		'terminal_unconsumed', 1, '{"status":"success"}', '',
+		CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+	)`)
+	if err == nil {
+		t.Fatal("terminal sandbox result accepted an empty digest")
+	}
+}
+
 func TestSessionBackgroundTaskStatusShapeIncludesTerminalFacts(t *testing.T) {
 	db, schema := newIsolatedPostgreSQLSchemaDB(t)
 	definition := readCheckConstraintDefinition(t, db, schema, "session_background_tasks", "session_background_tasks_status_shape")
@@ -369,11 +517,14 @@ func TestSessionBackgroundTaskStatusShapeIncludesTerminalFacts(t *testing.T) {
 		"failed",
 		"cancelled",
 		"expired",
-		"cancelled_by_cleanup",
-		"stale",
 	} {
 		if !strings.Contains(definition, "'"+required+"'::text") {
 			t.Fatalf("session_background_tasks_status_shape = %q; missing %q", definition, required)
+		}
+	}
+	for _, retired := range []string{"cancelled_by_cleanup", "stale"} {
+		if strings.Contains(definition, "'"+retired+"'::text") {
+			t.Fatalf("session_background_tasks_status_shape = %q; still admits retired %q", definition, retired)
 		}
 	}
 }
@@ -508,7 +659,6 @@ func TestSessionEventsSchemaMatchesDraftLedger(t *testing.T) {
 		"created_at",
 		"updated_at",
 		"processed_at",
-		"preparation_attempt_id",
 	}
 	if !equalStringSlices(columns, wantColumns) {
 		t.Fatalf("session_events columns = %v; want %v", columns, wantColumns)
@@ -546,7 +696,7 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		"session_messages": {
 			"workspace_id", "session_id", "session_thread_id", "message_id",
 			"sequence", "kind", "data_json", "source_event_id", "last_event_id",
-			"repair_key", "created_at", "updated_at", "model_request_id",
+			"repair_key", "model_request_id", "created_at", "updated_at",
 		},
 		"session_pending_tool_uses": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
@@ -555,21 +705,23 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_background_tasks": {
 			"workspace_id", "session_id", "session_thread_id", "task_id",
-			"source_tool_use_event_id", "binding_id", "sandbox_id", "provider_session_id",
-			"provider_command_id", "provider_command_metadata_json", "stdin_write_sequence", "status",
-			"terminal_event_id", "created_at", "updated_at", "terminal_at",
+			"source_tool_use_event_id", "binding_id", "sandbox_id", "provider", "binding_revision",
+			"provider_session_id", "provider_command_id", "provider_command_metadata_json", "resource_roots_json",
+			"stdin_write_sequence", "status", "terminal_result_json", "terminal_result_digest", "terminal_event_id",
+			"reconcile_generation", "next_poll_at", "release_operation_id", "created_at", "updated_at", "terminal_at",
 		},
 		"session_runtime_inbox": {
 			"workspace_id", "session_id", "session_thread_id", "runtime_input_id",
-			"input_kind", "event_ids_json", "sequence_from", "sequence_to", "status",
+			"input_kind", "rejection_reason_code", "event_ids_json", "sequence_from", "sequence_to", "status",
 			"binding_id", "binding_generation", "target_pod_uid", "created_at",
 			"updated_at", "committed_at",
 		},
 		"session_runtime_status": {
 			"workspace_id", "session_id", "status", "status_event_id", "idle_since",
+			"running_since", "active_seconds_total",
 			"cleanup_after", "cleanup_enqueued_at", "cleanup_claimed_at",
 			"cleanup_job_id", "binding_id", "binding_generation", "created_at",
-			"updated_at", "running_since", "active_seconds_total",
+			"updated_at",
 		},
 		"session_turn_retries": {
 			"workspace_id", "session_id", "session_thread_id", "provider_attempts",
@@ -577,23 +729,29 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_bridge_operations": {
 			"workspace_id", "session_id", "session_thread_id", "operation",
-			"idempotency_key", "request_hash", "ack_status", "runtime_input_id",
-			"runtime_write_id", "error_code", "result_json", "stdin_write_seq", "created_at",
-			"updated_at",
+			"idempotency_key", "source_kind", "request_hash", "declaration_digest",
+			"receipt_json", "ack_status", "runtime_input_id", "runtime_write_id",
+			"error_code", "result_json", "stdin_write_seq", "created_at", "updated_at",
+		},
+		"session_thread_context_prefixes": {
+			"workspace_id", "session_id", "child_thread_id", "parent_thread_id",
+			"parent_boundary_event_id", "entries_json", "created_at",
+			"consumed_by_checkpoint_message_id",
 		},
 		"session_runtime_tool_results": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
 			"tool_kind", "normalized_input_hash", "tool_name", "input_json",
-			"ack_status", "result_json", "background_task_started", "task_id",
+			"ack_status", "result_json", "model_tool_call_id", "execution_state",
+			"execution_attempt_generation", "waiting_activation_operation_id",
+			"waiting_materialization_operation_id", "authorized_binding_revision",
+			"authorized_provider_resource_id", "preparation_deadline", "result_digest",
+			"provider_command_reference_json", "cancel_requested_at", "cancel_state",
+			"cancel_submitted_at", "consumed_by_terminal_event_id", "consumption_reason",
+			"helper_recovery_count", "background_task_started", "task_id",
+			"background_operation_kind", "background_operation_state", "background_request_id",
+			"background_task_id", "background_max_output_tokens", "background_write_sequence",
 			"memory_projection_state", "mcp_claim_status", "mcp_claim_owner_request_id",
 			"mcp_claim_lease_expires_at", "created_at", "updated_at",
-		},
-		"session_preparations": {
-			"workspace_id", "session_id", "preparation_attempt_id", "environment_id",
-			"environment_generation", "sandbox_id", "status", "resource_cred_expires_at",
-			"resource_roots_json", "skills_index_json", "resource_helper_recovery_count", "failure_stage", "last_error_kind", "failure_reason",
-			"retryable", "superseded_at", "created_at", "updated_at", "ready_at", "failed_at",
-			"failure_resource_id", "failure_resource_url",
 		},
 		"session_git_tickets": {
 			"workspace_id", "session_id", "ticket_id", "token_hash", "status",
@@ -609,13 +767,27 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			"last_size_bytes", "last_sha256", "last_captured_at",
 			"created_at", "updated_at",
 		},
+		"sandbox_output_capture_operations": {
+			"workspace_id", "session_id", "session_thread_id", "finish_idle_write_id", "capture_generation",
+			"state", "binding_id", "binding_generation", "logical_sandbox_id", "provider", "provider_resource_id", "sandbox_binding_revision", "manifest_json", "skipped_json",
+			"scan_records_json", "failure_kind", "failure_detail", "outcome_state", "outcome_digest", "retain_until",
+			"cleanup_generation", "created_at", "updated_at", "staged_at", "adopted_at", "cleaned_at",
+		},
+		"sandbox_output_capture_blobs": {
+			"workspace_id", "session_id", "finish_idle_write_id", "capture_generation",
+			"source_path", "blob_pointer", "size_bytes", "sha256", "state", "file_id",
+			"created_at", "updated_at", "uploaded_at", "adopted_at",
+		},
 		"queue_jobs": {
-			"id", "workspace_id", "kind", "partition_key", "dedupe_key",
+			"id", "workspace_id", "kind", "partition_key", "queue_partition_sequence", "dedupe_key",
 			"payload_version", "status", "payload_json", "priority",
 			"lease_token", "leased_by", "leased_at", "leased_until",
-			"attempt_count", "max_attempts", "available_at", "created_at",
+			"attempt_count", "defer_count", "max_attempts", "available_at", "created_at",
 			"updated_at", "acknowledged_at", "cancelled_at",
 			"dead_lettered_at", "last_error_kind", "last_error_message",
+		},
+		"queue_partition_counters": {
+			"workspace_id", "partition_key", "last_sequence", "created_at", "updated_at",
 		},
 	}
 	for table, wantColumns := range required {
@@ -626,6 +798,244 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 			}
 			assertTableRLSForced(t, db, schema, table)
 		})
+	}
+}
+
+func TestQueuePartitionSequenceSchema(t *testing.T) {
+	_, admin, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	assertQueuePartitionSequenceSchema(t, admin, schema)
+}
+
+func TestSandboxQueueSchemaCarriesClosedKindsMaintenanceAndCleanupIndexes(t *testing.T) {
+	_, admin, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	ctx := context.Background()
+
+	sandboxKinds := []string{
+		"sandbox_tool_execute",
+		"sandbox_activate",
+		"sandbox_materialize",
+		"sandbox_release",
+		"sandbox_tool_cancel",
+		"sandbox_output_capture",
+		"sandbox_output_capture_cleanup",
+		"sandbox_memory_projection",
+		"sandbox_background_command",
+		"sandbox_background_reconcile",
+	}
+	kindConstraint := readCheckConstraintDefinition(t, admin, schema, "queue_jobs", "queue_jobs_kind_shape")
+	for _, kind := range sandboxKinds {
+		if !strings.Contains(kindConstraint, "'"+kind+"'") {
+			t.Fatalf("queue_jobs kind constraint = %q; missing %s", kindConstraint, kind)
+		}
+	}
+
+	for _, index := range []struct {
+		name      string
+		fragments []string
+	}{
+		{
+			name: "idx_queue_jobs_sandbox_terminal_retention",
+			fragments: []string{
+				"COALESCE(acknowledged_at, cancelled_at, dead_lettered_at)",
+				"status = ANY",
+				"sandbox_tool_execute",
+				"sandbox_background_reconcile",
+			},
+		},
+		{
+			name: "idx_queue_jobs_sandbox_session_cleanup",
+			fragments: []string{
+				"workspace_id",
+				"payload_json",
+				"session_id",
+				"status",
+				"sandbox_tool_execute",
+				"sandbox_background_reconcile",
+			},
+		},
+	} {
+		var definition string
+		if err := admin.QueryRowContext(ctx,
+			`SELECT indexdef
+			   FROM pg_indexes
+			  WHERE schemaname = $1 AND tablename = 'queue_jobs' AND indexname = $2`,
+			schema,
+			index.name,
+		).Scan(&definition); err != nil {
+			t.Fatalf("read %s: %v", index.name, err)
+		}
+		for _, fragment := range index.fragments {
+			if !strings.Contains(definition, fragment) {
+				t.Fatalf("%s definition = %q; missing %q", index.name, definition, fragment)
+			}
+		}
+		predicate := readIndexPredicate(t, admin, schema, index.name)
+		if got := strings.Count(predicate, "sandbox_"); got != len(sandboxKinds) {
+			t.Fatalf("%s Sandbox kind count = %d; want exact set of %d: %q", index.name, got, len(sandboxKinds), predicate)
+		}
+		if index.name == "idx_queue_jobs_sandbox_terminal_retention" {
+			for _, status := range []string{"acknowledged", "cancelled", "dead_lettered"} {
+				if !strings.Contains(definition, status) {
+					t.Fatalf("%s definition = %q; missing terminal status %s", index.name, definition, status)
+				}
+			}
+			for _, status := range []string{"pending", "leased"} {
+				if strings.Contains(definition, "'"+status+"'") {
+					t.Fatalf("%s definition = %q; unexpectedly indexes %s", index.name, definition, status)
+				}
+			}
+		}
+	}
+
+	for _, table := range []string{"queue_jobs", "queue_partition_counters"} {
+		var maintenancePolicyCount int
+		if err := admin.QueryRowContext(ctx,
+			`SELECT COUNT(*)
+			   FROM pg_policies
+			  WHERE schemaname = $1
+			    AND tablename = $2
+			    AND policyname = 'queue_maintenance'
+			    AND qual LIKE '%tetral.queue_maintenance%'
+			    AND with_check LIKE '%tetral.queue_maintenance%'`,
+			schema, table,
+		).Scan(&maintenancePolicyCount); err != nil {
+			t.Fatalf("read %s maintenance policy: %v", table, err)
+		}
+		if maintenancePolicyCount != 1 {
+			t.Fatalf("%s maintenance policy count = %d; want 1", table, maintenancePolicyCount)
+		}
+	}
+}
+
+func assertQueuePartitionSequenceSchema(t *testing.T, db *sql.DB, schema string) {
+	t.Helper()
+	assertTableRLSForced(t, db, schema, "queue_partition_counters")
+	assertTableRLSForced(t, db, schema, "queue_jobs")
+	assertPrimaryKeyColumns(t, db, schema, "queue_partition_counters", []string{"workspace_id", "partition_key"})
+
+	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_partition_sequence"); !equalStringSlices(columns, []string{"workspace_id", "partition_key", "queue_partition_sequence"}) {
+		t.Fatalf("queue partition sequence index columns = %v; want workspace_id, partition_key, queue_partition_sequence", columns)
+	}
+	if !readIndexIsUnique(t, db, schema, "idx_queue_jobs_partition_sequence") {
+		t.Fatal("queue partition sequence index is not unique")
+	}
+	if columns := readIndexColumns(t, db, schema, "idx_queue_jobs_available"); !equalStringSlices(columns, []string{
+		"workspace_id", "kind", "status", "partition_key", "priority", "available_at", "queue_partition_sequence",
+	}) {
+		t.Fatalf("queue available index columns = %v; want queue scan order", columns)
+	}
+	if predicate := readIndexPredicate(t, db, schema, "idx_queue_jobs_available"); !strings.Contains(predicate, "status = 'pending'") {
+		t.Fatalf("queue available index predicate = %q; want pending jobs only", predicate)
+	}
+
+	for _, constraint := range []struct {
+		table    string
+		name     string
+		fragment string
+	}{
+		{table: "queue_partition_counters", name: "queue_partition_counters_partition_shape", fragment: "partition_key <> ''"},
+		{table: "queue_partition_counters", name: "queue_partition_counters_sequence_shape", fragment: "last_sequence >= 0"},
+		{table: "queue_jobs", name: "queue_jobs_partition_sequence_shape", fragment: "queue_partition_sequence > 0"},
+		{table: "queue_jobs", name: "queue_jobs_defer_count_shape", fragment: "defer_count >= 0"},
+	} {
+		definition := readCheckConstraintDefinition(t, db, schema, constraint.table, constraint.name)
+		if !strings.Contains(definition, constraint.fragment) {
+			t.Fatalf("%s definition = %q; want %q", constraint.name, definition, constraint.fragment)
+		}
+	}
+
+	var nullable string
+	var defaultValue sql.NullString
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT is_nullable, column_default
+		   FROM information_schema.columns
+		  WHERE table_schema = $1
+		    AND table_name = 'queue_jobs'
+		    AND column_name = 'queue_partition_sequence'`,
+		schema,
+	).Scan(&nullable, &defaultValue); err != nil {
+		t.Fatalf("read queue partition sequence column shape: %v", err)
+	}
+	if nullable != "NO" || defaultValue.Valid {
+		t.Fatalf("queue partition sequence column nullable=%q default=%q; want required with no default", nullable, defaultValue.String)
+	}
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT is_nullable, column_default
+		   FROM information_schema.columns
+		  WHERE table_schema = $1
+		    AND table_name = 'queue_jobs'
+		    AND column_name = 'defer_count'`,
+		schema,
+	).Scan(&nullable, &defaultValue); err != nil {
+		t.Fatalf("read queue defer count column shape: %v", err)
+	}
+	if nullable != "NO" || !defaultValue.Valid || defaultValue.String != "0" {
+		t.Fatalf("queue defer count column nullable=%q default=%q; want required default zero", nullable, defaultValue.String)
+	}
+
+	const (
+		workspaceID = "workspace_queue_sequence"
+		partition   = "session:workspace_queue_sequence:sesn_queue_sequence"
+		now         = "2026-07-29T00:00:00Z"
+	)
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO queue_partition_counters (
+			workspace_id, partition_key, last_sequence, created_at, updated_at
+		) VALUES ($1, $2, 1, $3, $3)`,
+		workspaceID,
+		partition,
+		now,
+	); err != nil {
+		t.Fatalf("insert queue partition counter: %v", err)
+	}
+	insertJob := func(id string, sequence int64) error {
+		t.Helper()
+		_, err := db.ExecContext(context.Background(),
+			`INSERT INTO queue_jobs (
+				id, workspace_id, kind, partition_key, queue_partition_sequence,
+				payload_version, status, payload_json, priority, attempt_count,
+				defer_count, max_attempts, available_at, created_at, updated_at
+			) VALUES ($1, $2, 'cleanup_session', $3, $4, 1, 'pending', '{}', 0, 0, 0, 10, $5, $5, $5)`,
+			id,
+			workspaceID,
+			partition,
+			sequence,
+			now,
+		)
+		return err
+	}
+	if err := insertJob("qjob_queue_sequence_one", 1); err != nil {
+		t.Fatalf("insert first queue sequence: %v", err)
+	}
+	if err := insertJob("qjob_queue_sequence_duplicate", 1); err == nil {
+		t.Fatal("duplicate queue partition sequence inserted successfully")
+	}
+	if err := insertJob("qjob_queue_sequence_zero", 0); err == nil {
+		t.Fatal("nonpositive queue partition sequence inserted successfully")
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO queue_jobs (
+			id, workspace_id, kind, partition_key, queue_partition_sequence,
+			payload_version, status, payload_json, priority, attempt_count,
+			defer_count, max_attempts, available_at, created_at, updated_at
+		) VALUES (
+			'qjob_queue_negative_defer', $1, 'cleanup_session', $2, 2,
+			1, 'pending', '{}', 0, 0, -1, 10, $3, $3, $3
+		)`,
+		workspaceID,
+		partition,
+		now,
+	); err == nil {
+		t.Fatal("negative queue defer count inserted successfully")
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO queue_partition_counters (
+			workspace_id, partition_key, last_sequence, created_at, updated_at
+		) VALUES ($1, 'session:invalid', -1, $2, $2)`,
+		workspaceID,
+		now,
+	); err == nil {
+		t.Fatal("negative queue partition counter inserted successfully")
 	}
 }
 
@@ -774,7 +1184,7 @@ func TestSessionRuntimeToolResultsMemoryProjectionStateShape(t *testing.T) {
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("seed session thread: %v", err)
 	}
-	for _, state := range []any{nil, "pending", "refreshed", "skipped_cold"} {
+	for _, state := range []any{nil, "pending", "refreshed", "skipped_cold", "failed"} {
 		toolUseEventID := fmt.Sprintf("tool_%v", state)
 		if state == nil {
 			toolUseEventID = "tool_null"
@@ -809,6 +1219,39 @@ func TestSessionRuntimeToolResultsMemoryProjectionStateShape(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeToolResultsKeepsSandboxExecutionFieldsKindScoped(t *testing.T) {
+	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, admin, "workspace_tool_kind_scope", "sesn_tool_kind_scope")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_threads (
+		workspace_id, id, session_id, role, visibility, status, created_at, last_active_at, updated_at
+	) VALUES ('workspace_tool_kind_scope', 'thr_tool_kind_scope', 'sesn_tool_kind_scope', 'main', 'public', 'idle',
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed session thread: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		created_at, updated_at
+	) VALUES (
+		'workspace_tool_kind_scope', 'sesn_tool_kind_scope', 'thr_tool_kind_scope', 'evt_mcp_null_result', 'mcp',
+		'hash_mcp_null_result', 'mcp:server/tool', '{}', 'committed', NULL,
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	)`); err == nil {
+		t.Fatal("MCP row accepted a Sandbox-only nullable result body")
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		execution_state, execution_attempt_generation, created_at, updated_at
+	) VALUES (
+		'workspace_tool_kind_scope', 'sesn_tool_kind_scope', 'thr_tool_kind_scope', 'evt_memory_execution', 'memory',
+		'hash_memory_execution', 'memory', '{}', 'committed', '{}', 'pending', 1,
+		'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+	)`); err == nil {
+		t.Fatal("memory row accepted Sandbox execution state")
+	}
+}
+
 func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 	_, admin, _ := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
 	seedStorageSchemaSession(t, admin, "workspace_mcp_claim", "sesn_mcp_claim")
@@ -825,8 +1268,8 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
 			created_at, updated_at
 		) VALUES (
-			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_sandbox_null_claim', 'sandbox_tool',
-			'hash_sandbox_null_claim', 'Bash', '{}', 'committed', '{}',
+			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_memory_null_claim', 'memory',
+			'hash_memory_null_claim', 'memory', '{}', 'committed', '{}',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err != nil {
 		t.Fatalf("insert non-MCP row with null claim state: %v", err)
@@ -839,7 +1282,7 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'workspace_mcp_claim'
 		    AND session_id = 'sesn_mcp_claim'
-		    AND tool_use_event_id = 'tool_sandbox_null_claim'`).Scan(&claimStatus, &claimOwner, &claimLease); err != nil {
+		    AND tool_use_event_id = 'tool_memory_null_claim'`).Scan(&claimStatus, &claimOwner, &claimLease); err != nil {
 		t.Fatalf("read non-MCP claim state: %v", err)
 	}
 	if claimStatus.Valid || claimOwner.Valid || claimLease.Valid {
@@ -870,8 +1313,20 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 			'hash_mcp_claim', 'github/create_issue', '{}', 'committed', '{}',
 			'in_flight', 'req_claim', '2026-01-01T00:03:00Z',
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
-		)`); err != nil {
+	)`); err != nil {
 		t.Fatalf("insert in-flight MCP claim: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			mcp_claim_status, created_at, updated_at
+		) VALUES (
+			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_mcp_consumed', 'mcp',
+			'hash_mcp_consumed', 'github/create_issue', '{}', 'committed', '{}',
+			'consumed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+		)`); err != nil {
+		t.Fatalf("insert consumed MCP materialization: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_tool_results (
@@ -880,8 +1335,8 @@ func TestSessionRuntimeToolResultsMCPClaimStateShape(t *testing.T) {
 			mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at,
 			created_at, updated_at
 		) VALUES (
-			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_sandbox_claim', 'sandbox_tool',
-			'hash_sandbox_claim', 'Bash', '{}', 'committed', '{}',
+			'workspace_mcp_claim', 'sesn_mcp_claim', 'thr_mcp_claim', 'tool_memory_claim', 'memory',
+			'hash_memory_claim', 'memory', '{}', 'committed', '{}',
 			'stored', NULL, NULL,
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err == nil {
@@ -1058,6 +1513,203 @@ func TestSessionRuntimeBindingsSchemaShapeAndRLS(t *testing.T) {
 	}
 }
 
+func TestSandboxBindingAndLifecycleOperationSchemaShape(t *testing.T) {
+	_, db, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	for _, table := range []string{"session_sandbox_bindings", "sandbox_lifecycle_operations"} {
+		assertTableRLSForced(t, db, schema, table)
+	}
+	assertPrimaryKeyColumns(t, db, schema, "session_sandbox_bindings", []string{"workspace_id", "session_id"})
+	assertUniqueConstraintColumns(t, db, schema, "session_sandbox_bindings", []string{"workspace_id", "logical_sandbox_id"})
+	if columns := readIndexColumns(t, db, schema, "idx_session_sandbox_bindings_provider_resource_unique"); !equalStringSlices(columns, []string{"provider", "provider_resource_id"}) {
+		t.Fatalf("provider-resource index columns = %v", columns)
+	}
+	if !readIndexIsUnique(t, db, schema, "idx_session_sandbox_bindings_provider_resource_unique") {
+		t.Fatal("provider-resource index is not unique")
+	}
+	if predicate := readIndexPredicate(t, db, schema, "idx_session_sandbox_bindings_provider_resource_unique"); !strings.Contains(predicate, "provider_resource_id IS NOT NULL") {
+		t.Fatalf("provider-resource index predicate = %q", predicate)
+	}
+	assertPrimaryKeyColumns(t, db, schema, "sandbox_lifecycle_operations", []string{"workspace_id", "operation_id"})
+	if !slices.Contains(readColumnNames(t, db, schema, "sandbox_lifecycle_operations"), "materialization_resources_json") {
+		t.Fatal("sandbox lifecycle operations is missing immutable materialization resources")
+	}
+	if !slices.Contains(readColumnNames(t, db, schema, "sessions"), "sandbox_resource_revision") {
+		t.Fatal("sessions is missing sandbox_resource_revision")
+	}
+
+	seedStorageSchemaSession(t, db, "workspace_sandbox_binding", "sesn_sandbox_binding")
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, binding_revision,
+		materialized_resource_revision, resource_roots_json,
+		provider_metadata_json, created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sesn_sandbox_binding', 'sbox_binding',
+		'env_sesn_sandbox_binding', 1, 'daytona', 1, 0, '[]', '{}',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert daytona binding: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_sandbox_bindings SET provider = 'tetral' WHERE workspace_id = 'workspace_sandbox_binding' AND session_id = 'sesn_sandbox_binding'`); err == nil {
+		t.Fatal("retired tetral provider label was accepted")
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_sandbox_bindings SET provider_resource_id = 'sandbox_shared_provider_id' WHERE workspace_id = 'workspace_sandbox_binding' AND session_id = 'sesn_sandbox_binding'`); err != nil {
+		t.Fatalf("set first provider resource id: %v", err)
+	}
+	seedStorageSchemaSession(t, db, "workspace_sandbox_binding_other", "sesn_sandbox_binding_other")
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		materialized_resource_revision, resource_roots_json,
+		provider_metadata_json, created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding_other', 'sesn_sandbox_binding_other', 'sbox_binding_other',
+		'env_sesn_sandbox_binding_other', 1, 'daytona', 'sandbox_shared_provider_id', 1,
+		0, '[]', '{}', '2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err == nil {
+		t.Fatal("one provider resource was accepted by two workspaces")
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		observed_binding_revision, target_environment_generation,
+		provider_create_name, provider_request_labels_json,
+		queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sop_create', 'sesn_sandbox_binding', 'sbox_binding',
+		'create', 'pending', 1, 1, 'tetral-sbox-binding', '{"workspace_id":"workspace_sandbox_binding"}',
+		'qjob_create', 'sandbox_activate', 'sandbox-lifecycle:workspace_sandbox_binding:sbox_binding',
+		'sandbox_activate:workspace_sandbox_binding:sbox_binding:sop_create',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert lifecycle operation: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations SET state = 'mystery' WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err == nil {
+		t.Fatal("unknown lifecycle state was accepted")
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations SET state = 'waiting_activation' WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err == nil {
+		t.Fatal("materialization-only state was accepted for an activation operation")
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
+		SET state = 'completed', completed_at = '2026-07-31T00:01:00Z'
+		WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_create'`); err != nil {
+		t.Fatalf("complete first lifecycle operation: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		observed_binding_revision, target_environment_generation,
+		provider_create_name, provider_request_labels_json,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sop_waiting_artifact', 'sesn_sandbox_binding', 'sbox_binding',
+		'create', 'waiting_artifact', 1, 1, 'sbox_binding', '{"workspace_id":"workspace_sandbox_binding"}',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert lifecycle operation before queue notification: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
+		SET queue_job_id = 'qjob_partial'
+		WHERE workspace_id = 'workspace_sandbox_binding' AND operation_id = 'sop_waiting_artifact'`); err == nil {
+		t.Fatal("partial lifecycle queue identity was accepted")
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO sandbox_lifecycle_operations (
+		workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
+		target_provider_resource_id, release_reason,
+		queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_binding', 'sop_release', 'sesn_sandbox_binding', 'sbox_binding',
+		'release', 'pending', 'provider_old', 'replaced_handle',
+		'qjob_release', 'sandbox_release', 'sandbox-lifecycle:workspace_sandbox_binding:sbox_binding',
+		'sandbox_release:workspace_sandbox_binding:sbox_binding:sop_release',
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert replaced-handle release: %v", err)
+	}
+}
+
+func TestSandboxExecutionHandoffSchemaShape(t *testing.T) {
+	_, db, schema := newIsolatedPostgreSQLSchemaDBWithAdmin(t)
+	seedStorageSchemaSession(t, db, "workspace_sandbox_execution", "sesn_sandbox_execution")
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_threads (
+		workspace_id, session_id, id, role, status, visibility, created_at, last_active_at, updated_at
+	) VALUES (
+		'workspace_sandbox_execution', 'sesn_sandbox_execution', 'thr_sandbox_execution',
+		'main', 'idle', 'internal', '2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert execution thread: %v", err)
+	}
+	columns := readColumnNames(t, db, schema, "session_runtime_tool_results")
+	for _, column := range []string{
+		"model_tool_call_id", "execution_state", "execution_attempt_generation",
+		"waiting_activation_operation_id", "waiting_materialization_operation_id",
+		"authorized_binding_revision", "authorized_provider_resource_id",
+		"preparation_deadline", "result_digest", "provider_command_reference_json",
+		"cancel_requested_at", "cancel_state", "cancel_submitted_at",
+		"consumed_by_terminal_event_id", "consumption_reason", "helper_recovery_count",
+	} {
+		if !slices.Contains(columns, column) {
+			t.Fatalf("session_runtime_tool_results is missing %s", column)
+		}
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
+		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+		normalized_input_hash, tool_name, input_json, ack_status, result_json,
+		model_tool_call_id, execution_state, execution_attempt_generation,
+		created_at, updated_at
+	) VALUES (
+		'workspace_sandbox_execution', 'sesn_sandbox_execution', 'thr_sandbox_execution',
+		'evt_sandbox_execution', 'sandbox_tool', 'input_hash', 'bash', '{}', 'committed', NULL,
+		'call_sandbox_execution', 'pending', 1,
+		'2026-07-31T00:00:00Z', '2026-07-31T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert pending Sandbox execution handoff: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE session_runtime_tool_results
+		SET cancel_state = 'submitted'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`); err == nil {
+		t.Fatal("submitted cancellation without request/submission timestamps was accepted")
+	}
+	assertSandboxExecutionShapeRejected(t, db, `UPDATE session_runtime_tool_results
+		SET execution_state = 'consumed'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`, "consumed execution without terminal event and reason")
+	assertSandboxExecutionShapeRejected(t, db, `UPDATE session_runtime_tool_results
+		SET consumed_by_terminal_event_id = 'evt_missing', consumption_reason = 'runtime_terminated'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`, "non-consumed execution with consumption fields")
+	mustInsertSessionEventLedgerRow(t, db, "workspace_sandbox_execution", "sesn_sandbox_execution", "evt_sandbox_consumed", 1)
+	assertSandboxExecutionShapeRejected(t, db, `UPDATE session_runtime_tool_results
+		SET execution_state = 'consumed', result_digest = '',
+		    consumed_by_terminal_event_id = 'evt_sandbox_consumed', consumption_reason = 'runtime_terminated'
+		WHERE workspace_id = 'workspace_sandbox_execution'
+		  AND session_id = 'sesn_sandbox_execution'
+		  AND session_thread_id = 'thr_sandbox_execution'
+		  AND tool_use_event_id = 'evt_sandbox_execution'`, "consumed execution with empty digest")
+}
+
+func assertSandboxExecutionShapeRejected(t *testing.T, db *sql.DB, statement string, description string) {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin %s transaction: %v", description, err)
+	}
+	_, executionErr := tx.ExecContext(context.Background(), statement)
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback %s transaction: %v", description, err)
+	}
+	if executionErr == nil {
+		t.Fatalf("schema accepted %s", description)
+	}
+}
+
 func assertSessionMCPManifestsSchemaShapeAndRLS(t *testing.T, db *sql.DB, schema string) {
 	t.Helper()
 	columns := readColumnNames(t, db, schema, "session_mcp_manifests")
@@ -1068,10 +1720,10 @@ func assertSessionMCPManifestsSchemaShapeAndRLS(t *testing.T, db *sql.DB, schema
 		"tools_json",
 		"manifest_etag",
 		"manifest_generation",
-		"created_at",
-		"updated_at",
 		"readiness",
 		"diagnostic",
+		"created_at",
+		"updated_at",
 	}
 	if !equalStringSlices(columns, wantColumns) {
 		t.Fatalf("session_mcp_manifests columns = %v; want %v", columns, wantColumns)
@@ -1099,21 +1751,6 @@ func assertSessionMCPManifestsSchemaShapeAndRLS(t *testing.T, db *sql.DB, schema
 	}
 	if columns := readIndexColumns(t, db, schema, "idx_session_mcp_manifests_session_generation"); !equalStringSlices(columns, []string{"workspace_id", "session_id", "manifest_generation"}) {
 		t.Fatalf("idx_session_mcp_manifests_session_generation columns = %v; want workspace/session/generation", columns)
-	}
-}
-
-func TestSandboxesSchemaEnforcesOneRowPerSession(t *testing.T) {
-	db, schema := newIsolatedPostgreSQLSchemaDB(t)
-	assertTableRLSForced(t, db, schema, "sandboxes")
-	assertPrimaryKeyColumns(t, db, schema, "sandboxes", []string{"id"})
-	if definition := readCheckConstraintDefinition(t, db, schema, "sandboxes", "sandboxes_provider_shape"); !strings.Contains(definition, "provider = 'tetral'::text") {
-		t.Fatalf("sandboxes_provider_shape = %q; want provider fixed to tetral", definition)
-	}
-	if columns := readIndexColumns(t, db, schema, "idx_sandboxes_session_unique"); !equalStringSlices(columns, []string{"workspace_id", "session_id"}) {
-		t.Fatalf("idx_sandboxes_session_unique columns = %v; want workspace_id/session_id", columns)
-	}
-	if predicate := readIndexPredicate(t, db, schema, "idx_sandboxes_session_unique"); predicate != "" {
-		t.Fatalf("idx_sandboxes_session_unique predicate = %q; want full-session uniqueness", predicate)
 	}
 }
 
@@ -1703,9 +2340,11 @@ func expectedVersionOneControlPlaneTables() []string {
 		"memory_versions",
 		"platform_provider_keys",
 		"queue_jobs",
+		"queue_partition_counters",
 		"request_usage_details",
-		"sandbox_release_idempotency_keys",
-		"sandboxes",
+		"sandbox_lifecycle_operations",
+		"sandbox_output_capture_blobs",
+		"sandbox_output_capture_operations",
 		"session_background_tasks",
 		"session_bridge_operations",
 		"session_event_idempotency_keys",
@@ -1720,7 +2359,6 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_messages",
 		"session_output_captures",
 		"session_pending_tool_uses",
-		"session_preparations",
 		"session_provider_auth",
 		"session_resource_prefix_gc",
 		"session_resources",
@@ -1728,6 +2366,8 @@ func expectedVersionOneControlPlaneTables() []string {
 		"session_runtime_inbox",
 		"session_runtime_status",
 		"session_runtime_tool_results",
+		"session_sandbox_bindings",
+		"session_thread_context_prefixes",
 		"session_threads",
 		"session_transient_attachments",
 		"session_turn_retries",
@@ -2112,6 +2752,24 @@ func readIndexColumns(t *testing.T, db *sql.DB, schema string, indexName string)
 		t.Fatalf("index column rows: %v", err)
 	}
 	return columns
+}
+
+func readIndexIsUnique(t *testing.T, db *sql.DB, schema string, indexName string) bool {
+	t.Helper()
+	var unique bool
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT indexes.indisunique
+		   FROM pg_index indexes
+		   JOIN pg_class index_class ON index_class.oid = indexes.indexrelid
+		   JOIN pg_namespace namespace ON namespace.oid = index_class.relnamespace
+		  WHERE namespace.nspname = $1
+		    AND index_class.relname = $2`,
+		schema,
+		indexName,
+	).Scan(&unique); err != nil {
+		t.Fatalf("query index uniqueness: %v", err)
+	}
+	return unique
 }
 
 func readBaseTableNames(t *testing.T, db *sql.DB, schema string) []string {

@@ -41,7 +41,6 @@ func TestTetralSandboxSchemaBehindStopsBeforeQueueAndListeners(t *testing.T) {
 func validSandboxSchemaEnv() sandboxEnvMap {
 	return sandboxEnvMap{
 		tetralsandbox.EnvPostgresDSN:         "postgres://runtime@postgres/tetral",
-		tetralsandbox.EnvSandboxDriver:       "daytona",
 		tetralsandbox.EnvSandboxBaseImage:    "ghcr.io/tetral-ai/sandbox:0.1.0-alpha.test",
 		tetralsandbox.EnvDaytonaAPIURL:       "https://daytona.example",
 		tetralsandbox.EnvDaytonaAPIKey:       "test-key",
@@ -65,14 +64,23 @@ func TestTetralSandboxCommandStartsAllSandboxOwnedQueueRunners(t *testing.T) {
 	}
 	required := []string{
 		"RunWorkspaceConsumerLoop",
+		"RunSandboxToolExecutionConsumerGroup",
 		"workspace.NewStore",
 		"EnvironmentBuildJobRunner",
 		"EnvironmentReadyFanoutJobRunner",
-		"SessionPrepareJobRunner",
+		"SandboxToolCancelJobRunner",
+		"SandboxBackgroundReconcileJobRunner",
+		"SandboxBackgroundCommandJobRunner",
+		"SandboxActivationJobRunner",
+		"SandboxMaterializationJobRunner",
+		"SandboxReleaseJobRunner",
+		"SandboxMemoryProjectionJobRunner",
+		"SandboxOutputCaptureJobRunner",
+		"SandboxOutputCaptureCleanupRunner",
+		"SweepExpiredCaptures",
+		"SandboxQueueOverLimitReconciler",
+		"RunSandboxQueueOverLimitLoop",
 		"ResourcePrefixGCRunner",
-		"StaleCreatingReconciler",
-		"StartupCleanupReconciler",
-		"MethodAuthorizer:  tetralsandbox.SandboxServiceMethodAuthorizer",
 	}
 	for _, symbol := range required {
 		if !strings.Contains(string(source), symbol) {

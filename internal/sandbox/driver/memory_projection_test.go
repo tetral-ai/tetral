@@ -47,7 +47,7 @@ func innerJoinedCommands(t *testing.T, commands []string) string {
 
 func TestDaytonaHelperExecutorProjectsMemoryUpsertWithStagedRename(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.RefreshMemoryProjection(context.Background(), MemoryProjectionRefresh{
 		Target:     ToolTarget{ProviderSandboxID: "provider_memory_upsert"},
 		MountPaths: []string{"/mnt/memory/project"},
@@ -91,7 +91,7 @@ func TestDaytonaHelperExecutorProjectsMemoryUpsertWithStagedRename(t *testing.T)
 
 func TestDaytonaHelperExecutorGuardsMemoryUpsertTargetKind(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.RefreshMemoryProjection(context.Background(), MemoryProjectionRefresh{
 		Target:     ToolTarget{ProviderSandboxID: "provider_memory_kind_guard"},
 		MountPaths: []string{"/mnt/memory/project"},
@@ -112,7 +112,7 @@ func TestDaytonaHelperExecutorGuardsMemoryUpsertTargetKind(t *testing.T) {
 
 func TestDaytonaHelperExecutorProjectsMemoryRemoveWithoutTouchingMountRoot(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.RefreshMemoryProjection(context.Background(), MemoryProjectionRefresh{
 		Target:     ToolTarget{ProviderSandboxID: "provider_memory_remove"},
 		MountPaths: []string{"/mnt/memory/project"},
@@ -141,7 +141,7 @@ func TestDaytonaHelperExecutorProjectsMemoryRemoveWithoutTouchingMountRoot(t *te
 
 func TestDaytonaHelperExecutorPassesConfiguredMemoryPreparationTimeoutOnWire(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	err := executor.RefreshMemoryProjection(ctx, MemoryProjectionRefresh{
@@ -163,7 +163,7 @@ func TestDaytonaHelperExecutorPassesConfiguredMemoryPreparationTimeoutOnWire(t *
 
 func TestDaytonaHelperExecutorTreatsDirectoryRemoveAsNoOp(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.RefreshMemoryProjection(context.Background(), MemoryProjectionRefresh{
 		Target:     ToolTarget{ProviderSandboxID: "provider_memory_remove_dir"},
 		MountPaths: []string{"/mnt/memory/project"},
@@ -235,7 +235,7 @@ func TestDaytonaHelperExecutorDeletesExistingMemoryFileRemove(t *testing.T) {
 
 func TestDaytonaHelperExecutorTreatsDescendantUnderFileRemoveAsNoOp(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.RefreshMemoryProjection(context.Background(), MemoryProjectionRefresh{
 		Target:     ToolTarget{ProviderSandboxID: "provider_memory_remove_descendant"},
 		MountPaths: []string{"/mnt/memory/project"},
@@ -261,7 +261,7 @@ func TestDaytonaHelperExecutorTreatsDescendantUnderFileRemoveAsNoOp(t *testing.T
 
 func TestDaytonaHelperExecutorMaterializesMemoryStoreSnapshot(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.MaterializeMemoryStore(context.Background(), sandbox.MemoryStoreMaterialization{
 		ProviderSandboxID: "provider_memory_materialize",
 		MountPath:         "/mnt/memory/project",
@@ -310,7 +310,7 @@ func TestDaytonaHelperExecutorMaterializesMemoryStoreSnapshot(t *testing.T) {
 	}
 
 	emptyClient := newRecordingMemoryProjectionClient()
-	executor = NewDaytonaHelperExecutorForClientWithPreparationTimeout(emptyClient, 45*time.Second)
+	executor = NewDaytonaHelperExecutorForClientWithCommandTimeout(emptyClient, 45*time.Second)
 	if err := executor.MaterializeMemoryStore(context.Background(), sandbox.MemoryStoreMaterialization{ProviderSandboxID: "provider_empty", MountPath: "/mnt/memory/empty"}); err != nil {
 		t.Fatalf("MaterializeMemoryStore empty: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestDaytonaHelperExecutorMaterializesMemoryStoreSnapshot(t *testing.T) {
 func TestDaytonaHelperExecutorFailsMemoryProjectionOnCommandError(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	client.process.exitCode = 7
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	err := executor.RefreshMemoryProjection(context.Background(), MemoryProjectionRefresh{
 		Target:     ToolTarget{ProviderSandboxID: "provider_memory_error"},
 		MountPaths: []string{"/mnt/memory/project"},
@@ -341,7 +341,7 @@ func TestDaytonaHelperExecutorFailsMemoryProjectionOnCommandError(t *testing.T) 
 
 func TestDaytonaHelperExecutorRemovesDeletedMemoryStoreTree(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	if err := executor.RemoveMemoryStore(context.Background(), "provider_memory_delete", sandbox.MemoryStoreMount{MountPath: "/mnt/memory/project"}); err != nil {
 		t.Fatalf("RemoveMemoryStore: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestDaytonaHelperExecutorRemovesDeletedMemoryStoreTree(t *testing.T) {
 func TestDaytonaHelperExecutorPropagatesDeletedMemoryStoreRemovalFailure(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	client.process.exitCode = 23
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 
 	err := executor.RemoveMemoryStore(context.Background(), "provider_memory_delete", sandbox.MemoryStoreMount{MountPath: "/mnt/memory/project"})
 	if err == nil {
@@ -366,7 +366,7 @@ func TestDaytonaHelperExecutorPropagatesDeletedMemoryStoreRemovalFailure(t *test
 
 func TestDaytonaHelperExecutorRejectsMemoryRootMountPath(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
-	executor := NewDaytonaHelperExecutorForClientWithPreparationTimeout(client, 45*time.Second)
+	executor := NewDaytonaHelperExecutorForClientWithCommandTimeout(client, 45*time.Second)
 	for _, mountPath := range []string{"/mnt/memory", "/mnt/memory/", "/mnt/memory/.staging", "/mnt/memory/.staging/store"} {
 		t.Run(mountPath, func(t *testing.T) {
 			err := executor.MaterializeMemoryStore(context.Background(), sandbox.MemoryStoreMaterialization{

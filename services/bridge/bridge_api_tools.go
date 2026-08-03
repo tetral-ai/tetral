@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/memory"
@@ -27,231 +25,357 @@ import (
 	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge tools protocol-family boundary.
 
-// RunTool settles at-least-once, identity-fenced by tool_use_event_id, and holds
-// no pre-execution reservation or wall-clock lease. Its executor is
-// Bridge-in-process; the MCP connector's out-of-band executor is the only tool
-// path that carries a claim. The queue admits one in-flight runtime_input per
-// session partition, so the sole delivery overlap is a suspected-pod-loss
-// redelivery, whose re-execution is the at-least-once residual bounded by that
-// identity fence. Long-running work detaches into session_background_tasks and
-// recovers by the same identity.
-func (s *PostgreSQLBridgeAPIStore) RunTool(ctx context.Context, request *bridgev1.RunToolRequest) (*bridgev1.RunToolResponse, error) {
-	if request.GetToolUseEventId() == "" || request.GetNormalizedInputHash() == "" || request.GetToolName() == "" || request.GetInputJson() == "" {
-		return nil, status.Error(codes.InvalidArgument, "invalid run tool request")
-	}
-	if !json.Valid([]byte(request.GetInputJson())) {
-		return nil, status.Error(codes.InvalidArgument, "tool input must be JSON")
-	}
-	canonicalInputJSON, canonicalInputHash, err := canonicalRunToolInput(request.GetInputJson())
+const (
+	sandboxToolExecuteMaxAttempts = 5
+	runtimeToolResultPollInterval = 25 * time.Millisecond
+	sandboxExecutionWaitTimeout   = 30 * time.Second
+)
+
+// AcceptSandboxExecution durably transfers one already-authored Tool Use to
+// Sandbox Service. The execution row and refs-only Queue job become visible
+// together, and the ACK returns immediately after that transaction commits.
+func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, request *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error) {
+	canonicalInputJSON, canonicalInputHash, err := validateSandboxExecutionRequest(request)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "tool input must be JSON")
+		return nil, err
 	}
-	if request.GetNormalizedInputHash() != canonicalInputHash {
-		return nil, status.Error(codes.InvalidArgument, "normalized input hash does not match canonical tool input")
-	}
-	if request.GetApprovalDecisionJson() != "" && !json.Valid([]byte(request.GetApprovalDecisionJson())) {
-		return nil, status.Error(codes.InvalidArgument, "approval decision must be JSON")
-	}
-	now := s.now()
-	var response *bridgev1.RunToolResponse
-	var target SandboxToolTarget
-	var readinessResultJSON string
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.execute_tool", func(tx *dbconnect.Tx) error {
+	created := false
+	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.accept_sandbox_execution", func(tx *dbconnect.Tx) error {
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := verifyRuntimeThreadScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := lockSandboxExecutionThreadTx(ctx, tx, request.GetScope()); err != nil {
 			return err
+		}
+		if _, settled, err := toolResultForToolUseExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetToolUseEventId()); err != nil {
+			return err
+		} else if settled {
+			return status.Error(codes.FailedPrecondition, "sandbox tool use is already settled")
 		}
 		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
 			return err
 		} else if ok {
-			if existing.ToolKind != bridgeToolKindSandbox || existing.NormalizedInputHash != canonicalInputHash || existing.ToolName != request.GetToolName() || existing.InputJSON != canonicalInputJSON {
+			if !sandboxExecutionIdentityMatches(existing, request, canonicalInputJSON, canonicalInputHash) {
 				return status.Error(codes.AlreadyExists, "tool use id conflicts with existing result")
 			}
-			response = &bridgev1.RunToolResponse{
-				Ack:                   duplicateAck("", ""),
-				ResultJson:            existing.ResultJSON,
-				BackgroundTaskStarted: existing.BackgroundTaskStarted,
-				TaskId:                existing.TaskID.String,
+			if existing.ExecutionState.String == "consumed" {
+				return status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
 			}
 			return nil
 		}
-		loadedTarget, readyResultJSON, err := runToolTargetTx(ctx, tx, request.GetScope(), s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), now)
+		if err := rejectSandboxExecutionAfterReleaseFenceTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		evaluatedPermission, err := verifySandboxExecutionDurableIdentityTx(ctx, tx, request, canonicalInputJSON)
 		if err != nil {
 			return err
 		}
-		target = loadedTarget
-		readinessResultJSON = readyResultJSON
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if response != nil {
-		return response, nil
-	}
-
-	// Ordinary Runtime delivery is queue-serialized, so generic RunTool has no
-	// pre-execution lease or reservation. A suspected pod loss can redeliver in
-	// this execute-to-commit window; the stable event id fences settlement (and
-	// the helper task id), but external foreground effects are not exactly once.
-	execution := SandboxToolExecution{ResultJSON: readinessResultJSON}
-	transientResourceHelperFailure := false
-	if readinessResultJSON == "" {
-		if s.SandboxToolExecutor == nil {
-			execution.ResultJSON = mustMarshalToolRuntimeError("sandbox_helper_unavailable", "sandbox helper execution is not installed for "+request.GetToolName(), true)
-		} else {
-			if err := s.SandboxToolExecutor.CheckHealth(ctx, target); err != nil {
-				execution = SandboxToolExecution{ResultJSON: sandboxHelperExecutionErrorResult(err, "sandbox helper health check failed before "+request.GetToolName())}
-			} else {
-				var err error
-				execution, err = s.SandboxToolExecutor.RunTool(ctx, SandboxToolInvocation{
-					Target:               target,
-					ToolUseEventID:       request.GetToolUseEventId(),
-					ToolName:             request.GetToolName(),
-					InputJSON:            canonicalInputJSON,
-					ApprovalDecisionJSON: request.GetApprovalDecisionJson(),
-				})
-				if err != nil {
-					transientResourceHelperFailure = sandboxHelperFailureError(err) && runToolReadsResourceRoot(request.GetToolName(), canonicalInputJSON, target.ResourceRootsJSON)
-					execution = SandboxToolExecution{ResultJSON: sandboxHelperExecutionErrorResult(err, "sandbox helper execution failed for "+request.GetToolName())}
-				}
-			}
-		}
-	}
-	if execution.ResultJSON == "" || !json.Valid([]byte(execution.ResultJSON)) {
-		execution.ResultJSON = mustMarshalToolRuntimeError("sandbox_helper_protocol_error", "sandbox helper returned an invalid result", false)
-	}
-	execution.ResultJSON = stripInternalProviderFields(execution.ResultJSON)
-	var pendingAttachment *uploadedTransientAttachment
-	execution.ResultJSON, pendingAttachment = s.materializeSandboxMediaResult(ctx, request.GetScope(), request.GetToolUseEventId(), request.GetToolName(), canonicalInputJSON, execution.ResultJSON)
-	attachmentCommitted := false
-	attachmentCleanupTracked := false
-	attachmentCleanupInserted := false
-	defer func() {
-		if pendingAttachment != nil && !attachmentCommitted && !attachmentCleanupTracked {
-			_ = s.AttachmentBlobStore.Delete(context.WithoutCancel(ctx), pendingAttachment.BlobPointer)
-		}
-	}()
-	durableResultJSON := durableSandboxToolResultJSON(request.GetToolName(), execution.ResultJSON)
-	if execution.BackgroundTask != nil {
-		if err := validateSandboxBackgroundTask(*execution.BackgroundTask); err != nil {
-			return nil, err
-		}
-	}
-	var taskID sql.NullString
-	if execution.BackgroundTask != nil {
-		taskID = sql.NullString{String: execution.BackgroundTask.TaskID, Valid: true}
-	}
-	commitNow := s.now()
-	attachmentInserted := false
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.execute_tool", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := verifyApprovedSandboxExecutionHandoffTx(ctx, tx, request, canonicalInputJSON, evaluatedPermission); err != nil {
 			return err
 		}
-		if existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId()); err != nil {
+		now := s.now()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO session_runtime_tool_results (
+				workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+				normalized_input_hash, tool_name, input_json, ack_status, result_json,
+				model_tool_call_id, execution_state, execution_attempt_generation,
+				background_task_started, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, 'sandbox_tool', $5, $6, $7, 'committed', NULL,
+				$8, 'pending', 1, FALSE, $9, $9)`,
+			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+			request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+			canonicalInputHash, request.GetToolName(), canonicalInputJSON,
+			request.GetModelToolCallId(), now,
+		); err != nil {
 			return err
-		} else if ok {
-			if existing.ToolKind != bridgeToolKindSandbox || existing.NormalizedInputHash != canonicalInputHash || existing.ToolName != request.GetToolName() || existing.InputJSON != canonicalInputJSON {
-				return status.Error(codes.AlreadyExists, "tool use id conflicts with existing result")
-			}
-			response = &bridgev1.RunToolResponse{
-				Ack:                   duplicateAck("", ""),
-				ResultJson:            existing.ResultJSON,
-				BackgroundTaskStarted: existing.BackgroundTaskStarted,
-				TaskId:                existing.TaskID.String,
-			}
-			if pendingAttachment != nil {
-				if err := insertTransientAttachmentForDeletionTx(ctx, tx, pendingAttachment.Create, pendingAttachment.Attachment, pendingAttachment.BlobPointer, commitNow); err != nil {
-					return err
-				}
-				attachmentCleanupInserted = true
-			}
-			return nil
 		}
-		if transientResourceHelperFailure {
-			requeued, err := resetResourcePreparationAfterHelperFailureTx(ctx, tx, request.GetScope(), target, commitNow, s.resourceCredentialRefreshMargin())
-			if err != nil {
-				return err
-			}
-			if requeued {
-				if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
-					ToolUseEventID: request.GetToolUseEventId(), ToolKind: bridgeToolKindSandbox,
-					NormalizedInputHash: canonicalInputHash, ToolName: request.GetToolName(), InputJSON: canonicalInputJSON,
-					AckStatus: bridgeAckCommitted, ResultJSON: durableResultJSON, Now: commitNow,
-				}); err != nil {
-					return err
-				}
-				response = &bridgev1.RunToolResponse{
-					Ack:        committedAck("", ""),
-					ResultJson: execution.ResultJSON,
-				}
-				return nil
-			}
+		payload, err := marshalBridgeJSON(map[string]string{
+			"workspace_id": request.GetScope().GetWorkspaceId(), "session_id": request.GetScope().GetSessionId(),
+			"session_thread_id": request.GetScope().GetSessionThreadId(), "tool_use_event_id": request.GetToolUseEventId(),
+		})
+		if err != nil {
+			return err
 		}
-		if execution.BackgroundTask != nil {
-			// Once the helper has started a task, its original launch target and
-			// provider recovery identity own that process even if the session's
-			// current sandbox changes before settlement.
-			if err := insertBackgroundTaskTx(ctx, tx, request.GetScope(), target, request.GetToolUseEventId(), *execution.BackgroundTask, commitNow); err != nil {
-				return err
-			}
-		}
-		if pendingAttachment != nil {
-			if err := insertTransientAttachmentTx(ctx, tx, pendingAttachment.Create, pendingAttachment.Attachment, pendingAttachment.BlobPointer, commitNow); err != nil {
-				return err
-			}
-			attachmentInserted = true
-		}
-		if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
-			ToolUseEventID:        request.GetToolUseEventId(),
-			ToolKind:              bridgeToolKindSandbox,
-			NormalizedInputHash:   canonicalInputHash,
-			ToolName:              request.GetToolName(),
-			InputJSON:             canonicalInputJSON,
-			AckStatus:             bridgeAckCommitted,
-			ResultJSON:            durableResultJSON,
-			BackgroundTaskStarted: execution.BackgroundTask != nil,
-			TaskID:                taskID,
-			Now:                   commitNow,
+		workspaceID := workspace.ID(request.GetScope().GetWorkspaceId())
+		if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+			ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxToolExecute,
+			PartitionKey:   queue.FormatSandboxExecutionPartitionKey(workspaceID, request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetToolUseEventId()),
+			DedupeKey:      queue.FormatSandboxToolExecuteDedupeKey(workspaceID, request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(), 1),
+			PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: sandboxToolExecuteMaxAttempts, Now: now,
 		}); err != nil {
 			return err
 		}
-		response = &bridgev1.RunToolResponse{
-			Ack:                   committedAck("", ""),
-			ResultJson:            execution.ResultJSON,
-			BackgroundTaskStarted: execution.BackgroundTask != nil,
-			TaskId:                taskID.String,
-		}
+		created = true
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	attachmentCommitted = attachmentInserted
-	attachmentCleanupTracked = attachmentCleanupInserted
-	if attachmentCleanupTracked {
-		cleanupCtx := context.WithoutCancel(ctx)
-		deleteErr := s.AttachmentBlobStore.Delete(cleanupCtx, pendingAttachment.BlobPointer)
-		var notFound *blob.NotFoundError
-		if deleteErr == nil || errors.As(deleteErr, &notFound) {
-			_ = s.markTransientAttachmentDeleted(cleanupCtx, transientAttachmentGCRow{
-				WorkspaceID:    pendingAttachment.Create.Scope.GetWorkspaceId(),
-				AttachmentRef:  pendingAttachment.Attachment.GetAttachmentRef(),
-				BlobPointer:    pendingAttachment.BlobPointer,
-				PreviousStatus: "deleting",
-			}, s.now())
-		}
+	ack := duplicateAck("", "")
+	if created {
+		ack = committedAck("", "")
 	}
-	return response, nil
+	return &bridgev1.AcceptSandboxExecutionResponse{Ack: ack}, nil
 }
 
-// RunMemory is commit-then-push, giving exactly-once mutation and at-least-once
-// projection push. Two-phase control flow:
+func rejectSandboxExecutionAfterReleaseFenceTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var releaseRequested bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM session_sandbox_bindings
+			 WHERE workspace_id = $1 AND session_id = $2 AND release_requested_at IS NOT NULL
+		)`,
+		scope.GetWorkspaceId(), scope.GetSessionId(),
+	).Scan(&releaseRequested); err != nil {
+		return err
+	}
+	if releaseRequested {
+		return status.Error(codes.FailedPrecondition, "sandbox release is already requested")
+	}
+	return nil
+}
+
+// AwaitSandboxExecution reads one accepted execution until Sandbox Service
+// settles it. It never creates an execution row or Queue job.
+func (s *PostgreSQLBridgeAPIStore) AwaitSandboxExecution(ctx context.Context, request *bridgev1.AwaitSandboxExecutionRequest) (*bridgev1.AwaitSandboxExecutionResponse, error) {
+	if _, _, err := validateSandboxExecutionRequest(request); err != nil {
+		return nil, err
+	}
+	if err := s.withScopeReadOnlyTx(ctx, request.GetScope(), "agentruntimebridge.await_sandbox_execution", func(tx *dbconnect.Tx) error {
+		return verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope())
+	}); err != nil {
+		return nil, err
+	}
+	terminal, err := s.waitForSandboxExecutionResult(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.AwaitSandboxExecutionResponse{
+		ResultJson:            terminal.ResultJSON,
+		ResultDigest:          terminal.ResultDigest,
+		BackgroundTaskStarted: terminal.BackgroundTaskStarted,
+		TaskId:                terminal.TaskID.String,
+	}, nil
+}
+
+type sandboxExecutionRequest interface {
+	GetScope() *bridgev1.RuntimeScope
+	GetToolUseEventId() string
+	GetNormalizedInputHash() string
+	GetToolName() string
+	GetInputJson() string
+	GetModelToolCallId() string
+}
+
+func validateSandboxExecutionRequest(request sandboxExecutionRequest) (string, string, error) {
+	if request.GetToolUseEventId() == "" || request.GetModelToolCallId() == "" || request.GetNormalizedInputHash() == "" || request.GetToolName() == "" || request.GetInputJson() == "" {
+		return "", "", status.Error(codes.InvalidArgument, "invalid sandbox execution request")
+	}
+	if !json.Valid([]byte(request.GetInputJson())) {
+		return "", "", status.Error(codes.InvalidArgument, "tool input must be JSON")
+	}
+	canonicalInputJSON, canonicalInputHash, err := canonicalRunToolInput(request.GetInputJson())
+	if err != nil {
+		return "", "", status.Error(codes.InvalidArgument, "tool input must be JSON")
+	}
+	if request.GetNormalizedInputHash() != canonicalInputHash {
+		return "", "", status.Error(codes.InvalidArgument, "normalized input hash does not match canonical tool input")
+	}
+	return canonicalInputJSON, canonicalInputHash, nil
+}
+
+func lockSandboxExecutionThreadTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var threadID string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM session_threads
+		  WHERE workspace_id = $1 AND session_id = $2 AND id = $3
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	).Scan(&threadID); dbconnect.IsNoRows(err) {
+		return closeoutUnrepairableError(status.Error(codes.FailedPrecondition, "runtime thread is stale"))
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifySandboxExecutionDurableIdentityTx(ctx context.Context, tx *dbconnect.Tx, request sandboxExecutionRequest, canonicalInputJSON string) (string, error) {
+	var payloadJSON string
+	var modelRequestID sql.NullString
+	if err := tx.QueryRow(ctx,
+		`SELECT payload_json, model_request_id FROM session_events
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND event_id = $4 AND type = 'agent.tool_use'
+		  FOR UPDATE`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+	).Scan(&payloadJSON, &modelRequestID); dbconnect.IsNoRows(err) {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use is missing")
+	} else if err != nil {
+		return "", err
+	}
+	var payload runtimeToolUseEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil || payload.Name != request.GetToolName() {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use identity is invalid")
+	}
+	eventInputJSON, _, err := canonicalRunToolInput(string(defaultRawJSON(payload.Input, json.RawMessage(`{}`))))
+	if err != nil || eventInputJSON != canonicalInputJSON {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use input does not match")
+	}
+	if !modelRequestID.Valid || modelRequestID.String == "" {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool use has no model request")
+	}
+	var messageJSON string
+	if err := tx.QueryRow(ctx,
+		`SELECT data_json FROM session_messages
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND model_request_id = $4 AND kind = 'assistant'
+		  LIMIT 1`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), modelRequestID.String,
+	).Scan(&messageJSON); dbconnect.IsNoRows(err) {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool message is missing")
+	} else if err != nil {
+		return "", err
+	}
+	var message struct {
+		Parts []struct {
+			Type           string `json:"type"`
+			ToolCallID     string `json:"toolCallId"`
+			ToolName       string `json:"toolName"`
+			ToolUseEventID string `json:"toolUseEventId"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(messageJSON), &message); err != nil {
+		return "", status.Error(codes.FailedPrecondition, "durable sandbox tool message is invalid")
+	}
+	for _, part := range message.Parts {
+		if part.Type == "tool" && part.ToolUseEventID == request.GetToolUseEventId() &&
+			part.ToolCallID == request.GetModelToolCallId() && part.ToolName == request.GetToolName() {
+			return payload.EvaluatedPermission, nil
+		}
+	}
+	return "", status.Error(codes.FailedPrecondition, "durable sandbox tool call identity does not match")
+}
+
+func defaultRawJSON(value json.RawMessage, fallback json.RawMessage) json.RawMessage {
+	if len(value) == 0 || string(value) == "null" {
+		return fallback
+	}
+	return value
+}
+
+func verifyApprovedSandboxExecutionHandoffTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request sandboxExecutionRequest,
+	canonicalInputJSON string,
+	evaluatedPermission string,
+) error {
+	var modelToolCallID, toolName, inputJSON, statusValue string
+	var decision sql.NullString
+	err := tx.QueryRow(ctx,
+		`SELECT model_tool_call_id, tool_name, input_json, status, decision
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4 AND kind = 'approval'
+		  FOR UPDATE`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
+	).Scan(&modelToolCallID, &toolName, &inputJSON, &statusValue, &decision)
+	if dbconnect.IsNoRows(err) {
+		switch evaluatedPermission {
+		case "allow":
+			return nil
+		case "ask", "deny":
+			return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
+		default:
+			return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
+		}
+	}
+	if err != nil {
+		return err
+	}
+	canonicalApprovalInput, _, err := canonicalRunToolInput(inputJSON)
+	if err != nil || modelToolCallID != request.GetModelToolCallId() || toolName != request.GetToolName() ||
+		canonicalApprovalInput != canonicalInputJSON {
+		return status.Error(codes.AlreadyExists, "approved tool identity conflicts with execution")
+	}
+	switch evaluatedPermission {
+	case "allow":
+		return nil
+	case "deny":
+		return status.Error(codes.FailedPrecondition, "sandbox tool permission is not executable")
+	case "ask":
+		if statusValue != "resolving" || !decision.Valid || decision.String != "allow" {
+			return status.Error(codes.FailedPrecondition, "sandbox tool approval is not executable")
+		}
+		return nil
+	default:
+		return status.Error(codes.FailedPrecondition, "sandbox tool permission is invalid")
+	}
+}
+
+func mustCanonicalRunToolInput(raw string) string {
+	canonical, _, err := canonicalRunToolInput(raw)
+	if err != nil {
+		return ""
+	}
+	return canonical
+}
+
+func sandboxExecutionIdentityMatches(existing runtimeToolResult, request sandboxExecutionRequest, canonicalInputJSON string, canonicalInputHash string) bool {
+	return existing.ToolKind == bridgeToolKindSandbox && existing.NormalizedInputHash == canonicalInputHash &&
+		existing.ToolName == request.GetToolName() && existing.InputJSON == canonicalInputJSON &&
+		existing.ModelToolCallID.Valid && existing.ModelToolCallID.String == request.GetModelToolCallId()
+}
+
+func (s *PostgreSQLBridgeAPIStore) waitForSandboxExecutionResult(ctx context.Context, request sandboxExecutionRequest) (runtimeToolResult, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, sandboxExecutionWaitTimeout)
+	defer cancel()
+	ticker := time.NewTicker(runtimeToolResultPollInterval)
+	defer ticker.Stop()
+	for {
+		var stored runtimeToolResult
+		var found bool
+		err := s.Client.WithWorkspaceReadOnlyTx(waitCtx, request.GetScope().GetWorkspaceId(), "agentruntimebridge.wait_sandbox_tool", func(tx *dbconnect.Tx) error {
+			var err error
+			stored, found, err = readRuntimeToolResultReadOnlyTx(waitCtx, tx, request.GetScope(), request.GetToolUseEventId())
+			return err
+		})
+		if err != nil {
+			if waitCtx.Err() != nil {
+				return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
+			}
+			return runtimeToolResult{}, err
+		}
+		if !found || !sandboxExecutionIdentityMatches(stored, request, mustCanonicalRunToolInput(request.GetInputJson()), request.GetNormalizedInputHash()) {
+			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool execution identity changed while waiting")
+		}
+		if stored.ExecutionState.Valid && stored.ExecutionState.String == "terminal_unconsumed" {
+			if stored.ResultJSON == "" || !json.Valid([]byte(stored.ResultJSON)) {
+				return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool execution result is invalid")
+			}
+			return stored, nil
+		}
+		if stored.ExecutionState.Valid && stored.ExecutionState.String == "consumed" {
+			return runtimeToolResult{}, status.Error(codes.FailedPrecondition, "sandbox tool result is already consumed")
+		}
+		select {
+		case <-waitCtx.Done():
+			return runtimeToolResult{}, status.Error(codes.DeadlineExceeded, "sandbox tool result is not ready")
+		case <-ticker.C:
+		}
+	}
+}
+
+// RunMemory is commit-then-project. The mutation and, when a live Sandbox is
+// currently bound, its projection job commit atomically. Bridge never calls a
+// Sandbox provider; it waits on the durable projection state written by the
+// Sandbox worker.
 //
 //	phase 1  (withScopeTx here): scope-verify, idempotency read, applyMemoryToolTx,
 //	         compute the refresh plan, and insert the tool result with
@@ -259,20 +383,12 @@ func (s *PostgreSQLBridgeAPIStore) RunTool(ctx context.Context, request *bridgev
 //	         On replay of a row already at pending, the mutation is SKIPPED (it is
 //	         already committed) and control drops straight into phase 2.
 //	phase 2  (completePendingMemoryProjection): runs with no open transaction and
-//	         is self-contained — it re-derives the plan, writable store, mount
-//	         paths, target sandbox, and per-path ops entirely from committed truth,
-//	         carrying nothing from any earlier delivery. A crash between the phases
-//	         leaves the row pending for the Runtime's normal retry.
+//	         waits for Sandbox Service to settle the durable projection row. A
+//	         disconnect leaves the row pending for the Runtime's normal replay.
 //
 // INVARIANTS:
-//   - Refresh op content is the CURRENT committed PostgreSQL head
-//     (memoryProjectionHeadsTx), never the request input. That is what makes
-//     refresh self-healing: the pushed bytes match durable truth for the touched
-//     paths regardless of what the projection held before.
-//   - Re-resolving the writable store on replay is safe because session resources
-//     are immutable while a session runs and the memory route is session-serialized
-//     (no concurrent memory mutation), so the re-resolved store is the one the
-//     mutation committed against.
+//   - The Queue job carries only durable identities. Sandbox Service derives the
+//     current committed heads and provider target after leasing the job.
 //   - Scope is deliberately narrow: RunMemory refreshes ONLY the mutating session's
 //     own bound sandbox projection. Other sessions that attach the same store are
 //     not fanned out and see the change only at their own next materialization
@@ -310,7 +426,43 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		}
 		var projectionState sql.NullString
 		if len(memoryProjectionPlanPaths(request.GetInputJson(), resultJSON)) > 0 {
-			projectionState = sql.NullString{String: memoryProjectionStatePending, Valid: true}
+			storeID, bindingResultJSON, err := resolveWritableMemoryStoreTx(ctx, tx, request.GetScope())
+			if err != nil {
+				return err
+			}
+			if bindingResultJSON != "" {
+				return status.Error(codes.FailedPrecondition, "writable memory store binding changed during mutation")
+			}
+			var providerResourceID sql.NullString
+			if err := tx.QueryRow(ctx,
+				`SELECT provider_resource_id
+				   FROM session_sandbox_bindings
+				  WHERE workspace_id = $1 AND session_id = $2 AND release_requested_at IS NULL`,
+				request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+			).Scan(&providerResourceID); err != nil && !dbconnect.IsNoRows(err) {
+				return err
+			}
+			if providerResourceID.Valid && providerResourceID.String != "" {
+				projectionState = sql.NullString{String: memoryProjectionStatePending, Valid: true}
+				payload, err := marshalBridgeJSON(map[string]string{
+					"workspace_id": request.GetScope().GetWorkspaceId(), "session_id": request.GetScope().GetSessionId(),
+					"memory_store_id": storeID, "memory_write_id": request.GetToolUseEventId(),
+				})
+				if err != nil {
+					return err
+				}
+				workspaceID := workspace.ID(request.GetScope().GetWorkspaceId())
+				if _, err := queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
+					ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxMemoryProjection,
+					PartitionKey:   queue.FormatSandboxMemoryPartitionKey(workspaceID, storeID),
+					DedupeKey:      queue.FormatSandboxMemoryProjectionDedupeKey(workspaceID, storeID, request.GetToolUseEventId()),
+					PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: queue.SandboxMemoryProjectionMaxAttempts, Now: now,
+				}); err != nil {
+					return err
+				}
+			} else {
+				projectionState = sql.NullString{String: memoryProjectionStateSkippedCold, Valid: true}
+			}
 		}
 		if err := insertRuntimeToolResultTx(ctx, tx, request.GetScope(), runtimeToolResultInsert{
 			ToolUseEventID:        request.GetToolUseEventId(),
@@ -325,7 +477,7 @@ func (s *PostgreSQLBridgeAPIStore) RunMemory(ctx context.Context, request *bridg
 		}); err != nil {
 			return err
 		}
-		if projectionState.Valid {
+		if projectionState.Valid && projectionState.String == memoryProjectionStatePending {
 			phaseTwoAck = committedAck("", "")
 			return nil
 		}
@@ -345,139 +497,188 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		return nil, err
 	}
 	repairKey := internalToolRepairKey(request.GetModelRequestId(), request.GetModelToolCallId(), request.GetToolName())
-	dataJSON := stripInternalProviderFields(request.GetDataJson())
-	requestHash := bridgeRequestHash(bridgeOpCommitInternalToolRepair, repairKey, dataJSON)
+	declarationDigest, err := internalToolRepairDeclarationDigest(request, repairKey)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
-	var response *bridgev1.CommitInternalToolRepairResponse
+	var (
+		ack     *bridgev1.BridgeWriteAck
+		receipt *bridgev1.DeclarationReceipt
+	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_internal_tool_repair", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInternalToolRepair,
+			"internal_tool_repair",
+			repairKey,
+		); err != nil {
+			return err
+		} else if ok {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
+				return status.Error(codes.AlreadyExists, "internal tool repair idempotency conflict")
+			}
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+			}
+			ack = duplicateAck("", repairKey)
+			return nil
+		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitInternalToolRepair, repairKey); err != nil {
-			return err
-		} else if ok {
-			if existing.RequestHash != requestHash {
-				return status.Error(codes.AlreadyExists, "internal tool repair idempotency conflict")
-			}
-			response = &bridgev1.CommitInternalToolRepairResponse{Ack: duplicateAck("", repairKey)}
-			return nil
-		}
-		if err := insertInternalToolRepairMessageTx(ctx, tx, request.GetScope(), repairKey, dataJSON, now); err != nil {
+		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpCommitInternalToolRepair,
-			IdempotencyKey: repairKey,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeWriteID: sql.NullString{String: repairKey, Valid: true},
-			ResultJSON:     `{"status":"committed"}`,
-			Now:            now,
-		}); err != nil {
+		eventID, eventSequence, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
+		if err != nil {
 			return err
 		}
-		response = &bridgev1.CommitInternalToolRepairResponse{Ack: committedAck("", repairKey)}
+		receipt, err = commitInternalToolRepairDraftTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			repairKey,
+			eventID,
+			eventSequence,
+			request.GetModelToolCallId(),
+			request.GetToolName(),
+			request.GetDrafts()[0],
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		receipt.DeclarationDigest = declarationDigest
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		if err != nil {
+			return err
+		}
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInternalToolRepair,
+			"internal_tool_repair",
+			repairKey,
+			declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
+			return err
+		}
+		ack = committedAck("", repairKey)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	return response, nil
+	if receipt == nil || len(receipt.GetEvents()) != 1 || len(receipt.GetMessages()) != 1 {
+		return nil, status.Error(codes.FailedPrecondition, "internal tool repair receipt is invalid")
+	}
+	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpCommitInternalToolRepair,
+		"internal_tool_repair",
+		repairKey,
+		declarationDigest,
+		ack,
+		observation,
+	)
+	return &bridgev1.CommitInternalToolRepairResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
 func validateInternalToolRepairRequest(request *bridgev1.CommitInternalToolRepairRequest) error {
 	if err := validateRuntimeScope(request.GetScope()); err != nil {
 		return err
 	}
-	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetDataJson() == "" {
+	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || len(request.GetDrafts()) != 1 {
 		return status.Error(codes.InvalidArgument, "invalid internal tool repair request")
 	}
 	if len([]byte(request.GetModelToolCallId())) > internalToolRepairIDMaxBytes || len([]byte(request.GetToolName())) > internalToolRepairIDMaxBytes {
 		return status.Error(codes.InvalidArgument, "internal tool repair identifiers are too large")
 	}
-	if len([]byte(request.GetDataJson())) > internalToolRepairDataMaxBytes {
-		return status.Error(codes.InvalidArgument, "internal tool repair data is too large")
-	}
-	if !json.Valid([]byte(request.GetDataJson())) {
-		return status.Error(codes.InvalidArgument, "internal tool repair data must be JSON")
-	}
-	return validateInternalToolRepairData(request.GetScope(), request.GetModelToolCallId(), request.GetToolName(), request.GetDataJson())
-}
-
-type internalToolRepairData struct {
-	ID        string `json:"id"`
-	SessionID string `json:"sessionId"`
-	Role      string `json:"role"`
-	Origin    string `json:"origin"`
-	Status    string `json:"status"`
-	Parts     []struct {
-		ID             string  `json:"id"`
-		SessionID      string  `json:"sessionId"`
-		MessageID      string  `json:"messageId"`
-		Type           string  `json:"type"`
-		ToolCallID     string  `json:"toolCallId"`
-		ToolName       string  `json:"toolName"`
-		ToolUseEventID *string `json:"toolUseEventId"`
-		State          struct {
-			Status string `json:"status"`
-		} `json:"state"`
-	} `json:"parts"`
-}
-
-func validateInternalToolRepairData(scope *bridgev1.RuntimeScope, modelToolCallID string, toolName string, dataJSON string) error {
-	var message internalToolRepairData
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
-		return status.Error(codes.InvalidArgument, "internal tool repair data is malformed")
-	}
-	if message.ID == "" || message.SessionID != scope.GetSessionId() || message.Role != "assistant" || message.Origin != "agent" || message.Status != "completed" || len(message.Parts) != 1 {
-		return status.Error(codes.InvalidArgument, "internal tool repair message is invalid")
-	}
-	part := message.Parts[0]
-	if part.ID == "" || part.SessionID != scope.GetSessionId() || part.MessageID != message.ID || part.Type != "tool" {
-		return status.Error(codes.InvalidArgument, "internal tool repair part is invalid")
-	}
-	if part.ToolCallID != modelToolCallID || part.ToolName != toolName || part.State.Status != "error" {
-		return status.Error(codes.InvalidArgument, "internal tool repair payload does not match request")
-	}
-	if part.ToolUseEventID != nil && *part.ToolUseEventID != "" {
-		return status.Error(codes.InvalidArgument, "internal tool repair must not carry a public tool use event id")
-	}
 	return nil
 }
 
-func insertInternalToolRepairMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, repairKey string, dataJSON string, now time.Time) error {
-	var message internalToolRepairData
-	if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
-		return status.Error(codes.InvalidArgument, "internal tool repair data is malformed")
+func insertInternalToolRepairEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.CommitInternalToolRepairRequest,
+	threadScope threadMutationScope,
+	repairKey string,
+	now time.Time,
+) (string, int64, error) {
+	scope := request.GetScope()
+	payloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":               "agent.tool_result",
+		"model_tool_call_id": request.GetModelToolCallId(),
+		"tool_name":          request.GetToolName(),
+		"repair_kind":        "invalid_tool",
+	})
+	if err != nil {
+		return "", 0, err
 	}
-	var sequence int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
+	eventID := id.New("evt_")
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return "", 0, err
+	}
+	visibility, sessionVisible := threadScope.publicProjection("agent.tool_result")
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, model_request_id, projection_json,
+			created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, '{}', $11, $11, $11)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
-	).Scan(&sequence); err != nil {
-		return err
-	}
-	timestamp := now
-	_, err := tx.Exec(ctx,
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, repair_key, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, NULL, NULL, $7, $8, $8)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		message.ID,
+		eventID,
 		sequence,
-		dataJSON,
+		payloadJSON,
+		visibility,
+		sessionVisible,
 		repairKey,
-		timestamp,
-	)
-	return err
+		request.GetModelRequestId(),
+		now,
+	); err != nil {
+		return "", 0, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
+		return "", 0, err
+	}
+	return eventID, sequence, nil
 }
 
 func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolName string) string {
@@ -490,942 +691,44 @@ func internalToolRepairKey(modelRequestID string, modelToolCallID string, toolNa
 	return "internal_invalid_tool_" + hex.EncodeToString(hash.Sum(nil))
 }
 
-type memoryProjectionRefreshLoad struct {
-	ResultJSON string
-	StoreID    string
-	Target     SandboxToolTarget
-	MountPaths []string
-	Ops        []MemoryProjectionOp
-}
-
-type memoryProjectionHead struct {
-	Content       string
-	ContentSHA256 string
-}
-
 func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection(ctx context.Context, request *bridgev1.RunMemoryRequest, ack *bridgev1.BridgeWriteAck) (*bridgev1.RunMemoryResponse, error) {
 	if ack == nil {
 		ack = duplicateAck("", "")
 	}
-	var response *bridgev1.RunMemoryResponse
-	var loaded memoryProjectionRefreshLoad
-	var noProjectionWork bool
-	var skipCold bool
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.load_memory_projection_refresh", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		existing, ok, err := readRuntimeToolResultReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "memory tool result is missing")
-		}
-		if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
-			return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
-		}
-		if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
-			response = &bridgev1.RunMemoryResponse{Ack: duplicateAck("", ""), ResultJson: existing.ResultJSON}
-			return nil
-		}
-		planPaths := memoryProjectionPlanPaths(existing.InputJSON, existing.ResultJSON)
-		if len(planPaths) == 0 {
-			noProjectionWork = true
-			return nil
-		}
-		if s.MemoryProjectionRefresher == nil {
-			return status.Error(codes.FailedPrecondition, "memory projection refresh is not installed")
-		}
-		storeID, resultJSON, err := resolveWritableMemoryStoreTx(ctx, tx, request.GetScope())
-		if err != nil {
-			return err
-		}
-		if resultJSON != "" {
-			return status.Error(codes.FailedPrecondition, "writable memory store binding changed before projection refresh")
-		}
-		target, reachable, err := memoryProjectionTargetTx(ctx, tx, request.GetScope(), s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), s.now())
-		if err != nil {
-			return err
-		}
-		if !reachable {
-			skipCold = true
-			return nil
-		}
-		mountPaths, err := memoryProjectionMountPathsTx(ctx, tx, request.GetScope(), storeID)
-		if err != nil {
-			return err
-		}
-		heads, err := memoryProjectionHeadsTx(ctx, tx, request.GetScope().GetWorkspaceId(), storeID, planPaths)
-		if err != nil {
-			return err
-		}
-		loaded = memoryProjectionRefreshLoad{
-			ResultJSON: existing.ResultJSON,
-			StoreID:    storeID,
-			Target:     target,
-			MountPaths: mountPaths,
-			Ops:        memoryProjectionOps(planPaths, heads),
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	if response != nil {
-		return response, nil
-	}
-	if noProjectionWork {
-		finalResultJSON, err := s.advancePendingMemoryProjectionState(ctx, request, "agentruntimebridge.finish_memory_projection_without_refresh", sql.NullString{}, false)
-		if err != nil {
-			return nil, err
-		}
-		return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: finalResultJSON}, nil
-	}
-	if skipCold {
-		finalResultJSON, err := s.advancePendingMemoryProjectionState(ctx, request, "agentruntimebridge.skip_cold_memory_projection_refresh", sql.NullString{String: memoryProjectionStateSkippedCold, Valid: true}, false)
-		if err != nil {
-			return nil, err
-		}
-		return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: finalResultJSON}, nil
-	}
-	pushCtx, cancelPush := context.WithTimeout(ctx, s.memoryProjectionPushTimeout())
-	defer cancelPush()
-	if err := s.withMemoryProjectionPushLock(pushCtx, request.GetScope(), loaded.StoreID, func() error {
-		return s.MemoryProjectionRefresher.RefreshMemoryProjection(pushCtx, MemoryProjectionRefresh{
-			Target:     loaded.Target,
-			MountPaths: loaded.MountPaths,
-			Ops:        loaded.Ops,
-		})
-	}); err != nil {
-		resultJSON, marshalErr := marshalToolRuntimeError("projection_refresh_failed", "memory projection refresh failed", true)
-		if marshalErr != nil {
-			return nil, marshalErr
-		}
-		return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: resultJSON}, nil
-	}
-	finalResultJSON, err := s.advancePendingMemoryProjectionState(ctx, request, "agentruntimebridge.finish_memory_projection_refresh", sql.NullString{String: memoryProjectionStateRefreshed, Valid: true}, true)
-	if err != nil {
-		return nil, err
-	}
-	return &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: finalResultJSON}, nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) withMemoryProjectionPushLock(ctx context.Context, scope *bridgev1.RuntimeScope, memoryStoreID string, fn func() error) error {
-	category, resource, err := storage.MemoryStoreMutationAdvisoryLockKey(scope.GetWorkspaceId(), memoryStoreID)
-	if err != nil {
-		return err
-	}
-	locked, err := s.Client.TryWithAdvisoryLock(ctx, "agentruntimebridge.memory_projection_push_lock", category, resource, fn)
-	if err != nil {
-		return err
-	}
-	if !locked {
-		return errMemoryProjectionPushLockContended
-	}
-	return nil
-}
-
-func (s *PostgreSQLBridgeAPIStore) advancePendingMemoryProjectionState(ctx context.Context, request *bridgev1.RunMemoryRequest, operation string, nextState sql.NullString, rewriteStaleResult bool) (string, error) {
-	var finalResultJSON string
-	if err := s.withScopeTx(ctx, request.GetScope(), operation, func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		existing, ok, err := readRuntimeToolResultTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return status.Error(codes.FailedPrecondition, "memory tool result is missing")
-		}
-		if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
-			return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
-		}
-		finalResultJSON = existing.ResultJSON
-		if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
-			return nil
-		}
-		if rewriteStaleResult && memoryResultIsStaleToolError(existing.ResultJSON) {
-			var err error
-			finalResultJSON, err = rewriteMemoryProjectionRefreshed(existing.ResultJSON, true)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var response *bridgev1.RunMemoryResponse
+		if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.await_memory_projection", func(tx *dbconnect.Tx) error {
+			if err := verifyRuntimeScopeReadOnlyTx(ctx, tx, request.GetScope()); err != nil {
+				return err
+			}
+			existing, ok, err := readRuntimeToolResultReadOnlyTx(ctx, tx, request.GetScope(), request.GetToolUseEventId())
 			if err != nil {
 				return err
 			}
-		}
-		return updateMemoryProjectionStateTx(ctx, tx, request.GetScope(), request.GetToolUseEventId(), nextState, finalResultJSON, s.now())
-	}); err != nil {
-		return "", err
-	}
-	return finalResultJSON, nil
-}
-
-func runToolTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (SandboxToolTarget, string, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return SandboxToolTarget{}, "", err
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil {
-		return SandboxToolTarget{}, "", err
-	}
-	if !ok || readiness.Status != "ready" {
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox preparation is not ready", true), nil
-	}
-	if readiness.SandboxStatus == "failed" {
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_failed", "sandbox preparation failed", false), nil
-	}
-	if readiness.SandboxStatus != "active" {
-		if sandboxStatusNeedsPreparationReset(readiness.SandboxStatus) {
-			if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-				return SandboxToolTarget{}, "", err
+			if !ok {
+				return status.Error(codes.FailedPrecondition, "memory tool result is missing")
 			}
-		}
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox is not active", true), nil
-	}
-	if readiness.ProviderSandboxID == "" {
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox provider handle is unavailable", true), nil
-	}
-	if resourceCredentialNeedsLiveRotation(readiness.ResourceCredentialExpiresAt, now, resourceCredentialRefreshMargin) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-			return SandboxToolTarget{}, "", err
-		}
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "resource materialization credential is expiring", true), nil
-	}
-	if !sandboxRefreshIsFresh(readiness.StatusRefreshedAt, now, freshnessWindow) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, true); err != nil {
-			return SandboxToolTarget{}, "", err
-		}
-		return SandboxToolTarget{}, mustMarshalToolRuntimeError("sandbox_not_ready", "sandbox readiness is stale", true), nil
-	}
-	return SandboxToolTarget{
-		WorkspaceID:          scope.GetWorkspaceId(),
-		SessionID:            scope.GetSessionId(),
-		SessionThreadID:      scope.GetSessionThreadId(),
-		BindingID:            scope.GetBinding().GetBindingId(),
-		BindingGeneration:    scope.GetBinding().GetBindingGeneration(),
-		SandboxID:            readiness.SandboxID,
-		ProviderSandboxID:    readiness.ProviderSandboxID,
-		PreparationAttemptID: readiness.PreparationAttemptID,
-		ResourceRootsJSON:    readiness.ResourceRootsJSON.String,
-	}, "", nil
-}
-
-func outputCaptureTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (outputcapture.SandboxOutputTarget, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return outputcapture.SandboxOutputTarget{}, err
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil {
-		return outputcapture.SandboxOutputTarget{}, err
-	}
-	if !ok || readiness.Status != "ready" {
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "sandbox preparation is not ready for output capture")
-	}
-	if readiness.SandboxStatus != "active" || readiness.ProviderSandboxID == "" {
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "sandbox is not active for output capture")
-	}
-	if resourceCredentialNeedsLiveRotation(readiness.ResourceCredentialExpiresAt, now, resourceCredentialRefreshMargin) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-			return outputcapture.SandboxOutputTarget{}, err
-		}
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "resource materialization credential is expiring for output capture")
-	}
-	if !sandboxRefreshIsFresh(readiness.StatusRefreshedAt, now, freshnessWindow) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, true); err != nil {
-			return outputcapture.SandboxOutputTarget{}, err
-		}
-		return outputcapture.SandboxOutputTarget{}, status.Error(codes.FailedPrecondition, "sandbox readiness is stale for output capture")
-	}
-	return outputcapture.SandboxOutputTarget{
-		WorkspaceID:       scope.GetWorkspaceId(),
-		SessionID:         scope.GetSessionId(),
-		SessionThreadID:   scope.GetSessionThreadId(),
-		BindingID:         scope.GetBinding().GetBindingId(),
-		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
-		SandboxID:         readiness.SandboxID,
-		ProviderSandboxID: readiness.ProviderSandboxID,
-	}, nil
-}
-
-func isOutputCapturePreparationRequeued(err error) bool {
-	if status.Code(err) != codes.FailedPrecondition {
-		return false
-	}
-	message := err.Error()
-	return strings.Contains(message, "sandbox readiness is stale for output capture") ||
-		strings.Contains(message, "resource materialization credential is expiring for output capture")
-}
-
-func memoryProjectionTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, freshnessWindow time.Duration, resourceCredentialRefreshMargin time.Duration, now time.Time) (SandboxToolTarget, bool, error) {
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId()); err != nil {
-		return SandboxToolTarget{}, false, err
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil {
-		return SandboxToolTarget{}, false, err
-	}
-	if !ok || readiness.Status != "ready" {
-		return SandboxToolTarget{}, false, nil
-	}
-	if readiness.SandboxStatus != "active" {
-		if sandboxStatusNeedsPreparationReset(readiness.SandboxStatus) {
-			if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-				return SandboxToolTarget{}, false, err
+			if existing.ToolKind != bridgeToolKindMemory || existing.NormalizedInputHash != request.GetNormalizedInputHash() {
+				return status.Error(codes.AlreadyExists, "memory tool use id conflicts with existing result")
 			}
-		}
-		return SandboxToolTarget{}, false, nil
-	}
-	if readiness.ProviderSandboxID == "" {
-		return SandboxToolTarget{}, false, nil
-	}
-	if resourceCredentialNeedsLiveRotation(readiness.ResourceCredentialExpiresAt, now, resourceCredentialRefreshMargin) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-			return SandboxToolTarget{}, false, err
-		}
-		return SandboxToolTarget{}, false, nil
-	}
-	if !sandboxRefreshIsFresh(readiness.StatusRefreshedAt, now, freshnessWindow) {
-		if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, true); err != nil {
-			return SandboxToolTarget{}, false, err
-		}
-		return SandboxToolTarget{}, false, nil
-	}
-	return SandboxToolTarget{
-		WorkspaceID:          scope.GetWorkspaceId(),
-		SessionID:            scope.GetSessionId(),
-		SessionThreadID:      scope.GetSessionThreadId(),
-		BindingID:            scope.GetBinding().GetBindingId(),
-		BindingGeneration:    scope.GetBinding().GetBindingGeneration(),
-		SandboxID:            readiness.SandboxID,
-		ProviderSandboxID:    readiness.ProviderSandboxID,
-		PreparationAttemptID: readiness.PreparationAttemptID,
-		ResourceRootsJSON:    readiness.ResourceRootsJSON.String,
-	}, true, nil
-}
-
-func memoryProjectionMountPathsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, storeID string) ([]string, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT smr.mount_path
-		   FROM session_memory_store_resources smr
-		   JOIN session_resources sr
-		     ON sr.workspace_id = smr.workspace_id
-		    AND sr.session_id = smr.session_id
-		    AND sr.resource_id = smr.resource_id
-		    AND sr.type = 'memory_store'
-		    AND sr.detached_at IS NULL
-		    AND sr.delete_requested_at IS NULL
-		  WHERE smr.workspace_id = $1
-		    AND smr.session_id = $2
-		    AND smr.memory_store_id = $3
-		  ORDER BY smr.resource_id ASC`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		storeID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var mountPaths []string
-	for rows.Next() {
-		var mountPath string
-		if err := rows.Scan(&mountPath); err != nil {
+			if !existing.MemoryProjectionState.Valid || existing.MemoryProjectionState.String != memoryProjectionStatePending {
+				response = &bridgev1.RunMemoryResponse{Ack: ack, ResultJson: existing.ResultJSON}
+			}
+			return nil
+		}); err != nil {
 			return nil, err
 		}
-		mountPaths = append(mountPaths, mountPath)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(mountPaths) == 0 {
-		return nil, status.Error(codes.FailedPrecondition, "memory store has no session projection mounts")
-	}
-	return mountPaths, nil
-}
-
-func memoryProjectionHeadsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, storeID string, paths []string) (map[string]memoryProjectionHead, error) {
-	if len(paths) == 0 {
-		return map[string]memoryProjectionHead{}, nil
-	}
-	heads := map[string]memoryProjectionHead{}
-	const queryPathLimit = 10_000
-	for offset := 0; offset < len(paths); offset += queryPathLimit {
-		end := min(offset+queryPathLimit, len(paths))
-		placeholders := make([]string, 0, end-offset)
-		args := []any{workspaceID, storeID}
-		for index, pathValue := range paths[offset:end] {
-			placeholders = append(placeholders, "$"+strconv.Itoa(index+3))
-			args = append(args, pathValue)
+		if response != nil {
+			return response, nil
 		}
-		rows, err := tx.Query(ctx,
-			`SELECT m.path, v.content, m.content_sha256
-			   FROM memories m
-			   JOIN memory_versions v
-			     ON v.workspace_id = m.workspace_id
-			    AND v.memory_store_id = m.memory_store_id
-			    AND v.memory_id = m.memory_id
-			    AND v.memory_version_id = m.current_version_id
-			  WHERE m.workspace_id = $1
-			    AND m.memory_store_id = $2
-			    AND m.deleted_at IS NULL
-			    AND m.path IN (`+strings.Join(placeholders, ", ")+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var pathValue string
-			var head memoryProjectionHead
-			if err := rows.Scan(&pathValue, &head.Content, &head.ContentSHA256); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			heads[pathValue] = head
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+		select {
+		case <-ctx.Done():
+			return nil, status.Error(codes.DeadlineExceeded, "memory projection result is not ready")
+		case <-ticker.C:
 		}
 	}
-	return heads, nil
-}
-
-func memoryProjectionOps(paths []string, heads map[string]memoryProjectionHead) []MemoryProjectionOp {
-	ops := make([]MemoryProjectionOp, 0, len(paths))
-	for _, pathValue := range paths {
-		if head, ok := heads[pathValue]; ok {
-			ops = append(ops, MemoryProjectionOp{Kind: "upsert", RelativePath: pathValue, Content: head.Content, ContentSHA256: head.ContentSHA256})
-		} else {
-			ops = append(ops, MemoryProjectionOp{Kind: "remove", RelativePath: pathValue})
-		}
-	}
-	return ops
-}
-
-func updateMemoryProjectionStateTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, state sql.NullString, resultJSON string, now time.Time) error {
-	result, err := tx.Exec(ctx,
-		`UPDATE session_runtime_tool_results
-		    SET memory_projection_state = $4,
-		        result_json = $5,
-		        updated_at = $6
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND tool_use_event_id = $3
-		    AND tool_kind = 'memory'`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		toolUseEventID,
-		state,
-		resultJSON,
-		now,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "memory projection state update failed")
-	}
-	return nil
-}
-
-type sessionPreparationReadiness struct {
-	PreparationAttemptID        string
-	EnvironmentID               string
-	EnvironmentGeneration       int64
-	Status                      string
-	SandboxID                   string
-	ProviderSandboxID           string
-	SandboxStatus               string
-	StatusRefreshedAt           sql.NullString
-	ResourceCredentialExpiresAt sql.NullString
-	ResourceRootsJSON           sql.NullString
-	ResourceHelperRecoveryCount int
-	FailureStage                sql.NullString
-	LastErrorKind               sql.NullString
-	FailureReason               sql.NullString
-	FailureResourceID           sql.NullString
-	FailureResourceURL          sql.NullString
-	Retryable                   sql.NullBool
-}
-
-func loadLatestSessionPreparationReadinessTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (sessionPreparationReadiness, bool, error) {
-	return loadLatestSessionPreparationReadiness(ctx, tx, workspaceID, sessionID, false)
-}
-
-func loadLatestSessionPreparationReadinessForUpdateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) (sessionPreparationReadiness, bool, error) {
-	return loadLatestSessionPreparationReadiness(ctx, tx, workspaceID, sessionID, true)
-}
-
-func loadLatestSessionPreparationReadiness(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, forUpdate bool) (sessionPreparationReadiness, bool, error) {
-	query := `SELECT p.preparation_attempt_id, p.environment_id, p.environment_generation,
-	        p.status, p.sandbox_id,
-	        COALESCE(s.provider_sandbox_id, ''), COALESCE(s.status, ''), s.status_refreshed_at,
-	        p.resource_cred_expires_at, p.resource_roots_json, p.resource_helper_recovery_count,
-	        p.failure_stage, p.last_error_kind, p.failure_reason,
-	        p.failure_resource_id, p.failure_resource_url, p.retryable
-	   FROM session_preparations p
-	   LEFT JOIN sandboxes s
-	     ON s.workspace_id = p.workspace_id
-	    AND s.session_id = p.session_id
-	    AND s.id = p.sandbox_id
-		  WHERE p.workspace_id = $1
-		    AND p.session_id = $2
-		    AND p.superseded_at IS NULL
-		  ORDER BY p.created_at DESC, p.preparation_attempt_id DESC
-		  LIMIT 1`
-	if forUpdate {
-		query += `
-		  FOR UPDATE OF p`
-	}
-	row := tx.QueryRow(ctx,
-		query,
-		workspaceID,
-		sessionID,
-	)
-	var readiness sessionPreparationReadiness
-	if err := row.Scan(
-		&readiness.PreparationAttemptID,
-		&readiness.EnvironmentID,
-		&readiness.EnvironmentGeneration,
-		&readiness.Status,
-		&readiness.SandboxID,
-		&readiness.ProviderSandboxID,
-		&readiness.SandboxStatus,
-		&readiness.StatusRefreshedAt,
-		&readiness.ResourceCredentialExpiresAt,
-		&readiness.ResourceRootsJSON,
-		&readiness.ResourceHelperRecoveryCount,
-		&readiness.FailureStage,
-		&readiness.LastErrorKind,
-		&readiness.FailureReason,
-		&readiness.FailureResourceID,
-		&readiness.FailureResourceURL,
-		&readiness.Retryable,
-	); dbconnect.IsNoRows(err) {
-		return sessionPreparationReadiness{}, false, nil
-	} else if err != nil {
-		return sessionPreparationReadiness{}, false, err
-	}
-	return readiness, true, nil
-}
-
-func loadEarliestFailedPreparationAtOrAfterTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	birthPreparationAttemptID string,
-	forUpdate bool,
-) (sessionPreparationReadiness, bool, error) {
-	if birthPreparationAttemptID == "" {
-		return sessionPreparationReadiness{}, false, runtimeDeliveryPrepareError{
-			kind:      "invalid_runtime_job_payload",
-			message:   "runtime input birth preparation attempt is missing",
-			retryable: false,
-		}
-	}
-	if forUpdate {
-		if err := lockSessionPreparationResetFenceTx(ctx, tx, workspaceID, sessionID); err != nil {
-			return sessionPreparationReadiness{}, false, err
-		}
-	}
-	birthQuery := `SELECT created_at
-	   FROM session_preparations
-	  WHERE workspace_id = $1
-	    AND session_id = $2
-	    AND preparation_attempt_id = $3`
-	var birthCreatedAt time.Time
-	if err := tx.QueryRow(ctx, birthQuery, workspaceID, sessionID, birthPreparationAttemptID).Scan(&birthCreatedAt); dbconnect.IsNoRows(err) {
-		return sessionPreparationReadiness{}, false, runtimeDeliveryPrepareError{
-			kind:      "runtime_preparation_failure_unavailable",
-			message:   "runtime input birth preparation attempt is unavailable",
-			retryable: true,
-		}
-	} else if err != nil {
-		return sessionPreparationReadiness{}, false, err
-	}
-	if forUpdate {
-		rows, err := tx.Query(ctx,
-			`SELECT preparation_attempt_id
-			   FROM session_preparations
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND (
-			        created_at > $3
-			        OR (
-			            created_at = $3
-			            AND preparation_attempt_id >= $4
-			        )
-			    )
-			  ORDER BY created_at ASC, preparation_attempt_id ASC
-			  FOR UPDATE`,
-			workspaceID,
-			sessionID,
-			birthCreatedAt,
-			birthPreparationAttemptID,
-		)
-		if err != nil {
-			return sessionPreparationReadiness{}, false, err
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var preparationAttemptID string
-			if err := rows.Scan(&preparationAttemptID); err != nil {
-				return sessionPreparationReadiness{}, false, err
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return sessionPreparationReadiness{}, false, err
-		}
-	}
-	query := `SELECT p.preparation_attempt_id, p.environment_id, p.environment_generation,
-	        p.status, p.sandbox_id,
-	        COALESCE(s.provider_sandbox_id, ''), COALESCE(s.status, ''), s.status_refreshed_at,
-	        p.resource_cred_expires_at, p.resource_roots_json, p.resource_helper_recovery_count,
-	        p.failure_stage, p.last_error_kind, p.failure_reason,
-	        p.failure_resource_id, p.failure_resource_url, p.retryable
-	   FROM session_preparations p
-	   LEFT JOIN sandboxes s
-	     ON s.workspace_id = p.workspace_id
-	    AND s.session_id = p.session_id
-	    AND s.id = p.sandbox_id
-	  WHERE p.workspace_id = $1
-	    AND p.session_id = $2
-	    AND p.status = 'failed'
-	    AND (
-	        p.created_at > $3
-	        OR (
-	            p.created_at = $3
-	            AND p.preparation_attempt_id >= $4
-	        )
-	    )
-	  ORDER BY p.created_at ASC, p.preparation_attempt_id ASC
-	  LIMIT 1`
-	row := tx.QueryRow(ctx, query, workspaceID, sessionID, birthCreatedAt, birthPreparationAttemptID)
-	var readiness sessionPreparationReadiness
-	if err := row.Scan(
-		&readiness.PreparationAttemptID,
-		&readiness.EnvironmentID,
-		&readiness.EnvironmentGeneration,
-		&readiness.Status,
-		&readiness.SandboxID,
-		&readiness.ProviderSandboxID,
-		&readiness.SandboxStatus,
-		&readiness.StatusRefreshedAt,
-		&readiness.ResourceCredentialExpiresAt,
-		&readiness.ResourceRootsJSON,
-		&readiness.ResourceHelperRecoveryCount,
-		&readiness.FailureStage,
-		&readiness.LastErrorKind,
-		&readiness.FailureReason,
-		&readiness.FailureResourceID,
-		&readiness.FailureResourceURL,
-		&readiness.Retryable,
-	); dbconnect.IsNoRows(err) {
-		return sessionPreparationReadiness{}, false, nil
-	} else if err != nil {
-		return sessionPreparationReadiness{}, false, err
-	}
-	return readiness, true, nil
-}
-
-func lockSessionPreparationResetFenceTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
-	var lockedSessionID string
-	if err := tx.QueryRow(ctx,
-		`SELECT id
-		   FROM sessions
-		  WHERE workspace_id = $1
-		    AND id = $2
-		  FOR UPDATE`,
-		workspaceID,
-		sessionID,
-	).Scan(&lockedSessionID); dbconnect.IsNoRows(err) {
-		return scopeSupersededError(status.Error(codes.NotFound, "session not found"))
-	} else if err != nil {
-		return err
-	}
-	return nil
-}
-
-func resetSessionPreparationAndEnqueuePrepareTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, readiness sessionPreparationReadiness, now time.Time, preserveResourceCredentialExpiry bool) error {
-	if workspaceID == "" || sessionID == "" || readiness.PreparationAttemptID == "" || readiness.EnvironmentID == "" || readiness.EnvironmentGeneration <= 0 || readiness.SandboxID == "" {
-		return closeoutUnrepairableError(status.Error(codes.Internal, "session preparation identity is incomplete"))
-	}
-	requestedResourceCredentialExpiresAt := readiness.ResourceCredentialExpiresAt
-	requestedResourceHelperRecoveryCount := readiness.ResourceHelperRecoveryCount
-	if err := lockSessionPreparationResetFenceTx(ctx, tx, workspaceID, sessionID); err != nil {
-		return err
-	}
-	current, ok, err := loadLatestSessionPreparationReadinessForUpdateTx(ctx, tx, workspaceID, sessionID)
-	if err != nil {
-		return err
-	}
-	if !ok || current.PreparationAttemptID != readiness.PreparationAttemptID || current.Status != "ready" {
-		return nil
-	}
-	readiness = current
-	if requestedResourceHelperRecoveryCount > readiness.ResourceHelperRecoveryCount {
-		readiness.ResourceHelperRecoveryCount = requestedResourceHelperRecoveryCount
-	}
-	timestamp := now
-	preparationAttemptID := id.New("prep_")
-	freshAttemptTime, err := nextSessionPreparationCreatedAtTx(ctx, tx, workspaceID, sessionID, now)
-	if err != nil {
-		return err
-	}
-	freshAttemptTimestamp := freshAttemptTime
-	resourceCredExpiresAt := any(nil)
-	if preserveResourceCredentialExpiry && requestedResourceCredentialExpiresAt.Valid {
-		resourceCredExpiresAt = requestedResourceCredentialExpiresAt.String
-	}
-	result, err := tx.Exec(ctx,
-		`UPDATE session_preparations
-		    SET superseded_at = $4, updated_at = $4
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND preparation_attempt_id = $3
-		    AND status = 'ready'
-		    AND superseded_at IS NULL`,
-		workspaceID,
-		sessionID,
-		readiness.PreparationAttemptID,
-		timestamp,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "session preparation is no longer ready")
-	}
-	result, err = tx.Exec(ctx,
-		`INSERT INTO session_preparations (
-			workspace_id, session_id, preparation_attempt_id, environment_id,
-			environment_generation, sandbox_id, status, resource_cred_expires_at,
-			resource_helper_recovery_count, created_at, updated_at
-		)
-		SELECT workspace_id, session_id, $4, environment_id,
-		       environment_generation, sandbox_id, 'pending', $5, $6,
-		       $7, $7
-		  FROM session_preparations
-		 WHERE workspace_id = $1
-		   AND session_id = $2
-		   AND preparation_attempt_id = $3
-		   AND status = 'ready'`,
-		workspaceID,
-		sessionID,
-		readiness.PreparationAttemptID,
-		preparationAttemptID,
-		resourceCredExpiresAt,
-		readiness.ResourceHelperRecoveryCount,
-		freshAttemptTimestamp,
-	)
-	if err != nil {
-		return err
-	}
-	if !rowsAffected(result) {
-		return status.Error(codes.FailedPrecondition, "session preparation is no longer ready")
-	}
-	payload, err := json.Marshal(map[string]string{
-		"workspace_id":           workspaceID,
-		"session_id":             sessionID,
-		"preparation_attempt_id": preparationAttemptID,
-	})
-	if err != nil {
-		return err
-	}
-	ws := workspace.ID(workspaceID)
-	_, err = queue.EnqueueTx(ctx, tx, queue.EnqueueRequest{
-		ID:             id.New(queue.JobIDPrefix),
-		WorkspaceID:    ws,
-		Kind:           queue.KindSessionPrepare,
-		PartitionKey:   queue.FormatSessionPartitionKey(ws, sessionID),
-		DedupeKey:      queue.FormatSessionPrepareDedupeKey(ws, sessionID, preparationAttemptID),
-		PayloadVersion: 1,
-		PayloadJSON:    payload,
-		MaxAttempts:    queue.DefaultMaxAttempts,
-		Now:            now,
-	})
-	return err
-}
-
-func nextSessionPreparationCreatedAtTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, requested time.Time) (time.Time, error) {
-	var latest sql.NullTime
-	if err := tx.QueryRow(ctx,
-		`SELECT MAX(created_at)
-		   FROM session_preparations
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		workspaceID,
-		sessionID,
-	).Scan(&latest); err != nil {
-		return time.Time{}, err
-	}
-	next := requested.UTC()
-	if latest.Valid && !next.After(latest.Time.UTC()) {
-		next = latest.Time.UTC().Add(time.Microsecond)
-	}
-	return next, nil
-}
-
-// resetResourcePreparationAfterHelperFailureTx handles the edge where a
-// helper_failure on a resource-ROOT read is treated as a retryable transient that
-// re-preps EVEN WHEN the stored resource_cred_expires_at has not yet passed: a
-// silently capped credential fails the read before the local expiry, so waiting
-// for the margin would never recover. The re-prep is bounded per preparation
-// (maxResourceHelperRecoveries) so a non-credential fault cannot loop, and it
-// fires only for resource-root reads — helper failures elsewhere never trigger
-// re-preparation.
-func resetResourcePreparationAfterHelperFailureTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, target SandboxToolTarget, now time.Time, _ time.Duration) (bool, error) {
-	if target.PreparationAttemptID == "" {
-		return false, nil
-	}
-	readiness, ok, err := loadLatestSessionPreparationReadinessTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId())
-	if err != nil || !ok {
-		return false, err
-	}
-	if readiness.PreparationAttemptID != target.PreparationAttemptID || readiness.Status != "ready" || readiness.SandboxID != target.SandboxID {
-		return false, nil
-	}
-	if !resourceCredentialMaterializationRecorded(readiness.ResourceCredentialExpiresAt) ||
-		readiness.ResourceHelperRecoveryCount >= maxResourceHelperRecoveries {
-		return false, nil
-	}
-	readiness.ResourceHelperRecoveryCount++
-	if err := resetSessionPreparationAndEnqueuePrepareTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), readiness, now, false); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func sandboxRefreshIsFresh(refreshedAt sql.NullString, now time.Time, freshnessWindow time.Duration) bool {
-	if !refreshedAt.Valid || strings.TrimSpace(refreshedAt.String) == "" {
-		return false
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, refreshedAt.String)
-	if err != nil {
-		return false
-	}
-	return !parsed.Before(now.Add(-freshnessWindow))
-}
-
-// sandboxStatusNeedsPreparationReset is one arm of a closed partition over
-// sandboxes.status that the readiness gate (runToolTargetTx and its siblings)
-// applies before tool execution:
-//
-//	status                          action
-//	stopped | archived | released   reset-and-re-enqueue (this function true) —
-//	                                  cold-return re-preparation
-//	active but stale, or an          reset-and-re-enqueue via the freshness /
-//	  expiring resource credential    credential sub-conditions in the gate
-//	creating | resuming | releasing  retry-only, NEVER reset — their in-flight
-//	                                  transitions are advanced by their own queue
-//	                                  jobs, and a reset would race the preparation
-//	                                  Sandbox Service is already driving
-//	failed                          terminal preparation path
-//
-// This function returns true only for the reset set; the in-flight statuses fall
-// through to the default (retry-only) precisely so a reset cannot race an
-// in-flight transition.
-func sandboxStatusNeedsPreparationReset(status string) bool {
-	switch status {
-	case "stopped", "archived", "released":
-		return true
-	default:
-		return false
-	}
-}
-
-func resourceCredentialExpiresFresh(expiresAt sql.NullString, now time.Time, refreshMargin time.Duration) bool {
-	if !expiresAt.Valid || strings.TrimSpace(expiresAt.String) == "" {
-		return true
-	}
-	if refreshMargin <= 0 {
-		refreshMargin = defaultResourceCredentialRefreshMargin
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, expiresAt.String)
-	if err != nil {
-		return false
-	}
-	return !now.After(parsed.Add(-refreshMargin))
-}
-
-// resourceCredentialNeedsLiveRotation is true once now() passes
-// resource_cred_expires_at minus the refresh margin. Bridge is READ-ONLY on the
-// credential: on this signal the readiness gate resets the preparation to
-// pending, enqueues session_prepare, and returns a retryable transient tool
-// error. Bridge never mints, refreshes, or calls the credential driver — the
-// re-mint happens inside the re-run session_prepare on Sandbox Service, which
-// owns the credential lifecycle and the expiry field Bridge only reads.
-func resourceCredentialNeedsLiveRotation(expiresAt sql.NullString, now time.Time, refreshMargin time.Duration) bool {
-	return !resourceCredentialExpiresFresh(expiresAt, now, refreshMargin)
-}
-
-func resourceCredentialMaterializationRecorded(expiresAt sql.NullString) bool {
-	return expiresAt.Valid && strings.TrimSpace(expiresAt.String) != ""
-}
-
-type resourceRootSnapshotEntry struct {
-	Path string `json:"path"`
-	Mode string `json:"mode"`
-}
-
-func runToolReadsResourceRoot(toolName string, inputJSON string, resourceRootsJSON string) bool {
-	if toolName != "Read" && toolName != "read" {
-		return false
-	}
-	if strings.TrimSpace(resourceRootsJSON) == "" {
-		return false
-	}
-	var input struct {
-		Path     string `json:"path"`
-		FilePath string `json:"file_path"`
-	}
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return false
-	}
-	path := input.Path
-	if strings.TrimSpace(path) == "" {
-		path = input.FilePath
-	}
-	candidate, ok := normalizeSandboxToolPath(path)
-	if !ok {
-		return false
-	}
-	var roots []resourceRootSnapshotEntry
-	if err := json.Unmarshal([]byte(resourceRootsJSON), &roots); err != nil {
-		return false
-	}
-	for _, root := range roots {
-		if root.Mode != "read" {
-			continue
-		}
-		rootPath, ok := normalizeSandboxToolPath(root.Path)
-		if !ok || rootPath == "/workspace" {
-			continue
-		}
-		if candidate == rootPath || strings.HasPrefix(candidate, rootPath+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeSandboxToolPath(raw string) (string, bool) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", false
-	}
-	if !path.IsAbs(trimmed) {
-		trimmed = path.Join("/workspace", trimmed)
-	}
-	cleaned := path.Clean(trimmed)
-	if !path.IsAbs(cleaned) || cleaned == "/" {
-		return "", false
-	}
-	return cleaned, true
 }
 
 type memoryToolInput struct {
@@ -1556,23 +859,6 @@ func isMemoryStaleErrorCode(errorCode string) bool {
 	default:
 		return false
 	}
-}
-
-func memoryResultIsStaleToolError(resultJSON string) bool {
-	var result memoryToolResultShape
-	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-		return false
-	}
-	return result.Status == "tool_error" && result.RereadRequired && isMemoryStaleErrorCode(result.ErrorCode)
-}
-
-func rewriteMemoryProjectionRefreshed(resultJSON string, refreshed bool) (string, error) {
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(resultJSON), &payload); err != nil {
-		return "", err
-	}
-	payload["projection_refreshed"] = refreshed
-	return marshalBridgeJSON(payload)
 }
 
 func applyMemoryToolTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, requestedOperation string, inputJSON string) (string, error) {
@@ -2045,30 +1331,6 @@ func marshalBridgeDataJSON(value any) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(body.String(), "\n"), nil
-}
-
-func marshalToolRuntimeError(errorCode string, message string, retryable bool) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"status":     "runtime_error",
-		"error_code": errorCode,
-		"message":    message,
-		"retryable":  retryable,
-	})
-}
-
-func mustMarshalToolRuntimeError(errorCode string, message string, retryable bool) string {
-	result, err := marshalToolRuntimeError(errorCode, message, retryable)
-	if err != nil {
-		return `{"status":"runtime_error","error_code":"serialization_failed","message":"sandbox tool result serialization failed","retryable":false}`
-	}
-	return result
-}
-
-func sandboxHelperExecutionErrorResult(err error, defaultMessage string) string {
-	if sandboxHelperFailureError(err) {
-		return mustMarshalToolRuntimeError("helper_failure", "sandbox helper failed before emitting an authoritative envelope", true)
-	}
-	return mustMarshalToolRuntimeError("sandbox_helper_unavailable", defaultMessage, true)
 }
 
 func marshalMemoryToolError(errorCode string, message string, rereadRequired bool) (string, error) {

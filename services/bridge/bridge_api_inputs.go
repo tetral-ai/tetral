@@ -6,17 +6,21 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strconv"
-	"strings"
+	"sort"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+)
+
+const (
+	sandboxToolCancelMaxAttempts = 5
 )
 
 // This file owns the Bridge inputs protocol-family boundary.
@@ -29,128 +33,225 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 	if err := validateCommitInputsRequest(inputKind, request); err != nil {
 		return nil, err
 	}
-	interAgentHashPart := request.GetInterAgentMessageJson()
-	if inputKind == "inter_agent_message" {
+	key := request.GetRuntimeInputId()
+	declarationDigest, err := commitInputsDeclarationDigest(request, inputKind)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	var ack *bridgev1.BridgeWriteAck
+	var receipt *bridgev1.DeclarationReceipt
+	var observation declarationApplicationObservation
+	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
+		// Serialize replay lookup before validating the current binding. A replacement
+		// binding may recover an ACK lost by its predecessor, while concurrent writers
+		// for the same session must still observe one committed operation.
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInputs,
+			inputKind,
+			key,
+		); err != nil {
+			return err
+		} else if ok {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "commit inputs receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
+				return status.Error(codes.AlreadyExists, "commit inputs idempotency conflict")
+			}
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "commit inputs receipt is invalid")
+			}
+			ack = duplicateAck(key, "")
+			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
+		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		if err := lockThreadMutationOnlyTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
+		receipt, err = commitInputDeclarationTx(ctx, tx, request, inputKind, key, now)
+		if err != nil {
+			return err
+		}
+		receipt.DeclarationDigest = declarationDigest
+		resultJSON, err := marshalDeclarationReceipt(receipt)
+		if err != nil {
+			return err
+		}
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitInputs,
+			inputKind,
+			key,
+			declarationDigest,
+			resultJSON,
+			now,
+		); err != nil {
+			return err
+		}
+		ack = committedAck(key, "")
+		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpCommitInputs,
+		inputKind,
+		key,
+		declarationDigest,
+		ack,
+		observation,
+	)
+	return &bridgev1.CommitInputsResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
+}
+
+func commitInputDeclarationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.CommitInputsRequest,
+	inputKind string,
+	key string,
+	now time.Time,
+) (*bridgev1.DeclarationReceipt, error) {
+	inboxStatus := ""
+	if commitInputsKindUsesRuntimeInbox(inputKind) {
 		var err error
-		interAgentHashPart, err = interAgentMessageIdentityHashPart(request.GetInterAgentMessageJson())
+		inboxStatus, err = lockAndValidateRuntimeInboxCommitTx(ctx, tx, request, inputKind)
+		if err != nil {
+			return nil, err
+		}
+		if inputKind == "interrupt_control" {
+			if err := validateInterruptCancellationDraftCoverageTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetDrafts(),
+			); err != nil {
+				return nil, err
+			}
+			if err := cancelInterruptedSandboxExecutionsTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetSandboxExecutionToolUseEventIds(),
+				now,
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if inboxStatus == "committed" {
+		return nil, status.Error(codes.FailedPrecondition, "committed runtime input is missing idempotency state")
+	}
+	if expectedEventType := commitInputEventType(inputKind); expectedEventType != "" {
+		if err := requireCommitInputEventTypesTx(ctx, tx, request.GetScope(), request.GetEventIds(), expectedEventType); err != nil {
+			return nil, err
+		}
+	}
+	if inputKind == "approval_review" {
+		if err := requireApprovalReviewerInputTargetTx(ctx, tx, request.GetScope()); err != nil {
+			return nil, err
+		}
+	}
+	if inputKind == "agent_mail" {
+		if err := requireAgentMailInputTargetTx(ctx, tx, request.GetScope()); err != nil {
+			return nil, err
+		}
+	}
+	if commitInputsKindUsesRuntimeInbox(inputKind) {
+		if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
+			return nil, err
+		}
+	}
+	if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+		return nil, err
+	}
+	if inputKind == "tool_confirmation" {
+		if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+			return nil, err
+		}
+	}
+	receipt, err := commitInputDraftsTx(
+		ctx,
+		tx,
+		request.GetScope(),
+		inputKind,
+		key,
+		request.GetEventIds(),
+		request.GetDrafts(),
+		now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil {
+		receipt = &bridgev1.DeclarationReceipt{
+			SessionThreadId: request.GetScope().GetSessionThreadId(),
+			OperationKind:   bridgeOpCommitInputs,
+			SourceKind:      inputKind,
+			SourceId:        key,
+		}
+	}
+	if inputKind == "messages" {
+		receipt.PendingAttachmentDeltaJson, err = loadCommittedInputAttachmentDeltaTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			request.GetEventIds(),
+		)
 		if err != nil {
 			return nil, err
 		}
 	}
-	key := request.GetRuntimeInputId()
-	requestHash := bridgeRequestHash(
-		bridgeOpCommitInputs,
-		key,
-		request.GetScope().GetSessionThreadId(),
-		inputKind,
-		strings.Join(request.GetEventIds(), "\x1f"),
-		strconv.FormatInt(request.GetSequenceFrom(), 10),
-		strconv.FormatInt(request.GetSequenceTo(), 10),
-		request.GetHotContextPatchJson(),
-		interAgentHashPart,
-		request.GetApprovalReviewJson(),
-	)
-	now := s.now()
-	var ack *bridgev1.BridgeWriteAck
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_inputs", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
-			return err
-		}
-		inboxStatus := ""
-		if commitInputsKindUsesRuntimeInbox(inputKind) {
-			var err error
-			inboxStatus, err = lockAndValidateRuntimeInboxCommitTx(ctx, tx, request, inputKind)
-			if err != nil {
-				return err
-			}
-		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitInputs, key); err != nil {
-			return err
-		} else if ok {
-			if existing.RequestHash != requestHash {
-				return status.Error(codes.AlreadyExists, "commit inputs idempotency conflict")
-			}
-			ack = duplicateAck(key, "")
-			return nil
-		}
-		if inboxStatus == "committed" {
-			return status.Error(codes.FailedPrecondition, "committed runtime input is missing idempotency state")
-		}
-		switch inputKind {
-		case "messages":
-			if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-				return err
-			}
-			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-			if err := projectAcceptedInputTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-		case "interrupt_control":
-			if err := requireCommitInputEventTypesTx(ctx, tx, request.GetScope(), request.GetEventIds(), "user.interrupt"); err != nil {
-				return err
-			}
-			if err := cancelInterruptedPendingToolUsesTx(ctx, tx, request.GetScope(), now); err != nil {
-				return err
-			}
-			if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-				return err
-			}
-			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-		case "tool_confirmation":
-			if err := markRuntimeInboxCommittedTx(ctx, tx, request.GetScope(), key, now); err != nil {
-				return err
-			}
-			if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-			if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-				return err
-			}
-		case "inter_agent_message":
-			if err := commitInterAgentMessageTx(ctx, tx, request.GetScope(), request.GetInterAgentMessageJson(), now); err != nil {
-				return err
-			}
-		case "approval_review":
-			if err := commitApprovalReviewInputTx(ctx, tx, request.GetScope(), request.GetApprovalReviewJson(), now); err != nil {
-				return err
-			}
-		default:
-			return status.Error(codes.InvalidArgument, "unsupported commit inputs kind")
-		}
-		resultJSON, err := marshalBridgeJSON(map[string]any{
-			"runtime_input_id": key,
-			"input_kind":       inputKind,
-			"event_ids":        request.GetEventIds(),
-			"status":           "committed",
-		})
+	if inputKind == "interrupt_control" {
+		receipt.PendingToolDeltaJson, err = cancelInterruptedPendingToolUsesTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			request.GetEventIds()[0],
+			request.GetPendingToolCancellations(),
+			now,
+		)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpCommitInputs,
-			IdempotencyKey: key,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeInputID: sql.NullString{String: key, Valid: true},
-			ResultJSON:     resultJSON,
-			Now:            now,
-		}); err != nil {
-			return err
-		}
-		ack = committedAck(key, "")
-		return nil
-	}); err != nil {
-		return nil, err
 	}
-	return &bridgev1.CommitInputsResponse{Ack: ack}, nil
+	return receipt, nil
 }
 
 func commitInputsKindUsesRuntimeInbox(inputKind string) bool {
-	return inputKind == "messages" || inputKind == "interrupt_control" || inputKind == "tool_confirmation"
+	switch inputKind {
+	case "messages", "interrupt_control", "tool_confirmation", "agent_mail", "rejection":
+		return true
+	default:
+		return false
+	}
 }
 
 func lockAndValidateRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
@@ -209,25 +310,6 @@ func lockAndValidateRuntimeInboxCommitTx(ctx context.Context, tx *dbconnect.Tx, 
 		!sameBridgeSequence(inboxSequenceFrom, request.GetSequenceFrom()) ||
 		!sameBridgeSequence(inboxSequenceTo, request.GetSequenceTo()) {
 		return "", status.Error(codes.AlreadyExists, "commit inputs payload conflicts with runtime inbox")
-	}
-	if inputKind == "messages" && inboxStatus != "committed" {
-		expectedPayloadJSON, err := acceptedMessageCommandPayloadTx(ctx, tx, RuntimeJob{
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     scope.GetWorkspaceId(),
-			SessionID:       inboxSessionID,
-			SessionThreadID: inboxThreadID,
-			RuntimeInputID:  runtimeInputID,
-			EventIDs:        inboxEventIDs,
-			SequenceFrom:    inboxSequenceFrom.Int64,
-			SequenceTo:      inboxSequenceTo.Int64,
-			InputKind:       inboxKind,
-		})
-		if err != nil {
-			return "", status.Error(codes.FailedPrecondition, "runtime inbox payload is not committable")
-		}
-		if bridgeRequestHash(expectedPayloadJSON) != bridgeRequestHash(request.GetHotContextPatchJson()) {
-			return "", status.Error(codes.AlreadyExists, "commit inputs payload conflicts with runtime inbox")
-		}
 	}
 	return inboxStatus, nil
 }
@@ -323,6 +405,86 @@ func markSessionEventsProcessed(ctx context.Context, tx *dbconnect.Tx, scope *br
 	return nil
 }
 
+func loadCommittedInputAttachmentDeltaTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	eventIDs []string,
+) ([]string, error) {
+	result := make([]string, 0)
+	for _, eventID := range eventIDs {
+		var payloadJSON string
+		if err := tx.QueryRow(ctx,
+			`SELECT payload_json
+			   FROM session_events
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND event_id = $4
+			    AND type = 'user.message'`,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			eventID,
+		).Scan(&payloadJSON); err != nil {
+			return nil, err
+		}
+		var payload struct {
+			Content []struct {
+				Type   string `json:"type"`
+				Source struct {
+					Type   string `json:"type"`
+					FileID string `json:"file_id"`
+				} `json:"source"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, "runtime input attachment payload is invalid")
+		}
+		seen := make(map[string]struct{})
+		for _, part := range payload.Content {
+			if (part.Type != "image" && part.Type != "document") ||
+				part.Source.Type != "file" ||
+				part.Source.FileID == "" {
+				continue
+			}
+			if _, ok := seen[part.Source.FileID]; ok {
+				continue
+			}
+			seen[part.Source.FileID] = struct{}{}
+			var mime, filename sql.NullString
+			if err := tx.QueryRow(ctx,
+				`SELECT mime_type, filename
+				   FROM files
+				  WHERE workspace_id = $1
+				    AND file_id = $2`,
+				scope.GetWorkspaceId(),
+				part.Source.FileID,
+			).Scan(&mime, &filename); dbconnect.IsNoRows(err) {
+				mime = sql.NullString{}
+				filename = sql.NullString{}
+			} else if err != nil {
+				return nil, err
+			}
+			encoded, err := marshalBridgeJSON(bridgeLoadContextPendingAttachment{
+				Origin: bridgeLoadContextAttachmentOrigin{
+					FileBacked: &bridgeLoadContextFileAttachment{
+						SourceEventID: eventID,
+						FileID:        part.Source.FileID,
+					},
+				},
+				Mime:     mime.String,
+				Filename: filename.String,
+			})
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, encoded)
+		}
+	}
+	return result, nil
+}
+
 func sessionEventProcessedState(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string) (bool, bool, error) {
 	var processedAt sql.NullTime
 	err := tx.QueryRow(ctx,
@@ -344,38 +506,6 @@ func sessionEventProcessedState(ctx context.Context, tx *dbconnect.Tx, scope *br
 		return false, false, err
 	}
 	return processedAt.Valid, true, nil
-}
-
-func projectAcceptedInputTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventIDs []string, now time.Time) error {
-	for _, eventID := range eventIDs {
-		row := tx.QueryRow(ctx,
-			`SELECT type, payload_json
-			   FROM session_events
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND event_id = $4
-			  FOR UPDATE`,
-			scope.GetWorkspaceId(),
-			scope.GetSessionId(),
-			scope.GetSessionThreadId(),
-			eventID,
-		)
-		var eventType string
-		var payloadJSON string
-		if err := row.Scan(&eventType, &payloadJSON); err != nil {
-			return err
-		}
-		switch eventType {
-		case "user.message":
-			if err := insertSessionMessageProjectionTx(ctx, tx, scope, eventID, "accepted_user", payloadJSON, now); err != nil {
-				return err
-			}
-		default:
-			return status.Error(codes.FailedPrecondition, "message input event type is not committable")
-		}
-	}
-	return nil
 }
 
 func requireCommitInputEventTypesTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventIDs []string, expectedType string) error {
@@ -439,51 +569,48 @@ func settleToolConfirmationEventsTx(ctx context.Context, tx *dbconnect.Tx, scope
 	return nil
 }
 
-func cancelInterruptedPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
-	if _, err := lockThreadMutationTx(ctx, tx, scope); err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT p.tool_use_event_id, p.model_tool_call_id, p.tool_name, p.input_json,
-		        e.type, COALESCE(e.payload_json::jsonb ->> 'mcp_server_name', '')
-		   FROM session_pending_tool_uses p
-		   JOIN session_events e
-		     ON e.workspace_id = p.workspace_id
-		    AND e.session_id = p.session_id
-		    AND e.session_thread_id = p.session_thread_id
-		    AND e.event_id = p.tool_use_event_id
-		  WHERE p.workspace_id = $1
-		    AND p.session_id = $2
-		    AND p.session_thread_id = $3
-		    AND p.kind = 'approval'
-		    AND p.status IN ('pending', 'resolving')
-		  ORDER BY e.sequence ASC, p.tool_use_event_id ASC
-		  FOR UPDATE OF p`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId())
+func cancelInterruptedPendingToolUsesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	interruptEventID string,
+	cancellations []*bridgev1.PendingToolCancellationDraft,
+	now time.Time,
+) ([]string, error) {
+	expected, err := pendingApprovalToolUseIDsTx(ctx, tx, scope)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	waits := make([]cleanupPendingWait, 0)
-	for rows.Next() {
-		wait := cleanupPendingWait{ThreadID: scope.GetSessionThreadId()}
-		if err := rows.Scan(&wait.ToolUseEventID, &wait.ModelToolCallID, &wait.ToolName, &wait.InputJSON, &wait.EventType, &wait.MCPServerName); err != nil {
-			return err
+	provided := make([]string, 0, len(cancellations))
+	for _, cancellation := range cancellations {
+		provided = append(provided, cancellation.GetToolUseEventId())
+	}
+	sort.Strings(provided)
+	if !sameBridgeStringSlice(expected, provided) {
+		return nil, status.Error(codes.FailedPrecondition, "interrupt approval-tool coverage is incomplete")
+	}
+	deltas := make([]string, 0, len(cancellations))
+	for _, cancellation := range cancellations {
+		var statusValue string
+		if err := tx.QueryRow(ctx,
+			`SELECT status
+			   FROM session_pending_tool_uses
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND tool_use_event_id = $4
+			  FOR UPDATE`,
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			cancellation.GetToolUseEventId(),
+		).Scan(&statusValue); dbconnect.IsNoRows(err) {
+			return nil, status.Error(codes.FailedPrecondition, "interrupted pending tool use is missing")
+		} else if err != nil {
+			return nil, err
 		}
-		waits = append(waits, wait)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	terminal := pendingToolTerminal{
-		PartStatus: "cancelled",
-		ErrorType:  "runtime_interrupted",
-		Message:    "Tool call cancelled by user interrupt.",
-	}
-	for _, wait := range waits {
-		eventID, err := insertPendingToolTerminalResultTx(ctx, tx, scope, wait, terminal, now)
-		if err != nil {
-			return err
+		if statusValue != "pending" && statusValue != "resolving" {
+			return nil, status.Error(codes.FailedPrecondition, "interrupted pending tool use is stale")
 		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_pending_tool_uses
@@ -496,14 +623,637 @@ func cancelInterruptedPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 			    AND session_thread_id = $3
 			    AND tool_use_event_id = $4
 			    AND status IN ('pending', 'resolving')`,
-			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), wait.ToolUseEventID,
-			eventID, now)
+			scope.GetWorkspaceId(),
+			scope.GetSessionId(),
+			scope.GetSessionThreadId(),
+			cancellation.GetToolUseEventId(),
+			interruptEventID,
+			now,
+		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !rowsAffected(result) {
-			return status.Error(codes.FailedPrecondition, "interrupted pending tool use is stale")
+			return nil, status.Error(codes.FailedPrecondition, "interrupted pending tool use is stale")
 		}
+		delta, err := marshalBridgeJSON(map[string]any{
+			"result_event_id":   interruptEventID,
+			"runtime_local_id":  cancellation.GetRuntimeLocalId(),
+			"status":            "cancelled",
+			"tool_use_event_id": cancellation.GetToolUseEventId(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		deltas = append(deltas, delta)
+	}
+	return deltas, nil
+}
+
+func pendingApprovalToolUseIDsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT p.tool_use_event_id
+		   FROM session_pending_tool_uses p
+		  WHERE p.workspace_id = $1
+		    AND p.session_id = $2
+		    AND p.session_thread_id = $3
+		    AND p.status IN ('pending', 'resolving')
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_runtime_tool_results r
+		       WHERE r.workspace_id = p.workspace_id
+		         AND r.session_id = p.session_id
+		         AND r.session_thread_id = p.session_thread_id
+		         AND r.tool_use_event_id = p.tool_use_event_id
+		         AND r.tool_kind = 'sandbox_tool'
+		         AND r.execution_state <> 'consumed'
+		    )
+		  ORDER BY p.tool_use_event_id
+		  FOR UPDATE OF p`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []string
+	for rows.Next() {
+		var toolUseEventID string
+		if err := rows.Scan(&toolUseEventID); err != nil {
+			return nil, err
+		}
+		result = append(result, toolUseEventID)
+	}
+	return result, rows.Err()
+}
+
+type interruptedSandboxExecution struct {
+	toolUseEventID                    string
+	executionState                    string
+	executionAttemptGeneration        int64
+	waitingActivationOperationID      sql.NullString
+	waitingMaterializationOperationID sql.NullString
+	providerCommandReference          sql.NullString
+}
+
+type interruptedLifecycleOperation struct {
+	operationID      string
+	kind             string
+	state            string
+	logicalSandboxID string
+	targetProviderID sql.NullString
+	supersededByID   sql.NullString
+	queueJobID       sql.NullString
+	queueKind        sql.NullString
+	partitionKey     sql.NullString
+	dedupeKey        sql.NullString
+}
+
+func cancelInterruptedSandboxExecutionsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	requestedToolUseEventIDs []string,
+	now time.Time,
+) error {
+	operationIDs, err := sandboxExecutionDependencyIDsTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	if err := lockInterruptedSandboxBindingTx(ctx, tx, scope); err != nil {
+		return err
+	}
+	operations, releases, err := lockInterruptedLifecycleOperationsTx(ctx, tx, scope, operationIDs)
+	if err != nil {
+		return err
+	}
+	executions, err := lockInterruptedSandboxExecutionsTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+	provided := append([]string(nil), requestedToolUseEventIDs...)
+	sort.Strings(provided)
+	expected := make([]string, 0, len(executions))
+	for _, execution := range executions {
+		expected = append(expected, execution.toolUseEventID)
+	}
+	if !sameBridgeStringSlice(expected, provided) {
+		return status.Error(codes.FailedPrecondition, "interrupt sandbox-execution coverage is incomplete")
+	}
+
+	var enqueueRequests []queue.EnqueueRequest
+	for _, execution := range executions {
+		switch execution.executionState {
+		case "pending", "preparing", "waiting_activation", "waiting_materialization":
+			if err := terminalizeInterruptedSandboxExecutionTx(ctx, tx, scope, execution, "cancelled", "Sandbox tool execution was cancelled.", "cancelled", now); err != nil {
+				return err
+			}
+		case "running":
+			if !execution.providerCommandReference.Valid || execution.providerCommandReference.String == "" {
+				if err := terminalizeInterruptedSandboxExecutionTx(ctx, tx, scope, execution, "sandbox_execution_outcome_unknown", "Sandbox tool execution outcome is unknown.", "error", now); err != nil {
+					return err
+				}
+				continue
+			}
+			request, err := requestSandboxExecutionCancellationTx(ctx, tx, scope, execution, now)
+			if err != nil {
+				return err
+			}
+			enqueueRequests = append(enqueueRequests, request)
+		case "terminal_unconsumed":
+			// A durable completion already won; Runtime commits its ordinary Tool Result.
+		default:
+			return status.Error(codes.FailedPrecondition, "interrupt sandbox execution is not cancellable")
+		}
+	}
+	cancelRequests, err := abandonUnneededInterruptedLifecycleOperationsTx(ctx, tx, scope, operations, now)
+	if err != nil {
+		return err
+	}
+	releaseRequests, err := interruptedSandboxReleaseRequestsTx(ctx, tx, scope, releases, now)
+	if err != nil {
+		return err
+	}
+	enqueueRequests = append(enqueueRequests, releaseRequests...)
+	if _, err := queue.EnqueueBatchTx(ctx, tx, enqueueRequests); err != nil {
+		return err
+	}
+	sort.Slice(cancelRequests, func(left, right int) bool {
+		return cancelRequests[left].JobID < cancelRequests[right].JobID
+	})
+	for _, request := range cancelRequests {
+		if _, err := queue.CancelTx(ctx, tx, request); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sandboxExecutionDependencyIDsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]string, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT waiting_activation_operation_id, waiting_materialization_operation_id
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_kind = 'sandbox_tool' AND execution_state <> 'consumed'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var activationID, materializationID sql.NullString
+		if err := rows.Scan(&activationID, &materializationID); err != nil {
+			return nil, err
+		}
+		if activationID.Valid {
+			seen[activationID.String] = struct{}{}
+		}
+		if materializationID.Valid {
+			seen[materializationID.String] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(seen))
+	for operationID := range seen {
+		result = append(result, operationID)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func lockInterruptedSandboxBindingTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	var logicalSandboxID string
+	err := tx.QueryRow(ctx,
+		`SELECT logical_sandbox_id FROM session_sandbox_bindings
+		  WHERE workspace_id=$1 AND session_id=$2 FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(),
+	).Scan(&logicalSandboxID)
+	if dbconnect.IsNoRows(err) {
+		return nil
+	}
+	return err
+}
+
+func lockInterruptedLifecycleOperationsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operationIDs []string,
+) ([]interruptedLifecycleOperation, []interruptedLifecycleOperation, error) {
+	// Interrupt settlement locks the complete lifecycle set before execution
+	// rows, so release wakeup never has to reacquire an earlier lock class.
+	rows, err := tx.Query(ctx,
+		`SELECT operation_id, kind, state, logical_sandbox_id, target_provider_resource_id,
+		        superseded_by_operation_id,
+		        queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key
+		   FROM sandbox_lifecycle_operations
+		  WHERE workspace_id=$1 AND session_id=$2
+		  ORDER BY operation_id
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	all := make(map[string]interruptedLifecycleOperation)
+	var releases []interruptedLifecycleOperation
+	for rows.Next() {
+		var operation interruptedLifecycleOperation
+		if err := rows.Scan(
+			&operation.operationID, &operation.kind, &operation.state,
+			&operation.logicalSandboxID, &operation.targetProviderID,
+			&operation.supersededByID,
+			&operation.queueJobID, &operation.queueKind, &operation.partitionKey, &operation.dedupeKey,
+		); err != nil {
+			return nil, nil, err
+		}
+		all[operation.operationID] = operation
+		if operation.kind == "release" && operation.state == "pending" && !operation.supersededByID.Valid {
+			releases = append(releases, operation)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	operations := make([]interruptedLifecycleOperation, 0, len(operationIDs))
+	for _, operationID := range operationIDs {
+		operation, ok := all[operationID]
+		if !ok {
+			return nil, nil, status.Error(codes.FailedPrecondition, "sandbox execution dependency is missing")
+		}
+		operations = append(operations, operation)
+	}
+	return operations, releases, nil
+}
+
+func interruptedSandboxReleaseRequestsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	releases []interruptedLifecycleOperation,
+	now time.Time,
+) ([]queue.EnqueueRequest, error) {
+	workspaceID := scope.GetWorkspaceId()
+	sessionID := scope.GetSessionId()
+	requests := make([]queue.EnqueueRequest, 0, len(releases))
+	for _, release := range releases {
+		if !release.targetProviderID.Valid || release.targetProviderID.String == "" {
+			return nil, status.Error(codes.FailedPrecondition, "sandbox release target is missing")
+		}
+		blocked, err := sandboxrelease.BlockedTx(
+			ctx, tx, workspaceID, sessionID, release.logicalSandboxID, release.operationID, release.targetProviderID.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			continue
+		}
+		if release.queueJobID.Valid {
+			var queueStatus string
+			err := tx.QueryRow(ctx,
+				`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, workspaceID, release.queueJobID.String,
+			).Scan(&queueStatus)
+			if err != nil && !dbconnect.IsNoRows(err) {
+				return nil, err
+			}
+			if err == nil && (queueStatus == queue.StatusPending || queueStatus == queue.StatusLeased) {
+				continue
+			}
+		}
+		jobID := queue.NewJobID()
+		partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(workspaceID), release.logicalSandboxID)
+		dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxRelease, workspace.ID(workspaceID), release.logicalSandboxID, release.operationID)
+		payload, err := marshalBridgeJSON(map[string]string{
+			"workspace_id": workspaceID, "session_id": sessionID,
+			"logical_sandbox_id": release.logicalSandboxID, "operation_id": release.operationID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET queue_job_id=$3, queue_kind=$4, queue_partition_key=$5, queue_dedupe_key=$6,
+			        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL, attempt_count=0, updated_at=$7
+			  WHERE workspace_id=$1 AND operation_id=$2 AND state='pending'`,
+			workspaceID, release.operationID, jobID, queue.KindSandboxRelease, partitionKey, dedupeKey, now.UTC(),
+		); err != nil {
+			return nil, err
+		}
+		requests = append(requests, queue.EnqueueRequest{
+			ID: jobID, WorkspaceID: workspace.ID(workspaceID), Kind: queue.KindSandboxRelease,
+			PartitionKey: partitionKey, DedupeKey: dedupeKey, PayloadVersion: 1,
+			PayloadJSON: []byte(payload), MaxAttempts: sandboxrelease.MaxAttempts, Now: now.UTC(),
+		})
+	}
+	return requests, nil
+}
+
+func lockInterruptedSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]interruptedSandboxExecution, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT tool_use_event_id, execution_state, execution_attempt_generation,
+		        waiting_activation_operation_id, waiting_materialization_operation_id,
+		        provider_command_reference_json
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_kind = 'sandbox_tool' AND execution_state <> 'consumed'
+		  ORDER BY tool_use_event_id
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var executions []interruptedSandboxExecution
+	for rows.Next() {
+		var execution interruptedSandboxExecution
+		if err := rows.Scan(
+			&execution.toolUseEventID,
+			&execution.executionState,
+			&execution.executionAttemptGeneration,
+			&execution.waitingActivationOperationID,
+			&execution.waitingMaterializationOperationID,
+			&execution.providerCommandReference,
+		); err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
+func terminalizeInterruptedSandboxExecutionTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	execution interruptedSandboxExecution,
+	errorKind string,
+	safeMessage string,
+	resultStatus string,
+	now time.Time,
+) error {
+	resultJSON, err := marshalBridgeJSON(map[string]any{
+		"error":  map[string]string{"kind": errorKind, "message": safeMessage},
+		"status": resultStatus,
+	})
+	if err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_tool_results
+		    SET execution_state = 'terminal_unconsumed', result_json = $6, result_digest = $7,
+		        waiting_activation_operation_id = NULL, waiting_materialization_operation_id = NULL,
+		        authorized_binding_revision = NULL, authorized_provider_resource_id = NULL,
+		        preparation_deadline = NULL, provider_command_reference_json = NULL,
+		        cancel_requested_at = NULL, cancel_state = NULL, cancel_submitted_at = NULL,
+		        updated_at = $8
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4 AND execution_attempt_generation = $5
+		    AND execution_state <> 'consumed'`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), execution.toolUseEventID,
+		execution.executionAttemptGeneration, resultJSON, sha256Hex(resultJSON), now.UTC(),
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(result) {
+		return status.Error(codes.Aborted, "sandbox execution changed during interrupt settlement")
+	}
+	return nil
+}
+
+func requestSandboxExecutionCancellationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, execution interruptedSandboxExecution, now time.Time) (queue.EnqueueRequest, error) {
+	result, err := tx.Exec(ctx,
+		`UPDATE session_runtime_tool_results
+		    SET cancel_requested_at = COALESCE(cancel_requested_at, $6),
+		        cancel_state = COALESCE(cancel_state, 'pending'), updated_at = $6
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+		    AND tool_use_event_id = $4 AND execution_attempt_generation = $5
+		    AND execution_state = 'running'
+		    AND provider_command_reference_json IS NOT NULL`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), execution.toolUseEventID,
+		execution.executionAttemptGeneration, now.UTC(),
+	)
+	if err != nil {
+		return queue.EnqueueRequest{}, err
+	}
+	if !rowsAffected(result) {
+		return queue.EnqueueRequest{}, status.Error(codes.Aborted, "sandbox execution changed during interrupt settlement")
+	}
+	payload, err := marshalBridgeJSON(map[string]string{
+		"workspace_id": scope.GetWorkspaceId(), "session_id": scope.GetSessionId(),
+		"session_thread_id": scope.GetSessionThreadId(), "tool_use_event_id": execution.toolUseEventID,
+	})
+	if err != nil {
+		return queue.EnqueueRequest{}, err
+	}
+	workspaceID := workspace.ID(scope.GetWorkspaceId())
+	return queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspaceID, Kind: queue.KindSandboxToolCancel,
+		PartitionKey:   queue.FormatSandboxCancelPartitionKey(workspaceID, scope.GetSessionId(), scope.GetSessionThreadId(), execution.toolUseEventID),
+		DedupeKey:      queue.FormatSandboxToolCancelDedupeKey(workspaceID, scope.GetSessionId(), scope.GetSessionThreadId(), execution.toolUseEventID),
+		PayloadVersion: 1, PayloadJSON: []byte(payload), MaxAttempts: sandboxToolCancelMaxAttempts, Now: now,
+	}, nil
+}
+
+func abandonUnneededInterruptedLifecycleOperationsTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operations []interruptedLifecycleOperation,
+	now time.Time,
+) ([]queue.TargetedCancelRequest, error) {
+	var cancelRequests []queue.TargetedCancelRequest
+	for _, operation := range operations {
+		var waiterCount int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM session_runtime_tool_results
+			  WHERE workspace_id = $1 AND session_id = $2 AND tool_kind = 'sandbox_tool'
+			    AND execution_state <> 'consumed'
+			    AND (waiting_activation_operation_id = $3 OR waiting_materialization_operation_id = $3)`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), operation.operationID,
+		).Scan(&waiterCount); err != nil {
+			return nil, err
+		}
+		if waiterCount != 0 {
+			continue
+		}
+		abandonable := (operation.kind == "create" || operation.kind == "start" || operation.kind == "replace") &&
+			(operation.state == "pending" || operation.state == "waiting_artifact")
+		abandonable = abandonable || operation.kind == "materialize" &&
+			(operation.state == "pending" || operation.state == "waiting_activation")
+		if !abandonable {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_lifecycle_operations
+			    SET state = 'abandoned', completed_at = $3, updated_at = $3
+			  WHERE workspace_id = $1 AND operation_id = $2 AND state = $4`,
+			scope.GetWorkspaceId(), operation.operationID, now.UTC(), operation.state,
+		); err != nil {
+			return nil, err
+		}
+		if operation.queueJobID.Valid && operation.queueKind.Valid && operation.partitionKey.Valid && operation.dedupeKey.Valid {
+			cancelRequests = append(cancelRequests, queue.TargetedCancelRequest{
+				WorkspaceID: workspace.ID(scope.GetWorkspaceId()), JobID: operation.queueJobID.String,
+				Kind: operation.queueKind.String, PartitionKey: operation.partitionKey.String,
+				DedupeKey: operation.dedupeKey.String, Now: now,
+			})
+		}
+	}
+	return cancelRequests, nil
+}
+
+func validatePendingToolCancellationDrafts(
+	interruptEventID string,
+	cancellations []*bridgev1.PendingToolCancellationDraft,
+	drafts []*bridgev1.RuntimeMessageDraft,
+) error {
+	draftsByLocalID := make(map[string]map[string]struct{}, len(drafts))
+	seenDraftTools := make(map[string]struct{})
+	for _, draft := range drafts {
+		if draft == nil || draft.GetRuntimeLocalId() == "" ||
+			draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION ||
+			draft.GetSourceEventId() != interruptEventID || len(draft.GetParts()) == 0 {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
+		if _, exists := draftsByLocalID[draft.GetRuntimeLocalId()]; exists {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is duplicated")
+		}
+		tools := make(map[string]struct{}, len(draft.GetParts()))
+		for _, part := range draft.GetParts() {
+			if part == nil || part.GetPartKind() != "tool" {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation draft is invalid")
+			}
+			var payload struct {
+				Type           string `json:"type"`
+				ToolUseEventID string `json:"toolUseEventId"`
+				State          struct {
+					Status string `json:"status"`
+				} `json:"state"`
+			}
+			if err := json.Unmarshal([]byte(part.GetPartJson()), &payload); err != nil ||
+				payload.Type != "tool" || payload.ToolUseEventID == "" || payload.State.Status != "cancelled" {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation draft is invalid")
+			}
+			if _, exists := seenDraftTools[payload.ToolUseEventID]; exists {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
+			}
+			seenDraftTools[payload.ToolUseEventID] = struct{}{}
+			tools[payload.ToolUseEventID] = struct{}{}
+		}
+		draftsByLocalID[draft.GetRuntimeLocalId()] = tools
+	}
+	seenTools := make(map[string]struct{}, len(cancellations))
+	for _, cancellation := range cancellations {
+		if cancellation == nil || cancellation.GetToolUseEventId() == "" || cancellation.GetRuntimeLocalId() == "" {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation is invalid")
+		}
+		if _, exists := seenTools[cancellation.GetToolUseEventId()]; exists {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation is duplicated")
+		}
+		seenTools[cancellation.GetToolUseEventId()] = struct{}{}
+		draftTools, ok := draftsByLocalID[cancellation.GetRuntimeLocalId()]
+		if !ok {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
+		if _, ok := draftTools[cancellation.GetToolUseEventId()]; !ok {
+			return status.Error(codes.InvalidArgument, "pending tool cancellation draft is missing")
+		}
+	}
+	return nil
+}
+
+func validateInterruptCancellationDraftCoverageTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	drafts []*bridgev1.RuntimeMessageDraft,
+) error {
+	provided := make([]string, 0)
+	for _, draft := range drafts {
+		for _, part := range draft.GetParts() {
+			var payload struct {
+				ToolUseEventID string `json:"toolUseEventId"`
+			}
+			if err := json.Unmarshal([]byte(part.GetPartJson()), &payload); err != nil {
+				return status.Error(codes.InvalidArgument, "pending tool cancellation draft is invalid")
+			}
+			provided = append(provided, payload.ToolUseEventID)
+		}
+	}
+	sort.Strings(provided)
+
+	rows, err := tx.Query(ctx,
+		`SELECT e.event_id
+		   FROM session_events e
+		  WHERE e.workspace_id = $1
+		    AND e.session_id = $2
+		    AND e.session_thread_id = $3
+		    AND e.type IN ('agent.tool_use', 'agent.mcp_tool_use')
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_events result
+		       WHERE result.workspace_id = e.workspace_id
+		         AND result.session_id = e.session_id
+		         AND result.session_thread_id = e.session_thread_id
+		         AND (
+		           (result.type = 'agent.tool_result' AND result.payload_json::jsonb ->> 'tool_use_id' = e.event_id)
+		           OR
+		           (result.type = 'agent.mcp_tool_result' AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = e.event_id)
+		         )
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1
+		        FROM session_messages message
+		        CROSS JOIN LATERAL jsonb_array_elements(
+		          CASE
+		            WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
+		              THEN message.data_json::jsonb -> 'parts'
+		            ELSE '[]'::jsonb
+		          END
+		        ) part
+		       WHERE message.workspace_id = e.workspace_id
+		         AND message.session_id = e.session_id
+		         AND message.session_thread_id = e.session_thread_id
+		         AND part ->> 'type' = 'tool'
+		         AND part ->> 'toolUseEventId' = e.event_id
+		         AND part #>> '{state,status}' IN ('completed', 'error', 'cancelled')
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM session_runtime_tool_results execution
+		       WHERE execution.workspace_id = e.workspace_id
+		         AND execution.session_id = e.session_id
+		         AND execution.session_thread_id = e.session_thread_id
+		         AND execution.tool_use_event_id = e.event_id
+		         AND execution.tool_kind = 'sandbox_tool'
+		         AND execution.execution_state <> 'consumed'
+		    )
+		  ORDER BY e.event_id
+		  FOR UPDATE OF e`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	expected := make([]string, 0)
+	for rows.Next() {
+		var toolUseEventID string
+		if err := rows.Scan(&toolUseEventID); err != nil {
+			return err
+		}
+		expected = append(expected, toolUseEventID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !sameBridgeStringSlice(expected, provided) {
+		return status.Error(codes.FailedPrecondition, "interrupt loop-owned tool coverage is incomplete")
 	}
 	return nil
 }
@@ -511,40 +1261,43 @@ func cancelInterruptedPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInputsRequest) error {
 	switch inputKind {
 	case "messages":
-		if len(request.GetEventIds()) == 0 {
-			return status.Error(codes.InvalidArgument, "message commit requires event ids")
+		if len(request.GetEventIds()) == 0 || len(request.GetDrafts()) != len(request.GetEventIds()) {
+			return status.Error(codes.InvalidArgument, "message commit requires one user draft per event")
 		}
-		var snapshot struct {
-			Messages []json.RawMessage `json:"messages"`
-		}
-		if request.GetHotContextPatchJson() == "" || json.Unmarshal([]byte(request.GetHotContextPatchJson()), &snapshot) != nil || len(snapshot.Messages) != len(request.GetEventIds()) {
-			return status.Error(codes.InvalidArgument, "message commit requires an accepted message snapshot")
-		}
-		for _, message := range snapshot.Messages {
-			var object map[string]json.RawMessage
-			if json.Unmarshal(message, &object) != nil || object == nil {
-				return status.Error(codes.InvalidArgument, "accepted message snapshot contains an invalid message")
-			}
+		if len(request.GetPendingToolCancellations()) != 0 || len(request.GetSandboxExecutionToolUseEventIds()) != 0 {
+			return status.Error(codes.InvalidArgument, "message commit cannot cancel pending tools")
 		}
 		return nil
 	case "interrupt_control":
 		if len(request.GetEventIds()) != 1 {
 			return status.Error(codes.InvalidArgument, "interrupt commit requires one event id")
 		}
-		return nil
+		if err := validateInterruptSandboxExecutionIDs(request); err != nil {
+			return err
+		}
+		return validatePendingToolCancellationDrafts(
+			request.GetEventIds()[0],
+			request.GetPendingToolCancellations(),
+			request.GetDrafts(),
+		)
 	case "tool_confirmation":
-		if len(request.GetEventIds()) != 1 {
-			return status.Error(codes.InvalidArgument, "tool confirmation commit requires one event id")
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 || len(request.GetSandboxExecutionToolUseEventIds()) != 0 {
+			return status.Error(codes.InvalidArgument, "tool confirmation commit requires one approval draft")
 		}
 		return nil
-	case "inter_agent_message":
-		if request.GetInterAgentMessageJson() == "" || !json.Valid([]byte(request.GetInterAgentMessageJson())) {
-			return status.Error(codes.InvalidArgument, "inter-agent message commit requires JSON payload")
+	case "agent_mail":
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 || len(request.GetSandboxExecutionToolUseEventIds()) != 0 {
+			return status.Error(codes.InvalidArgument, "agent mail commit requires one mail draft")
 		}
 		return nil
 	case "approval_review":
-		if request.GetApprovalReviewJson() == "" || !json.Valid([]byte(request.GetApprovalReviewJson())) {
-			return status.Error(codes.InvalidArgument, "approval review commit requires JSON payload")
+		if len(request.GetEventIds()) != 1 || len(request.GetDrafts()) != 1 || len(request.GetPendingToolCancellations()) != 0 || len(request.GetSandboxExecutionToolUseEventIds()) != 0 {
+			return status.Error(codes.InvalidArgument, "approval review commit requires one reviewer draft")
+		}
+		return nil
+	case "rejection":
+		if len(request.GetEventIds()) == 0 || len(request.GetDrafts()) != len(request.GetEventIds()) || len(request.GetPendingToolCancellations()) != 0 || len(request.GetSandboxExecutionToolUseEventIds()) != 0 {
+			return status.Error(codes.InvalidArgument, "rejection commit requires one rejection draft per event")
 		}
 		return nil
 	default:
@@ -552,155 +1305,61 @@ func validateCommitInputsRequest(inputKind string, request *bridgev1.CommitInput
 	}
 }
 
-type interAgentMessagePayload struct {
-	DeliveryID           string          `json:"delivery_id"`
-	SourceThreadID       string          `json:"source_thread_id"`
-	SourceToolUseEventID string          `json:"source_tool_use_event_id"`
-	Message              json.RawMessage `json:"message"`
-	Presentation         string          `json:"presentation,omitempty"`
+func validateInterruptSandboxExecutionIDs(request *bridgev1.CommitInputsRequest) error {
+	seen := make(map[string]struct{}, len(request.GetSandboxExecutionToolUseEventIds()))
+	for _, toolUseEventID := range request.GetSandboxExecutionToolUseEventIds() {
+		if toolUseEventID == "" {
+			return status.Error(codes.InvalidArgument, "interrupt sandbox execution identity is invalid")
+		}
+		if _, ok := seen[toolUseEventID]; ok {
+			return status.Error(codes.InvalidArgument, "interrupt sandbox execution identity is duplicated")
+		}
+		seen[toolUseEventID] = struct{}{}
+	}
+	for _, cancellation := range request.GetPendingToolCancellations() {
+		if _, ok := seen[cancellation.GetToolUseEventId()]; ok {
+			return status.Error(codes.InvalidArgument, "interrupt tool ownership sets overlap")
+		}
+	}
+	return nil
 }
 
-func commitInterAgentMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, payloadJSON string, now time.Time) error {
-	var payload interAgentMessagePayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return status.Error(codes.InvalidArgument, "inter-agent message payload must be JSON")
+func commitInputEventType(inputKind string) string {
+	switch inputKind {
+	case "messages":
+		return "user.message"
+	case "interrupt_control":
+		return "user.interrupt"
+	case "tool_confirmation":
+		return "user.tool_confirmation"
+	case "agent_mail":
+		return "agent.thread_message_received"
+	default:
+		return ""
 	}
-	if payload.DeliveryID == "" || payload.SourceThreadID == "" || payload.SourceToolUseEventID == "" || len(payload.Message) == 0 || !json.Valid(payload.Message) {
-		return status.Error(codes.InvalidArgument, "inter-agent message payload is incomplete")
-	}
-	if payload.Presentation == "" {
-		payload.Presentation = "push"
-	}
-	if payload.Presentation != "push" && payload.Presentation != "pull" {
-		return status.Error(codes.InvalidArgument, "inter-agent message presentation is invalid")
-	}
-	publicMessage, err := publicInterAgentMessageJSON(payload.Message)
-	if err != nil {
-		return err
-	}
+}
+
+func requireApprovalReviewerInputTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
 	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
-	if threadScope.role != "subagent" && threadScope.role != "main" {
-		return status.Error(codes.FailedPrecondition, "inter-agent message must target a main or sub-agent thread")
+	if threadScope.role != "approval_reviewer" || threadScope.visibility != "internal" {
+		return status.Error(codes.FailedPrecondition, "approval review input must target an internal reviewer thread")
 	}
-	_, existingPayloadJSON, ok, err := readReceivedInterAgentMessageTx(ctx, tx, scope, payload.DeliveryID)
+	return nil
+}
+
+func requireAgentMailInputTargetTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) error {
+	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
 	if err != nil {
 		return err
 	}
-	if ok {
-		return verifyInterAgentDeliveryReplay(existingPayloadJSON, payload)
+	if threadScope.role != "main" && threadScope.role != "subagent" {
+		return status.Error(codes.FailedPrecondition, "agent mail must target a main or sub-agent thread")
 	}
 	if !threadReceivableTx(threadScope) {
-		return status.Error(codes.FailedPrecondition, "target child thread is not receivable")
-	}
-	visibility, sessionVisible := threadScope.publicProjection("agent.thread_message_received")
-	sourceTaskName, err := sessionThreadCallableTaskNameTx(ctx, tx, scope, payload.SourceThreadID)
-	if err != nil {
-		return err
-	}
-	eventPayloadJSON, err := marshalBridgeJSON(map[string]any{
-		"type":                     "agent.thread_message_received",
-		"delivery_id":              payload.DeliveryID,
-		"source_thread_id":         payload.SourceThreadID,
-		"source_task_name":         nullableJSONString(sourceTaskName),
-		"source_tool_use_event_id": payload.SourceToolUseEventID,
-		"message":                  publicMessage,
-	})
-	if err != nil {
-		return err
-	}
-	eventID := id.New("evt_")
-	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_events (
-			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-			visibility, session_visible, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.thread_message_received', $6, $7, $8, $6, $9, $9, $9)`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		eventID,
-		sequence,
-		eventPayloadJSON,
-		visibility,
-		sessionVisible,
-		now,
-	); err != nil {
-		return err
-	}
-	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
-		return err
-	}
-	if payload.Presentation == "pull" {
-		return nil
-	}
-	return insertSessionMessageProjectionTx(ctx, tx, scope, eventID, "user", string(payload.Message), now)
-}
-
-func interAgentMessageIdentityHashPart(payloadJSON string) (string, error) {
-	var payload interAgentMessagePayload
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", status.Error(codes.InvalidArgument, "inter-agent message payload must be JSON")
-	}
-	return marshalBridgeJSON(map[string]any{
-		"delivery_id":              payload.DeliveryID,
-		"source_thread_id":         payload.SourceThreadID,
-		"source_tool_use_event_id": payload.SourceToolUseEventID,
-		"message":                  payload.Message,
-	})
-}
-
-func readReceivedInterAgentMessageTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, deliveryID string) (string, string, bool, error) {
-	var eventID string
-	var payloadJSON string
-	err := tx.QueryRow(ctx,
-		`SELECT event_id, payload_json
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND type = 'agent.thread_message_received'
-		    AND payload_json::jsonb ->> 'delivery_id' = $4
-		  ORDER BY sequence ASC
-		  LIMIT 1
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		deliveryID,
-	).Scan(&eventID, &payloadJSON)
-	if dbconnect.IsNoRows(err) {
-		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	return eventID, payloadJSON, true, nil
-}
-
-func verifyInterAgentDeliveryReplay(existingPayloadJSON string, next interAgentMessagePayload) error {
-	var existing interAgentMessagePayload
-	if err := json.Unmarshal([]byte(existingPayloadJSON), &existing); err != nil {
-		return status.Error(codes.AlreadyExists, "inter-agent delivery replay conflicts with malformed existing payload")
-	}
-	existingMessage, err := publicInterAgentMessageJSON(existing.Message)
-	if err != nil {
-		return status.Error(codes.AlreadyExists, "inter-agent delivery replay conflicts with malformed existing message")
-	}
-	nextMessage, err := publicInterAgentMessageJSON(next.Message)
-	if err != nil {
-		return err
-	}
-	if existing.DeliveryID != next.DeliveryID ||
-		existing.SourceThreadID != next.SourceThreadID ||
-		existing.SourceToolUseEventID != next.SourceToolUseEventID ||
-		normalizeJSONForCompare(existingMessage) != normalizeJSONForCompare(nextMessage) {
-		return status.Error(codes.AlreadyExists, "inter-agent delivery idempotency conflict")
+		return status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 	}
 	return nil
 }
@@ -910,18 +1569,6 @@ func onlyJSONFields(object map[string]json.RawMessage, fields ...string) bool {
 	return true
 }
 
-func commitApprovalReviewInputTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, payloadJSON string, now time.Time) error {
-	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
-	if err != nil {
-		return err
-	}
-	if threadScope.role != "approval_reviewer" || threadScope.visibility != "internal" {
-		return status.Error(codes.FailedPrecondition, "approval review input must target an internal reviewer thread")
-	}
-	messageJSON := approvalReviewMessageJSON(payloadJSON)
-	return insertSessionMessageProjectionTx(ctx, tx, scope, id.New("approval_review_"), "user", messageJSON, now)
-}
-
 func threadReceivableTx(threadScope threadMutationScope) bool {
 	switch threadScope.status {
 	case "closed_for_runtime", "terminated", "failed":
@@ -941,16 +1588,6 @@ func normalizeJSONForCompare(raw json.RawMessage) string {
 		return string(raw)
 	}
 	return string(normalized)
-}
-
-func approvalReviewMessageJSON(payloadJSON string) string {
-	var payload struct {
-		Message json.RawMessage `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil && len(payload.Message) > 0 && json.Valid(payload.Message) {
-		return string(payload.Message)
-	}
-	return payloadJSON
 }
 
 func recordPendingToolConfirmationDecisionTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, payloadJSON string, now time.Time) error {

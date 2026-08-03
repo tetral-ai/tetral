@@ -258,25 +258,19 @@ var workloadManifests = []workloadManifest{
 		binary:        "tetral-sandbox",
 		httpEnv:       "TETRAL_SANDBOX_HTTP_ADDR",
 		httpPortName:  "http",
-		internalGRPC:  true,
-		grpcEnv:       "TETRAL_SANDBOX_GRPC_ADDR",
-		grpcPortName:  "grpc",
 		requiredEnvVar: []string{
 			"TETRAL_POSTGRES_DSN",
-			"TETRAL_INTERNAL_GRPC_AUDIENCE",
-			"TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS",
-			"TETRAL_SANDBOX_GRPC_BEARER_TOKEN_PATH",
-			"TETRAL_SANDBOX_DRIVER",
 			"DAYTONA_API_URL",
 			"DAYTONA_API_KEY",
 			"TETRAL_QUEUE_GRPC_ADDR",
 			"TETRAL_GIT_PROXY_HOST",
+			"TETRAL_SANDBOX_JOB_LEASE_DURATION",
+			"TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT",
+			"TETRAL_SANDBOX_WORKER_CONCURRENCY",
 			"TETRAL_RESOURCE_CRED_TTL",
 			"TETRAL_RESOURCE_CRED_REFRESH_MARGIN",
 			"TETRAL_R2_PARENT_API_TOKEN",
 			"TETRAL_R2_PARENT_ACCESS_KEY",
-			"TETRAL_SANDBOX_CLEANUP_LEASE_DURATION",
-			"SANDBOX_CLEANUP_MAX_ATTEMPTS",
 		},
 	},
 	{
@@ -1323,11 +1317,10 @@ func TestKubernetesManifestCoreControlPlaneUsesPinnedEgress(t *testing.T) {
 
 	bridge := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
 	requireContains(t, bridge, "policyTypes:\n    - Ingress\n    - Egress")
-	requireContains(t, bridge, `tetral.ai/egress-intent: "daytona.example.internal, blob.example.internal"`)
+	requireContains(t, bridge, `tetral.ai/egress-intent: "blob.example.internal"`)
 	requireNetworkPolicyEgressEdge(t, bridge, 5432, networkPolicyPeer{namespace: "tetral-system", podName: "tetral-postgres"})
 	requireNetworkPolicyEgressEdge(t, bridge, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "queue"})
 	requireNetworkPolicyEgressEdge(t, bridge, 9091, networkPolicyPeer{namespace: "tetral-system", podName: "gateway"})
-	requireNetworkPolicyEgressEdge(t, bridge, 9090, networkPolicyPeer{namespace: "tetral-system", podName: "sandbox"})
 	requireNetworkPolicyEgressEdge(t, bridge, 9090, networkPolicyPeer{namespace: "tetral-agent-runtime", podName: "agent-runtime"})
 	requireNetworkPolicyEgressIPBlock(t, bridge, 443, "10.96.0.1/32")
 	requireNetworkPolicyEgressIPBlock(t, bridge, 443, "0.0.0.0/0")
@@ -1431,8 +1424,6 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 	configMap := requireDocument(t, documents, "bridge.yaml", "ConfigMap", "bridge-config")
 	service := requireDocument(t, documents, "bridge.yaml", "Service", "bridge")
 	networkPolicy := requireDocument(t, documents, "bridge.yaml", "NetworkPolicy", "bridge")
-	requireContains(t, configMap, "TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW: 60s")
-	requireContains(t, configMap, "TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT: 30s")
 	requireContains(t, configMap, "TETRAL_PROVIDER_RESCHEDULE_BUDGET: \"3\"")
 	requireContains(t, configMap, "TETRAL_COMPACTION_RESCHEDULE_BUDGET: \"2\"")
 
@@ -1450,9 +1441,6 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"name: TETRAL_RUNTIME_BINDING_TOKEN_HMAC_KEY",
 		"name: runtime-binding-token",
 		"key: hmac-key",
-		"name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN",
-		"name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW",
-		"name: TETRAL_MEMORY_PROJECTION_PUSH_TIMEOUT",
 		"name: TETRAL_PROVIDER_RESCHEDULE_BUDGET",
 		"name: TETRAL_COMPACTION_RESCHEDULE_BUDGET",
 		"name: KUBERNETES_TOKEN_REVIEW_REVIEWER_TOKEN_PATH\n              value: /var/run/secrets/tetral-kubernetes-api/bridge-api-tokenreview/token",
@@ -1460,14 +1448,15 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"name: KUBERNETES_API_CA_CERT_PATH\n              value: /var/run/secrets/tetral-kubernetes-api/ca.crt",
 		"name: TETRAL_BLOB_ENDPOINT",
 		"name: TETRAL_BLOB_SECRET_KEY",
-		"name: TETRAL_SANDBOX_DRIVER",
-		"name: DAYTONA_API_URL",
-		"name: DAYTONA_TARGET",
-		"name: DAYTONA_API_KEY",
 		"mountPath: /var/run/secrets/tetral-internal-grpc/gateway",
 	} {
 		if !manifestTextContains(bridgeAPI, required) {
 			t.Fatalf("bridge-api container missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"TETRAL_SANDBOX_DRIVER", "DAYTONA_"} {
+		if manifestTextContains(configMap.text, forbidden) || strings.Contains(bridgeAPI, forbidden) {
+			t.Fatalf("Bridge must not receive Sandbox-provider configuration %q", forbidden)
 		}
 	}
 	for _, required := range []string{
@@ -1475,22 +1464,19 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		"name: TETRAL_BRIDGE_JOB_RUNNER_HTTP_ADDR\n              value: \":8081\"",
 		"name: TETRAL_DATABASE_URL",
 		"name: TETRAL_QUEUE_GRPC_ADDR\n              value: queue.tetral-system.svc.cluster.local:9090",
-		"name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_GRPC_ADDR\n              value: 127.0.0.1:9090",
-		"name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN",
-		"name: TETRAL_SANDBOX_STATUS_FRESHNESS_WINDOW",
 		"name: TETRAL_KUBERNETES_NAMESPACE\n              value: tetral-agent-runtime",
 		"name: TETRAL_AGENT_RUNTIME_LABEL_SELECTOR\n              value: app.kubernetes.io/name=agent-runtime",
 		"name: TETRAL_AGENT_RUNTIME_GRPC_PORT\n              value: \"9090\"",
 		"name: TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/agent-runtime/token",
-		"name: TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/bridge-api/token",
 		"name: TETRAL_BRIDGE_JOB_RUNNER_MCP_CONNECTOR_GRPC_ADDR\n              value: gateway.tetral-system.svc.cluster.local:9091",
 		"name: TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/gateway/token",
-		"name: TETRAL_SANDBOX_GRPC_ADDR\n              value: sandbox.tetral-system.svc.cluster.local:9090",
-		"name: TETRAL_BRIDGE_SANDBOX_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/sandbox/token",
+		"name: TETRAL_BLOB_ENDPOINT",
+		"name: TETRAL_BLOB_REGION",
+		"name: TETRAL_BLOB_BUCKET",
+		"name: TETRAL_BLOB_ACCESS_KEY",
+		"name: TETRAL_BLOB_SECRET_KEY",
 		"mountPath: /var/run/secrets/tetral-internal-grpc/agent-runtime",
-		"mountPath: /var/run/secrets/tetral-internal-grpc/bridge-api",
 		"mountPath: /var/run/secrets/tetral-internal-grpc/gateway",
-		"mountPath: /var/run/secrets/tetral-internal-grpc/sandbox",
 		"mountPath: /var/run/secrets/kubernetes.io/serviceaccount",
 	} {
 		if !manifestTextContains(jobRunner, required) {
@@ -1501,12 +1487,11 @@ func TestKubernetesManifestAgentRuntimeBridgeUsesSplitContainers(t *testing.T) {
 		t.Fatal("job-runner must discover workspaces instead of using TETRAL_WORKSPACE_ID")
 	}
 	for _, forbidden := range []string{
-		"TETRAL_BLOB_",
 		"TETRAL_SANDBOX_DRIVER",
 		"DAYTONA_",
 	} {
 		if strings.Contains(jobRunner, forbidden) {
-			t.Fatalf("job-runner container must not receive Bridge API helper credential %q", forbidden)
+			t.Fatalf("job-runner container must not receive Sandbox-provider configuration %q", forbidden)
 		}
 	}
 	requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
@@ -2262,15 +2247,6 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 			expirationSeconds: 600,
 		})
 		requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
-			envName:           "TETRAL_BRIDGE_JOB_RUNNER_BRIDGE_API_TOKEN_PATH",
-			volume:            "bridge-job-runner-bridge-api-token",
-			mountPath:         "/var/run/secrets/tetral-internal-grpc/bridge-api",
-			filePath:          "token",
-			audienceMode:      projectedTokenWithAudience,
-			audience:          "tetral-internal-grpc",
-			expirationSeconds: 600,
-		})
-		requireProjectedBoundedServiceAccountToken(t, deployment, projectedTokenExpectation{
 			envName:           "TETRAL_BRIDGE_JOB_RUNNER_GATEWAY_TOKEN_PATH",
 			volume:            "bridge-job-runner-gateway-token",
 			mountPath:         "/var/run/secrets/tetral-internal-grpc/gateway",
@@ -2279,8 +2255,6 @@ func TestKubernetesManifestInternalGRPCClientTokensAreAudienceProjected(t *testi
 			audience:          "tetral-internal-grpc",
 			expirationSeconds: 600,
 		})
-		requireContains(t, deployment, "- name: bridge-sandbox-token\n          secret:\n            secretName: sandbox-internal-grpc\n            items:\n              - key: token\n                path: token")
-		requireNotContains(t, deployment, "- name: bridge-sandbox-token\n          projected:")
 		requireContains(t, deployment, "automountServiceAccountToken: false")
 	})
 }
@@ -2409,18 +2383,6 @@ func TestKubernetesManifestSandboxUsesPublicGitProxyHost(t *testing.T) {
 	}
 	configMap := requireDocument(t, documents, "sandbox.yaml", "ConfigMap", "sandbox-config")
 	requireNotContains(t, configMap, "git.tetral.example.internal")
-}
-
-func TestKubernetesManifestSandboxCleanupLeaseMatchesServiceLocalConfiguration(t *testing.T) {
-	documents := readManifestDocuments(t)
-	const want = "3m"
-	if actual := requireConfigMapDataValue(t, documents, "sandbox.yaml", "sandbox-config", "TETRAL_SANDBOX_CLEANUP_LEASE_DURATION"); actual != want {
-		t.Fatalf("top-level sandbox cleanup lease = %q; want %q", actual, want)
-	}
-	serviceLocal := readServiceLocalManifestText(t, filepath.Join("sandbox", "k8s", "configmap.yaml"))
-	if !strings.Contains(serviceLocal, "TETRAL_SANDBOX_CLEANUP_LEASE_DURATION: "+want) {
-		t.Fatalf("service-local sandbox cleanup lease does not match %q", want)
-	}
 }
 
 func TestKubernetesManifestCleanupIsComposedFromServiceLocalManifests(t *testing.T) {

@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { Metadata, Server, ServerCredentials, status } from "@grpc/grpc-js";
 import type { ServiceError } from "@grpc/grpc-js";
 import {
   AgentRuntimeBridgeServiceService,
   BridgeWriteStatus,
+  ReceiptApplicationDisposition,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { AgentRuntimeBridgeServiceServer } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import {
@@ -21,11 +23,17 @@ import type {
   ClaimMcpToolResultResponse,
   CommitMcpToolResultRequest,
   CommitMcpToolResultResponse,
+  DeclarationResponse,
   McpManifestChangedRequest,
   McpManifestChangedResponse,
 } from "@tetral/gateway-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type { CallOptions } from "@grpc/grpc-js";
 import { RunMcpToolStatus } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import {
+  InMemoryMcpIdempotencyStore,
+  McpIdempotencyStaleCustodyError,
+} from "../../src/idempotency.js";
 
 describe("BridgeAPIManifestChangeNotifier", () => {
   test("admits the bounded MCP inline-media commit on both gRPC directions", () => {
@@ -165,6 +173,152 @@ describe("BridgeAPIManifestChangeNotifier", () => {
 });
 
 describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
+  test("keeps the same tool-use event id isolated across thread-scoped local caches", () => {
+    const store = new InMemoryMcpIdempotencyStore();
+    const key = { toolUseEventId: "sevt_shared", normalizedInputHash: "hash_shared" };
+    const main = mcpIdempotencyContext();
+    const child = { ...main, sessionThreadId: "thrd_child" };
+
+    expect(store.claim(key, main)).toEqual({ status: "new" });
+    expect(store.claim(key, child)).toEqual({ status: "new" });
+    store.store(key, {
+      response: { status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED, resultText: "main", attachments: [] },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, main);
+    store.store(key, {
+      response: { status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED, resultText: "child", attachments: [] },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, child);
+
+    expect(store.claim(key, main)).toMatchObject({ status: "replay", stored: { response: { resultText: "main" } } });
+    expect(store.claim(key, child)).toMatchObject({ status: "replay", stored: { response: { resultText: "child" } } });
+  });
+
+  test("returns Bridge's durable materialization handle with the refs-only response", async () => {
+    const client = new MaterializationBridgeClient();
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "ok",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).resolves.toMatchObject({
+      resultText: "ok",
+      materializationHandle: "sevt_tool_1",
+    });
+  });
+
+  test("rejects a committed MCP result whose declaration names stale custody", async () => {
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client: new MaterializationBridgeClient({ staleCustody: true }),
+      metadataFactory: async () => new Metadata(),
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "ok",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).rejects.toBeInstanceOf(McpIdempotencyStaleCustodyError);
+  });
+
+  test("retries an unknown commit outcome with the exact frozen declaration", async () => {
+    const client = new UnknownThenReplayBridgeClient();
+    const delays: number[] = [];
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client,
+      metadataFactory: async () => new Metadata(),
+      sleep: async (delayMs) => {
+        delays.push(delayMs);
+      },
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "ok",
+        attachments: [],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).resolves.toMatchObject({
+      resultText: "ok",
+      materializationHandle: "sevt_tool_1",
+    });
+
+    expect(delays).toEqual([100]);
+    expect(client.commitRequests).toHaveLength(2);
+    expect(client.commitRequests[0]).toBe(client.commitRequests[1]);
+    expect(client.commitRequests[0]).toEqual(client.commitRequests[1]);
+  });
+
+  test("classifies a durable replay observed under stale custody without local application", async () => {
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client: new StaleClaimReplayBridgeClient(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(store.claim(
+      { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" },
+      mcpIdempotencyContext(),
+    )).resolves.toEqual({ status: "stale_custody" });
+  });
+
+  test("rejects an attachment receipt whose delta differs from the refs-only result", async () => {
+    const store = new BridgeAPIMcpToolResultIdempotencyStore({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client: new MalformedAttachmentReceiptBridgeClient(),
+      metadataFactory: async () => new Metadata(),
+    });
+    const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
+    const context = mcpIdempotencyContext();
+
+    await expect(store.claim(key, context)).resolves.toEqual({ status: "new" });
+    await expect(store.store(key, {
+      response: {
+        status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+        resultText: "image",
+        attachments: [{
+          data: Uint8Array.from([1, 2, 3]),
+          mime: "image/png",
+          suggestedFilename: "plot.png",
+        }],
+      },
+      contentItems: 1,
+      refreshTriggered: false,
+    }, context)).rejects.toThrow("mcp tool commit returned malformed declaration receipt");
+  });
+
   test("bounds a hung Claim RPC before any external tool execution can begin", async () => {
     const server = new Server();
     server.addService(AgentRuntimeBridgeServiceService, {
@@ -189,16 +343,27 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
     }
   });
 
-  test("sets a bounded commit deadline and propagates deadline expiry for classification", async () => {
-    const client = new CommitDeadlineBridgeClient();
+  test("keeps an unknown commit receipt awaiting past the capped backoff without rebuilding the declaration", async () => {
+    const client = new RepeatedUnknownThenReplayBridgeClient();
+    const sleepDelays: number[] = [];
+    const attachmentBytes = Uint8Array.from([1, 2, 3]);
+    let metadataGeneration = 0;
     const store = new BridgeAPIMcpToolResultIdempotencyStore({
       address: "bridge.tetral-system.svc.cluster.local:9090",
       tokenPath: "/token",
       client,
-      metadataFactory: async () => new Metadata(),
+      metadataFactory: async () => {
+        const metadata = new Metadata();
+        metadata.set("authorization", `bearer token_${++metadataGeneration}`);
+        return metadata;
+      },
       claimTimeoutMs: 321,
       commitTimeoutMs: 1_234,
       now: () => 1_000,
+      sleep: async (delayMs) => {
+        sleepDelays.push(delayMs);
+        attachmentBytes[0] = 9;
+      },
     });
     const key = { toolUseEventId: "sevt_tool_1", normalizedInputHash: "hash_1" };
     const context = {
@@ -219,16 +384,39 @@ describe("BridgeAPIMcpToolResultIdempotencyStore", () => {
       response: {
         status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
         resultText: "ok",
-        attachments: [],
+        attachments: [{
+          data: attachmentBytes,
+          mime: "image/png",
+          suggestedFilename: "plot.png",
+        }],
       },
       contentItems: 1,
       refreshTriggered: false,
-    }, context)).rejects.toMatchObject({ code: status.DEADLINE_EXCEEDED });
+    }, context)).resolves.toMatchObject({
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "ok",
+    });
 
     expect(client.claimOptions).toEqual([{ deadline: new Date(1_321) }]);
-    expect(client.commitOptions).toEqual([{ deadline: new Date(2_234) }]);
+    expect(client.commitOptions).toHaveLength(5);
+    expect(client.commitOptions).toEqual(
+      Array.from({ length: 5 }, () => ({ deadline: new Date(2_234) })),
+    );
+    expect(new Set(client.commitRequests).size).toBe(1);
+    expect(client.commitAttachmentSnapshots).toEqual(
+      Array.from({ length: 5 }, () => [1, 2, 3]),
+    );
+    expect(client.commitAuthorizations).toEqual([
+      ["bearer token_2"],
+      ["bearer token_3"],
+      ["bearer token_4"],
+      ["bearer token_5"],
+      ["bearer token_6"],
+    ]);
+    expect(sleepDelays).toEqual([100, 300, 1_000, 1_000]);
     expect(MCP_COMMIT_RPC_TIMEOUT_MS).toBe(10_000);
   });
+
 });
 
 class RecordingBridgeClient {
@@ -278,9 +466,12 @@ class FailingBridgeClient {
   }
 }
 
-class CommitDeadlineBridgeClient {
+class RepeatedUnknownThenReplayBridgeClient {
   readonly claimOptions: CallOptions[] = [];
   readonly commitOptions: CallOptions[] = [];
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+  readonly commitAttachmentSnapshots: number[][] = [];
+  readonly commitAuthorizations: unknown[] = [];
 
   claimMcpToolResult(
     _request: ClaimMcpToolResultRequest,
@@ -292,21 +483,243 @@ class CommitDeadlineBridgeClient {
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
       resultJson: "",
+      declaration: undefined,
     });
   }
 
   commitMcpToolResult(
-    _request: CommitMcpToolResultRequest,
-    _metadata: Metadata,
+    request: CommitMcpToolResultRequest,
+    metadata: Metadata,
     options: CallOptions,
     callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
   ) {
     this.commitOptions.push(options);
-    callback(Object.assign(new Error("deadline exceeded"), { code: status.DEADLINE_EXCEEDED }) as ServiceError, {
-      ack: undefined,
-      refsOnlyResultJson: "",
+    this.commitRequests.push(request);
+    this.commitAttachmentSnapshots.push(Array.from(request.inlineMedia[0]?.data ?? []));
+    this.commitAuthorizations.push(metadata.get("authorization"));
+    if (this.commitRequests.length <= 4) {
+      const codes = [
+        status.DEADLINE_EXCEEDED,
+        status.UNKNOWN,
+        status.INTERNAL,
+        status.RESOURCE_EXHAUSTED,
+      ];
+      callback(Object.assign(new Error("commit result unavailable"), { code: codes[this.commitRequests.length - 1] }) as ServiceError, {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
+    void metadata;
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      refsOnlyResultJson: `{"response":{"status":1,"result_text":"ok","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+      materializationHandle: "sevt_tool_1",
+      declaration: mcpMaterializationDeclaration(request, false),
     });
   }
+}
+
+class MaterializationBridgeClient {
+  constructor(private readonly options: { readonly staleCustody?: boolean } = {}) {}
+
+  claimMcpToolResult(
+    _request: ClaimMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
+  ) {
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: "",
+      declaration: undefined,
+    });
+  }
+
+  commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      refsOnlyResultJson: `{"response":{"status":1,"result_text":"ok","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+      materializationHandle: "sevt_tool_1",
+      declaration: mcpMaterializationDeclaration(request, this.options.staleCustody === true),
+    });
+  }
+}
+
+class UnknownThenReplayBridgeClient extends MaterializationBridgeClient {
+  readonly commitRequests: CommitMcpToolResultRequest[] = [];
+
+  override commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    metadata: Metadata,
+    options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    this.commitRequests.push(request);
+    if (this.commitRequests.length === 1) {
+      callback(Object.assign(new Error("connection closed after commit"), { code: status.UNAVAILABLE }) as ServiceError, {
+        ack: undefined,
+        refsOnlyResultJson: "",
+        declaration: undefined,
+      });
+      return;
+    }
+    super.commitMcpToolResult(request, metadata, options, callback);
+  }
+}
+
+class StaleClaimReplayBridgeClient extends MaterializationBridgeClient {
+  override claimMcpToolResult(
+    request: ClaimMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: ClaimMcpToolResultResponse) => void,
+  ) {
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      resultJson: `{"response":{"status":1,"result_text":"ok","attachments":[]},"content_items":1,"refresh_triggered":false}`,
+      materializationHandle: request.toolUseEventId,
+      declaration: {
+        receipts: [{
+          sessionThreadId: request.scope?.sessionThreadId ?? "",
+          operationKind: "commit_mcp_tool_result",
+          sourceKind: "mcp_tool_execution",
+          sourceId: stableMcpMaterializationSourceId(request),
+          events: [],
+          messages: [],
+          pendingAttachmentDeltaJson: [],
+          pendingToolDeltaJson: [],
+          prefixConsumptions: [],
+          declarationDigest: "digest_from_durable_operation",
+          requestReschedule: undefined,
+          childLifecycle: [],
+          idleCloseout: undefined,
+          compactedThroughMessageSequence: undefined,
+        }],
+        observedBindingId: "bind_new",
+        observedBindingGeneration: 2,
+        applicationDisposition: ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY,
+      },
+    });
+  }
+}
+
+class MalformedAttachmentReceiptBridgeClient extends MaterializationBridgeClient {
+  override commitMcpToolResult(
+    request: CommitMcpToolResultRequest,
+    _metadata: Metadata,
+    _options: CallOptions,
+    callback: (error: ServiceError | null, response: CommitMcpToolResultResponse) => void,
+  ) {
+    const raw = JSON.parse(request.resultJson) as {
+      response: {
+        attachments: Array<{
+          mime: string;
+          size_bytes: number;
+          suggested_filename: string;
+          attachment_ref?: string;
+        }>;
+      };
+    };
+    const attachment = raw.response.attachments[0]!;
+    attachment.attachment_ref = "att_1";
+    const refsOnlyResultJson = JSON.stringify(raw);
+    const declaration = mcpMaterializationDeclaration(request, false);
+    declaration.receipts[0]!.pendingAttachmentDeltaJson = [JSON.stringify({
+      origin: {
+        transient: {
+          attachmentRef: "att_wrong",
+          sourceToolUseEventId: request.toolUseEventId,
+          sourcePath: `mcp:${request.mcpServerName}/${attachment.suggested_filename}`,
+          detail: "auto",
+        },
+      },
+      mime: attachment.mime,
+      filename: attachment.suggested_filename,
+    })];
+    callback(null, {
+      ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
+      refsOnlyResultJson,
+      materializationHandle: request.toolUseEventId,
+      declaration,
+    });
+  }
+}
+
+function mcpMaterializationDeclaration(
+  request: CommitMcpToolResultRequest,
+  staleCustody: boolean,
+): DeclarationResponse {
+  return {
+    receipts: [{
+      sessionThreadId: request.scope?.sessionThreadId ?? "",
+      operationKind: "commit_mcp_tool_result",
+      sourceKind: "mcp_tool_execution",
+      sourceId: stableMcpMaterializationSourceId(request),
+      events: [],
+      messages: [],
+      pendingAttachmentDeltaJson: [],
+      pendingToolDeltaJson: [],
+      prefixConsumptions: [],
+      declarationDigest: mcpMaterializationDeclarationDigest(request),
+      requestReschedule: undefined,
+      childLifecycle: [],
+      idleCloseout: undefined,
+      compactedThroughMessageSequence: undefined,
+    }],
+    observedBindingId: request.scope?.binding?.bindingId ?? "",
+    observedBindingGeneration: request.scope?.binding?.bindingGeneration ?? 0,
+    applicationDisposition: staleCustody
+      ? ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_STALE_CUSTODY
+      : ReceiptApplicationDisposition.RECEIPT_APPLICATION_DISPOSITION_CURRENT_CUSTODY,
+  };
+}
+
+function stableMcpMaterializationSourceId(
+  request: Pick<ClaimMcpToolResultRequest, "toolUseEventId" | "normalizedInputHash">,
+): string {
+  const encoder = new TextEncoder();
+  const parts = [
+    "mcp_tool_execution",
+    request.toolUseEventId,
+    request.normalizedInputHash,
+  ].map((part) => encoder.encode(part));
+  const framed = new Uint8Array(parts.reduce((total, part) => total + 4 + part.byteLength, 0));
+  const view = new DataView(framed.buffer);
+  let offset = 0;
+  for (const part of parts) {
+    view.setUint32(offset, part.byteLength, false);
+    offset += 4;
+    framed.set(part, offset);
+    offset += part.byteLength;
+  }
+  return `stid_${createHash("sha256").update(framed).digest("hex")}`;
+}
+
+function mcpMaterializationDeclarationDigest(request: CommitMcpToolResultRequest): string {
+  const inlineMedia = request.inlineMedia.map((media) => ({
+      content_sha256: createHash("sha256").update(media.data).digest("hex"),
+      mime: media.mime,
+      suggested_filename: media.suggestedFilename,
+    }));
+  const declaration = `{
+    "inline_media":${JSON.stringify(inlineMedia)},
+    "input":${canonicalRunToolJSON(request.inputJson)},
+    "mcp_server_name":${JSON.stringify(request.mcpServerName)},
+    "normalized_input_hash":${JSON.stringify(request.normalizedInputHash)},
+    "operation_kind":"commit_mcp_tool_result",
+    "result":${canonicalRunToolJSON(request.resultJson)},
+    "session_thread_id":${JSON.stringify(request.scope?.sessionThreadId ?? "")},
+    "tool_name":${JSON.stringify(request.toolName)},
+    "tool_use_event_id":${JSON.stringify(request.toolUseEventId)}
+  }`;
+  return createHash("sha256").update(canonicalRunToolJSON(declaration), "utf8").digest("hex");
 }
 
 function mcpIdempotencyContext() {

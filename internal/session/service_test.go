@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,12 +126,12 @@ func TestCreateRejectsGitHubResourceWithoutAuthorizationToken(t *testing.T) {
 	}
 }
 
-func TestUpdateGitHubResourceTokenAllowsRunningSessionAndNeverReturnsToken(t *testing.T) {
+func TestUpdateGitHubResourceTokenRequiresIdleSessionAndNeverReturnsToken(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
 	session := testStoredSession(fixed)
-	session.Status = StatusRunning
+	session.Status = StatusIdle
 	session.Resources = []*Resource{{
 		ID:          "sesrsc_github",
 		SessionID:   session.ID,
@@ -165,6 +164,25 @@ func TestUpdateGitHubResourceTokenAllowsRunningSessionAndNeverReturnsToken(t *te
 	}
 	if strings.Contains(string(encoded), "github_resource_token_rotated") || strings.Contains(string(encoded), "encrypted:") {
 		t.Fatalf("resource response leaked credential material: %s", encoded)
+	}
+}
+
+func TestUpdateGitHubResourceTokenRejectsRunningSession(t *testing.T) {
+	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	store := newRecordingSessionStore()
+	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
+	session := testStoredSession(fixed)
+	session.Status = StatusRunning
+	session.Resources = []*Resource{{
+		ID: "sesrsc_github", SessionID: session.ID, WorkspaceID: workspace.DefaultID,
+		Type:             ResourceTypeGitHubRepository,
+		GitHubRepository: &GitHubRepositoryResource{URL: "https://github.com/tetral-ai/tetral", MountPath: "/workspace/tetral", AuthorizationTokenEncrypted: []byte("encrypted:old")},
+	}}
+	store.sessions[session.ID] = session
+	_, err := service.UpdateResource(context.Background(), workspace.DefaultID, session.ID, "sesrsc_github", "github_resource_token_rotated")
+	var conflict *ConflictError
+	if !errors.As(err, &conflict) || conflict.Message != "session must be idle for mutation" {
+		t.Fatalf("UpdateResource err = %T %v; want idle conflict", err, err)
 	}
 }
 
@@ -605,7 +623,7 @@ func TestThreadResponseStatsAreNullThisStage(t *testing.T) {
 	}
 }
 
-func TestCreatePersistsPrimaryThreadAndAdmitsSessionPreparation(t *testing.T) {
+func TestCreatePersistsSessionPrimaryThreadAndResources(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	fileIdentities := &recordingFileIdentities{}
@@ -684,14 +702,6 @@ func TestCreatePersistsPrimaryThreadAndAdmitsSessionPreparation(t *testing.T) {
 	if !strings.HasPrefix(thread.ID, "thread_") && thread.ID != "thread_test" {
 		t.Fatalf("thread id = %q; want thread_ prefix", thread.ID)
 	}
-	preparation := store.preparations["sesn_test"]
-	if preparation == nil {
-		t.Fatal("session preparation admission was not persisted")
-		return
-	}
-	if preparation.SessionID != "sesn_test" || preparation.EnvironmentID != "env_test" || !strings.HasPrefix(preparation.PreparationAttemptID, "prep_") || !strings.HasPrefix(preparation.SandboxID, "sandbox_") {
-		t.Fatalf("preparation = %+v; want pinned session/env/prep/sandbox identities", preparation)
-	}
 	encodedResources, err := json.Marshal(store.sessions["sesn_test"].Resources)
 	if err != nil {
 		t.Fatalf("Marshal session resources: %v", err)
@@ -701,7 +711,7 @@ func TestCreatePersistsPrimaryThreadAndAdmitsSessionPreparation(t *testing.T) {
 	}
 }
 
-func TestCreateDefaultsOmittedFileMountPathBeforePreparationAdmission(t *testing.T) {
+func TestCreateDefaultsOmittedFileMountPathBeforePersistence(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
@@ -724,12 +734,9 @@ func TestCreateDefaultsOmittedFileMountPathBeforePreparationAdmission(t *testing
 	if got := store.sessions["sesn_test"].Resources[0].File.MountPath; got != wantMountPath {
 		t.Fatalf("stored mount_path = %q; want %q", got, wantMountPath)
 	}
-	if store.preparations["sesn_test"] == nil {
-		t.Fatalf("preparation=%+v; want preparation admission without sandbox start", store.preparations["sesn_test"])
-	}
 }
 
-func TestCreateCommitsPreparationWithBaselineRows(t *testing.T) {
+func TestCreateCommitsSessionAndPrimaryThreadTogether(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	service := newTestService(store, &recordingFileIdentities{}, &recordingVaultValidator{}, fixed)
@@ -746,12 +753,12 @@ func TestCreateCommitsPreparationWithBaselineRows(t *testing.T) {
 	if response.ID != "sesn_boundary" || response.Status != StatusIdle {
 		t.Fatalf("response = %+v; want committed idle session", response)
 	}
-	if store.committedTxCount != 1 || store.preparations["sesn_boundary"] == nil || store.threads["thread_boundary"] == nil {
-		t.Fatalf("committed baseline rows: commits=%d preparation=%+v thread=%+v", store.committedTxCount, store.preparations["sesn_boundary"], store.threads["thread_boundary"])
+	if store.committedTxCount != 1 || store.sessions["sesn_boundary"] == nil || store.threads["thread_boundary"] == nil {
+		t.Fatalf("committed baseline rows: commits=%d session=%+v thread=%+v", store.committedTxCount, store.sessions["sesn_boundary"], store.threads["thread_boundary"])
 	}
 }
 
-func TestCreateWithMCPConfigurationDoesNotApplyNetworkPolicyAtAdmission(t *testing.T) {
+func TestCreateWithMCPConfigurationCommitsIdleSession(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
 	agents := staticAgentReader{agent: &agent.Agent{
@@ -801,40 +808,12 @@ func TestCreateWithMCPConfigurationDoesNotApplyNetworkPolicyAtAdmission(t *testi
 	if response.Status != StatusIdle {
 		t.Fatalf("status = %s; want idle", response.Status)
 	}
-	if store.preparations["sesn_test"] == nil {
-		t.Fatalf("preparation=%+v; want durable preparation only", store.preparations["sesn_test"])
+	if store.sessions["sesn_test"] == nil || store.threads["thread_test"] == nil {
+		t.Fatalf("session=%+v thread=%+v; want committed session and primary thread", store.sessions["sesn_test"], store.threads["thread_test"])
 	}
 }
 
-func TestCreateAdmitsDurablePreparationWithoutRuntimeStartup(t *testing.T) {
-	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	store := newRecordingSessionStore()
-	service := NewService(
-		testAgents{},
-		testEnvironments{},
-		&recordingFileIdentities{},
-		testMemories{},
-		&recordingVaultValidator{},
-		store,
-		testSessionEncryptor{},
-		WithClock(func() time.Time { return fixed }),
-	)
-	service.sessionIDStrategy = func() string { return "sesn_test" }
-	service.threadIDStrategy = func() string { return "thread_test" }
-
-	response, err := service.Create(context.Background(), workspace.DefaultID, CreateRequest{
-		Agent:         AgentReference{ID: "agent_test"},
-		EnvironmentID: "env_test",
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if response == nil || response.ID != "sesn_test" || store.preparations["sesn_test"] == nil {
-		t.Fatalf("response=%+v preparation=%+v; want admitted session without sandbox lifecycle", response, store.preparations["sesn_test"])
-	}
-}
-
-func TestCreateRollsBackPreparationWhenBaselineCommitFails(t *testing.T) {
+func TestCreateRollsBackSessionAndThreadWhenBaselineCommitFails(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	durableErr := errors.New("synthetic durable commit failure")
 	store := newRecordingSessionStore()
@@ -862,8 +841,8 @@ func TestCreateRollsBackPreparationWhenBaselineCommitFails(t *testing.T) {
 	if response != nil {
 		t.Fatalf("response = %+v; want nil after durable failure", response)
 	}
-	if len(store.sessions) != 0 || len(store.threads) != 0 || len(store.preparations) != 0 {
-		t.Fatalf("durable state persisted after commit failure: sessions=%d threads=%d preparations=%d", len(store.sessions), len(store.threads), len(store.preparations))
+	if len(store.sessions) != 0 || len(store.threads) != 0 {
+		t.Fatalf("durable state persisted after commit failure: sessions=%d threads=%d", len(store.sessions), len(store.threads))
 	}
 }
 
@@ -1877,196 +1856,6 @@ func TestMutableSessionMutationsDoNotRequireSandboxReadiness(t *testing.T) {
 	}
 }
 
-func TestResourceMutationsRequeuePreparedIdleSession(t *testing.T) {
-	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-
-	t.Run("add file resource", func(t *testing.T) {
-		store := newRecordingSessionStore()
-		fileIdentities := &recordingFileIdentities{}
-		service := newTestService(store, fileIdentities, &recordingVaultValidator{}, fixed)
-		store.sessions["sesn_test"] = testStoredSession(fixed)
-		store.preparations["sesn_test"] = &SessionPreparationAdmission{
-			SessionID:            "sesn_test",
-			EnvironmentID:        "env_test",
-			PreparationAttemptID: "prep_ready",
-			SandboxID:            "sandbox_ready",
-		}
-		store.preparationStatuses["sesn_test"] = "ready"
-
-		_, err := service.AddResource(context.Background(), workspace.DefaultID, "sesn_test", ResourceRequest{
-			Type:   string(ResourceTypeFile),
-			FileID: "file_source",
-		})
-		if err != nil {
-			t.Fatalf("AddResource: %v", err)
-		}
-		if store.preparationStatuses["sesn_test"] != "pending" {
-			t.Fatalf("preparation status = %q; want pending", store.preparationStatuses["sesn_test"])
-		}
-		if got := store.preparations["sesn_test"].PreparationAttemptID; got != "prep_resource_mutation_1" {
-			t.Fatalf("preparation attempt = %q; want fresh attempt", got)
-		}
-		if !reflect.DeepEqual(store.resourcePrepareJobs, []string{"prep_resource_mutation_1"}) {
-			t.Fatalf("resource prepare jobs = %v; want fresh attempt job", store.resourcePrepareJobs)
-		}
-		if len(store.sessions["sesn_test"].Resources) != 1 {
-			t.Fatalf("resources = %+v; want added resource", store.sessions["sesn_test"].Resources)
-		}
-	})
-
-	t.Run("delete file resource", func(t *testing.T) {
-		store := newRecordingSessionStore()
-		fileIdentities := &recordingFileIdentities{}
-		service := newTestService(store, fileIdentities, &recordingVaultValidator{}, fixed)
-		store.sessions["sesn_test"] = sessionWithFileAndGitHubResources(fixed)
-		store.preparations["sesn_test"] = &SessionPreparationAdmission{
-			SessionID:            "sesn_test",
-			EnvironmentID:        "env_test",
-			PreparationAttemptID: "prep_delete_ready",
-			SandboxID:            "sandbox_ready",
-		}
-		store.preparationStatuses["sesn_test"] = "ready"
-
-		_, err := service.DeleteResource(context.Background(), workspace.DefaultID, "sesn_test", "sesrsc_file")
-		if err != nil {
-			t.Fatalf("DeleteResource: %v", err)
-		}
-		if store.preparationStatuses["sesn_test"] != "pending" {
-			t.Fatalf("preparation status = %q; want pending", store.preparationStatuses["sesn_test"])
-		}
-		if got := store.preparations["sesn_test"].PreparationAttemptID; got != "prep_resource_mutation_1" {
-			t.Fatalf("preparation attempt = %q; want fresh attempt", got)
-		}
-		if !reflect.DeepEqual(store.resourcePrepareJobs, []string{"prep_resource_mutation_1"}) {
-			t.Fatalf("resource prepare jobs = %v; want fresh attempt job", store.resourcePrepareJobs)
-		}
-		if store.sessions["sesn_test"].Resources[0].DeleteRequestedAt == nil {
-			t.Fatal("file resource delete was not requested")
-		}
-		if store.sessions["sesn_test"].Resources[0].DetachedAt != nil {
-			t.Fatal("file resource detached before sandbox cleanup finalized")
-		}
-	})
-
-	t.Run("failed preparation creates fresh attempt", func(t *testing.T) {
-		store := newRecordingSessionStore()
-		fileIdentities := &recordingFileIdentities{}
-		service := newTestService(store, fileIdentities, &recordingVaultValidator{}, fixed)
-		store.sessions["sesn_test"] = testStoredSession(fixed)
-		store.preparations["sesn_test"] = &SessionPreparationAdmission{
-			SessionID:            "sesn_test",
-			EnvironmentID:        "env_test",
-			PreparationAttemptID: "prep_failed",
-			SandboxID:            "sandbox_ready",
-		}
-		store.preparationStatuses["sesn_test"] = "failed"
-
-		_, err := service.AddResource(context.Background(), workspace.DefaultID, "sesn_test", ResourceRequest{
-			Type:   string(ResourceTypeFile),
-			FileID: "file_source",
-		})
-		if err != nil {
-			t.Fatalf("AddResource: %v", err)
-		}
-		if store.preparationStatuses["sesn_test"] != "pending" {
-			t.Fatalf("preparation status = %q; want pending", store.preparationStatuses["sesn_test"])
-		}
-		if got := store.preparations["sesn_test"].PreparationAttemptID; got != "prep_resource_mutation_1" {
-			t.Fatalf("preparation attempt = %q; want fresh attempt", got)
-		}
-		if !reflect.DeepEqual(store.resourcePrepareJobs, []string{"prep_resource_mutation_1"}) {
-			t.Fatalf("resource prepare jobs = %v; want fresh attempt job", store.resourcePrepareJobs)
-		}
-		if len(store.sessions["sesn_test"].Resources) != 1 {
-			t.Fatalf("resources = %+v; want added resource", store.sessions["sesn_test"].Resources)
-		}
-	})
-
-	for _, tc := range []struct {
-		name   string
-		status string
-		action string
-	}{
-		{name: "pending add does not enqueue duplicate", status: "pending", action: "add"},
-		{name: "waiting add does not enqueue", status: "waiting_environment", action: "add"},
-		{name: "pending delete does not enqueue duplicate", status: "pending", action: "delete"},
-		{name: "waiting delete does not enqueue", status: "waiting_environment", action: "delete"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := newRecordingSessionStore()
-			fileIdentities := &recordingFileIdentities{}
-			service := newTestService(store, fileIdentities, &recordingVaultValidator{}, fixed)
-			if tc.action == "delete" {
-				store.sessions["sesn_test"] = sessionWithFileAndGitHubResources(fixed)
-			} else {
-				store.sessions["sesn_test"] = testStoredSession(fixed)
-			}
-			store.preparations["sesn_test"] = &SessionPreparationAdmission{
-				SessionID:            "sesn_test",
-				EnvironmentID:        "env_test",
-				PreparationAttemptID: "prep_" + tc.status,
-				SandboxID:            "sandbox_ready",
-			}
-			store.preparationStatuses["sesn_test"] = tc.status
-
-			if tc.action == "delete" {
-				if _, err := service.DeleteResource(context.Background(), workspace.DefaultID, "sesn_test", "sesrsc_file"); err != nil {
-					t.Fatalf("DeleteResource: %v", err)
-				}
-				if store.sessions["sesn_test"].Resources[0].DeleteRequestedAt != nil {
-					t.Fatal("file resource delete requested before materialization")
-				}
-				if store.sessions["sesn_test"].Resources[0].DetachedAt == nil {
-					t.Fatal("file resource was not detached immediately")
-				}
-				if len(fileIdentities.tombstoned) != 1 || fileIdentities.tombstoned[0] != "sesn_test:file_session" {
-					t.Fatalf("file identities tombstoned = %+v; want immediate session file tombstone", fileIdentities.tombstoned)
-				}
-			} else {
-				if _, err := service.AddResource(context.Background(), workspace.DefaultID, "sesn_test", ResourceRequest{
-					Type:   string(ResourceTypeFile),
-					FileID: "file_source",
-				}); err != nil {
-					t.Fatalf("AddResource: %v", err)
-				}
-				if len(store.sessions["sesn_test"].Resources) != 1 {
-					t.Fatalf("resources = %+v; want added resource", store.sessions["sesn_test"].Resources)
-				}
-			}
-			if store.preparationStatuses["sesn_test"] != tc.status {
-				t.Fatalf("preparation status = %q; want unchanged %q", store.preparationStatuses["sesn_test"], tc.status)
-			}
-			if len(store.resourcePrepareJobs) != 0 {
-				t.Fatalf("resource prepare jobs = %v; want no duplicate job", store.resourcePrepareJobs)
-			}
-		})
-	}
-}
-
-func TestResourceMutationsRejectPreparingSessionBeforeMutation(t *testing.T) {
-	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	store := newRecordingSessionStore()
-	fileIdentities := &recordingFileIdentities{}
-	service := newTestService(store, fileIdentities, &recordingVaultValidator{}, fixed)
-	store.sessions["sesn_test"] = testStoredSession(fixed)
-	store.preparationStatuses["sesn_test"] = "preparing"
-
-	_, err := service.AddResource(context.Background(), workspace.DefaultID, "sesn_test", ResourceRequest{
-		Type:   string(ResourceTypeFile),
-		FileID: "file_source",
-	})
-	if err == nil {
-		t.Fatal("AddResource accepted a preparing session")
-	}
-	var conflict *ConflictError
-	if !errors.As(err, &conflict) || !conflict.InvalidRequest {
-		t.Fatalf("err = %T %v; want invalid_request conflict", err, err)
-	}
-	if len(store.sessions["sesn_test"].Resources) != 0 {
-		t.Fatalf("resources created despite preparing conflict: %+v", store.sessions["sesn_test"].Resources)
-	}
-}
-
 func TestAddResourceInvalidMountPathDoesNotEnterMutationBoundary(t *testing.T) {
 	fixed := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	store := newRecordingSessionStore()
@@ -2562,7 +2351,7 @@ func TestDeleteResourceRequestsCleanupForMaterializedFile(t *testing.T) {
 		},
 	}}
 	store.sessions["sesn_test"] = stored
-	store.preparationStatuses["sesn_test"] = "ready"
+	store.materializedSessions["sesn_test"] = true
 
 	_, err := service.DeleteResource(context.Background(), workspace.DefaultID, "sesn_test", "sesrsc_delete")
 	if err != nil {
@@ -2599,7 +2388,7 @@ func TestDeleteResourceRequestsCleanupForMaterializedMemoryAndGitHubResources(t 
 		stored := testStoredSession(fixed)
 		stored.Resources = []*Resource{resource}
 		store.sessions["sesn_test"] = stored
-		store.preparationStatuses["sesn_test"] = "ready"
+		store.materializedSessions["sesn_test"] = true
 
 		if _, err := service.DeleteResource(context.Background(), workspace.DefaultID, "sesn_test", resource.ID); err != nil {
 			t.Fatalf("DeleteResource(%s): %v", resource.Type, err)
@@ -2633,7 +2422,7 @@ func TestDeleteResourceRejectsRepeatedDeleteWhileCleanupPending(t *testing.T) {
 		},
 	}}
 	store.sessions["sesn_test"] = stored
-	store.preparationStatuses["sesn_test"] = "ready"
+	store.materializedSessions["sesn_test"] = true
 
 	if _, err := service.DeleteResource(context.Background(), workspace.DefaultID, "sesn_test", "sesrsc_delete"); err != nil {
 		t.Fatalf("first DeleteResource: %v", err)
@@ -2680,8 +2469,8 @@ func TestDeleteResourceTombstonesUnmaterializedFileImmediately(t *testing.T) {
 	if len(fileIdentities.tombstoned) != 1 || fileIdentities.tombstoned[0] != "sesn_test:file_session_delete" {
 		t.Fatalf("file identities tombstoned = %+v; want file_session_delete", fileIdentities.tombstoned)
 	}
-	if store.resourcePrepareCalls != 0 {
-		t.Fatalf("resourcePrepareCalls = %d; want no sandbox cleanup for unmaterialized file", store.resourcePrepareCalls)
+	if store.resourceMutationCalls != 1 {
+		t.Fatalf("resourceMutationCalls = %d; want the detached declaration to advance the resource revision", store.resourceMutationCalls)
 	}
 }
 
@@ -3531,8 +3320,7 @@ func (r *recordingFileIdentities) TombstoneSessionFileIdentity(_ context.Context
 type recordingSessionStore struct {
 	sessions                   map[string]*Session
 	threads                    map[string]*Thread
-	preparations               map[string]*SessionPreparationAdmission
-	preparationStatuses        map[string]string
+	materializedSessions       map[string]bool
 	providerAuth               map[string]SessionProviderAuthAdmission
 	providerCredentials        map[string]*ProviderCredentialForAdmission
 	runtimeConfigUpdates       []string
@@ -3552,18 +3340,16 @@ type recordingSessionStore struct {
 	archiveErr                 error
 	deleteErr                  error
 	updateSessionCalls         int
-	resourcePrepareCalls       int
-	resourcePrepareJobs        []string
+	resourceMutationCalls      int
 }
 
 func newRecordingSessionStore() *recordingSessionStore {
 	return &recordingSessionStore{
-		sessions:            map[string]*Session{},
-		threads:             map[string]*Thread{},
-		preparations:        map[string]*SessionPreparationAdmission{},
-		preparationStatuses: map[string]string{},
-		providerAuth:        map[string]SessionProviderAuthAdmission{},
-		providerCredentials: map[string]*ProviderCredentialForAdmission{},
+		sessions:             map[string]*Session{},
+		threads:              map[string]*Thread{},
+		materializedSessions: map[string]bool{},
+		providerAuth:         map[string]SessionProviderAuthAdmission{},
+		providerCredentials:  map[string]*ProviderCredentialForAdmission{},
 	}
 }
 
@@ -3605,15 +3391,10 @@ func (s *recordingSessionStore) WithWorkspaceTxAndCleanup(_ context.Context, ws 
 	for id, thread := range s.threads {
 		threadSnapshot[id] = cloneThread(thread)
 	}
-	preparationSnapshot := map[string]*SessionPreparationAdmission{}
-	for id, preparation := range s.preparations {
-		preparationSnapshot[id] = clonePreparationAdmission(preparation)
+	materializedSnapshot := map[string]bool{}
+	for id, materialized := range s.materializedSessions {
+		materializedSnapshot[id] = materialized
 	}
-	preparationStatusSnapshot := map[string]string{}
-	for id, status := range s.preparationStatuses {
-		preparationStatusSnapshot[id] = status
-	}
-	resourcePrepareJobsSnapshot := append([]string(nil), s.resourcePrepareJobs...)
 	runtimeConfigUpdatesSnapshot := append([]string(nil), s.runtimeConfigUpdates...)
 	providerAuthSnapshot := map[string]SessionProviderAuthAdmission{}
 	for id, selector := range s.providerAuth {
@@ -3628,9 +3409,7 @@ func (s *recordingSessionStore) WithWorkspaceTxAndCleanup(_ context.Context, ws 
 		s.inTx = false
 		s.sessions = sessionSnapshot
 		s.threads = threadSnapshot
-		s.preparations = preparationSnapshot
-		s.preparationStatuses = preparationStatusSnapshot
-		s.resourcePrepareJobs = resourcePrepareJobsSnapshot
+		s.materializedSessions = materializedSnapshot
 		s.runtimeConfigUpdates = runtimeConfigUpdatesSnapshot
 		s.providerAuth = providerAuthSnapshot
 		s.providerCredentials = providerCredentialSnapshot
@@ -3643,9 +3422,7 @@ func (s *recordingSessionStore) WithWorkspaceTxAndCleanup(_ context.Context, ws 
 		}
 		s.sessions = sessionSnapshot
 		s.threads = threadSnapshot
-		s.preparations = preparationSnapshot
-		s.preparationStatuses = preparationStatusSnapshot
-		s.resourcePrepareJobs = resourcePrepareJobsSnapshot
+		s.materializedSessions = materializedSnapshot
 		s.runtimeConfigUpdates = runtimeConfigUpdatesSnapshot
 		s.providerAuth = providerAuthSnapshot
 		s.providerCredentials = providerCredentialSnapshot
@@ -3802,15 +3579,6 @@ func (tx *recordingSessionTx) CreatePrimaryThread(_ context.Context, thread *Thr
 	return nil
 }
 
-func (tx *recordingSessionTx) CreateSessionPreparation(_ context.Context, preparation SessionPreparationAdmission) error {
-	if preparation.SessionID == "" {
-		return &ValidationError{Message: "session_id is required"}
-	}
-	tx.store.preparations[preparation.SessionID] = clonePreparationAdmission(&preparation)
-	tx.store.preparationStatuses[preparation.SessionID] = "pending"
-	return nil
-}
-
 func (tx *recordingSessionTx) GetSession(_ context.Context, sessionID string) (*Session, error) {
 	return tx.store.Get(context.Background(), tx.workspaceID, sessionID)
 }
@@ -3875,39 +3643,14 @@ func (tx *recordingSessionTx) RequireSessionUsableForMutation(_ context.Context,
 	}
 }
 
-func (tx *recordingSessionTx) PrepareSessionResourceMutation(_ context.Context, sessionID string, _ time.Time) error {
-	tx.store.resourcePrepareCalls++
+func (tx *recordingSessionTx) RecordSessionResourceMutation(_ context.Context, sessionID string, _ time.Time) error {
+	tx.store.resourceMutationCalls++
 	sess, ok := tx.store.sessions[sessionID]
 	if !ok {
 		return &NotFoundError{Message: "session not found"}
 	}
 	if sess.Status == StatusRunning {
 		return &ConflictError{Message: "session must be idle for resource mutation", InvalidRequest: true}
-	}
-	status := tx.store.preparationStatuses[sessionID]
-	switch status {
-	case "ready":
-		attemptID := "prep_resource_mutation_" + strconv.Itoa(len(tx.store.resourcePrepareJobs)+1)
-		preparation := clonePreparationAdmission(tx.store.preparations[sessionID])
-		if preparation == nil {
-			preparation = &SessionPreparationAdmission{SessionID: sessionID}
-		}
-		preparation.PreparationAttemptID = attemptID
-		tx.store.preparations[sessionID] = preparation
-		tx.store.preparationStatuses[sessionID] = "pending"
-		tx.store.resourcePrepareJobs = append(tx.store.resourcePrepareJobs, attemptID)
-	case "failed":
-		attemptID := "prep_resource_mutation_" + strconv.Itoa(len(tx.store.resourcePrepareJobs)+1)
-		preparation := clonePreparationAdmission(tx.store.preparations[sessionID])
-		if preparation == nil {
-			preparation = &SessionPreparationAdmission{SessionID: sessionID}
-		}
-		preparation.PreparationAttemptID = attemptID
-		tx.store.preparations[sessionID] = preparation
-		tx.store.preparationStatuses[sessionID] = "pending"
-		tx.store.resourcePrepareJobs = append(tx.store.resourcePrepareJobs, attemptID)
-	case "preparing":
-		return &ConflictError{Message: "session preparation is in progress", InvalidRequest: true}
 	}
 	return nil
 }
@@ -4123,7 +3866,7 @@ func (tx *recordingSessionTx) RequestResourceDelete(_ context.Context, sessionID
 			if resource.DeleteRequestedAt != nil {
 				return nil, &ConflictError{Message: "session resource deletion is already in progress", InvalidRequest: true}
 			}
-			if tx.store.preparationStatuses[sessionID] == "ready" {
+			if tx.store.materializedSessions[sessionID] {
 				resource.DeleteRequestedAt = &requestedAt
 			} else {
 				resource.DetachedAt = &requestedAt
@@ -4262,14 +4005,6 @@ func cloneThread(thread *Thread) *Thread {
 		archivedAt := *thread.ArchivedAt
 		clone.ArchivedAt = &archivedAt
 	}
-	return &clone
-}
-
-func clonePreparationAdmission(preparation *SessionPreparationAdmission) *SessionPreparationAdmission {
-	if preparation == nil {
-		return nil
-	}
-	clone := *preparation
 	return &clone
 }
 

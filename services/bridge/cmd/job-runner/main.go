@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
@@ -69,13 +70,6 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
 	}
 	defer func() { _ = queueConn.Close() }()
-	bridgeReader, bridgeConn, err := agentruntimebridge.DialBridgeAPITaskNotificationReader(cfg.BridgeAPIGRPCAddress, internalgrpcauth.FileTokenSource{
-		Path: cfg.BridgeAPITokenPath,
-	})
-	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
-	}
-	defer func() { _ = bridgeConn.Close() }()
 	visibilityConfig, err := enginekubernetes.LoadConfig(env)
 	if err != nil {
 		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
@@ -98,6 +92,24 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 	defer watchHandles.Stop()
 	readiness := workload.NewReadiness().WithReadinessDependency(kubernetesCache.Ready)
 	readiness.MarkReady()
+	blobConfig, err := blob.LoadConfig()
+	if err != nil {
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+	}
+	if err := blobConfig.AssertProductionReady(); err != nil {
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+	}
+	blobStore, err := blob.NewS3BlobStore(ctx, blobConfig)
+	if err != nil {
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+	}
+	deliveryStore := agentruntimebridge.NewJobRunnerRuntimeDeliveryStore(
+		database.Client,
+		logger,
+		cfg,
+		kubernetesCache.BindingVisibilitySnapshot,
+	)
+	deliveryStore.AttachmentBlobStore = blobStore
 	loopCtx, cancelLoop := context.WithCancel(ctx)
 	defer cancelLoop()
 	go func() {
@@ -105,13 +117,7 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 			Queue:      agentruntimebridge.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
 			Workspaces: workspaceStore,
 			Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{
-				Store: agentruntimebridge.NewJobRunnerRuntimeDeliveryStore(
-					database.Client,
-					logger,
-					cfg,
-					bridgeReader,
-					kubernetesCache.BindingVisibilitySnapshot,
-				),
+				Store: deliveryStore,
 				Sender: agentruntimebridge.NewRuntimePodCommandClient(internalgrpcauth.FileTokenSource{
 					Path: cfg.RuntimePodTokenPath,
 				}),

@@ -14,6 +14,7 @@ describe("Runtime Pod server bind addresses", () => {
     metricsRegistry.observeEventWriteLatency("append", 7, "success");
     metricsRegistry.observeContextLoadLatency("commit_accepted_input", 11, "success");
     metricsRegistry.recordCleanupCommandOutcome("completed");
+    metricsRegistry.recordReceiptEvidence("stale_custody");
     metricsRegistry.recordCloseoutEvent({ event: "runtime_closeout_stalled", activeCloseouts: 2 });
     metricsRegistry.recordCloseoutEvent({ event: "runtime_closeout_recovered", activeCloseouts: 0 });
     const httpServer = createRuntimeHttpServer("0.0.0.0:0", fakeLifecycle(), metricsRegistry);
@@ -34,6 +35,7 @@ describe("Runtime Pod server bind addresses", () => {
       expect(body).toContain('runtimepod_event_write_latency_ms_count{operation="append",outcome="success"} 1');
       expect(body).toContain('runtimepod_context_load_latency_ms_count{operation="commit_accepted_input",outcome="success"} 1');
       expect(body).toContain('runtimepod_cleanup_command_outcomes_total{outcome="completed"} 1');
+      expect(body).toContain('runtimepod_receipt_evidence_total{outcome="stale_custody"} 1');
       expect(body).toContain('runtimepod_closeout_events_total{event="runtime_closeout_stalled"} 2');
       expect(body).toContain('runtimepod_closeout_events_total{event="runtime_closeout_recovered"} 1');
     } finally {

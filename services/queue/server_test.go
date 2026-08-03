@@ -130,7 +130,7 @@ func TestQueueLeaseCarriesMaximumLegalBatchWithinScopedFuse(t *testing.T) {
 		jobs = append(jobs, &queue.Job{
 			ID:             queue.JobIDPrefix + suffix,
 			WorkspaceID:    workspace.ID(strings.Repeat("w", workspace.MaxWorkspaceIDBytes)),
-			Kind:           queue.KindEnvironmentFailedFanout,
+			Kind:           queue.KindSandboxToolExecute,
 			PartitionKey:   strings.Repeat("p", queue.MaxQueuePartitionKeyBytes-len(suffix)) + suffix,
 			DedupeKey:      strings.Repeat("d", queue.MaxQueueDedupeKeyBytes-len(suffix)) + suffix,
 			PayloadVersion: int(^uint32(0) >> 1),
@@ -151,7 +151,7 @@ func TestQueueLeaseCarriesMaximumLegalBatchWithinScopedFuse(t *testing.T) {
 	defer cleanup()
 
 	response, err := queuev1.NewQueueServiceClient(conn).Lease(context.Background(), &queuev1.LeaseRequest{
-		WorkspaceId: strings.Repeat("w", workspace.MaxWorkspaceIDBytes), Kinds: []string{queue.KindEnvironmentFailedFanout},
+		WorkspaceId: strings.Repeat("w", workspace.MaxWorkspaceIDBytes), Kinds: []string{queue.KindSandboxToolExecute},
 		LeaseOwner: strings.Repeat("l", queue.MaxQueueLeaseOwnerBytes), MaxJobs: int32(queue.MaxQueueLeaseJobs()), LeaseDurationMs: 60000,
 	})
 	if err != nil {
@@ -270,8 +270,8 @@ func (s *recordingStore) Lease(_ context.Context, request queue.LeaseRequest) ([
 	return s.leaseJobs, nil
 }
 
-func (s *recordingStore) Heartbeat(context.Context, queue.HeartbeatRequest) (bool, error) {
-	return true, nil
+func (s *recordingStore) Heartbeat(context.Context, queue.HeartbeatRequest) (queue.HeartbeatResult, error) {
+	return queue.HeartbeatResult{Updated: true, LeasedUntil: time.Now().UTC().Add(time.Minute)}, nil
 }
 
 func (s *recordingStore) Ack(_ context.Context, request queue.AckRequest) (bool, error) {

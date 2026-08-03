@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -23,14 +24,22 @@ const (
 )
 
 const (
-	KindRuntimeInput            = "runtime_input"
-	KindRuntimeConfigUpdate     = "runtime_config_update"
-	KindCleanupSession          = "cleanup_session"
-	KindSessionDeleteCleanup    = "session_delete_cleanup"
-	KindSessionPrepare          = "session_prepare"
-	KindEnvironmentBuild        = "environment_build"
-	KindEnvironmentReadyFanout  = "environment_ready_fanout"
-	KindEnvironmentFailedFanout = "environment_failed_fanout"
+	KindRuntimeInput                = "runtime_input"
+	KindRuntimeConfigUpdate         = "runtime_config_update"
+	KindCleanupSession              = "cleanup_session"
+	KindSessionDeleteCleanup        = "session_delete_cleanup"
+	KindEnvironmentBuild            = "environment_build"
+	KindEnvironmentReadyFanout      = "environment_ready_fanout"
+	KindSandboxToolExecute          = "sandbox_tool_execute"
+	KindSandboxActivate             = "sandbox_activate"
+	KindSandboxMaterialize          = "sandbox_materialize"
+	KindSandboxRelease              = "sandbox_release"
+	KindSandboxToolCancel           = "sandbox_tool_cancel"
+	KindSandboxOutputCapture        = "sandbox_output_capture"
+	KindSandboxOutputCaptureCleanup = "sandbox_output_capture_cleanup"
+	KindSandboxMemoryProjection     = "sandbox_memory_projection"
+	KindSandboxBackgroundCommand    = "sandbox_background_command"
+	KindSandboxBackgroundReconcile  = "sandbox_background_reconcile"
 
 	// MaxMcpManifestBytes is owned by Bridge manifest acceptance. Queue jobs
 	// carry only the manifest row identity; delivery rebuilds read the bounded
@@ -45,6 +54,14 @@ const (
 	// The all-kind accept fuse is over five times the largest current
 	// refs-only payload (a 512-event runtime_input job).
 	MaxQueueJobPayloadBytes = 64 * 1024
+	// SandboxMemoryProjectionMaxAttempts bounds projection-only retries after
+	// the authoritative memory mutation has committed.
+	SandboxMemoryProjectionMaxAttempts = 5
+	// Output capture and staged-blob cleanup use separate bounded generations.
+	// Exhaustion closes the current generation before replay or cleanup creates
+	// a successor with a new durable identity.
+	SandboxOutputCaptureMaxAttempts        = 5
+	SandboxOutputCaptureCleanupMaxAttempts = 5
 	// Bridge/Sandbox startup knobs own lease_owner; Lease admission rechecks
 	// it, and deployed service identifiers are below 32 bytes.
 	MaxQueueLeaseOwnerBytes = 256
@@ -60,7 +77,7 @@ const (
 	// bytes encoded as 16 hexadecimal characters.
 	MaxQueueJobIDBytes = len(JobIDPrefix) + 16
 	// Kind and status are closed queue enums; these are their longest members.
-	MaxQueueJobKindBytes   = len(KindEnvironmentFailedFanout)
+	MaxQueueJobKindBytes   = len(KindSandboxOutputCaptureCleanup)
 	MaxQueueJobStatusBytes = len(StatusDeadLettered)
 	// RFC3339Nano plus PostgreSQL's six-digit maximum year bounds timestamps.
 	MaxQueueTimestampBytes = 35
@@ -144,26 +161,27 @@ func QueueJobEnvelopeAllowance() int {
 // Queue job lifecycle state machine. These are the closed status values of a
 // queue_jobs row. Every transition is written by a PostgreSQLQueueStore method
 // in postgresql_store.go. Every caller-driven write off "leased"
-// (Ack/Retry/Defer/DeadLetter) matches on the row's lease_token, so a stale
+// (Ack/Retry/Defer/DeadLetter/Heartbeat) matches on the row's lease_token, so a stale
 // token affects no row. The maintenance path ReclaimExpiredLeases is the
 // exception: it reclaims an expired lease off "leased" without the now-stale
 // token, matching only on workspace_id/id/status='leased'.
 //
 //	state          meaning                                       writers (postgresql_store.go)         transitions
 //	-------------  --------------------------------------------  ------------------------------------  ----------------------------
-//	pending        admitted, awaiting a lease; Retry/Defer       Enqueue (insert), Retry (not          -> leased, -> cancelled
+//	pending        admitted, awaiting a lease; Retry/Defer       Enqueue (insert), Retry (not          -> leased, -> cancelled,
 //	               re-admit with backoff-delayed available_at,   exhausted), Defer, ReclaimExpired-
-//	               reclaim re-admits at available_at = now       Leases
+//	               reclaim re-admits at available_at = now       Leases                                -> dead_lettered
 //	leased         one consumer holds the row under a             Lease                                 -> pending, -> acknowledged,
 //	               lease_token for the lease window                                                     -> dead_lettered
 //	acknowledged   terminal; the leased work committed            Ack                                   (none)
-//	cancelled      terminal; a superseded pending runtime_input   Cancel (runtime_input rows only)      (none)
-//	               row was fenced out
-//	dead_lettered  terminal; attempts exhausted or an explicit    Retry (exhausted), DeadLetter         (none)
+//	cancelled      terminal; pending work was fenced out          Cancel, CancelTx                       (none)
+//	dead_lettered  terminal; attempts exhausted or an explicit    Retry (exhausted), DeadLetter,         (none)
 //	               dead-letter
+//	                                                            DeadLetterExhaustedTx
 //
 // Readers of status: Lease candidate selection with its per-partition barrier,
-// the active-dedupe lookup in EnqueueTx, and Metrics.
+// the active-dedupe lookup in EnqueueTx, Metrics, the Sandbox over-budget
+// census, and terminal-retention maintenance.
 //
 // INVARIANTS:
 //   - At most one active job per (workspace_id, dedupe_key) across pending and
@@ -175,10 +193,12 @@ func QueueJobEnvelopeAllowance() int {
 //   - At most one leased job per partition_key: the same-session serial-execution
 //     barrier. leaseCandidate's NOT EXISTS leased-in-partition guard and the
 //     partial-unique index run a partition's jobs one at a time.
-//   - Caller-driven transitions off leased (Ack/Retry/Defer/DeadLetter) are
+//   - Caller-driven transitions off leased (Ack/Retry/Defer/DeadLetter/Heartbeat) are
 //     lease-token fenced; a stale one carrying an old lease_token matches no
-//     row and is ignored. ReclaimExpiredLeases is exempt by design: it
-//     reclaims an expired lease off leased without the stale token.
+//     row and is ignored. Heartbeat cannot revive an expired lease. Lease,
+//     Heartbeat, and reclaim author durable lease times from PostgreSQL's
+//     clock. ReclaimExpiredLeases is exempt by design: it reclaims an expired
+//     lease off leased without the stale token.
 //   - Lease scans candidates FOR UPDATE SKIP LOCKED; runtime-facing consumers
 //     hold at most one leased job per session partition.
 //
@@ -194,31 +214,43 @@ const (
 
 const DefaultMaxAttempts = 10
 
+const (
+	SandboxTerminalRetentionAge  = 24 * time.Hour
+	SandboxMaintenanceBatchLimit = 100
+)
+
 type ValidationError struct {
 	Message string
 }
 
 func (e *ValidationError) Error() string { return e.Message }
 
+type IntegrityError struct {
+	Message string
+}
+
+func (e *IntegrityError) Error() string { return e.Message }
+
 type Job struct {
-	ID             string
-	WorkspaceID    workspace.ID
-	Kind           string
-	PartitionKey   string
-	DedupeKey      string
-	PayloadVersion int
-	PayloadJSON    json.RawMessage
-	Status         string
-	Priority       int
-	AvailableAt    time.Time
-	LeasedBy       string
-	LeaseToken     string
-	LeasedAt       *time.Time
-	LeasedUntil    *time.Time
-	AttemptCount   int
-	MaxAttempts    int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                     string
+	WorkspaceID            workspace.ID
+	Kind                   string
+	PartitionKey           string
+	QueuePartitionSequence int64
+	DedupeKey              string
+	PayloadVersion         int
+	PayloadJSON            json.RawMessage
+	Status                 string
+	Priority               int
+	AvailableAt            time.Time
+	LeasedBy               string
+	LeaseToken             string
+	LeasedAt               *time.Time
+	LeasedUntil            *time.Time
+	AttemptCount           int
+	MaxAttempts            int
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type MetricsSnapshot struct {
@@ -258,7 +290,17 @@ type HeartbeatRequest struct {
 	JobID         string
 	LeaseToken    string
 	LeaseDuration time.Duration
-	Now           time.Time
+}
+
+type HeartbeatResult struct {
+	Updated     bool
+	LeasedUntil time.Time
+}
+
+type ActiveLeaseRequest struct {
+	WorkspaceID workspace.ID
+	JobID       string
+	LeaseToken  string
 }
 
 type AckRequest struct {
@@ -307,7 +349,48 @@ type ReclaimExpiredLeasesRequest struct {
 	Limit        int
 	ErrorKind    string
 	ErrorMessage string
+}
+
+type TargetedCancelRequest struct {
+	WorkspaceID  workspace.ID
+	JobID        string
+	Kind         string
+	PartitionKey string
+	DedupeKey    string
 	Now          time.Time
+}
+
+type ListPendingAtOrOverBudgetRequest struct {
+	Limit int
+}
+
+type PendingAtOrOverBudgetJob struct {
+	WorkspaceID  workspace.ID
+	JobID        string
+	Kind         string
+	PartitionKey string
+	DedupeKey    string
+	PayloadJSON  json.RawMessage
+	AttemptCount int
+	MaxAttempts  int
+}
+
+type DeadLetterExhaustedRequest struct {
+	WorkspaceID          workspace.ID
+	JobID                string
+	ObservedAttemptCount int
+	ErrorKind            string
+	ErrorMessage         string
+	Now                  time.Time
+}
+
+type SandboxTerminalSweepRequest struct {
+	Now   time.Time
+	Limit int
+}
+
+type EmptyPartitionCounterSweepRequest struct {
+	Limit int
 }
 
 func NewJobID() string {
@@ -497,6 +580,29 @@ func FormatRuntimeInputDedupeKey(workspaceID workspace.ID, sessionID string, run
 	return "runtime_input:" + string(workspaceID) + ":" + sessionID + ":" + runtimeInputID
 }
 
+func NewTaskNotificationRuntimeInputEnqueueRequest(workspaceID workspace.ID, sessionID string, sessionThreadID string, taskID string, now time.Time) (EnqueueRequest, error) {
+	runtimeInputID := "task_notification:" + taskID
+	payload, err := json.Marshal(struct {
+		WorkspaceID     string   `json:"workspace_id"`
+		SessionID       string   `json:"session_id"`
+		SessionThreadID string   `json:"session_thread_id"`
+		RuntimeInputID  string   `json:"runtime_input_id"`
+		EventIDs        []string `json:"event_ids"`
+		SequenceFrom    int64    `json:"sequence_from"`
+		SequenceTo      int64    `json:"sequence_to"`
+		InputKind       string   `json:"input_kind"`
+	}{string(workspaceID), sessionID, sessionThreadID, runtimeInputID, []string{}, 0, 0, "task_notification"})
+	if err != nil {
+		return EnqueueRequest{}, err
+	}
+	return EnqueueRequest{
+		ID: NewJobID(), WorkspaceID: workspaceID, Kind: KindRuntimeInput,
+		PartitionKey:   FormatSessionPartitionKey(workspaceID, sessionID),
+		DedupeKey:      FormatRuntimeInputDedupeKey(workspaceID, sessionID, runtimeInputID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: DefaultMaxAttempts, Now: now,
+	}, nil
+}
+
 func FormatRuntimeConfigUpdateDedupeKey(workspaceID workspace.ID, sessionID string, configGeneration string) string {
 	return formatQueueDedupeKey(KindRuntimeConfigUpdate, workspaceID, sessionID, configGeneration)
 }
@@ -513,10 +619,6 @@ func FormatSessionDeleteCleanupDedupeKey(workspaceID workspace.ID, sessionID str
 	return formatQueueDedupeKey(KindSessionDeleteCleanup, workspaceID, sessionID, deleteCleanupID)
 }
 
-func FormatSessionPrepareDedupeKey(workspaceID workspace.ID, sessionID string, preparationAttemptID string) string {
-	return formatQueueDedupeKey(KindSessionPrepare, workspaceID, sessionID, preparationAttemptID)
-}
-
 func FormatEnvironmentBuildDedupeKey(workspaceID workspace.ID, environmentID string, generation string) string {
 	return formatQueueDedupeKey(KindEnvironmentBuild, workspaceID, environmentID, generation)
 }
@@ -525,8 +627,97 @@ func FormatEnvironmentReadyFanoutDedupeKey(workspaceID workspace.ID, environment
 	return formatQueueDedupeKey(KindEnvironmentReadyFanout, workspaceID, environmentID, generation)
 }
 
-func FormatEnvironmentFailedFanoutDedupeKey(workspaceID workspace.ID, environmentID string, generation string) string {
-	return formatQueueDedupeKey(KindEnvironmentFailedFanout, workspaceID, environmentID, generation)
+func FormatSandboxExecutionPartitionKey(workspaceID workspace.ID, sessionID string, sessionThreadID string, toolUseEventID string) string {
+	if workspaceID == "" || sessionID == "" || sessionThreadID == "" || toolUseEventID == "" {
+		return ""
+	}
+	return "sandbox-execution:" + string(workspaceID) + ":" + sessionID + ":" + sessionThreadID + ":" + toolUseEventID
+}
+
+func FormatSandboxToolExecuteDedupeKey(workspaceID workspace.ID, sessionID string, sessionThreadID string, toolUseEventID string, generation int64) string {
+	if generation <= 0 {
+		return ""
+	}
+	return formatSandboxExecutionDedupeKey(KindSandboxToolExecute, workspaceID, sessionID, sessionThreadID, toolUseEventID, strconv.FormatInt(generation, 10))
+}
+
+func FormatSandboxLifecyclePartitionKey(workspaceID workspace.ID, logicalSandboxID string) string {
+	return FormatPartitionKey("sandbox-lifecycle", workspaceID, logicalSandboxID)
+}
+
+func FormatSandboxLifecycleDedupeKey(kind string, workspaceID workspace.ID, logicalSandboxID string, operationID string) string {
+	if !isSandboxLifecycleKind(kind) {
+		return ""
+	}
+	return formatQueueDedupeKey(kind, workspaceID, logicalSandboxID, operationID)
+}
+
+func FormatSandboxCancelPartitionKey(workspaceID workspace.ID, sessionID string, sessionThreadID string, toolUseEventID string) string {
+	if workspaceID == "" || sessionID == "" || sessionThreadID == "" || toolUseEventID == "" {
+		return ""
+	}
+	return "sandbox-cancel:" + string(workspaceID) + ":" + sessionID + ":" + sessionThreadID + ":" + toolUseEventID
+}
+
+func FormatSandboxToolCancelDedupeKey(workspaceID workspace.ID, sessionID string, sessionThreadID string, toolUseEventID string) string {
+	return formatSandboxExecutionDedupeKey(KindSandboxToolCancel, workspaceID, sessionID, sessionThreadID, toolUseEventID, "cancel")
+}
+
+func FormatSandboxCapturePartitionKey(workspaceID workspace.ID, sessionID string, finishIdleWriteID string) string {
+	if workspaceID == "" || sessionID == "" || finishIdleWriteID == "" {
+		return ""
+	}
+	return "sandbox-capture:" + string(workspaceID) + ":" + sessionID + ":" + finishIdleWriteID
+}
+
+func FormatSandboxOutputCaptureDedupeKey(workspaceID workspace.ID, sessionID string, finishIdleWriteID string, captureGeneration int64) string {
+	if workspaceID == "" || sessionID == "" || finishIdleWriteID == "" || captureGeneration <= 0 {
+		return ""
+	}
+	return KindSandboxOutputCapture + ":" + string(workspaceID) + ":" + sessionID + ":" + finishIdleWriteID + ":" + strconv.FormatInt(captureGeneration, 10)
+}
+
+func FormatSandboxOutputCaptureCleanupDedupeKey(workspaceID workspace.ID, sessionID string, finishIdleWriteID string, captureGeneration int64, cleanupGeneration int64) string {
+	if workspaceID == "" || sessionID == "" || finishIdleWriteID == "" || captureGeneration <= 0 || cleanupGeneration <= 0 {
+		return ""
+	}
+	return KindSandboxOutputCaptureCleanup + ":" + string(workspaceID) + ":" + sessionID + ":" + finishIdleWriteID + ":" + strconv.FormatInt(captureGeneration, 10) + ":" + strconv.FormatInt(cleanupGeneration, 10)
+}
+
+func FormatSandboxMemoryPartitionKey(workspaceID workspace.ID, memoryStoreID string) string {
+	return FormatPartitionKey("sandbox-memory", workspaceID, memoryStoreID)
+}
+
+func FormatSandboxMemoryProjectionDedupeKey(workspaceID workspace.ID, memoryStoreID string, memoryWriteID string) string {
+	return formatQueueDedupeKey(KindSandboxMemoryProjection, workspaceID, memoryStoreID, memoryWriteID)
+}
+
+func FormatSandboxBackgroundPartitionKey(workspaceID workspace.ID, sessionID string, taskID string) string {
+	if workspaceID == "" || sessionID == "" || taskID == "" {
+		return ""
+	}
+	return "sandbox-background:" + string(workspaceID) + ":" + sessionID + ":" + taskID
+}
+
+func FormatSandboxBackgroundCommandDedupeKey(workspaceID workspace.ID, sessionID string, taskID string, requestID string) string {
+	if workspaceID == "" || sessionID == "" || taskID == "" || requestID == "" {
+		return ""
+	}
+	return KindSandboxBackgroundCommand + ":" + string(workspaceID) + ":" + sessionID + ":" + taskID + ":" + requestID
+}
+
+func FormatSandboxBackgroundReconcileDedupeKey(workspaceID workspace.ID, sessionID string, taskID string, generation int64) string {
+	if workspaceID == "" || sessionID == "" || taskID == "" || generation <= 0 {
+		return ""
+	}
+	return KindSandboxBackgroundReconcile + ":" + string(workspaceID) + ":" + sessionID + ":" + taskID + ":" + strconv.FormatInt(generation, 10)
+}
+
+func formatSandboxExecutionDedupeKey(kind string, workspaceID workspace.ID, sessionID string, sessionThreadID string, toolUseEventID string, suffix string) string {
+	if kind == "" || workspaceID == "" || sessionID == "" || sessionThreadID == "" || toolUseEventID == "" || suffix == "" {
+		return ""
+	}
+	return kind + ":" + string(workspaceID) + ":" + sessionID + ":" + sessionThreadID + ":" + toolUseEventID + ":" + suffix
 }
 
 func formatQueueDedupeKey(kind string, workspaceID workspace.ID, ownerID string, itemID string) string {
@@ -555,12 +746,17 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 	if workspaceID != string(request.WorkspaceID) {
 		return &ValidationError{Message: "payload workspace_id must match queue workspace_id"}
 	}
+	if IsSandboxJobKind(request.Kind) && request.MaxAttempts <= 0 {
+		return &ValidationError{Message: "max_attempts must be positive for " + request.Kind}
+	}
+	if IsSandboxJobKind(request.Kind) {
+		if err := requirePayloadStrings(rawPayload, "workspace_id"); err != nil {
+			return err
+		}
+	}
 	switch request.Kind {
 	case KindRuntimeInput:
-		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind", "preparation_attempt_id"}
-		if value, ok := payloadToken(rawPayload["preparation_attempt_id"]); !ok || value == "" {
-			return &ValidationError{Message: "runtime_input preparation_attempt_id is invalid"}
-		}
+		runtimeInputKeys := []string{"workspace_id", "session_id", "session_thread_id", "runtime_input_id", "event_ids", "sequence_from", "sequence_to", "input_kind"}
 		if err := validatePayloadKeys(rawPayload, runtimeInputKeys...); err != nil {
 			return err
 		}
@@ -612,20 +808,18 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeInputDedupeKey(request.WorkspaceID, sessionID, runtimeInputID))
 	case KindRuntimeConfigUpdate:
 		if _, ok := rawPayload["config_generation"]; ok {
-			if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "config_generation", "approval_mode", "tool_policy"); err != nil {
+			if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "config_generation"); err != nil {
 				return err
 			}
-			sessionID, configGeneration, err := requiredPayloadTokens(payload, "session_id", "config_generation")
+			sessionID, err := requiredPayloadToken(payload, "session_id")
 			if err != nil {
 				return err
 			}
-			if rawApprovalMode, ok := rawPayload["approval_mode"]; ok {
-				approvalMode, ok := payloadToken(rawApprovalMode)
-				if !ok || !isApprovalMode(approvalMode) {
-					return &ValidationError{Message: "runtime_config_update approval_mode is invalid"}
-				}
+			configGeneration, err := requiredPayloadInt64(payload, "config_generation")
+			if err != nil || configGeneration <= 0 {
+				return &ValidationError{Message: "payload_json missing config_generation"}
 			}
-			return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeConfigUpdateDedupeKey(request.WorkspaceID, sessionID, configGeneration))
+			return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatRuntimeConfigUpdateDedupeKey(request.WorkspaceID, sessionID, strconv.FormatInt(configGeneration, 10)))
 		}
 		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "mcp_server_name", "manifest_generation"); err != nil {
 			return err
@@ -657,15 +851,6 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 			return err
 		}
 		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatSessionDeleteCleanupDedupeKey(request.WorkspaceID, sessionID, deleteCleanupID))
-	case KindSessionPrepare:
-		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "preparation_attempt_id"); err != nil {
-			return err
-		}
-		sessionID, preparationAttemptID, err := requiredPayloadTokens(payload, "session_id", "preparation_attempt_id")
-		if err != nil {
-			return err
-		}
-		return requireCanonicalKeys(request, FormatSessionPartitionKey(request.WorkspaceID, sessionID), FormatSessionPrepareDedupeKey(request.WorkspaceID, sessionID, preparationAttemptID))
 	case KindEnvironmentBuild:
 		if err := validatePayloadKeys(rawPayload, "workspace_id", "environment_id", "generation"); err != nil {
 			return err
@@ -684,18 +869,183 @@ func validateCanonicalQueueShape(request EnqueueRequest) error {
 			return err
 		}
 		return requireCanonicalKeys(request, FormatEnvironmentPartitionKey(request.WorkspaceID, environmentID), FormatEnvironmentReadyFanoutDedupeKey(request.WorkspaceID, environmentID, generation))
-	case KindEnvironmentFailedFanout:
-		if err := validatePayloadKeys(rawPayload, "workspace_id", "environment_id", "generation"); err != nil {
+	case KindSandboxToolExecute:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "session_thread_id", "tool_use_event_id"); err != nil {
 			return err
 		}
-		environmentID, generation, err := requiredPayloadTokens(payload, "environment_id", "generation")
+		if err := requirePayloadStrings(rawPayload, "session_id", "session_thread_id", "tool_use_event_id"); err != nil {
+			return err
+		}
+		sessionID, sessionThreadID, toolUseEventID, err := sandboxExecutionPayloadIdentity(payload)
 		if err != nil {
 			return err
 		}
-		return requireCanonicalKeys(request, FormatEnvironmentPartitionKey(request.WorkspaceID, environmentID), FormatEnvironmentFailedFanoutDedupeKey(request.WorkspaceID, environmentID, generation))
+		if request.PartitionKey != FormatSandboxExecutionPartitionKey(request.WorkspaceID, sessionID, sessionThreadID, toolUseEventID) {
+			return &ValidationError{Message: fmt.Sprintf("%s partition_key must be canonical", request.Kind)}
+		}
+		return validateSandboxToolExecuteDedupeKey(request, sessionID, sessionThreadID, toolUseEventID)
+	case KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "logical_sandbox_id", "operation_id"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "logical_sandbox_id", "operation_id"); err != nil {
+			return err
+		}
+		if _, err := requiredPayloadToken(payload, "session_id"); err != nil {
+			return err
+		}
+		logicalSandboxID, operationID, err := requiredPayloadTokens(payload, "logical_sandbox_id", "operation_id")
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxLifecyclePartitionKey(request.WorkspaceID, logicalSandboxID),
+			FormatSandboxLifecycleDedupeKey(request.Kind, request.WorkspaceID, logicalSandboxID, operationID),
+		)
+	case KindSandboxToolCancel:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "session_thread_id", "tool_use_event_id"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "session_thread_id", "tool_use_event_id"); err != nil {
+			return err
+		}
+		sessionID, sessionThreadID, toolUseEventID, err := sandboxExecutionPayloadIdentity(payload)
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxCancelPartitionKey(request.WorkspaceID, sessionID, sessionThreadID, toolUseEventID),
+			FormatSandboxToolCancelDedupeKey(request.WorkspaceID, sessionID, sessionThreadID, toolUseEventID),
+		)
+	case KindSandboxOutputCapture:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "finish_idle_write_id", "capture_generation"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "finish_idle_write_id"); err != nil {
+			return err
+		}
+		sessionID, finishIdleWriteID, err := requiredPayloadTokens(payload, "session_id", "finish_idle_write_id")
+		if err != nil {
+			return err
+		}
+		captureGeneration, err := requiredPositivePayloadInt64(payload, "capture_generation")
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxCapturePartitionKey(request.WorkspaceID, sessionID, finishIdleWriteID),
+			FormatSandboxOutputCaptureDedupeKey(request.WorkspaceID, sessionID, finishIdleWriteID, captureGeneration),
+		)
+	case KindSandboxOutputCaptureCleanup:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "finish_idle_write_id", "capture_generation", "cleanup_generation"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "finish_idle_write_id"); err != nil {
+			return err
+		}
+		sessionID, finishIdleWriteID, err := requiredPayloadTokens(payload, "session_id", "finish_idle_write_id")
+		if err != nil {
+			return err
+		}
+		captureGeneration, err := requiredPositivePayloadInt64(payload, "capture_generation")
+		if err != nil {
+			return err
+		}
+		cleanupGeneration, err := requiredPositivePayloadInt64(payload, "cleanup_generation")
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxCapturePartitionKey(request.WorkspaceID, sessionID, finishIdleWriteID),
+			FormatSandboxOutputCaptureCleanupDedupeKey(request.WorkspaceID, sessionID, finishIdleWriteID, captureGeneration, cleanupGeneration),
+		)
+	case KindSandboxMemoryProjection:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "memory_store_id", "memory_write_id"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "memory_store_id", "memory_write_id"); err != nil {
+			return err
+		}
+		if _, err := requiredPayloadToken(payload, "session_id"); err != nil {
+			return err
+		}
+		memoryStoreID, memoryWriteID, err := requiredPayloadTokens(payload, "memory_store_id", "memory_write_id")
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxMemoryPartitionKey(request.WorkspaceID, memoryStoreID),
+			FormatSandboxMemoryProjectionDedupeKey(request.WorkspaceID, memoryStoreID, memoryWriteID),
+		)
+	case KindSandboxBackgroundCommand:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "task_id", "request_id"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "task_id", "request_id"); err != nil {
+			return err
+		}
+		sessionID, taskID, err := requiredPayloadTokens(payload, "session_id", "task_id")
+		if err != nil {
+			return err
+		}
+		requestID, err := requiredPayloadToken(payload, "request_id")
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxBackgroundPartitionKey(request.WorkspaceID, sessionID, taskID),
+			FormatSandboxBackgroundCommandDedupeKey(request.WorkspaceID, sessionID, taskID, requestID),
+		)
+	case KindSandboxBackgroundReconcile:
+		if err := validatePayloadKeys(rawPayload, "workspace_id", "session_id", "task_id", "reconcile_generation"); err != nil {
+			return err
+		}
+		if err := requirePayloadStrings(rawPayload, "session_id", "task_id"); err != nil {
+			return err
+		}
+		sessionID, taskID, err := requiredPayloadTokens(payload, "session_id", "task_id")
+		if err != nil {
+			return err
+		}
+		generation, err := requiredPositivePayloadInt64(payload, "reconcile_generation")
+		if err != nil {
+			return err
+		}
+		return requireCanonicalKeys(request,
+			FormatSandboxBackgroundPartitionKey(request.WorkspaceID, sessionID, taskID),
+			FormatSandboxBackgroundReconcileDedupeKey(request.WorkspaceID, sessionID, taskID, generation),
+		)
 	default:
 		return &ValidationError{Message: "unknown queue job kind: " + request.Kind}
 	}
+}
+
+func validateSandboxToolExecuteDedupeKey(request EnqueueRequest, sessionID string, sessionThreadID string, toolUseEventID string) error {
+	separator := strings.LastIndexByte(request.DedupeKey, ':')
+	if separator < 0 || separator == len(request.DedupeKey)-1 {
+		return &ValidationError{Message: KindSandboxToolExecute + " dedupe_key must carry a positive execution generation"}
+	}
+	generation, err := strconv.ParseInt(request.DedupeKey[separator+1:], 10, 64)
+	if err != nil || generation <= 0 || request.DedupeKey != FormatSandboxToolExecuteDedupeKey(request.WorkspaceID, sessionID, sessionThreadID, toolUseEventID, generation) {
+		return &ValidationError{Message: KindSandboxToolExecute + " dedupe_key must be canonical"}
+	}
+	return nil
+}
+
+func sandboxExecutionPayloadIdentity(payload map[string]string) (string, string, string, error) {
+	sessionID, err := requiredPayloadToken(payload, "session_id")
+	if err != nil {
+		return "", "", "", err
+	}
+	sessionThreadID, err := requiredPayloadToken(payload, "session_thread_id")
+	if err != nil {
+		return "", "", "", err
+	}
+	toolUseEventID, err := requiredPayloadToken(payload, "tool_use_event_id")
+	if err != nil {
+		return "", "", "", err
+	}
+	return sessionID, sessionThreadID, toolUseEventID, nil
 }
 
 func requireCanonicalKeys(request EnqueueRequest, wantPartitionKey string, wantDedupeKey string) error {
@@ -738,6 +1088,20 @@ func validatePayloadKeys(raw map[string]json.RawMessage, allowed ...string) erro
 	for key := range raw {
 		if !allowedSet[key] {
 			return &ValidationError{Message: "payload_json contains unsupported field " + key}
+		}
+	}
+	return nil
+}
+
+func requirePayloadStrings(raw map[string]json.RawMessage, keys ...string) error {
+	for _, key := range keys {
+		value, ok := raw[key]
+		if !ok {
+			return &ValidationError{Message: "payload_json missing " + key}
+		}
+		var text string
+		if err := json.Unmarshal(value, &text); err != nil || text == "" {
+			return &ValidationError{Message: "payload_json field " + key + " must be a non-empty string"}
 		}
 	}
 	return nil
@@ -799,6 +1163,14 @@ func requiredPayloadInt64(payload map[string]string, key string) (int64, error) 
 	return parsePayloadInt64(value, key)
 }
 
+func requiredPositivePayloadInt64(payload map[string]string, key string) (int64, error) {
+	value, err := requiredPayloadInt64(payload, key)
+	if err != nil || value <= 0 {
+		return 0, &ValidationError{Message: "payload_json field " + key + " must be positive"}
+	}
+	return value, nil
+}
+
 func parsePayloadInt64(value string, key string) (int64, error) {
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
@@ -833,7 +1205,28 @@ func payloadStringArray(raw map[string]json.RawMessage, key string, allowEmpty b
 
 func isKnownKind(kind string) bool {
 	switch kind {
-	case KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindSessionPrepare, KindEnvironmentBuild, KindEnvironmentReadyFanout, KindEnvironmentFailedFanout:
+	case KindRuntimeInput, KindRuntimeConfigUpdate, KindCleanupSession, KindSessionDeleteCleanup, KindEnvironmentBuild, KindEnvironmentReadyFanout,
+		KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
+		KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup, KindSandboxMemoryProjection, KindSandboxBackgroundCommand, KindSandboxBackgroundReconcile:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsSandboxJobKind(kind string) bool {
+	switch kind {
+	case KindSandboxToolExecute, KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease, KindSandboxToolCancel,
+		KindSandboxOutputCapture, KindSandboxOutputCaptureCleanup, KindSandboxMemoryProjection, KindSandboxBackgroundCommand, KindSandboxBackgroundReconcile:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSandboxLifecycleKind(kind string) bool {
+	switch kind {
+	case KindSandboxActivate, KindSandboxMaterialize, KindSandboxRelease:
 		return true
 	default:
 		return false
@@ -842,16 +1235,7 @@ func isKnownKind(kind string) bool {
 
 func isRuntimeInputKind(inputKind string) bool {
 	switch inputKind {
-	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail":
-		return true
-	default:
-		return false
-	}
-}
-
-func isApprovalMode(mode string) bool {
-	switch mode {
-	case "full_access", "ask_for_approval", "approve_for_me":
+	case "messages", "interrupt_control", "tool_confirmation", "task_notification", "agent_mail", "approval_review", "rejection":
 		return true
 	default:
 		return false
@@ -861,4 +1245,9 @@ func isApprovalMode(mode string) bool {
 func IsValidationError(err error) bool {
 	var validation *ValidationError
 	return errors.As(err, &validation)
+}
+
+func IsIntegrityError(err error) bool {
+	var integrity *IntegrityError
+	return errors.As(err, &integrity)
 }

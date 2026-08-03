@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
-import type { RuntimeAcceptedInputState } from "../../src/session/session-state.js";
+import type {
+  RuntimeAcceptedInputState,
+  RuntimeTaskNotificationState,
+} from "../../src/session/session-state.js";
 import { MaxProviderRequestAttachments, SessionState } from "../../src/session/session-state.js";
 
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -34,96 +37,6 @@ describe("SessionState", () => {
     expect(state.lastRequestUsage()).toBeUndefined();
     expect(state.lastRequestModelLimits()).toBeUndefined();
     expect(state.lastRequestContextAnchorSequence()).toBeUndefined();
-  });
-
-  test("cold family carrier survives later hot runtime config patches", () => {
-    const state = new SessionState("sesn_cold_family");
-    const scope = {
-      requestId: "req_config",
-      workspaceId: "default",
-      sessionId: "sesn_cold_family",
-      sessionThreadId: "thrd_cold_family",
-      bindingId: "bind_cold_family",
-      bindingGeneration: 1,
-      targetPodUid: "pod_cold_family",
-      eventIds: [] as const,
-      sequenceFrom: 0,
-      sequenceTo: 0,
-    };
-    const cold = {
-      ...scope,
-      runtimeInputId: "rin_cold",
-      generation: 1,
-      payloadJson: JSON.stringify({ runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] } }),
-      coldLoad: true as const,
-      installedBuiltinFamily: "claude" as const,
-    };
-    const hot = {
-      ...scope,
-      runtimeInputId: "rin_hot",
-      generation: 2,
-      payloadJson: JSON.stringify({ tool_policy: { approvalMode: "full_access" } }),
-    };
-    expect(state.applyRuntimeConfigPatch(cold)).toBe("applied");
-    expect(state.applyRuntimeConfigPatch(hot)).toBe("applied");
-    expect(state.runtimeConfigPatches()).toEqual([cold, hot]);
-    expect(state.installedBuiltinFamily()).toBe("claude");
-  });
-
-  test("MCP manifest apply is generation-monotonic across etag flaps and stale late delivery", () => {
-    const state = new SessionState("sesn_mcp_generation");
-    const scope = {
-      requestId: "req_mcp_generation",
-      workspaceId: "default",
-      sessionId: "sesn_mcp_generation",
-      sessionThreadId: "thrd_mcp_generation",
-      bindingId: "bind_mcp_generation",
-      bindingGeneration: 4,
-      targetPodUid: "pod_mcp_generation",
-      eventIds: [] as const,
-      sequenceFrom: 0,
-      sequenceTo: 0,
-    };
-    const generationOne = {
-      ...scope,
-      runtimeInputId: "rin_mcp_1",
-      generation: 1,
-      mcpServerName: "github",
-      manifestETag: "etag_a",
-      payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_a\",\"manifest_generation\":1,\"tools\":[]}}",
-    };
-    const generationThree = {
-      ...scope,
-      runtimeInputId: "rin_mcp_3",
-      generation: 3,
-      mcpServerName: "github",
-      manifestETag: "etag_a",
-      payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_a\",\"manifest_generation\":3,\"tools\":[]}}",
-    };
-    const staleGenerationTwo = {
-      ...scope,
-      runtimeInputId: "rin_mcp_2_late",
-      generation: 2,
-      mcpServerName: "github",
-      manifestETag: "etag_b",
-      payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_etag\":\"etag_b\",\"manifest_generation\":2,\"tools\":[]}}",
-    };
-    const generationFourUnready = {
-      ...scope,
-      runtimeInputId: "rin_mcp_4",
-      generation: 4,
-      mcpServerName: "github",
-      manifestReadiness: "unready" as const,
-      manifestDiagnostic: "delivery_exhausted",
-      payloadJson: "{\"mcp_manifest\":{\"mcp_server_name\":\"github\",\"manifest_generation\":4,\"readiness\":\"unready\",\"diagnostic\":\"delivery_exhausted\"}}",
-    };
-
-    expect(state.applyRuntimeConfigPatch(generationOne)).toBe("applied");
-    expect(state.applyRuntimeConfigPatch(generationOne)).toBe("stale");
-    expect(state.applyRuntimeConfigPatch(generationThree)).toBe("applied");
-    expect(state.applyRuntimeConfigPatch(staleGenerationTwo)).toBe("stale");
-    expect(state.applyRuntimeConfigPatch(generationFourUnready)).toBe("applied");
-    expect(state.runtimeConfigPatches()).toEqual([generationFourUnready]);
   });
 
   test("caps pending provider attachments and records model-visible overflow work", () => {
@@ -208,7 +121,7 @@ describe("SessionState", () => {
     expect(state.beginPendingAttachmentRide()).toEqual([nextRide]);
   });
 
-  test("agent-mail delivery identity deduplicates hot enqueue and cold rescan after ACK", () => {
+  test("agent-mail delivery identity deduplicates hot enqueue and cold resolution after ACK", () => {
     const state = new SessionState("sesn_agent_mail_dedup");
     const message = RuntimeMessageSchema.parse({
       id: "msg_agent_mail",
@@ -242,9 +155,9 @@ describe("SessionState", () => {
       bindingGeneration: 1,
       targetPodUid: "pod_agent_mail",
       runtimeInputId: "agent_mail:delivery_agent_mail",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
+      eventIds: ["sevt_agent_mail_received"],
+      sequenceFrom: 2,
+      sequenceTo: 2,
       kind: "inter_agent_message",
       deliveryId: "delivery_agent_mail",
       sourceThreadId: "thrd_agent_mail_child",
@@ -259,7 +172,7 @@ describe("SessionState", () => {
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
   });
 
-  test("interrupt fence preserves queued completion mail regardless of its synthetic sequence", () => {
+  test("interrupt fence preserves queued stamped completion mail", () => {
     const state = new SessionState("sesn_agent_mail_interrupt_fence");
     const message = RuntimeMessageSchema.parse({
       id: "msg_agent_mail_interrupt_fence",
@@ -293,9 +206,9 @@ describe("SessionState", () => {
       bindingGeneration: 1,
       targetPodUid: "pod_agent_mail_interrupt_fence",
       runtimeInputId: "agent_mail:delivery_interrupt_fence",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
+      eventIds: ["sevt_agent_mail_interrupt_received"],
+      sequenceFrom: 2,
+      sequenceTo: 2,
       kind: "inter_agent_message",
       deliveryId: "delivery_interrupt_fence",
       sourceThreadId: "thrd_agent_mail_child",
@@ -308,6 +221,82 @@ describe("SessionState", () => {
 
     expect(state.peekAcceptedInput()).toEqual(mail);
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+  });
+
+  test("task-notification identity deduplicates while the accepted fact remains queued", () => {
+    const state = new SessionState("sesn_task_notification_queued");
+    const notification = {
+      requestId: "req_task_notification_queued",
+      workspaceId: "wksp_task_notification_queued",
+      sessionId: "sesn_task_notification_queued",
+      sessionThreadId: "thrd_task_notification_queued",
+      bindingId: "bind_task_notification_queued",
+      bindingGeneration: 1,
+      targetPodUid: "pod_task_notification_queued",
+      runtimeInputId: "rin_task_notification_queued",
+      eventIds: ["sevt_task_notification_queued"],
+      sequenceFrom: 3,
+      sequenceTo: 3,
+      kind: "task_notification",
+      taskId: "task_notification_queued",
+      sourceToolUseEventId: "sevt_task_notification_source",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      commit: async () => ({ ok: true, stale: true }),
+    } satisfies RuntimeAcceptedInputState;
+
+    expect(state.enqueueAcceptedInput(notification)).toBe("applied");
+    expect(state.enqueueAcceptedInput(notification)).toBe("duplicate");
+    expect(state.peekAcceptedInput()).toBe(notification);
+  });
+
+  test("task-notification identity deduplicates after its durable message is committed", () => {
+    const state = new SessionState("sesn_task_notification_committed");
+    const committedMessage = RuntimeMessageSchema.parse({
+      id: "msg_task_notification_committed",
+      sessionId: "sesn_task_notification_committed",
+      role: "user",
+      origin: "runtime",
+      sequence: 4,
+      status: "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      parts: [{
+        id: "part_task_notification_committed",
+        sessionId: "sesn_task_notification_committed",
+        messageId: "msg_task_notification_committed",
+        sequence: 0,
+        type: "text",
+        text: "Task completed.",
+        truncated: false,
+        status: "completed",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: timestamp,
+      }],
+    });
+    const notification = {
+      requestId: "req_task_notification_committed",
+      workspaceId: "wksp_task_notification_committed",
+      sessionId: "sesn_task_notification_committed",
+      sessionThreadId: "thrd_task_notification_committed",
+      bindingId: "bind_task_notification_committed",
+      bindingGeneration: 1,
+      targetPodUid: "pod_task_notification_committed",
+      runtimeInputId: "rin_task_notification_committed",
+      eventIds: ["sevt_task_notification_committed"],
+      sequenceFrom: 4,
+      sequenceTo: 4,
+      taskId: "task_notification_committed",
+      sourceToolUseEventId: "sevt_task_notification_source",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      committedMessage,
+    } satisfies RuntimeTaskNotificationState;
+
+    expect(state.commitTaskNotification(notification)).toBe("applied");
+    expect(state.commitTaskNotification(notification)).toBe("duplicate");
+    expect(state.contextManager.messages()).toEqual([committedMessage]);
   });
 
   test("clear removes transient attachments and model-only messages", () => {

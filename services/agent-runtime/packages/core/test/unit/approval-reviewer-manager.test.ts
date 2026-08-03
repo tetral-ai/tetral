@@ -78,6 +78,7 @@ describe("AutoApprovalReviewerManager", () => {
     manager.completeTrunkReview(
       { generation: 1, messages: [first] },
       [userMessage("reviewer_snapshot", 1, "snapshot")],
+      "evt_parent_boundary",
     );
     expect(manager.parentTranscriptFeed({ generation: 1, messages: [first, second] })).toEqual({
       reanchored: false,
@@ -89,7 +90,7 @@ describe("AutoApprovalReviewerManager", () => {
     const manager = new AutoApprovalReviewerManager();
     const first = userMessage("msg_1", 1, "first");
     const second = userMessage("msg_2", 2, "second");
-    manager.completeTrunkReview({ generation: 4, messages: [first] }, []);
+    manager.completeTrunkReview({ generation: 4, messages: [first] }, [], "evt_parent_boundary");
 
     const delta = manager.parentTranscriptFeed({ generation: 4, messages: [first, second] });
     expect(delta.messages).toEqual([second]);
@@ -100,7 +101,7 @@ describe("AutoApprovalReviewerManager", () => {
     });
   });
 
-  test("owns the trunk snapshot and target-specific memo until disposal", () => {
+  test("owns the trunk snapshot and target-specific memo until disposal", async () => {
     const manager = new AutoApprovalReviewerManager();
     const snapshot = [userMessage("reviewer_snapshot", 1, "snapshot")];
     const decision = {
@@ -110,25 +111,33 @@ describe("AutoApprovalReviewerManager", () => {
       outcome: "allow" as const,
     };
 
-    manager.completeTrunkReview({ generation: 1, messages: [] }, snapshot);
+    manager.completeTrunkReview({ generation: 1, messages: [] }, snapshot, "evt_parent_boundary");
     manager.rememberDecision("target-specific-key", decision);
-    expect(manager.trunkSnapshot()).toEqual(snapshot);
+    expect(manager.trunkSnapshot()).toEqual({
+      messages: snapshot,
+      parentBoundaryEventId: "evt_parent_boundary",
+    });
     expect(manager.decisionFor("target-specific-key")).toEqual(decision);
 
-    manager.dispose();
+    await Effect.runPromise(manager.dispose());
     expect(manager.isDisposed()).toBe(true);
     expect(manager.trunkSnapshot()).toBeUndefined();
     expect(manager.decisionFor("target-specific-key")).toBeUndefined();
   });
 
-  test("disposal closes the manager scope and finalizes owned reviewer work", async () => {
+  test("disposal awaits asynchronous finalizers for owned reviewer work", async () => {
     const manager = new AutoApprovalReviewerManager();
     let started = false;
     let finalized = false;
+    let releaseFinalizer = (): void => undefined;
+    const finalizerGate = new Promise<void>((resolve) => {
+      releaseFinalizer = resolve;
+    });
     await Effect.runPromise(manager.fork(Effect.sync(() => {
       started = true;
     }).pipe(Effect.andThen(Effect.never),
-      Effect.ensuring(Effect.sync(() => {
+      Effect.ensuring(Effect.promise(async () => {
+        await finalizerGate;
         finalized = true;
       })),
     )));
@@ -138,10 +147,14 @@ describe("AutoApprovalReviewerManager", () => {
     }
     expect(started).toBe(true);
 
-    manager.dispose();
-    for (let attempt = 0; attempt < 100 && !finalized; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    let disposalFinished = false;
+    const disposal = Effect.runPromise(manager.dispose()).then(() => {
+      disposalFinished = true;
+    });
+    await Bun.sleep(0);
+    expect(disposalFinished).toBe(false);
+    releaseFinalizer();
+    await disposal;
     expect(finalized).toBe(true);
   });
 });

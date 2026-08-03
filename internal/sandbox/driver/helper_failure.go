@@ -3,7 +3,7 @@ package driver
 import "fmt"
 
 // HelperFailureError marks cases where the sandbox helper failed before
-// emitting an authoritative envelope, so Bridge can synthesize helper_failure.
+// emitting an authoritative envelope, so Sandbox Service can synthesize helper_failure.
 type HelperFailureError struct {
 	Message string
 	Cause   error

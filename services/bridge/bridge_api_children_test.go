@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -13,14 +14,52 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge children protocol-family boundary.
+
+func seedBridgeAPIChildLifecycleToolSource(
+	t *testing.T,
+	db *sql.DB,
+	sessionID string,
+	threadID string,
+	eventID string,
+) *bridgev1.ChildLifecycleSource {
+	t.Helper()
+	seedBridgeAPIEvent(
+		t,
+		db,
+		"default",
+		sessionID,
+		threadID,
+		eventID,
+		nextBridgeAPIEventSequenceForTest(t, db, sessionID, threadID),
+		"agent.tool_use",
+		`{}`,
+	)
+	if _, err := db.ExecContext(
+		context.Background(),
+		`UPDATE session_events
+		    SET visibility = 'public'
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND session_thread_id = $2
+		    AND event_id = $3`,
+		sessionID,
+		threadID,
+		eventID,
+	); err != nil {
+		t.Fatalf("make child lifecycle source public: %v", err)
+	}
+	return &bridgev1.ChildLifecycleSource{
+		Identity: &bridgev1.ChildLifecycleSource_SourceToolUseEventId{
+			SourceToolUseEventId: eventID,
+		},
+	}
+}
 
 func TestPostgreSQLBridgeAPIStoreCreateChildThreadVisibilityFollowsRole(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -28,18 +67,19 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadVisibilityFollowsRole(t *testi
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_visibility", "bind_bridge_child_visibility", 1, "pod_uid_child_visibility")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_child_visibility", "thr_bridge_child_parent", "bind_bridge_child_visibility", 1, "pod_uid_child_visibility")
-	forkSeedJSON := bridgeForkSeedJSON(t, "sesn_bridge_child_visibility", "msg_bridge_child_seed", "seed context", "thr_bridge_child_parent", "evt_bridge_child_public_spawn", "all")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_visibility", "thr_bridge_child_parent", "evt_bridge_child_public_spawn", 1, "agent.tool_use", `{}`)
+	prefixJSON := bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_visibility", "msg_bridge_child_seed", "seed context", "thr_bridge_child_parent", "evt_bridge_child_public_spawn", "all")
 
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_child_parent",
-		ChildThreadId:        "thr_bridge_child_public",
-		Role:                 "subagent",
-		TaskName:             "public child",
-		AgentType:            "general",
-		SourceToolUseEventId: "evt_bridge_child_public_spawn",
-		ForkTurns:            "all",
-		ForkSeedJson:         forkSeedJSON,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_child_parent",
+		ChildThreadId:           "thr_bridge_child_public",
+		Role:                    "subagent",
+		TaskName:                "public child",
+		AgentType:               "general",
+		SourceToolUseEventId:    "evt_bridge_child_public_spawn",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: prefixJSON,
 	}); err != nil {
 		t.Fatalf("CreateChildThread subagent: %v", err)
 	}
@@ -133,41 +173,41 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadVisibilityFollowsRole(t *testi
 	}
 }
 
-func TestValidateChildThreadRequestRejectsInvalidReviewerForkSeed(t *testing.T) {
+func TestValidateChildThreadRequestRejectsInvalidReviewerThreadContextPrefix(t *testing.T) {
 	scope := bridgeAPIScope("sesn_bridge_reviewer_validation", "thr_bridge_reviewer_parent", "bind_bridge_reviewer_validation", 1, "pod_uid_reviewer_validation")
 	reviewID := "arvw_bridge_reviewer_validation"
 	request := &bridgev1.CreateChildThreadRequest{
-		Scope:            scope,
-		ParentThreadId:   "thr_bridge_reviewer_parent",
-		ChildThreadId:    approvalReviewerSidecarThreadID(scope, "thr_bridge_reviewer_parent", reviewID),
-		Role:             "approval_reviewer",
-		AgentType:        "approval_reviewer",
-		ForkTurns:        "all",
-		ForkSeedJson:     bridgeReviewerForkSeedJSON(t, "thr_bridge_reviewer_parent", reviewID, nil),
-		ReviewerReviewId: reviewID,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_reviewer_parent",
+		ChildThreadId:           approvalReviewerSidecarThreadID(scope, "thr_bridge_reviewer_parent", reviewID),
+		Role:                    "approval_reviewer",
+		AgentType:               "approval_reviewer",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: bridgeReviewerThreadContextPrefixJSON(t, "thr_bridge_reviewer_parent", "evt_bridge_reviewer_parent_boundary", reviewID, nil),
+		ReviewerReviewId:        reviewID,
 	}
 
 	tests := []struct {
-		name         string
-		forkTurns    string
-		forkSeedJSON string
+		name       string
+		forkTurns  string
+		prefixJSON string
 	}{
 		{
-			name:         "zero fork turns",
-			forkTurns:    "0",
-			forkSeedJSON: `{"source_parent_thread_id":"thr_bridge_reviewer_parent","review_id":"arvw_bridge_reviewer_validation","fork_turns":"0","runtime_messages_snapshot":[]}`,
+			name:       "zero fork turns",
+			forkTurns:  "0",
+			prefixJSON: `{"source_parent_thread_id":"thr_bridge_reviewer_parent","review_id":"arvw_bridge_reviewer_validation","fork_turns":"0","runtime_messages_snapshot":[]}`,
 		},
 		{
-			name:         "trailing JSON value",
-			forkTurns:    "all",
-			forkSeedJSON: request.GetForkSeedJson() + `{}`,
+			name:       "trailing JSON value",
+			forkTurns:  "all",
+			prefixJSON: request.GetThreadContextPrefixJson() + `{}`,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 			candidate.ForkTurns = test.forkTurns
-			candidate.ForkSeedJson = test.forkSeedJSON
+			candidate.ThreadContextPrefixJson = test.prefixJSON
 			if err := validateChildThreadRequest(candidate, "approval_reviewer", "approval_reviewer", candidate.GetParentThreadId(), candidate.GetForkTurns()); status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("validateChildThreadRequest err = %v; want InvalidArgument", err)
 			}
@@ -181,6 +221,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_reviewer_trunk", "bind_bridge_reviewer_trunk", 1, "pod_uid_reviewer_trunk")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_reviewer_trunk", "thr_bridge_reviewer_parent", "bind_bridge_reviewer_trunk", 1, "pod_uid_reviewer_trunk")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_reviewer_trunk", "thr_bridge_reviewer_parent", "evt_bridge_reviewer_parent_boundary", 1, "user.message", `{"content":[{"type":"text","text":"parent"}]}`)
 
 	trunkRequest := &bridgev1.CreateChildThreadRequest{
 		Scope:          scope,
@@ -242,7 +283,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 		sidecar.IsTrunk = false
 		sidecar.ReviewerReviewId = reviewID
 		sidecar.ForkTurns = "all"
-		sidecar.ForkSeedJson = bridgeReviewerForkSeedJSON(t, "thr_bridge_reviewer_parent", reviewID, nil)
+		sidecar.ThreadContextPrefixJson = bridgeReviewerThreadContextPrefixJSON(t, "thr_bridge_reviewer_parent", "evt_bridge_reviewer_parent_boundary", reviewID, nil)
 		if _, err := store.CreateChildThread(context.Background(), sidecar); err != nil {
 			t.Fatalf("CreateChildThread reviewer sidecar %q: %v", sidecar.ChildThreadId, err)
 		}
@@ -264,16 +305,16 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 	}
 
 	invalidSubagent := &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_reviewer_parent",
-		ChildThreadId:        "thr_bridge_invalid_subagent_trunk",
-		Role:                 "subagent",
-		TaskName:             "invalid subagent trunk",
-		AgentType:            "general",
-		SourceToolUseEventId: "evt_bridge_invalid_subagent_trunk",
-		ForkTurns:            "all",
-		ForkSeedJson:         bridgeForkSeedJSON(t, "sesn_bridge_reviewer_trunk", "msg_bridge_invalid_subagent_trunk", "seed context", "thr_bridge_reviewer_parent", "evt_bridge_invalid_subagent_trunk", "all"),
-		IsTrunk:              true,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_reviewer_parent",
+		ChildThreadId:           "thr_bridge_invalid_subagent_trunk",
+		Role:                    "subagent",
+		TaskName:                "invalid subagent trunk",
+		AgentType:               "general",
+		SourceToolUseEventId:    "evt_bridge_invalid_subagent_trunk",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(t, "sesn_bridge_reviewer_trunk", "msg_bridge_invalid_subagent_trunk", "seed context", "thr_bridge_reviewer_parent", "evt_bridge_invalid_subagent_trunk", "all"),
+		IsTrunk:                 true,
 	}
 	if _, err := store.CreateChildThread(context.Background(), invalidSubagent); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("subagent is_trunk err = %v; want InvalidArgument", err)
@@ -346,24 +387,25 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadConcurrentReviewerTrunkReplay(
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndContextPrefix(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_child_seed", "thr_bridge_child_seed_parent")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_seed", "bind_bridge_child_seed", 1, "pod_uid_child_seed")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("child-seed-load-context-test-key")
 	scope := bridgeAPIScope("sesn_bridge_child_seed", "thr_bridge_child_seed_parent", "bind_bridge_child_seed", 1, "pod_uid_child_seed")
-	forkSeedJSON := bridgeForkSeedJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_spawn", "all")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_seed", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_spawn", 1, "agent.tool_use", `{}`)
+	prefixJSON := bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_spawn", "all")
 	request := &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_child_seed_parent",
-		ChildThreadId:        "thr_bridge_child_seed_worker",
-		Role:                 "subagent",
-		TaskName:             "seeded worker",
-		AgentType:            "worker",
-		SourceToolUseEventId: "evt_bridge_child_seed_spawn",
-		ForkTurns:            "all",
-		ForkSeedJson:         forkSeedJSON,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_child_seed_parent",
+		ChildThreadId:           "thr_bridge_child_seed_worker",
+		Role:                    "subagent",
+		TaskName:                "seeded worker",
+		AgentType:               "worker",
+		SourceToolUseEventId:    "evt_bridge_child_seed_spawn",
+		ForkTurns:               "all",
+		ThreadContextPrefixJson: prefixJSON,
 	}
 	missingSource := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 	missingSource.ChildThreadId = "thr_bridge_child_seed_missing_source"
@@ -377,6 +419,17 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 	invalidForkTurns.ForkTurns = "0"
 	if _, err := store.CreateChildThread(context.Background(), invalidForkTurns); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("invalid fork_turns err = %v; want InvalidArgument", err)
+	}
+	forbiddenRouting := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
+	forbiddenRouting.ChildThreadId = "thr_bridge_child_seed_routing"
+	forbiddenRouting.ThreadContextPrefixJson = strings.Replace(
+		prefixJSON,
+		`"role":"user"`,
+		`"role":"user","providerId":"openai","modelId":"gpt-5.5"`,
+		1,
+	)
+	if _, err := store.CreateChildThread(context.Background(), forbiddenRouting); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("fork prefix routing metadata err = %v; want InvalidArgument", err)
 	}
 
 	response, err := store.CreateChildThread(context.Background(), request)
@@ -447,19 +500,18 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 		t.Fatalf("thread_created stream thread = %q; want child thread", streamThreadID)
 	}
 
-	var forkSeedDataJSON string
-	var forkSeedSource sql.NullString
+	var prefixEntriesJSON string
+	var prefixBoundaryEventID string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json, source_event_id
-		   FROM session_messages
+		`SELECT entries_json, parent_boundary_event_id
+		   FROM session_thread_context_prefixes
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_child_seed'
-		    AND session_thread_id = 'thr_bridge_child_seed_worker'
-		    AND kind = 'fork_seed'`).Scan(&forkSeedDataJSON, &forkSeedSource); err != nil {
-		t.Fatalf("read fork_seed message: %v", err)
+		    AND child_thread_id = 'thr_bridge_child_seed_worker'`).Scan(&prefixEntriesJSON, &prefixBoundaryEventID); err != nil {
+		t.Fatalf("read thread context prefix: %v", err)
 	}
-	if !forkSeedSource.Valid || forkSeedSource.String != "evt_bridge_child_seed_spawn" || testJSONPathString(t, forkSeedDataJSON, "fork_turns") != "all" {
-		t.Fatalf("fork seed source=%v data=%s; want source tool use and fork_turns", forkSeedSource, forkSeedDataJSON)
+	if prefixBoundaryEventID != "evt_bridge_child_seed_spawn" || !strings.Contains(prefixEntriesJSON, "parent context") {
+		t.Fatalf("thread context prefix boundary=%q entries=%s; want durable parent boundary and snapshot", prefixBoundaryEventID, prefixEntriesJSON)
 	}
 	childContext, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_child_seed", "thr_bridge_child_seed_worker", "bind_bridge_child_seed", 1, "pod_uid_child_seed"),
@@ -468,30 +520,38 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 		SequenceTo:     1,
 	})
 	if err != nil {
-		t.Fatalf("LoadContext child fork seed: %v", err)
+		t.Fatalf("LoadContext child context prefix: %v", err)
 	}
 	var childContextPayload struct {
-		Messages []map[string]any `json:"messages"`
+		Messages            []map[string]any `json:"messages"`
+		ThreadContextPrefix *struct {
+			ParentBoundaryEventID string           `json:"parentBoundaryEventId"`
+			Entries               []map[string]any `json:"entries"`
+		} `json:"threadContextPrefix"`
 	}
 	if err := json.Unmarshal([]byte(childContext.GetContextJson()), &childContextPayload); err != nil {
 		t.Fatalf("decode child context: %v", err)
 	}
-	if len(childContextPayload.Messages) != 1 || childContextPayload.Messages[0]["id"] != "msg_bridge_child_seed_parent" {
-		t.Fatalf("child context = %s; want fork_seed RuntimeMessage only", childContext.GetContextJson())
+	if len(childContextPayload.Messages) != 0 {
+		t.Fatalf("child context messages = %s; want no sequenced fork message", childContext.GetContextJson())
 	}
-	if _, ok := childContextPayload.Messages[0]["fork_turns"]; ok {
-		t.Fatalf("child context leaked fork_seed wrapper: %s", childContext.GetContextJson())
+	if childContextPayload.ThreadContextPrefix == nil ||
+		childContextPayload.ThreadContextPrefix.ParentBoundaryEventID != "evt_bridge_child_seed_spawn" ||
+		len(childContextPayload.ThreadContextPrefix.Entries) != 1 ||
+		childContextPayload.ThreadContextPrefix.Entries[0]["id"] != "msg_bridge_child_seed_parent" {
+		t.Fatalf("child context = %s; want separate parent context prefix", childContext.GetContextJson())
 	}
 
-	emptyForkSeedJSON := `{"source_parent_thread_id":"thr_bridge_child_seed_parent","source_tool_use_event_id":"evt_bridge_child_seed_empty_spawn","fork_turns":"none","runtime_messages_snapshot":[]}`
+	emptyPrefixJSON := `{"source_parent_thread_id":"thr_bridge_child_seed_parent","parent_boundary_event_id":"evt_bridge_child_seed_empty_spawn","source_tool_use_event_id":"evt_bridge_child_seed_empty_spawn","fork_turns":"none","runtime_messages_snapshot":[]}`
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_seed", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_empty_spawn", 2, "agent.tool_use", `{}`)
 	emptySeedRequest := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 	emptySeedRequest.ChildThreadId = "thr_bridge_child_seed_empty"
 	emptySeedRequest.TaskName = "empty seed worker"
 	emptySeedRequest.SourceToolUseEventId = "evt_bridge_child_seed_empty_spawn"
 	emptySeedRequest.ForkTurns = "none"
-	emptySeedRequest.ForkSeedJson = emptyForkSeedJSON
+	emptySeedRequest.ThreadContextPrefixJson = emptyPrefixJSON
 	if _, err := store.CreateChildThread(context.Background(), emptySeedRequest); err != nil {
-		t.Fatalf("CreateChildThread empty fork seed: %v", err)
+		t.Fatalf("CreateChildThread empty context prefix: %v", err)
 	}
 	emptyChildContext, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_child_seed", "thr_bridge_child_seed_empty", "bind_bridge_child_seed", 1, "pod_uid_child_seed"),
@@ -500,16 +560,22 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 		SequenceTo:     1,
 	})
 	if err != nil {
-		t.Fatalf("LoadContext empty child fork seed: %v", err)
+		t.Fatalf("LoadContext empty child context prefix: %v", err)
 	}
 	var emptyChildContextPayload struct {
-		Messages []map[string]any `json:"messages"`
+		Messages            []map[string]any `json:"messages"`
+		ThreadContextPrefix *struct {
+			Entries []map[string]any `json:"entries"`
+		} `json:"threadContextPrefix"`
 	}
 	if err := json.Unmarshal([]byte(emptyChildContext.GetContextJson()), &emptyChildContextPayload); err != nil {
 		t.Fatalf("decode empty child context: %v", err)
 	}
 	if len(emptyChildContextPayload.Messages) != 0 {
-		t.Fatalf("empty child context = %s; want no fork_seed wrapper message", emptyChildContext.GetContextJson())
+		t.Fatalf("empty child context = %s; want no sequenced fork message", emptyChildContext.GetContextJson())
+	}
+	if emptyChildContextPayload.ThreadContextPrefix == nil || len(emptyChildContextPayload.ThreadContextPrefix.Entries) != 0 {
+		t.Fatalf("empty child context = %s; want empty separate prefix", emptyChildContext.GetContextJson())
 	}
 
 	conflict := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
@@ -520,7 +586,7 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadCommitsCreatedEventAndForkSeed
 	duplicateTask := proto.Clone(request).(*bridgev1.CreateChildThreadRequest)
 	duplicateTask.ChildThreadId = "thr_bridge_child_seed_duplicate_task"
 	duplicateTask.SourceToolUseEventId = "evt_bridge_child_seed_other_spawn"
-	duplicateTask.ForkSeedJson = bridgeForkSeedJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_other_spawn", "all")
+	duplicateTask.ThreadContextPrefixJson = bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_seed", "msg_bridge_child_seed_parent", "parent context", "thr_bridge_child_seed_parent", "evt_bridge_child_seed_other_spawn", "all")
 	if _, err := store.CreateChildThread(context.Background(), duplicateTask); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("duplicate task_name err = %v; want AlreadyExists", err)
 	}
@@ -533,21 +599,23 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadConcurrentDuplicateTaskName(t 
 	storeA := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	storeB := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_child_race", "thr_bridge_child_race_parent", "bind_bridge_child_race", 1, "pod_uid_child_race")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_race", "thr_bridge_child_race_parent", "evt_bridge_child_race_a", 1, "agent.tool_use", `{}`)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_race", "thr_bridge_child_race_parent", "evt_bridge_child_race_b", 2, "agent.tool_use", `{}`)
 	requestA := &bridgev1.CreateChildThreadRequest{
-		Scope:                scope,
-		ParentThreadId:       "thr_bridge_child_race_parent",
-		ChildThreadId:        "thr_bridge_child_race_a",
-		Role:                 "subagent",
-		TaskName:             "same worker",
-		AgentType:            "worker",
-		SourceToolUseEventId: "evt_bridge_child_race_a",
-		ForkTurns:            "none",
-		ForkSeedJson:         `{"source_parent_thread_id":"thr_bridge_child_race_parent","source_tool_use_event_id":"evt_bridge_child_race_a","fork_turns":"none","runtime_messages_snapshot":[]}`,
+		Scope:                   scope,
+		ParentThreadId:          "thr_bridge_child_race_parent",
+		ChildThreadId:           "thr_bridge_child_race_a",
+		Role:                    "subagent",
+		TaskName:                "same worker",
+		AgentType:               "worker",
+		SourceToolUseEventId:    "evt_bridge_child_race_a",
+		ForkTurns:               "none",
+		ThreadContextPrefixJson: `{"source_parent_thread_id":"thr_bridge_child_race_parent","parent_boundary_event_id":"evt_bridge_child_race_a","source_tool_use_event_id":"evt_bridge_child_race_a","fork_turns":"none","runtime_messages_snapshot":[]}`,
 	}
 	requestB := proto.Clone(requestA).(*bridgev1.CreateChildThreadRequest)
 	requestB.ChildThreadId = "thr_bridge_child_race_b"
 	requestB.SourceToolUseEventId = "evt_bridge_child_race_b"
-	requestB.ForkSeedJson = `{"source_parent_thread_id":"thr_bridge_child_race_parent","source_tool_use_event_id":"evt_bridge_child_race_b","fork_turns":"none","runtime_messages_snapshot":[]}`
+	requestB.ThreadContextPrefixJson = `{"source_parent_thread_id":"thr_bridge_child_race_parent","parent_boundary_event_id":"evt_bridge_child_race_b","source_tool_use_event_id":"evt_bridge_child_race_b","fork_turns":"none","runtime_messages_snapshot":[]}`
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -613,8 +681,6 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_child_status", "thr_bridge_child_status_parent")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_child_status", "bind_bridge_child_status", 1, "pod_uid_child_status")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_child_status", "prep_bridge_child_status")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_child_status", "2026-01-01T00:00:00Z")
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE sessions
 		    SET status = 'running'
@@ -642,28 +708,23 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		)`); err != nil {
 		t.Fatalf("seed running runtime status sentinel: %v", err)
 	}
-	blobStore := blob.NewFakeBlobStore()
-	scanner := &recordingOutputScanner{files: []outputcapture.SandboxOutputFile{
-		capturedOutputFile("/mnt/session/outputs/child-report.txt", "captured child output"),
-	}}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	clockNow := time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC)
 	store.Clock = func() time.Time { return clockNow }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
-	store.OutputCapturer = outputcapture.NewCapturer(blobStore, scanner)
 	parentScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_parent", "bind_bridge_child_status", 1, "pod_uid_child_status")
 	childScope := bridgeAPIScope("sesn_bridge_child_status", "thr_bridge_child_status_worker", "bind_bridge_child_status", 1, "pod_uid_child_status")
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_child_status", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", 1, "agent.tool_use", `{}`)
 
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
-		Scope:                parentScope,
-		ParentThreadId:       "thr_bridge_child_status_parent",
-		ChildThreadId:        "thr_bridge_child_status_worker",
-		Role:                 "subagent",
-		TaskName:             "status worker",
-		AgentType:            "worker",
-		SourceToolUseEventId: "evt_bridge_child_status_spawn",
-		ForkTurns:            "none",
-		ForkSeedJson:         bridgeForkSeedJSON(t, "sesn_bridge_child_status", "msg_bridge_child_status_seed", "seed", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", "none"),
+		Scope:                   parentScope,
+		ParentThreadId:          "thr_bridge_child_status_parent",
+		ChildThreadId:           "thr_bridge_child_status_worker",
+		Role:                    "subagent",
+		TaskName:                "status worker",
+		AgentType:               "worker",
+		SourceToolUseEventId:    "evt_bridge_child_status_spawn",
+		ForkTurns:               "none",
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(t, "sesn_bridge_child_status", "msg_bridge_child_status_seed", "seed", "thr_bridge_child_status_parent", "evt_bridge_child_status_spawn", "none"),
 	}); err != nil {
 		t.Fatalf("CreateChildThread: %v", err)
 	}
@@ -677,13 +738,51 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	if err != nil {
 		t.Fatalf("WriteEvent child running: %v", err)
 	}
+	runningReplay, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          childScope,
+		RuntimeWriteId: "rwrite_bridge_child_status_running",
+		EventType:      "session.status_running",
+		PayloadJson:    `{"type":"session.status_running"}`,
+		SessionVisible: true,
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent child running replay: %v", err)
+	}
+	if runningReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		runningReplay.GetEventId() != running.GetEventId() ||
+		runningReplay.GetSequence() != running.GetSequence() {
+		t.Fatalf("child running replay = %+v; want duplicate for first event", runningReplay)
+	}
+	var runningEventCount, runningOperationCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT
+		    (SELECT count(*)
+		       FROM session_events
+		      WHERE workspace_id = 'default'
+		        AND session_id = 'sesn_bridge_child_status'
+		        AND session_thread_id = 'thr_bridge_child_status_worker'
+		        AND type = 'session.thread_status_running'
+		        AND runtime_write_id = 'rwrite_bridge_child_status_running'),
+		    (SELECT count(*)
+		       FROM session_bridge_operations
+		      WHERE workspace_id = 'default'
+		        AND session_id = 'sesn_bridge_child_status'
+		        AND session_thread_id = 'thr_bridge_child_status_worker'
+		        AND operation = 'write_event'
+		        AND source_kind = 'session.thread_status_running'
+		        AND idempotency_key = 'rwrite_bridge_child_status_running')`,
+	).Scan(&runningEventCount, &runningOperationCount); err != nil {
+		t.Fatalf("count child running replay rows: %v", err)
+	}
+	if runningEventCount != 1 || runningOperationCount != 1 {
+		t.Fatalf("child running replay rows = event %d operation %d; want 1/1", runningEventCount, runningOperationCount)
+	}
 	finishIdleRequest := &bridgev1.FinishIdleRequest{
 		Scope:          childScope,
-		RuntimeWriteId: "rwrite_bridge_child_status_idle",
-		IdleSince:      "2026-01-01T00:00:30Z",
+		DurableTurnId:  running.GetEventId(),
 		StopReasonJson: `{"type":"end_turn"}`,
 	}
-	finishIdleResponse, err := store.FinishIdle(context.Background(), finishIdleRequest)
+	finishIdleResponse, err := finishIdleWithStagedCaptureForTest(t, admin, store, finishIdleRequest)
 	if err != nil {
 		t.Fatalf("FinishIdle child: %v", err)
 	}
@@ -697,18 +796,6 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	if finishIdleReplay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("FinishIdle child replay ack = %s; want duplicate", finishIdleReplay.GetAck().GetStatus())
 	}
-	if len(scanner.targets) != 1 {
-		t.Fatalf("child output scanner calls after replay = %d; want 1", len(scanner.targets))
-	}
-	scanTarget := scanner.targets[0]
-	if scanTarget.WorkspaceID != "default" ||
-		scanTarget.SessionID != "sesn_bridge_child_status" ||
-		scanTarget.SessionThreadID != "thr_bridge_child_status_worker" ||
-		scanTarget.BindingID != "bind_bridge_child_status" ||
-		scanTarget.BindingGeneration != 1 {
-		t.Fatalf("child output scan target = %+v; want request workspace/session/child thread/binding", scanTarget)
-	}
-
 	var runningType string
 	var runningPayload string
 	var runningThreadID string
@@ -735,7 +822,9 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		    AND session_id = 'sesn_bridge_child_status'
 		    AND session_thread_id = 'thr_bridge_child_status_worker'
 		    AND type = 'session.thread_status_idle'
-		    AND runtime_write_id = 'rwrite_bridge_child_status_idle'`).Scan(&idleEventCount); err != nil {
+		    AND runtime_write_id = $1`,
+		running.GetEventId(),
+	).Scan(&idleEventCount); err != nil {
 		t.Fatalf("count child idle events: %v", err)
 	}
 	if idleEventCount != 1 {
@@ -752,7 +841,9 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		    AND session_id = 'sesn_bridge_child_status'
 		    AND session_thread_id = 'thr_bridge_child_status_worker'
 		    AND type = 'session.thread_status_idle'
-		    AND runtime_write_id = 'rwrite_bridge_child_status_idle'`).Scan(&idleEventID, &idlePayload, &idleVisibility, &idleSessionVisible); err != nil {
+		    AND runtime_write_id = $1`,
+		running.GetEventId(),
+	).Scan(&idleEventID, &idlePayload, &idleVisibility, &idleSessionVisible); err != nil {
 		t.Fatalf("read child idle event: %v", err)
 	}
 	if idleVisibility != "public" || !idleSessionVisible ||
@@ -814,52 +905,29 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		    AND session_id = 'sesn_bridge_child_status'
 		    AND session_thread_id = 'thr_bridge_child_status_worker'
 		    AND operation = 'finish_idle'
-		    AND idempotency_key = 'rwrite_bridge_child_status_idle'
-		    AND runtime_write_id = 'rwrite_bridge_child_status_idle'
-		    AND ack_status = 'committed'`).Scan(&finishIdleOperationCount); err != nil {
+		    AND source_kind = 'turn_closeout'
+		    AND idempotency_key = $1
+		    AND runtime_input_id = $1
+		    AND ack_status = 'committed'`, running.GetEventId()).Scan(&finishIdleOperationCount); err != nil {
 		t.Fatalf("count child finish_idle operations: %v", err)
 	}
 	if finishIdleOperationCount != 1 {
 		t.Fatalf("child finish_idle operation count after replay = %d; want 1", finishIdleOperationCount)
 	}
-	var outputCaptureCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_output_captures
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_child_status'
-		    AND source_path = '/mnt/session/outputs/child-report.txt'`).Scan(&outputCaptureCount); err != nil {
-		t.Fatalf("count child output captures: %v", err)
-	}
-	if outputCaptureCount != 1 {
-		t.Fatalf("child output capture rows after replay = %d; want 1", outputCaptureCount)
-	}
-	var capturedFileCount int
-	var capturedObjectKey string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*), max(o.blob_key)
-		   FROM files f
-		   JOIN file_objects o
-		     ON o.workspace_id = f.workspace_id
-		    AND o.object_id = f.object_id
-		  WHERE f.workspace_id = 'default'
-		    AND f.scope_type = 'session'
-		    AND f.scope_id = 'sesn_bridge_child_status'
-		    AND f.filename = 'child-report.txt'`).Scan(&capturedFileCount, &capturedObjectKey); err != nil {
-		t.Fatalf("read child captured file projection: %v", err)
-	}
-	if capturedFileCount != 1 {
-		t.Fatalf("child captured file rows after replay = %d; want 1", capturedFileCount)
-	}
-	if body, ok := blobStore.Bytes(capturedObjectKey); !ok || string(body) != "captured child output" {
-		t.Fatalf("child captured blob = %q present=%v; want captured child output", string(body), ok)
-	}
 	assertBridgeAPIChildFinishIdlePreservesSessionState(t, admin, "sesn_bridge_child_status", "thr_bridge_child_status_parent", "bind_bridge_child_status", 1)
+	firstCloseSource := seedBridgeAPIChildLifecycleToolSource(
+		t,
+		admin,
+		"sesn_bridge_child_status",
+		"thr_bridge_child_status_parent",
+		"evt_bridge_child_status_close_first",
+	)
 	clockNow = time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC)
 	if _, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
 		Scope:         parentScope,
 		ChildThreadId: "thr_bridge_child_status_worker",
 		ClosedAt:      "2026-01-01T00:01:00Z",
+		Source:        firstCloseSource,
 	}); err != nil {
 		t.Fatalf("MarkChildThreadClosed: %v", err)
 	}
@@ -867,6 +935,7 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		Scope:         parentScope,
 		ChildThreadId: "thr_bridge_child_status_worker",
 		ClosedAt:      "2026-01-01T00:01:00Z",
+		Source:        firstCloseSource,
 	}); err != nil {
 		t.Fatalf("MarkChildThreadClosed replay: %v", err)
 	}
@@ -891,7 +960,7 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		    AND session_id = 'sesn_bridge_child_status'
 		    AND session_thread_id = 'thr_bridge_child_status_worker'
 		    AND type = 'session.thread_status_idle'
-		    AND runtime_write_id LIKE 'mark_child_thread_closed:thr_bridge_child_status_worker:%'`).Scan(&closeIdleCount, &closeIdlePayload); err != nil {
+		    AND payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'`).Scan(&closeIdleCount, &closeIdlePayload); err != nil {
 		t.Fatalf("read close idle event: %v", err)
 	}
 	if closeIdleCount != 1 || testJSONPathString(t, closeIdlePayload, "stop_reason.type") != "closed_for_runtime" {
@@ -900,19 +969,35 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 	if testJSONPathString(t, closeIdlePayload, "task_name") != "status worker" {
 		t.Fatalf("close idle task_name = %s; want callable status worker", closeIdlePayload)
 	}
+	resumeSource := seedBridgeAPIChildLifecycleToolSource(
+		t,
+		admin,
+		"sesn_bridge_child_status",
+		"thr_bridge_child_status_parent",
+		"evt_bridge_child_status_resume",
+	)
 	clockNow = time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC)
 	if _, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
 		Scope:         parentScope,
 		ChildThreadId: "thr_bridge_child_status_worker",
 		ActiveAt:      "2026-01-01T00:02:00Z",
+		Source:        resumeSource,
 	}); err != nil {
 		t.Fatalf("MarkChildThreadActive after close: %v", err)
 	}
+	secondCloseSource := seedBridgeAPIChildLifecycleToolSource(
+		t,
+		admin,
+		"sesn_bridge_child_status",
+		"thr_bridge_child_status_parent",
+		"evt_bridge_child_status_close_second",
+	)
 	clockNow = time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC)
 	if _, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
 		Scope:         parentScope,
 		ChildThreadId: "thr_bridge_child_status_worker",
 		ClosedAt:      "2026-01-01T00:03:00Z",
+		Source:        secondCloseSource,
 	}); err != nil {
 		t.Fatalf("MarkChildThreadClosed after resume: %v", err)
 	}
@@ -923,7 +1008,7 @@ func TestPostgreSQLBridgeAPIStoreChildThreadStatusEventsStayThreadScoped(t *test
 		    AND session_id = 'sesn_bridge_child_status'
 		    AND session_thread_id = 'thr_bridge_child_status_worker'
 		    AND type = 'session.thread_status_idle'
-		    AND runtime_write_id LIKE 'mark_child_thread_closed:thr_bridge_child_status_worker:%'`).Scan(&closeIdleCount); err != nil {
+		    AND payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'`).Scan(&closeIdleCount); err != nil {
 		t.Fatalf("read close idle event count after resume: %v", err)
 	}
 	if closeIdleCount != 2 {
@@ -958,21 +1043,81 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, childID, grandchildID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_close_tree")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 6, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = 5 * time.Minute
+	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_close_tree_command")
 	response, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
 		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
 		ChildThreadId: childID,
-		ClosedAt:      "2026-01-01T00:00:05Z",
+		ClosedAt:      "2026-01-01T00:00:05.000Z",
+		Source:        closeSource,
 	})
 	if err != nil {
 		t.Fatalf("MarkChildThreadClosed tree: %v", err)
 	}
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("close tree ack = %s; want committed", response.GetAck().GetStatus())
+	}
+	if len(response.GetDeclaration().GetReceipts()) != 2 {
+		t.Fatalf("close tree receipts = %d; want one per target", len(response.GetDeclaration().GetReceipts()))
+	}
+	receiptTargets := map[string]string{}
+	for _, receipt := range response.GetDeclaration().GetReceipts() {
+		if len(receipt.GetChildLifecycle()) != 1 {
+			t.Fatalf("close tree receipt %q lifecycle stamps = %d; want 1", receipt.GetSessionThreadId(), len(receipt.GetChildLifecycle()))
+		}
+		stamp := receipt.GetChildLifecycle()[0]
+		if stamp.GetChildThreadId() != receipt.GetSessionThreadId() {
+			t.Fatalf("close tree receipt target = %q/%q; want matching thread scope", receipt.GetSessionThreadId(), stamp.GetChildThreadId())
+		}
+		if stamp.GetEffectiveAt() != "2026-01-01T00:00:05.000Z" {
+			t.Fatalf("close tree receipt effective_at = %q; want original declaration bytes", stamp.GetEffectiveAt())
+		}
+		receiptTargets[receipt.GetSessionThreadId()] = stamp.GetDisposition().String()
+	}
+	if receiptTargets[childID] != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED.String() ||
+		receiptTargets[grandchildID] != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED.String() {
+		t.Fatalf("close tree receipt targets = %#v; want both target-scoped closed receipts", receiptTargets)
+	}
+	var operationScopes []string
+	operationRows, err := admin.QueryContext(context.Background(),
+		`SELECT session_thread_id
+		   FROM session_bridge_operations
+		  WHERE workspace_id='default'
+		    AND session_id=$1
+		    AND operation='mark_child_thread_closed'
+		  ORDER BY session_thread_id`,
+		sessionID,
+	)
+	if err != nil {
+		t.Fatalf("read close tree declaration operations: %v", err)
+	}
+	defer func() { _ = operationRows.Close() }()
+	for operationRows.Next() {
+		var threadID string
+		if err := operationRows.Scan(&threadID); err != nil {
+			t.Fatalf("scan close tree declaration operation: %v", err)
+		}
+		operationScopes = append(operationScopes, threadID)
+	}
+	if err := operationRows.Err(); err != nil {
+		t.Fatalf("iterate close tree declaration operations: %v", err)
+	}
+	if len(operationScopes) != 2 || operationScopes[0] != childID || operationScopes[1] != grandchildID {
+		t.Fatalf("close tree operation scopes = %v; want [%s %s]", operationScopes, childID, grandchildID)
+	}
+	replay, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
+		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ChildThreadId: childID,
+		ClosedAt:      "2026-01-01T00:00:05.000Z",
+		Source:        closeSource,
+	})
+	if err != nil {
+		t.Fatalf("MarkChildThreadClosed tree replay: %v", err)
+	}
+	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		!proto.Equal(response.GetDeclaration(), replay.GetDeclaration()) {
+		t.Fatalf("close tree replay = %+v; want duplicate with exact stored receipts", replay)
 	}
 	rows, err := admin.QueryContext(context.Background(),
 		`SELECT id, status FROM session_threads
@@ -1012,14 +1157,12 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	if closedEvents != 2 || completionMail != 0 {
 		t.Fatalf("closed child tree events/mail = %d/%d; want 2/0", closedEvents, completionMail)
 	}
-	store.OutputCapturer = outputcapture.NewCapturer(blob.NewFakeBlobStore(), &recordingOutputScanner{})
 	if _, err := store.FinishIdle(context.Background(), &bridgev1.FinishIdleRequest{
 		Scope:          bridgeAPIScope(sessionID, grandchildID, bindingID, 1, podUID),
-		RuntimeWriteId: "rwrite_bridge_close_tree_late_finish",
-		IdleSince:      "2026-01-01T00:00:06Z",
+		DurableTurnId:  "evt_bridge_close_tree_grandchild_running",
 		StopReasonJson: `{"type":"end_turn"}`,
-	}); err != nil {
-		t.Fatalf("late FinishIdle after descendant close: %v", err)
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("late FinishIdle after descendant close = %v; want FailedPrecondition", err)
 	}
 	var lateStatus string
 	if err := admin.QueryRowContext(context.Background(),
@@ -1040,6 +1183,40 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 	if lateStatus != "closed_for_runtime" || completionMail != 0 {
 		t.Fatalf("late FinishIdle status/mail = %q/%d; want closed_for_runtime/0", lateStatus, completionMail)
 	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status = 'idle', closed_at = NULL
+		  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+		sessionID,
+		childID,
+	); err != nil {
+		t.Fatalf("reopen child before topology-change replay: %v", err)
+	}
+	const laterChildID = "thr_bridge_close_tree_later_child"
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, childID, laterChildID)
+	replayAfterTopologyChange, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
+		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ChildThreadId: childID,
+		ClosedAt:      "2026-01-01T00:00:05.000Z",
+		Source:        closeSource,
+	})
+	if err != nil {
+		t.Fatalf("MarkChildThreadClosed replay after topology change: %v", err)
+	}
+	if replayAfterTopologyChange.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		!proto.Equal(response.GetDeclaration(), replayAfterTopologyChange.GetDeclaration()) {
+		t.Fatalf("close tree replay after topology change = %+v; want original duplicate receipt set", replayAfterTopologyChange)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status = 'closed_for_runtime', closed_at = '2026-01-01T00:00:05Z'
+		  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+		sessionID,
+		childID,
+	); err != nil {
+		t.Fatalf("restore closed parent after topology-change replay: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "sevt_bridge_close_tree_late_spawn", 2, "agent.tool_use", `{}`)
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
 		Scope:                bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
 		ParentThreadId:       childID,
@@ -1049,7 +1226,7 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 		AgentType:            "worker",
 		SourceToolUseEventId: "sevt_bridge_close_tree_late_spawn",
 		ForkTurns:            "none",
-		ForkSeedJson: bridgeForkSeedJSON(
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(
 			t,
 			sessionID,
 			"msg_bridge_close_tree_late_seed",
@@ -1060,6 +1237,172 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 		),
 	}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("create below already-closed parent err = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedPreservesTerminalTargetsInFrozenSubtree(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID         = "sesn_bridge_close_terminal_tree"
+		mainID            = "thr_bridge_close_terminal_tree_main"
+		failedRootID      = "thr_bridge_close_terminal_tree_failed"
+		terminatedChildID = "thr_bridge_close_terminal_tree_terminated"
+		runningGrandID    = "thr_bridge_close_terminal_tree_running"
+		closedSiblingID   = "thr_bridge_close_terminal_tree_closed"
+		bindingID         = "bind_bridge_close_terminal_tree"
+		podUID            = "pod_bridge_close_terminal_tree"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, failedRootID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, failedRootID, terminatedChildID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, terminatedChildID, runningGrandID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, failedRootID, closedSiblingID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status = CASE id
+		      WHEN $2 THEN 'failed'
+		      WHEN $3 THEN 'terminated'
+		      WHEN $4 THEN 'running'
+		      WHEN $5 THEN 'closed_for_runtime'
+		    END,
+		        closed_at = CASE WHEN id = $5 THEN '2026-01-01T00:00:01Z'::timestamptz ELSE NULL END
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND id IN ($2, $3, $4, $5)`,
+		sessionID,
+		failedRootID,
+		terminatedChildID,
+		runningGrandID,
+		closedSiblingID,
+	); err != nil {
+		t.Fatalf("seed mixed child subtree statuses: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 6, 0, time.UTC) }
+	closeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_close_terminal_tree")
+	request := &bridgev1.MarkChildThreadClosedRequest{
+		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ChildThreadId: failedRootID,
+		ClosedAt:      "2026-01-01T00:00:05.000Z",
+		Source:        closeSource,
+	}
+	response, err := store.MarkChildThreadClosed(context.Background(), request)
+	if err != nil {
+		t.Fatalf("MarkChildThreadClosed mixed terminal tree: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("close mixed terminal tree ack = %s; want committed", response.GetAck().GetStatus())
+	}
+	wantDispositions := map[string]bridgev1.ChildLifecycleDisposition{
+		failedRootID:      bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED,
+		terminatedChildID: bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED,
+		runningGrandID:    bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_CLOSED,
+		closedSiblingID:   bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_CLOSED,
+	}
+	gotDispositions := make(map[string]bridgev1.ChildLifecycleDisposition, len(wantDispositions))
+	for _, receipt := range response.GetDeclaration().GetReceipts() {
+		if len(receipt.GetChildLifecycle()) != 1 {
+			t.Fatalf("close mixed terminal tree receipt %q lifecycle stamps = %d; want 1", receipt.GetSessionThreadId(), len(receipt.GetChildLifecycle()))
+		}
+		gotDispositions[receipt.GetSessionThreadId()] = receipt.GetChildLifecycle()[0].GetDisposition()
+	}
+	if !reflect.DeepEqual(gotDispositions, wantDispositions) {
+		t.Fatalf("close mixed terminal tree dispositions = %#v; want %#v", gotDispositions, wantDispositions)
+	}
+	rows, err := admin.QueryContext(context.Background(),
+		`SELECT id, status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND id IN ($2, $3, $4, $5)`,
+		sessionID,
+		failedRootID,
+		terminatedChildID,
+		runningGrandID,
+		closedSiblingID,
+	)
+	if err != nil {
+		t.Fatalf("read mixed terminal tree statuses: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	gotStatuses := map[string]string{}
+	for rows.Next() {
+		var threadID, threadStatus string
+		if err := rows.Scan(&threadID, &threadStatus); err != nil {
+			t.Fatalf("scan mixed terminal tree status: %v", err)
+		}
+		gotStatuses[threadID] = threadStatus
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate mixed terminal tree statuses: %v", err)
+	}
+	wantStatuses := map[string]string{
+		failedRootID:      "failed",
+		terminatedChildID: "terminated",
+		runningGrandID:    "closed_for_runtime",
+		closedSiblingID:   "closed_for_runtime",
+	}
+	if !reflect.DeepEqual(gotStatuses, wantStatuses) {
+		t.Fatalf("close mixed terminal tree statuses = %#v; want %#v", gotStatuses, wantStatuses)
+	}
+	var closedEvents int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_events
+		  WHERE workspace_id = 'default'
+		    AND session_id = $1
+		    AND type = 'session.thread_status_idle'
+		    AND payload_json::jsonb #>> '{stop_reason,type}' = 'closed_for_runtime'`,
+		sessionID,
+	).Scan(&closedEvents); err != nil {
+		t.Fatalf("count mixed terminal tree close events: %v", err)
+	}
+	if closedEvents != 1 {
+		t.Fatalf("mixed terminal tree close events = %d; want only the running descendant transition", closedEvents)
+	}
+	replay, err := store.MarkChildThreadClosed(context.Background(), request)
+	if err != nil {
+		t.Fatalf("MarkChildThreadClosed mixed terminal tree replay: %v", err)
+	}
+	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+		!proto.Equal(response.GetDeclaration(), replay.GetDeclaration()) {
+		t.Fatalf("close mixed terminal tree replay = %+v; want exact duplicate declaration", replay)
+	}
+	const escapedChildID = "thr_bridge_close_terminal_tree_escaped"
+	seedBridgeAPIEvent(t, admin, "default", sessionID, failedRootID, "sevt_bridge_close_terminal_tree_late_spawn", 2, "agent.tool_use", `{}`)
+	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
+		Scope:                bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ParentThreadId:       failedRootID,
+		ChildThreadId:        escapedChildID,
+		Role:                 "subagent",
+		TaskName:             "escaped-child",
+		AgentType:            "worker",
+		SourceToolUseEventId: "sevt_bridge_close_terminal_tree_late_spawn",
+		ForkTurns:            "none",
+		ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(
+			t,
+			sessionID,
+			"msg_bridge_close_terminal_tree_late_seed",
+			"late seed",
+			failedRootID,
+			"sevt_bridge_close_terminal_tree_late_spawn",
+			"none",
+		),
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("create below preserved failed root err = %v; want FailedPrecondition", err)
+	}
+	var escapedChildCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_threads
+		  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+		sessionID,
+		escapedChildID,
+	).Scan(&escapedChildCount); err != nil {
+		t.Fatalf("count child below preserved failed root: %v", err)
+	}
+	if escapedChildCount != 0 {
+		t.Fatalf("children created below preserved failed root = %d; want 0", escapedChildCount)
 	}
 }
 
@@ -1087,6 +1430,7 @@ func TestPostgreSQLBridgeAPIStoreCloseAndConcurrentChildCreateSerializeAtThePare
 			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, parentID, "sevt_bridge_close_create_"+suffix, 1, "agent.tool_use", `{}`)
 			scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
 			createRequest := &bridgev1.CreateChildThreadRequest{
 				Scope:                scope,
@@ -1097,7 +1441,7 @@ func TestPostgreSQLBridgeAPIStoreCloseAndConcurrentChildCreateSerializeAtThePare
 				AgentType:            "worker",
 				SourceToolUseEventId: "sevt_bridge_close_create_" + suffix,
 				ForkTurns:            "none",
-				ForkSeedJson: bridgeForkSeedJSON(
+				ThreadContextPrefixJson: bridgeThreadContextPrefixJSON(
 					t,
 					sessionID,
 					"msg_bridge_close_create_seed_"+suffix,
@@ -1111,6 +1455,13 @@ func TestPostgreSQLBridgeAPIStoreCloseAndConcurrentChildCreateSerializeAtThePare
 				Scope:         scope,
 				ChildThreadId: parentID,
 				ClosedAt:      "2026-01-01T00:00:05Z",
+				Source: seedBridgeAPIChildLifecycleToolSource(
+					t,
+					admin,
+					sessionID,
+					mainID,
+					"evt_bridge_close_create_command_"+suffix,
+				),
 			}
 			blocker, blockerPID := lockPostgreSQLFinalizationFence(t, admin,
 				`SELECT id FROM session_threads
@@ -1223,10 +1574,18 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadActiveOnlyReopensClosedThread(t 
 	}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, "pod_uid_bridge_child_resume_guard")
-	if _, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
+	firstResumeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_child_resume_guard_first")
+	activeResponse, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
 		Scope: scope, ChildThreadId: childID, ActiveAt: "2026-01-01T00:01:00Z",
-	}); err != nil {
+		Source: firstResumeSource,
+	})
+	if err != nil {
 		t.Fatalf("MarkChildThreadActive running child: %v", err)
+	}
+	if len(activeResponse.GetDeclaration().GetReceipts()) != 1 ||
+		activeResponse.GetDeclaration().GetReceipts()[0].GetSessionThreadId() != childID ||
+		activeResponse.GetDeclaration().GetReceipts()[0].GetChildLifecycle()[0].GetDisposition() != bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE {
+		t.Fatalf("already-active receipt = %+v; want one target-scoped ALREADY_ACTIVE receipt", activeResponse.GetDeclaration())
 	}
 	var childStatus string
 	if err := admin.QueryRowContext(context.Background(),
@@ -1243,8 +1602,10 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadActiveOnlyReopensClosedThread(t 
 		sessionID, childID); err != nil {
 		t.Fatalf("mark child closed_for_runtime: %v", err)
 	}
+	secondResumeSource := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_child_resume_guard_second")
 	if _, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
 		Scope: scope, ChildThreadId: childID, ActiveAt: "2026-01-01T00:02:00Z",
+		Source: secondResumeSource,
 	}); err != nil {
 		t.Fatalf("MarkChildThreadActive closed child: %v", err)
 	}
@@ -1255,6 +1616,133 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadActiveOnlyReopensClosedThread(t 
 	}
 	if childStatus != "idle" {
 		t.Fatalf("closed child status after resume = %q; want idle", childStatus)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMarkChildThreadActivePreservesTerminalThread(t *testing.T) {
+	for _, testCase := range []struct {
+		status      string
+		disposition bridgev1.ChildLifecycleDisposition
+	}{
+		{status: "failed", disposition: bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_FAILED},
+		{status: "terminated", disposition: bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_PRESERVED_TERMINATED},
+	} {
+		t.Run(testCase.status, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_bridge_resume_" + testCase.status
+			mainID := "thr_bridge_resume_" + testCase.status + "_main"
+			childID := "thr_bridge_resume_" + testCase.status + "_child"
+			bindingID := "bind_bridge_resume_" + testCase.status
+			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_bridge_resume_terminal")
+			if _, err := admin.ExecContext(context.Background(),
+				`UPDATE session_threads
+				    SET status = $3
+				  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+				sessionID,
+				childID,
+				testCase.status,
+			); err != nil {
+				t.Fatalf("mark child %s: %v", testCase.status, err)
+			}
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_resume_"+testCase.status)
+			response, err := store.MarkChildThreadActive(context.Background(), &bridgev1.MarkChildThreadActiveRequest{
+				Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, "pod_bridge_resume_terminal"),
+				ChildThreadId: childID,
+				ActiveAt:      "2026-01-01T00:01:00Z",
+				Source:        source,
+			})
+			if err != nil {
+				t.Fatalf("MarkChildThreadActive %s child: %v", testCase.status, err)
+			}
+			stamps := response.GetDeclaration().GetReceipts()[0].GetChildLifecycle()
+			if len(stamps) != 1 || stamps[0].GetDisposition() != testCase.disposition {
+				t.Fatalf("resume %s disposition = %+v; want %s", testCase.status, stamps, testCase.disposition)
+			}
+			var childStatus string
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT status FROM session_threads
+				  WHERE workspace_id = 'default' AND session_id = $1 AND id = $2`,
+				sessionID,
+				childID,
+			).Scan(&childStatus); err != nil {
+				t.Fatalf("read %s child status: %v", testCase.status, err)
+			}
+			if childStatus != testCase.status {
+				t.Fatalf("resume %s child status = %q; want unchanged", testCase.status, childStatus)
+			}
+			var statusEvents int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_events
+				  WHERE workspace_id = 'default'
+				    AND session_id = $1
+				    AND session_thread_id = $2
+				    AND type = 'session.thread_status_idle'`,
+				sessionID,
+				childID,
+			).Scan(&statusEvents); err != nil {
+				t.Fatalf("count resume %s status events: %v", testCase.status, err)
+			}
+			if statusEvents != 0 {
+				t.Fatalf("resume %s status events = %d; want 0", testCase.status, statusEvents)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreReviewerLifecycleSourceRequiresReviewerThread(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_reviewer_lifecycle_role"
+		mainID    = "thr_bridge_reviewer_lifecycle_role_main"
+		reviewID  = "arvw_bridge_reviewer_lifecycle_role"
+		bindingID = "bind_bridge_reviewer_lifecycle_role"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, "pod_uid_bridge_reviewer_lifecycle_role")
+	childID := approvalReviewerSidecarThreadID(scope, mainID, reviewID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_bridge_reviewer_lifecycle_role")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+
+	_, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
+		Scope:         scope,
+		ChildThreadId: childID,
+		ClosedAt:      "2026-01-01T00:01:00Z",
+		Source:        &bridgev1.ChildLifecycleSource{Identity: &bridgev1.ChildLifecycleSource_ReviewerReviewId{ReviewerReviewId: reviewID}},
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("reviewer lifecycle source on subagent role err = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreToolLifecycleSourceRequiresDirectSubagentChild(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_bridge_tool_lifecycle_owner"
+		mainID    = "thr_bridge_tool_lifecycle_owner_main"
+		parentID  = "thr_bridge_tool_lifecycle_owner_parent"
+		targetID  = "thr_bridge_tool_lifecycle_owner_target"
+		bindingID = "bind_bridge_tool_lifecycle_owner"
+		podUID    = "pod_bridge_tool_lifecycle_owner"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, parentID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, targetID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	source := seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, "evt_bridge_tool_lifecycle_owner")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+
+	_, err := store.MarkChildThreadClosed(context.Background(), &bridgev1.MarkChildThreadClosedRequest{
+		Scope:         bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID),
+		ChildThreadId: targetID,
+		ClosedAt:      "2026-01-01T00:01:00Z",
+		Source:        source,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("tool lifecycle source on another parent's child err = %v; want FailedPrecondition", err)
 	}
 }
 

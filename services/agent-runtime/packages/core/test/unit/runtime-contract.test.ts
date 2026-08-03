@@ -9,11 +9,9 @@ import {
   RuntimeInternalToolRepairCommitSchema,
   RuntimeMessageInfoSchema,
   RuntimeMessageSchema,
-  RuntimeMessageStore,
+  RuntimeInternalToolRepairStore,
   RuntimeMessageStoreErrorSchema,
-  RuntimeMessageStoreOperationControlsSchema,
-  RuntimeMessageStoreWriteMessageResultSchema,
-  RuntimeMessageStoreWritePartResultSchema,
+  RuntimeDeclarationOperationControlsSchema,
   RuntimePartSchema,
   RuntimeToolErrorSchema,
   MaxStableReasoningPartsPerRequest,
@@ -38,9 +36,8 @@ import { normalizeProviderError } from "../../src/contracts/provider.js";
 import type {
   RuntimeMessageInfo,
   RuntimeInternalToolRepairCommit,
-  RuntimeMessageStoreOperationControls,
-  RuntimeMessageStoreWriteMessageResult,
-  RuntimeMessageStoreWritePartResult,
+  RuntimeInternalToolRepairCommitResult,
+  RuntimeDeclarationOperationControls,
   RuntimePart,
   SessionEvent,
 } from "../../src/contracts/runtime.js";
@@ -53,6 +50,15 @@ const connectionString = "postgres://user:pass@db.internal/app";
 const rawHeaders = "authorization: bearer raw-header-secret";
 const rawPrompt = "system prompt raw backend payload marker";
 const rawProviderPayload = "raw provider payload marker";
+
+function writerIdentity(requestId: string) {
+  return {
+    requestId,
+    bindingId: "binding-1",
+    bindingGeneration: 1,
+    targetPodUid: "pod-1",
+  } as const;
+}
 
 test("attachment_unavailable defaults to a non-fatal provider failure", () => {
   expect(normalizeProviderError({ code: "attachment_unavailable" })).toMatchObject({
@@ -147,7 +153,7 @@ async function sleepUntilAborted(_durationMs: number, sleepSignal: AbortSignal):
   return false;
 }
 
-function operationControls(overrides: Partial<RuntimeMessageStoreOperationControls> = {}): RuntimeMessageStoreOperationControls {
+function operationControls(overrides: Partial<RuntimeDeclarationOperationControls> = {}): RuntimeDeclarationOperationControls {
   return {
     signal,
     timeoutMs: 100,
@@ -165,8 +171,6 @@ function messageInfo(overrides: Partial<RuntimeMessageInfo> = {}): RuntimeMessag
     sequence: 7,
     status: "streaming",
     createdAt,
-    providerId: "openai",
-    modelId: "gpt-5.5",
     ...overrides,
   });
 }
@@ -228,12 +232,9 @@ function part(overrides: Partial<RuntimePart> = {}): RuntimePart {
 }
 
 function internalToolRepairCommit(): RuntimeInternalToolRepairCommit {
-  const repairMessageId = "message-repair-1";
   const modelToolCallId = "tool-call-1";
   const toolName = "tool";
   const repairPart = part({
-    id: "part-repair-1",
-    messageId: repairMessageId,
     type: "tool",
     toolCallId: modelToolCallId,
     toolName,
@@ -246,19 +247,35 @@ function internalToolRepairCommit(): RuntimeInternalToolRepairCommit {
       },
     },
   });
+  if (repairPart.type !== "tool") {
+    throw new Error("internal repair fixture must be a tool part");
+  }
   return RuntimeInternalToolRepairCommitSchema.parse({
+    ...writerIdentity("repair-request-1"),
+    workspaceId: "workspace-1",
     sessionId: "session-1",
     sessionThreadId: "thread-1",
     modelRequestId: "model-request-1",
     modelToolCallId,
     toolName,
     repairKey: "repair-key-1",
-    message: {
-      ...messageInfo({
-        id: repairMessageId,
-        status: "completed",
-      }),
-      parts: [repairPart],
+    draft: {
+      runtimeLocalId: "stid_repair_message_1",
+      sourceKind: "internal_tool_repair",
+      sourceId: "repair-key-1",
+      draftKind: "internal_tool_repair",
+      ordinal: 0,
+      role: "assistant",
+      origin: "agent",
+      status: "completed",
+      parts: [{
+        type: repairPart.type,
+        toolCallId: repairPart.toolCallId,
+        toolName: repairPart.toolName,
+        state: repairPart.state,
+        runtimeLocalPartId: "stid_repair_part_1",
+        ordinal: 0,
+      }],
     },
   });
 }
@@ -274,29 +291,68 @@ function expectSanitized(value: unknown): void {
   }
 }
 
-class UnitRuntimeMessageStore extends RuntimeMessageStore {
-  readonly messages: RuntimeMessageInfo[] = [];
-  readonly parts: RuntimePart[] = [];
-
-  protected async writeMessageRecord(message: RuntimeMessageInfo): Promise<RuntimeMessageStoreWriteMessageResult> {
-    this.messages.push(message);
-    return { ok: true, messageId: message.id, operation: "writeMessage" };
-  }
-
-  protected async writePartRecord(runtimePart: RuntimePart): Promise<RuntimeMessageStoreWritePartResult> {
-    this.parts.push(runtimePart);
-    return { ok: true, messageId: runtimePart.messageId, partId: runtimePart.id, operation: "writePart" };
-  }
-
-  protected override async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit): Promise<RuntimeMessageStoreWritePartResult> {
-    const [runtimePart] = repair.message.parts;
+class UnitRuntimeInternalToolRepairStore extends RuntimeInternalToolRepairStore {
+  protected override async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit): Promise<RuntimeInternalToolRepairCommitResult> {
+    const [runtimePart] = repair.draft.parts;
     if (runtimePart === undefined) {
-      throw new Error("repair message missing part");
+      throw new Error("repair draft missing part");
     }
-    this.messages.push(repair.message);
-    this.parts.push(runtimePart);
-    return { ok: true, messageId: repair.message.id, partId: runtimePart.id, operation: "writePart" };
+    return internalToolRepairResult(repair);
   }
+}
+
+function internalToolRepairResult(repair: RuntimeInternalToolRepairCommit): RuntimeInternalToolRepairCommitResult {
+  const part = repair.draft.parts[0];
+  if (part === undefined) {
+    throw new Error("repair draft missing part");
+  }
+  return {
+    ok: true,
+    eventId: "event-repair-1",
+    declaration: {
+      applicationDisposition: "current_custody",
+      observedBindingId: repair.bindingId,
+      observedBindingGeneration: repair.bindingGeneration,
+      receipt: {
+        sessionThreadId: repair.sessionThreadId,
+        operationKind: "commit_internal_tool_repair",
+        sourceKind: "internal_tool_repair",
+        sourceId: repair.repairKey,
+        declarationDigest: "repair-digest",
+        pendingAttachmentDelta: [],
+              pendingToolDelta: [],
+              prefixConsumptions: [],
+
+              childLifecycle: [],
+        events: [{
+          sessionThreadId: repair.sessionThreadId,
+          sourceEventId: repair.repairKey,
+          eventId: "event-repair-1",
+          eventSequence: 2,
+          disposition: "created",
+        }],
+        messages: [{
+          runtimeLocalId: repair.draft.runtimeLocalId,
+          sessionThreadId: repair.sessionThreadId,
+          owningEventId: "event-repair-1",
+          messageId: "message-repair-1",
+          messageSequence: 2,
+          createdAt,
+          updatedAt: createdAt,
+          disposition: "created",
+          parts: [{
+            runtimeLocalPartId: part.runtimeLocalPartId,
+            partId: "part-repair-1",
+            messageId: "message-repair-1",
+            partSequence: 0,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created",
+          }],
+        }],
+      },
+    },
+  };
 }
 
 describe("runtime boundary contracts", () => {
@@ -310,9 +366,12 @@ describe("runtime boundary contracts", () => {
       truncated: false,
     };
     const base = {
+      ...writerIdentity("rwrite_1"),
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_1",
+      drafts: [],
       stableReasoningParts: [part],
       modelRequestId: "mreq_anchor_1",
     };
@@ -330,33 +389,65 @@ describe("runtime boundary contracts", () => {
       evaluated_permission: "allow",
     } }).success).toBe(false);
     expect(SessionEventEnvelopeSchema.safeParse({
+      ...writerIdentity("rwrite_2"),
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_2",
+      drafts: [{
+        runtimeLocalId: "draft_tool",
+        sourceKind: "agent.tool_use",
+        sourceId: "rwrite_2",
+        draftKind: "tool_use",
+        ordinal: 0,
+        role: "assistant",
+        origin: "agent",
+        status: "streaming",
+        parts: [{
+          runtimeLocalPartId: "draft_tool_part",
+          type: "tool",
+          ordinal: 0,
+          toolCallId: "call_1",
+          toolName: "bash",
+          state: { status: "running", input: { value: {}, preview: "{}", truncated: false } },
+        }],
+      }],
       event: { type: "agent.tool_use", name: "bash", input: {}, evaluated_permission: "allow" },
       modelRequestId: "mreq_without_anchor",
-    }).success).toBe(false);
+    }).success).toBe(true);
 
     const projectionBase = {
+      ...writerIdentity("rwrite_projection"),
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_projection",
       modelRequestId: "mreq_projection",
-      projectionJson: "{\"type\":\"runtime_projection\"}",
+      drafts: [{
+        runtimeLocalId: "draft_projection",
+        sourceKind: "agent_output",
+        sourceId: "rwrite_projection",
+        draftKind: "assistant_text",
+        ordinal: 0,
+        role: "assistant",
+        origin: "agent",
+        status: "completed",
+        parts: [],
+      }],
     };
-    for (const event of [
-      { type: "agent.tool_result" as const, tool_use_id: "sevt_tool", content: [{ type: "text" as const, text: "done" }] },
-      { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] },
-      { type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] },
+    for (const [event, mcpMaterializationHandle] of [
+      [{ type: "agent.tool_result" as const, tool_use_id: "sevt_tool", content: [{ type: "text" as const, text: "done" }] }, undefined],
+      [{ type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] }, "sevt_mcp"],
+      [{ type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] }, undefined],
     ]) {
-      expect(SessionEventEnvelopeSchema.safeParse({ ...projectionBase, event }).success).toBe(true);
-      expect(SessionEventEnvelopeSchema.safeParse({ ...projectionBase, modelRequestId: undefined, event }).success).toBe(false);
+      const envelope = {
+        ...projectionBase,
+        event,
+        ...(mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle }),
+      };
+      expect(SessionEventEnvelopeSchema.safeParse(envelope).success).toBe(true);
+      expect(SessionEventEnvelopeSchema.safeParse({ ...envelope, modelRequestId: undefined }).success).toBe(false);
     }
-    expect(SessionEventEnvelopeSchema.safeParse({
-      ...projectionBase,
-      event: { type: "agent.message", content: [{ type: "text", text: "answer" }] },
-      projectionJson: "{}",
-    }).success).toBe(true);
     expect(SessionEventEnvelopeSchema.safeParse({
       ...projectionBase,
       event: { type: "span.model_request_start", model_request_id: "mreq_projection" },
@@ -365,6 +456,8 @@ describe("runtime boundary contracts", () => {
 
   test("request-end stable reasoning contract enforces count aggregate identity order and success-only bounds", () => {
     const base = {
+      ...writerIdentity("rwrite_1"),
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_1",
@@ -384,6 +477,28 @@ describe("runtime boundary contracts", () => {
     const exactCount = Array.from({ length: MaxStableReasoningPartsPerRequest }, (_, sequence) => part(`part_${sequence}`, sequence));
     expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: exactCount }).success).toBe(true);
     expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: [...exactCount, part("part_16", 16)] }).success).toBe(false);
+    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({
+      ...base,
+      drafts: [{
+        runtimeLocalId: "stid_terminal_message",
+        sourceKind: "model_request",
+        sourceId: base.modelRequestId,
+        draftKind: "assistant_text",
+        ordinal: 0,
+        role: "assistant",
+        origin: "agent",
+        status: "completed",
+        finishReason: "stop",
+        parts: [{
+          runtimeLocalPartId: "stid_terminal_text",
+          ordinal: 0,
+          type: "text",
+          text: "done",
+          truncated: false,
+          status: "completed",
+        }],
+      }],
+    }).success).toBe(true);
 
     const exactAggregate = [
       part("aggregate_1", 0, "a".repeat(1024 * 1024 - 2)),
@@ -402,6 +517,8 @@ describe("runtime boundary contracts", () => {
 
   test("request-end attachment settlement is combined-bounded and absent on reschedule", () => {
     const base = {
+      ...writerIdentity("rwrite_attachments"),
+      workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_attachments",
@@ -628,9 +745,12 @@ describe("runtime boundary contracts", () => {
       error: normalizeRuntimeFailure({ type: "runtime", code: "runtime_invalid_sequence", rawError: "tool failed" }),
     }).success).toBe(false);
     expect(SessionEventEnvelopeSchema.parse({
+      ...writerIdentity("write-1"),
+      workspaceId: "workspace-1",
       sessionId: "session-1",
       sessionThreadId: "thread-1",
       writeId: "write-1",
+      drafts: [],
       event: { type: "session.status_running" },
     }).writeId).toBe("write-1");
     const appendResult = SessionEventWriterAppendResultSchema.parse({
@@ -659,24 +779,16 @@ describe("runtime boundary contracts", () => {
     });
   });
 
-  test("RuntimeMessageStore exposes only durable writes, validates payloads, and rejects acknowledgement mismatch", async () => {
-    class MismatchStore extends UnitRuntimeMessageStore {
-      protected override async writeMessageRecord(): Promise<RuntimeMessageStoreWriteMessageResult> {
-        return { ok: true, messageId: `${canary}-${rawSql}`, operation: "writeMessage" };
-      }
-      protected override async writePartRecord(): Promise<RuntimeMessageStoreWritePartResult> {
-        return { ok: true, messageId: `${canary}-${rawSql}`, partId: `${connectionString}-${rawHeaders}`, operation: "writePart" };
-      }
-    }
-    class HostileFailureStore extends UnitRuntimeMessageStore {
-      protected override async writePartRecord(): Promise<RuntimeMessageStoreWritePartResult> {
+  test("RuntimeInternalToolRepairStore exposes only the durable repair declaration and validates payloads", async () => {
+    class HostileFailureStore extends UnitRuntimeInternalToolRepairStore {
+      protected override async commitInternalToolRepairRecord(): Promise<RuntimeInternalToolRepairCommitResult> {
         const hostileText = `${canary} ${rawSql} ${connectionString} ${rawHeaders} ${rawPrompt} ${rawProviderPayload}`;
         return {
           ok: false,
           error: {
             type: "message-store",
             code: "schema_mismatch",
-            operation: "writePart",
+            operation: "commitInternalToolRepair",
             message: hostileText,
             retryable: false,
             fatal: true,
@@ -688,78 +800,25 @@ describe("runtime boundary contracts", () => {
         };
       }
     }
-    class RawAcknowledgementStore extends UnitRuntimeMessageStore {
-      protected override async writeMessageRecord(): Promise<RuntimeMessageStoreWriteMessageResult> {
-        return { ok: true, messageId: canary, operation: "writeMessage" };
-      }
-      protected override async writePartRecord(): Promise<RuntimeMessageStoreWritePartResult> {
-        return { ok: true, messageId: canary, partId: rawSql, operation: "writePart" };
-      }
-    }
 
-    const store = new UnitRuntimeMessageStore();
-    const runtimeMessage = messageInfo();
-    const runtimePart = part();
+    const store = new UnitRuntimeInternalToolRepairStore();
     const repair = internalToolRepairCommit();
-    const writeMessageResult = await store.writeMessage(runtimeMessage, operationControls());
-    const writePartResult = await store.writePart(runtimePart, operationControls());
     const repairResult = await store.commitInternalToolRepair(repair, operationControls());
-    const mismatchStore = new MismatchStore();
-    const mismatchMessage = await mismatchStore.writeMessage(runtimeMessage, operationControls());
-    const mismatchPart = await mismatchStore.writePart(runtimePart, operationControls());
-    const hostileFailure = await new HostileFailureStore().writePart(runtimePart, operationControls());
-    const rawAcknowledgementStore = new RawAcknowledgementStore();
-    const rawAcknowledgementMessage = await rawAcknowledgementStore.writeMessage(messageInfo({ id: canary }), operationControls());
-    const rawAcknowledgementPart = await rawAcknowledgementStore.writePart(part({ messageId: canary, id: rawSql }), operationControls());
-    const repairPart = repair.message.parts[0];
-    if (repairPart === undefined) {
-      throw new Error("internal repair fixture must include one part");
-    }
+    const hostileFailure = await new HostileFailureStore().commitInternalToolRepair(repair, operationControls());
 
-    expect(Object.getOwnPropertyNames(RuntimeMessageStore.prototype).sort()).toEqual([
+    expect(Object.getOwnPropertyNames(RuntimeInternalToolRepairStore.prototype).sort()).toEqual([
       "commitInternalToolRepair",
-      "commitInternalToolRepairRecord",
       "constructor",
-      "writeMessage",
-      "writePart",
     ]);
     expect("listMessages" in store).toBe(false);
     expect("readMessages" in store).toBe(false);
-    expect(writeMessageResult).toEqual({ ok: true, messageId: runtimeMessage.id, operation: "writeMessage" });
-    expect(writePartResult).toEqual({ ok: true, messageId: runtimePart.messageId, partId: runtimePart.id, operation: "writePart" });
-    expect(repairResult).toEqual({ ok: true, messageId: repair.message.id, partId: repairPart.id, operation: "writePart" });
-    expect(await store.writeMessage({ ...runtimeMessage, rawDriver: "pg" }, operationControls())).toMatchObject({
-      ok: false,
-      error: { code: "schema_mismatch", operation: "writeMessage" },
-    });
-    expect(await store.writePart({ ...runtimePart, rawDriver: "pg" }, operationControls())).toMatchObject({
-      ok: false,
-      error: { code: "schema_mismatch", operation: "writePart" },
-    });
+    expect(repairResult).toEqual(internalToolRepairResult(repair));
     expect(await store.commitInternalToolRepair({ ...repair, rawDriver: "pg" }, operationControls())).toMatchObject({
       ok: false,
-      error: { code: "schema_mismatch", operation: "writePart" },
+      error: { code: "schema_mismatch", operation: "commitInternalToolRepair" },
     });
-    expect(RuntimeMessageSchema.safeParse({
-      ...messageInfo({ id: canary, sessionId: rawHeaders }),
-      parts: [part({ id: "part-mismatch", messageId: rawSql, sessionId: connectionString })],
-    }).success).toBe(false);
-    expect(mismatchMessage).toMatchObject({
-      ok: false,
-      error: { code: "schema_mismatch", operation: "writeMessage", reason: "write_acknowledgement_mismatch" },
-    });
-    expect(mismatchPart).toMatchObject({
-      ok: false,
-      error: { code: "schema_mismatch", operation: "writePart", reason: "write_acknowledgement_mismatch" },
-    });
-    expectSanitized(mismatchMessage);
-    expectSanitized(mismatchPart);
-    expect(rawAcknowledgementMessage).toEqual({ ok: true, messageId: canary, operation: "writeMessage" });
-    expect(rawAcknowledgementPart).toEqual({ ok: true, messageId: canary, partId: rawSql, operation: "writePart" });
     expectSanitized(hostileFailure);
-    expect(RuntimeMessageStoreOperationControlsSchema.safeParse({ ...operationControls(), sessionId: "session-1" }).success).toBe(false);
-    expect(RuntimeMessageStoreWriteMessageResultSchema.safeParse({ ok: true, messageId: "message-1", operation: "listMessages" }).success).toBe(false);
-    expect(RuntimeMessageStoreWritePartResultSchema.safeParse({ ok: true, messageId: "message-1", partId: "part-1", operation: "listMessages" }).success).toBe(false);
+    expect(RuntimeDeclarationOperationControlsSchema.safeParse({ ...operationControls(), sessionId: "session-1" }).success).toBe(false);
   });
 
   test("preserves executable runtime payloads while sanitizing failure channels", () => {
@@ -770,14 +829,15 @@ describe("runtime boundary contracts", () => {
       truncated: false,
     });
     const runtimeMessage = RuntimeMessageSchema.parse({
-      ...messageInfo({ id: canary, sessionId: rawHeaders, modelId: rawProviderPayload }),
+      ...messageInfo({ id: canary, sessionId: rawHeaders }),
       parts: [part({ type: "text", id: "part-raw", messageId: canary, sessionId: rawHeaders, text: executableText })],
     });
     const toolCall = LLMEventSchema.parse({
       type: "tool-call",
       id: canary,
       toolName: "search",
-      input: boundedJson,
+      input: boundedJson.value,
+      inputPreview: boundedJson,
     });
     const failure = RuntimeFailureSchema.parse({
       type: "provider",
@@ -789,7 +849,10 @@ describe("runtime boundary contracts", () => {
 
     expect(boundedJson).toEqual({ value: { [rawHeaders]: executableText }, preview: executableText, truncated: false });
     expect(runtimeMessage.parts[0]).toMatchObject({ text: executableText });
-    expect(toolCall).toMatchObject({ input: { value: { [rawHeaders]: executableText }, preview: executableText } });
+    expect(toolCall).toMatchObject({
+      input: { [rawHeaders]: executableText },
+      inputPreview: { value: { [rawHeaders]: executableText }, preview: executableText },
+    });
     expectSanitized(failure);
   });
 
@@ -806,7 +869,7 @@ describe("runtime boundary contracts", () => {
         sessionId: rawHeaders,
         reason: hostileText,
       }),
-      normalizeRuntimeMessageStoreError({ code: "schema_mismatch", operation: "writePart", rawError: hostileText }),
+      normalizeRuntimeMessageStoreError({ code: "schema_mismatch", operation: "commitInternalToolRepair", rawError: hostileText }),
       normalizeSessionEventWriterError({ code: "unavailable", rawError: hostileText }),
       normalizeRuntimeFailure({ type: "provider", code: "provider_stream_error", rawError: hostileText }),
       RuntimeFailureSchema.parse({
@@ -822,7 +885,7 @@ describe("runtime boundary contracts", () => {
       }),
       normalizeRuntimeMessageStoreError({
         code: "schema_mismatch",
-        operation: "writePart",
+        operation: "commitInternalToolRepair",
         constraint: rawSql,
         messageId: canary,
         partId: connectionString,
@@ -831,7 +894,7 @@ describe("runtime boundary contracts", () => {
       RuntimeMessageStoreErrorSchema.parse({
         type: "message-store",
         code: "schema_mismatch",
-        operation: "writePart",
+        operation: "commitInternalToolRepair",
         message: hostileText,
         retryable: false,
         fatal: true,
@@ -849,7 +912,7 @@ describe("runtime boundary contracts", () => {
           message: hostileText,
           retryable: false,
           fatal: true,
-          operation: "writePart",
+          operation: "commitInternalToolRepair",
           constraint: rawSql,
         }),
       }),
@@ -877,8 +940,8 @@ describe("runtime boundary contracts", () => {
     const controller = new AbortController();
     controller.abort();
     expect(await runtimeSleep(deps, 10_000, controller.signal)).toBe(false);
-    expect(RuntimeMessageStoreErrorSchema.parse(normalizeRuntimeMessageStoreError({ code: "timeout", operation: "writePart" })).operation).toBe(
-      "writePart",
+    expect(RuntimeMessageStoreErrorSchema.parse(normalizeRuntimeMessageStoreError({ code: "timeout", operation: "commitInternalToolRepair" })).operation).toBe(
+      "commitInternalToolRepair",
     );
   });
 });

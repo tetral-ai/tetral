@@ -10,13 +10,12 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
-	"github.com/tetral-ai/tetral/internal/sandbox"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	"github.com/tetral-ai/tetral/services/sandbox/internal/resourceprojection"
 )
 
 func TestResourcePrefixGCRunnerDeletesDueUnboundPrefixAndMarksDeleted(t *testing.T) {
-	runtime, admin := newReleaseHandlerTestDB(t)
+	runtime, admin := newSandboxServiceTestDB(t)
 	ctx := context.Background()
 	sessionID := "sesn_resource_prefix_gc_delete"
 	fixedNow := time.Date(2026, 7, 5, 9, 0, 0, 0, time.UTC)
@@ -47,66 +46,8 @@ func TestResourcePrefixGCRunnerDeletesDueUnboundPrefixAndMarksDeleted(t *testing
 	assertResourcePrefixGCStatus(t, admin, sessionID, "deleted", 1, "", fixedNow, "")
 }
 
-func TestResourcePrefixGCRunnerClaimsDeleteNullHandleProviderMissingAfterDurableRelease(t *testing.T) {
-	runtime, admin := newReleaseHandlerTestDB(t)
-	ctx := context.Background()
-	fixedNow := time.Date(2026, 7, 5, 9, 30, 0, 0, time.UTC)
-	client := dbconnect.NewClientForTesting(runtime)
-	store := sandbox.NewPostgreSQLStore(client)
-	provider := &recordingReleaseProvider{status: sandbox.ProviderStatus{Availability: sandbox.ProviderMissing}}
-	handler := NewReleaseHandler(client, sandbox.NewService(store, provider, sandbox.WithProviderName("tetral")), store)
-	request := seedPreparationScopedDeleteRelease(t, admin, "null_handle_missing_gc")
-	if _, err := admin.ExecContext(ctx,
-		`UPDATE sandboxes
-		    SET status='failed', provider_sandbox_id=NULL, provider_metadata_json='{}',
-		        cleanup_status='released', startup_failure_reason='startup_failed', failed_at=updated_at
-		  WHERE id=$1`, request.SandboxID); err != nil {
-		t.Fatalf("seed NULL-handle failed sandbox: %v", err)
-	}
-	prefix := resourceprojection.SessionPrefix(request.WorkspaceID, request.SessionID)
-	seedSessionResourcePrefixGCMarker(t, admin, request.SessionID, prefix, fixedNow.Add(-time.Minute))
-	blobStore := blob.NewFakeBlobStore()
-	putResourcePrefixGCBlob(t, blobStore, prefix+"detached/file", "detached")
-	runner := newTestResourcePrefixGCRunner(t, runtime, blobStore, fixedNow)
-	claimed, err := runner.RunOnce(ctx)
-	if err != nil {
-		t.Fatalf("RunOnce before release: %v", err)
-	}
-	if len(claimed) != 0 || !blobStore.Has(prefix+"detached/file") {
-		t.Fatalf("pre-release claim=%+v object_exists=%v; want failed sandbox to block GC", claimed, blobStore.Has(prefix+"detached/file"))
-	}
-	assertResourcePrefixGCStatus(t, admin, request.SessionID, "pending", 0, "", time.Time{}, "")
-
-	result, err := handler.ReleaseSandbox(ctx, request)
-	if err != nil || result != (ReleaseSandboxResult{Status: ReleaseSandboxStatusAlreadyReleased, SandboxStatus: "released"}) {
-		t.Fatalf("ReleaseSandbox = %#v, %v; want already_released/released", result, err)
-	}
-	if provider.statusCalls != 1 || provider.releaseCalls != 0 {
-		t.Fatalf("provider probes/releases = %d/%d; want 1/0", provider.statusCalls, provider.releaseCalls)
-	}
-	var sandboxStatus string
-	if err := admin.QueryRowContext(ctx, `SELECT status FROM sandboxes WHERE id=$1`, request.SandboxID).Scan(&sandboxStatus); err != nil {
-		t.Fatalf("read sandbox status: %v", err)
-	}
-	if sandboxStatus != "released" {
-		t.Fatalf("sandbox status = %q; want released before prefix GC", sandboxStatus)
-	}
-
-	claimed, err = runner.RunOnce(ctx)
-	if err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if len(claimed) != 1 || claimed[0].SessionID != request.SessionID || claimed[0].Prefix != prefix {
-		t.Fatalf("claimed = %+v; want exactly released session %s", claimed, request.SessionID)
-	}
-	if blobStore.Has(prefix + "detached/file") {
-		t.Fatal("released NULL-handle session prefix object still exists after GC")
-	}
-	assertResourcePrefixGCStatus(t, admin, request.SessionID, "deleted", 1, "", fixedNow, "")
-}
-
 func TestResourcePrefixGCRunnerSkipsBoundAndActiveResourceMarkers(t *testing.T) {
-	runtime, admin := newReleaseHandlerTestDB(t)
+	runtime, admin := newSandboxServiceTestDB(t)
 	ctx := context.Background()
 	fixedNow := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
 	blobStore := blob.NewFakeBlobStore()
@@ -133,15 +74,13 @@ func TestResourcePrefixGCRunnerSkipsBoundAndActiveResourceMarkers(t *testing.T) 
 	seedSessionResourceRow(t, admin, liveSessionID, "sesrsc_gc_live", true)
 	putResourcePrefixGCBlob(t, blobStore, livePrefix+"sesrsc_gc_live/file", "live")
 
-	archivedSandboxSessionID := "sesn_resource_prefix_gc_archived_sandbox"
-	archivedSandboxPrefix := resourceprojection.SessionPrefix(string(workspace.DefaultID), archivedSandboxSessionID)
-	seedResourcePrefixGCSession(t, admin, archivedSandboxSessionID, false)
-	markResourcePrefixGCSessionDeleted(t, admin, archivedSandboxSessionID)
-	seedSessionResourcePrefixGCMarker(t, admin, archivedSandboxSessionID, archivedSandboxPrefix, fixedNow.Add(-time.Minute))
-	if _, err := admin.ExecContext(ctx, `UPDATE sandboxes SET status='archived' WHERE session_id=$1`, archivedSandboxSessionID); err != nil {
-		t.Fatalf("mark sandbox archived: %v", err)
-	}
-	putResourcePrefixGCBlob(t, blobStore, archivedSandboxPrefix+"archived/file", "archived")
+	sandboxBoundSessionID := "sesn_resource_prefix_gc_sandbox_bound"
+	sandboxBoundPrefix := resourceprojection.SessionPrefix(string(workspace.DefaultID), sandboxBoundSessionID)
+	seedResourcePrefixGCSession(t, admin, sandboxBoundSessionID, false)
+	markResourcePrefixGCSessionDeleted(t, admin, sandboxBoundSessionID)
+	seedSessionResourcePrefixGCMarker(t, admin, sandboxBoundSessionID, sandboxBoundPrefix, fixedNow.Add(-time.Minute))
+	seedResourcePrefixGCSandboxBinding(t, admin, sandboxBoundSessionID, fixedNow)
+	putResourcePrefixGCBlob(t, blobStore, sandboxBoundPrefix+"bound/file", "bound")
 
 	runner := newTestResourcePrefixGCRunner(t, runtime, blobStore, fixedNow)
 	claimed, err := runner.RunOnce(ctx)
@@ -154,17 +93,17 @@ func TestResourcePrefixGCRunnerSkipsBoundAndActiveResourceMarkers(t *testing.T) 
 	if !blobStore.Has(boundPrefix+"sesrsc_bound/file") ||
 		!blobStore.Has(activePrefix+"sesrsc_gc_active/file") ||
 		!blobStore.Has(livePrefix+"sesrsc_gc_live/file") ||
-		!blobStore.Has(archivedSandboxPrefix+"archived/file") {
+		!blobStore.Has(sandboxBoundPrefix+"bound/file") {
 		t.Fatalf("resource prefix GC deleted a fenced object")
 	}
 	assertResourcePrefixGCStatus(t, admin, boundSessionID, "pending", 0, "", time.Time{}, "")
 	assertResourcePrefixGCStatus(t, admin, activeSessionID, "pending", 0, "", time.Time{}, "")
 	assertResourcePrefixGCStatus(t, admin, liveSessionID, "pending", 0, "", time.Time{}, "")
-	assertResourcePrefixGCStatus(t, admin, archivedSandboxSessionID, "pending", 0, "", time.Time{}, "")
+	assertResourcePrefixGCStatus(t, admin, sandboxBoundSessionID, "pending", 0, "", time.Time{}, "")
 }
 
 func TestResourcePrefixGCRunnerRetryableFailureKeepsMarkerDueLater(t *testing.T) {
-	runtime, admin := newReleaseHandlerTestDB(t)
+	runtime, admin := newSandboxServiceTestDB(t)
 	ctx := context.Background()
 	sessionID := "sesn_resource_prefix_gc_retry"
 	fixedNow := time.Date(2026, 7, 5, 11, 0, 0, 0, time.UTC)
@@ -195,7 +134,7 @@ func TestResourcePrefixGCRunnerRetryableFailureKeepsMarkerDueLater(t *testing.T)
 }
 
 func TestResourcePrefixGCRunnerRequiresConfiguredWorkspaceID(t *testing.T) {
-	runtime, _ := newReleaseHandlerTestDB(t)
+	runtime, _ := newSandboxServiceTestDB(t)
 	runner := newTestResourcePrefixGCRunner(t, runtime, blob.NewFakeBlobStore(), time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC))
 	runner.Config.WorkspaceID = ""
 
@@ -213,10 +152,7 @@ func newTestResourcePrefixGCRunner(t *testing.T, runtime *sql.DB, blobStore *blo
 	t.Helper()
 	return &ResourcePrefixGCRunner{
 		Client: dbconnect.NewClientForTesting(runtime),
-		Preparer: newTestResourceProjectionPreparer(t, blobStore,
-			&recordingResourceCredentialMinter{},
-			&recordingPreparationCommandRunner{},
-		),
+		Blobs:  blobStore,
 		Config: ResourcePrefixGCRunnerConfig{
 			WorkspaceID: string(workspace.DefaultID),
 			Limit:       10,
@@ -229,41 +165,31 @@ func newTestResourcePrefixGCRunner(t *testing.T, runtime *sql.DB, blobStore *blo
 
 func seedResourcePrefixGCSession(t *testing.T, db *sql.DB, sessionID string, bound bool) {
 	t.Helper()
-	request := ReleaseSandboxRequest{
-		WorkspaceID:       string(workspace.DefaultID),
-		SessionID:         sessionID,
-		SandboxID:         "sandbox_" + sessionID,
-		BindingID:         "binding_" + sessionID,
-		BindingGeneration: 1,
-	}
-	seedReleaseHandlerClaimedSandbox(t, db, request)
+	workspaceID := string(workspace.DefaultID)
+	seedEnvironmentArtifactStoreEnvironment(t, db, workspaceID, "env_resource_prefix_gc")
+	seedEnvironmentArtifactStoreSession(t, db, workspaceID, sessionID, "env_resource_prefix_gc")
 	if bound {
-		return
+		now := time.Date(2026, 7, 5, 8, 0, 0, 0, time.UTC)
+		if _, err := db.Exec(`INSERT INTO session_runtime_bindings (
+			workspace_id, session_id, binding_id, binding_generation,
+			agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid,
+			agent_runtime_pod_ip, bound_at, updated_at
+		) VALUES ($1, $2, $3, 1, 'tetral', 'agent-runtime', $4, '10.0.0.1', $5, $5)`,
+			workspaceID, sessionID, "binding_"+sessionID, "uid_"+sessionID, now); err != nil {
+			t.Fatalf("seed runtime binding: %v", err)
+		}
 	}
-	if _, err := db.Exec(
-		`UPDATE session_runtime_status
-		    SET cleanup_job_id = NULL,
-		        cleanup_after = NULL,
-		        cleanup_enqueued_at = NULL,
-		        cleanup_claimed_at = NULL,
-		        binding_id = NULL,
-		        binding_generation = NULL
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		string(workspace.DefaultID),
-		sessionID,
-	); err != nil {
-		t.Fatalf("mark session unbound: %v", err)
-	}
-	if _, err := db.Exec(
-		`UPDATE sandboxes
-		    SET status = 'released'
-		  WHERE workspace_id = $1
-		    AND session_id = $2`,
-		string(workspace.DefaultID),
-		sessionID,
-	); err != nil {
-		t.Fatalf("mark sandbox released: %v", err)
+}
+
+func seedResourcePrefixGCSandboxBinding(t *testing.T, db *sql.DB, sessionID string, now time.Time) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		created_at, updated_at
+	) VALUES ($1, $2, $3, 'env_resource_prefix_gc', 1, 'daytona', $4, 1, $5, $5)`,
+		string(workspace.DefaultID), sessionID, "sandbox_"+sessionID, "provider_"+sessionID, now); err != nil {
+		t.Fatalf("seed sandbox binding: %v", err)
 	}
 }
 

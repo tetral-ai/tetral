@@ -415,6 +415,7 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 		chart,
 		"bootstrapWorkspaceID=true",
 		"secrets.apiSecrets=true",
+		"secrets.tetralBlob=custom-blob",
 		"edge.enabled=true",
 		"gitProxyHost=true",
 		"edge.tlsSecretName=true",
@@ -439,6 +440,17 @@ func TestHelmChartStringValuesRemainStringsForBooleanShapedOverrides(t *testing.
 	}
 	if !foundOverriddenSecret {
 		t.Fatal("boolean-shaped secret override was not rendered as the string \"true\"")
+	}
+	var blobSecretRefs int
+	for _, object := range rendered {
+		for _, value := range nestedMapFieldValues(object, "secretKeyRef", "name") {
+			if value == "custom-blob" {
+				blobSecretRefs++
+			}
+		}
+	}
+	if blobSecretRefs != 15 {
+		t.Fatalf("custom Blob Secret references = %d; want 15 across API and both Bridge containers", blobSecretRefs)
 	}
 
 	wantImages := map[string]bool{

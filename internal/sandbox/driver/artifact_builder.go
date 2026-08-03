@@ -2,42 +2,31 @@ package driver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	stderrors "errors"
 	"sort"
 	"strconv"
 	"strings"
 
+	apiclient "github.com/daytonaio/daytona/libs/api-client-go"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
 
-type daytonaSnapshotCreator interface {
+type daytonaSnapshotService interface {
+	Get(context.Context, string) (*types.Snapshot, error)
 	Create(context.Context, *types.CreateSnapshotParams) (*types.Snapshot, <-chan string, error)
 }
 
 type DaytonaArtifactBuilder struct {
-	snapshots daytonaSnapshotCreator
+	snapshots daytonaSnapshotService
 	baseImage string
 }
 
-func NewDaytonaArtifactBuilder(cfg Config) (*DaytonaArtifactBuilder, error) {
-	if cfg.ArtifactBaseImage == "" {
-		return nil, stderrors.New("artifact base image is required")
-	}
-	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
-		APIKey: cfg.DaytonaAPIKey,
-		APIUrl: cfg.DaytonaAPIURL,
-		Target: cfg.DaytonaTarget,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return NewDaytonaArtifactBuilderForClient(client.Snapshot, cfg.ArtifactBaseImage), nil
-}
-
-func NewDaytonaArtifactBuilderForClient(snapshots daytonaSnapshotCreator, baseImage string) *DaytonaArtifactBuilder {
+func NewDaytonaArtifactBuilderForClient(snapshots daytonaSnapshotService, baseImage string) *DaytonaArtifactBuilder {
 	return &DaytonaArtifactBuilder{snapshots: snapshots, baseImage: baseImage}
 }
 
@@ -55,6 +44,25 @@ func (b *DaytonaArtifactBuilder) BuildArtifact(ctx context.Context, request sand
 		return sandbox.BuildArtifactResult{}, err
 	}
 	name := deterministicSnapshotName(request)
+	existing, err := b.snapshots.Get(ctx, name)
+	if err == nil {
+		return adoptDaytonaSnapshot(existing, name)
+	}
+	mapped := mapDaytonaError(sandbox.StageBuildArtifact, err)
+	var providerErr *sandbox.ProviderError
+	if !stderrors.As(mapped, &providerErr) || providerErr.Kind != sandbox.ProviderErrorNotFound {
+		return sandbox.BuildArtifactResult{}, mapped
+	}
+	if request.AuthorizeProviderCreate == nil {
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorConfigInvalid, false, 0, "artifact create authorization is unavailable", nil)
+	}
+	authorized, err := request.AuthorizeProviderCreate(ctx)
+	if err != nil {
+		return sandbox.BuildArtifactResult{}, err
+	}
+	if !authorized {
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnavailable, true, 0, "daytona snapshot create is awaiting provider visibility", nil)
+	}
 	dockerfile := deterministicArtifactDockerfile(b.baseImage, request.NormalizedPackages)
 	snapshot, logs, err := b.snapshots.Create(ctx, &types.CreateSnapshotParams{
 		Name:  name,
@@ -62,19 +70,42 @@ func (b *DaytonaArtifactBuilder) BuildArtifact(ctx context.Context, request sand
 	})
 	drainAvailableSnapshotLogs(logs)
 	if err != nil {
-		return sandbox.BuildArtifactResult{}, mapDaytonaError(sandbox.StageBuildArtifact, err)
+		mapped := mapDaytonaError(sandbox.StageBuildArtifact, err)
+		if daytonaRequestWasRejected(err) {
+			mapped = MarkProviderOperationNotSubmitted(mapped)
+		}
+		return sandbox.BuildArtifactResult{}, mapped
 	}
 	if snapshot == nil {
 		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnknown, true, 0, "daytona snapshot create returned no snapshot", nil)
 	}
-	ref := snapshot.ID
-	if ref == "" {
-		ref = snapshot.Name
+	return adoptDaytonaSnapshot(snapshot, name)
+}
+
+func adoptDaytonaSnapshot(snapshot *types.Snapshot, expectedName string) (sandbox.BuildArtifactResult, error) {
+	if snapshot == nil {
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona snapshot lookup returned no snapshot", nil)
 	}
-	if ref == "" {
-		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnknown, true, 0, "daytona snapshot create returned no artifact ref", nil)
+	if snapshot.Name != expectedName {
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorConflict, false, 0, "daytona snapshot identity does not match", nil)
 	}
-	return sandbox.BuildArtifactResult{ProviderArtifactRef: ref}, nil
+	switch apiclient.SnapshotState(snapshot.State) {
+	case apiclient.SNAPSHOTSTATE_ACTIVE:
+		return daytonaSnapshotResult(snapshot)
+	case apiclient.SNAPSHOTSTATE_PENDING, apiclient.SNAPSHOTSTATE_BUILDING, apiclient.SNAPSHOTSTATE_PULLING:
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnavailable, true, 0, "daytona snapshot build is still in progress", nil)
+	case apiclient.SNAPSHOTSTATE_ERROR, apiclient.SNAPSHOTSTATE_BUILD_FAILED:
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorUnknown, false, 0, "daytona snapshot build failed", nil)
+	default:
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona snapshot is not usable", nil)
+	}
+}
+
+func daytonaSnapshotResult(snapshot *types.Snapshot) (sandbox.BuildArtifactResult, error) {
+	if snapshot.ID == "" {
+		return sandbox.BuildArtifactResult{}, daytonaProviderError(sandbox.StageBuildArtifact, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona snapshot returned no provider id", nil)
+	}
+	return sandbox.BuildArtifactResult{ProviderArtifactRef: snapshot.ID}, nil
 }
 
 func drainAvailableSnapshotLogs(logs <-chan string) {
@@ -94,45 +125,18 @@ func drainAvailableSnapshotLogs(logs <-chan string) {
 }
 
 func deterministicSnapshotName(request sandbox.BuildArtifactRequest) string {
-	hash := request.ArtifactInputHash
-	if len(hash) > 12 {
-		hash = hash[:12]
-	}
-	return sanitizeSnapshotName("tetral-" + string(request.WorkspaceID) + "-" + request.EnvironmentID + "-" + strconv.FormatInt(request.Generation, 10) + "-" + hash)
-}
-
-func sanitizeSnapshotName(value string) string {
-	value = strings.ToLower(value)
-	var builder strings.Builder
-	builder.Grow(len(value))
-	lastDash := false
-	for _, r := range value {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if ok {
-			builder.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			builder.WriteByte('-')
-			lastDash = true
-		}
-	}
-	name := strings.Trim(builder.String(), "-")
-	if name == "" {
-		return "tetral-environment-artifact"
-	}
-	if len(name) > 63 {
-		name = strings.TrimRight(name[:63], "-")
-	}
-	if name == "" {
-		return "tetral-environment-artifact"
-	}
-	return name
+	identity := strings.Join([]string{
+		string(request.WorkspaceID),
+		request.EnvironmentID,
+		strconv.FormatInt(request.Generation, 10),
+		request.ArtifactInputHash,
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return "tetral-" + hex.EncodeToString(digest[:])[:56]
 }
 
 func deterministicArtifactDockerfile(baseImage string, packages sandbox.PackageSetup) string {
-	lines := []string{"FROM " + baseImage}
+	lines := []string{"FROM " + baseImage, "USER root"}
 	managers := make([]string, 0, len(packages))
 	for manager, entries := range packages {
 		if len(entries) > 0 {
@@ -147,6 +151,7 @@ func deterministicArtifactDockerfile(baseImage string, packages sandbox.PackageS
 			lines = append(lines, line)
 		}
 	}
+	lines = append(lines, "USER daytona")
 	return strings.Join(lines, "\n") + "\n"
 }
 

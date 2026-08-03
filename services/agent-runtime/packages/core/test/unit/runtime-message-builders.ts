@@ -1,10 +1,85 @@
 // Shared RuntimeMessage fixtures preserve suite-specific wire values while keeping
 // schema construction in one auditable test module.
 
-import type { RuntimeJsonValue, RuntimeMessage, RuntimePart } from "../../src/contracts/runtime.js";
-import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
+import type {
+  RuntimeJsonValue,
+  RuntimeMessage,
+  RuntimeMessageDraft,
+  RuntimePart,
+} from "../../src/contracts/runtime.js";
+import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "../../src/contracts/runtime.js";
+import type {
+  RuntimeControlInputCommitResult,
+  RuntimeControlInputDeclaration,
+  RuntimeThreadControlState,
+} from "../../src/session/session-state.js";
 
-export function buildAgentLoopUserMessage(id: string, sequence: number, text: string, providerId: string, modelId: string): RuntimeMessage {
+export function buildRuntimeControlCommitResult(
+  scope: RuntimeThreadControlState,
+  inputKind: "interrupt_control" | "tool_confirmation",
+  declaration: RuntimeControlInputDeclaration,
+): RuntimeControlInputCommitResult {
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  return {
+    ok: true,
+    receipt: {
+      sessionThreadId: scope.sessionThreadId,
+      operationKind: "commit_inputs",
+      sourceKind: inputKind,
+      sourceId: scope.runtimeInputId,
+      declarationDigest: "digest_test",
+      events: scope.eventIds.map((eventId, index) => ({
+        sessionThreadId: scope.sessionThreadId,
+        sourceEventId: eventId,
+        eventId,
+        eventSequence: scope.sequenceFrom + index,
+        disposition: "existing" as const,
+      })),
+      messages: declaration.drafts.map((draft, index) =>
+        runtimeControlMessageStamp(scope, draft, index, createdAt)
+      ),
+      pendingAttachmentDelta: [],
+      pendingToolDelta: declaration.pendingToolCancellations.map((cancellation) => JSON.stringify({
+        runtime_local_id: cancellation.runtimeLocalId,
+        tool_use_event_id: cancellation.toolUseEventId,
+        status: "cancelled",
+        result_event_id: scope.eventIds[0],
+      })),
+      prefixConsumptions: [],
+      childLifecycle: [],
+    },
+  };
+}
+
+function runtimeControlMessageStamp(
+  scope: RuntimeThreadControlState,
+  draft: RuntimeMessageDraft,
+  index: number,
+  createdAt: string,
+) {
+  const messageId = `msg_control_${scope.runtimeInputId}_${index}`;
+  return {
+    runtimeLocalId: draft.runtimeLocalId,
+    sessionThreadId: scope.sessionThreadId,
+    owningEventId: draft.sourceEventId!,
+    messageId,
+    messageSequence: scope.sequenceTo + index + 1,
+    createdAt,
+    updatedAt: "",
+    disposition: "created" as const,
+    parts: draft.parts.map((part, partIndex) => ({
+      runtimeLocalPartId: part.runtimeLocalPartId,
+      partId: `part_control_${scope.runtimeInputId}_${index}_${partIndex}`,
+      messageId,
+      partSequence: partIndex,
+      createdAt,
+      updatedAt: "",
+      disposition: "created" as const,
+    })),
+  };
+}
+
+export function buildAgentLoopUserMessage(id: string, sequence: number, text: string): RuntimeMessage {
   const createdAt = "2026-06-14T00:00:00.000Z";
   return RuntimeMessageSchema.parse({
     id,
@@ -14,8 +89,6 @@ export function buildAgentLoopUserMessage(id: string, sequence: number, text: st
     sequence,
     status: "completed",
     createdAt,
-    providerId,
-    modelId,
     parts: [
       {
         id: `${id}-text`,
@@ -71,7 +144,6 @@ export function buildContextLoaderTextMessage(id: string, sessionId: string, rol
     sequence,
     status: "completed",
     createdAt,
-    ...(role === "user" ? { providerId: "fake", modelId: "fake-chat" } : {}),
     parts: [
       {
         id: `${id}-text`,
@@ -167,8 +239,6 @@ export function buildContextLoaderFailedVisibleAssistantMessage(): RuntimeMessag
 export function buildContextLoaderAssistantMessageWithUsage(): RuntimeMessage {
   return RuntimeMessageSchema.parse({
     ...buildContextLoaderTextMessage("assistant-usage", "sesn_1", "assistant", 7, "answer"),
-    providerId: "fake",
-    modelId: "fake-chat",
     usage: {
       inputTokens: 11,
       outputTokens: 7,
@@ -189,8 +259,6 @@ export function buildContextLoaderStreamingAssistantMessage(): RuntimeMessage {
     origin: "agent",
     sequence: 8,
     status: "streaming",
-    providerId: "fake",
-    modelId: "fake-chat",
     createdAt,
     parts: [
       {
@@ -317,8 +385,6 @@ export function buildRuntimeMessageProjectionMessage(
     sequence: role === "user" ? 0 : 1,
     status: "completed",
     createdAt,
-    providerId: "openai",
-    modelId: "gpt-5.5",
     parts,
   });
 }
@@ -362,8 +428,6 @@ export function buildSessionManagerColdUserMessage(sessionId: string): RuntimeMe
     sequence: 1,
     status: "completed",
     createdAt: timestamp,
-    providerId: "anthropic",
-    modelId: "claude-opus-4-8",
     parts: [{
       id: `part_${sessionId}`,
       sessionId,
@@ -418,8 +482,6 @@ export function buildSessionRunHostUserMessage(id: string, sequence: number, tex
     sequence,
     status: "completed",
     createdAt,
-    providerId: "fake",
-    modelId: "fake-chat",
     parts: [
       {
         id: `${id}-text`,
@@ -467,16 +529,16 @@ export function buildSessionRunHostRuntimeNotificationMessage(sessionId: string)
 
 export function buildApprovalReviewerUserMessage(sessionId: string, messageId = "msg_user", text = "please edit the file"): RuntimeMessage {
   const createdAt = "2026-07-06T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id: messageId,
     sessionId,
+    owningEventId: `evt_${messageId}`,
+    eventSequence: 1,
     role: "user",
     origin: "user",
     sequence: 0,
     status: "completed",
     createdAt,
-    providerId: "anthropic",
-    modelId: "claude-test",
     parts: [{
       id: `part_${messageId}`,
       sessionId,
@@ -502,8 +564,6 @@ export function buildApprovalReviewerAssistantDraftMessage(sessionId: string): R
     sequence: 1,
     status: "streaming",
     createdAt,
-    providerId: "anthropic",
-    modelId: "claude-test",
     parts: [
       {
         id: "part_assistant_text",
@@ -563,8 +623,6 @@ export function buildApprovalReviewerAssistantReviewerText(sessionId: string, te
     sequence: 1,
     status: "completed",
     createdAt,
-    providerId: "anthropic",
-    modelId: "claude-test",
     parts: [{
       id: "part_reviewer",
       sessionId,
@@ -605,6 +663,14 @@ export function buildBridgeClientRuntimeMessage(id: string, text: string): Runti
   };
 }
 
+export function buildBridgeClientDurableRuntimeMessage(id: string, text: string): RuntimeMessage {
+  return DurableRuntimeMessageSchema.parse({
+    ...buildBridgeClientRuntimeMessage(id, text),
+    owningEventId: `evt_${id}`,
+    eventSequence: 1,
+  });
+}
+
 export function buildBridgeClientRuntimeRepairMessage(): RuntimeMessage {
   return {
     id: "msg_repair",
@@ -635,7 +701,7 @@ export function buildBridgeClientRuntimeRepairMessage(): RuntimeMessage {
   };
 }
 
-export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string, providerId: string, modelId: string): RuntimeMessage {
+export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string): RuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
   return RuntimeMessageSchema.parse({
     id,
@@ -645,8 +711,6 @@ export function buildCoreHostsUserMessage(sessionId: string, id: string, sequenc
     sequence,
     status: "completed",
     createdAt: "2026-06-16T00:00:00.000Z",
-    providerId,
-    modelId,
     parts: [
       {
         id: `${id}-text`,
@@ -671,18 +735,22 @@ export function buildCoreHostsAssistantRunningToolMessage(
   toolName: string,
   toolUseEventId: string,
   input: unknown,
+  toolEvent: { readonly kind: "tool" } | {
+    readonly kind: "mcp";
+    readonly mcpServerName: string;
+  } = { kind: "tool" },
 ): RuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id,
     sessionId,
+    owningEventId: toolUseEventId,
+    eventSequence: sequence,
     role: "assistant",
     origin: "agent",
     sequence,
     status: "completed",
     createdAt: "2026-06-16T00:00:00.000Z",
-    providerId: "fake",
-    modelId: "fake-chat",
     parts: [
       {
         id: `${id}-tool`,
@@ -693,7 +761,7 @@ export function buildCoreHostsAssistantRunningToolMessage(
         toolCallId,
         toolName,
         toolUseEventId,
-        toolEvent: { kind: "tool" },
+        toolEvent,
         state: {
           status: "running",
           input: {

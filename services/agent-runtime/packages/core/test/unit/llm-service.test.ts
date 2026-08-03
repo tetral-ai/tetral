@@ -751,9 +751,36 @@ describe("LLMService Gateway boundary", () => {
       { type: "tool-input-start", id: "call-1", toolName: "lookup" },
       { type: "tool-input-delta", id: "call-1", toolName: "lookup", text_delta: "{\"q\":\"hi\"}" },
       { type: "tool-input-end", id: "call-1", toolName: "lookup" },
-      { type: "tool-call", id: "call-1", toolName: "lookup", input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false } },
+      {
+        type: "tool-call", id: "call-1", toolName: "lookup", input: { q: "hi" },
+        inputPreview: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
+      },
       { type: "finish", finishReason: "tool-calls", usage: emptyFinishUsage, modelLimits: defaultFinishLimits },
     ]);
+  });
+
+  test("keeps exact tool input above the message preview bound", async () => {
+    const input = { content: "x".repeat(9_000), file_path: "notes/large.txt" };
+    const service = createLLMService(gatewayClient([
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
+        toolCall: { id: "call-large", name: "Write", inputJson: JSON.stringify(input), metadataJson: "{}" },
+      }),
+      successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_TOOL_CALLS),
+    ]));
+
+    const events = await collect(service.stream(request()));
+
+    expect(events[0]).toMatchObject({
+      type: "tool-call",
+      id: "call-large",
+      toolName: "Write",
+      input,
+      inputPreview: {
+        truncated: true,
+      },
+    });
+    expect(events[0]?.type === "tool-call" ? new TextEncoder().encode(events[0].inputPreview.preview).byteLength : 0).toBeLessThanOrEqual(8_192);
+    expect(events[1]).toMatchObject({ type: "finish", finishReason: "tool-calls" });
   });
 
   test("emits gateway_stream_error when Gateway stream closes without terminal", async () => {

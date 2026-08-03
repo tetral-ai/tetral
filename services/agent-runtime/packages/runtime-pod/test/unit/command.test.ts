@@ -16,6 +16,7 @@ import type { RuntimePodCommandDependencies } from "../../src/command.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import type { RuntimePodConfig } from "../../src/config.js";
 import type { RuntimePodLogger } from "../../src/logger.js";
+import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 
 describe("Runtime Pod command entrypoint", () => {
@@ -294,7 +295,7 @@ describe("Runtime Pod command entrypoint", () => {
     expect(() => runtimeToolPolicyFromPatchPayload(undefined)).toThrow("runtime installed builtin family is malformed");
   });
 
-  test("runtime config patch payload carries the preparation-resolved skill index", () => {
+  test("runtime config patch payload carries the durable resolved skill index", () => {
     const policy = runtimeToolPolicyFromPatchPayload(JSON.stringify({
       runtime_config: {
         installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
@@ -628,10 +629,25 @@ describe("Runtime Pod command entrypoint", () => {
       config,
       logger: { info: () => undefined, error: () => undefined },
       builderOptions: {
+        coreHostsFactory: async (options) => await buildRuntimeCoreHosts({
+          ...options,
+          contextLoader: {
+            loadThreadContext: async () => ({
+              messages: [],
+              runtimeBindingToken: "runtime-binding-token-command-test",
+              coldCoverage: {
+                pendingToolIds: [],
+                pendingSandboxExecutionIds: [],
+                pendingAttachmentIdentities: [],
+                undeliveredMailDeliveryIds: [],
+              },
+            }),
+          },
+        }),
         controlInputCommitterFactory: () => ({
           commitControlInput: async (input) => {
             controlCommits.push(input);
-            return { ok: true as const };
+            return { ok: true as const, stale: true as const };
           },
         }),
       },

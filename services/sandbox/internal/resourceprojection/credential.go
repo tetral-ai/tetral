@@ -23,7 +23,7 @@ import (
 // key and never the minted triple.
 //
 // UPDATE-WITH: mount.go (RcloneEnv, which injects the minted triple),
-// services/sandbox/resource_projection_preparer.go (backend copy path).
+// services/sandbox/daytona_file_resource_materializer.go (backend copy path).
 type CredentialMintConfig struct {
 	AccountID           string
 	Bucket              string

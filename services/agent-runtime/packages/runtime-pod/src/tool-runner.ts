@@ -9,23 +9,22 @@
  * delivery and lifecycle mutation. Model order sorts entries that are still
  * pending, while an already-running first arrival is not preempted.
  *
- * `buildRuntimePodCommandDependencies` constructs this module and installs
- * `RuntimePodToolRunner.runTool` as the Agent Loop tool callback. The runner
- * calls Agent Runtime Bridge for sandbox, memory, command, event, and durable
- * child-thread operations; Provider Gateway for web tools; MCP Connector for
- * MCP tools; and `RuntimeSubAgentRunHost` for local child-thread execution.
+ * `buildRuntimePodCommandDependencies` constructs this module and installs its
+ * general tool callback plus the separate Sandbox acceptance and result-wait
+ * callbacks into Agent Loop. The runner calls Agent Runtime Bridge for durable
+ * sandbox handoff, memory, command, event, and child-thread operations;
+ * Provider Gateway for web tools; MCP Connector for MCP tools; and
+ * `RuntimeSubAgentRunHost` for local child-thread execution.
  */
 import { createHash } from "node:crypto";
 import { credentials, status } from "@grpc/grpc-js";
-import type { ClientUnaryCall, Metadata, ServiceError } from "@grpc/grpc-js";
+import type { CallOptions, ClientUnaryCall, Metadata, ServiceError } from "@grpc/grpc-js";
 import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions } from "./bounds.js";
 import {
   AgentRuntimeBridgeServiceClient,
   BridgeWriteStatus,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
-  CancelCommandRequest,
-  CancelCommandResponse,
   CreateChildThreadRequest,
   CreateChildThreadResponse,
   ListChildThreadsRequest,
@@ -42,8 +41,10 @@ import type {
   ResolveInterAgentDeliveryResponse,
   RunMemoryRequest,
   RunMemoryResponse,
-  RunToolRequest,
-  RunToolResponse,
+  AcceptSandboxExecutionResponse,
+  AwaitSandboxExecutionRequest,
+  AwaitSandboxExecutionResponse,
+  AcceptSandboxExecutionRequest,
   RuntimeScope,
   SendCommandInputRequest,
   SendCommandInputResponse,
@@ -68,10 +69,16 @@ import type {
   ProviderRequestAttachment,
   WebToolInput,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { RuntimeBoundedTextSchema, RuntimeFailureSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import {
+  RuntimeBoundedTextSchema,
+  RuntimeFailureSchema,
+  SessionEventWriterRetryPolicy,
+} from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
+  RuntimeSandboxExecutionAcceptanceResult,
+  RuntimeSandboxExecutionRequest,
   RuntimeToolExecutionRequest,
   RuntimeToolExecutionResult,
 } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
@@ -81,20 +88,13 @@ import type { RuntimeAcceptedInputState, RuntimeThreadStatusState } from "@tetra
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
-import { canonicalRunToolJSON } from "./run-tool-canonical-json.js";
+import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import { validateChildLifecycleDeclarationResponse } from "./bridge-client.js";
 
-// MEMORY_PROJECTION_REPLAY_DELAY_MS bounds the wait between reissues of the same
-// tool_use_event_id after a memory tool result reports projection_refresh_failed
-// (the replay loop in runBridgeTool below). Value: pinned at 300 ms, the top of
-// the established 100-300 ms retry-backoff family. It is fixed (not ramped), with
-// no attempt ceiling and no total deadline: the common trigger is brief push-lock
-// contention on the Bridge side that clears within one lock holder's push, so a
-// short fixed delay recovers fastest; the loop instead ends only when the replay
-// lands or the memory tool returns a non-replay result. The wait is
-// cancellation-aware — the injected sleep honors the tool route's AbortSignal and
-// the abort is re-checked after each wait.
-// UPDATE-WITH: runBridgeTool replay loop (isMemoryProjectionReplayResult / this.sleep).
-const MEMORY_PROJECTION_REPLAY_DELAY_MS = 300;
+// Durable tool-route transport retries rejoin one accepted identity. This
+// delay paces only transport uncertainty; it is not an execution-attempt
+// budget and never authorizes the provider operation a second time.
+const DURABLE_TOOL_REJOIN_DELAY_MS = 300;
 // WEB_SEARCH_REQUESTS_MAX / WEB_FETCH_REQUESTS_MAX bound the per-call
 // server_tool_use counters accepted from a RunWebResponse usage block before that
 // block is attached to the durable web tool result (webServerToolUse below). They
@@ -124,16 +124,15 @@ export interface RuntimePodToolRunnerOptions {
   readonly webAddress: string;
   readonly mcpConnectorAddress: string;
   readonly tokenPath: string;
-  readonly scopeForThread: (sessionId: string, sessionThreadId: string) => RuntimeAcceptedInputState | undefined;
   readonly subAgentRunHost?: () => RuntimeSubAgentRunHost | undefined;
   readonly metadataFactory?: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   readonly sleep?: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
   readonly bridgeClient?: Pick<AgentRuntimeBridgeServiceClient,
-    | "runTool"
+    | "acceptSandboxExecution"
+    | "awaitSandboxExecution"
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
-    | "cancelCommand"
     | "createChildThread"
     | "resolveChildThread"
     | "listChildThreads"
@@ -173,11 +172,11 @@ interface ChildTaskOperationQueueState {
  */
 export class RuntimePodToolRunner {
   private readonly bridgeClient: Pick<AgentRuntimeBridgeServiceClient,
-    | "runTool"
+    | "acceptSandboxExecution"
+    | "awaitSandboxExecution"
     | "runMemory"
     | "sendCommandInput"
     | "readCommandResult"
-    | "cancelCommand"
     | "createChildThread"
     | "resolveChildThread"
     | "listChildThreads"
@@ -192,6 +191,7 @@ export class RuntimePodToolRunner {
   private readonly sleep: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
   private readonly childOperationLocks = new Map<string, Promise<void>>();
   private readonly childTaskOperationQueues = new Map<string, ChildTaskOperationQueueState>();
+  private readonly pendingChildLifecycleTimestamps = new Map<string, string>();
   private nextChildTaskOperationSequence = 0;
 
   /**
@@ -234,42 +234,86 @@ export class RuntimePodToolRunner {
   }
 
   private async runSandboxTool(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
-    const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this tool call.", true);
+    const acceptance = await this.acceptSandboxExecution(request);
+    if (acceptance.type !== "accepted") {
+      return acceptance;
     }
+    return await this.awaitSandboxExecution(request);
+  }
+
+  /** Durably registers one Sandbox execution before any result wait begins. */
+  async acceptSandboxExecution(request: RuntimeSandboxExecutionRequest): Promise<RuntimeSandboxExecutionAcceptanceResult> {
+    const scope = this.scope(request);
     const inputJson = stableJsonStringify(request.input);
-    try {
-      const response = await runTool(this.bridgeClient, {
-        scope,
-        toolUseEventId: request.toolUseEventId,
-        normalizedInputHash: normalizedInputHash(inputJson),
-        toolName: request.entry.name,
-        inputJson,
-        approvalDecisionJson: "",
-      }, await this.metadata(), request.abortSignal);
-      if (!bridgeAckAccepted(response.ack?.status)) {
-        return toolFailure(request, "Bridge rejected the sandbox tool call.", true);
+    const durableRequest: AcceptSandboxExecutionRequest = {
+      scope,
+      toolUseEventId: request.toolUseEventId,
+      modelToolCallId: request.modelToolCallId,
+      normalizedInputHash: normalizedInputHash(inputJson),
+      toolName: request.entry.name,
+      inputJson,
+    };
+    for (;;) {
+      try {
+        const response = await acceptSandboxExecution(this.bridgeClient, durableRequest, await this.metadata());
+        if (!bridgeAckAccepted(response.ack?.status)) {
+          return toolFailure(request, "Bridge rejected the sandbox tool call.", true);
+        }
+        return { type: "accepted" };
+      } catch (error) {
+        if (isDurableBridgeRejection(error)) {
+          return toolFailure(request, "Bridge rejected the sandbox tool call.", false);
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, new AbortController().signal);
       }
-      if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
-        return await this.mediaResultToAttachment(request, response.resultJson);
+    }
+  }
+
+  /** Waits for one already-accepted Sandbox execution without re-registering it. */
+  async awaitSandboxExecution(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
+    const scope = this.scope(request);
+    const inputJson = stableJsonStringify(request.input);
+    const durableRequest: AwaitSandboxExecutionRequest = {
+      scope,
+      toolUseEventId: request.toolUseEventId,
+      modelToolCallId: request.modelToolCallId,
+      normalizedInputHash: normalizedInputHash(inputJson),
+      toolName: request.entry.name,
+      inputJson,
+    };
+    for (;;) {
+      try {
+        const response = await awaitSandboxExecution(this.bridgeClient, durableRequest, await this.metadata(), request.abortSignal);
+        if (request.entry.route.kind === "sandbox" && mediaAttachmentHelper(request.entry.route.helperSubcommand)) {
+          return withSandboxResultDigest(
+            await this.mediaResultToAttachment(request, response.resultJson, response.resultDigest),
+            response.resultDigest,
+          );
+        }
+        return withSandboxResultDigest(
+          resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId), response.resultDigest),
+          response.resultDigest,
+        );
+      } catch (error) {
+        if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+          return toolCancelled(request, "Sandbox tool execution was cancelled.");
+        }
+        if (isDurableBridgeRejection(error)) {
+          return { type: "stale_custody" };
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
-      return resultJsonToExecutionResult(request, withBackgroundTask(response.resultJson, response.taskId));
-    } catch (error) {
-      if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-        return toolCancelled(request, "Sandbox tool execution was cancelled.");
-      }
-      return toolFailure(request, "Bridge sandbox tool execution is unavailable.", true);
     }
   }
 
   private async mediaResultToAttachment(
     request: RuntimeToolExecutionRequest,
     resultJson: string,
+    resultDigest: string,
   ): Promise<RuntimeToolExecutionResult> {
     const parsed = parseResultJson(resultJson);
     if (!isRecord(parsed) || stringField(parsed, "status") !== "success") {
-      return resultJsonToExecutionResult(request, resultJson);
+      return resultJsonToExecutionResult(request, resultJson, resultDigest);
     }
     const result = recordField(parsed, "result");
     const source = isRecord(result) ? result : parsed;
@@ -293,6 +337,7 @@ export class RuntimePodToolRunner {
       return {
         type: "completed",
         output: capturedToolText(lines.join("\n")),
+        sandboxResultDigest: resultDigest,
         attachments: [providerAttachmentFromBridge({
           attachmentRef,
           mime,
@@ -309,7 +354,7 @@ export class RuntimePodToolRunner {
     }
     if (mime === undefined) {
       if (request.entry.route.kind === "sandbox" && request.entry.route.helperSubcommand === "read") {
-        return resultJsonToExecutionResult(request, resultJson);
+        return resultJsonToExecutionResult(request, resultJson, resultDigest);
       }
       return toolFailure(request, `${request.entry.name} returned malformed media payload.`, false);
     }
@@ -318,9 +363,6 @@ export class RuntimePodToolRunner {
 
   private async runCommandInput(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this command input.", true);
-    }
     const taskId = taskIdFromInput(request.input);
     if (taskId === undefined) {
       return toolFailure(request, "write_stdin requires a session_id task handle.", false);
@@ -331,45 +373,41 @@ export class RuntimePodToolRunner {
       ...scope,
       requestId: stableId("req", `command-followup:${request.toolUseEventId}`),
     };
-    try {
-      const metadata = await this.metadata();
-      const cancelOnAbort = (): void => {
-        void cancelCommand(this.bridgeClient, {
+    for (;;) {
+      try {
+        const metadata = await this.metadata();
+        if (chars === undefined || chars.length === 0) {
+          const response = await readCommandResult(this.bridgeClient, {
+            scope: commandScope,
+            taskId,
+            maxOutputTokens,
+            toolUseEventId: request.toolUseEventId,
+          }, metadata, request.abortSignal);
+          if (!bridgeAckAccepted(response.ack?.status)) {
+            return toolFailure(request, "Bridge rejected the command poll.", true);
+          }
+          return resultJsonToExecutionResult(request, response.resultJson);
+        }
+        const response = await sendCommandInput(this.bridgeClient, {
           scope: commandScope,
           taskId,
-          reason: "runtime_interrupted",
-          toolUseEventId: request.toolUseEventId,
-        }, metadata, new AbortController().signal).catch(() => undefined);
-      };
-      if (chars === undefined || chars.length === 0) {
-        const response = await readCommandResult(this.bridgeClient, {
-          scope: commandScope,
-          taskId,
-          deferTerminalSettlement: false,
           maxOutputTokens,
+          inputJson: stableJsonStringify(request.input),
           toolUseEventId: request.toolUseEventId,
-        }, metadata, request.abortSignal, cancelOnAbort);
+        }, metadata, request.abortSignal);
         if (!bridgeAckAccepted(response.ack?.status)) {
-          return toolFailure(request, "Bridge rejected the command poll.", true);
+          return toolFailure(request, "Bridge rejected the command input.", true);
         }
         return resultJsonToExecutionResult(request, response.resultJson);
+      } catch (error) {
+        if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+          return toolCancelled(request, "Command task was cancelled.");
+        }
+        if (isDurableBridgeRejection(error)) {
+          return toolFailure(request, "Bridge rejected the command operation.", false);
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
-      const response = await sendCommandInput(this.bridgeClient, {
-        scope: commandScope,
-        taskId,
-        maxOutputTokens,
-        inputJson: stableJsonStringify(request.input),
-        toolUseEventId: request.toolUseEventId,
-      }, metadata, request.abortSignal, cancelOnAbort);
-      if (!bridgeAckAccepted(response.ack?.status)) {
-        return toolFailure(request, "Bridge rejected the command input.", true);
-      }
-      return resultJsonToExecutionResult(request, response.resultJson);
-    } catch (error) {
-      if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-        return toolCancelled(request, "Command task was cancelled.");
-      }
-      return toolFailure(request, "Bridge command input route is unavailable.", true);
     }
   }
 
@@ -378,9 +416,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, `Bridge tool route ${request.entry.route.operation} is not installed.`, false);
     }
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this memory tool call.", true);
-    }
     const inputJson = stableJsonStringify(request.input);
     const runMemoryRequest: RunMemoryRequest = {
       scope,
@@ -389,8 +424,8 @@ export class RuntimePodToolRunner {
       operation: stringField(request.input, "action") ?? "",
       inputJson,
     };
-    try {
-      while (true) {
+    while (true) {
+      try {
         throwIfToolRouteAborted(request.abortSignal);
         const metadata = await this.metadata();
         throwIfToolRouteAborted(request.abortSignal);
@@ -398,18 +433,16 @@ export class RuntimePodToolRunner {
         if (!bridgeAckAccepted(response.ack?.status)) {
           return toolFailure(request, "Bridge rejected the memory tool call.", true);
         }
-        if (!isMemoryProjectionReplayResult(response.resultJson)) {
-          return resultJsonToExecutionResult(request, response.resultJson);
+        return resultJsonToExecutionResult(request, response.resultJson);
+      } catch (error) {
+        if (isToolRouteAborted(error) || request.abortSignal.aborted) {
+          return toolCancelled(request, "Memory tool execution was cancelled.");
         }
-        throwIfToolRouteAborted(request.abortSignal);
-        await this.sleep(MEMORY_PROJECTION_REPLAY_DELAY_MS, request.abortSignal);
-        throwIfToolRouteAborted(request.abortSignal);
+        if (isDurableBridgeRejection(error)) {
+          return toolFailure(request, "Bridge rejected the memory tool call.", false);
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
       }
-    } catch (error) {
-      if (isToolRouteAborted(error) || request.abortSignal.aborted) {
-        return toolCancelled(request, "Memory tool execution was cancelled.");
-      }
-      return toolFailure(request, "Bridge memory tool execution is unavailable.", true);
     }
   }
 
@@ -468,9 +501,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "MCP tool route is missing mcp_server_name.", false);
     }
     const scope = this.scope(request);
-    if (scope === undefined) {
-      return toolFailure(request, "Runtime scope is unavailable for MCP tool execution.", true);
-    }
     const inputJson = stableJsonStringify(request.input);
     try {
       const response = await runMcpTool(this.mcpConnectorClient, {
@@ -486,9 +516,18 @@ export class RuntimePodToolRunner {
         bindingGeneration: request.bindingGeneration,
         runtimeBindingToken: request.runtimeBindingToken,
       }, await this.metadata(), request.abortSignal);
+      if (response.errorKind === McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST) {
+        return { type: "stale_custody" };
+      }
       if (response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED) {
         const attachments = response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment));
-        return { ...completedText(response.resultText), ...(attachments.length > 0 ? { attachments } : {}) };
+        return {
+          ...completedText(response.resultText),
+          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(response.materializationHandle !== undefined && response.materializationHandle.length > 0
+            ? { mcpMaterializationHandle: response.materializationHandle }
+            : {}),
+        };
       }
       const attachments = response.status === RunMcpToolStatus.RUN_MCP_TOOL_STATUS_TOOL_ERROR
         ? response.attachments.map((attachment) => providerAttachmentFromMcp(request, mcpServerName, attachment))
@@ -504,6 +543,10 @@ export class RuntimePodToolRunner {
         runtimeRetryStatusFromMcp(response.retryStatus),
         publicMcpErrorEventFromResponse(response, mcpServerName, message),
         attachments,
+        undefined,
+        response.materializationHandle !== undefined && response.materializationHandle.length > 0
+          ? response.materializationHandle
+          : undefined,
       );
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
@@ -552,24 +595,19 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "spawn_agent requires an inherited current model.", true);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent spawn.", true);
-    }
     const host = this.options.subAgentRunHost?.();
     if (host === undefined) {
       return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
     }
     const childThreadId = stableId("thr", `subagent:${request.toolUseEventId}`);
-    const childScope = scopeForChild(parentScope, childThreadId);
     const childMessage = runtimeUserMessage({
       sessionId: request.sessionId,
       messageId: stableId("msg", `subagent-message:${request.toolUseEventId}:0`),
       text: prompt,
-      providerId: currentModel.providerId,
-      modelId: currentModel.modelId,
     });
-    const forkSeedJson = JSON.stringify({
+    const threadContextPrefixJson = JSON.stringify({
       source_parent_thread_id: request.sessionThreadId,
+      parent_boundary_event_id: request.toolUseEventId,
       source_tool_use_event_id: request.toolUseEventId,
       fork_turns: forkTurns,
       runtime_messages_snapshot: forkedMessages(request.committedMessages, forkTurns),
@@ -586,7 +624,7 @@ export class RuntimePodToolRunner {
         agentType,
         sourceToolUseEventId: request.toolUseEventId,
         forkTurns,
-        forkSeedJson,
+        threadContextPrefixJson,
         isTrunk: false,
         reviewerReviewId: "",
       }, metadata, request.abortSignal);
@@ -610,33 +648,24 @@ export class RuntimePodToolRunner {
       if (!bridgeAckAccepted(sent.ack?.status)) {
         return toolFailure(request, sent.ack?.errorCode || "Bridge rejected sub-agent message send.", true);
       }
-      const repair = await resolveInterAgentDelivery(this.bridgeClient, {
+      const resolved = await resolveInterAgentDelivery(this.bridgeClient, {
         scope: parentScope,
         childThreadId,
         deliveryId: delivery.deliveryId,
-      }, metadata, request.abortSignal);
-      if (!bridgeAckAccepted(repair.ack?.status) || !repair.sentExists) {
-        return toolFailure(request, repair.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
+      }, metadata);
+      if (
+        !bridgeAckAccepted(resolved.ack?.status) ||
+        resolved.deliveryId !== delivery.deliveryId ||
+        resolved.sourceThreadId !== request.sessionThreadId ||
+        resolved.targetThreadId !== childThreadId ||
+        resolved.sourceToolUseEventId !== delivery.sourceToolUseEventId ||
+        resolved.receivedEventId.length === 0 ||
+        resolved.receivedSequence <= 0 ||
+        resolved.messageJson.length === 0
+      ) {
+        return toolFailure(request, resolved.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
       }
-      if (repair.receivedExists) {
-        return completedText(`task_name: ${taskName}\nsession_thread_id: ${createResponse.childThreadId || childThreadId}\nstatus: delivered`);
-      }
-      if (!repair.childReceivable) {
-        return toolFailure(request, `Sub-agent ${taskName} is not receivable.`, false);
-      }
-      throwIfToolRouteAborted(request.abortSignal);
-      const accepted = await host.enqueueThreadInput(interAgentAcceptedInput(request, childScope, delivery, childMessage, {
-        parentThreadId: request.sessionThreadId,
-        role: "subagent",
-        visibility: "public",
-        taskName,
-        agentType,
-        status: "idle",
-      }));
-      if (!accepted.ok) {
-        return toolFailure(request, `Sub-agent input was not accepted: ${accepted.reason}.`, accepted.reason === "local_session_capacity_exceeded");
-      }
-      return completedText(`task_name: ${taskName}\nsession_thread_id: ${createResponse.childThreadId || childThreadId}\nstatus: accepted`);
+      return completedText(`task_name: ${taskName}\nsession_thread_id: ${createResponse.childThreadId || childThreadId}\nstatus: delivered`);
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent spawn was cancelled.");
@@ -659,9 +688,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "send_message requires an inherited current model.", true);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent send.", true);
-    }
     const host = this.options.subAgentRunHost?.();
     if (host === undefined) {
       return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
@@ -694,41 +720,30 @@ export class RuntimePodToolRunner {
             sessionId: request.sessionId,
             messageId: stableId("msg", `subagent-message:${request.toolUseEventId}:0`),
             text: messageText,
-            providerId: currentModel.providerId,
-            modelId: currentModel.modelId,
           });
           const delivery = deliveryIdentity(request.toolUseEventId, currentChild.sessionThreadId, 0);
           const sent = await writeThreadMessageSent(this.bridgeClient, parentScope, request, delivery, taskName, currentChild.sessionThreadId, childMessage, metadata, request.abortSignal);
           if (!bridgeAckAccepted(sent.ack?.status)) {
             return toolFailure(request, sent.ack?.errorCode || "Bridge rejected sub-agent message send.", true);
           }
-          const repair = await resolveInterAgentDelivery(this.bridgeClient, {
+          const resolved = await resolveInterAgentDelivery(this.bridgeClient, {
             scope: parentScope,
             childThreadId: currentChild.sessionThreadId,
             deliveryId: delivery.deliveryId,
-          }, metadata, request.abortSignal);
-          if (!bridgeAckAccepted(repair.ack?.status) || !repair.sentExists) {
-            return toolFailure(request, repair.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
+          }, metadata);
+          if (
+            !bridgeAckAccepted(resolved.ack?.status) ||
+            resolved.deliveryId !== delivery.deliveryId ||
+            resolved.sourceThreadId !== request.sessionThreadId ||
+            resolved.targetThreadId !== currentChild.sessionThreadId ||
+            resolved.sourceToolUseEventId !== delivery.sourceToolUseEventId ||
+            resolved.receivedEventId.length === 0 ||
+            resolved.receivedSequence <= 0 ||
+            resolved.messageJson.length === 0
+          ) {
+            return toolFailure(request, resolved.ack?.errorCode || "Bridge could not resolve sub-agent delivery.", true);
           }
-          if (repair.receivedExists) {
-            return completedText(`task_name: ${taskName}\nsession_thread_id: ${currentChild.sessionThreadId}\nstatus: delivered`);
-          }
-          if (!repair.childReceivable) {
-            return toolFailure(request, `Sub-agent ${taskName} is not receivable.`, false);
-          }
-          throwIfToolRouteAborted(request.abortSignal);
-          const accepted = await host.enqueueThreadInput(interAgentAcceptedInput(request, scopeForChild(parentScope, currentChild.sessionThreadId), delivery, childMessage, {
-            parentThreadId: request.sessionThreadId,
-            role: "subagent",
-            visibility: "public",
-            taskName: currentChild.taskName,
-            agentType: currentChild.agentType,
-            status: currentChild.status,
-          }));
-          if (!accepted.ok) {
-            return toolFailure(request, `Sub-agent input was not accepted: ${accepted.reason}.`, accepted.reason === "local_session_capacity_exceeded");
-          }
-          return completedText(`task_name: ${taskName}\nsession_thread_id: ${currentChild.sessionThreadId}\nstatus: accepted`);
+          return completedText(`task_name: ${taskName}\nsession_thread_id: ${currentChild.sessionThreadId}\nstatus: delivered`);
         });
       });
     } catch (error) {
@@ -745,9 +760,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, "wait_agent requires task_name.", false);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent wait.", true);
-    }
     try {
       const child = await this.resolveChildByTaskName(request, parentScope, taskName, await this.metadata());
       if (child === undefined) {
@@ -819,29 +831,64 @@ export class RuntimePodToolRunner {
         return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
       }
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
+        const lifecycleKey = childLifecycleRequestKey("close", request, child.sessionThreadId);
+        const closedAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
+        this.pendingChildLifecycleTimestamps.set(lifecycleKey, closedAt);
         const response = await markChildThreadClosed(this.bridgeClient, {
           scope: parentScope,
           childThreadId: child.sessionThreadId,
-          closedAt: new Date().toISOString(),
+          closedAt,
+          source: { sourceToolUseEventId: request.toolUseEventId },
         }, metadata, request.abortSignal);
-        if (!bridgeAckAccepted(response.ack?.status)) {
-          return toolFailure(request, response.ack?.errorCode || "Bridge rejected sub-agent close.", true);
+        const declaration = validateChildLifecycleDeclarationResponse({
+          action: "close",
+          sessionThreadId: request.sessionThreadId,
+          childThreadId: child.sessionThreadId,
+          sourceKind: "tool_use",
+          sourceCommandId: request.toolUseEventId,
+          requestedAt: closedAt,
+          bindingId: request.bindingId,
+          bindingGeneration: request.bindingGeneration,
+        }, response);
+        if (!declaration.ok) {
+          if (declaration.discardHotState) {
+            return { type: "stale_custody" };
+          }
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+          return toolFailure(request, declaration.errorCode, true);
         }
-        const lifecycle = await host.markThreadClosed(threadControlFromRequest(request, parentScope, child.sessionThreadId));
-        if (!lifecycle.ok) {
-          return toolFailure(request, `Sub-agent close was not accepted: ${lifecycle.reason}.`, true);
+        const rootDisposition = declaration.dispositions.find(
+          (stamp) => stamp.childThreadId === child.sessionThreadId,
+        )?.disposition;
+        let rootRunExitOutcome: string | undefined;
+        for (const stamp of declaration.dispositions) {
+          const lifecycle = await host.markThreadClosed(
+            threadControlFromRequest(request, parentScope, stamp.childThreadId),
+          );
+          if (!lifecycle.ok) {
+            return toolFailure(request, `Sub-agent close was not accepted: ${lifecycle.reason}.`, true);
+          }
+          if (stamp.childThreadId === child.sessionThreadId) {
+            rootRunExitOutcome = lifecycle.runExitOutcome;
+          }
         }
+        this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+        const rootStatus = rootDisposition === "preserved_failed"
+          ? "failed"
+          : rootDisposition === "preserved_terminated"
+            ? "terminated"
+            : "closed_for_runtime";
         return completedText([
           `task_name: ${child.taskName}`,
           `session_thread_id: ${child.sessionThreadId}`,
-          "status: closed_for_runtime",
-          ...(lifecycle.runExitOutcome === undefined ? [] : [`run_outcome: ${lifecycle.runExitOutcome}`]),
+          `status: ${rootStatus}`,
+          ...(rootRunExitOutcome === undefined ? [] : [`run_outcome: ${rootRunExitOutcome}`]),
         ].join("\n"));
       });
     });
   }
 
-  // Resume is complete only when durable reactivation and hot residency both hold.
+  // A durable terminal receipt completes without installing hot state; reopened children require hot residency.
   private async resumeAgent(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     return await this.withResolvedChild(request, "resume_agent", async (parentScope, child, metadata) => {
       const host = this.options.subAgentRunHost?.();
@@ -850,54 +897,85 @@ export class RuntimePodToolRunner {
       }
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
         const control = threadControlFromRequest(request, parentScope, child.sessionThreadId);
+        const lifecycleKey = childLifecycleRequestKey("resume", request, child.sessionThreadId);
+        const activeAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
+        this.pendingChildLifecycleTimestamps.set(lifecycleKey, activeAt);
+        const response = await markChildThreadActive(this.bridgeClient, {
+          scope: parentScope,
+          childThreadId: child.sessionThreadId,
+          activeAt,
+          source: { sourceToolUseEventId: request.toolUseEventId },
+        }, metadata, request.abortSignal);
+        const declaration = validateChildLifecycleDeclarationResponse({
+          action: "resume",
+          sessionThreadId: request.sessionThreadId,
+          childThreadId: child.sessionThreadId,
+          sourceKind: "tool_use",
+          sourceCommandId: request.toolUseEventId,
+          requestedAt: activeAt,
+          bindingId: request.bindingId,
+          bindingGeneration: request.bindingGeneration,
+        }, response);
+        if (!declaration.ok) {
+          if (declaration.discardHotState) {
+            return { type: "stale_custody" };
+          }
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+          return toolFailure(request, declaration.errorCode, true);
+        }
+        const disposition = declaration.dispositions[0]?.disposition;
+        const preservedStatus = disposition === "preserved_failed"
+          ? "failed"
+          : disposition === "preserved_terminated"
+            ? "terminated"
+            : undefined;
+        if (preservedStatus !== undefined) {
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+          return completedText([
+            `task_name: ${child.taskName}`,
+            `session_thread_id: ${child.sessionThreadId}`,
+            `status: ${preservedStatus}`,
+          ].join("\n"));
+        }
+        // Observe residency after the durable receipt so a concurrent run exit cannot make the result stale.
         const inspected = await host.inspectThread(control);
         if (!inspected.ok) {
           return toolFailure(request, `Sub-agent resume inspection failed: ${inspected.reason}.`, true);
         }
-        if (child.status !== "closed_for_runtime" && inspected.observed) {
+        if (disposition === "already_active" && inspected.observed) {
+          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return completedText([
             `task_name: ${child.taskName}`,
             `session_thread_id: ${child.sessionThreadId}`,
-            `status: ${child.status}`,
+            `status: ${inspected.status ?? child.status}`,
           ].join("\n"));
         }
-        if (child.status === "closed_for_runtime") {
-          const response = await markChildThreadActive(this.bridgeClient, {
-            scope: parentScope,
-            childThreadId: child.sessionThreadId,
-            activeAt: new Date().toISOString(),
-          }, metadata, request.abortSignal);
-          if (!bridgeAckAccepted(response.ack?.status)) {
-            return toolFailure(request, response.ack?.errorCode || "Bridge rejected sub-agent resume.", true);
-          }
-          if (inspected.observed) {
-            const lifecycle = await host.markThreadActive(control);
-            if (!lifecycle.ok) {
-              return toolFailure(request, `Sub-agent resume was not accepted: ${lifecycle.reason}.`, true);
-            }
+        if (disposition === "resumed" && inspected.observed) {
+          const lifecycle = await host.markThreadActive(control);
+          if (!lifecycle.ok) {
+            return toolFailure(request, `Sub-agent resume was not accepted: ${lifecycle.reason}.`, true);
           }
         }
+        const activeStatus = disposition === "resumed" ? "idle" : child.status;
         const preloaded = await preloadChildThread(host, request, parentScope, child.sessionThreadId, {
           parentThreadId: request.sessionThreadId,
           role: "subagent",
           visibility: "public",
           taskName: child.taskName,
           agentType: child.agentType,
-          status: "idle",
+          status: activeStatus,
         });
         if (!preloaded.ok) {
           return toolFailure(request, `Sub-agent resume context preload failed: ${preloaded.reason}.`, true);
         }
-        return completedText(`task_name: ${child.taskName}\nsession_thread_id: ${child.sessionThreadId}\nstatus: idle`);
+        this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+        return completedText(`task_name: ${child.taskName}\nsession_thread_id: ${child.sessionThreadId}\nstatus: ${activeStatus}`);
       });
     });
   }
 
   private async listAgents(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, "Runtime Bridge scope is unavailable for this sub-agent list.", true);
-    }
     try {
       const response = await listChildThreads(this.bridgeClient, {
         scope: parentScope,
@@ -930,9 +1008,6 @@ export class RuntimePodToolRunner {
       return toolFailure(request, `${toolName} requires task_name.`, false);
     }
     const parentScope = this.scope(request);
-    if (parentScope === undefined) {
-      return toolFailure(request, `Runtime Bridge scope is unavailable for ${toolName}.`, true);
-    }
     try {
       return await this.withChildTaskOperationQueue(request, taskName, async () => {
         const metadata = await this.metadata();
@@ -1127,20 +1202,16 @@ export class RuntimePodToolRunner {
     }
   }
 
-  private scope(request: RuntimeToolExecutionRequest): RuntimeScope | undefined {
-    const input = this.options.scopeForThread(request.sessionId, request.sessionThreadId);
-    if (input === undefined || input.sessionThreadId !== request.sessionThreadId) {
-      return undefined;
-    }
+  private scope(request: RuntimeSandboxExecutionRequest): RuntimeScope {
     return {
-      requestId: input.requestId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      sessionThreadId: input.sessionThreadId,
+      requestId: stableId("req", `tool:${request.modelRequestId}:${request.modelToolCallId}`),
+      workspaceId: request.workspaceId,
+      sessionId: request.sessionId,
+      sessionThreadId: request.sessionThreadId,
       binding: {
-        bindingId: input.bindingId,
-        bindingGeneration: input.bindingGeneration,
-        targetPodUid: input.targetPodUid,
+        bindingId: request.bindingId,
+        bindingGeneration: request.bindingGeneration,
+        targetPodUid: request.targetPodUid,
       },
     };
   }
@@ -1190,44 +1261,6 @@ function compareChildTaskOperationEntries(left: ChildTaskOperationQueueEntry, ri
   return left.sequence - right.sequence;
 }
 
-function scopeForChild(parentScope: RuntimeScope, childThreadId: string): RuntimeScope {
-  return {
-    requestId: parentScope.requestId,
-    workspaceId: parentScope.workspaceId,
-    sessionId: parentScope.sessionId,
-    sessionThreadId: childThreadId,
-    binding: parentScope.binding,
-  };
-}
-
-function interAgentAcceptedInput(
-  request: RuntimeToolExecutionRequest,
-  childScope: RuntimeScope,
-  delivery: DeliveryIdentity,
-  message: RuntimeMessage,
-  thread: Extract<RuntimeAcceptedInputState, { readonly kind: "inter_agent_message" }>["thread"],
-): RuntimeAcceptedInputState {
-  return {
-    requestId: stableId("req", `inter-agent:${delivery.deliveryId}`),
-    workspaceId: childScope.workspaceId,
-    sessionId: childScope.sessionId,
-    sessionThreadId: childScope.sessionThreadId,
-    bindingId: childScope.binding?.bindingId ?? request.bindingId,
-    bindingGeneration: childScope.binding?.bindingGeneration ?? request.bindingGeneration,
-    targetPodUid: childScope.binding?.targetPodUid ?? "",
-    runtimeInputId: stableId("rin", `inter-agent:${delivery.deliveryId}`),
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
-    kind: "inter_agent_message",
-    deliveryId: delivery.deliveryId,
-    sourceThreadId: request.sessionThreadId,
-    sourceToolUseEventId: delivery.sourceToolUseEventId,
-    message,
-    thread,
-  };
-}
-
 async function preloadChildThread(
   host: RuntimeSubAgentRunHost,
   request: RuntimeToolExecutionRequest,
@@ -1266,10 +1299,10 @@ async function writeThreadMessageSent(
       source_tool_use_event_id: delivery.sourceToolUseEventId,
       message,
     }),
-    projectionJson: "{}",
     sessionVisible: true,
     stableReasoningParts: [],
     serverToolUse: undefined,
+    drafts: [],
   }, metadata, abortSignal);
 }
 
@@ -1277,8 +1310,6 @@ function runtimeUserMessage(input: {
   readonly sessionId: string;
   readonly messageId: string;
   readonly text: string;
-  readonly providerId: string;
-  readonly modelId: string;
 }): RuntimeMessage {
   const now = new Date().toISOString();
   return RuntimeMessageSchema.parse({
@@ -1289,8 +1320,6 @@ function runtimeUserMessage(input: {
     sequence: 0,
     status: "completed",
     createdAt: now,
-    providerId: input.providerId,
-    modelId: input.modelId,
     parts: [
       {
         id: `${input.messageId}_text`,
@@ -1411,18 +1440,56 @@ function threadControlFromRequest(
   };
 }
 
+function childLifecycleRequestKey(
+  action: "close" | "resume",
+  request: RuntimeToolExecutionRequest,
+  childThreadId: string,
+): string {
+  return [
+    action,
+    request.workspaceId,
+    request.sessionId,
+    request.sessionThreadId,
+    request.toolUseEventId,
+    childThreadId,
+  ].join("\u0000");
+}
+
 function recordInput(input: RuntimeJsonValue): Record<string, RuntimeJsonValue> {
   return isRecord(input) ? input : {};
 }
 
-function runTool(
-  client: Pick<AgentRuntimeBridgeServiceClient, "runTool">,
-  request: RunToolRequest,
+function acceptSandboxExecution(
+  client: Pick<AgentRuntimeBridgeServiceClient, "acceptSandboxExecution">,
+  request: AcceptSandboxExecutionRequest,
+  metadata: Metadata,
+): Promise<AcceptSandboxExecutionResponse> {
+  const options: CallOptions = {
+    deadline: Date.now() + SessionEventWriterRetryPolicy.timeoutPerAttemptMs,
+  };
+  return new Promise((resolve, reject) => {
+    try {
+      client.acceptSandboxExecution(request, metadata, options, (error, response) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function awaitSandboxExecution(
+  client: Pick<AgentRuntimeBridgeServiceClient, "awaitSandboxExecution">,
+  request: AwaitSandboxExecutionRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
-): Promise<RunToolResponse> {
+): Promise<AwaitSandboxExecutionResponse> {
   return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.runTool(unaryRequest, unaryMetadata, callback)
+    client.awaitSandboxExecution(unaryRequest, unaryMetadata, callback)
   );
 }
 
@@ -1442,10 +1509,9 @@ function sendCommandInput(
   request: SendCommandInputRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
-  onAbort: () => void,
 ): Promise<SendCommandInputResponse> {
   return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.sendCommandInput(unaryRequest, unaryMetadata, callback), onAbort
+    client.sendCommandInput(unaryRequest, unaryMetadata, callback)
   );
 }
 
@@ -1454,21 +1520,9 @@ function readCommandResult(
   request: ReadCommandResultRequest,
   metadata: Metadata,
   abortSignal: AbortSignal,
-  onAbort: () => void,
 ): Promise<ReadCommandResultResponse> {
   return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.readCommandResult(unaryRequest, unaryMetadata, callback), onAbort
-  );
-}
-
-function cancelCommand(
-  client: Pick<AgentRuntimeBridgeServiceClient, "cancelCommand">,
-  request: CancelCommandRequest,
-  metadata: Metadata,
-  abortSignal: AbortSignal,
-): Promise<CancelCommandResponse> {
-  return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
-    client.cancelCommand(unaryRequest, unaryMetadata, callback)
+    client.readCommandResult(unaryRequest, unaryMetadata, callback)
   );
 }
 
@@ -1509,9 +1563,8 @@ function resolveInterAgentDelivery(
   client: Pick<AgentRuntimeBridgeServiceClient, "resolveInterAgentDelivery">,
   request: ResolveInterAgentDeliveryRequest,
   metadata: Metadata,
-  abortSignal: AbortSignal,
 ): Promise<ResolveInterAgentDeliveryResponse> {
-  return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
+  return unaryCall(request, metadata, (unaryRequest, unaryMetadata, callback) =>
     client.resolveInterAgentDelivery(unaryRequest, unaryMetadata, callback)
   );
 }
@@ -1581,6 +1634,26 @@ type UnaryInvoker<Request, Response> = (
   metadata: Metadata,
   callback: UnaryCallback<Response>,
 ) => ClientUnaryCall;
+
+function unaryCall<Request, Response>(
+  request: Request,
+  metadata: Metadata,
+  invoke: UnaryInvoker<Request, Response>,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    try {
+      invoke(request, metadata, (error: ServiceError | null, response: Response) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
 
 class ToolRouteAborted extends Error {
   constructor() {
@@ -1653,11 +1726,9 @@ function cancellableUnaryCall<Request, Response>(
   metadata: Metadata,
   abortSignal: AbortSignal,
   invoke: UnaryInvoker<Request, Response>,
-  onAbort?: () => void,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
     if (abortSignal.aborted) {
-      onAbort?.();
       reject(new ToolRouteAborted());
       return;
     }
@@ -1675,7 +1746,6 @@ function cancellableUnaryCall<Request, Response>(
       settlement();
     };
     const abort = (): void => {
-      onAbort?.();
       call?.cancel();
       settle(() => reject(new ToolRouteAborted()));
     };
@@ -1703,35 +1773,77 @@ function isGrpcStatus(error: unknown, code: status): boolean {
   return typeof error === "object" && error !== null && (error as Partial<ServiceError>).code === code;
 }
 
+function isDurableBridgeRejection(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || typeof (error as Partial<ServiceError>).code !== "number") {
+    return false;
+  }
+  switch ((error as Partial<ServiceError>).code) {
+    case status.INVALID_ARGUMENT:
+    case status.NOT_FOUND:
+    case status.ALREADY_EXISTS:
+    case status.FAILED_PRECONDITION:
+      return true;
+    default:
+      return false;
+  }
+}
+
 function bridgeAckAccepted(status: BridgeWriteStatus | undefined): boolean {
   return status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE;
 }
 
-function resultJsonToExecutionResult(request: RuntimeToolExecutionRequest, resultJson: string): RuntimeToolExecutionResult {
+function resultJsonToExecutionResult(
+  request: RuntimeToolExecutionRequest,
+  resultJson: string,
+  sandboxResultDigest?: string,
+): RuntimeToolExecutionResult {
   const parsed = parseResultJson(resultJson);
   if (parsed === undefined) {
     return toolFailure(request, "Tool route returned malformed result JSON.", false);
   }
   const visible = filterVisibleToolResult(request, parsed);
   const status = isRecord(visible) ? stringField(visible, "status") : undefined;
+  const retryableValue = isRecord(visible) && Object.hasOwn(visible, "retryable")
+    ? visible.retryable
+    : undefined;
+  if (retryableValue !== undefined && typeof retryableValue !== "boolean") {
+    return {
+      ...toolFailure(request, "Tool route returned malformed retryability.", false),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
+    };
+  }
   if (status === "success" || status === "completed" || status === "running" || status === "accepted") {
     const backgroundTask = status === "running" ? backgroundTaskFromResult(visible) : undefined;
     return {
       type: "completed",
       output: { text: formatToolResult(request, visible), truncated: resultIsTruncated(parsed) },
       ...(backgroundTask !== undefined ? { backgroundTask } : {}),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
   }
   if (status === "cancelled" || status === "expired") {
     return {
       type: "cancelled",
       error: runtimeFailure(request, resultErrorMessage(request, visible, `Tool route ${status}.`), false),
+      ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
   }
   return {
     type: "error",
-    error: runtimeFailure(request, resultErrorMessage(request, visible, "Tool route failed."), status === "runtime_error" || status === "failed"),
+    error: runtimeFailure(
+      request,
+      resultErrorMessage(request, visible, "Tool route failed."),
+      typeof retryableValue === "boolean" ? retryableValue : status === "runtime_error" || status === "failed",
+    ),
+    ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
   };
+}
+
+function withSandboxResultDigest(
+  result: RuntimeToolExecutionResult,
+  sandboxResultDigest: string,
+): RuntimeToolExecutionResult {
+  return result.type === "stale_custody" ? result : { ...result, sandboxResultDigest };
 }
 
 function backgroundTaskFromResult(parsed: RuntimeJsonValue): { readonly taskId: string } | undefined {
@@ -1754,14 +1866,6 @@ function parseResultJson(resultJson: string): RuntimeJsonValue | undefined {
   } catch {
     return undefined;
   }
-}
-
-function isMemoryProjectionReplayResult(resultJson: string): boolean {
-  const parsed = parseResultJson(resultJson);
-  return isRecord(parsed) &&
-    stringField(parsed, "status") === "runtime_error" &&
-    stringField(parsed, "error_code") === "projection_refresh_failed" &&
-    parsed.retryable === true;
 }
 
 function withBackgroundTask(resultJson: string, taskId: string): string {
@@ -2029,20 +2133,22 @@ function webServerToolUse(response: RunWebResponse): { readonly webSearchRequest
 }
 
 function toolFailure(
-  request: RuntimeToolExecutionRequest,
+  request: RuntimeSandboxExecutionRequest,
   message: string,
   retryable: boolean,
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,
   publicErrorEvent?: PublicMcpErrorEvent | undefined,
   attachments?: readonly ProviderRequestAttachment[],
   serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number },
-): RuntimeToolExecutionResult {
+  mcpMaterializationHandle?: string,
+): Extract<RuntimeToolExecutionResult, { readonly type: "error" }> {
   return {
     type: "error",
     error: runtimeFailure(request, message, retryable, retryStatus),
     ...(publicErrorEvent !== undefined ? { publicErrorEvent } : {}),
     ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     ...(serverToolUse !== undefined ? { serverToolUse } : {}),
+    ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
   };
 }
 
@@ -2054,7 +2160,7 @@ function toolCancelled(request: RuntimeToolExecutionRequest, message: string): R
 }
 
 function runtimeFailure(
-  request: RuntimeToolExecutionRequest,
+  request: RuntimeSandboxExecutionRequest,
   message: string,
   retryable: boolean,
   retryStatus?: ReturnType<typeof runtimeRetryStatusFromMcp>,
@@ -2120,6 +2226,7 @@ function publicMcpErrorEventFromResponse(
     case McpErrorKind.MCP_ERROR_KIND_IN_FLIGHT:
     case McpErrorKind.MCP_ERROR_KIND_COMMIT_FAILED:
     case McpErrorKind.MCP_ERROR_KIND_INTERNAL:
+    case McpErrorKind.MCP_ERROR_KIND_CUSTODY_LOST:
     case McpErrorKind.MCP_ERROR_KIND_UNSPECIFIED:
     case undefined:
     case McpErrorKind.UNRECOGNIZED:

@@ -3,9 +3,9 @@ import {
   RuntimeMessageRole,
   RuntimeToolPartState,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { RuntimeMessage, RuntimeMessageInfo, RuntimeMessageStoreOperationControls, RuntimePart } from "../../src/contracts/runtime.js";
-import { RuntimeMessageSchema, RuntimeMessageStore } from "../../src/contracts/runtime.js";
-import { RuntimeMessageProjection, toGatewayRuntimeMessages } from "../../src/runtime/message-projection.js";
+import type { RuntimeMessage, RuntimePart } from "../../src/contracts/runtime.js";
+import { RuntimeMessageSchema } from "../../src/contracts/runtime.js";
+import { toGatewayRuntimeMessages } from "../../src/runtime/message-projection.js";
 import {
   buildRuntimeMessageProjectionMessage as message,
 } from "./runtime-message-builders.js";
@@ -179,7 +179,7 @@ describe("RuntimeMessageProjection", () => {
     });
   });
 
-  test("rejects pending/running tool state and missing tool_use_event_id before Gateway request assembly", () => {
+  test("rejects pending public tool state and completed tools without a durable tool-use identity", () => {
     expect(toGatewayRuntimeMessages([
       message("assistant-1", "assistant", [
         toolPart({
@@ -190,23 +190,13 @@ describe("RuntimeMessageProjection", () => {
     ])).toMatchObject({ ok: false, error: { code: "provider_invalid_request" } });
 
     expect(toGatewayRuntimeMessages([
-      message("assistant-1", "assistant", [
-        toolPart({
-          status: "error",
-          input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
-          error: { type: "tool_failed", message: "failed", retryable: false },
-        }, ""),
-      ]),
-    ])).toMatchObject({ ok: false, error: { code: "provider_invalid_request" } });
-
-    expect(toGatewayRuntimeMessages([
-      message("assistant-1", "assistant", [
-        toolPart({
+      message("assistant-1", "assistant", [{
+        ...toolPart({
           status: "completed",
           input: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
           output: { text: "result", truncated: false },
         }, ""),
-      ]),
+      }]),
     ])).toMatchObject({ ok: false, error: { code: "provider_invalid_request" } });
   });
 
@@ -250,41 +240,4 @@ describe("RuntimeMessageProjection", () => {
     }
   });
 
-  test("keeps hot projection updates ACK-gated by successful store writes", async () => {
-    const projection = new RuntimeMessageProjection();
-    const info: RuntimeMessageInfo = {
-      id: "assistant-1",
-      sessionId: "session-a",
-      role: "assistant",
-      origin: "agent",
-      sequence: 0,
-      status: "streaming",
-      createdAt,
-    };
-    const writes: unknown[] = [];
-    class RecordingStore extends RuntimeMessageStore {
-      protected async writeMessageRecord(messageInfo: RuntimeMessageInfo, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-        writes.push(messageInfo);
-        return { ok: true, messageId: messageInfo.id, operation: "writeMessage" as const };
-      }
-
-      protected async writePartRecord(part: RuntimePart, _controls: RuntimeMessageStoreOperationControls): Promise<unknown> {
-        writes.push(part);
-        return { ok: true, messageId: part.messageId, partId: part.id, operation: "writePart" as const };
-      }
-    }
-    const store = new RecordingStore();
-    const controls = { signal: new AbortController().signal, timeoutMs: 1000, sleep: async () => true };
-
-    await projection.writeMessageAndUpdate(store, info, controls);
-    await projection.writePartAndUpdate(store, textPart("text-1", "assistant-1", "ok"), controls);
-
-    expect(writes).toHaveLength(2);
-    expect(projection.messages()).toEqual([
-      expect.objectContaining({
-        id: "assistant-1",
-        parts: [expect.objectContaining({ type: "text", text: "ok" })],
-      }),
-    ]);
-  });
 });

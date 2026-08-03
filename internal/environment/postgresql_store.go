@@ -432,7 +432,7 @@ func upsertEnvironmentArtifact(ctx context.Context, tx *dbconnect.Tx, ws workspa
 			workspace_id, environment_id, generation, status, provider,
 			normalized_config_hash, artifact_input_hash, runtime_network_policy_json,
 			packages_json, provider_artifact_ref, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'tetral', $5, $6, $7, $8, NULLIF($9, ''), $10, $10)
+		) VALUES ($1, $2, $3, $4, 'daytona', $5, $6, $7, $8, NULLIF($9, ''), $10, $10)
 		ON CONFLICT (workspace_id, environment_id, generation) DO UPDATE SET
 			status = EXCLUDED.status,
 			provider_artifact_ref = EXCLUDED.provider_artifact_ref,

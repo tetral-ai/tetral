@@ -7,6 +7,7 @@
  * into these shapes, while SessionProcessor and AgentLoop consume them.
  */
 import { z } from "zod/v4";
+import { MaxJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   ProviderError,
 } from "../contracts/provider.js";
@@ -21,7 +22,7 @@ export const LLMEventProviderMetadataMaxBytes = 4_096;
 
 const IdentifierSchema = z.string().min(1);
 const NonNegativeIntegerSchema = z.number().int().nonnegative();
-const SafeOperationNameSchema = z.enum(["writeMessage", "writePart"]);
+const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
   "bounded",
@@ -206,6 +207,10 @@ export type RuntimeBoundedText = z.infer<typeof RuntimeBoundedTextSchema>;
 
 /** Recursive JSON value validator used by bounded provider-stream payloads. */
 export const RuntimeJsonValueSchema = z.custom<RuntimeJsonValue>(isRuntimeJsonValue, "RuntimeJsonValue");
+const RuntimeToolInputSchema = RuntimeJsonValueSchema.refine(
+  (value) => serializedRuntimeJsonByteLength(value) <= MaxJsonBytes,
+  `tool input must be at most ${MaxJsonBytes} UTF-8 bytes`,
+);
 
 /** Bounded JSON payload retaining either its value or a safe preview. */
 export const RuntimeBoundedJsonSchema = z.strictObject({
@@ -282,7 +287,13 @@ export const LLMEventSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("tool-input-start"), id: RuntimeIdentifierSchema, toolName: RuntimeIdentifierSchema }),
   z.strictObject({ type: z.literal("tool-input-delta"), id: RuntimeIdentifierSchema, text_delta: RuntimeTextSchema, toolName: RuntimeIdentifierSchema.optional() }),
   z.strictObject({ type: z.literal("tool-input-end"), id: RuntimeIdentifierSchema, toolName: RuntimeIdentifierSchema.optional() }),
-  z.strictObject({ type: z.literal("tool-call"), id: RuntimeIdentifierSchema, toolName: RuntimeIdentifierSchema, input: RuntimeBoundedJsonSchema }),
+  z.strictObject({
+    type: z.literal("tool-call"),
+    id: RuntimeIdentifierSchema,
+    toolName: RuntimeIdentifierSchema,
+    input: RuntimeToolInputSchema,
+    inputPreview: RuntimeBoundedJsonSchema,
+  }),
   z.strictObject({ type: z.literal("step-finish"), finishReason: RuntimeFinishReasonSchema.optional(), usage: RuntimeUsageSchema.optional() }),
   z.strictObject({
     type: z.literal("finish"),

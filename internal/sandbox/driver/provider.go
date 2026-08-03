@@ -24,17 +24,14 @@ import (
 const DaytonaProviderName = "daytona"
 
 type DaytonaLifecycleProvider struct {
-	client                    daytonaLifecycleClient
-	lifecycle                 daytonaLifecyclePolicy
-	preparationCommandTimeout time.Duration
-	stopSandbox               func(context.Context, *daytona.Sandbox, time.Duration, bool) error
-	archiveSandbox            func(context.Context, *daytona.Sandbox) error
-	deleteSandbox             func(context.Context, *daytona.Sandbox, time.Duration) error
+	client         daytonaLifecycleClient
+	lifecycle      daytonaLifecyclePolicy
+	commandTimeout time.Duration
+	deleteSandbox  func(context.Context, *daytona.Sandbox, time.Duration) error
 }
 
 type daytonaLifecyclePolicy struct {
 	stopTimeout        time.Duration
-	stopForceAfter     time.Duration
 	autoStopMinutes    *int
 	autoArchiveMinutes *int
 	autoDeleteMinutes  *int
@@ -45,39 +42,32 @@ type daytonaLifecycleClient interface {
 	Get(context.Context, string) (*daytona.Sandbox, error)
 }
 
-func NewDaytonaLifecycleProvider(cfg Config) (*DaytonaLifecycleProvider, error) {
-	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
-		APIKey: cfg.DaytonaAPIKey,
-		APIUrl: cfg.DaytonaAPIURL,
-		Target: cfg.DaytonaTarget,
-	})
-	if err != nil {
-		return nil, err
+// NewDaytonaLifecycleProviderForSDKClient binds lifecycle operations to the
+// process-wide Daytona client owned by the Sandbox Service adapter.
+func NewDaytonaLifecycleProviderForSDKClient(client *daytona.Client, cfg Config) (*DaytonaLifecycleProvider, error) {
+	if client == nil {
+		return nil, stderrors.New("daytona client is required")
 	}
-	return newDaytonaLifecycleProvider(client, cfg.Lifecycle, cfg.PreparationCommandTimeout)
+	return newDaytonaLifecycleProvider(client, cfg.Lifecycle, cfg.CommandTimeout)
 }
 
-func NewDaytonaLifecycleProviderForClient(client daytonaLifecycleClient, preparationCommandTimeout time.Duration) *DaytonaLifecycleProvider {
-	provider, _ := newDaytonaLifecycleProvider(client, LifecyclePolicy{}, preparationCommandTimeout)
+func NewDaytonaLifecycleProviderForClient(client daytonaLifecycleClient, commandTimeout time.Duration) *DaytonaLifecycleProvider {
+	provider, _ := newDaytonaLifecycleProvider(client, LifecyclePolicy{}, commandTimeout)
 	return provider
 }
 
-func newDaytonaLifecycleProvider(client daytonaLifecycleClient, policy LifecyclePolicy, preparationCommandTimeout time.Duration) (*DaytonaLifecycleProvider, error) {
-	if preparationCommandTimeout <= 0 {
-		return nil, stderrors.New("preparation command timeout is required")
+func newDaytonaLifecycleProvider(client daytonaLifecycleClient, policy LifecyclePolicy, commandTimeout time.Duration) (*DaytonaLifecycleProvider, error) {
+	if commandTimeout <= 0 {
+		return nil, stderrors.New("daytona command timeout is required")
 	}
 	resolved, err := resolveDaytonaLifecyclePolicy(policy)
 	if err != nil {
 		return nil, err
 	}
 	return &DaytonaLifecycleProvider{
-		client:                    client,
-		lifecycle:                 resolved,
-		preparationCommandTimeout: preparationCommandTimeout,
-		stopSandbox: func(ctx context.Context, sandbox *daytona.Sandbox, timeout time.Duration, force bool) error {
-			return sandbox.StopWithTimeout(ctx, timeout, force)
-		},
-		archiveSandbox: func(ctx context.Context, sandbox *daytona.Sandbox) error { return sandbox.Archive(ctx) },
+		client:         client,
+		lifecycle:      resolved,
+		commandTimeout: commandTimeout,
 		deleteSandbox: func(ctx context.Context, sandbox *daytona.Sandbox, timeout time.Duration) error {
 			return sandbox.DeleteWithTimeout(ctx, timeout)
 		},
@@ -86,17 +76,17 @@ func newDaytonaLifecycleProvider(client daytonaLifecycleClient, policy Lifecycle
 
 func (p *DaytonaLifecycleProvider) CreateSandbox(ctx context.Context, request sandbox.CreateSandboxRequest) (sandbox.ProviderHandle, error) {
 	if p == nil || p.client == nil {
-		return sandbox.ProviderHandle{}, daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
+		return sandbox.ProviderHandle{}, MarkProviderOperationNotSubmitted(daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil))
 	}
 	if request.Setup.SandboxID == "" {
-		return sandbox.ProviderHandle{}, daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox id is required", nil)
+		return sandbox.ProviderHandle{}, MarkProviderOperationNotSubmitted(daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox id is required", nil))
 	}
 	if request.Setup.ProviderArtifactRef == "" {
-		return sandbox.ProviderHandle{}, daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "provider_artifact_ref is required", nil)
+		return sandbox.ProviderHandle{}, MarkProviderOperationNotSubmitted(daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "provider_artifact_ref is required", nil))
 	}
 	networkBlockAll, networkAllowList, err := daytonaNetworkPolicy(request.Setup.Network)
 	if err != nil {
-		return sandbox.ProviderHandle{}, err
+		return sandbox.ProviderHandle{}, MarkProviderOperationNotSubmitted(err)
 	}
 	created, err := p.client.Create(ctx, types.SnapshotParams{
 		SandboxBaseParams: types.SandboxBaseParams{
@@ -112,7 +102,11 @@ func (p *DaytonaLifecycleProvider) CreateSandbox(ctx context.Context, request sa
 		Snapshot: request.Setup.ProviderArtifactRef,
 	}, options.WithWaitForStart(true))
 	if err != nil {
-		return sandbox.ProviderHandle{}, mapDaytonaError(sandbox.StageCreateSandbox, err)
+		mapped := mapDaytonaError(sandbox.StageCreateSandbox, err)
+		if daytonaRequestWasRejected(err) {
+			mapped = MarkProviderOperationNotSubmitted(mapped)
+		}
+		return sandbox.ProviderHandle{}, mapped
 	}
 	if created == nil || created.ID == "" {
 		return sandbox.ProviderHandle{}, daytonaProviderError(sandbox.StageCreateSandbox, sandbox.ProviderErrorUnknown, true, 0, "daytona create returned no sandbox", nil)
@@ -126,19 +120,71 @@ func (p *DaytonaLifecycleProvider) CreateSandbox(ctx context.Context, request sa
 	}, nil
 }
 
+// ResolveSandbox returns the exact provider resource for a stable Tetral name
+// only when every Tetral ownership label matches and the only additional label
+// is Daytona's SDK-owned default-language label. It is the crash-recovery probe
+// that prevents an uncertain Create response from authorizing another Create.
+func (p *DaytonaLifecycleProvider) ResolveSandbox(ctx context.Context, name string, labels map[string]string) (sandbox.ProviderHandle, bool, error) {
+	if p == nil || p.client == nil {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
+	}
+	if name == "" || len(labels) == 0 {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox resolution identity is required", nil)
+	}
+	got, err := p.client.Get(ctx, name)
+	if err != nil {
+		mapped := mapDaytonaError(sandbox.StageStatus, err)
+		var providerErr *sandbox.ProviderError
+		if stderrors.As(mapped, &providerErr) && providerErr.Kind == sandbox.ProviderErrorNotFound {
+			return sandbox.ProviderHandle{}, false, nil
+		}
+		return sandbox.ProviderHandle{}, false, mapped
+	}
+	if got == nil || got.ID == "" || got.Name != name {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona returned an invalid sandbox identity", nil)
+	}
+	if !daytonaOwnershipLabelsMatch(got.Labels, labels) {
+		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona sandbox ownership labels do not match", nil)
+	}
+	return sandbox.ProviderHandle{
+		Provider: DaytonaProviderName, SandboxID: got.ID,
+		Metadata: map[string]string{"daytona_state": string(got.State)},
+	}, true, nil
+}
+
+func daytonaOwnershipLabelsMatch(got map[string]string, ownership map[string]string) bool {
+	if len(got) != len(ownership) && len(got) != len(ownership)+1 {
+		return false
+	}
+	for key, value := range ownership {
+		if got[key] != value {
+			return false
+		}
+	}
+	for key, value := range got {
+		if _, owned := ownership[key]; owned {
+			continue
+		}
+		if key != types.CodeToolboxLanguageLabel || value != string(types.CodeLanguagePython) {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *DaytonaLifecycleProvider) StartSandbox(ctx context.Context, handle sandbox.ProviderHandle) error {
 	if p == nil || p.client == nil {
-		return daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
+		return MarkProviderOperationNotSubmitted(daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil))
 	}
 	if handle.SandboxID == "" {
-		return daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "provider sandbox id is required", nil)
+		return MarkProviderOperationNotSubmitted(daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "provider sandbox id is required", nil))
 	}
 	got, err := p.client.Get(ctx, handle.SandboxID)
 	if err != nil {
-		return mapDaytonaError(sandbox.StageStartSandbox, err)
+		return MarkProviderOperationNotSubmitted(mapDaytonaError(sandbox.StageStartSandbox, err))
 	}
 	if got == nil {
-		return daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorNotFound, false, http.StatusNotFound, "daytona sandbox not found", nil)
+		return MarkProviderOperationNotSubmitted(daytonaProviderError(sandbox.StageStartSandbox, sandbox.ProviderErrorNotFound, false, http.StatusNotFound, "daytona sandbox not found", nil))
 	}
 	if err := got.Start(ctx); err != nil {
 		return mapDaytonaError(sandbox.StageStartSandbox, err)
@@ -160,7 +206,7 @@ func (p *DaytonaLifecycleProvider) CheckBaseTemplateHealth(ctx context.Context, 
 	if got == nil || got.Process == nil {
 		return daytonaProviderError(sandbox.StageCheckBaseTemplate, sandbox.ProviderErrorUnavailable, true, 0, "daytona sandbox is missing process service", nil)
 	}
-	response, err := got.Process.ExecuteCommand(ctx, runtimeUserShellCommand(shellQuote(helperPath)+" health"), options.WithExecuteTimeout(p.preparationCommandTimeout))
+	response, err := got.Process.ExecuteCommand(ctx, runtimeUserShellCommand(shellQuote(helperPath)+" health"), options.WithExecuteTimeout(p.commandTimeout))
 	if err != nil {
 		return mapDaytonaError(sandbox.StageCheckBaseTemplate, err)
 	}
@@ -242,7 +288,7 @@ func (p *DaytonaLifecycleProvider) PrepareBaseDirectories(ctx context.Context, h
 	if got == nil || got.Process == nil {
 		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnavailable, true, 0, "daytona sandbox is missing process service", nil)
 	}
-	response, err := got.Process.ExecuteCommand(ctx, canonicalSandboxBaseDirectoryCommand(), options.WithExecuteTimeout(p.preparationCommandTimeout))
+	response, err := got.Process.ExecuteCommand(ctx, canonicalSandboxBaseDirectoryCommand(), options.WithExecuteTimeout(p.commandTimeout))
 	if err != nil {
 		return mapDaytonaError(sandbox.StageMountResources, err)
 	}
@@ -265,9 +311,6 @@ func canonicalSandboxBaseDirectoryCommand() string {
 		helperMemoryRoot,
 		helperSkillsRoot,
 	}
-	internalRoots := []string{
-		"/tmp/tetral/session-prepare",
-	}
 	runtimeRoots := []string{
 		"/tmp/tetral-runtime",
 		"/tmp/tetral-runtime/rclone-cache",
@@ -277,15 +320,12 @@ func canonicalSandboxBaseDirectoryCommand() string {
 	// root-owned /mnt or chown anything to root. The sandbox image guarantees
 	// the runtime user passwordless sudo; the projection mount and teardown
 	// scripts rely on the same contract.
-	parts := make([]string, 0, len(writableRoots)+len(readOnlyProjectionRoots)+len(internalRoots)+len(runtimeRoots))
+	parts := make([]string, 0, len(writableRoots)+len(readOnlyProjectionRoots)+len(runtimeRoots))
 	for _, root := range writableRoots {
 		parts = append(parts, "sudo install -d -m 0755 -o "+shellQuote(RuntimeUser)+" -g "+shellQuote(RuntimeUser)+" "+shellQuote(root))
 	}
 	for _, root := range readOnlyProjectionRoots {
 		parts = append(parts, "sudo install -d -m 0755 -o root -g root "+shellQuote(root))
-	}
-	for _, root := range internalRoots {
-		parts = append(parts, "sudo install -d -m 0700 -o root -g root "+shellQuote(root))
 	}
 	for _, root := range runtimeRoots {
 		parts = append(parts, "sudo install -d -m 0700 -o "+shellQuote(RuntimeUser)+" -g "+shellQuote(RuntimeUser)+" "+shellQuote(root))
@@ -293,55 +333,37 @@ func canonicalSandboxBaseDirectoryCommand() string {
 	return strings.Join(parts, " && ")
 }
 
-func (p *DaytonaLifecycleProvider) GetStatus(ctx context.Context, handle sandbox.ProviderHandle) (sandbox.ProviderStatus, error) {
+func (p *DaytonaLifecycleProvider) InspectState(ctx context.Context, providerResourceID string) (string, error) {
 	if p == nil || p.client == nil {
-		return sandbox.ProviderStatus{}, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
+		return "", daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
 	}
-	got, err := p.client.Get(ctx, handle.SandboxID)
+	got, err := p.client.Get(ctx, providerResourceID)
 	if err != nil {
-		return sandbox.ProviderStatus{}, mapDaytonaError(sandbox.StageStatus, err)
+		return "", mapDaytonaError(sandbox.StageStatus, err)
 	}
-	return sandbox.ProviderStatus{
-		Availability:  daytonaAvailability(got),
-		SandboxStatus: daytonaSandboxStatus(got),
-		Retryable:     daytonaStatusRetryable(got),
-		SafeMessage:   daytonaSafeStatusMessage(got),
-		Metadata: map[string]string{
-			"daytona_state": string(got.State),
-		},
-	}, nil
+	if got == nil || got.ID == "" || got.ID != providerResourceID {
+		return "", daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona status response identity is invalid", nil)
+	}
+	return string(got.State), nil
 }
 
-func (p *DaytonaLifecycleProvider) ReleaseSandbox(ctx context.Context, handle sandbox.ProviderHandle, reason sandbox.ReleaseReason) error {
+func (p *DaytonaLifecycleProvider) ReleaseSandbox(ctx context.Context, handle sandbox.ProviderHandle) error {
 	if p == nil || p.client == nil {
 		return daytonaProviderError(sandbox.StageReleaseSandbox, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona lifecycle provider is unavailable", nil)
 	}
 	got, err := p.client.Get(ctx, handle.SandboxID)
 	if err != nil {
-		return mapDaytonaError(sandbox.StageReleaseSandbox, err)
+		return MarkProviderOperationNotSubmitted(mapDaytonaError(sandbox.StageReleaseSandbox, err))
 	}
 	if got == nil {
 		return daytonaProviderError(sandbox.StageReleaseSandbox, sandbox.ProviderErrorNotFound, false, http.StatusNotFound, "daytona sandbox not found", nil)
 	}
-	switch reason {
-	case sandbox.ReleaseReasonDelete:
-		if err := p.deleteSandbox(ctx, got, p.lifecycle.stopTimeout); err != nil {
-			return mapDaytonaError(sandbox.StageReleaseSandbox, err)
+	if err := p.deleteSandbox(ctx, got, p.lifecycle.stopTimeout); err != nil {
+		mapped := mapDaytonaError(sandbox.StageReleaseSandbox, err)
+		if daytonaRequestWasRejected(err) {
+			mapped = MarkProviderOperationNotSubmitted(mapped)
 		}
-	case sandbox.ReleaseReasonArchive, sandbox.ReleaseReasonCleanup, sandbox.ReleaseReasonRuntimePodLost:
-		if err := p.stopSandbox(ctx, got, p.lifecycle.stopTimeout, false); err != nil {
-			if p.lifecycle.stopForceAfter <= 0 {
-				return mapDaytonaError(sandbox.StageReleaseSandbox, err)
-			}
-			if forceErr := p.stopSandbox(ctx, got, p.lifecycle.stopForceAfter, true); forceErr != nil {
-				return mapDaytonaError(sandbox.StageReleaseSandbox, forceErr)
-			}
-		}
-		if err := p.archiveSandbox(ctx, got); err != nil {
-			return mapDaytonaError(sandbox.StageReleaseSandbox, err)
-		}
-	default:
-		return daytonaProviderError(sandbox.StageReleaseSandbox, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox release reason is invalid", nil)
+		return mapped
 	}
 	return nil
 }
@@ -361,7 +383,6 @@ func resolveDaytonaLifecyclePolicy(policy LifecyclePolicy) (daytonaLifecyclePoli
 	}
 	return daytonaLifecyclePolicy{
 		stopTimeout:        policy.StopTimeout,
-		stopForceAfter:     policy.StopForceAfter,
 		autoStopMinutes:    autoStop,
 		autoArchiveMinutes: autoArchive,
 		autoDeleteMinutes:  autoDelete,
@@ -384,13 +405,17 @@ func daytonaIntervalMinutes(interval time.Duration, name string) (*int, error) {
 }
 
 func daytonaLabels(request sandbox.CreateSandboxRequest) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"tetral.workspace_id":    string(request.Setup.WorkspaceID),
 		"tetral.session_id":      request.Setup.SessionID,
 		"tetral.sandbox_id":      request.Setup.SandboxID,
 		"tetral.environment_id":  request.Setup.EnvironmentID,
 		"tetral.lifecycle_owner": "sandbox",
 	}
+	if request.Setup.LifecycleOperationID != "" {
+		labels["tetral.lifecycle_operation_id"] = request.Setup.LifecycleOperationID
+	}
+	return labels
 }
 
 func daytonaNetworkPolicy(network sandbox.NetworkSetup) (bool, *string, error) {
@@ -430,111 +455,13 @@ func normalizeDaytonaCIDRAllowList(raw string) (string, error) {
 	return strings.Join(normalized, ","), nil
 }
 
-func daytonaAvailability(got *daytona.Sandbox) sandbox.ProviderAvailability {
-	if got == nil {
-		return sandbox.ProviderMissing
-	}
-	switch daytonaSandboxStatus(got) {
-	case sandbox.StatusActive:
-		return sandbox.ProviderAvailable
-	case sandbox.StatusReleased:
-		return sandbox.ProviderMissing
-	case sandbox.StatusFailed:
-		return sandbox.ProviderUnknown
-	default:
-		return sandbox.ProviderUnavailable
-	}
-}
-
-// daytonaSandboxStatus maps a Daytona provider runtime state to the tetral
-// sandboxes.status axis. The mapping is explicit and fail-closed: any provider
-// state not named below — including SANDBOXSTATE_UNKNOWN and any string a newer
-// SDK adds — maps to StatusFailed, so an unmapped state can never be mistaken for
-// a usable machine. Extend this table deliberately when the provider gains a
-// state; do not introduce a permissive default.
-//
-//	provider state (apiclient.SANDBOXSTATE_* / lowercased string)     tetral status
-//	---------------------------------------------------------------   -------------
-//	CREATING, PENDING_BUILD, BUILDING_SNAPSHOT, PULLING_SNAPSHOT,      creating
-//	  RESIZING, SNAPSHOTTING, FORKING
-//	RESTORING, STARTING, "resuming"                                    resuming
-//	STARTED                                                            active
-//	STOPPING, STOPPED, "pausing", "paused"                            stopped
-//	ARCHIVING, ARCHIVED                                                archived
-//	DESTROYING, DESTROYED, "deleting","deleted","destroyed"           released
-//	ERROR, BUILD_FAILED, UNKNOWN, UNKNOWN_DEFAULT_OPEN_API,            failed
-//	  and every other unrecognized state (fail-closed default)
-//	(nil sandbox)                                                      released
-//
-// UPDATE-WITH: daytonaAvailability and daytonaStatusRetryable (which read the same
-// *daytona.Sandbox); internal/sandbox/session_prepare.go sandboxStatusFromProviderAvailability.
-func daytonaSandboxStatus(got *daytona.Sandbox) sandbox.Status {
-	if got == nil {
-		return sandbox.StatusReleased
-	}
-	switch got.State {
-	case apiclient.SANDBOXSTATE_CREATING, apiclient.SANDBOXSTATE_PENDING_BUILD,
-		apiclient.SANDBOXSTATE_BUILDING_SNAPSHOT, apiclient.SANDBOXSTATE_PULLING_SNAPSHOT,
-		apiclient.SANDBOXSTATE_RESIZING, apiclient.SANDBOXSTATE_SNAPSHOTTING,
-		apiclient.SANDBOXSTATE_FORKING:
-		return sandbox.StatusCreating
-	case apiclient.SANDBOXSTATE_RESTORING, apiclient.SANDBOXSTATE_STARTING:
-		return sandbox.StatusResuming
-	case apiclient.SANDBOXSTATE_STARTED:
-		return sandbox.StatusActive
-	case apiclient.SANDBOXSTATE_STOPPING, apiclient.SANDBOXSTATE_STOPPED:
-		return sandbox.StatusStopped
-	case apiclient.SANDBOXSTATE_ARCHIVING, apiclient.SANDBOXSTATE_ARCHIVED:
-		return sandbox.StatusArchived
-	case apiclient.SANDBOXSTATE_DESTROYING, apiclient.SANDBOXSTATE_DESTROYED:
-		return sandbox.StatusReleased
-	case apiclient.SANDBOXSTATE_ERROR, apiclient.SANDBOXSTATE_BUILD_FAILED,
-		apiclient.SANDBOXSTATE_UNKNOWN, apiclient.SANDBOXSTATE_UNKNOWN_DEFAULT_OPEN_API:
-		return sandbox.StatusFailed
-	default:
-		switch strings.ToLower(string(got.State)) {
-		case "resuming":
-			return sandbox.StatusResuming
-		case "pausing", "paused":
-			return sandbox.StatusStopped
-		case "deleting", "deleted", "destroyed", "destroying":
-			return sandbox.StatusReleased
-		default:
-			return sandbox.StatusFailed
-		}
-	}
-}
-
-func daytonaStatusRetryable(got *daytona.Sandbox) bool {
-	if got == nil {
-		return false
-	}
-	switch got.State {
-	case apiclient.SANDBOXSTATE_CREATING, apiclient.SANDBOXSTATE_RESTORING, apiclient.SANDBOXSTATE_STARTING,
-		apiclient.SANDBOXSTATE_STOPPING, apiclient.SANDBOXSTATE_PENDING_BUILD, apiclient.SANDBOXSTATE_BUILDING_SNAPSHOT,
-		apiclient.SANDBOXSTATE_PULLING_SNAPSHOT, apiclient.SANDBOXSTATE_ARCHIVING, apiclient.SANDBOXSTATE_RESIZING,
-		apiclient.SANDBOXSTATE_SNAPSHOTTING, apiclient.SANDBOXSTATE_FORKING:
-		return true
-	default:
-		switch string(got.State) {
-		case "pausing", "resuming":
-			return true
-		default:
-			return false
-		}
-	}
-}
-
-func daytonaSafeStatusMessage(got *daytona.Sandbox) string {
-	if got == nil {
-		return "daytona sandbox is missing"
-	}
-	return fmt.Sprintf("daytona sandbox state: %s", got.State)
-}
-
 func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 	if err == nil {
 		return nil
+	}
+	var providerErr *sandbox.ProviderError
+	if stderrors.As(err, &providerErr) {
+		return err
 	}
 	var notFound *daytonaerrors.DaytonaNotFoundError
 	if stderrors.As(err, &notFound) {
@@ -574,6 +501,27 @@ func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 		return daytonaProviderError(stage, sandbox.ProviderErrorUnknown, retryable, daytonaErr.StatusCode, "daytona sandbox request failed", err)
 	}
 	return daytonaProviderError(stage, sandbox.ProviderErrorUnknown, true, 0, "daytona sandbox request failed", err)
+}
+
+func daytonaRequestWasRejected(err error) bool {
+	var rateLimited *daytonaerrors.DaytonaRateLimitError
+	if stderrors.As(err, &rateLimited) {
+		return true
+	}
+	var auth *daytonaerrors.DaytonaAuthenticationError
+	if stderrors.As(err, &auth) {
+		return true
+	}
+	var forbidden *daytonaerrors.DaytonaForbiddenError
+	if stderrors.As(err, &forbidden) {
+		return true
+	}
+	var validation *daytonaerrors.DaytonaValidationError
+	if stderrors.As(err, &validation) {
+		return true
+	}
+	var conflict *daytonaerrors.DaytonaConflictError
+	return stderrors.As(err, &conflict)
 }
 
 func daytonaProviderError(stage sandbox.ProviderStage, kind sandbox.ProviderErrorKind, retryable bool, statusCode int, message string, cause error) error {

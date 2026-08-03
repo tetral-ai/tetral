@@ -28,8 +28,8 @@ registry, and the upstream transport respectively.
 
 ### Request pipeline
 
-Sandbox git CLIs reach the proxy through a global git config written at
-preparation: an `insteadOf` URL rewrite pointing `github.com` here, plus an
+Sandbox git CLIs reach the proxy through a global git config written during
+resource materialization: an `insteadOf` URL rewrite pointing `github.com` here, plus an
 `extraHeader` carrying the session ticket. Each request passes four stages. A
 failure in any of the first three — path gate, ticket check, authorization —
 short-circuits with **zero upstream requests**; the zero-upstream guarantee is
@@ -72,7 +72,7 @@ it off, URL-borne tickets are never accepted.
 ### Ticket states
 
 Tickets are minted by Sandbox Service at the session's first GitHub
-preparation and rotated by each re-preparation, which rewrites the sandbox git
+materialization and rotated by each rematerialization, which rewrites the Sandbox git
 config wholesale. Only `SHA-256` hashes are stored, never raw tickets.
 
 | Ticket row state | Accepted? |
@@ -86,8 +86,8 @@ The rotation grace defaults equal to the drain grace
 (`DefaultTicketRotationGraceSeconds = DefaultDrainGraceSeconds`, wired from
 `TETRAL_GIT_PROXY_DRAIN_GRACE_SECONDS`) so a single git operation whose
 sequential requests (`GET /info/refs` then `POST git-*-pack`) straddle a
-re-preparation completes instead of failing mid-way. Rotation is
-crash-hardened by pending-activation ordering: a re-preparation inserts the new
+rematerialization completes instead of failing mid-way. Rotation is
+crash-hardened by pending-activation ordering: rematerialization inserts the new
 ticket as a `pending` row and keeps the prior ticket `live`; only after the
 sandbox git-config install succeeds does one DB transaction flip the new row
 `pending -> live` and the old row `live -> rotated`. The installed token stays

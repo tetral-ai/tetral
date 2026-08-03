@@ -35,9 +35,10 @@
 //   - Every DDL statement is idempotent (IF NOT EXISTS, or DROP + CREATE for
 //     policies), so InitializePostgreSQLSchema is a no-op against an
 //     already-initialized database.
-//   - Baseline statement bytes are frozen: a checksum pins each schema
-//     version, so a DDL change is a new appended migration, never an edit of
-//     an applied statement.
+//   - Before the first public release, the version-one baseline is the clean
+//     bootstrap schema and its checksum is regenerated when pre-release
+//     shapes are folded into their final definitions. After release, schema
+//     changes append migrations without rewriting an applied version.
 //   - The DDL uses only ordinary table/index DDL plus row-level security, so
 //     it stays portable across self-managed PostgreSQL and managed providers.
 //
@@ -62,29 +63,32 @@
 //	session_event_stream_changes                           the same transaction that inserts/updates a public event         Event Stream cursor / SSE
 //	                                                        (api admission, Bridge event/projection writes)
 //	session_event_idempotency_keys                         api event admission                                       api replay/conflict lookup
-//	session_messages                                       Bridge only                                                      Bridge LoadContext, Runtime cold repair
+//	session_messages                                       Runtime declarations persisted by Bridge                       Bridge LoadContext, Runtime cold repair
 //	session_pending_tool_uses                              Bridge only                                                      Bridge LoadContext cold-resume,
 //	                                                                                                                         Runtime pending ToolJob
 //	session_runtime_status                                 Bridge, the cleanup scheduler, and session-create seeding        cleanup scheduler, Bridge Job Runner, repair
 //	session_runtime_bindings                               Bridge only                                                      Bridge command delivery/reconcile, repair
-//	session_runtime_inbox (runtime delivery commits)       Bridge only                                                      Bridge repair, Runtime cold-load guard
-//	session_preparations                                   Sandbox Service (advances); api/event-admission           Bridge runtime-input gating, Sandbox Service
-//	                                                        allocate a fresh attempt; Bridge resets to pending
-//	session_output_captures                                Bridge only                                                      Bridge capture dedup
-//	sandboxes                                              Sandbox Service only                                             Bridge cold-return gating (read-only)
+//	session_runtime_inbox (runtime delivery commits)       Bridge delivery; Sandbox task notifications                    Bridge repair, Runtime cold-load guard
+//	session_sandbox_bindings                               Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service tool/lifecycle workers
+//	                                                        Session-delete release boundary
+//	sandbox_lifecycle_operations                           Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service lifecycle workers
+//	                                                        Session-delete release boundary
+//	session_output_captures                                Bridge FinishIdle adoption                                      Sandbox Service capture dedup
+//	sandbox_output_capture_operations / blobs              Sandbox Service                                                  Bridge FinishIdle adoption, cleanup workers
 //	session_resources / session_github_repository_resources api Session admission (+ token rotation)                 Sandbox Service clone, git-proxy
 //	                                                                                                                         allowlist, public Resources API
-//	session_git_tickets                                    Sandbox Service GitHub preparation (mint/rotate)                 git-proxy per-request validation
+//	session_git_tickets                                    Sandbox Service GitHub materialization (mint/rotate)             git-proxy per-request validation
 //	session_mcp_manifests                                  Bridge only                                                      Bridge LoadContext, manifest patch delivery
-//	session_background_tasks                               Bridge only                                                      Runtime task read/send/cancel, Bridge cleanup
+//	session_background_tasks                               Sandbox Service (execution/result); Bridge (conversation commit) Runtime task read/send/cancel, cleanup
 //	request_usage_details                                  Bridge only (WriteRequestEnd)                                    session usage projection, audit/billing
-//	session_runtime_tool_results                           Bridge only                                                      Bridge replay/idempotency, MCP claim replays
-//	session_transient_attachments                          Bridge only                                                      Gateway ResolveTransientAttachment,
-//	                                                                                                                         Bridge GC and LoadContext
+//	session_runtime_tool_results                           Bridge (accept/consume); Sandbox Service (execute/result)         Runtime result wait, Bridge replay, MCP lifecycle
+//	session_transient_attachments                          Sandbox Service (stage); Bridge (activate/consume/GC)             Gateway ResolveTransientAttachment,
+//	                                                                                                                         Bridge LoadContext
 //	session_provider_auth                                  api upserts (rotate + soft-delete siblings,               Gateway provider credential resolution
 //	                                                       not insert-only); Vault hard-deletes on credential delete
 //	queue_jobs                                             owning services admit atomically; Queue Service transitions      Sandbox Service, Bridge Job Runner,
 //	                                                                                                                         cleanup scheduler
+//	queue_partition_counters                               Queue admission and bounded Queue maintenance                    Queue admission and maintenance
 //	platform_provider_keys                                 operator ops CLI (platform credential domain)                    Gateway platform key pool (read-only, cached)
 //
 // UPDATE-WITH: the table DDL in postgresql_schema.go; the writer/reader

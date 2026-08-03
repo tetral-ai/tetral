@@ -339,14 +339,12 @@ func readFileAttachmentBlobRange(ctx context.Context, store blob.BlobStore, key 
 	return data, nil
 }
 
-// ReconcileTransientAttachments is Bridge-owned BUSINESS GC for transient media:
-// Bridge is the sole authority that reclaims these rows and their blobs, and the
-// object bucket's own lifecycle rule is only a safety net. This ownership split
-// is deliberate and diverges from the web cache bucket, whose GC IS the
-// bucket-lifecycle rule — because that bucket holds cache, not user-supplied
-// data. GC deletes are ordered: the index row leaves active and commits before
-// its blob object is deleted, so a resolve can never serve bytes for a row GC
-// has already released.
+// ReconcileTransientAttachments is the business GC for transient media. The
+// object bucket's lifecycle rule is only a safety net. Uploading and staged
+// media remain protected while their source execution is unconsumed. GC
+// deletes are ordered: the index row leaves its readable state and commits
+// before its Blob is deleted, so a resolver cannot serve bytes after custody
+// is released.
 func (s *PostgreSQLBridgeAPIStore) ReconcileTransientAttachments(ctx context.Context, limit int) (TransientAttachmentGCResult, error) {
 	if s == nil || s.AttachmentBlobStore == nil {
 		return TransientAttachmentGCResult{}, status.Error(codes.FailedPrecondition, "transient attachment blob store is unavailable")
@@ -389,7 +387,17 @@ func (s *PostgreSQLBridgeAPIStore) markTransientAttachmentsForDeletion(ctx conte
 				  FROM session_transient_attachments
 				 WHERE status = 'deleting'
 				    OR status = 'consumed'
-				    OR (status = 'active' AND expires_at <= $1)
+				    OR (status IN ('uploading', 'staged', 'active') AND expires_at <= $1
+				        AND NOT (status IN ('uploading', 'staged') AND EXISTS (
+				          SELECT 1
+				            FROM session_runtime_tool_results AS execution
+				           WHERE execution.workspace_id = session_transient_attachments.workspace_id
+				             AND execution.session_id = session_transient_attachments.session_id
+				             AND execution.session_thread_id = session_transient_attachments.session_thread_id
+				             AND execution.tool_use_event_id = session_transient_attachments.source_tool_use_event_id
+				             AND execution.tool_kind = 'sandbox_tool'
+				             AND execution.execution_state <> 'consumed'
+				        )))
 				 ORDER BY storage_sequence
 				 LIMIT $2
 				 FOR UPDATE SKIP LOCKED
@@ -510,155 +518,6 @@ func stripInternalProviderFields(raw string) string {
 		return raw
 	}
 	return string(encoded)
-}
-
-func (s *PostgreSQLBridgeAPIStore) materializeSandboxMediaResult(ctx context.Context, scope *bridgev1.RuntimeScope, toolUseEventID string, toolName string, inputJSON string, raw string) (string, *uploadedTransientAttachment) {
-	if !sandboxToolCanReturnMedia(toolName) {
-		return raw, nil
-	}
-	var value map[string]any
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
-		return raw, nil
-	}
-	if stringFromAny(value["status"]) != "success" {
-		return raw, nil
-	}
-	source := value
-	if result, ok := value["result"].(map[string]any); ok {
-		source = result
-	}
-	if stringFromAny(source["attachment_ref"]) != "" {
-		return raw, nil
-	}
-	dataBase64 := stringFromAny(source["data_base64"])
-	if dataBase64 == "" {
-		return raw, nil
-	}
-	mime := stringFromAny(source["mime"])
-	data, err := base64.StdEncoding.DecodeString(dataBase64)
-	if err != nil {
-		return mustMarshalToolRuntimeError("sandbox_helper_protocol_error", "sandbox helper returned invalid media data", false), nil
-	}
-	create, err := sandboxMediaAttachmentCreate(scope, toolUseEventID, inputJSON, mime, stringFromAny(source["page_range"]), data)
-	if err != nil {
-		return mustMarshalToolRuntimeError("sandbox_helper_protocol_error", err.Error(), false), nil
-	}
-	pending, err := s.uploadTransientAttachment(ctx, create)
-	if err != nil {
-		return mustMarshalToolRuntimeError("transient_attachment_unavailable", "sandbox media attachment handoff failed", transientAttachmentErrorRetryable(err)), nil
-	}
-	attachment := pending.Attachment
-	if attachment == nil || attachment.GetAttachmentRef() == "" {
-		return mustMarshalToolRuntimeError("transient_attachment_unavailable", "sandbox media attachment handoff returned no ref", true), nil
-	}
-	delete(source, "data_base64")
-	source["attachment_ref"] = attachment.GetAttachmentRef()
-	source["filename"] = attachment.GetFilename()
-	source["source_tool_use_event_id"] = attachment.GetSourceToolUseEventId()
-	source["source_path"] = attachment.GetSourcePath()
-	source["page_range"] = attachment.GetPageRange()
-	source["detail"] = attachment.GetDetail()
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		_ = s.AttachmentBlobStore.Delete(context.WithoutCancel(ctx), pending.BlobPointer)
-		return mustMarshalToolRuntimeError("sandbox_helper_protocol_error", "sandbox media attachment result could not be encoded", false), nil
-	}
-	return string(encoded), pending
-}
-
-func sandboxMediaAttachmentCreate(scope *bridgev1.RuntimeScope, toolUseEventID string, inputJSON string, mime string, pageRange string, data []byte) (transientAttachmentCreate, error) {
-	var input map[string]any
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return transientAttachmentCreate{}, errors.New("sandbox media input must be JSON")
-	}
-	sourcePath := stringFromAny(input["path"])
-	if sourcePath == "" {
-		sourcePath = stringFromAny(input["file_path"])
-	}
-	if sourcePath == "" {
-		sourcePath = "image"
-	}
-	return transientAttachmentCreate{
-		Scope:                scope,
-		SourceToolUseEventID: toolUseEventID,
-		Data:                 data,
-		Mime:                 mime,
-		Filename:             filenameFromSandboxPath(sourcePath),
-		SourcePath:           sourcePath,
-		PageRange:            pageRange,
-		Detail:               "auto",
-	}, nil
-}
-
-func filenameFromSandboxPath(value string) string {
-	filename := path.Base(strings.TrimSpace(value))
-	if filename == "." || filename == "/" || filename == "" {
-		return "attachment"
-	}
-	return filename
-}
-
-func transientAttachmentErrorRetryable(err error) bool {
-	switch status.Code(err) {
-	case codes.InvalidArgument, codes.AlreadyExists:
-		return false
-	default:
-		return true
-	}
-}
-
-func durableSandboxToolResultJSON(toolName string, raw string) string {
-	if !sandboxToolCanReturnMedia(toolName) {
-		return raw
-	}
-	var value any
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
-		return raw
-	}
-	if !stripDataBase64Value(value) {
-		return raw
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return raw
-	}
-	return string(encoded)
-}
-
-func sandboxToolCanReturnMedia(toolName string) bool {
-	return toolName == "view_image" || toolName == "Read" || toolName == "read"
-}
-
-func stringFromAny(value any) string {
-	typed, _ := value.(string)
-	return typed
-}
-
-func stripDataBase64Value(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		stripped := false
-		if _, ok := typed["data_base64"]; ok {
-			delete(typed, "data_base64")
-			stripped = true
-		}
-		for _, child := range typed {
-			if stripDataBase64Value(child) {
-				stripped = true
-			}
-		}
-		return stripped
-	case []any:
-		stripped := false
-		for _, child := range typed {
-			if stripDataBase64Value(child) {
-				stripped = true
-			}
-		}
-		return stripped
-	default:
-		return false
-	}
 }
 
 func stripInternalProviderValue(value any) any {
@@ -948,7 +807,7 @@ func insertTransientAttachmentTx(ctx context.Context, tx *dbconnect.Tx, create t
 	return err
 }
 
-func insertTransientAttachmentForDeletionTx(ctx context.Context, tx *dbconnect.Tx, create transientAttachmentCreate, attachment *bridgev1.TransientAttachmentRef, blobPointer string, now time.Time) error {
+func insertStagedTransientAttachmentTx(ctx context.Context, tx *dbconnect.Tx, create transientAttachmentCreate, attachment *bridgev1.TransientAttachmentRef, blobPointer string, now time.Time) error {
 	metadataJSON, err := transientAttachmentMetadataJSON(create)
 	if err != nil {
 		return err
@@ -958,10 +817,10 @@ func insertTransientAttachmentForDeletionTx(ctx context.Context, tx *dbconnect.T
 			workspace_id, attachment_ref, session_id, session_thread_id,
 			source_tool_use_event_id, blob_pointer, mime, metadata_json,
 			status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'deleting', $9, $10, $10)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'staged', $9, $10, $10)`,
 		create.Scope.GetWorkspaceId(), attachment.GetAttachmentRef(), create.Scope.GetSessionId(),
 		create.Scope.GetSessionThreadId(), create.SourceToolUseEventID, blobPointer, create.Mime, metadataJSON,
-		now, now)
+		now.Add(defaultTransientAttachmentTTL), now)
 	return err
 }
 
@@ -1114,11 +973,13 @@ func validateTransientAttachmentsForConsumptionTx(
 	return active, nil
 }
 
-// markTransientAttachmentsConsumedTx is the transition site for the transient
-// attachment status machine, of which Bridge is the sole writer:
+// markTransientAttachmentsConsumedTx is Bridge's conversation-side transition
+// site for the transient attachment status machine. Sandbox Service owns the
+// uploading-to-staged handoff; Bridge owns activation and consumption:
 //
 //	status      meaning                                     transitions
-//	uploading   bytes being written through blob APIs        (never written)
+//	uploading   bytes being written through blob APIs        -> staged | deleting
+//	staged      committed by a tool, not yet model-visible    -> active | deleting
 //	active      resolvable by the Gateway; may be consumed    -> consumed | deleting
 //	consumed    spent by a settled-output request-end        (GC-eligible)
 //	expired     TTL passed before consumption                (never written)
@@ -1126,10 +987,9 @@ func validateTransientAttachmentsForConsumptionTx(
 //	deleted     blob released                                 (terminal)
 //	failed      write failed                                  (never written)
 //
-// Only 'active', 'consumed', 'deleting', and 'deleted' are ever written. The
-// other three are permitted by the status CHECK constraint and reserved for
-// future writers; the GC sweep reclaims 'deleting', 'consumed', and 'active'
-// rows past their TTL, which is the whole reachable set.
+// The GC sweep reclaims deleting and consumed rows, plus expired uploading,
+// staged, or active rows. Uploading and staged Sandbox attachments remain
+// protected while their execution result is still unconsumed.
 //
 // The UPDATE flips 'active' -> 'consumed' ONLY (WHERE status = 'active'). A ref
 // the caller already validated as present but in ANY non-active in-scope status

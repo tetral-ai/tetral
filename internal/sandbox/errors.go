@@ -19,6 +19,7 @@ const (
 	StageCheckBaseTemplate  ProviderStage = "check_base_template"
 	StageApplyNetworkPolicy ProviderStage = "apply_network_policy"
 	StageMountResources     ProviderStage = "mount_resources"
+	StageExecuteTool        ProviderStage = "execute_tool"
 	StageStatus             ProviderStage = "status"
 	StageStartSandbox       ProviderStage = "start_sandbox"
 	StageReleaseSandbox     ProviderStage = "release_sandbox"
@@ -27,15 +28,16 @@ const (
 type ProviderErrorKind string
 
 const (
-	ProviderErrorAuthFailed     ProviderErrorKind = "auth_failed"
-	ProviderErrorConfigInvalid  ProviderErrorKind = "config_invalid"
-	ProviderErrorUnavailable    ProviderErrorKind = "unavailable"
-	ProviderErrorQuotaExceeded  ProviderErrorKind = "quota_exceeded"
-	ProviderErrorTimeout        ProviderErrorKind = "timeout"
-	ProviderErrorInvalidRequest ProviderErrorKind = "invalid_request"
-	ProviderErrorNotFound       ProviderErrorKind = "not_found"
-	ProviderErrorConflict       ProviderErrorKind = "conflict"
-	ProviderErrorUnknown        ProviderErrorKind = "unknown"
+	ProviderErrorAuthFailed        ProviderErrorKind = "auth_failed"
+	ProviderErrorConfigInvalid     ProviderErrorKind = "config_invalid"
+	ProviderErrorUnavailable       ProviderErrorKind = "unavailable"
+	ProviderErrorQuotaExceeded     ProviderErrorKind = "quota_exceeded"
+	ProviderErrorTimeout           ProviderErrorKind = "timeout"
+	ProviderErrorInvalidRequest    ProviderErrorKind = "invalid_request"
+	ProviderErrorNotFound          ProviderErrorKind = "not_found"
+	ProviderErrorConflict          ProviderErrorKind = "conflict"
+	ProviderErrorMalformedResponse ProviderErrorKind = "malformed_response"
+	ProviderErrorUnknown           ProviderErrorKind = "unknown"
 )
 
 type ProviderError struct {
@@ -139,23 +141,6 @@ func ValidateProviderHandle(handle ProviderHandle) error {
 		return &ValidationError{Message: "provider sandbox id contains secret-shaped value"}
 	}
 	return ValidateProviderMetadata(handle.Metadata)
-}
-
-func ValidateProviderStatus(status ProviderStatus) error {
-	switch status.Availability {
-	case ProviderAvailable, ProviderMissing, ProviderUnavailable, ProviderUnknown:
-	default:
-		return &ValidationError{Message: "provider status availability is invalid"}
-	}
-	if status.SandboxStatus != "" {
-		if err := validateStatus(status.SandboxStatus); err != nil {
-			return err
-		}
-	}
-	if err := ValidateProviderMetadata(status.Metadata); err != nil {
-		return err
-	}
-	return ValidateProviderSafeMessage(status.SafeMessage)
 }
 
 func ValidateProviderSafeMessage(message string) error {

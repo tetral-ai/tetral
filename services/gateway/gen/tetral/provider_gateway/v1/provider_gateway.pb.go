@@ -603,6 +603,7 @@ const (
 	McpErrorKind_MCP_ERROR_KIND_COMMIT_FAILED         McpErrorKind = 8
 	McpErrorKind_MCP_ERROR_KIND_CREDENTIAL_REQUIRED   McpErrorKind = 9
 	McpErrorKind_MCP_ERROR_KIND_INTERNAL              McpErrorKind = 10
+	McpErrorKind_MCP_ERROR_KIND_CUSTODY_LOST          McpErrorKind = 11
 )
 
 // Enum value maps for McpErrorKind.
@@ -619,6 +620,7 @@ var (
 		8:  "MCP_ERROR_KIND_COMMIT_FAILED",
 		9:  "MCP_ERROR_KIND_CREDENTIAL_REQUIRED",
 		10: "MCP_ERROR_KIND_INTERNAL",
+		11: "MCP_ERROR_KIND_CUSTODY_LOST",
 	}
 	McpErrorKind_value = map[string]int32{
 		"MCP_ERROR_KIND_UNSPECIFIED":           0,
@@ -632,6 +634,7 @@ var (
 		"MCP_ERROR_KIND_COMMIT_FAILED":         8,
 		"MCP_ERROR_KIND_CREDENTIAL_REQUIRED":   9,
 		"MCP_ERROR_KIND_INTERNAL":              10,
+		"MCP_ERROR_KIND_CUSTODY_LOST":          11,
 	}
 )
 
@@ -3327,14 +3330,15 @@ func (x *RunMcpToolRequest) GetRuntimeBindingToken() string {
 }
 
 type RunMcpToolResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        RunMcpToolStatus       `protobuf:"varint,1,opt,name=status,proto3,enum=tetral.provider_gateway.v1.RunMcpToolStatus" json:"status,omitempty"`
-	ResultText    string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"`
-	Attachments   []*McpAttachmentRef    `protobuf:"bytes,3,rep,name=attachments,proto3" json:"attachments,omitempty"`
-	ErrorKind     *McpErrorKind          `protobuf:"varint,4,opt,name=error_kind,json=errorKind,proto3,enum=tetral.provider_gateway.v1.McpErrorKind,oneof" json:"error_kind,omitempty"`
-	RetryStatus   *McpRetryStatus        `protobuf:"varint,5,opt,name=retry_status,json=retryStatus,proto3,enum=tetral.provider_gateway.v1.McpRetryStatus,oneof" json:"retry_status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Status                RunMcpToolStatus       `protobuf:"varint,1,opt,name=status,proto3,enum=tetral.provider_gateway.v1.RunMcpToolStatus" json:"status,omitempty"`
+	ResultText            string                 `protobuf:"bytes,2,opt,name=result_text,json=resultText,proto3" json:"result_text,omitempty"`
+	Attachments           []*McpAttachmentRef    `protobuf:"bytes,3,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	ErrorKind             *McpErrorKind          `protobuf:"varint,4,opt,name=error_kind,json=errorKind,proto3,enum=tetral.provider_gateway.v1.McpErrorKind,oneof" json:"error_kind,omitempty"`
+	RetryStatus           *McpRetryStatus        `protobuf:"varint,5,opt,name=retry_status,json=retryStatus,proto3,enum=tetral.provider_gateway.v1.McpRetryStatus,oneof" json:"retry_status,omitempty"`
+	MaterializationHandle *string                `protobuf:"bytes,6,opt,name=materialization_handle,json=materializationHandle,proto3,oneof" json:"materialization_handle,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *RunMcpToolResponse) Reset() {
@@ -3400,6 +3404,13 @@ func (x *RunMcpToolResponse) GetRetryStatus() McpRetryStatus {
 		return *x.RetryStatus
 	}
 	return McpRetryStatus_MCP_RETRY_STATUS_UNSPECIFIED
+}
+
+func (x *RunMcpToolResponse) GetMaterializationHandle() string {
+	if x != nil && x.MaterializationHandle != nil {
+		return *x.MaterializationHandle
+	}
+	return ""
 }
 
 type McpAttachmentRef struct {
@@ -3953,7 +3964,7 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"binding_id\x18\t \x01(\tR\tbindingId\x12-\n" +
 	"\x12binding_generation\x18\n" +
 	" \x01(\x03R\x11bindingGeneration\x122\n" +
-	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingToken\"\x8d\x03\n" +
+	"\x15runtime_binding_token\x18\v \x01(\tR\x13runtimeBindingToken\"\xe4\x03\n" +
 	"\x12RunMcpToolResponse\x12D\n" +
 	"\x06status\x18\x01 \x01(\x0e2,.tetral.provider_gateway.v1.RunMcpToolStatusR\x06status\x12\x1f\n" +
 	"\vresult_text\x18\x02 \x01(\tR\n" +
@@ -3961,9 +3972,11 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\vattachments\x18\x03 \x03(\v2,.tetral.provider_gateway.v1.McpAttachmentRefR\vattachments\x12L\n" +
 	"\n" +
 	"error_kind\x18\x04 \x01(\x0e2(.tetral.provider_gateway.v1.McpErrorKindH\x00R\terrorKind\x88\x01\x01\x12R\n" +
-	"\fretry_status\x18\x05 \x01(\x0e2*.tetral.provider_gateway.v1.McpRetryStatusH\x01R\vretryStatus\x88\x01\x01B\r\n" +
+	"\fretry_status\x18\x05 \x01(\x0e2*.tetral.provider_gateway.v1.McpRetryStatusH\x01R\vretryStatus\x88\x01\x01\x12:\n" +
+	"\x16materialization_handle\x18\x06 \x01(\tH\x02R\x15materializationHandle\x88\x01\x01B\r\n" +
 	"\v_error_kindB\x0f\n" +
-	"\r_retry_status\"\x9b\x01\n" +
+	"\r_retry_statusB\x19\n" +
+	"\x17_materialization_handle\"\x9b\x01\n" +
 	"\x10McpAttachmentRef\x12%\n" +
 	"\x0eattachment_ref\x18\x01 \x01(\tR\rattachmentRef\x12\x12\n" +
 	"\x04mime\x18\x02 \x01(\tR\x04mime\x12\x1d\n" +
@@ -4052,7 +4065,7 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x1fRUN_MCP_TOOL_STATUS_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dRUN_MCP_TOOL_STATUS_COMPLETED\x10\x01\x12\"\n" +
 	"\x1eRUN_MCP_TOOL_STATUS_TOOL_ERROR\x10\x02\x12%\n" +
-	"!RUN_MCP_TOOL_STATUS_RUNTIME_ERROR\x10\x03*\x83\x03\n" +
+	"!RUN_MCP_TOOL_STATUS_RUNTIME_ERROR\x10\x03*\xa4\x03\n" +
 	"\fMcpErrorKind\x12\x1e\n" +
 	"\x1aMCP_ERROR_KIND_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19MCP_ERROR_KIND_TOOL_ERROR\x10\x01\x12 \n" +
@@ -4065,7 +4078,8 @@ const file_tetral_provider_gateway_v1_provider_gateway_proto_rawDesc = "" +
 	"\x1cMCP_ERROR_KIND_COMMIT_FAILED\x10\b\x12&\n" +
 	"\"MCP_ERROR_KIND_CREDENTIAL_REQUIRED\x10\t\x12\x1b\n" +
 	"\x17MCP_ERROR_KIND_INTERNAL\x10\n" +
-	"*\x90\x01\n" +
+	"\x12\x1f\n" +
+	"\x1bMCP_ERROR_KIND_CUSTODY_LOST\x10\v*\x90\x01\n" +
 	"\x0eMcpRetryStatus\x12 \n" +
 	"\x1cMCP_RETRY_STATUS_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19MCP_RETRY_STATUS_RETRYING\x10\x01\x12\x1e\n" +

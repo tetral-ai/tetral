@@ -300,7 +300,7 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 	assertQueuedMCPManifestGenerations(t, admin, "sesn_mcp_restore", []int64{1, 3, 5})
 }
 
-func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyBeforeDeadLetter(t *testing.T) {
+func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyWithoutReplacementJob(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedMCPFamilySession(t, admin, "sesn_mcp_exhaust", "thr_mcp_exhaust", "claude")
 	bridge := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
@@ -315,8 +315,8 @@ func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyBef
 	if err != nil {
 		t.Fatalf("FinalizeRuntimeDelivery final MCP attempt: %v", err)
 	}
-	if result.Status != RuntimeDeliveryRejected || result.Retryable {
-		t.Fatalf("finalized result = %#v; want terminal rejected", result)
+	if result.Status != RuntimeDeliveryRejected || result.Retryable || result.ErrorKind != "runtime_delivery_exhausted" {
+		t.Fatalf("finalized result = %#v; want typed same-job defer disposition", result)
 	}
 	var generation int64
 	var readiness, diagnostic string
@@ -327,7 +327,7 @@ func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyBef
 	if generation != 2 || readiness != "unready" || diagnostic != "delivery_exhausted" {
 		t.Fatalf("exhausted manifest = generation %d readiness %q diagnostic %q", generation, readiness, diagnostic)
 	}
-	assertQueuedMCPManifestGenerations(t, admin, "sesn_mcp_exhaust", []int64{1, 2})
+	assertQueuedMCPManifestGenerations(t, admin, "sesn_mcp_exhaust", []int64{1})
 	var maxAttempts []int
 	rows, err := admin.Query(`SELECT max_attempts FROM queue_jobs WHERE workspace_id = 'default' AND payload_json::jsonb ->> 'session_id' = 'sesn_mcp_exhaust' ORDER BY created_at`)
 	if err != nil {
@@ -341,8 +341,8 @@ func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyBef
 		}
 		maxAttempts = append(maxAttempts, attempts)
 	}
-	if stringSliceJSON(maxAttempts) != stringSliceJSON([]int{5, 5}) {
-		t.Fatalf("MCP max attempts = %v; want [5 5]", maxAttempts)
+	if stringSliceJSON(maxAttempts) != stringSliceJSON([]int{5}) {
+		t.Fatalf("MCP max attempts = %v; want the original queue job only", maxAttempts)
 	}
 }
 

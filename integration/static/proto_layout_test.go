@@ -36,14 +36,18 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"rpc ListChildThreads(ListChildThreadsRequest) returns (ListChildThreadsResponse);",
 		"rpc MarkChildThreadClosed(MarkChildThreadClosedRequest) returns (MarkChildThreadClosedResponse);",
 		"rpc MarkChildThreadActive(MarkChildThreadActiveRequest) returns (MarkChildThreadActiveResponse);",
-		"rpc RunTool(RunToolRequest) returns (RunToolResponse);",
+		"rpc AcceptSandboxExecution(AcceptSandboxExecutionRequest) returns (AcceptSandboxExecutionResponse);",
+		"rpc AwaitSandboxExecution(AwaitSandboxExecutionRequest) returns (AwaitSandboxExecutionResponse);",
 		"rpc ReadCommandResult(ReadCommandResultRequest) returns (ReadCommandResultResponse);",
 		"rpc SendCommandInput(SendCommandInputRequest) returns (SendCommandInputResponse);",
 		"rpc CancelCommand(CancelCommandRequest) returns (CancelCommandResponse);",
 		"rpc RunMemory(RunMemoryRequest) returns (RunMemoryResponse);",
-		"message RunToolRequest",
+		"message AcceptSandboxExecutionRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
+		"string model_tool_call_id = 7;",
+		"message AcceptSandboxExecutionResponse",
+		"message AwaitSandboxExecutionResponse",
 		"message RunMemoryRequest",
 		"string tool_use_event_id = 2;",
 		"string normalized_input_hash = 3;",
@@ -105,13 +109,20 @@ func TestBridgeStableReasoningUsesOnlyAuthorizedDualBoundaries(t *testing.T) {
 	if count := strings.Count(text, "repeated StableReasoningPart stable_reasoning_parts"); count != 2 {
 		t.Fatalf("bridge stable reasoning boundary count = %d; want exactly WriteEvent and WriteRequestEnd", count)
 	}
-	for _, forbidden := range []string{
-		"CommitStable" + "ReasoningPart",
-		"message_id = 3;",
-	} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("bridge proto retained standalone or caller-selected stable reasoning surface %q", forbidden)
-		}
+	if forbidden := "CommitStable" + "ReasoningPart"; strings.Contains(text, forbidden) {
+		t.Fatalf("bridge proto retained standalone stable reasoning surface %q", forbidden)
+	}
+	stableReasoningStart := strings.Index(text, "message StableReasoningPart {")
+	if stableReasoningStart < 0 {
+		t.Fatal("bridge proto stable reasoning part block is missing")
+	}
+	stableReasoningEnd := strings.Index(text[stableReasoningStart:], "}")
+	if stableReasoningEnd < 0 {
+		t.Fatal("bridge proto stable reasoning part block is malformed")
+	}
+	stableReasoningBlock := text[stableReasoningStart : stableReasoningStart+stableReasoningEnd]
+	if strings.Contains(stableReasoningBlock, "message_id") {
+		t.Fatal("bridge proto stable reasoning part retained caller-selected message identity")
 	}
 }
 
@@ -245,7 +256,7 @@ func TestQueueServiceLocalProtoLayoutAndPackages(t *testing.T) {
 		"package tetral.queue.v1;",
 		"github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1;queuev1",
 		"rpc Lease(LeaseRequest) returns (LeaseResponse);",
-		"rpc Heartbeat(HeartbeatRequest) returns (TransitionResponse);",
+		"rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);",
 		"rpc Ack(AckRequest) returns (TransitionResponse);",
 		"rpc Retry(RetryRequest) returns (TransitionResponse);",
 		"rpc Defer(DeferRequest) returns (TransitionResponse);",
@@ -264,43 +275,6 @@ func TestQueueServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	} {
 		if _, err := os.Stat(filepath.Join(root, generated)); err != nil {
 			t.Fatalf("expected queue generated file %s: %v", generated, err)
-		}
-	}
-}
-
-func TestSandboxServiceLocalProtoLayoutAndPackages(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	source := "services/sandbox/proto/tetral/sandbox/v1/sandbox.proto"
-	body, err := os.ReadFile(filepath.Join(root, source)) //nolint:gosec // source tree path.
-	if err != nil {
-		t.Fatalf("read sandbox proto: %v", err)
-	}
-	text := string(body)
-	for _, required := range []string{
-		"package tetral.sandbox.v1;",
-		"github.com/tetral-ai/tetral/services/sandbox/gen/tetral/sandbox/v1;tetralsandboxv1",
-		"service SandboxService",
-		"rpc ReleaseSandbox(ReleaseSandboxRequest) returns (ReleaseSandboxResponse);",
-		"string workspace_id = 1;",
-		"string session_id = 2;",
-		"string sandbox_id = 3;",
-		"string binding_id = 4;",
-		"int64 binding_generation = 5;",
-		"string idempotency_key = 7;",
-		"RELEASE_SANDBOX_STATUS_RELEASED",
-		"RELEASE_SANDBOX_STATUS_ALREADY_RELEASED",
-		"RELEASE_SANDBOX_STATUS_RETRY_LATER",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("sandbox proto missing %q", required)
-		}
-	}
-	for _, generated := range []string{
-		"services/sandbox/gen/tetral/sandbox/v1/sandbox.pb.go",
-		"services/sandbox/gen/tetral/sandbox/v1/sandbox_grpc.pb.go",
-	} {
-		if _, err := os.Stat(filepath.Join(root, generated)); err != nil {
-			t.Fatalf("expected sandbox generated file %s: %v", generated, err)
 		}
 	}
 }
@@ -335,7 +309,6 @@ func TestRootBufWorkspaceListsOnlyServiceLocalProtoModules(t *testing.T) {
 		"path: services/bridge/proto",
 		"path: services/agent-runtime/proto",
 		"path: services/gateway/proto",
-		"path: services/sandbox/proto",
 		"path: services/queue/proto",
 	} {
 		if !strings.Contains(text, required) {
@@ -382,16 +355,6 @@ func TestBridgeServiceLocalBufGenerationFreshness(t *testing.T) {
 		t.Fatalf("bridge buf generate failed: %v\n%s", err, output)
 	}
 	assertGeneratedOutputClean(t, root, "services/bridge/gen", "services/agent-runtime/packages/protocol/src/gen-bridge", "services/gateway/packages/protocol/src/gen-bridge")
-}
-
-func TestSandboxServiceLocalBufGenerationFreshness(t *testing.T) {
-	root := finalArchitectureEngineRoot(t)
-	cmd := exec.Command("buf", "generate", "--template", "services/sandbox/buf.gen.yaml", "services/sandbox/proto") //nolint:gosec // repository-local generation command.
-	cmd.Dir = root
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sandbox buf generate failed: %v\n%s", err, output)
-	}
-	assertGeneratedOutputClean(t, root, "services/sandbox/gen")
 }
 
 func assertNoProtoSources(t *testing.T, root string) {

@@ -7,12 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,18 +21,1015 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/memory"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxmodel "github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
-	"github.com/tetral-ai/tetral/internal/storage"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
+	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 // This file owns the Bridge tools protocol-family boundary.
+
+type bridgeMemoryProjectionProvider struct {
+	requests []sandboxdriver.MemoryProjectionRefresh
+}
+
+func (*bridgeMemoryProjectionProvider) InspectForExecution(context.Context, string) tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness]{Value: tetralsandbox.ExecutionReady}
+}
+
+func (*bridgeMemoryProjectionProvider) InspectForRelease(context.Context, string) tetralsandbox.ProviderOutcome[bool] {
+	return tetralsandbox.ProviderOutcome[bool]{Value: true}
+}
+
+func (*bridgeMemoryProjectionProvider) ResolveActivation(context.Context, tetralsandbox.ActivationResolutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ActivationResolution] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ActivationResolution]{}
+}
+
+func (*bridgeMemoryProjectionProvider) Activate(context.Context, tetralsandbox.ActivationRequest) tetralsandbox.ProviderOutcome[sandboxmodel.ProviderHandle] {
+	return tetralsandbox.ProviderOutcome[sandboxmodel.ProviderHandle]{}
+}
+
+func (*bridgeMemoryProjectionProvider) MaterializeResources(context.Context, tetralsandbox.MaterializationRequest) tetralsandbox.ProviderOutcome[tetralsandbox.MaterializationResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.MaterializationResult]{}
+}
+
+func (*bridgeMemoryProjectionProvider) PrepareTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult]{}
+}
+
+func (*bridgeMemoryProjectionProvider) ExecuteTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+	return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{}
+}
+
+func (*bridgeMemoryProjectionProvider) ObserveTool(context.Context, sandboxdriver.ForegroundCommandObservation) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+	return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{}
+}
+
+func (*bridgeMemoryProjectionProvider) Release(context.Context, tetralsandbox.ReleaseRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ReleaseResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ReleaseResult]{}
+}
+
+func (p *bridgeMemoryProjectionProvider) RefreshMemoryProjection(_ context.Context, request sandboxdriver.MemoryProjectionRefresh) tetralsandbox.ProviderOutcome[struct{}] {
+	p.requests = append(p.requests, request)
+	return tetralsandbox.ProviderOutcome[struct{}]{}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentWait(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID  = "default"
+		sessionID    = "sesn_bridge_durable_tool"
+		threadID     = "thr_bridge_durable_tool"
+		toolUseID    = "evt_bridge_durable_tool"
+		modelCallID  = "call_bridge_durable_tool"
+		modelRequest = "mreq_bridge_durable_tool"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool")
+	const reasoningEventID = "evt_bridge_durable_reasoning"
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, reasoningEventID, 1, "agent.thinking", `{}`)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 2, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"printf ok"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id = $2 WHERE workspace_id = $1 AND event_id = $3`,
+		workspaceID, modelRequest, toolUseID,
+	); err != nil {
+		t.Fatalf("stamp durable tool-use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequest, toolUseID, modelCallID, "exec_command")
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_messages SET source_event_id = $5
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
+		workspaceID, sessionID, threadID, modelRequest, reasoningEventID,
+	); err != nil {
+		t.Fatalf("move durable assistant message ownership to its first event: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
+	request := &bridgev1.AcceptSandboxExecutionRequest{
+		Scope:               bridgeAPIScope(sessionID, threadID, "bind_bridge_durable_tool", 1, "pod_uid_bridge_durable_tool"),
+		ToolUseEventId:      toolUseID,
+		ModelToolCallId:     modelCallID,
+		NormalizedInputHash: sha256Hex(`{"cmd":"printf ok"}`),
+		ToolName:            "exec_command",
+		InputJson:           `{"cmd":"printf ok"}`,
+	}
+	accepted, err := store.AcceptSandboxExecution(context.Background(), request)
+	if err != nil {
+		t.Fatalf("AcceptSandboxExecution: %v", err)
+	}
+	if accepted.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("AcceptSandboxExecution ack = %s; want committed", accepted.GetAck().GetStatus())
+	}
+	var executionCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results
+			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+			    AND tool_use_event_id = $4 AND tool_kind = 'sandbox_tool'
+			    AND model_tool_call_id = $5 AND execution_state = 'pending'`,
+		workspaceID, sessionID, threadID, toolUseID, modelCallID,
+	).Scan(&executionCount); err != nil {
+		t.Fatalf("read accepted sandbox execution: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs
+			  WHERE workspace_id = $1 AND kind = 'sandbox_tool_execute'
+			    AND partition_key = $2 AND dedupe_key = $3 AND status = 'pending'`,
+		workspaceID,
+		queue.FormatSandboxExecutionPartitionKey(workspace.ID(workspaceID), sessionID, threadID, toolUseID),
+		queue.FormatSandboxToolExecuteDedupeKey(workspace.ID(workspaceID), sessionID, threadID, toolUseID, 1),
+	).Scan(&queueCount); err != nil {
+		t.Fatalf("read accepted sandbox queue job: %v", err)
+	}
+	if executionCount != 1 || queueCount != 1 {
+		t.Fatalf("accepted execution/queue counts = %d/%d; want 1/1", executionCount, queueCount)
+	}
+
+	type result struct {
+		response *bridgev1.AwaitSandboxExecutionResponse
+		err      error
+	}
+	waitResult := make(chan result, 1)
+	go func() {
+		response, err := store.AwaitSandboxExecution(context.Background(), awaitSandboxExecutionRequest(request))
+		waitResult <- result{response: response, err: err}
+	}()
+	select {
+	case completed := <-waitResult:
+		t.Fatalf("AwaitSandboxExecution returned before durable settlement: response=%+v err=%v", completed.response, completed.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	const terminalResult = `{"status":"success","result":{"exit_code":0,"stdout":"ok"}}`
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_tool_results
+		    SET execution_state = 'terminal_unconsumed', result_json = $5,
+		        result_digest = $6, updated_at = '2026-01-01T00:00:31Z'
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND tool_use_event_id = $4`,
+		workspaceID, sessionID, threadID, toolUseID, terminalResult, sha256Hex(terminalResult),
+	); err != nil {
+		t.Fatalf("settle durable sandbox execution: %v", err)
+	}
+	select {
+	case completed := <-waitResult:
+		if completed.err != nil {
+			t.Fatalf("AwaitSandboxExecution after durable settlement: %v", completed.err)
+		}
+		if completed.response.GetResultJson() != terminalResult {
+			t.Fatalf("AwaitSandboxExecution response = %+v; want durable result", completed.response)
+		}
+		if completed.response.GetResultDigest() != sha256Hex(terminalResult) {
+			t.Fatalf("AwaitSandboxExecution digest = %q; want durable result digest", completed.response.GetResultDigest())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AwaitSandboxExecution did not observe durable sandbox settlement")
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		release_requested_at, release_reason, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, $6, 'session_delete', $6, $6)`,
+		workspaceID, sessionID, "sbox_"+sessionID, "env_"+sessionID, "provider_"+sessionID,
+		time.Date(2026, 1, 1, 0, 0, 32, 0, time.UTC)); err != nil {
+		t.Fatalf("seed release fence before accepted replay: %v", err)
+	}
+
+	replayRequest := proto.Clone(request).(*bridgev1.AcceptSandboxExecutionRequest)
+	replayRequest.Scope.RequestId = "req_bridge_durable_tool_replay"
+	replayStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	replay, err := replayStore.AcceptSandboxExecution(context.Background(), replayRequest)
+	if err != nil {
+		t.Fatalf("AcceptSandboxExecution replay from another Bridge store: %v", err)
+	}
+	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+		t.Fatalf("AcceptSandboxExecution replay = %+v; want duplicate", replay)
+	}
+	lockTx, err := admin.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin unrelated Session lock: %v", err)
+	}
+	if _, err := lockTx.ExecContext(context.Background(),
+		`SELECT id FROM sessions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`, workspaceID, sessionID,
+	); err != nil {
+		_ = lockTx.Rollback()
+		t.Fatalf("hold unrelated Session lock: %v", err)
+	}
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	replayedResult, err := replayStore.AwaitSandboxExecution(waitCtx, awaitSandboxExecutionRequest(replayRequest))
+	cancelWait()
+	if rollbackErr := lockTx.Rollback(); rollbackErr != nil {
+		t.Fatalf("rollback unrelated Session lock: %v", rollbackErr)
+	}
+	if err != nil || replayedResult.GetResultJson() != terminalResult {
+		t.Fatalf("AwaitSandboxExecution behind unrelated Session lock = %+v, %v; want durable result", replayedResult, err)
+	}
+	conflict := proto.Clone(replayRequest).(*bridgev1.AcceptSandboxExecutionRequest)
+	conflict.Scope.RequestId = "req_bridge_durable_tool_conflict"
+	conflict.ModelToolCallId = "call_bridge_durable_tool_changed"
+	if _, err := store.AcceptSandboxExecution(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("AcceptSandboxExecution model call conflict error = %v; want AlreadyExists", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjection(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID    = "default"
+		sessionID      = "sesn_bridge_shared_tools"
+		threadID       = "thr_bridge_shared_tools"
+		bindingID      = "bind_bridge_shared_tools"
+		podUID         = "pod_bridge_shared_tools"
+		modelRequestID = "mreq_bridge_shared_tools"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-shared-tool-projection-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+
+	encoded, err := os.ReadFile(filepath.Join(repoRootFromBridgeTest(t), "testdata", "stable-reasoning-anchor-vector.json"))
+	if err != nil {
+		t.Fatalf("read stable reasoning fixture: %v", err)
+	}
+	var fixture struct {
+		Parts []struct {
+			ReasoningPartID string `json:"reasoning_part_id"`
+			ProviderPartID  string `json:"provider_part_id"`
+			PartSequence    int32  `json:"part_sequence"`
+			Text            string `json:"text"`
+			MetadataJSON    string `json:"metadata_json"`
+			Truncated       bool   `json:"truncated"`
+		} `json:"stable_reasoning_parts"`
+	}
+	if err := json.Unmarshal(encoded, &fixture); err != nil {
+		t.Fatalf("decode stable reasoning fixture: %v", err)
+	}
+	if len(fixture.Parts) != 2 {
+		t.Fatalf("stable reasoning fixture parts = %d; want 2", len(fixture.Parts))
+	}
+	reasoning := make([]*bridgev1.StableReasoningPart, 0, len(fixture.Parts))
+	draftParts := make([]bridgeRuntimePartDraftForTest, 0, len(fixture.Parts)+4)
+	for _, part := range fixture.Parts {
+		reasoning = append(reasoning, &bridgev1.StableReasoningPart{
+			ReasoningPartId: part.ReasoningPartID,
+			ProviderPartId:  part.ProviderPartID,
+			PartSequence:    part.PartSequence,
+			Text:            part.Text,
+			MetadataJson:    part.MetadataJSON,
+			Truncated:       part.Truncated,
+		})
+		draftParts = append(draftParts, bridgeRuntimePartDraftForTest{
+			kind: "reasoning",
+			json: fmt.Sprintf(
+				`{"type":"reasoning","providerPartId":%q,"providerMetadata":%s,"text":%q,"truncated":%t,"status":"completed"}`,
+				part.ProviderPartID, part.MetadataJSON, part.Text, part.Truncated,
+			),
+		})
+	}
+
+	type acceptedTool struct {
+		eventID  string
+		callID   string
+		toolName string
+		input    string
+		hash     string
+	}
+	inputs := []string{
+		`{"cmd":"printf one"}`,
+		`{"cmd":"printf two"}`,
+		`{"cmd":"` + strings.Repeat("x", 9000) + `"}`,
+		`{"cmd":"printf four"}`,
+	}
+	tools := make([]acceptedTool, 0, len(inputs))
+	for index, input := range inputs {
+		canonicalInput, inputHash, err := canonicalRunToolInput(input)
+		if err != nil {
+			t.Fatalf("canonical tool input %d: %v", index, err)
+		}
+		callID := fmt.Sprintf("call_bridge_shared_%d", index+1)
+		runtimeWriteID := fmt.Sprintf("rwrite_bridge_shared_%d", index+1)
+		var exactInput any
+		if err := json.Unmarshal([]byte(canonicalInput), &exactInput); err != nil {
+			t.Fatalf("decode canonical tool input %d: %v", index, err)
+		}
+		inputValue := map[string]any{"value": exactInput, "preview": canonicalInput, "truncated": false}
+		if index == 2 {
+			inputValue = map[string]any{"preview": canonicalInput[:8192], "truncated": true}
+		}
+		partJSON, err := json.Marshal(map[string]any{
+			"type":       "tool",
+			"toolCallId": callID,
+			"toolName":   "exec_command",
+			"state": map[string]any{
+				"status": "running",
+				"input":  inputValue,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal tool part %d: %v", index, err)
+		}
+		draftParts = append(draftParts, bridgeRuntimePartDraftForTest{kind: "tool", json: string(partJSON)})
+		request := &bridgev1.WriteEventRequest{
+			Scope:          scope,
+			RuntimeWriteId: runtimeWriteID,
+			ModelRequestId: modelRequestID,
+			EventType:      "agent.tool_use",
+			PayloadJson:    `{"type":"agent.tool_use","name":"exec_command","input":` + canonicalInput + `,"evaluated_permission":"ask"}`,
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+				t, scope, runtimeWriteID, "agent.tool_use", "streaming", draftParts...,
+			)},
+		}
+		if index == 0 {
+			request.StableReasoningParts = reasoning
+		}
+		written, err := store.WriteEvent(context.Background(), request)
+		if err != nil {
+			t.Fatalf("WriteEvent shared tool %d: %v", index, err)
+		}
+		tools = append(tools, acceptedTool{
+			eventID: written.GetEventId(), callID: callID, toolName: "exec_command", input: canonicalInput, hash: inputHash,
+		})
+		var stamped map[string]any
+		if err := json.Unmarshal(partJSON, &stamped); err != nil {
+			t.Fatalf("decode tool part %d: %v", index, err)
+		}
+		stamped["toolUseEventId"] = written.GetEventId()
+		stamped["toolEvent"] = map[string]any{"kind": "tool"}
+		stampedJSON, err := json.Marshal(stamped)
+		if err != nil {
+			t.Fatalf("stamp tool part %d: %v", index, err)
+		}
+		draftParts[len(draftParts)-1].json = string(stampedJSON)
+	}
+	var reboundPart map[string]any
+	if err := json.Unmarshal([]byte(draftParts[len(fixture.Parts)].json), &reboundPart); err != nil {
+		t.Fatalf("decode stamped tool part for rebound attempt: %v", err)
+	}
+	delete(reboundPart, "toolUseEventId")
+	delete(reboundPart, "toolEvent")
+	reboundJSON, err := json.Marshal(reboundPart)
+	if err != nil {
+		t.Fatalf("marshal rebound tool part: %v", err)
+	}
+	reboundParts := append([]bridgeRuntimePartDraftForTest(nil), draftParts...)
+	reboundParts[len(fixture.Parts)].json = string(reboundJSON)
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          scope,
+		RuntimeWriteId: "rwrite_bridge_shared_rebind",
+		ModelRequestId: modelRequestID,
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"exec_command","input":` + tools[0].input + `,"evaluated_permission":"ask"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_bridge_shared_rebind", "agent.tool_use", "streaming", reboundParts...,
+		)},
+	}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("WriteEvent rebound stamped tool part error = %v; want AlreadyExists", err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_pending_tool_uses
+		    SET status = 'resolving', decision = 'allow', updated_at = clock_timestamp()
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3`,
+		workspaceID, sessionID, threadID,
+	); err != nil {
+		t.Fatalf("resolve shared tool approvals: %v", err)
+	}
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_shared_tools_cold",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext shared tools: %v", err)
+	}
+	var contextPayload struct {
+		PendingToolUses []struct {
+			ToolUseEventID string          `json:"toolUseEventId"`
+			Input          json.RawMessage `json:"input"`
+		} `json:"pendingToolUses"`
+	}
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &contextPayload); err != nil {
+		t.Fatalf("decode shared tool context: %v", err)
+	}
+	if len(contextPayload.PendingToolUses) != len(tools) {
+		t.Fatalf("cold pending tools = %d; want %d", len(contextPayload.PendingToolUses), len(tools))
+	}
+	loadedInput := make(map[string]string, len(contextPayload.PendingToolUses))
+	for _, pending := range contextPayload.PendingToolUses {
+		loadedInput[pending.ToolUseEventID] = string(pending.Input)
+	}
+	for _, tool := range tools {
+		if loadedInput[tool.eventID] != tool.input {
+			t.Fatalf("cold approval input for %s differs from exact durable input", tool.eventID)
+		}
+	}
+
+	baseRequest := func(tool acceptedTool) *bridgev1.AcceptSandboxExecutionRequest {
+		return &bridgev1.AcceptSandboxExecutionRequest{
+			Scope: scope, ToolUseEventId: tool.eventID, ModelToolCallId: tool.callID,
+			NormalizedInputHash: tool.hash, ToolName: tool.toolName, InputJson: tool.input,
+		}
+	}
+	for name, mutate := range map[string]func(*bridgev1.AcceptSandboxExecutionRequest){
+		"tool use event": func(request *bridgev1.AcceptSandboxExecutionRequest) { request.ToolUseEventId = tools[0].eventID },
+		"model tool call": func(request *bridgev1.AcceptSandboxExecutionRequest) {
+			request.ModelToolCallId = "call_bridge_shared_changed"
+		},
+		"tool name": func(request *bridgev1.AcceptSandboxExecutionRequest) { request.ToolName = "Read" },
+		"canonical input": func(request *bridgev1.AcceptSandboxExecutionRequest) {
+			request.InputJson = `{"cmd":"changed"}`
+			request.NormalizedInputHash = sha256Hex(request.InputJson)
+		},
+	} {
+		t.Run("reject changed "+name, func(t *testing.T) {
+			request := baseRequest(tools[3])
+			mutate(request)
+			if _, err := store.AcceptSandboxExecution(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("AcceptSandboxExecution changed %s error = %v; want FailedPrecondition", name, err)
+			}
+		})
+	}
+	settledParts := append([]bridgeRuntimePartDraftForTest(nil), draftParts...)
+	for index, tool := range tools {
+		accepted, err := store.AcceptSandboxExecution(context.Background(), baseRequest(tool))
+		if err != nil {
+			t.Fatalf("AcceptSandboxExecution shared tool %d: %v", index, err)
+		}
+		if accepted.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+			t.Fatalf("shared tool %d ack = %s; want committed", index, accepted.GetAck().GetStatus())
+		}
+	}
+	var messageCount, partCount, executionCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*), COALESCE(sum(jsonb_array_length(data_json::jsonb->'parts')), 0)
+		   FROM session_messages
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4`,
+		workspaceID, sessionID, threadID, modelRequestID,
+	).Scan(&messageCount, &partCount); err != nil {
+		t.Fatalf("count shared projection: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND tool_kind = 'sandbox_tool'`,
+		workspaceID, sessionID, threadID,
+	).Scan(&executionCount); err != nil {
+		t.Fatalf("count shared executions: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = 'sandbox_tool_execute'`, workspaceID,
+	).Scan(&queueCount); err != nil {
+		t.Fatalf("count shared execution jobs: %v", err)
+	}
+	if messageCount != 1 || partCount != 6 || executionCount != 4 || queueCount != 4 {
+		t.Fatalf("shared message/parts/executions/jobs = %d/%d/%d/%d; want 1/6/4/4", messageCount, partCount, executionCount, queueCount)
+	}
+	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
+	provider := newGatedBridgeToolProvider()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{sandboxdriver.DaytonaProviderName: provider})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	pool, err := tetralsandbox.NewWorkspaceConsumerPool(4)
+	if err != nil {
+		t.Fatalf("NewWorkspaceConsumerPool: %v", err)
+	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- tetralsandbox.RunWorkspaceConsumerGroup(
+			runCtx,
+			4,
+			pool,
+			staticWorkspaceLister{workspace.ID(workspaceID)},
+			time.Millisecond,
+			func(cycleCtx context.Context, discovered workspace.ID) (bool, error) {
+				return (&tetralsandbox.SandboxToolExecutionJobRunner{
+					Queue:       tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
+					Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute),
+					Providers:   registry,
+					Media:       backgroundNotificationMedia{},
+					Config: tetralsandbox.SandboxToolExecutionRunnerConfig{
+						WorkspaceID: discovered.String(), LeaseOwner: "sandbox-shared-projection", MaxJobs: 1,
+						LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second,
+					},
+				}).RunOnceWithActivity(cycleCtx)
+			},
+		)
+	}()
+	for range 4 {
+		select {
+		case <-provider.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("four accepted Sandbox executions did not overlap at the provider")
+		}
+	}
+	if provider.maximum.Load() != 4 {
+		t.Fatalf("shared projection provider concurrency = %d; want 4", provider.maximum.Load())
+	}
+	close(provider.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var terminal, acknowledged int
+		if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results
+			WHERE workspace_id=$1 AND session_id=$2 AND execution_state='terminal_unconsumed'`, workspaceID, sessionID).Scan(&terminal); err != nil {
+			t.Fatalf("count shared terminal executions: %v", err)
+		}
+		if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs
+			WHERE workspace_id=$1 AND kind=$2 AND status='acknowledged'`, workspaceID, queue.KindSandboxToolExecute).Scan(&acknowledged); err != nil {
+			t.Fatalf("count shared acknowledged executions: %v", err)
+		}
+		if terminal == 4 && acknowledged == 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shared terminal/acknowledged executions = %d/%d; want 4/4", terminal, acknowledged)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for index, tool := range tools {
+		result, err := store.AwaitSandboxExecution(context.Background(), awaitSandboxExecutionRequest(baseRequest(tool)))
+		if err != nil {
+			t.Fatalf("AwaitSandboxExecution shared tool %d: %v", index, err)
+		}
+		if result.GetResultJson() == "" || result.GetResultDigest() == "" {
+			t.Fatalf("shared tool %d result/digest is empty", index)
+		}
+		var exactInput any
+		if err := json.Unmarshal([]byte(tool.input), &exactInput); err != nil {
+			t.Fatalf("decode settled tool input %d: %v", index, err)
+		}
+		inputValue := map[string]any{"value": exactInput, "preview": tool.input, "truncated": false}
+		if len(tool.input) > 8192 {
+			inputValue = map[string]any{"preview": tool.input[:8192], "truncated": true}
+		}
+		partJSON, err := json.Marshal(map[string]any{
+			"type": "tool", "toolCallId": tool.callID, "toolName": tool.toolName,
+			"toolUseEventId": tool.eventID, "toolEvent": map[string]any{"kind": "tool"},
+			"state": map[string]any{
+				"status": "completed", "input": inputValue,
+				"output": map[string]any{"text": "done", "truncated": false},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal settled tool part %d: %v", index, err)
+		}
+		settledParts[len(reasoning)+index].json = string(partJSON)
+		runtimeWriteID := fmt.Sprintf("rwrite_bridge_shared_result_%d", index+1)
+		digest := result.GetResultDigest()
+		messageStatus := "streaming"
+		if index == len(tools)-1 {
+			messageStatus = "completed"
+		}
+		written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: modelRequestID,
+			EventType:           "agent.tool_result",
+			PayloadJson:         `{"type":"agent.tool_result","tool_use_event_id":"` + tool.eventID + `","content":[{"type":"text","text":"done"}]}`,
+			SandboxResultDigest: &digest,
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+				t, scope, runtimeWriteID, "agent.tool_result", messageStatus, settledParts...,
+			)},
+		})
+		if err != nil {
+			t.Fatalf("WriteEvent shared tool result %d: %v", index, err)
+		}
+		if written.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+			t.Fatalf("shared tool result %d ack = %s; want committed", index, written.GetAck().GetStatus())
+		}
+	}
+	var resultEvents, consumedExecutions int
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND model_request_id=$4 AND type='agent.tool_result'`, workspaceID, sessionID, threadID, modelRequestID).Scan(&resultEvents); err != nil {
+		t.Fatalf("count shared Tool Result events: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND execution_state='consumed'`, workspaceID, sessionID, threadID).Scan(&consumedExecutions); err != nil {
+		t.Fatalf("count consumed shared executions: %v", err)
+	}
+	if resultEvents != 4 || consumedExecutions != 4 {
+		t.Fatalf("shared result events/consumed executions = %d/%d; want 4/4", resultEvents, consumedExecutions)
+	}
+	cancelRun()
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunWorkspaceConsumerGroup error = %v; want context cancellation", err)
+	}
+}
+
+func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID     = "default"
+		sessionID       = "sesn_sandbox_settle_consume_race"
+		threadID        = "thr_sandbox_settle_consume_race"
+		bindingID       = "bind_sandbox_settle_consume_race"
+		podUID          = "pod_sandbox_settle_consume_race"
+		toolUseEventID  = "evt_sandbox_settle_consume_race"
+		modelRequestID  = "mreq_sandbox_settle_consume_race"
+		modelToolCallID = "call_sandbox_settle_consume_race"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
+	if _, err := admin.Exec(`UPDATE session_events SET model_request_id=$2 WHERE workspace_id=$1 AND event_id=$3`, workspaceID, modelRequestID, toolUseEventID); err != nil {
+		t.Fatalf("stamp Tool Use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ModelToolCallId: modelToolCallID,
+		NormalizedInputHash: sha256Hex(`{}`), ToolName: "Read", InputJson: `{}`,
+	}); err != nil {
+		t.Fatalf("AcceptSandboxExecution: %v", err)
+	}
+	seedReadySandboxForSharedToolExecution(t, admin, workspaceID, sessionID)
+
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queueConnection := startBackgroundNotificationQueueServer(t, queueStore)
+	provider := newGatedBridgeToolProvider()
+	registry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: provider,
+	})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &tetralsandbox.SandboxToolExecutionJobRunner{
+		Queue:       tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConnection)),
+		Coordinator: tetralsandbox.NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute),
+		Providers:   registry,
+		Media:       backgroundNotificationMedia{},
+		Config: tetralsandbox.SandboxToolExecutionRunnerConfig{
+			WorkspaceID: workspaceID, LeaseOwner: "sandbox-settle-consume-race", MaxJobs: 1,
+			LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second, PreparationTimeout: 45 * time.Second,
+		},
+	}
+	type runnerResult struct {
+		active bool
+		err    error
+	}
+	runnerDone := make(chan runnerResult, 1)
+	go func() {
+		active, err := runner.RunOnceWithActivity(context.Background())
+		runnerDone <- runnerResult{active: active, err: err}
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Sandbox execution did not reach provider")
+	}
+
+	locker, lockerPID := lockPostgreSQLFinalizationFence(t, admin,
+		`SELECT id FROM sessions WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, workspaceID, sessionID)
+	defer func() { _ = locker.Rollback() }()
+	const resultJSON = `{"status":"success","result":{"text":"done"}}`
+	resultDigest := sha256Hex(resultJSON)
+	writeRequest := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_sandbox_settle_consume_race", ModelRequestId: modelRequestID,
+		EventType:           "agent.tool_result",
+		PayloadJson:         `{"type":"agent.tool_result","tool_use_event_id":"` + toolUseEventID + `","content":[{"type":"text","text":"done"}]}`,
+		SandboxResultDigest: &resultDigest,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_sandbox_settle_consume_race", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"` + modelToolCallID + `","toolName":"Read","toolUseEventId":"` + toolUseEventID + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{},"preview":"{}","truncated":false},"output":{"text":"done","truncated":false}}}`},
+		)},
+	}
+	type writeResult struct {
+		response *bridgev1.WriteEventResponse
+		err      error
+	}
+	writeDone := make(chan writeResult, 1)
+	go func() {
+		response, err := store.WriteEvent(context.Background(), writeRequest)
+		writeDone <- writeResult{response: response, err: err}
+	}()
+	close(provider.release)
+	waitForPostgreSQLLockWaiters(t, admin, lockerPID, 2)
+	if err := locker.Commit(); err != nil {
+		t.Fatalf("release Session race fence: %v", err)
+	}
+	settled := <-runnerDone
+	if settled.err != nil || !settled.active {
+		t.Fatalf("Sandbox execution runner = active %v, err %v; want true,nil", settled.active, settled.err)
+	}
+	written := <-writeDone
+	if written.err != nil {
+		if status.Code(written.err) != codes.FailedPrecondition {
+			t.Fatalf("concurrent WriteEvent: %v", written.err)
+		}
+		written.response, written.err = store.WriteEvent(context.Background(), writeRequest)
+	}
+	if written.err != nil {
+		t.Fatalf("WriteEvent after Sandbox settlement: %v", written.err)
+	}
+	if written.response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("WriteEvent status = %s; want committed", written.response.GetAck().GetStatus())
+	}
+
+	var executionState string
+	var retainedResult sql.NullString
+	var resultEvents int
+	if err := admin.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
+		WHERE workspace_id=$1 AND session_id=$2 AND tool_use_event_id=$3`, workspaceID, sessionID, toolUseEventID).Scan(&executionState, &retainedResult); err != nil {
+		t.Fatalf("read converged execution: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT count(*) FROM session_events
+		WHERE workspace_id=$1 AND session_id=$2 AND type='agent.tool_result'
+		  AND payload_json::jsonb ->> 'tool_use_event_id'=$3`, workspaceID, sessionID, toolUseEventID).Scan(&resultEvents); err != nil {
+		t.Fatalf("count converged Tool Result events: %v", err)
+	}
+	if executionState != "consumed" || retainedResult.Valid || resultEvents != 1 {
+		t.Fatalf("converged execution = state %q result %v events %d; want consumed/NULL/1", executionState, retainedResult, resultEvents)
+	}
+}
+
+type gatedBridgeToolProvider struct {
+	*bridgeMemoryProjectionProvider
+	started chan struct{}
+	release chan struct{}
+	active  atomic.Int32
+	maximum atomic.Int32
+}
+
+func newGatedBridgeToolProvider() *gatedBridgeToolProvider {
+	return &gatedBridgeToolProvider{
+		bridgeMemoryProjectionProvider: &bridgeMemoryProjectionProvider{},
+		started:                        make(chan struct{}, 4), release: make(chan struct{}),
+	}
+}
+
+func (*gatedBridgeToolProvider) InspectForExecution(context.Context, string) tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ExecutionReadiness]{Value: tetralsandbox.ExecutionReady}
+}
+
+func (*gatedBridgeToolProvider) PrepareTool(context.Context, tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult] {
+	return tetralsandbox.ProviderOutcome[tetralsandbox.ToolPreparationResult]{Value: tetralsandbox.ToolPreparationResult{}}
+}
+
+func (p *gatedBridgeToolProvider) ExecuteTool(ctx context.Context, _ tetralsandbox.ToolExecutionRequest) tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution] {
+	current := p.active.Add(1)
+	defer p.active.Add(-1)
+	for {
+		observed := p.maximum.Load()
+		if current <= observed || p.maximum.CompareAndSwap(observed, current) {
+			break
+		}
+	}
+	p.started <- struct{}{}
+	select {
+	case <-p.release:
+		return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{Value: sandboxdriver.ToolExecution{
+			ResultJSON: `{"status":"success","result":{"text":"done"}}`,
+		}}
+	case <-ctx.Done():
+		return tetralsandbox.ProviderOutcome[sandboxdriver.ToolExecution]{
+			EffectBoundary: tetralsandbox.ProviderOutcomeUnknown, Disposition: tetralsandbox.ProviderTerminal,
+			ErrorKind: "provider_cancelled", SafeMessage: "provider execution was cancelled",
+		}
+	}
+}
+
+var _ tetralsandbox.ProviderAdapter = (*gatedBridgeToolProvider)(nil)
+
+func seedReadySandboxForSharedToolExecution(t *testing.T, db *sql.DB, workspaceID string, sessionID string) {
+	t.Helper()
+	environmentID := "env_" + sessionID
+	if _, err := db.Exec(`UPDATE environments SET current_generation=1 WHERE workspace_id=$1 AND id=$2`, workspaceID, environmentID); err != nil {
+		t.Fatalf("set shared-tool environment generation: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO environment_artifacts (
+		workspace_id, environment_id, generation, status, provider, provider_artifact_ref,
+		normalized_config_hash, artifact_input_hash, runtime_network_policy_json, packages_json,
+		created_at, updated_at
+	) VALUES ($1, $2, 1, 'ready', 'daytona', 'artifact_shared_tool_execution',
+		'config_hash', 'artifact_hash', '{"type":"unrestricted"}', '{}', clock_timestamp(), clock_timestamp())`, workspaceID, environmentID); err != nil {
+		t.Fatalf("seed shared-tool environment artifact: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id, environment_generation,
+		provider, provider_resource_id, binding_revision, materialized_resource_revision,
+		resource_credential_expires_at, resource_roots_json, provider_metadata_json,
+		helper_verified_at, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, 1,
+		clock_timestamp()+interval '2 hours', '[]', '{}', clock_timestamp(), clock_timestamp(), clock_timestamp())`,
+		workspaceID, sessionID, "sbox_"+sessionID, environmentID, "provider_"+sessionID); err != nil {
+		t.Fatalf("seed ready shared-tool Sandbox binding: %v", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission(t *testing.T) {
+	for _, testCase := range []struct {
+		name                string
+		evaluatedPermission string
+		approvalStatus      string
+		approvalDecision    string
+		approvalInput       string
+		wantCode            codes.Code
+		wantAccepted        bool
+	}{
+		{name: "direct allow", evaluatedPermission: "allow", wantCode: codes.OK, wantAccepted: true},
+		{name: "resolved ask allow", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", wantCode: codes.OK, wantAccepted: true},
+		{name: "deny", evaluatedPermission: "deny", wantCode: codes.FailedPrecondition},
+		{name: "ask missing approval", evaluatedPermission: "ask", wantCode: codes.FailedPrecondition},
+		{name: "ask denied", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "deny", wantCode: codes.FailedPrecondition},
+		{name: "unknown permission", evaluatedPermission: "unknown", wantCode: codes.FailedPrecondition},
+		{name: "approval identity conflict", evaluatedPermission: "ask", approvalStatus: "resolving", approvalDecision: "allow", approvalInput: `{"cmd":"different"}`, wantCode: codes.AlreadyExists},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(testCase.name, " ", "_")
+			sessionID := "sesn_permission_" + suffix
+			threadID := "thr_permission_" + suffix
+			toolUseID := "evt_permission_" + suffix
+			modelRequestID := "mreq_permission_" + suffix
+			modelToolCallID := "call_permission_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseID, 1, "agent.tool_use",
+				`{"name":"exec_command","input":{"cmd":"printf ok"},"evaluated_permission":"`+testCase.evaluatedPermission+`"}`)
+			if _, err := admin.ExecContext(context.Background(),
+				`UPDATE session_events SET model_request_id = $2 WHERE workspace_id = $1 AND event_id = $3`,
+				"default", modelRequestID, toolUseID,
+			); err != nil {
+				t.Fatalf("stamp permission model request: %v", err)
+			}
+			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseID, modelToolCallID, "exec_command")
+			if testCase.approvalStatus != "" {
+				approvalInput := testCase.approvalInput
+				if approvalInput == "" {
+					approvalInput = `{"cmd":"printf ok"}`
+				}
+				if _, err := admin.ExecContext(context.Background(),
+					`INSERT INTO session_pending_tool_uses (
+						workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+						tool_name, kind, input_json, decision, status, expires_at, created_at, updated_at
+					) VALUES ('default', $1, $2, $3, $4, 'exec_command', 'approval', $5, $6, $7,
+						'2026-01-01T01:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+					sessionID, threadID, toolUseID, modelToolCallID, approvalInput, testCase.approvalDecision, testCase.approvalStatus,
+				); err != nil {
+					t.Fatalf("seed permission approval: %v", err)
+				}
+			}
+
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+				Scope:               bridgeAPIScope(sessionID, threadID, "bind_permission_"+suffix, 1, "pod_permission_"+suffix),
+				ToolUseEventId:      toolUseID,
+				ModelToolCallId:     modelToolCallID,
+				NormalizedInputHash: sha256Hex(`{"cmd":"printf ok"}`),
+				ToolName:            "exec_command",
+				InputJson:           `{"cmd":"printf ok"}`,
+			})
+			if status.Code(err) != testCase.wantCode {
+				t.Fatalf("AcceptSandboxExecution error = %v; want %s", err, testCase.wantCode)
+			}
+			var executionCount, queueCount int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id = 'default' AND session_id = $1`,
+				sessionID,
+			).Scan(&executionCount); err != nil {
+				t.Fatalf("count permission executions: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*) FROM queue_jobs WHERE workspace_id = 'default' AND kind = 'sandbox_tool_execute' AND partition_key LIKE $1`,
+				"%"+sessionID+"%",
+			).Scan(&queueCount); err != nil {
+				t.Fatalf("count permission jobs: %v", err)
+			}
+			wantCount := 0
+			if testCase.wantAccepted {
+				wantCount = 1
+			}
+			if executionCount != wantCount || queueCount != wantCount {
+				t.Fatalf("permission execution/job counts = %d/%d; want %d/%d", executionCount, queueCount, wantCount, wantCount)
+			}
+		})
+	}
+}
+
+func awaitSandboxExecutionRequest(request *bridgev1.AcceptSandboxExecutionRequest) *bridgev1.AwaitSandboxExecutionRequest {
+	return &bridgev1.AwaitSandboxExecutionRequest{
+		Scope: request.GetScope(), ToolUseEventId: request.GetToolUseEventId(),
+		NormalizedInputHash: request.GetNormalizedInputHash(), ToolName: request.GetToolName(),
+		InputJson: request.GetInputJson(), ModelToolCallId: request.GetModelToolCallId(),
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsNewWorkAfterReleaseFence(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_released_tool"
+		threadID    = "thr_bridge_released_tool"
+		toolUseID   = "evt_bridge_released_tool"
+		modelCallID = "call_bridge_released_tool"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id = 'mreq_bridge_released_tool' WHERE workspace_id = $1 AND event_id = $2`,
+		workspaceID, toolUseID,
+	); err != nil {
+		t.Fatalf("stamp durable tool-use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_released_tool", toolUseID, modelCallID, "exec_command")
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		release_requested_at, release_reason, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 1, 'daytona', $5, 1, $6, 'session_delete', $6, $6)`,
+		workspaceID, sessionID, "sbox_"+sessionID, "env_"+sessionID, "provider_"+sessionID,
+		time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC)); err != nil {
+		t.Fatalf("seed release fence: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope:               bridgeAPIScope(sessionID, threadID, "bind_bridge_released_tool", 1, "pod_uid_bridge_released_tool"),
+		ToolUseEventId:      toolUseID,
+		ModelToolCallId:     modelCallID,
+		NormalizedInputHash: sha256Hex(`{"cmd":"true"}`),
+		ToolName:            "exec_command",
+		InputJson:           `{"cmd":"true"}`,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("AcceptSandboxExecution after release fence error = %v; want FailedPrecondition", err)
+	}
+	var executionCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id = $1 AND session_id = $2 AND tool_use_event_id = $3`,
+		workspaceID, sessionID, toolUseID,
+	).Scan(&executionCount); err != nil {
+		t.Fatalf("count fenced execution rows: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = 'sandbox_tool_execute'`, workspaceID,
+	).Scan(&queueCount); err != nil {
+		t.Fatalf("count fenced execution jobs: %v", err)
+	}
+	if executionCount != 0 || queueCount != 0 {
+		t.Fatalf("release-fenced execution/queue counts = %d/%d; want 0/0", executionCount, queueCount)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionRejectsSettledToolUse(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_settled_tool"
+		threadID    = "thr_bridge_settled_tool"
+		toolUseID   = "evt_bridge_settled_tool"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, "bind_bridge_settled_tool", 1, "pod_uid_bridge_settled_tool")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseID, 1, "agent.tool_use", `{"name":"exec_command","input":{"cmd":"true"},"evaluated_permission":"allow"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id = 'mreq_bridge_settled_tool' WHERE workspace_id = $1 AND event_id = $2`,
+		workspaceID, toolUseID,
+	); err != nil {
+		t.Fatalf("stamp durable tool-use model request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(t, admin, workspaceID, sessionID, threadID, "mreq_bridge_settled_tool", toolUseID, "call_bridge_settled_tool", "exec_command")
+	seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, "evt_bridge_settled_result", 2, "agent.tool_result", `{"tool_use_event_id":"evt_bridge_settled_tool","content":[{"type":"text","text":"cancelled"}]}`)
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	_, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope:               bridgeAPIScope(sessionID, threadID, "bind_bridge_settled_tool", 1, "pod_uid_bridge_settled_tool"),
+		ToolUseEventId:      toolUseID,
+		ModelToolCallId:     "call_bridge_settled_tool",
+		NormalizedInputHash: sha256Hex(`{"cmd":"true"}`),
+		ToolName:            "exec_command",
+		InputJson:           `{"cmd":"true"}`,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("AcceptSandboxExecution settled Tool Use error = %v; want FailedPrecondition", err)
+	}
+	var executionCount, queueCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id = $1 AND session_id = $2 AND tool_use_event_id = $3`,
+		workspaceID, sessionID, toolUseID,
+	).Scan(&executionCount); err != nil {
+		t.Fatalf("count fenced executions: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = 'sandbox_tool_execute'`, workspaceID,
+	).Scan(&queueCount); err != nil {
+		t.Fatalf("count fenced queue jobs: %v", err)
+	}
+	if executionCount != 0 || queueCount != 0 {
+		t.Fatalf("fenced execution/queue counts = %d/%d; want 0/0", executionCount, queueCount)
+	}
+}
 
 func TestInternalToolRepairKeyIsBoundedTupleSafeAndCrossLanguageStable(t *testing.T) {
 	key := internalToolRepairKey("request", "call:a", "b")
@@ -56,12 +1052,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	seedBridgeAPIInternalToolCallMessage(t, admin, "default", "sesn_bridge_repair", "thr_bridge_repair", "msg_invalid_call", "part_invalid_call", "call_repair", "unknown_tool", 1)
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	repairKey := internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool")
 	request := &bridgev1.CommitInternalToolRepairRequest{
 		Scope:           bridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair"),
 		ModelRequestId:  "mreq_repair",
 		ModelToolCallId: "call_repair",
 		ToolName:        "unknown_tool",
-		DataJson:        bridgeInternalToolRepairMessageJSON(t, "sesn_bridge_repair", "msg_repair", "part_repair", "call_repair", "unknown_tool", "invalid tool"),
+		Drafts: []*bridgev1.RuntimeMessageDraft{
+			bridgeInternalToolRepairDraftForTest("default", "sesn_bridge_repair", "thr_bridge_repair", repairKey, "call_repair", "unknown_tool", "invalid tool"),
+		},
 	}
 	response, err := store.CommitInternalToolRepair(context.Background(), request)
 	if err != nil {
@@ -70,6 +1069,18 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("ack = %s; want committed", response.GetAck().GetStatus())
 	}
+	if len(response.GetDeclaration().GetReceipts()) != 1 {
+		t.Fatalf("declaration receipts = %d; want 1", len(response.GetDeclaration().GetReceipts()))
+	}
+	receipt := response.GetDeclaration().GetReceipts()[0]
+	if receipt.GetOperationKind() != bridgeOpCommitInternalToolRepair ||
+		receipt.GetSourceKind() != "internal_tool_repair" ||
+		receipt.GetSourceId() != repairKey ||
+		len(receipt.GetEvents()) != 1 ||
+		len(receipt.GetMessages()) != 1 ||
+		len(receipt.GetMessages()[0].GetParts()) != 1 {
+		t.Fatalf("repair receipt = %+v; want one complete repair declaration", receipt)
+	}
 	replay, err := store.CommitInternalToolRepair(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitInternalToolRepair replay: %v", err)
@@ -77,11 +1088,14 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("replay ack = %s; want duplicate", replay.GetAck().GetStatus())
 	}
+	if !proto.Equal(replay.GetDeclaration(), response.GetDeclaration()) {
+		t.Fatal("replayed repair declaration differs from the committed receipt")
+	}
 
 	var messageID string
 	var kind string
 	var sourceEventID sql.NullString
-	var repairKey string
+	var storedRepairKey string
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT message_id, kind, source_event_id, repair_key, data_json
@@ -89,11 +1103,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_repair'
 		    AND session_thread_id = 'thr_bridge_repair'
-		    AND repair_key IS NOT NULL`).Scan(&messageID, &kind, &sourceEventID, &repairKey, &dataJSON); err != nil {
+		    AND repair_key IS NOT NULL`).Scan(&messageID, &kind, &sourceEventID, &storedRepairKey, &dataJSON); err != nil {
 		t.Fatalf("read repair row: %v", err)
 	}
-	if messageID != "msg_repair" || kind != "assistant" || sourceEventID.Valid || repairKey != internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool") {
-		t.Fatalf("repair row message=%q kind=%q source=%v key=%q; want event-less assistant repair", messageID, kind, sourceEventID.Valid, repairKey)
+	if messageID != receipt.GetMessages()[0].GetMessageId() || kind != "assistant" || !sourceEventID.Valid || storedRepairKey != repairKey {
+		t.Fatalf("repair row message=%q kind=%q source=%v key=%q; want event-owned assistant repair", messageID, kind, sourceEventID.Valid, storedRepairKey)
 	}
 	var durable map[string]any
 	if err := json.Unmarshal([]byte(dataJSON), &durable); err != nil {
@@ -118,13 +1132,17 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	}
 	if len(payload.Messages) != 2 ||
 		!strings.Contains(string(payload.Messages[0]), `"id":"msg_invalid_call"`) ||
-		!strings.Contains(string(payload.Messages[1]), `"id":"msg_repair"`) ||
+		!strings.Contains(string(payload.Messages[1]), `"id":"`+messageID+`"`) ||
 		!strings.Contains(string(payload.Messages[1]), `"toolCallId":"call_repair"`) {
 		t.Fatalf("LoadContext repair messages = %s; want invalid call followed by durable repair row", contextResponse.GetContextJson())
 	}
 
 	conflict := proto.Clone(request).(*bridgev1.CommitInternalToolRepairRequest)
-	conflict.DataJson = bridgeInternalToolRepairMessageJSON(t, "sesn_bridge_repair", "msg_repair_conflict", "part_repair_conflict", "call_repair", "unknown_tool", "different invalid tool")
+	conflict.Drafts[0].Parts[0].PartJson = strings.ReplaceAll(
+		conflict.Drafts[0].Parts[0].GetPartJson(),
+		"invalid tool",
+		"different invalid tool",
+	)
 	if _, err := store.CommitInternalToolRepair(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInternalToolRepair err = %v; want AlreadyExists", err)
 	}
@@ -141,7 +1159,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 		ModelRequestId:  "mreq_repair_stale",
 		ModelToolCallId: "call_repair_stale",
 		ToolName:        "unknown_tool",
-		DataJson:        bridgeInternalToolRepairMessageJSON(t, "sesn_bridge_repair_stale", "msg_repair_stale", "part_repair_stale", "call_repair_stale", "unknown_tool", "invalid tool"),
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInternalToolRepairDraftForTest(
+			"default",
+			"sesn_bridge_repair_stale",
+			"thr_bridge_repair_stale",
+			internalToolRepairKey("mreq_repair_stale", "call_repair_stale", "unknown_tool"),
+			"call_repair_stale",
+			"unknown_tool",
+			"invalid tool",
+		)},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("stale CommitInternalToolRepair err = %v; want FailedPrecondition", err)
@@ -156,31 +1182,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsStaleBinding(t *
 	}
 }
 
-func TestMemoryProjectionHeadsChunksBeyondPostgreSQLParameterLimit(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const storeID = "memstore_bridge_memory_many_paths"
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_many_paths", "thr_bridge_memory_many_paths")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_many_paths", storeID)
-	seedBridgeAPIMemory(t, admin, "default", storeID, "mem_bridge_memory_many_paths_first", "/paths/00000", "first")
-	seedBridgeAPIMemory(t, admin, "default", storeID, "mem_bridge_memory_many_paths_last", "/paths/65534", "last")
-	paths := make([]string, 65_535)
-	for index := range paths {
-		paths[index] = fmt.Sprintf("/paths/%05d", index)
-	}
-	var heads map[string]memoryProjectionHead
-	client := dbconnect.NewClientForTesting(runtime)
-	if err := client.WithWorkspaceTx(context.Background(), "default", "bridge_api.memory_projection_many_paths", func(tx *dbconnect.Tx) error {
-		var err error
-		heads, err = memoryProjectionHeadsTx(context.Background(), tx, "default", storeID, paths)
-		return err
-	}); err != nil {
-		t.Fatalf("memoryProjectionHeadsTx beyond parameter limit: %v", err)
-	}
-	if len(heads) != 2 || heads["/paths/00000"].Content != "first" || heads["/paths/65534"].Content != "last" {
-		t.Fatalf("chunked heads = %+v; want first and last paths from separate chunks", heads)
-	}
-}
-
 func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory", "thr_bridge_memory")
@@ -188,7 +1189,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory", "memstore_bridge_memory")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 	create := &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory", "thr_bridge_memory", "bind_bridge_memory", 1, "pod_uid_memory"),
 		ToolUseEventId:      "evt_tool_memory_create",
@@ -277,6 +1277,120 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryMutatesDurableMemoryAndReplays(t *test
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_memory_projection_queue"
+		threadID    = "thr_bridge_memory_projection_queue"
+		bindingID   = "bind_bridge_memory_projection_queue"
+		memoryStore = "memstore_bridge_memory_projection_queue"
+		memoryWrite = "evt_tool_memory_projection_queue"
+		providerID  = "provider_memory_projection_queue"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, "pod_uid_memory_projection_queue")
+	seedBridgeAPIWritableMemoryStore(t, admin, workspaceID, sessionID, memoryStore)
+	if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		materialized_resource_revision, resource_roots_json, provider_metadata_json,
+		created_at, updated_at
+	) VALUES ($1, $2, 'sbox_memory_projection_queue', $3, 1, 'daytona', $4, 1, 1, '[]', '{}', $5, $5)`,
+		workspaceID, sessionID, "env_"+sessionID, providerID, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed sandbox binding: %v", err)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	request := &bridgev1.RunMemoryRequest{
+		Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_projection_queue"),
+		ToolUseEventId:      memoryWrite,
+		NormalizedInputHash: "hash_memory_projection_queue",
+		Operation:           "create",
+		InputJson:           `{"action":"create","path":"notes/queue.md","content":"durable"}`,
+	}
+	type callResult struct {
+		response *bridgev1.RunMemoryResponse
+		err      error
+	}
+	result := make(chan callResult, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		response, err := store.RunMemory(ctx, request)
+		result <- callResult{response: response, err: err}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var projectionState string
+		var queueCount int
+		err := admin.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results
+			WHERE workspace_id = $1 AND session_id = $2 AND tool_use_event_id = $3`, workspaceID, sessionID, memoryWrite).Scan(&projectionState)
+		if err == nil {
+			if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id = $1 AND kind = $2 AND dedupe_key = $3`,
+				workspaceID, queue.KindSandboxMemoryProjection,
+				queue.FormatSandboxMemoryProjectionDedupeKey(workspace.ID(workspaceID), memoryStore, memoryWrite)).Scan(&queueCount); err != nil {
+				t.Fatalf("count memory projection jobs: %v", err)
+			}
+			if projectionState == memoryProjectionStatePending && queueCount == 1 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("memory projection did not become pending with one Queue job: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	projectionStore := tetralsandbox.NewPostgreSQLSandboxMemoryProjectionStore(dbconnect.NewClientForTesting(runtime))
+	provider := &bridgeMemoryProjectionProvider{}
+	providers, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{"daytona": provider})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	runner := &tetralsandbox.SandboxMemoryProjectionJobRunner{
+		Queue: tetralqueue.NewServer(queueStore), Store: projectionStore, Providers: providers,
+		Config: tetralsandbox.SandboxMemoryProjectionRunnerConfig{
+			WorkspaceID: workspaceID, LeaseOwner: "bridge-memory-projection-test",
+			MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("SandboxMemoryProjectionJobRunner.RunOnce: %v", err)
+	}
+	if len(provider.requests) != 1 || provider.requests[0].Target.ProviderSandboxID != providerID ||
+		len(provider.requests[0].Ops) != 1 || provider.requests[0].Ops[0].Kind != "upsert" ||
+		provider.requests[0].Ops[0].RelativePath != "/notes/queue.md" || provider.requests[0].Ops[0].Content != "durable" {
+		t.Fatalf("projection requests = %+v; want one durable memory upsert", provider.requests)
+	}
+	var settledState string
+	if err := admin.QueryRow(`SELECT memory_projection_state FROM session_runtime_tool_results
+		WHERE workspace_id = $1 AND session_id = $2 AND tool_use_event_id = $3`, workspaceID, sessionID, memoryWrite).Scan(&settledState); err != nil {
+		t.Fatalf("read settled projection: %v", err)
+	}
+	if settledState != memoryProjectionStateRefreshed {
+		t.Fatalf("settled projection state = %q; want refreshed", settledState)
+	}
+
+	completed := <-result
+	if completed.err != nil {
+		t.Fatalf("RunMemory: %v", completed.err)
+	}
+	assertMemoryResultStatus(t, completed.response.GetResultJson(), "completed")
+	replay, err := store.RunMemory(context.Background(), request)
+	if err != nil {
+		t.Fatalf("RunMemory replay: %v", err)
+	}
+	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetResultJson() != completed.response.GetResultJson() {
+		t.Fatalf("RunMemory replay = %+v; want duplicate durable result", replay)
+	}
+	if count := countMemoryVersions(t, admin, memoryStore); count != 1 {
+		t.Fatalf("memory versions = %d; want one committed mutation", count)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing.T) {
 	t.Run("memory identities", func(t *testing.T) {
 		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
@@ -286,7 +1400,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 		seedBridgeAPIMemoryIdentities(t, admin, "memstore_bridge_memory_identity_quota", memory.MaxMemoriesPerStore)
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 		_, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 			Scope:               bridgeAPIScope("sesn_bridge_memory_identity_quota", "thr_bridge_memory_identity_quota", "bind_bridge_memory_identity_quota", 1, "pod_uid_memory_identity_quota"),
 			ToolUseEventId:      "evt_tool_memory_identity_quota",
@@ -313,7 +1426,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 		seedBridgeAPIAdditionalMemoryVersions(t, admin, "memstore_bridge_memory_version_quota", "mem_bridge_memory_version_quota", memory.MaxMemoryVersionsPerStore-1)
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 		requests := []struct {
 			name      string
 			operation string
@@ -354,7 +1466,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryEnforcesDurableMemoryQuotas(t *testing
 		seedBridgeAPIRetainedMemoryPayload(t, admin, "memstore_bridge_memory_retained_quota", "mem_bridge_memory_retained_quota", memory.MaxRetainedMemoryPayloadBytesPerStore-1)
 
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 		requests := []struct {
 			name      string
 			operation string
@@ -391,10 +1502,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRequiresWritableSessionBinding(t *test
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_missing", "thr_bridge_memory_missing")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_missing", "bind_bridge_memory_missing", 1, "pod_uid_memory_missing")
-
-	refresher := &recordingMemoryProjectionRefresher{}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = refresher
 	missing := &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_missing", "thr_bridge_memory_missing", "bind_bridge_memory_missing", 1, "pod_uid_memory_missing"),
 		ToolUseEventId:      "evt_tool_memory_missing",
@@ -443,417 +1551,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRequiresWritableSessionBinding(t *test
 	}
 	assertMemoryToolErrorCode(t, ambiguousResponse.GetResultJson(), "memory_store_ambiguous")
 	assertMemoryProjectionStateNull(t, admin, "sesn_bridge_memory_ambiguous", "evt_tool_memory_ambiguous")
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection calls = %d; want none for memory binding errors", len(refresher.calls))
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryRefreshesProjectionAfterCommit(t *testing.T) {
-	tests := []struct {
-		name      string
-		operation string
-		inputJSON string
-		seed      func(t *testing.T, db *sql.DB, storeID string)
-		wantOps   []MemoryProjectionOp
-	}{
-		{
-			name:      "create",
-			operation: "create",
-			inputJSON: `{"action":"create","path":"notes/create.md","content":"created"}`,
-			wantOps: []MemoryProjectionOp{{
-				Kind:          "upsert",
-				RelativePath:  "/notes/create.md",
-				Content:       "created",
-				ContentSHA256: sha256Hex("created"),
-			}},
-		},
-		{
-			name:      "replace",
-			operation: "replace",
-			inputJSON: `{"action":"replace","path":"notes/replace.md","old_text":"one","new_text":"two"}`,
-			seed: func(t *testing.T, db *sql.DB, storeID string) {
-				seedBridgeAPIMemory(t, db, "default", storeID, "mem_bridge_memory_refresh_replace", "/notes/replace.md", "one")
-			},
-			wantOps: []MemoryProjectionOp{{
-				Kind:          "upsert",
-				RelativePath:  "/notes/replace.md",
-				Content:       "two",
-				ContentSHA256: sha256Hex("two"),
-			}},
-		},
-		{
-			name:      "delete",
-			operation: "delete",
-			inputJSON: `{"action":"delete","path":"notes/delete.md","expected_text":"delete me"}`,
-			seed: func(t *testing.T, db *sql.DB, storeID string) {
-				seedBridgeAPIMemory(t, db, "default", storeID, "mem_bridge_memory_refresh_delete", "/notes/delete.md", "delete me")
-			},
-			wantOps: []MemoryProjectionOp{{
-				Kind:         "remove",
-				RelativePath: "/notes/delete.md",
-			}},
-		},
-		{
-			name:      "rename",
-			operation: "rename",
-			inputJSON: `{"action":"rename","path":"notes/old.md","new_path":"notes/new.md","expected_text":"rename me"}`,
-			seed: func(t *testing.T, db *sql.DB, storeID string) {
-				seedBridgeAPIMemory(t, db, "default", storeID, "mem_bridge_memory_refresh_rename", "/notes/old.md", "rename me")
-			},
-			wantOps: []MemoryProjectionOp{
-				{Kind: "remove", RelativePath: "/notes/old.md"},
-				{Kind: "upsert", RelativePath: "/notes/new.md", Content: "rename me", ContentSHA256: sha256Hex("rename me")},
-			},
-		},
-	}
-	for index, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			sessionID := "sesn_bridge_memory_refresh_" + strconv.Itoa(index)
-			threadID := "thr_bridge_memory_refresh_" + strconv.Itoa(index)
-			bindingID := "bind_bridge_memory_refresh_" + strconv.Itoa(index)
-			storeID := "memstore_bridge_memory_refresh_" + strconv.Itoa(index)
-			toolUseID := "evt_tool_memory_refresh_" + tc.name
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_refresh")
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-			seedBridgeAPIMemoryStoreBinding(t, admin, "default", sessionID, storeID, "read_only", "/mnt/memory/readonly")
-			seedBridgeAPIDetachedMemoryStoreBinding(t, admin, "default", sessionID, storeID, "read_only", "/mnt/memory/detached")
-			if tc.seed != nil {
-				tc.seed(t, admin, storeID)
-			}
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_refresh_"+strconv.Itoa(index))
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-
-			refresher := &recordingMemoryProjectionRefresher{}
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-			store.MemoryProjectionRefresher = refresher
-			response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-				Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_refresh"),
-				ToolUseEventId:      toolUseID,
-				NormalizedInputHash: "hash_memory_refresh_" + tc.name,
-				Operation:           tc.operation,
-				InputJson:           tc.inputJSON,
-			})
-			if err != nil {
-				t.Fatalf("RunMemory refresh: %v", err)
-			}
-			assertMemoryResultStatus(t, response.GetResultJson(), "completed")
-			if len(refresher.calls) != 1 {
-				t.Fatalf("projection refresh calls = %d; want 1", len(refresher.calls))
-			}
-			call := refresher.calls[0]
-			wantMounts := []string{"/mnt/memory/bridge_memory_refresh_" + strconv.Itoa(index), "/mnt/memory/readonly"}
-			if call.Target.ProviderSandboxID != "provider_"+sessionID ||
-				!equalStringSlices(call.MountPaths, wantMounts) {
-				t.Fatalf("refresh target/mounts = %+v %v; want active sandbox and every attached store mount %v", call.Target, call.MountPaths, wantMounts)
-			}
-			assertMemoryProjectionOps(t, call.Ops, tc.wantOps)
-			assertMemoryProjectionState(t, admin, sessionID, toolUseID, memoryProjectionStateRefreshed)
-		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsProjectionRefreshWithPushTimeout(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	sessionID := "sesn_bridge_memory_push_timeout"
-	threadID := "thr_bridge_memory_push_timeout"
-	bindingID := "bind_bridge_memory_push_timeout"
-	storeID := "memstore_bridge_memory_push_timeout"
-	toolUseID := "evt_tool_memory_push_timeout"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_push_timeout")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-	seedBridgeAPIMemoryStoreBinding(t, admin, "default", sessionID, storeID, "read_only", "/mnt/memory/push-timeout")
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_push_timeout")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.MemoryProjectionPushTimeout = 10 * time.Second
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_push_timeout"),
-		ToolUseEventId:      toolUseID,
-		NormalizedInputHash: "hash_memory_push_timeout",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/timeout.md","content":"bounded"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory push timeout: %v", err)
-	}
-	assertMemoryResultStatus(t, response.GetResultJson(), "completed")
-	if len(refresher.deadlines) != 1 {
-		t.Fatalf("projection refresh deadlines = %d; want 1", len(refresher.deadlines))
-	}
-	deadline := refresher.deadlines[0]
-	if deadline.IsZero() {
-		t.Fatal("projection refresh context has no deadline")
-	}
-	if len(refresher.observedAt) != 1 {
-		t.Fatalf("projection refresh observedAt = %d; want 1", len(refresher.observedAt))
-	}
-	remaining := deadline.Sub(refresher.observedAt[0])
-	if remaining < 9*time.Second || remaining > 10*time.Second {
-		t.Fatalf("projection refresh deadline is %s after callback start; want bounded by 10s push timeout", remaining)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryProjectionPushLockContentionReturnsRetryable(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	sessionID := "sesn_bridge_memory_push_lock_contention"
-	threadID := "thr_bridge_memory_push_lock_contention"
-	bindingID := "bind_bridge_memory_push_lock_contention"
-	storeID := "memstore_bridge_memory_push_lock_contention"
-	toolUseID := "evt_tool_memory_push_lock_contention"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_push_lock_contention")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-	seedBridgeAPIMemoryStoreBinding(t, admin, "default", sessionID, storeID, "read_only", "/mnt/memory/contention")
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_push_lock_contention")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-	seedPendingMemoryProjectionResult(t, admin, "default", sessionID, threadID, toolUseID,
-		"hash_memory_push_lock_contention",
-		`{"action":"delete","path":"notes/contention.md","expected_text":"old"}`,
-		`{"status":"completed","action":"delete","path":"notes/contention.md","projection_refreshed":false}`)
-
-	lockTx, err := admin.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("begin lock tx: %v", err)
-	}
-	defer func() { _ = lockTx.Rollback() }()
-	if err := storage.AcquireMemoryStoreMutationLock(context.Background(), lockTx, "default", storeID); err != nil {
-		t.Fatalf("acquire blocking memory lock: %v", err)
-	}
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_push_lock_contention"),
-		ToolUseEventId:      toolUseID,
-		NormalizedInputHash: "hash_memory_push_lock_contention",
-		Operation:           "delete",
-		InputJson:           `{"action":"delete","path":"notes/contention.md","expected_text":"old"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory contended refresh: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "projection_refresh_failed")
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection refresh calls = %d; want none while push lock is contended", len(refresher.calls))
-	}
-	assertMemoryProjectionState(t, admin, sessionID, toolUseID, memoryProjectionStatePending)
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryProjectionPushLockCoversRefreshAndReleasesOnFailure(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	sessionID := "sesn_bridge_memory_push_lock_release"
-	threadID := "thr_bridge_memory_push_lock_release"
-	bindingID := "bind_bridge_memory_push_lock_release"
-	storeID := "memstore_bridge_memory_push_lock_release"
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_push_lock_release")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-	seedBridgeAPIMemoryStoreBinding(t, admin, "default", sessionID, storeID, "read_only", "/mnt/memory/release")
-	seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_push_lock_release")
-	seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-
-	refresher := newBlockingMemoryProjectionRefresher(errors.New("refresh crashed"))
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.MemoryProjectionRefresher = refresher
-	runDone := make(chan struct {
-		response *bridgev1.RunMemoryResponse
-		err      error
-	}, 1)
-	go func() {
-		response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-			Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_push_lock_release"),
-			ToolUseEventId:      "evt_tool_memory_push_lock_release",
-			NormalizedInputHash: "hash_memory_push_lock_release",
-			Operation:           "create",
-			InputJson:           `{"action":"create","path":"notes/release.md","content":"one"}`,
-		})
-		runDone <- struct {
-			response *bridgev1.RunMemoryResponse
-			err      error
-		}{response: response, err: err}
-	}()
-
-	select {
-	case <-refresher.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for projection refresh to start")
-	}
-	if err := tryMemoryStoreMutationLockWithTimeout(admin, storeID, 50*time.Millisecond); err == nil {
-		close(refresher.release)
-		t.Fatal("prepare-time memory lock acquired while projection push lock was held")
-	}
-	close(refresher.release)
-	var completed struct {
-		response *bridgev1.RunMemoryResponse
-		err      error
-	}
-	select {
-	case completed = <-runDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for RunMemory to finish")
-	}
-	if completed.err != nil {
-		t.Fatalf("RunMemory refresh failure: %v", completed.err)
-	}
-	assertRuntimeToolErrorCode(t, completed.response.GetResultJson(), "projection_refresh_failed")
-	if err := tryMemoryStoreMutationLockWithTimeout(admin, storeID, time.Second); err != nil {
-		t.Fatalf("memory store lock after failed refresh = %v; want released", err)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryReturnsRetryableWhenRefreshFails(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_refresh_fail", "thr_bridge_memory_refresh_fail")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_refresh_fail", "bind_bridge_memory_refresh_fail", 1, "pod_uid_memory_refresh_fail")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_refresh_fail", "memstore_bridge_memory_refresh_fail")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_refresh_fail", "prep_bridge_memory_refresh_fail")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_refresh_fail", "2026-01-01T00:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{err: errors.New("projection unavailable")}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.MemoryProjectionRefresher = refresher
-	request := &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_refresh_fail", "thr_bridge_memory_refresh_fail", "bind_bridge_memory_refresh_fail", 1, "pod_uid_memory_refresh_fail"),
-		ToolUseEventId:      "evt_tool_memory_refresh_fail",
-		NormalizedInputHash: "hash_memory_refresh_fail",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/todo.md","content":"one"}`,
-	}
-	failed, err := store.RunMemory(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunMemory refresh failure: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, failed.GetResultJson(), "projection_refresh_failed")
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_refresh_fail", "evt_tool_memory_refresh_fail", memoryProjectionStatePending)
-	assertStoredMemoryResultStatus(t, admin, "sesn_bridge_memory_refresh_fail", "evt_tool_memory_refresh_fail", "completed")
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_refresh_fail"); count != 1 {
-		t.Fatalf("memory versions after failed refresh = %d; want committed mutation only once", count)
-	}
-	storedSemanticResult := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_refresh_fail", "evt_tool_memory_refresh_fail")
-	if strings.Contains(storedSemanticResult, "projection_refresh_failed") {
-		t.Fatalf("stored result contains synthesized projection failure: %s", storedSemanticResult)
-	}
-
-	refresher.err = nil
-	reopenedStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	reopenedStore.Clock = store.Clock
-	reopenedStore.MemoryProjectionRefresher = refresher
-	replayed, err := reopenedStore.RunMemory(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunMemory refresh replay after store reopen: %v", err)
-	}
-	assertMemoryResultStatus(t, replayed.GetResultJson(), "completed")
-	if replayed.GetResultJson() != storedSemanticResult {
-		t.Fatalf("replayed result = %s; want byte-identical stored result %s", replayed.GetResultJson(), storedSemanticResult)
-	}
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_refresh_fail", "evt_tool_memory_refresh_fail", memoryProjectionStateRefreshed)
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_refresh_fail"); count != 1 {
-		t.Fatalf("memory versions after healed replay = %d; want no duplicate mutation", count)
-	}
-	if len(refresher.calls) != 2 {
-		t.Fatalf("projection calls after replay = %d; want failed attempt plus healed attempt", len(refresher.calls))
-	}
-
-	conflict := proto.Clone(request).(*bridgev1.RunMemoryRequest)
-	conflict.NormalizedInputHash = "different_hash"
-	if _, err := reopenedStore.RunMemory(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("conflicting RunMemory replay err = %v; want AlreadyExists", err)
-	}
-	if storedAfterConflict := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_refresh_fail", "evt_tool_memory_refresh_fail"); storedAfterConflict != storedSemanticResult {
-		t.Fatalf("stored result after mismatch = %s; want preserved %s", storedAfterConflict, storedSemanticResult)
-	}
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_refresh_fail"); count != 1 {
-		t.Fatalf("memory versions after mismatched replay = %d; want first mutation preserved", count)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryReplayRefreshUsesStoredInputOperation(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_replay_input", "thr_bridge_memory_replay_input")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_replay_input", "bind_bridge_memory_replay_input", 1, "pod_uid_memory_replay_input")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_replay_input", "memstore_bridge_memory_replay_input")
-	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_replay_input", "mem_bridge_memory_replay_old", "/notes/old.md", "one")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_replay_input", "prep_bridge_memory_replay_input")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_replay_input", "2026-01-01T00:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{err: errors.New("projection unavailable")}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.MemoryProjectionRefresher = refresher
-	request := &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_replay_input", "thr_bridge_memory_replay_input", "bind_bridge_memory_replay_input", 1, "pod_uid_memory_replay_input"),
-		ToolUseEventId:      "evt_tool_memory_replay_input",
-		NormalizedInputHash: "hash_memory_replay_input",
-		Operation:           "rename",
-		InputJson:           `{"action":"rename","path":"notes/old.md","new_path":"notes/new.md","expected_text":"wrong"}`,
-	}
-	first, err := store.RunMemory(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunMemory first stale rename refresh failure: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, first.GetResultJson(), "projection_refresh_failed")
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_replay_input", "evt_tool_memory_replay_input", memoryProjectionStatePending)
-	storedSemanticResult := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_replay_input", "evt_tool_memory_replay_input")
-	if strings.Contains(storedSemanticResult, "projection_refresh_failed") {
-		t.Fatalf("stored result contains synthesized projection failure: %s", storedSemanticResult)
-	}
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_replay_input"); count != 1 {
-		t.Fatalf("memory versions after first stale result = %d; want original durable version only", count)
-	}
-
-	refresher.err = nil
-	replay := proto.Clone(request).(*bridgev1.RunMemoryRequest)
-	replay.Operation = "create"
-	replay.InputJson = `{"action":"create","path":"notes/replay-only.md","content":"must-not-drive-replay-planning"}`
-	reopenedStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	reopenedStore.Clock = store.Clock
-	reopenedStore.MemoryProjectionRefresher = refresher
-	replayed, err := reopenedStore.RunMemory(context.Background(), replay)
-	if err != nil {
-		t.Fatalf("RunMemory pending replay with conflicting request input: %v", err)
-	}
-	assertMemoryToolError(t, replayed.GetResultJson(), "expected_text_mismatch", true)
-	assertMemoryProjectionRefreshed(t, replayed.GetResultJson(), true)
-	if len(refresher.calls) != 2 {
-		t.Fatalf("projection calls = %d; want initial failed attempt plus replay", len(refresher.calls))
-	}
-	ops := refresher.calls[1].Ops
-	if len(ops) != 2 ||
-		ops[0].Kind != "upsert" || ops[0].RelativePath != "/notes/old.md" || ops[0].Content != "one" ||
-		ops[1].Kind != "remove" || ops[1].RelativePath != "/notes/new.md" {
-		t.Fatalf("replay projection ops = %+v; want durable rename input old+new paths, never replay-only create input", ops)
-	}
-	storedAfterReplay := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_replay_input", "evt_tool_memory_replay_input")
-	if replayed.GetResultJson() != storedAfterReplay {
-		t.Fatalf("replayed result = %s; want byte-identical stored result %s", replayed.GetResultJson(), storedAfterReplay)
-	}
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_replay_input"); count != 1 {
-		t.Fatalf("memory versions after same-ID replay = %d; want no phase-1 replay", count)
-	}
-
-	conflict := proto.Clone(replay).(*bridgev1.RunMemoryRequest)
-	conflict.NormalizedInputHash = "different_hash"
-	if _, err := reopenedStore.RunMemory(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("conflicting RunMemory replay err = %v; want AlreadyExists", err)
-	}
-	if storedAfterConflict := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_replay_input", "evt_tool_memory_replay_input"); storedAfterConflict != storedAfterReplay {
-		t.Fatalf("stored result after mismatch = %s; want preserved %s", storedAfterConflict, storedAfterReplay)
-	}
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_replay_input"); count != 1 {
-		t.Fatalf("memory versions after mismatched replay = %d; want first durable version preserved", count)
-	}
 }
 
 func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOperationActionMismatchBeforeDurableWrite(t *testing.T) {
@@ -861,10 +1558,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOperationActionMismatchBeforeDu
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_action_mismatch", "thr_bridge_memory_action_mismatch")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_action_mismatch", "bind_bridge_memory_action_mismatch", 1, "pod_uid_memory_action_mismatch")
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_action_mismatch", "memstore_bridge_memory_action_mismatch")
-
-	refresher := &recordingMemoryProjectionRefresher{}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = refresher
 	_, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_action_mismatch", "thr_bridge_memory_action_mismatch", "bind_bridge_memory_action_mismatch", 1, "pod_uid_memory_action_mismatch"),
 		ToolUseEventId:      "evt_tool_memory_action_mismatch",
@@ -879,248 +1573,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOperationActionMismatchBeforeDu
 	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_action_mismatch"); count != 0 {
 		t.Fatalf("memory versions after action mismatch = %d; want 0", count)
 	}
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection calls after action mismatch = %d; want none", len(refresher.calls))
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshWhenSandboxCold(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_cold", "thr_bridge_memory_cold")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_cold", "bind_bridge_memory_cold", 1, "pod_uid_memory_cold")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_cold", "memstore_bridge_memory_cold")
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_cold", "thr_bridge_memory_cold", "bind_bridge_memory_cold", 1, "pod_uid_memory_cold"),
-		ToolUseEventId:      "evt_tool_memory_cold",
-		NormalizedInputHash: "hash_memory_cold",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/cold.md","content":"one"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory cold refresh: %v", err)
-	}
-	assertMemoryResultStatus(t, response.GetResultJson(), "completed")
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_cold", "evt_tool_memory_cold", memoryProjectionStateSkippedCold)
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection refresher calls = %d; want none for cold sandbox", len(refresher.calls))
-	}
-
-	reopenedStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	reopenedStore.MemoryProjectionRefresher = refresher
-	replayed, err := reopenedStore.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_cold", "thr_bridge_memory_cold", "bind_bridge_memory_cold", 1, "pod_uid_memory_cold"),
-		ToolUseEventId:      "evt_tool_memory_cold",
-		NormalizedInputHash: "hash_memory_cold",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/cold.md","content":"one"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory cold same-ID replay after reopen: %v", err)
-	}
-	if replayed.GetResultJson() != response.GetResultJson() {
-		t.Fatalf("cold replay result = %s; want byte-identical %s", replayed.GetResultJson(), response.GetResultJson())
-	}
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection refresher calls after cold replay = %d; want zero", len(refresher.calls))
-	}
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_cold"); count != 1 {
-		t.Fatalf("memory versions after cold replay = %d; want one mutation", count)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemorySkipsStaleErrorRefreshWhenSandboxCold(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_cold_stale", "thr_bridge_memory_cold_stale")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_cold_stale", "bind_bridge_memory_cold_stale", 1, "pod_uid_memory_cold_stale")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_cold_stale", "memstore_bridge_memory_cold_stale")
-	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_cold_stale", "mem_bridge_memory_cold_stale", "/notes/todo.md", "one")
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_cold_stale", "thr_bridge_memory_cold_stale", "bind_bridge_memory_cold_stale", 1, "pod_uid_memory_cold_stale"),
-		ToolUseEventId:      "evt_tool_memory_cold_stale",
-		NormalizedInputHash: "hash_memory_cold_stale",
-		Operation:           "replace",
-		InputJson:           `{"action":"replace","path":"notes/todo.md","old_text":"absent","new_text":"two"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory cold stale refresh: %v", err)
-	}
-	assertMemoryToolError(t, response.GetResultJson(), "old_text_not_found", true)
-	assertMemoryProjectionRefreshed(t, response.GetResultJson(), false)
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_cold_stale", "evt_tool_memory_cold_stale", memoryProjectionStateSkippedCold)
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection refresher calls = %d; want none for cold stale error", len(refresher.calls))
-	}
-	stored := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_cold_stale", "evt_tool_memory_cold_stale")
-	assertMemoryProjectionRefreshed(t, stored, false)
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryRequeuesPreparationForInactiveSandbox(t *testing.T) {
-	for _, sandboxStatus := range []string{"stopped", "archived", "released"} {
-		t.Run(sandboxStatus, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			sessionID := "sesn_bridge_memory_inactive_" + sandboxStatus
-			threadID := "thr_bridge_memory_inactive_" + sandboxStatus
-			preparationAttemptID := "prep_bridge_memory_inactive_" + sandboxStatus
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_memory_inactive_"+sandboxStatus, 1, "pod_uid_memory_inactive_"+sandboxStatus)
-			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, "memstore_bridge_memory_inactive_"+sandboxStatus)
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, preparationAttemptID)
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
-			setBridgeAPISandboxStatus(t, admin, "default", sessionID, sandboxStatus)
-
-			refresher := &recordingMemoryProjectionRefresher{}
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-			store.MemoryProjectionRefresher = refresher
-			response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-				Scope:               bridgeAPIScope(sessionID, threadID, "bind_bridge_memory_inactive_"+sandboxStatus, 1, "pod_uid_memory_inactive_"+sandboxStatus),
-				ToolUseEventId:      "evt_tool_memory_inactive_" + sandboxStatus,
-				NormalizedInputHash: "hash_memory_inactive_" + sandboxStatus,
-				Operation:           "create",
-				InputJson:           `{"action":"create","path":"notes/inactive.md","content":"one"}`,
-			})
-			if err != nil {
-				t.Fatalf("RunMemory inactive sandbox: %v", err)
-			}
-			assertMemoryResultStatus(t, response.GetResultJson(), "completed")
-			assertMemoryProjectionState(t, admin, sessionID, "evt_tool_memory_inactive_"+sandboxStatus, memoryProjectionStateSkippedCold)
-			if len(refresher.calls) != 0 {
-				t.Fatalf("projection calls = %d; want none while sandbox status is %s", len(refresher.calls), sandboxStatus)
-			}
-			assertSessionPrepareRequeued(t, admin, "default", sessionID, preparationAttemptID)
-		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshWhenSandboxReadinessStale(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_stale_sandbox", "thr_bridge_memory_stale_sandbox")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_stale_sandbox", "bind_bridge_memory_stale_sandbox", 1, "pod_uid_memory_stale_sandbox")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_stale_sandbox", "memstore_bridge_memory_stale_sandbox")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_stale_sandbox", "prep_bridge_memory_stale_sandbox")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_stale_sandbox", "2026-01-01T00:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_stale_sandbox", "thr_bridge_memory_stale_sandbox", "bind_bridge_memory_stale_sandbox", 1, "pod_uid_memory_stale_sandbox"),
-		ToolUseEventId:      "evt_tool_memory_stale_sandbox",
-		NormalizedInputHash: "hash_memory_stale_sandbox",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/stale-sandbox.md","content":"one"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory stale sandbox refresh: %v", err)
-	}
-	assertMemoryResultStatus(t, response.GetResultJson(), "completed")
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_stale_sandbox", "evt_tool_memory_stale_sandbox", memoryProjectionStateSkippedCold)
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection calls = %d; want none while sandbox status is stale", len(refresher.calls))
-	}
-	assertSessionPrepareRequeued(t, admin, "default", "sesn_bridge_memory_stale_sandbox", "prep_bridge_memory_stale_sandbox")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshWithExpiringResourceCredential(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_cred_expiring", "thr_bridge_memory_cred_expiring")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_cred_expiring", "bind_bridge_memory_cred_expiring", 1, "pod_uid_memory_cred_expiring")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_cred_expiring", "memstore_bridge_memory_cred_expiring")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_cred_expiring", "prep_bridge_memory_cred_expiring")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_cred_expiring", "2026-01-01T00:40:00Z")
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_memory_cred_expiring", "prep_bridge_memory_cred_expiring", "2026-01-01T01:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_cred_expiring", "thr_bridge_memory_cred_expiring", "bind_bridge_memory_cred_expiring", 1, "pod_uid_memory_cred_expiring"),
-		ToolUseEventId:      "evt_tool_memory_cred_expiring",
-		NormalizedInputHash: "hash_memory_cred_expiring",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/cred-expiring.md","content":"one"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory expiring resource credential: %v", err)
-	}
-	assertMemoryResultStatus(t, response.GetResultJson(), "completed")
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_cred_expiring", "evt_tool_memory_cred_expiring", memoryProjectionStateSkippedCold)
-	if len(refresher.calls) != 0 {
-		t.Fatalf("projection calls = %d; want none while file-resource credential is expiring", len(refresher.calls))
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_memory_cred_expiring", "prep_bridge_memory_cred_expiring")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryFailsClosedWithoutProjectionRefresher(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_no_refresher", "thr_bridge_memory_no_refresher")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_no_refresher", "bind_bridge_memory_no_refresher", 1, "pod_uid_memory_no_refresher")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_no_refresher", "memstore_bridge_memory_no_refresher")
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	_, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_no_refresher", "thr_bridge_memory_no_refresher", "bind_bridge_memory_no_refresher", 1, "pod_uid_memory_no_refresher"),
-		ToolUseEventId:      "evt_tool_memory_no_refresher",
-		NormalizedInputHash: "hash_memory_no_refresher",
-		Operation:           "create",
-		InputJson:           `{"action":"create","path":"notes/no-refresher.md","content":"one"}`,
-	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("RunMemory without projection refresher err = %v; want FailedPrecondition", err)
-	}
-	assertMemoryProjectionState(t, admin, "sesn_bridge_memory_no_refresher", "evt_tool_memory_no_refresher", memoryProjectionStatePending)
-	assertStoredMemoryResultStatus(t, admin, "sesn_bridge_memory_no_refresher", "evt_tool_memory_no_refresher", "completed")
-	if count := countMemoryVersions(t, admin, "memstore_bridge_memory_no_refresher"); count != 1 {
-		t.Fatalf("memory versions after fail-closed projection = %d; want committed mutation once", count)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunMemoryRefreshesStaleErrorPaths(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_stale", "thr_bridge_memory_stale")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_stale", "bind_bridge_memory_stale", 1, "pod_uid_memory_stale")
-	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_stale", "memstore_bridge_memory_stale")
-	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_stale", "mem_bridge_memory_stale", "/notes/todo.md", "one")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_stale", "prep_bridge_memory_stale")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_stale", "2026-01-01T00:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.MemoryProjectionRefresher = refresher
-	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_memory_stale", "thr_bridge_memory_stale", "bind_bridge_memory_stale", 1, "pod_uid_memory_stale"),
-		ToolUseEventId:      "evt_tool_memory_stale",
-		NormalizedInputHash: "hash_memory_stale",
-		Operation:           "replace",
-		InputJson:           `{"action":"replace","path":"notes/todo.md","old_text":"absent","new_text":"two"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunMemory stale refresh: %v", err)
-	}
-	assertMemoryToolError(t, response.GetResultJson(), "old_text_not_found", true)
-	assertMemoryProjectionRefreshed(t, response.GetResultJson(), true)
-	if len(refresher.calls) != 1 || len(refresher.calls[0].Ops) != 1 ||
-		refresher.calls[0].Ops[0].Kind != "upsert" ||
-		refresher.calls[0].Ops[0].RelativePath != "/notes/todo.md" ||
-		refresher.calls[0].Ops[0].Content != "one" {
-		t.Fatalf("stale refresh calls = %+v; want current durable truth for referenced path", refresher.calls)
-	}
-	stored := storedMemoryResultJSON(t, admin, "sesn_bridge_memory_stale", "evt_tool_memory_stale")
-	assertMemoryProjectionRefreshed(t, stored, true)
 }
 
 func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors(t *testing.T) {
@@ -1156,15 +1608,10 @@ func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors(t *tes
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_validation")
 			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_validation_"+strconv.Itoa(index))
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 			if tc.seed != nil {
 				tc.seed(t, admin, storeID)
 			}
-
-			refresher := &recordingMemoryProjectionRefresher{}
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.MemoryProjectionRefresher = refresher
 			response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 				Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_validation"),
 				ToolUseEventId:      toolUseID,
@@ -1177,9 +1624,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemorySkipsRefreshForValidationErrors(t *tes
 			}
 			assertMemoryToolError(t, response.GetResultJson(), tc.wantCode, false)
 			assertMemoryProjectionStateNull(t, admin, sessionID, toolUseID)
-			if len(refresher.calls) != 0 {
-				t.Fatalf("projection calls = %d; want none for validation error", len(refresher.calls))
-			}
 		})
 	}
 }
@@ -1219,7 +1663,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsInvalidInputs(t *testing.T) {
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_bridge_memory_invalid_"+strconv.Itoa(index), "/notes/todo.md", "one")
 
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 			response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 				Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_invalid"),
 				ToolUseEventId:      "evt_tool_memory_invalid_" + strconv.Itoa(index),
@@ -1264,10 +1707,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOversizedReplaceBeforeDurableWr
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_uid_memory_replace_cap")
 			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_bridge_memory_replace_cap_"+strconv.Itoa(index), "/notes/todo.md", tc.content)
-
-			refresher := &recordingMemoryProjectionRefresher{}
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.MemoryProjectionRefresher = refresher
 			response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 				Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_uid_memory_replace_cap"),
 				ToolUseEventId:      toolUseID,
@@ -1280,9 +1720,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsOversizedReplaceBeforeDurableWr
 			}
 			assertMemoryToolError(t, response.GetResultJson(), "content_too_large", false)
 			assertMemoryProjectionStateNull(t, admin, sessionID, toolUseID)
-			if len(refresher.calls) != 0 {
-				t.Fatalf("projection calls = %d; want none for oversized replace validation", len(refresher.calls))
-			}
 			if count := countMemoryVersions(t, admin, storeID); count != 1 {
 				t.Fatalf("memory versions after oversized replace = %d; want seed version only", count)
 			}
@@ -1297,12 +1734,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryReadsLegacyOversizedRows(t *testing.T)
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_legacy_large", "memstore_bridge_memory_legacy_large")
 	legacyContent := strings.Repeat("x", memoryToolContentMaxBytes+1)
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_legacy_large", "mem_bridge_memory_legacy_large", "/notes/legacy-large.md", legacyContent)
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_legacy_large", "prep_bridge_memory_legacy_large")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_legacy_large", "2026-01-01T00:00:00Z")
-
-	refresher := &recordingMemoryProjectionRefresher{}
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = refresher
 	response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_legacy_large", "thr_bridge_memory_legacy_large", "bind_bridge_memory_legacy_large", 1, "pod_uid_memory_legacy_large"),
 		ToolUseEventId:      "evt_tool_memory_legacy_large",
@@ -1328,7 +1760,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryDeletesWithExpectedText(t *testing.T) 
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_delete", "mem_bridge_memory_delete_other", "/notes/other.md", "keep me")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 	deleted, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_delete", "thr_bridge_memory_delete", "bind_bridge_memory_delete", 1, "pod_uid_memory_delete"),
 		ToolUseEventId:      "evt_tool_memory_delete",
@@ -1364,7 +1795,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRenamesWithExpectedText(t *testing.T) 
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_rename", "mem_bridge_memory_rename_collision", "/notes/existing.md", "existing")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 
 	wrongRename, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_rename", "thr_bridge_memory_rename", "bind_bridge_memory_rename", 1, "pod_uid_memory_rename"),
@@ -1418,7 +1848,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryReportsStaleReplace(t *testing.T) {
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_replace_stale", "mem_bridge_memory_replace_stale", "/notes/repeat.md", "one one")
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.MemoryProjectionRefresher = &recordingMemoryProjectionRefresher{}
 	missing, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_replace_stale", "thr_bridge_memory_replace_stale", "bind_bridge_memory_replace_stale", 1, "pod_uid_memory_replace_stale"),
 		ToolUseEventId:      "evt_tool_memory_replace_missing",
@@ -1462,8 +1891,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_memory_prefix", "thr_bridge_memory_prefix")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix")
 	seedBridgeAPIWritableMemoryStore(t, admin, "default", "sesn_bridge_memory_prefix", "memstore_bridge_memory_prefix")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_memory_prefix", "prep_bridge_memory_prefix")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_memory_prefix", "2026-01-01T00:00:00Z")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_a", "/a", "a")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_parent_child", "/parent/child", "child")
 	seedBridgeAPIMemory(t, admin, "default", "memstore_bridge_memory_prefix", "mem_bridge_memory_prefix_parent_other", "/parent/other", "other")
@@ -1471,8 +1898,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	refresher := &recordingMemoryProjectionRefresher{}
-	store.MemoryProjectionRefresher = refresher
 	descendant, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_prefix", "thr_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix"),
 		ToolUseEventId:      "evt_tool_memory_prefix_descendant",
@@ -1488,13 +1913,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 		t.Fatalf("descendant conflict message = %q; want distinguishing descendant message", got)
 	}
 	assertMemoryPathConflictResult(t, descendant.GetResultJson(), []memoryPathConflictWireHead{{MemoryID: "mem_bridge_memory_prefix_a", Path: "/a"}}, 1, false)
-	if len(refresher.calls) != 1 {
-		t.Fatalf("memory projection refresh calls = %+v; want one descendant cleanup refresh", refresher.calls)
-	}
-	assertMemoryProjectionOps(t, refresher.calls[0].Ops, []MemoryProjectionOp{
-		{Kind: "remove", RelativePath: "/a/b"},
-		{Kind: "upsert", RelativePath: "/a", Content: "a", ContentSHA256: sha256Hex("a")},
-	})
 
 	ancestorCreate, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_prefix", "thr_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix"),
@@ -1514,14 +1932,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryRejectsPrefixConflictingPaths(t *testi
 		{MemoryID: "mem_bridge_memory_prefix_parent_child", Path: "/parent/child"},
 		{MemoryID: "mem_bridge_memory_prefix_parent_other", Path: "/parent/other"},
 	}, 2, false)
-	if len(refresher.calls) != 2 {
-		t.Fatalf("memory projection refresh calls = %+v; want ancestor refresh", refresher.calls)
-	}
-	assertMemoryProjectionOps(t, refresher.calls[1].Ops, []MemoryProjectionOp{
-		{Kind: "remove", RelativePath: "/parent"},
-		{Kind: "upsert", RelativePath: "/parent/child", Content: "child", ContentSHA256: sha256Hex("child")},
-		{Kind: "upsert", RelativePath: "/parent/other", Content: "other", ContentSHA256: sha256Hex("other")},
-	})
 
 	exactRename, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 		Scope:               bridgeAPIScope("sesn_bridge_memory_prefix", "thr_bridge_memory_prefix", "bind_bridge_memory_prefix", 1, "pod_uid_memory_prefix"),
@@ -1598,8 +2008,6 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsPathConflictWire(t *testing.T) {
 			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_memory_conflict_bound", 1, "pod_uid_memory_conflict_bound")
 			seedBridgeAPIWritableMemoryStore(t, admin, "default", sessionID, storeID)
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, "prep_bridge_memory_conflict_bound")
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:00:00Z")
 
 			targetPath := "/root/target"
 			seedBridgeAPIMemory(t, admin, "default", storeID, "mem_00_exact", targetPath, "exact")
@@ -1610,11 +2018,8 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsPathConflictWire(t *testing.T) {
 				pathValue := fmt.Sprintf("%s/child-%02d", targetPath, index)
 				seedBridgeAPIMemory(t, admin, "default", storeID, memoryID, pathValue, memoryID)
 			}
-
-			refresher := &recordingMemoryProjectionRefresher{}
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-			store.MemoryProjectionRefresher = refresher
 			response, err := store.RunMemory(context.Background(), &bridgev1.RunMemoryRequest{
 				Scope:               bridgeAPIScope(sessionID, threadID, "bind_bridge_memory_conflict_bound", 1, "pod_uid_memory_conflict_bound"),
 				ToolUseEventId:      "evt_tool_memory_conflict_bound_" + suffix,
@@ -1640,27 +2045,12 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryBoundsPathConflictWire(t *testing.T) {
 			}
 			assertMemoryPathConflictResult(t, response.GetResultJson(), wantHeads, conflictTotal, conflictTotal > MaxMemoryPathConflicts)
 
-			if len(refresher.calls) != 1 {
-				t.Fatalf("memory projection refresh calls = %d; want one", len(refresher.calls))
-			}
-			if len(refresher.calls[0].Ops) != len(wantHeads) {
-				t.Fatalf("refresh ops = %+v; want exactly %d returned conflict heads", refresher.calls[0].Ops, len(wantHeads))
-			}
-			for index, head := range wantHeads {
-				op := refresher.calls[0].Ops[index]
-				if op.Kind != "upsert" || op.RelativePath != head.Path {
-					t.Fatalf("refresh op[%d] = %+v; want returned conflict head %+v", index, op, head)
-				}
-			}
 		})
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreRunToolSettlementReplayIsIdentityFenced(t *testing.T) {
-	t.Run("terminal identity and cross-kind conflicts", testPostgreSQLRunToolTerminalIdentityFencing)
-	t.Run("running durability and cold recovery", TestPostgreSQLBridgeAPIStoreRunToolPersistsBackgroundTaskBeforeAck)
-	t.Run("media refs-only replay", TestPostgreSQLBridgeAPIStoreRunToolMaterializesViewImageAttachmentBeforePersisting)
-	t.Run("suspected-pod-loss media loser cleanup", TestPostgreSQLBridgeAPIStoreRunToolConcurrentMediaReplayDeletesLoserBlob)
+func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionReplayIsIdentityFenced(t *testing.T) {
+	t.Run("durable identity and cross-kind conflicts", testPostgreSQLAcceptSandboxExecutionIdentityFencing)
 }
 
 func TestCanonicalRunToolInputMatchesJavaScriptStringifyEscaping(t *testing.T) {
@@ -1741,548 +2131,6 @@ func TestCanonicalRunToolInputSharedCrossLanguageVectors(t *testing.T) {
 	}
 	if _, _, err := canonicalRunToolInput(`{"unterminated":`); err == nil {
 		t.Fatal("malformed canonical input accepted")
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolMaterializesViewImageAttachmentBeforePersisting(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_view_image", "thr_bridge_view_image")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_view_image", "bind_bridge_view_image", 1, "pod_uid_view_image")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_view_image", "prep_bridge_view_image")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_view_image", "2026-01-01T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{
-		execution: SandboxToolExecution{
-			ResultJSON: `{"status":"success","result":{"mime":"image/png","size_bytes":3,"data_base64":"YWJj"}}`,
-		},
-	}
-	blobStore := blob.NewFakeBlobStore()
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.SandboxToolExecutor = executor
-	store.AttachmentBlobStore = blobStore
-
-	request := &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_view_image", "thr_bridge_view_image", "bind_bridge_view_image", 1, "pod_uid_view_image"),
-		ToolUseEventId:      "evt_tool_view_image",
-		NormalizedInputHash: sha256Hex(`{"path":"/workspace/chart.png"}`),
-		ToolName:            "view_image",
-		InputJson:           `{"path":"/workspace/chart.png"}`,
-	}
-	response, err := store.RunTool(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunTool view_image: %v", err)
-	}
-	if strings.Contains(response.GetResultJson(), "data_base64") || strings.Contains(response.GetResultJson(), "YWJj") {
-		t.Fatalf("RunTool response = %s; want no response base64", response.GetResultJson())
-	}
-	attachmentRef := testJSONPathString(t, response.GetResultJson(), "result.attachment_ref")
-	if !strings.HasPrefix(attachmentRef, "att_") {
-		t.Fatalf("RunTool response attachment_ref = %q; want transient attachment capability", attachmentRef)
-	}
-	if got := testJSONPathString(t, response.GetResultJson(), "result.filename"); got != "chart.png" {
-		t.Fatalf("RunTool response filename = %q; want chart.png", got)
-	}
-	blobKey := transientAttachmentBlobPointer(request.GetScope(), attachmentRef)
-	rc, err := blobStore.Get(context.Background(), blobKey)
-	if err != nil {
-		t.Fatalf("get materialized view_image blob: %v", err)
-	}
-	body, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("read materialized view_image blob: %v", err)
-	}
-	if string(body) != "abc" {
-		t.Fatalf("materialized blob = %q; want abc", string(body))
-	}
-
-	storedResult := storedMemoryResultJSON(t, admin, "sesn_bridge_view_image", "evt_tool_view_image")
-	if strings.Contains(storedResult, "data_base64") || strings.Contains(storedResult, "YWJj") {
-		t.Fatalf("stored view_image result = %s; want no durable base64", storedResult)
-	}
-	if got := testJSONPathString(t, storedResult, "result.attachment_ref"); got != attachmentRef {
-		t.Fatalf("stored attachment_ref = %q; want response ref %q", got, attachmentRef)
-	}
-	if got := testJSONPathString(t, storedResult, "result.mime"); got != "image/png" {
-		t.Fatalf("stored mime = %q; want image/png", got)
-	}
-	if got := testJSONPathInt(t, storedResult, "result.size_bytes"); got != 3 {
-		t.Fatalf("stored size_bytes = %d; want 3", got)
-	}
-	var claimStatus, claimOwner, claimLease sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
-		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_view_image' AND tool_use_event_id = 'evt_tool_view_image'`,
-	).Scan(&claimStatus, &claimOwner, &claimLease); err != nil {
-		t.Fatalf("read media RunTool claim fields: %v", err)
-	}
-	if claimStatus.Valid || claimOwner.Valid || claimLease.Valid {
-		t.Fatalf("media MCP claim fields = %+v/%+v/%+v; want all NULL", claimStatus, claimOwner, claimLease)
-	}
-	var indexCount int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM session_transient_attachments
-		  WHERE workspace_id = 'default'
-		    AND attachment_ref = $1
-		    AND status = 'active'
-		    AND source_tool_use_event_id = 'evt_tool_view_image'`,
-		attachmentRef,
-	).Scan(&indexCount); err != nil {
-		t.Fatalf("read transient attachment index count: %v", err)
-	}
-	if indexCount != 1 {
-		t.Fatalf("transient attachment index count = %d; want 1", indexCount)
-	}
-
-	replay, err := store.RunTool(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunTool view_image replay: %v", err)
-	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("RunTool replay ack = %v; want duplicate", replay.GetAck().GetStatus())
-	}
-	if strings.Contains(replay.GetResultJson(), "data_base64") || strings.Contains(replay.GetResultJson(), "YWJj") {
-		t.Fatalf("RunTool replay result = %s; want no replayed base64", replay.GetResultJson())
-	}
-	if got := testJSONPathString(t, replay.GetResultJson(), "result.attachment_ref"); got != attachmentRef {
-		t.Fatalf("RunTool replay attachment_ref = %q; want original ref %q", got, attachmentRef)
-	}
-	if len(executor.invocations) != 1 {
-		t.Fatalf("executor calls after replay = %d; want one transport execution", len(executor.invocations))
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolConcurrentMediaReplayDeletesLoserBlob(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_view_image_race", "thr_bridge_view_image_race")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_view_image_race", "bind_bridge_view_image_race", 1, "pod_uid_view_image_race")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_view_image_race", "prep_bridge_view_image_race")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_view_image_race", "2026-01-01T00:00:00Z")
-
-	innerBlobStore := blob.NewFakeBlobStore()
-	failingDeleteStore := &failDeleteBlobStore{inner: innerBlobStore, remaining: 1}
-	firstBeforePut := make(chan struct{})
-	secondBeforePut := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	firstDone := make(chan struct{})
-	var putMu sync.Mutex
-	putCount := 0
-	gatedBlobStore := &beforePutBlobStore{
-		inner: failingDeleteStore,
-		beforePut: func(_ string) {
-			putMu.Lock()
-			putCount++
-			call := putCount
-			putMu.Unlock()
-			switch call {
-			case 1:
-				close(firstBeforePut)
-				<-releaseFirst
-			case 2:
-				close(secondBeforePut)
-				<-firstDone
-			}
-		},
-	}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.SandboxToolExecutor = &recordingSandboxToolExecutor{execution: SandboxToolExecution{
-		ResultJSON: `{"status":"success","result":{"mime":"image/png","size_bytes":3,"data_base64":"YWJj"}}`,
-	}}
-	store.AttachmentBlobStore = gatedBlobStore
-	request := &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_view_image_race", "thr_bridge_view_image_race", "bind_bridge_view_image_race", 1, "pod_uid_view_image_race"),
-		ToolUseEventId:      "evt_tool_view_image_race",
-		NormalizedInputHash: sha256Hex(`{"path":"/workspace/chart.png"}`),
-		ToolName:            "view_image",
-		InputJson:           `{"path":"/workspace/chart.png"}`,
-	}
-	type runToolResult struct {
-		response *bridgev1.RunToolResponse
-		err      error
-	}
-	firstResult := make(chan runToolResult, 1)
-	secondResult := make(chan runToolResult, 1)
-	go func() {
-		response, err := store.RunTool(context.Background(), request)
-		firstResult <- runToolResult{response: response, err: err}
-	}()
-	waitForSignal(t, firstBeforePut, "first media upload")
-	go func() {
-		response, err := store.RunTool(context.Background(), proto.Clone(request).(*bridgev1.RunToolRequest))
-		secondResult <- runToolResult{response: response, err: err}
-	}()
-	waitForSignal(t, secondBeforePut, "second media upload")
-	close(releaseFirst)
-	first := <-firstResult
-	close(firstDone)
-	second := <-secondResult
-	if first.err != nil || second.err != nil {
-		t.Fatalf("concurrent RunTool errors = %v / %v", first.err, second.err)
-	}
-	if first.response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || second.response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
-		t.Fatalf("concurrent RunTool acks = %s / %s; want committed / duplicate", first.response.GetAck().GetStatus(), second.response.GetAck().GetStatus())
-	}
-	winnerRef := testJSONPathString(t, first.response.GetResultJson(), "result.attachment_ref")
-	if got := testJSONPathString(t, second.response.GetResultJson(), "result.attachment_ref"); got != winnerRef {
-		t.Fatalf("duplicate attachment ref = %q; want winner %q", got, winnerRef)
-	}
-	if innerBlobStore.Len() != 2 || !innerBlobStore.Has(transientAttachmentBlobPointer(request.GetScope(), winnerRef)) {
-		t.Fatalf("blob store len/deletes = %d/%v; want winner plus durably tracked loser after injected delete failure", innerBlobStore.Len(), innerBlobStore.Deletes())
-	}
-	var deletingRows int
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_transient_attachments
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_view_image_race' AND status = 'deleting'`,
-	).Scan(&deletingRows); err != nil {
-		t.Fatalf("read tracked loser attachment: %v", err)
-	}
-	if deletingRows != 1 {
-		t.Fatalf("tracked deleting loser rows = %d; want one discoverable GC owner", deletingRows)
-	}
-	failingDeleteStore.allowDeletes()
-	gc, err := store.ReconcileTransientAttachments(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("reconcile tracked loser: %v", err)
-	}
-	if gc.Marked != 1 || gc.Deleted != 1 || gc.Failed != 0 || innerBlobStore.Len() != 1 {
-		t.Fatalf("loser GC = %+v blobs=%d; want tracked loser removed and winner retained", gc, innerBlobStore.Len())
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolMaterializesReadPDFAttachmentBeforePersisting(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_read_pdf", "thr_bridge_read_pdf")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_read_pdf", "bind_bridge_read_pdf", 1, "pod_uid_read_pdf")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_read_pdf", "prep_bridge_read_pdf")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_read_pdf", "2026-01-01T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{
-		execution: SandboxToolExecution{
-			ResultJSON: `{"status":"success","result":{"mime":"application/pdf","size_bytes":5,"page_range":"2-3","data_base64":"JVBERi0="}}`,
-		},
-	}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.SandboxToolExecutor = executor
-	store.AttachmentBlobStore = blob.NewFakeBlobStore()
-
-	request := &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_read_pdf", "thr_bridge_read_pdf", "bind_bridge_read_pdf", 1, "pod_uid_read_pdf"),
-		ToolUseEventId:      "evt_tool_read_pdf",
-		NormalizedInputHash: sha256Hex(`{"file_path":"docs/report.pdf","page_range":"2-6"}`),
-		ToolName:            "Read",
-		InputJson:           `{"file_path":"docs/report.pdf","page_range":"2-6"}`,
-	}
-	response, err := store.RunTool(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunTool Read PDF: %v", err)
-	}
-	if strings.Contains(response.GetResultJson(), "data_base64") || strings.Contains(response.GetResultJson(), "JVBERi0=") {
-		t.Fatalf("RunTool Read PDF response = %s; want no response base64", response.GetResultJson())
-	}
-	attachmentRef := testJSONPathString(t, response.GetResultJson(), "result.attachment_ref")
-	if got := testJSONPathString(t, response.GetResultJson(), "result.filename"); got != "report.pdf" {
-		t.Fatalf("RunTool Read PDF filename = %q; want report.pdf", got)
-	}
-	if got := testJSONPathString(t, response.GetResultJson(), "result.page_range"); got != "2-3" {
-		t.Fatalf("RunTool Read PDF page_range = %q; want helper-extracted 2-3", got)
-	}
-	storedResult := storedMemoryResultJSON(t, admin, "sesn_bridge_read_pdf", "evt_tool_read_pdf")
-	if strings.Contains(storedResult, "data_base64") || strings.Contains(storedResult, "JVBERi0=") {
-		t.Fatalf("stored Read PDF result = %s; want no durable base64", storedResult)
-	}
-	if got := testJSONPathString(t, storedResult, "result.attachment_ref"); got != attachmentRef {
-		t.Fatalf("stored Read PDF attachment_ref = %q; want %q", got, attachmentRef)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolChecksHealthBeforeExecution(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_unhealthy", "thr_bridge_tool_unhealthy")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_unhealthy", "bind_bridge_tool_unhealthy", 1, "pod_uid_tool_unhealthy")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_unhealthy", "prep_bridge_tool_unhealthy")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_unhealthy", "2026-01-01T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{healthErr: errors.New("helper health unavailable")}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_unhealthy", "thr_bridge_tool_unhealthy", "bind_bridge_tool_unhealthy", 1, "pod_uid_tool_unhealthy"),
-		ToolUseEventId:      "evt_tool_unhealthy",
-		NormalizedInputHash: sha256Hex(`{"path":"/workspace/file.txt"}`),
-		ToolName:            "read",
-		InputJson:           `{"path":"/workspace/file.txt"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool unhealthy helper: %v", err)
-	}
-	if len(executor.healthChecks) != 1 {
-		t.Fatalf("health checks = %d; want 1", len(executor.healthChecks))
-	}
-	if len(executor.invocations) != 0 {
-		t.Fatalf("executor invocations = %d; want 0 when health preflight fails", len(executor.invocations))
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_helper_unavailable")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolRejectsStaleThreadBeforeHelperSideEffects(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_stale_thread", "thr_bridge_tool_real")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_stale_thread", "bind_bridge_tool_stale_thread", 1, "pod_uid_tool_stale_thread")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_stale_thread", "prep_bridge_tool_stale_thread")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale_thread", "2026-01-01T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{execution: SandboxToolExecution{ResultJSON: `{"status":"success"}`}}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.SandboxToolExecutor = executor
-	scope := bridgeAPIScope("sesn_bridge_tool_stale_thread", "thr_bridge_tool_missing", "bind_bridge_tool_stale_thread", 1, "pod_uid_tool_stale_thread")
-	_, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope: scope, ToolUseEventId: "evt_tool_stale_thread", ToolName: "exec_command",
-		InputJson: `{"cmd":"touch /workspace/must-not-run"}`, NormalizedInputHash: sha256Hex(`{"cmd":"touch /workspace/must-not-run"}`),
-	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("RunTool stale thread error = %v; want FailedPrecondition", err)
-	}
-	if len(executor.healthChecks) != 0 || len(executor.invocations) != 0 {
-		t.Fatalf("helper side effects = health %d run %d; want zero before stale-thread rejection", len(executor.healthChecks), len(executor.invocations))
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolRequeuesStaleSandboxPreparation(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_stale", "thr_bridge_tool_stale")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_stale", "bind_bridge_tool_stale", 1, "pod_uid_tool_stale")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_stale", "prep_bridge_tool_stale")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale", "2026-01-01T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_stale", "thr_bridge_tool_stale", "bind_bridge_tool_stale", 1, "pod_uid_tool_stale"),
-		ToolUseEventId:      "evt_tool_stale",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool stale sandbox: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-	if len(executor.invocations) != 0 {
-		t.Fatalf("executor calls = %d; want 0 while sandbox preparation is stale", len(executor.invocations))
-	}
-	assertSessionPrepareRequeued(t, admin, "default", "sesn_bridge_tool_stale", "prep_bridge_tool_stale")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolDoesNotRequeueInFlightSandboxLifecycle(t *testing.T) {
-	for _, sandboxStatus := range []string{"creating", "resuming", "releasing"} {
-		t.Run(sandboxStatus, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			sessionID := "sesn_bridge_tool_" + sandboxStatus + "_sandbox"
-			threadID := "thr_bridge_tool_" + sandboxStatus + "_sandbox"
-			bindingID := "bind_bridge_tool_" + sandboxStatus + "_sandbox"
-			podUID := "pod_uid_tool_" + sandboxStatus + "_sandbox"
-			preparationID := "prep_bridge_tool_" + sandboxStatus + "_sandbox"
-
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			seedBridgeAPIPreparationReady(t, admin, "default", sessionID, preparationID)
-			seedBridgeAPIActiveSandbox(t, admin, "default", sessionID, "2026-01-01T00:02:00Z")
-			setBridgeAPISandboxStatus(t, admin, "default", sessionID, sandboxStatus)
-
-			executor := &recordingSandboxToolExecutor{}
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-			store.SandboxStatusFreshnessWindow = time.Minute
-			store.SandboxToolExecutor = executor
-
-			response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-				Scope:               bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
-				ToolUseEventId:      "evt_tool_" + sandboxStatus + "_sandbox",
-				NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-				ToolName:            "exec_command",
-				InputJson:           `{"cmd":"pwd"}`,
-			})
-			if err != nil {
-				t.Fatalf("RunTool %s sandbox: %v", sandboxStatus, err)
-			}
-			assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-			if len(executor.invocations) != 0 {
-				t.Fatalf("executor calls = %d; want 0 while sandbox status is %s", len(executor.invocations), sandboxStatus)
-			}
-			assertSessionPreparationReady(t, admin, "default", sessionID, preparationID)
-			assertNoSessionPrepareJobsForSession(t, admin, "default", sessionID)
-		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolDoesNotRequeueFailedSandbox(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_failed_sandbox", "thr_bridge_tool_failed_sandbox")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_failed_sandbox", "bind_bridge_tool_failed_sandbox", 1, "pod_uid_tool_failed_sandbox")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_failed_sandbox", "prep_bridge_tool_failed_sandbox")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_failed_sandbox", "2026-01-01T00:02:00Z")
-	if _, err := admin.ExecContext(context.Background(), `UPDATE sandboxes SET status = 'failed' WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_tool_failed_sandbox'`); err != nil {
-		t.Fatalf("mark sandbox failed: %v", err)
-	}
-
-	executor := &recordingSandboxToolExecutor{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_failed_sandbox", "thr_bridge_tool_failed_sandbox", "bind_bridge_tool_failed_sandbox", 1, "pod_uid_tool_failed_sandbox"),
-		ToolUseEventId:      "evt_tool_failed_sandbox",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool failed sandbox: %v", err)
-	}
-	assertRuntimeToolErrorCodeWithRetryable(t, response.GetResultJson(), "sandbox_failed", false)
-	if len(executor.invocations) != 0 {
-		t.Fatalf("executor calls = %d; want 0 for failed sandbox", len(executor.invocations))
-	}
-	assertSessionPreparationReady(t, admin, "default", "sesn_bridge_tool_failed_sandbox", "prep_bridge_tool_failed_sandbox")
-	assertNoSessionPrepareJobsForSession(t, admin, "default", "sesn_bridge_tool_failed_sandbox")
-}
-
-func TestBridgePreparationResetLocksSessionBeforePreparationForUpdate(t *testing.T) {
-	source, err := os.ReadFile("bridge_api_tools.go")
-	if err != nil {
-		t.Fatalf("read bridge_api_tools.go: %v", err)
-	}
-	text := string(source)
-	resetStart := strings.Index(text, "func resetSessionPreparationAndEnqueuePrepareTx")
-	if resetStart < 0 {
-		t.Fatal("resetSessionPreparationAndEnqueuePrepareTx not found")
-	}
-	resetBody := text[resetStart:]
-	lockIndex := strings.Index(resetBody, "lockSessionPreparationResetFenceTx")
-	forUpdateIndex := strings.Index(resetBody, "loadLatestSessionPreparationReadinessForUpdateTx")
-	if lockIndex < 0 || forUpdateIndex < 0 || lockIndex > forUpdateIndex {
-		t.Fatalf("preparation reset must lock the sessions row before loading preparation FOR UPDATE; lock=%d load=%d", lockIndex, forUpdateIndex)
-	}
-	lockStart := strings.Index(text, "func lockSessionPreparationResetFenceTx")
-	if lockStart < 0 {
-		t.Fatal("lockSessionPreparationResetFenceTx not found")
-	}
-	lockBody := text[lockStart:]
-	lockEnd := strings.Index(lockBody, "\n}\n")
-	if lockEnd < 0 {
-		t.Fatal("lockSessionPreparationResetFenceTx body end not found")
-	}
-	lockBody = lockBody[:lockEnd]
-	for _, fragment := range []string{"FROM sessions", "FOR UPDATE"} {
-		if !strings.Contains(lockBody, fragment) {
-			t.Fatalf("session reset fence lock missing %q in:\n%s", fragment, lockBody)
-		}
-	}
-}
-
-func TestRuntimePreparationReadinessLocksSessionBeforePreparationForUpdate(t *testing.T) {
-	source, err := os.ReadFile("runtime_delivery.go")
-	if err != nil {
-		t.Fatalf("read runtime_delivery.go: %v", err)
-	}
-	body := string(source)
-	start := strings.Index(body, "func requireRuntimePreparationReadyTx")
-	if start < 0 {
-		t.Fatal("requireRuntimePreparationReadyTx not found")
-	}
-	body = body[start:]
-	lockIndex := strings.Index(body, "lockSessionPreparationResetFenceTx")
-	forUpdateIndex := strings.Index(body, "loadLatestSessionPreparationReadinessForUpdateTx")
-	plainReadIndex := strings.Index(body, "loadLatestSessionPreparationReadinessTx")
-	if lockIndex < 0 || forUpdateIndex < 0 || lockIndex > forUpdateIndex {
-		t.Fatalf("runtime preparation readiness must lock session before loading preparation FOR UPDATE; lock=%d load=%d", lockIndex, forUpdateIndex)
-	}
-	if plainReadIndex >= 0 && plainReadIndex < strings.Index(body, "\n}\n") {
-		t.Fatalf("runtime preparation readiness uses non-locking readiness load at index %d", plainReadIndex)
-	}
-}
-
-func TestBridgeAPIReadinessGatesLockSessionBeforePreparationForUpdate(t *testing.T) {
-	source, err := os.ReadFile("bridge_api_tools.go")
-	if err != nil {
-		t.Fatalf("read bridge_api_tools.go: %v", err)
-	}
-	text := string(source)
-	for _, name := range []string{"runToolTargetTx", "outputCaptureTargetTx"} {
-		t.Run(name, func(t *testing.T) {
-			start := strings.Index(text, "func "+name)
-			if start < 0 {
-				t.Fatalf("%s not found", name)
-			}
-			body := text[start:]
-			if next := strings.Index(body[len("func "+name):], "\nfunc "); next >= 0 {
-				body = body[:len("func "+name)+next]
-			}
-			lockIndex := strings.Index(body, "lockSessionPreparationResetFenceTx")
-			forUpdateIndex := strings.Index(body, "loadLatestSessionPreparationReadinessForUpdateTx")
-			plainReadIndex := strings.Index(body, "loadLatestSessionPreparationReadinessTx")
-			if lockIndex < 0 || forUpdateIndex < 0 || lockIndex > forUpdateIndex {
-				t.Fatalf("%s must lock session before preparation FOR UPDATE; lock=%d load=%d", name, lockIndex, forUpdateIndex)
-			}
-			if plainReadIndex >= 0 {
-				t.Fatalf("%s uses non-locking readiness load at index %d", name, plainReadIndex)
-			}
-		})
-	}
-}
-
-func TestBridgeAPIMemoryProjectionRefreshLoadCanResetPreparation(t *testing.T) {
-	source, err := os.ReadFile("bridge_api_tools.go")
-	if err != nil {
-		t.Fatalf("read bridge_api_tools.go: %v", err)
-	}
-	text := string(source)
-	start := strings.Index(text, "func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection")
-	if start < 0 {
-		t.Fatal("completePendingMemoryProjection not found")
-	}
-	body := text[start:]
-	if next := strings.Index(body[len("func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection"):], "\nfunc "); next >= 0 {
-		body = body[:len("func (s *PostgreSQLBridgeAPIStore) completePendingMemoryProjection")+next]
-	}
-	for _, fragment := range []string{
-		"withScopeTx",
-		"verifyRuntimeScopeReadOnlyTx",
-		"readRuntimeToolResultReadOnlyTx",
-		"memoryProjectionTargetTx",
-	} {
-		if !strings.Contains(body, fragment) {
-			t.Fatalf("memory projection refresh load missing fragment %q in:\n%s", fragment, body)
-		}
-	}
-	targetStart := strings.Index(text, "func memoryProjectionTargetTx")
-	if targetStart < 0 {
-		t.Fatal("memoryProjectionTargetTx not found")
-	}
-	targetBody := text[targetStart:]
-	if next := strings.Index(targetBody[len("func memoryProjectionTargetTx"):], "\nfunc "); next >= 0 {
-		targetBody = targetBody[:len("func memoryProjectionTargetTx")+next]
-	}
-	for _, fragment := range []string{
-		"lockSessionPreparationResetFenceTx",
-		"loadLatestSessionPreparationReadinessForUpdateTx",
-		"resetSessionPreparationAndEnqueuePrepareTx",
-	} {
-		if !strings.Contains(targetBody, fragment) {
-			t.Fatalf("memory projection target missing reset-gate fragment %q in:\n%s", fragment, targetBody)
-		}
 	}
 }
 
@@ -2375,521 +2223,5 @@ func TestVerifyRuntimeScopeRejectsDeletedSessionWithLiveBinding(t *testing.T) {
 	}
 	if bindingRows != 1 {
 		t.Fatalf("binding rows = %d; want retained for cleanup finalization", bindingRows)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRequeueResetsPreparationBehindActiveLeasedSessionPrepareJob(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "thr_bridge_tool_stale_active_lease")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "bind_bridge_tool_stale_active_lease", 1, "pod_uid_tool_stale_active_lease")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "prep_bridge_tool_stale_active_lease")
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET skills_index_json = '[{"skill_id":"sk_old","skill_version_id":"skv_old","version":"1.0.0","name":"Old","description":"Old index","directory":"old"}]'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_tool_stale_active_lease'
-		    AND preparation_attempt_id = 'prep_bridge_tool_stale_active_lease'`); err != nil {
-		t.Fatalf("seed old preparation skill index: %v", err)
-	}
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "2026-01-01T00:00:00Z")
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "prep_bridge_tool_stale_active_lease", "2026-01-01T01:00:00Z")
-
-	ws := workspace.ID("default")
-	if _, err := admin.ExecContext(context.Background(),
-		`INSERT INTO queue_jobs (
-			id, workspace_id, kind, partition_key, dedupe_key, status,
-			payload_json, lease_token, leased_by, leased_at, leased_until,
-			available_at, created_at, updated_at
-			) VALUES (
-				'qjob_bridge_tool_stale_active_lease_existing', 'default', 'session_prepare', $1, $2, 'leased',
-				'{"workspace_id":"default","session_id":"sesn_bridge_tool_stale_active_lease","preparation_attempt_id":"prep_bridge_tool_stale_active_lease"}', 'lease_active_prepare', 'sandbox-service',
-					'2026-01-01T00:39:30Z', '2026-01-01T01:10:00Z',
-					'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:39:30Z'
-			)`,
-		queue.FormatSessionPartitionKey(ws, "sesn_bridge_tool_stale_active_lease"),
-		queue.FormatSessionPrepareDedupeKey(ws, "sesn_bridge_tool_stale_active_lease", "prep_bridge_tool_stale_active_lease"),
-	); err != nil {
-		t.Fatalf("seed active leased session_prepare job: %v", err)
-	}
-
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Hour
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = &recordingSandboxToolExecutor{}
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_stale_active_lease", "thr_bridge_tool_stale_active_lease", "bind_bridge_tool_stale_active_lease", 1, "pod_uid_tool_stale_active_lease"),
-		ToolUseEventId:      "evt_tool_stale_active_lease",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool active leased prepare: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-		t.Fatalf("active leased prepare ack = %#v; want accepted retryable not-ready tool result", response.GetAck())
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_tool_stale_active_lease", "prep_bridge_tool_stale_active_lease")
-
-	var preparationStatus string
-	var readyAt sql.NullString
-	var resourceCredExpiresAt sql.NullString
-	var supersededAt sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status, ready_at, resource_cred_expires_at, superseded_at
-				   FROM session_preparations
-				  WHERE workspace_id = 'default'
-				    AND session_id = 'sesn_bridge_tool_stale_active_lease'
-				    AND preparation_attempt_id = 'prep_bridge_tool_stale_active_lease'`,
-	).Scan(&preparationStatus, &readyAt, &resourceCredExpiresAt, &supersededAt); err != nil {
-		t.Fatalf("read active-lease preparation: %v", err)
-	}
-	if preparationStatus != "ready" || !readyAt.Valid || !resourceCredExpiresAt.Valid || resourceCredExpiresAt.String != "2026-01-01T01:00:00Z" || !supersededAt.Valid {
-		t.Fatalf("superseded preparation status=%q ready_at=%v resource_cred_expires_at=%v superseded_at=%v; want old ready attempt preserved as historical superseded row",
-			preparationStatus, readyAt, resourceCredExpiresAt, supersededAt)
-	}
-	var freshSkillsIndex sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT skills_index_json
-		   FROM session_preparations
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_tool_stale_active_lease'
-		    AND superseded_at IS NULL`,
-	).Scan(&freshSkillsIndex); err != nil {
-		t.Fatalf("read fresh preparation skill index: %v", err)
-	}
-	if freshSkillsIndex.Valid {
-		t.Fatalf("fresh preparation skills_index_json = %q; want NULL until skills resolve", freshSkillsIndex.String)
-	}
-
-	var queueStatus string
-	var leaseToken sql.NullString
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT status, lease_token
-		   FROM queue_jobs
-		  WHERE workspace_id = 'default'
-		    AND id = 'qjob_bridge_tool_stale_active_lease_existing'`,
-	).Scan(&queueStatus, &leaseToken); err != nil {
-		t.Fatalf("read active leased session_prepare job: %v", err)
-	}
-	if queueStatus != "leased" || !leaseToken.Valid || leaseToken.String != "lease_active_prepare" {
-		t.Fatalf("active leased session_prepare status=%q lease=%v; want unchanged leased job", queueStatus, leaseToken)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolExpiringCredentialTakesPrecedenceOverStaleSandbox(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_stale_cred", "thr_bridge_tool_stale_cred")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_stale_cred", "bind_bridge_tool_stale_cred", 1, "pod_uid_tool_stale_cred")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_stale_cred", "prep_bridge_tool_stale_cred")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale_cred", "2026-01-01T00:00:00Z")
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_stale_cred", "prep_bridge_tool_stale_cred", "2026-01-01T01:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_stale_cred", "thr_bridge_tool_stale_cred", "bind_bridge_tool_stale_cred", 1, "pod_uid_tool_stale_cred"),
-		ToolUseEventId:      "evt_tool_stale_cred",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool stale sandbox with expiring resource credential: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-	if len(executor.invocations) != 0 {
-		t.Fatalf("executor calls = %d; want 0 while sandbox preparation is stale", len(executor.invocations))
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_tool_stale_cred", "prep_bridge_tool_stale_cred")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolStaleSandboxPreservesFreshCredentialForActiveRemount(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_stale_fresh_cred", "thr_bridge_tool_stale_fresh_cred")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_stale_fresh_cred", "bind_bridge_tool_stale_fresh_cred", 1, "pod_uid_tool_stale_fresh_cred")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_stale_fresh_cred", "prep_bridge_tool_stale_fresh_cred")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_stale_fresh_cred", "2026-01-01T00:00:00Z")
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_stale_fresh_cred", "prep_bridge_tool_stale_fresh_cred", "2026-01-02T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 2, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_stale_fresh_cred", "thr_bridge_tool_stale_fresh_cred", "bind_bridge_tool_stale_fresh_cred", 1, "pod_uid_tool_stale_fresh_cred"),
-		ToolUseEventId:      "evt_tool_stale_fresh_cred",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool stale sandbox with fresh resource credential: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-	if len(executor.invocations) != 0 {
-		t.Fatalf("executor calls = %d; want 0 while sandbox preparation is stale", len(executor.invocations))
-	}
-	assertSessionPrepareRequeuedPreservingCredential(t, admin, "default", "sesn_bridge_tool_stale_fresh_cred", "prep_bridge_tool_stale_fresh_cred", "2026-01-02T00:00:00Z")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolRequeuesExpiringResourceCredential(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_cred_expiring", "thr_bridge_tool_cred_expiring")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_cred_expiring", "bind_bridge_tool_cred_expiring", 1, "pod_uid_tool_cred_expiring")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_cred_expiring", "prep_bridge_tool_cred_expiring")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_cred_expiring", "2026-01-01T00:40:00Z")
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_cred_expiring", "prep_bridge_tool_cred_expiring", "2026-01-01T01:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Minute
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_cred_expiring", "thr_bridge_tool_cred_expiring", "bind_bridge_tool_cred_expiring", 1, "pod_uid_tool_cred_expiring"),
-		ToolUseEventId:      "evt_tool_cred_expiring",
-		NormalizedInputHash: sha256Hex(`{"cmd":"pwd"}`),
-		ToolName:            "exec_command",
-		InputJson:           `{"cmd":"pwd"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool expiring resource credential: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_not_ready")
-	if len(executor.invocations) != 0 {
-		t.Fatalf("executor calls = %d; want 0 while resource credential is expiring", len(executor.invocations))
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_tool_cred_expiring", "prep_bridge_tool_cred_expiring")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolSynthesizesHelperFailure(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_helper_failure", "thr_bridge_tool_helper_failure")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_helper_failure", "bind_bridge_tool_helper_failure", 1, "pod_uid_tool_helper_failure")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_helper_failure", "prep_bridge_tool_helper_failure")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_helper_failure", "2026-01-01T00:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{err: &sandboxdriver.HelperFailureError{Message: "helper exited"}}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC) }
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_helper_failure", "thr_bridge_tool_helper_failure", "bind_bridge_tool_helper_failure", 1, "pod_uid_tool_helper_failure"),
-		ToolUseEventId:      "evt_tool_helper_failure",
-		NormalizedInputHash: sha256Hex(`{"path":"/workspace/data/report.csv"}`),
-		ToolName:            "Read",
-		InputJson:           `{"path":"/workspace/data/report.csv"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool helper failure: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "helper_failure")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolHelperFailureResourceReadRequeuesForLiveRotation(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "thr_bridge_tool_resource_helper_failure")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "bind_bridge_tool_resource_helper_failure", 1, "pod_uid_tool_resource_helper_failure")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "prep_bridge_tool_resource_helper_failure")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "2026-01-01T00:20:00Z")
-	seedBridgeAPIResourceRootsJSON(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "prep_bridge_tool_resource_helper_failure", `[{"path":"/workspace/data/report.csv","mode":"read"}]`)
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "prep_bridge_tool_resource_helper_failure", "2026-01-01T01:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{err: &sandboxdriver.HelperFailureError{Message: "resource read failed"}}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	clockValues := []time.Time{
-		time.Date(2026, 1, 1, 0, 20, 0, 0, time.UTC),
-		time.Date(2026, 1, 1, 1, 0, 1, 0, time.UTC),
-	}
-	store.Clock = func() time.Time {
-		if len(clockValues) == 0 {
-			return time.Date(2026, 1, 1, 1, 0, 1, 0, time.UTC)
-		}
-		next := clockValues[0]
-		clockValues = clockValues[1:]
-		return next
-	}
-	store.SandboxStatusFreshnessWindow = time.Hour
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	request := &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_resource_helper_failure", "thr_bridge_tool_resource_helper_failure", "bind_bridge_tool_resource_helper_failure", 1, "pod_uid_tool_resource_helper_failure"),
-		ToolUseEventId:      "evt_tool_resource_helper_failure",
-		NormalizedInputHash: sha256Hex(`{"path":"data/report.csv"}`),
-		ToolName:            "Read",
-		InputJson:           `{"path":"data/report.csv"}`,
-	}
-	response, err := store.RunTool(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunTool resource helper failure: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "helper_failure")
-	if len(executor.invocations) != 1 {
-		t.Fatalf("executor calls = %d; want one helper attempt before requeue", len(executor.invocations))
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_tool_resource_helper_failure", "prep_bridge_tool_resource_helper_failure")
-	storedResult := storedMemoryResultJSON(t, admin, "sesn_bridge_tool_resource_helper_failure", "evt_tool_resource_helper_failure")
-	assertRuntimeToolErrorCode(t, storedResult, "helper_failure")
-	replay, err := store.RunTool(context.Background(), proto.Clone(request).(*bridgev1.RunToolRequest))
-	if err != nil {
-		t.Fatalf("RunTool lost-response retry: %v", err)
-	}
-	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetResultJson() != storedResult {
-		t.Fatalf("lost-response replay = %+v; want duplicate field-identical stored result", replay)
-	}
-	if len(executor.invocations) != 1 {
-		t.Fatalf("executor calls after lost-response retry = %d; want zero additional helper calls", len(executor.invocations))
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolHelperFailureResourceReadWithFreshCredentialRequeuesOnce(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "thr_bridge_tool_resource_helper_failure_fresh")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "bind_bridge_tool_resource_helper_failure_fresh", 1, "pod_uid_tool_resource_helper_failure_fresh")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "prep_bridge_tool_resource_helper_failure_fresh")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "2026-01-01T00:20:00Z")
-	seedBridgeAPIResourceRootsJSON(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "prep_bridge_tool_resource_helper_failure_fresh", `[{"path":"/workspace/data/report.csv","mode":"read"}]`)
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "prep_bridge_tool_resource_helper_failure_fresh", "2026-01-02T00:20:00Z")
-
-	executor := &recordingSandboxToolExecutor{err: &sandboxdriver.HelperFailureError{Message: "resource read failed"}}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	clockValues := []time.Time{
-		time.Date(2026, 1, 1, 0, 20, 0, 0, time.UTC),
-		time.Date(2026, 1, 1, 0, 20, 1, 0, time.UTC),
-	}
-	store.Clock = func() time.Time {
-		if len(clockValues) == 0 {
-			return time.Date(2026, 1, 1, 0, 20, 1, 0, time.UTC)
-		}
-		next := clockValues[0]
-		clockValues = clockValues[1:]
-		return next
-	}
-	store.SandboxStatusFreshnessWindow = time.Hour
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	request := &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_resource_helper_failure_fresh", "thr_bridge_tool_resource_helper_failure_fresh", "bind_bridge_tool_resource_helper_failure_fresh", 1, "pod_uid_tool_resource_helper_failure_fresh"),
-		ToolUseEventId:      "evt_tool_resource_helper_failure_fresh",
-		NormalizedInputHash: sha256Hex(`{"file_path":"data/report.csv"}`),
-		ToolName:            "Read",
-		InputJson:           `{"file_path":"data/report.csv"}`,
-	}
-	response, err := store.RunTool(context.Background(), request)
-	if err != nil {
-		t.Fatalf("RunTool resource helper failure with recorded credential: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "helper_failure")
-	if len(executor.invocations) != 1 {
-		t.Fatalf("executor calls = %d; want one helper attempt before requeue", len(executor.invocations))
-	}
-	assertSessionPrepareRequeuedForCredentialRotation(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", "prep_bridge_tool_resource_helper_failure_fresh")
-	storedFirst := storedMemoryResultJSON(t, admin, "sesn_bridge_tool_resource_helper_failure_fresh", "evt_tool_resource_helper_failure_fresh")
-	assertRuntimeToolErrorCode(t, storedFirst, "helper_failure")
-
-	var activeAttemptID string
-	if err := admin.QueryRowContext(context.Background(),
-		`SELECT preparation_attempt_id
-		   FROM session_preparations
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_tool_resource_helper_failure_fresh'
-		    AND superseded_at IS NULL`).Scan(&activeAttemptID); err != nil {
-		t.Fatalf("read reactive recovery attempt: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_preparations
-		    SET status = 'ready',
-		        resource_cred_expires_at = '2026-01-02T00:20:00Z',
-		        resource_roots_json = '[{"path":"/workspace/data/report.csv","mode":"read"}]',
-		        ready_at = '2026-01-01T00:20:02Z',
-		        updated_at = '2026-01-01T00:20:02Z'
-		  WHERE workspace_id = 'default'
-		    AND session_id = 'sesn_bridge_tool_resource_helper_failure_fresh'
-		    AND preparation_attempt_id = $1`, activeAttemptID); err != nil {
-		t.Fatalf("mark reactive recovery attempt ready: %v", err)
-	}
-	if _, err := admin.ExecContext(context.Background(),
-		`DELETE FROM queue_jobs
-		  WHERE workspace_id = 'default'
-		    AND kind = 'session_prepare'
-		    AND payload_json::jsonb ->> 'preparation_attempt_id' = $1`, activeAttemptID); err != nil {
-		t.Fatalf("settle reactive recovery job: %v", err)
-	}
-	secondRequest := proto.Clone(request).(*bridgev1.RunToolRequest)
-	secondRequest.ToolUseEventId = "evt_tool_resource_helper_failure_fresh_second"
-	secondRequest.NormalizedInputHash = sha256Hex(secondRequest.GetInputJson())
-	second, err := store.RunTool(context.Background(), secondRequest)
-	if err != nil {
-		t.Fatalf("RunTool after bounded reactive recovery: %v", err)
-	}
-	if second.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		testJSONPathString(t, second.GetResultJson(), "error_code") != "helper_failure" {
-		t.Fatalf("RunTool after bounded recovery = %+v; want committed helper failure", second)
-	}
-	if len(executor.invocations) != 2 {
-		t.Fatalf("executor calls after bounded recovery = %d; want two total helper attempts", len(executor.invocations))
-	}
-	assertSessionPreparationReady(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_fresh", activeAttemptID)
-	storedResult := storedMemoryResultJSON(t, admin, "sesn_bridge_tool_resource_helper_failure_fresh", "evt_tool_resource_helper_failure_fresh_second")
-	if testJSONPathString(t, storedResult, "error_code") != "helper_failure" {
-		t.Fatalf("stored helper failure result = %s; want helper_failure", storedResult)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolHelperFailureResourceReadWithoutCredentialExpiryDoesNotRequeue(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_no_cred", "thr_bridge_tool_resource_helper_failure_no_cred")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_no_cred", "bind_bridge_tool_resource_helper_failure_no_cred", 1, "pod_uid_tool_resource_helper_failure_no_cred")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_no_cred", "prep_bridge_tool_resource_helper_failure_no_cred")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_no_cred", "2026-01-01T00:20:00Z")
-	seedBridgeAPIResourceRootsJSON(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_no_cred", "prep_bridge_tool_resource_helper_failure_no_cred", `[{"path":"/workspace/data/report.csv","mode":"read"}]`)
-
-	executor := &recordingSandboxToolExecutor{err: &sandboxdriver.HelperFailureError{Message: "resource read failed"}}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 20, 0, 0, time.UTC) }
-	store.SandboxStatusFreshnessWindow = time.Hour
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_resource_helper_failure_no_cred", "thr_bridge_tool_resource_helper_failure_no_cred", "bind_bridge_tool_resource_helper_failure_no_cred", 1, "pod_uid_tool_resource_helper_failure_no_cred"),
-		ToolUseEventId:      "evt_tool_resource_helper_failure_no_cred",
-		NormalizedInputHash: sha256Hex(`{"file_path":"data/report.csv"}`),
-		ToolName:            "Read",
-		InputJson:           `{"file_path":"data/report.csv"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool resource helper failure without credential expiry: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "helper_failure")
-	if len(executor.invocations) != 1 {
-		t.Fatalf("executor calls = %d; want one helper attempt without requeue", len(executor.invocations))
-	}
-	assertSessionPreparationReady(t, admin, "default", "sesn_bridge_tool_resource_helper_failure_no_cred", "prep_bridge_tool_resource_helper_failure_no_cred")
-}
-
-func TestPostgreSQLBridgeAPIStoreRunToolProviderErrorPreservesUnavailableWithoutResourceRequeue(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_provider_error", "thr_bridge_tool_provider_error")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_provider_error", "bind_bridge_tool_provider_error", 1, "pod_uid_tool_provider_error")
-	seedBridgeAPIPreparationReady(t, admin, "default", "sesn_bridge_tool_provider_error", "prep_bridge_tool_provider_error")
-	seedBridgeAPIActiveSandbox(t, admin, "default", "sesn_bridge_tool_provider_error", "2026-01-01T00:20:00Z")
-	seedBridgeAPIResourceRootsJSON(t, admin, "default", "sesn_bridge_tool_provider_error", "prep_bridge_tool_provider_error", `[{"path":"/workspace/data/report.csv","mode":"read"}]`)
-	seedBridgeAPIResourceCredentialExpiresAt(t, admin, "default", "sesn_bridge_tool_provider_error", "prep_bridge_tool_provider_error", "2026-01-01T01:00:00Z")
-
-	executor := &recordingSandboxToolExecutor{err: errors.New("daytona transport down")}
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	clockValues := []time.Time{
-		time.Date(2026, 1, 1, 0, 20, 0, 0, time.UTC),
-		time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC),
-	}
-	store.Clock = func() time.Time {
-		if len(clockValues) == 0 {
-			return time.Date(2026, 1, 1, 0, 40, 1, 0, time.UTC)
-		}
-		next := clockValues[0]
-		clockValues = clockValues[1:]
-		return next
-	}
-	store.SandboxStatusFreshnessWindow = time.Hour
-	store.ResourceCredentialRefreshMargin = 30 * time.Minute
-	store.SandboxToolExecutor = executor
-
-	response, err := store.RunTool(context.Background(), &bridgev1.RunToolRequest{
-		Scope:               bridgeAPIScope("sesn_bridge_tool_provider_error", "thr_bridge_tool_provider_error", "bind_bridge_tool_provider_error", 1, "pod_uid_tool_provider_error"),
-		ToolUseEventId:      "evt_tool_provider_error",
-		NormalizedInputHash: sha256Hex(`{"path":"/workspace/data/report.csv"}`),
-		ToolName:            "Read",
-		InputJson:           `{"path":"/workspace/data/report.csv"}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool provider error: %v", err)
-	}
-	assertRuntimeToolErrorCode(t, response.GetResultJson(), "sandbox_helper_unavailable")
-	assertSessionPreparationReady(t, admin, "default", "sesn_bridge_tool_provider_error", "prep_bridge_tool_provider_error")
-}
-
-func TestResourceCredentialExpiresFresh(t *testing.T) {
-	now := time.Date(2026, 1, 1, 0, 30, 0, 0, time.UTC)
-	tests := []struct {
-		name      string
-		expiresAt sql.NullString
-		want      bool
-	}{
-		{name: "null means no file resource projection credential", expiresAt: sql.NullString{}, want: true},
-		{name: "outside margin", expiresAt: sql.NullString{String: "2026-01-01T01:01:00Z", Valid: true}, want: true},
-		{name: "exact margin boundary", expiresAt: sql.NullString{String: "2026-01-01T01:00:00Z", Valid: true}, want: true},
-		{name: "inside margin", expiresAt: sql.NullString{String: "2026-01-01T00:59:59Z", Valid: true}, want: false},
-		{name: "malformed fails closed", expiresAt: sql.NullString{String: "not-rfc3339", Valid: true}, want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := resourceCredentialExpiresFresh(tc.expiresAt, now, 30*time.Minute); got != tc.want {
-				t.Fatalf("resourceCredentialExpiresFresh() = %v; want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestResourceCredentialMaterializationRecorded(t *testing.T) {
-	tests := []struct {
-		name      string
-		expiresAt sql.NullString
-		want      bool
-	}{
-		{name: "null means no file resource projection credential", expiresAt: sql.NullString{}, want: false},
-		{name: "blank means no materialized file resource credential", expiresAt: sql.NullString{String: "   ", Valid: true}, want: false},
-		{name: "future expiry records materialization", expiresAt: sql.NullString{String: "2026-01-01T00:30:01Z", Valid: true}, want: true},
-		{name: "past expiry still records materialization", expiresAt: sql.NullString{String: "2026-01-01T00:29:59Z", Valid: true}, want: true},
-		{name: "malformed expiry still fails toward rotation", expiresAt: sql.NullString{String: "not-rfc3339", Valid: true}, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := resourceCredentialMaterializationRecorded(tc.expiresAt); got != tc.want {
-				t.Fatalf("resourceCredentialMaterializationRecorded() = %v; want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRunToolReadsResourceRoot(t *testing.T) {
-	rootsJSON := `[{"path":"/workspace/data/report.csv","mode":"read"},{"path":"/mnt/session/uploads","mode":"read"},{"path":"/workspace/writable","mode":"read_write"}]`
-	tests := []struct {
-		name      string
-		toolName  string
-		inputJSON string
-		want      bool
-	}{
-		{name: "absolute resource path", toolName: "Read", inputJSON: `{"path":"/workspace/data/report.csv"}`, want: true},
-		{name: "relative resource path resolves under workspace", toolName: "read", inputJSON: `{"path":"data/report.csv"}`, want: true},
-		{name: "read under resource directory", toolName: "Read", inputJSON: `{"path":"/mnt/session/uploads/nested/file.txt"}`, want: true},
-		{name: "non read tool ignored", toolName: "Write", inputJSON: `{"path":"/workspace/data/report.csv"}`, want: false},
-		{name: "writable root ignored", toolName: "Read", inputJSON: `{"path":"/workspace/writable/file.txt"}`, want: false},
-		{name: "non resource path ignored", toolName: "Read", inputJSON: `{"path":"/workspace/other.txt"}`, want: false},
-		{name: "runtime file path field", toolName: "Read", inputJSON: `{"file_path":"/workspace/data/report.csv"}`, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := runToolReadsResourceRoot(tc.toolName, tc.inputJSON, rootsJSON); got != tc.want {
-				t.Fatalf("runToolReadsResourceRoot() = %v; want %v", got, tc.want)
-			}
-		})
 	}
 }

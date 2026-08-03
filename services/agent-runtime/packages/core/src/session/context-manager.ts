@@ -11,6 +11,16 @@
 
 import type { RuntimeMessage } from "../contracts/runtime.js";
 
+/** Durable, non-sequenced parent context installed separately from child history. */
+export interface ThreadContextPrefix {
+  readonly childThreadId: string;
+  readonly parentThreadId: string;
+  readonly parentBoundaryEventId: string;
+  readonly entries: readonly RuntimeMessage[];
+  readonly createdAt: string;
+  readonly consumedByCheckpointMessageId?: string | undefined;
+}
+
 // ContextManager owns the hot RuntimeMessage list for one ThreadEntry. New writes are
 // projected only after durable ACK; cold hydration may append projections already read
 // from durable state. These methods carry the hot mutation, but the discipline
@@ -27,9 +37,9 @@ import type { RuntimeMessage } from "../contracts/runtime.js";
 // limits. A terminal RuntimeMessage may also carry its own usage when the
 // WriteRequestEnd-gated projection replaces that message in this list.
 //
-// Exceptions that append NO user message: a tool-confirmation commit updates ToolJob
-// approval state after ACK; a task notification uses the background-task settlement
-// path and projects a bounded runtime note. A fork seed is loaded from the CHILD
+// A tool-confirmation commit appends its database-stamped user decision before
+// waking the approved tool. A task notification uses the background-task settlement
+// path and projects a bounded runtime note. A thread context prefix is loaded from the CHILD
 // thread's durable context and is never rebuilt from the current parent. The
 // generation counter advances on any non-append-only rewrite (compaction or in-place
 // update) so the approval-reviewer feed cursor can detect invalidation within one hot
@@ -41,6 +51,7 @@ import type { RuntimeMessage } from "../contracts/runtime.js";
 export class ContextManager {
   readonly sessionId: string;
   #messages: RuntimeMessage[];
+  #threadContextPrefix: ThreadContextPrefix | undefined;
   #generation = 0;
 
   constructor(sessionId: string, initialMessages: readonly RuntimeMessage[] = []) {
@@ -50,6 +61,18 @@ export class ContextManager {
 
   messages(): readonly RuntimeMessage[] {
     return [...this.#messages];
+  }
+
+  threadContextPrefix(): ThreadContextPrefix | undefined {
+    return this.#threadContextPrefix;
+  }
+
+  installThreadContextPrefix(prefix: ThreadContextPrefix | undefined): void {
+    this.#threadContextPrefix = prefix;
+  }
+
+  providerMessages(): readonly RuntimeMessage[] {
+    return [...(this.#threadContextPrefix?.entries ?? []), ...this.#messages];
   }
 
   messageListSnapshot(): { readonly generation: number; readonly messages: readonly RuntimeMessage[] } {
@@ -80,6 +103,10 @@ export class ContextManager {
     this.#messages = [...this.#messages, message];
   }
 
+  message(messageId: string): RuntimeMessage | undefined {
+    return this.#messages.find((message) => message.id === messageId);
+  }
+
   updateMessage(message: RuntimeMessage): void {
     this.#messages = this.#messages.map((existingMessage) => (existingMessage.id === message.id ? message : existingMessage));
     this.#generation += 1;
@@ -87,6 +114,7 @@ export class ContextManager {
 
   clear(): void {
     this.#messages = [];
+    this.#threadContextPrefix = undefined;
     this.#generation += 1;
   }
 }

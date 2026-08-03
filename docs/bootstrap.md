@@ -53,7 +53,7 @@ used for the installation.
 
 ## 3. Create every in-cluster Secret
 
-Create the following 17 Secrets in `tetral-system` before installation. Secret
+Create the following 15 Secrets in `tetral-system` before installation. Secret
 names may be changed through Helm values, but their keys are fixed by the
 workloads.
 
@@ -64,14 +64,12 @@ workloads.
 | `auth-bootstrap` | `engine-api-key` |
 | `auth-database` | `url` |
 | `auth-internal-principal` | `private_key_b64`, `public_key_b64` |
-| `bridge-daytona` | `DAYTONA_API_KEY` |
 | `gateway-web-blob` | `TETRAL_BLOB_ENDPOINT`, `TETRAL_BLOB_REGION`, `TETRAL_BLOB_BUCKET`, `TETRAL_BLOB_ACCESS_KEY`, `TETRAL_BLOB_SECRET_KEY` |
 | `gateway-web-keypool` | `TETRAL_WEB_API_KEYS` |
 | `queue-database` | `url` |
 | `runtime-binding-token` | `hmac-key` |
 | `sandbox-blob` | `TETRAL_BLOB_ACCESS_KEY`, `TETRAL_BLOB_SECRET_KEY` |
 | `sandbox-daytona` | `DAYTONA_API_KEY` |
-| `sandbox-internal-grpc` | `token` |
 | `sandbox-r2-parent` | `TETRAL_R2_PARENT_API_TOKEN`, `TETRAL_R2_PARENT_ACCESS_KEY` |
 | `tetral-blob` | `endpoint`, `region`, `bucket`, `access-key`, `secret-key` |
 | `tetral-database` | `bridge-url`, `cleanup-url`, `gateway-url`, `git-proxy-url`, `TETRAL_POSTGRES_DSN` |

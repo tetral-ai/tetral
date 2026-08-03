@@ -30,9 +30,17 @@ const (
 	helperPath = "/usr/local/bin/sandbox"
 	// The helper starts as root only long enough to read/unlink root-owned
 	// payload files; the helper CLI drops to RuntimeUser before tool execution.
-	helperUser      = "root"
-	payloadRootPath = "/tmp/tetral-runtime/tool-payloads"
-	payloadFileName = "payload.json"
+	helperUser = "root"
+	// Payload staging is two-rooted because the two transports act as
+	// different identities: Daytona's filesystem API writes as the runtime
+	// user (it cannot produce root-owned files), while the helper's
+	// openProtectedPayload refuses any payload whose root, directory, or file
+	// is not root-owned with group/other bits clear. Each call therefore
+	// uploads into the runtime-user stage root and a sudo freeze command
+	// moves the payload directory into the root-owned final root.
+	payloadRootPath      = "/tmp/tetral-runtime/tool-payloads"
+	payloadStageRootPath = "/tmp/tetral-runtime/tool-payloads-stage"
+	payloadFileName      = "payload.json"
 
 	helperSubcommandExec       = "exec"
 	helperSubcommandStdin      = "stdin"
@@ -59,8 +67,8 @@ var helperCommandNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var helperPayloadIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type DaytonaHelperExecutor struct {
-	client                    daytonaSandboxGetter
-	preparationCommandTimeout time.Duration
+	client         daytonaSandboxGetter
+	commandTimeout time.Duration
 }
 
 type daytonaSandboxGetter interface {
@@ -130,16 +138,13 @@ func (g daytonaClientSandboxGetter) Get(ctx context.Context, providerSandboxID s
 	return daytonaSandboxHandle{FileSystem: got.FileSystem, Process: got.Process}, nil
 }
 
-func NewDaytonaHelperExecutor(cfg Config) (*DaytonaHelperExecutor, error) {
-	client, err := daytona.NewClientWithConfig(&types.DaytonaConfig{
-		APIKey: cfg.DaytonaAPIKey,
-		APIUrl: cfg.DaytonaAPIURL,
-		Target: cfg.DaytonaTarget,
-	})
-	if err != nil {
-		return nil, err
+// NewDaytonaHelperExecutorForSDKClient binds helper operations to the
+// process-wide Daytona client owned by the Sandbox Service adapter.
+func NewDaytonaHelperExecutorForSDKClient(client *daytona.Client, timeout time.Duration) (*DaytonaHelperExecutor, error) {
+	if client == nil || timeout <= 0 {
+		return nil, errors.New("daytona helper client and command timeout are required")
 	}
-	return &DaytonaHelperExecutor{client: daytonaClientSandboxGetter{client: client}, preparationCommandTimeout: cfg.PreparationCommandTimeout}, nil
+	return &DaytonaHelperExecutor{client: daytonaClientSandboxGetter{client: client}, commandTimeout: timeout}, nil
 }
 
 func NewDaytonaHelperExecutorForClient(client daytonaSandboxGetter) *DaytonaHelperExecutor {
@@ -150,43 +155,135 @@ func NewDaytonaHelperExecutorForSandboxServices(get func(context.Context, string
 	return &DaytonaHelperExecutor{client: daytonaSandboxServicesGetter{get: get}}
 }
 
-func NewDaytonaHelperExecutorForClientWithPreparationTimeout(client daytonaSandboxGetter, timeout time.Duration) *DaytonaHelperExecutor {
-	return &DaytonaHelperExecutor{client: client, preparationCommandTimeout: timeout}
+func NewDaytonaHelperExecutorForClientWithCommandTimeout(client daytonaSandboxGetter, timeout time.Duration) *DaytonaHelperExecutor {
+	return &DaytonaHelperExecutor{client: client, commandTimeout: timeout}
 }
 
-func (e *DaytonaHelperExecutor) RunTool(ctx context.Context, invocation ToolInvocation) (ToolExecution, error) {
+// PrepareTool validates and stages one deterministic helper payload. It may
+// be repeated for the same Tool Use after worker loss and does not invoke the
+// user-facing helper subcommand.
+func (e *DaytonaHelperExecutor) PrepareTool(ctx context.Context, invocation ToolInvocation) (PreparedToolExecution, error) {
 	if invocation.ToolUseEventID == "" || invocation.ToolName == "" {
-		return ToolExecution{}, errors.New("tool invocation is incomplete")
+		return PreparedToolExecution{}, errors.New("tool invocation is incomplete")
 	}
 	helperCommand, err := helperSubcommandForToolName(invocation.ToolName)
 	if err != nil {
-		return ToolExecution{}, err
+		return PreparedToolExecution{}, err
 	}
 	input, composition, err := helperRunToolInputForInvocation(helperCommand, invocation.ToolName, invocation.InputJSON, invocation.ToolUseEventID)
 	if err != nil {
 		var preHelperResult *preHelperToolResult
 		if errors.As(err, &preHelperResult) {
-			return ToolExecution{ResultJSON: preHelperResult.resultJSON}, nil
+			result := ToolExecution{ResultJSON: preHelperResult.resultJSON}
+			return PreparedToolExecution{immediateResult: &result}, nil
 		}
-		return ToolExecution{}, err
+		return PreparedToolExecution{}, err
 	}
 	payload, err := newHelperPayload(invocation.Target, helperCommand, invocation.ToolUseEventID, input)
 	if err != nil {
-		return ToolExecution{}, err
+		return PreparedToolExecution{}, err
 	}
 	limits := helperLimits(helperCommand, input)
-	result, err := e.executeHelper(ctx, invocation.Target, invocation.ToolUseEventID, helperCommand, payload)
+	payloadPath, process, err := e.stageHelperPayload(ctx, invocation.Target, invocation.ToolUseEventID, helperCommand, payload)
+	if err != nil {
+		return PreparedToolExecution{}, mapDaytonaError(sandbox.StageExecuteTool, err)
+	}
+	return PreparedToolExecution{
+		target: invocation.Target, process: process, toolUseEventID: invocation.ToolUseEventID,
+		helperCommand: helperCommand, payloadPath: payloadPath,
+		pollUntilTerminal: composition.pollUntilTerminal,
+		visibleBytes:      limits.VisibleBytes, visibleLines: limits.VisibleLines,
+	}, nil
+}
+
+// ExecutePreparedTool invokes the user-facing helper command exactly once for
+// a previously staged payload. Any returned error is post-authorization and
+// cannot justify replaying the command.
+func (e *DaytonaHelperExecutor) ExecutePreparedTool(ctx context.Context, prepared PreparedToolExecution) (ToolExecution, error) {
+	if prepared.immediateResult != nil {
+		return *prepared.immediateResult, nil
+	}
+	result, err := e.executePreparedHelper(ctx, prepared.process, prepared.helperCommand, prepared.payloadPath)
 	if err != nil {
 		return ToolExecution{}, err
 	}
-	if composition.pollUntilTerminal {
-		return e.pollForegroundTaskUntilTerminal(ctx, invocation.Target, invocation.ToolUseEventID, limits, result)
+	if prepared.pollUntilTerminal {
+		return e.pollForegroundTaskUntilTerminal(ctx, prepared.target, prepared.toolUseEventID, protocol.Limits{
+			VisibleBytes: prepared.visibleBytes,
+			VisibleLines: prepared.visibleLines,
+		}, result)
 	}
 	var backgroundTask *BackgroundTask
-	if helperCommand == helperSubcommandExec {
-		backgroundTask = synthesizeHelperBackgroundTask(invocation.Target, result)
+	if prepared.helperCommand == helperSubcommandExec {
+		backgroundTask = synthesizeHelperBackgroundTask(prepared.target, result)
 	}
 	return ToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: backgroundTask}, nil
+}
+
+// SubmitPreparedTool invokes the user-facing helper command once and returns
+// immediately with durable observation state when a foreground task remains
+// running. Callers must persist that state before polling it.
+func (e *DaytonaHelperExecutor) SubmitPreparedTool(ctx context.Context, prepared PreparedToolExecution) (ToolExecution, error) {
+	if prepared.immediateResult != nil {
+		return *prepared.immediateResult, nil
+	}
+	result, err := e.executePreparedHelper(ctx, prepared.process, prepared.helperCommand, prepared.payloadPath)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	if prepared.pollUntilTerminal {
+		return newForegroundCommandSubmission(prepared.target, prepared.toolUseEventID, protocol.Limits{
+			VisibleBytes: prepared.visibleBytes,
+			VisibleLines: prepared.visibleLines,
+		}, result)
+	}
+	var backgroundTask *BackgroundTask
+	if prepared.helperCommand == helperSubcommandExec {
+		backgroundTask = synthesizeHelperBackgroundTask(prepared.target, result)
+	}
+	return ToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: backgroundTask}, nil
+}
+
+func newForegroundCommandSubmission(target ToolTarget, sourceToolUseEventID string, limits protocol.Limits, first helperResult) (ToolExecution, error) {
+	task := synthesizeHelperBackgroundTask(target, first)
+	if task == nil {
+		return ToolExecution{ResultJSON: first.ResultJSON}, nil
+	}
+	accumulator := newForegroundCommandAccumulator(limits.VisibleBytes, limits.VisibleLines)
+	resultJSON, err := accumulator.add(first.ResultJSON)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	observation := accumulator.observation(CommandReference{
+		Target:          target,
+		Task:            *task,
+		ToolUseEventID:  sourceToolUseEventID,
+		MaxOutputTokens: limits.VisibleBytes / 4,
+	}, limits)
+	return ToolExecution{ResultJSON: resultJSON, ForegroundObservation: &observation}, nil
+}
+
+// ObserveForegroundTool performs one observation call for a previously
+// submitted foreground command. A running response returns updated durable
+// state; a terminal response returns the complete bounded aggregate.
+func (e *DaytonaHelperExecutor) ObserveForegroundTool(ctx context.Context, observation ForegroundCommandObservation) (ToolExecution, error) {
+	result, err := e.ReadCommandResult(ctx, observation.Reference)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	accumulator := foregroundCommandAccumulatorFromObservation(observation)
+	resultJSON, err := accumulator.add(result.ResultJSON)
+	if err != nil {
+		return ToolExecution{}, err
+	}
+	if result.TerminalStatus != "" {
+		return ToolExecution{ResultJSON: resultJSON}, nil
+	}
+	next := accumulator.observation(observation.Reference, protocol.Limits{
+		VisibleBytes: observation.Limits.VisibleBytes,
+		VisibleLines: observation.Limits.VisibleLines,
+	})
+	return ToolExecution{ResultJSON: resultJSON, ForegroundObservation: &next}, nil
 }
 
 func (e *DaytonaHelperExecutor) pollForegroundTaskUntilTerminal(ctx context.Context, target ToolTarget, sourceToolUseEventID string, limits protocol.Limits, first helperResult) (ToolExecution, error) {
@@ -263,6 +360,25 @@ func newForegroundCommandAccumulator(visibleBytes int, visibleLines int) *foregr
 	}
 }
 
+func foregroundCommandAccumulatorFromObservation(observation ForegroundCommandObservation) *foregroundCommandAccumulator {
+	return &foregroundCommandAccumulator{
+		stdout: foregroundStreamAccumulatorFromObservation(observation.Stdout, observation.Limits),
+		stderr: foregroundStreamAccumulatorFromObservation(observation.Stderr, observation.Limits),
+	}
+}
+
+func (a *foregroundCommandAccumulator) observation(reference CommandReference, limits protocol.Limits) ForegroundCommandObservation {
+	return ForegroundCommandObservation{
+		Reference: reference,
+		Stdout:    a.stdout.observation(),
+		Stderr:    a.stderr.observation(),
+		Limits: ForegroundObservationLimits{
+			VisibleBytes: limits.VisibleBytes,
+			VisibleLines: limits.VisibleLines,
+		},
+	}
+}
+
 func (a *foregroundCommandAccumulator) add(resultJSON string) (string, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(resultJSON), &envelope); err != nil {
@@ -330,6 +446,28 @@ func newForegroundStreamAccumulator(visibleBytes int, visibleLines int) *foregro
 		visibleLines = helperVisibleLines
 	}
 	return &foregroundStreamAccumulator{visibleBytes: visibleBytes, visibleLines: visibleLines}
+}
+
+func foregroundStreamAccumulatorFromObservation(state ForegroundStreamObservationState, limits ForegroundObservationLimits) *foregroundStreamAccumulator {
+	accumulator := newForegroundStreamAccumulator(limits.VisibleBytes, limits.VisibleLines)
+	accumulator.head = append([]byte(nil), state.Head...)
+	accumulator.tail = append([]byte(nil), state.Tail...)
+	accumulator.capturedBytes = state.CapturedBytes
+	accumulator.totalBytes = state.TotalBytes
+	accumulator.totalLines = state.TotalLines
+	accumulator.truncated = state.Truncated
+	return accumulator
+}
+
+func (a *foregroundStreamAccumulator) observation() ForegroundStreamObservationState {
+	return ForegroundStreamObservationState{
+		Head:          append([]byte(nil), a.head...),
+		Tail:          append([]byte(nil), a.tail...),
+		CapturedBytes: a.capturedBytes,
+		TotalBytes:    a.totalBytes,
+		TotalLines:    a.totalLines,
+		Truncated:     a.truncated,
+	}
 }
 
 func (a *foregroundStreamAccumulator) add(latest foregroundStreamSnapshot) foregroundStreamSnapshot {
@@ -523,7 +661,7 @@ func (e *DaytonaHelperExecutor) CancelCommand(ctx context.Context, cancel Comman
 	return e.executeCommandHelper(ctx, cancel.CommandReference, helperSubcommandCancel, input)
 }
 
-func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, target PreparationCommandTarget, command string, env map[string]string, timeout time.Duration) error {
+func (e *DaytonaHelperExecutor) RunDaytonaCommand(ctx context.Context, target DaytonaCommandTarget, command string, env map[string]string, timeout time.Duration) error {
 	if e == nil || e.client == nil {
 		return errors.New("daytona sandbox client is unavailable")
 	}
@@ -531,13 +669,13 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return errors.New("provider sandbox id is required")
 	}
 	if strings.TrimSpace(command) == "" {
-		return errors.New("preparation command is required")
+		return errors.New("daytona command is required")
 	}
 	if timeout <= 0 {
-		return errors.New("preparation command timeout is required")
+		return errors.New("daytona command timeout is required")
 	}
-	if e.preparationCommandTimeout <= 0 || timeout != e.preparationCommandTimeout {
-		return errors.New("preparation command timeout does not match configured server-side timeout")
+	if e.commandTimeout <= 0 || timeout != e.commandTimeout {
+		return errors.New("daytona command timeout does not match configured server-side timeout")
 	}
 	sandboxHandle, err := e.client.Get(ctx, target.ProviderSandboxID)
 	if err != nil {
@@ -547,7 +685,7 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnavailable, true, 0, "daytona sandbox is missing process service", nil)
 	}
 	opts := []func(*options.ExecuteCommand){
-		options.WithExecuteTimeout(e.preparationCommandTimeout),
+		options.WithExecuteTimeout(e.commandTimeout),
 	}
 	if len(env) > 0 {
 		opts = append(opts, options.WithCommandEnv(cloneCommandEnv(env)))
@@ -557,19 +695,19 @@ func (e *DaytonaHelperExecutor) RunPreparationCommand(ctx context.Context, targe
 		return mapDaytonaError(sandbox.StageMountResources, err)
 	}
 	if response == nil {
-		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona preparation command returned no response", nil)
+		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona daytona command returned no response", nil)
 	}
 	if response.ExitCode != 0 {
 		// Command output is deliberately NOT surfaced: tool errors (rclone
 		// especially) can embed signed URLs or other capability material, and
 		// the no-leak contract is pinned by test. Callers label the error
 		// with the engine-authored command name instead.
-		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona preparation command failed", nil)
+		return daytonaProviderError(sandbox.StageMountResources, sandbox.ProviderErrorUnknown, true, 0, "daytona daytona command failed", nil)
 	}
 	return nil
 }
 
-func (e *DaytonaHelperExecutor) StagePreparationFile(ctx context.Context, target PreparationCommandTarget, remotePath string, content io.Reader) error {
+func (e *DaytonaHelperExecutor) StageDaytonaFile(ctx context.Context, target DaytonaCommandTarget, remotePath string, content io.Reader) error {
 	if e == nil || e.client == nil {
 		return errors.New("daytona sandbox client is unavailable")
 	}
@@ -632,62 +770,93 @@ func (e *DaytonaHelperExecutor) executeCommandHelper(ctx context.Context, refere
 }
 
 func (e *DaytonaHelperExecutor) executeHelper(ctx context.Context, target ToolTarget, payloadID string, helperCommand string, payload map[string]any) (helperResult, error) {
-	if e == nil || e.client == nil {
-		return helperResult{}, errors.New("daytona sandbox client is unavailable")
-	}
-	if target.ProviderSandboxID == "" {
-		return helperResult{}, errors.New("provider sandbox id is required")
-	}
-	if !helperCommandNamePattern.MatchString(helperCommand) {
-		return helperResult{}, fmt.Errorf("helper command %q has invalid shape", helperCommand)
-	}
-	if !helperPayloadIDPattern.MatchString(payloadID) {
-		return helperResult{}, fmt.Errorf("helper payload id %q has invalid shape", payloadID)
-	}
-	sandbox, err := retryDaytonaTransient(ctx, func() (daytonaSandboxHandle, error) {
-		return e.client.Get(ctx, target.ProviderSandboxID)
-	}, nil)
+	payloadPath, process, err := e.stageHelperPayload(ctx, target, payloadID, helperCommand, payload)
 	if err != nil {
 		return helperResult{}, err
 	}
-	if sandbox.Process == nil || sandbox.FileSystem == nil {
-		return helperResult{}, errors.New("daytona sandbox is missing process or filesystem service")
+	return e.executePreparedHelper(ctx, process, helperCommand, payloadPath)
+}
+
+func (e *DaytonaHelperExecutor) stageHelperPayload(ctx context.Context, target ToolTarget, payloadID string, helperCommand string, payload map[string]any) (string, daytonaProcess, error) {
+	if e == nil || e.client == nil {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorConfigInvalid, false, 0, "daytona sandbox client is unavailable", nil)
 	}
+	if target.ProviderSandboxID == "" {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "provider sandbox id is required", nil)
+	}
+	if !helperCommandNamePattern.MatchString(helperCommand) {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "helper command has invalid shape", nil)
+	}
+	if !helperPayloadIDPattern.MatchString(payloadID) {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "helper payload id has invalid shape", nil)
+	}
+	providerSandbox, err := retryDaytonaTransient(ctx, func() (daytonaSandboxHandle, error) {
+		return e.client.Get(ctx, target.ProviderSandboxID)
+	}, nil)
+	if err != nil {
+		return "", nil, MarkProviderOperationNotSubmitted(mapDaytonaError(sandbox.StageExecuteTool, err))
+	}
+	if providerSandbox.Process == nil || providerSandbox.FileSystem == nil {
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorMalformedResponse, false, 0, "daytona sandbox is missing process or filesystem service", nil)
+	}
+	stageDir := path.Join(payloadStageRootPath, payloadID)
+	stagePath := path.Join(stageDir, payloadFileName)
 	payloadDir := path.Join(payloadRootPath, payloadID)
 	payloadPath := path.Join(payloadDir, payloadFileName)
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return helperResult{}, err
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorInvalidRequest, false, 0, "sandbox helper payload is invalid", err)
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
-		return sandbox.FileSystem.CreateFolder(ctx, payloadDir, options.WithMode("0700"))
+		return providerSandbox.FileSystem.CreateFolder(ctx, stageDir, options.WithMode("0700"))
 	}); err != nil {
-		return helperResult{}, err
+		return "", nil, err
 	}
 	if err := retryDaytonaTransientError(ctx, func() error {
-		return sandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), payloadPath)
+		return providerSandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(encoded), stagePath)
 	}); err != nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
-		return helperResult{}, err
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, err
 	}
+	// The freeze runs the privileged chain under one sudo sh -c so no
+	// intermediate state is observable: the final root is root-owned before
+	// the payload directory arrives, leftovers are cleared first, and
+	// ownership/mode land before the helper reads. There is deliberately no
+	// post-execution cleanup command: the helper unlinks the payload file
+	// itself, the runtime-user filesystem API cannot delete below the
+	// root-owned final root anyway, and the next call's sweep (rmdir of
+	// empty leftover directories plus rm -rf of this event id) reclaims what
+	// remains, so a session leaves at most one empty directory behind.
+	freezeScript := "install -d -m 0700 -o " + shellQuote(helperUser) + " -g " + shellQuote(helperUser) + " -- " + shellQuote(payloadRootPath) +
+		" && for leftover in " + shellQuote(payloadRootPath) + "/*/; do rmdir -- \"$leftover\" 2>/dev/null || true; done" +
+		" && rm -rf -- " + shellQuote(payloadDir) +
+		" && mv -T -- " + shellQuote(stageDir) + " " + shellQuote(payloadDir) +
+		" && chown -R " + shellQuote(helperUser) + ":" + shellQuote(helperUser) + " -- " + shellQuote(payloadDir) +
+		" && chmod 0700 -- " + shellQuote(payloadDir) +
+		" && chmod 0600 -- " + shellQuote(payloadPath)
 	permissionResponse, err := retryDaytonaTransient(ctx, func() (*types.ExecuteResponse, error) {
-		return sandbox.Process.ExecuteCommand(ctx, "chown "+shellQuote(helperUser)+":"+shellQuote(helperUser)+" "+shellQuote(payloadRootPath)+" && chmod 0700 "+shellQuote(payloadRootPath)+" && chown -R "+shellQuote(helperUser)+":"+shellQuote(helperUser)+" "+shellQuote(payloadDir)+" && chmod 0700 "+shellQuote(payloadDir)+" && chmod 0600 "+shellQuote(payloadPath))
+		return providerSandbox.Process.ExecuteCommand(ctx, "sudo -n sh -c "+shellQuote(freezeScript))
 	}, nil)
 	if err != nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
-		return helperResult{}, err
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, err
 	}
 	if permissionResponse == nil {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
-		return helperResult{}, errors.New("sandbox helper payload permission command returned no response")
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorMalformedResponse, false, 0, "sandbox helper payload permission command returned no response", nil)
 	}
 	if permissionResponse.ExitCode != 0 {
-		_ = sandbox.FileSystem.DeleteFile(ctx, payloadDir, true)
-		return helperResult{}, fmt.Errorf("sandbox helper payload permission command exited with code %d", permissionResponse.ExitCode)
+		_ = providerSandbox.FileSystem.DeleteFile(ctx, stageDir, true)
+		return "", nil, daytonaProviderError(sandbox.StageExecuteTool, sandbox.ProviderErrorUnknown, true, 0, "sandbox helper payload permission command failed", nil)
 	}
-	defer func() { _ = sandbox.FileSystem.DeleteFile(context.WithoutCancel(ctx), payloadDir, true) }()
+	return payloadPath, providerSandbox.Process, nil
+}
 
-	response, err := sandbox.Process.ExecuteCommand(ctx, "sudo -n -u "+shellQuote(helperUser)+" "+shellQuote(helperPath)+" "+shellQuote(helperCommand)+" --payload "+shellQuote(payloadPath))
+func (e *DaytonaHelperExecutor) executePreparedHelper(ctx context.Context, process daytonaProcess, helperCommand string, payloadPath string) (helperResult, error) {
+	if e == nil || process == nil {
+		return helperResult{}, errors.New("daytona sandbox is missing process service")
+	}
+	response, err := process.ExecuteCommand(ctx, "sudo -n -u "+shellQuote(helperUser)+" "+shellQuote(helperPath)+" "+shellQuote(helperCommand)+" --payload "+shellQuote(payloadPath))
 	if err != nil {
 		return helperResult{}, err
 	}
@@ -844,7 +1013,7 @@ func stripProviderMetadataValue(value any) any {
 //	result.cancelled = true                          "cancelled"
 //	result.timed_out = true                          "expired"
 //	result.exit_code = 0                            "completed"
-//	result.exit_code != 0, or result.signal set      "failed"
+//	result.exit_code != 0, result.signal set, or task_lost "failed"
 //	otherwise, including unparseable JSON            ""
 //
 // cancelled outranks timed_out, which outranks the exit_code/signal split, so a
@@ -852,6 +1021,9 @@ func stripProviderMetadataValue(value any) any {
 func terminalStatusFromResult(resultJSON string) string {
 	var payload struct {
 		Status string `json:"status"`
+		Error  *struct {
+			Kind string `json:"kind"`
+		} `json:"error"`
 		Result struct {
 			ExitCode  *int    `json:"exit_code"`
 			Signal    *string `json:"signal"`
@@ -871,7 +1043,7 @@ func terminalStatusFromResult(resultJSON string) string {
 		return "expired"
 	case payload.Result.ExitCode != nil && *payload.Result.ExitCode == 0:
 		return "completed"
-	case payload.Result.ExitCode != nil || payload.Result.Signal != nil:
+	case payload.Result.ExitCode != nil || payload.Result.Signal != nil || payload.Error != nil && payload.Error.Kind == protocol.ErrorKindTaskLost:
 		return "failed"
 	default:
 		return ""

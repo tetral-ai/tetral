@@ -3,11 +3,8 @@ package agentruntimebridge
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,7 +16,6 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
@@ -131,45 +127,6 @@ func normalizeStableReasoningParts(request stableReasoningCarrier) (normalizedSt
 	return normalized, nil
 }
 
-func stableReasoningPartJSON(scope *bridgev1.RuntimeScope, part normalizedStableReasoningPart, now time.Time) (json.RawMessage, error) {
-	timestamp := now
-	value := map[string]any{
-		"id":               part.ReasoningPartID,
-		"sessionId":        scope.GetSessionId(),
-		"sequence":         part.PartSequence,
-		"createdAt":        timestamp,
-		"updatedAt":        timestamp,
-		"type":             "reasoning",
-		"text":             part.Text,
-		"truncated":        part.Truncated,
-		"status":           "completed",
-		"completedAt":      timestamp,
-		"providerMetadata": part.Metadata,
-	}
-	if part.ProviderPartID != "" {
-		value["providerPartId"] = part.ProviderPartID
-	}
-	return json.Marshal(value)
-}
-
-func stableReasoningContentIdentity(part map[string]any) []byte {
-	identity := make(map[string]any, len(part))
-	for key, value := range part {
-		switch key {
-		case "messageId", "createdAt", "updatedAt", "startedAt", "completedAt":
-			continue
-		default:
-			identity[key] = value
-		}
-	}
-	encoded, _ := json.Marshal(identity)
-	return encoded
-}
-
-func sameStableReasoningContent(left, right map[string]any) bool {
-	return bytes.Equal(stableReasoningContentIdentity(left), stableReasoningContentIdentity(right))
-}
-
 func validateStableReasoningBudget(parts []any) error {
 	count := 0
 	aggregateBytes := 0
@@ -199,49 +156,213 @@ func validateStableReasoningSettlementSupersetTx(
 	modelRequestID string,
 	settlement normalizedStableReasoningSet,
 ) error {
-	var messageData string
-	err := tx.QueryRow(ctx,
-		`SELECT data_json
-		   FROM session_messages
-		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND model_request_id = $4
+	rows, err := tx.Query(ctx,
+		`SELECT stable_reasoning_json
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND stable_reasoning_json IS NOT NULL
+		  ORDER BY sequence ASC, event_id ASC
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	).Scan(&messageData)
-	if dbconnect.IsNoRows(err) {
-		return nil
-	}
+	)
 	if err != nil {
 		return err
 	}
-	var message map[string]any
-	if err := json.Unmarshal([]byte(messageData), &message); err != nil {
-		return status.Error(codes.FailedPrecondition, "assistant message projection is invalid")
+	defer func() { _ = rows.Close() }()
+	settlementByID := make(map[string]normalizedStableReasoningPart, len(settlement.Parts))
+	for _, part := range settlement.Parts {
+		settlementByID[part.ReasoningPartID] = part
 	}
-	candidates := make(map[string]map[string]any, len(settlement.Parts))
-	for _, normalized := range settlement.Parts {
-		raw, err := stableReasoningPartJSON(scope, normalized, time.Time{})
-		if err != nil {
+	anchoredByID := make(map[string]normalizedStableReasoningPart)
+	for rows.Next() {
+		var encoded string
+		if err := rows.Scan(&encoded); err != nil {
 			return err
 		}
-		var candidate map[string]any
-		if err := json.Unmarshal(raw, &candidate); err != nil {
-			return err
+		var anchored []normalizedStableReasoningPart
+		if err := json.Unmarshal([]byte(encoded), &anchored); err != nil {
+			return status.Error(codes.FailedPrecondition, "stable reasoning event ledger is invalid")
 		}
-		candidates[normalized.ReasoningPartID] = candidate
+		for _, part := range anchored {
+			if existing, ok := anchoredByID[part.ReasoningPartID]; ok && !sameNormalizedStableReasoningPart(existing, part) {
+				return status.Error(codes.FailedPrecondition, "stable reasoning event ledger is inconsistent")
+			}
+			anchoredByID[part.ReasoningPartID] = part
+		}
 	}
-	parts, _ := message["parts"].([]any)
-	for _, rawPart := range parts {
-		existing, ok := rawPart.(map[string]any)
-		if !ok || existing["type"] != "reasoning" {
-			continue
-		}
-		partID, _ := existing["id"].(string)
-		candidate, ok := candidates[partID]
-		if !ok || !sameStableReasoningContent(existing, candidate) {
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for partID, anchored := range anchoredByID {
+		candidate, ok := settlementByID[partID]
+		if !ok || !sameNormalizedStableReasoningPart(anchored, candidate) {
 			return status.Error(codes.AlreadyExists, "stable reasoning settlement omits or diverges from anchored content")
 		}
 	}
 	return nil
+}
+
+func validateStableReasoningAnchorBudgetTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	anchor normalizedStableReasoningSet,
+) error {
+	rows, err := tx.Query(ctx,
+		`SELECT stable_reasoning_json
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND stable_reasoning_json IS NOT NULL
+		  ORDER BY sequence ASC, event_id ASC
+		  FOR UPDATE`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	partsByID := make(map[string]normalizedStableReasoningPart)
+	add := func(part normalizedStableReasoningPart) error {
+		if existing, ok := partsByID[part.ReasoningPartID]; ok && !sameNormalizedStableReasoningPart(existing, part) {
+			return status.Error(codes.AlreadyExists, "stable reasoning anchor diverges from durable content")
+		}
+		partsByID[part.ReasoningPartID] = part
+		return nil
+	}
+	for rows.Next() {
+		var encoded string
+		if err := rows.Scan(&encoded); err != nil {
+			return err
+		}
+		var durable []normalizedStableReasoningPart
+		if err := json.Unmarshal([]byte(encoded), &durable); err != nil {
+			return status.Error(codes.FailedPrecondition, "stable reasoning event ledger is invalid")
+		}
+		for _, part := range durable {
+			if err := add(part); err != nil {
+				return err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, part := range anchor.Parts {
+		if err := add(part); err != nil {
+			return err
+		}
+	}
+	aggregateBytes := 0
+	for _, part := range partsByID {
+		metadata, _ := json.Marshal(part.Metadata)
+		aggregateBytes += len(part.Text) + len(metadata)
+	}
+	if len(partsByID) > MaxStableReasoningPartsPerRequest || aggregateBytes > MaxStableReasoningBytesPerRequest {
+		return status.Error(codes.InvalidArgument, "stable reasoning exceeds per-request budget")
+	}
+	return nil
+}
+
+func sameNormalizedStableReasoningPart(left, right normalizedStableReasoningPart) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return bytes.Equal(leftJSON, rightJSON)
+}
+
+func requestEndInterruptCommitRequest(
+	request *bridgev1.WriteRequestEndRequest,
+) (*bridgev1.CommitInputsRequest, string, error) {
+	settlement := request.GetInterruptSettlement()
+	cancellationDrafts := requestEndCancellationDrafts(request.GetDrafts())
+	if settlement == nil {
+		if len(cancellationDrafts) != 0 {
+			return nil, "", status.Error(codes.InvalidArgument, "request end cancellation drafts require interrupt settlement")
+		}
+		return nil, "", nil
+	}
+	if !request.GetIsError() || request.GetErrorKind() != "runtime_interrupted" || request.GetReschedule() != nil {
+		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement requires an interrupted terminal end")
+	}
+	interruptRequest := &bridgev1.CommitInputsRequest{
+		Scope:                           request.GetScope(),
+		RuntimeInputId:                  settlement.GetRuntimeInputId(),
+		EventIds:                        settlement.GetEventIds(),
+		SequenceFrom:                    settlement.GetSequenceFrom(),
+		SequenceTo:                      settlement.GetSequenceTo(),
+		InputKind:                       "interrupt_control",
+		Drafts:                          cancellationDrafts,
+		PendingToolCancellations:        settlement.GetPendingToolCancellations(),
+		SandboxExecutionToolUseEventIds: settlement.GetSandboxExecutionToolUseEventIds(),
+	}
+	if interruptRequest.GetRuntimeInputId() == "" {
+		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement is missing its runtime input")
+	}
+	if err := validateCommitInputsRequest("interrupt_control", interruptRequest); err != nil {
+		return nil, "", err
+	}
+	digest, err := commitInputsDeclarationDigest(interruptRequest, "interrupt_control")
+	if err != nil {
+		return nil, "", err
+	}
+	return interruptRequest, digest, nil
+}
+
+func requestEndCancellationDrafts(drafts []*bridgev1.RuntimeMessageDraft) []*bridgev1.RuntimeMessageDraft {
+	cancellations := make([]*bridgev1.RuntimeMessageDraft, 0, len(drafts))
+	for _, draft := range drafts {
+		if draft.GetDraftKind() == bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION {
+			cancellations = append(cancellations, draft)
+		}
+	}
+	return cancellations
+}
+
+func requestEndPrimaryDrafts(drafts []*bridgev1.RuntimeMessageDraft) []*bridgev1.RuntimeMessageDraft {
+	primary := make([]*bridgev1.RuntimeMessageDraft, 0, len(drafts))
+	for _, draft := range drafts {
+		if draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION {
+			primary = append(primary, draft)
+		}
+	}
+	return primary
+}
+
+func readRequestEndInterruptReceiptTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	declarationDigest string,
+) (*bridgev1.DeclarationReceipt, error) {
+	existing, ok, err := readBridgeDeclarationOperationTx(
+		ctx,
+		tx,
+		scope,
+		bridgeOpCommitInputs,
+		"interrupt_control",
+		runtimeInputID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+		return nil, status.Error(codes.FailedPrecondition, "request end interrupt receipt is invalid")
+	}
+	if existing.DeclarationDigest != declarationDigest {
+		return nil, status.Error(codes.AlreadyExists, "request end interrupt idempotency conflict")
+	}
+	receipt, err := unmarshalDeclarationReceipt(existing.ReceiptJSON)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "request end interrupt receipt is invalid")
+	}
+	return receipt, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request *bridgev1.WriteRequestEndRequest) (*bridgev1.WriteRequestEndResponse, error) {
@@ -260,6 +381,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	}
 	if request.GetReschedule() != nil && !request.GetIsError() {
 		return nil, status.Error(codes.InvalidArgument, "successful request end cannot reschedule")
+	}
+	interruptRequest, interruptDigest, err := requestEndInterruptCommitRequest(request)
+	if err != nil {
+		return nil, err
 	}
 	consumedTransientAttachments, err := normalizeConsumedAttachmentRefs(request.GetConsumedAttachmentRefs())
 	if err != nil {
@@ -301,58 +426,86 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 	if err != nil {
 		return nil, err
 	}
-	key := request.GetModelRequestId() + ":" + request.GetRuntimeWriteId()
-	rescheduleAttempt := ""
-	rescheduleDeadline := ""
-	rescheduleBackoff := ""
-	if request.GetReschedule() != nil {
-		rescheduleAttempt = strconv.FormatInt(int64(request.GetReschedule().GetAttempt()), 10)
-		rescheduleDeadline = request.GetReschedule().GetDeadline()
-		rescheduleBackoff = strconv.FormatInt(request.GetReschedule().GetBackoffMs(), 10)
-	}
-	requestHash := bridgeRequestHash(
-		bridgeOpWriteRequestEnd,
-		key,
-		request.GetModelRequestStartEventId(),
+	key := request.GetModelRequestId()
+	declarationDigest, err := writeRequestEndDeclarationDigest(
+		request,
 		requestKind,
-		boolHashPart(request.GetIsError()),
-		request.GetErrorKind(),
 		finishReason,
 		usageJSON,
+		stableReasoning.CanonicalJSON,
 		consumedTransientAttachments.CanonicalJSON,
 		consumedFileAttachments.CanonicalJSON,
-		rescheduleAttempt,
-		rescheduleDeadline,
-		rescheduleBackoff,
-		stableReasoning.CanonicalJSON,
 	)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
-	var response *bridgev1.WriteRequestEndResponse
+	var (
+		ack              *bridgev1.BridgeWriteAck
+		receipt          *bridgev1.DeclarationReceipt
+		interruptReceipt *bridgev1.DeclarationReceipt
+		observation      declarationApplicationObservation
+	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.write_request_end", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+		if err := lockRuntimeMutationSessionTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		); err != nil {
 			return err
 		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpWriteRequestEnd, key); err != nil {
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpWriteRequestEnd,
+			"model_request",
+			key,
+		); err != nil {
 			return err
 		} else if ok {
-			if existing.RequestHash != requestHash {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "request end receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
 				return status.Error(codes.AlreadyExists, "request end idempotency conflict")
 			}
-			var stored writeRequestEndResult
-			if err := json.Unmarshal([]byte(existing.ResultJSON), &stored); err != nil {
-				return err
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "request end receipt is invalid")
 			}
-			response = &bridgev1.WriteRequestEndResponse{
-				Ack:                   duplicateAck("", request.GetRuntimeWriteId()),
-				RescheduleDisposition: requestEndDispositionProto(stored.RescheduleDisposition),
+			if interruptRequest != nil {
+				interruptReceipt, err = readRequestEndInterruptReceiptTx(
+					ctx,
+					tx,
+					request.GetScope(),
+					interruptRequest.GetRuntimeInputId(),
+					interruptDigest,
+				)
+				if err != nil {
+					return err
+				}
 			}
-			return nil
+			ack = duplicateAck("", request.GetRuntimeWriteId())
+			observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+			return err
+		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
 		}
 		if !stableReasoning.StrictlyOrdered {
 			return status.Error(codes.InvalidArgument, "stable reasoning parts must be strictly ordered")
 		}
-		if err := validateStableReasoningSettlementSupersetTx(ctx, tx, request.GetScope(), request.GetModelRequestId(), stableReasoning); err != nil {
-			return err
+		// Only a successful end claims the complete reasoning set. Error and
+		// reschedule ends preserve prefixes already anchored by durable tools.
+		if !request.GetIsError() && request.GetReschedule() == nil {
+			if err := validateStableReasoningSettlementSupersetTx(ctx, tx, request.GetScope(), request.GetModelRequestId(), stableReasoning); err != nil {
+				return err
+			}
 		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), request.GetModelRequestStartEventId(), request.GetModelRequestId()); err != nil {
 			return err
@@ -360,33 +513,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if _, exists, err := modelRequestEndExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetModelRequestId()); err != nil {
 			return err
 		} else if exists {
-			stored := writeRequestEndResult{RescheduleDisposition: &requestEndDispositionResult{
-				Status:       "denied",
-				DenialReason: "stale_terminal",
-			}}
-			if reschedule != nil {
-				stored.RescheduleDisposition.Attempt = reschedule.Attempt
-			}
-			resultJSON, err := marshalBridgeJSON(stored)
-			if err != nil {
-				return err
-			}
-			if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-				Operation:      bridgeOpWriteRequestEnd,
-				IdempotencyKey: key,
-				RequestHash:    requestHash,
-				AckStatus:      bridgeAckCommitted,
-				RuntimeWriteID: sql.NullString{String: request.GetRuntimeWriteId(), Valid: true},
-				ResultJSON:     resultJSON,
-				Now:            now,
-			}); err != nil {
-				return err
-			}
-			response = &bridgev1.WriteRequestEndResponse{
-				Ack:                   committedAck("", request.GetRuntimeWriteId()),
-				RescheduleDisposition: requestEndDispositionProto(stored.RescheduleDisposition),
-			}
-			return nil
+			return status.Error(codes.AlreadyExists, "model request is already closed")
 		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
@@ -487,15 +614,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 				return err
 			}
 		}
-		for _, reasoningPart := range stableReasoning.Parts {
-			partJSON, err := stableReasoningPartJSON(request.GetScope(), reasoningPart, now)
-			if err != nil {
-				return err
-			}
-			if _, err := mergeAssistantMessagePartTx(ctx, tx, request.GetScope(), request.GetModelRequestId(), "", partJSON, true, now); err != nil {
-				return err
-			}
-		}
 		var disposition *requestEndDispositionResult
 		if reschedule != nil {
 			disposition, err = s.applyRequestEndRescheduleTx(ctx, tx, request, requestKind, threadScope, reschedule, now)
@@ -503,31 +621,113 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 				return err
 			}
 		}
-		stored := writeRequestEndResult{EventID: eventID, Sequence: sequence, RescheduleDisposition: disposition}
-		resultJSON, err := marshalBridgeJSON(stored)
+		receipt, err = commitWriteRequestEndDeclarationTx(
+			ctx,
+			tx,
+			request,
+			threadScope,
+			eventID,
+			sequence,
+			stableReasoning,
+			now,
+		)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpWriteRequestEnd,
-			IdempotencyKey: key,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeWriteID: sql.NullString{String: request.GetRuntimeWriteId(), Valid: true},
-			ResultJSON:     resultJSON,
-			Now:            now,
-		}); err != nil {
+		receipt.RequestReschedule = requestEndDispositionStamp(requestKind, disposition)
+		receipt.DeclarationDigest = declarationDigest
+		if interruptRequest != nil {
+			if _, ok, err := readBridgeDeclarationOperationTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				bridgeOpCommitInputs,
+				"interrupt_control",
+				interruptRequest.GetRuntimeInputId(),
+			); err != nil {
+				return err
+			} else if ok {
+				return status.Error(codes.AlreadyExists, "interrupt input is already settled")
+			}
+			interruptReceipt, err = commitInputDeclarationTx(
+				ctx,
+				tx,
+				interruptRequest,
+				"interrupt_control",
+				interruptRequest.GetRuntimeInputId(),
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			interruptReceipt.DeclarationDigest = interruptDigest
+			interruptReceiptJSON, err := marshalDeclarationReceipt(interruptReceipt)
+			if err != nil {
+				return err
+			}
+			if err := insertBridgeDeclarationOperationTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				bridgeOpCommitInputs,
+				"interrupt_control",
+				interruptRequest.GetRuntimeInputId(),
+				interruptDigest,
+				interruptReceiptJSON,
+				now,
+			); err != nil {
+				return err
+			}
+		}
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		if err != nil {
 			return err
 		}
-		response = &bridgev1.WriteRequestEndResponse{
-			Ack:                   committedAck("", request.GetRuntimeWriteId()),
-			RescheduleDisposition: requestEndDispositionProto(disposition),
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpWriteRequestEnd,
+			"model_request",
+			key,
+			declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
+			return err
 		}
-		return nil
+		ack = committedAck("", request.GetRuntimeWriteId())
+		observation, err = declarationApplicationObservationTx(ctx, tx, request.GetScope())
+		return err
 	}); err != nil {
 		return nil, err
 	}
-	return response, nil
+	if receipt == nil || len(receipt.GetEvents()) == 0 || (interruptRequest != nil && interruptReceipt == nil) {
+		return nil, status.Error(codes.FailedPrecondition, "request end receipt is invalid")
+	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpWriteRequestEnd,
+		"model_request",
+		key,
+		declarationDigest,
+		ack,
+		observation,
+	)
+	receipts := []*bridgev1.DeclarationReceipt{receipt}
+	if interruptReceipt != nil {
+		receipts = append(receipts, interruptReceipt)
+	}
+	return &bridgev1.WriteRequestEndResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  receipts,
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) applyRequestEndRescheduleTx(
@@ -712,12 +912,8 @@ func appendRequestRescheduledStatusTx(
 }
 
 func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *bridgev1.FinishIdleRequest) (*bridgev1.FinishIdleResponse, error) {
-	if request.GetRuntimeWriteId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "runtime write id is required")
-	}
-	idleSince, err := defaultTime(request.GetIdleSince(), s.now())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, "idle since must be an RFC 3339 timestamp")
+	if request.GetDurableTurnId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "durable turn id is required")
 	}
 	stopReasonJSON := defaultString(request.GetStopReasonJson(), `{"type":"end_turn"}`)
 	if !json.Valid([]byte(stopReasonJSON)) {
@@ -727,89 +923,102 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 	if err != nil {
 		return nil, err
 	}
-	key := request.GetRuntimeWriteId()
-	requestHash := bridgeRequestHash(bridgeOpFinishIdle, key, idleSince.UTC().Format(time.RFC3339Nano), stopReasonJSON)
+	const sourceKind = "turn_closeout"
+	key := request.GetDurableTurnId()
+	declarationDigest, err := finishIdleDeclarationDigest(request, stopReasonJSON)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
-	var ack *bridgev1.BridgeWriteAck
-	var cleanupCapture func()
-	var skippedCapture []outputcapture.SkippedFile
-	var captureScanRecords []outputcapture.ScanRecord
-	var captureScanFailure *outputcapture.CaptureScanError
-	var finishIdleErr error
-	err = s.withScopeTxAndCleanup(ctx, request.GetScope(), "agentruntimebridge.finish_idle", func(tx *dbconnect.Tx) error {
-		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+	capture, err := s.ensureFinishIdleOutputCapture(ctx, request, sourceKind, key, declarationDigest, now)
+	if err != nil {
+		return nil, err
+	}
+	capture, err = s.waitForFinishIdleOutputCapture(ctx, request.GetScope(), key, capture)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		ack     *bridgev1.BridgeWriteAck
+		receipt *bridgev1.DeclarationReceipt
+	)
+	var adoptedCapture adoptedOutputCapture
+	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.finish_idle", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		); err != nil {
 			return err
 		}
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpFinishIdle, key); err != nil {
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpFinishIdle,
+			sourceKind,
+			key,
+		); err != nil {
 			return err
 		} else if ok {
-			if existing.RequestHash != requestHash {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "finish idle receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
 				return status.Error(codes.AlreadyExists, "finish idle idempotency conflict")
+			}
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "finish idle receipt is invalid")
 			}
 			ack = duplicateAck("", key)
 			return nil
 		}
+		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
+			return err
+		}
 		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
 		if err != nil {
 			return err
+		}
+		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		if err != nil {
+			return err
+		}
+		if openDurableTurnID == nil || *openDurableTurnID != key {
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "durable turn is not open"))
+		}
+		if threadScope.role != "subagent" && len(request.GetDrafts()) != 0 {
+			return status.Error(codes.InvalidArgument, "completion mail is only valid for a sub-agent thread")
+		}
+		if len(request.GetDrafts()) > 1 {
+			return status.Error(codes.InvalidArgument, "finish idle accepts at most one completion mail")
 		}
 		projectionEventType := "session.status_idle"
 		if threadScope.role != "main" {
 			projectionEventType = "session.thread_status_idle"
 		}
 		visibility, sessionVisible := threadScope.publicProjection(projectionEventType)
-		if s.OutputCapturer == nil {
-			return status.Error(codes.FailedPrecondition, "output capture is not installed")
-		}
-		target, err := outputCaptureTargetTx(ctx, tx, request.GetScope(), s.sandboxStatusFreshnessWindow(), s.resourceCredentialRefreshMargin(), now)
+		adoptedCapture, err = adoptFinishIdleOutputCaptureTx(ctx, tx, request.GetScope(), key, capture.Generation, now)
 		if err != nil {
-			if isOutputCapturePreparationRequeued(err) {
-				finishIdleErr = err
-				return nil
-			}
 			return err
-		}
-		captureResult, err := s.OutputCapturer.CaptureOutputs(ctx, tx, outputcapture.Request{
-			WorkspaceID:    request.GetScope().GetWorkspaceId(),
-			SessionID:      request.GetScope().GetSessionId(),
-			RuntimeWriteID: key,
-			Target:         target,
-			CapturedAt:     now,
-		})
-		if err != nil {
-			var scanErr *outputcapture.CaptureScanError
-			if !errors.As(err, &scanErr) {
-				return err
-			}
-			// Output capture is best-effort by design, but settlement is not:
-			// only typed pre-persistence scan outcomes are swallowed here. The
-			// error-level record is the alarm; every persistence error still
-			// aborts FinishIdle.
-			captureScanFailure = scanErr
-		} else {
-			cleanupCapture = captureResult.Cleanup
-			skippedCapture = captureResult.Skipped
-			captureScanRecords = captureResult.ScanRecords
 		}
 		if idleStopReasonSettlesTurn(stopReasonJSON) {
 			if err := resetTurnRetryCountersTx(ctx, tx, request.GetScope(), now); err != nil {
 				return err
 			}
 		}
+		eventID := id.New("evt_")
+		sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
+		if err != nil {
+			return err
+		}
 		if threadScope.role != "main" {
-			// Stop reason alone cannot identify a completed child turn: end_turn
-			// also closes terminal-error and processed-interrupt paths. Decide
-			// completion mail from the durable events visible in this transaction.
-			completionDecision, err := classifyFinishIdleCompletionTx(ctx, tx, request.GetScope(), threadScope, stopReasonJSON)
-			if err != nil {
-				return err
-			}
 			childPayloadJSON, err := threadStatusPayloadJSON("session.thread_status_idle", request.GetScope(), threadScope, stopReasonJSON)
-			if err != nil {
-				return err
-			}
-			eventID := id.New("evt_")
-			sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
 			if err != nil {
 				return err
 			}
@@ -837,104 +1046,106 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			if err := updateChildThreadStatusTx(ctx, tx, request.GetScope(), "idle", now); err != nil {
 				return err
 			}
-			if err := appendCompletionMailTx(ctx, tx, request.GetScope(), threadScope, key, completionDecision, now); err != nil {
-				return err
-			}
-			if _, err := rearmPendingCompletionMailForThreadTx(
-				ctx,
-				tx,
+		} else {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO session_events (
+					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+					visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
+				) VALUES ($1, $2, $3, $4, $5, 'session.status_idle', $6, $7, $8, $9, $10, $11, $11, $11)`,
 				request.GetScope().GetWorkspaceId(),
 				request.GetScope().GetSessionId(),
 				request.GetScope().GetSessionThreadId(),
+				eventID,
+				sequence,
+				payloadJSON,
+				visibility,
+				sessionVisible,
+				key,
+				payloadJSON,
 				now,
 			); err != nil {
 				return err
 			}
-			resultJSON, err := marshalBridgeJSON(writeEventResult{EventID: eventID, Sequence: sequence})
+			if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
+				return err
+			}
+			cleanupAfter := now.Add(defaultIdleCleanupDelay)
+			statusResult, err := tx.Exec(ctx,
+				`INSERT INTO session_runtime_status (
+					workspace_id, session_id, status, status_event_id, idle_since, running_since, active_seconds_total, cleanup_after,
+					binding_id, binding_generation, created_at, updated_at
+				) VALUES ($1, $2, 'idle', $3, $4, NULL, 0, $5, $6, $7, $8, $8)
+				ON CONFLICT (workspace_id, session_id) DO UPDATE SET
+					status = 'idle',
+					status_event_id = EXCLUDED.status_event_id,
+					idle_since = EXCLUDED.idle_since,
+					active_seconds_total = session_runtime_status.active_seconds_total + CASE
+						WHEN session_runtime_status.running_since IS NULL THEN 0
+						ELSE GREATEST(0, EXTRACT(EPOCH FROM (EXCLUDED.updated_at - session_runtime_status.running_since)))
+					END,
+					running_since = NULL,
+					cleanup_after = EXCLUDED.cleanup_after,
+					cleanup_enqueued_at = NULL,
+					cleanup_claimed_at = NULL,
+					cleanup_job_id = NULL,
+					binding_id = EXCLUDED.binding_id,
+					binding_generation = EXCLUDED.binding_generation,
+					updated_at = EXCLUDED.updated_at
+					WHERE session_runtime_status.status <> 'terminated'`,
+				request.GetScope().GetWorkspaceId(),
+				request.GetScope().GetSessionId(),
+				eventID,
+				now,
+				cleanupAfter,
+				request.GetScope().GetBinding().GetBindingId(),
+				request.GetScope().GetBinding().GetBindingGeneration(),
+				now,
+			)
 			if err != nil {
 				return err
 			}
-			if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-				Operation:      bridgeOpFinishIdle,
-				IdempotencyKey: key,
-				RequestHash:    requestHash,
-				AckStatus:      bridgeAckCommitted,
-				RuntimeWriteID: sql.NullString{String: key, Valid: true},
-				ResultJSON:     resultJSON,
-				Now:            now,
-			}); err != nil {
+			if !rowsAffected(statusResult) {
+				return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is already terminal"))
+			}
+			if err := markPublicSessionIdleTx(ctx, tx, request.GetScope(), now, now); err != nil {
 				return err
 			}
-			ack = committedAck("", key)
-			return nil
 		}
-		eventID := id.New("evt_")
-		sequence, err := nextSessionEventSequenceTx(ctx, tx, request.GetScope())
-		if err != nil {
-			return err
+		receipt = &bridgev1.DeclarationReceipt{
+			SessionThreadId:   request.GetScope().GetSessionThreadId(),
+			OperationKind:     bridgeOpFinishIdle,
+			SourceKind:        sourceKind,
+			SourceId:          key,
+			DeclarationDigest: declarationDigest,
+			Events: []*bridgev1.DurableEventStamp{{
+				SessionThreadId: request.GetScope().GetSessionThreadId(),
+				SourceEventId:   key,
+				EventId:         eventID,
+				EventSequence:   sequence,
+				Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+			}},
+			IdleCloseout: &bridgev1.IdleCloseoutStamp{
+				DurableTurnId:     key,
+				IdleEventId:       eventID,
+				IdleEventSequence: sequence,
+				CommittedIdleAt:   now.UTC().Format(time.RFC3339Nano),
+			},
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO session_events (
-				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
-				visibility, session_visible, runtime_write_id, projection_json, created_at, updated_at, processed_at
-			) VALUES ($1, $2, $3, $4, $5, 'session.status_idle', $6, $7, $8, $9, $10, $11, $11, $11)`,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			eventID,
-			sequence,
-			payloadJSON,
-			visibility,
-			sessionVisible,
-			key,
-			payloadJSON,
-			now,
-		); err != nil {
-			return err
-		}
-		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
-			return err
-		}
-		cleanupAfter := now.Add(defaultIdleCleanupDelay)
-		statusResult, err := tx.Exec(ctx,
-			`INSERT INTO session_runtime_status (
-				workspace_id, session_id, status, status_event_id, idle_since, running_since, active_seconds_total, cleanup_after,
-				binding_id, binding_generation, created_at, updated_at
-			) VALUES ($1, $2, 'idle', $3, $4, NULL, 0, $5, $6, $7, $8, $8)
-			ON CONFLICT (workspace_id, session_id) DO UPDATE SET
-				status = 'idle',
-				status_event_id = EXCLUDED.status_event_id,
-				idle_since = EXCLUDED.idle_since,
-				active_seconds_total = session_runtime_status.active_seconds_total + CASE
-					WHEN session_runtime_status.running_since IS NULL THEN 0
-					ELSE GREATEST(0, EXTRACT(EPOCH FROM (EXCLUDED.updated_at - session_runtime_status.running_since)))
-				END,
-				running_since = NULL,
-				cleanup_after = EXCLUDED.cleanup_after,
-				cleanup_enqueued_at = NULL,
-				cleanup_claimed_at = NULL,
-				cleanup_job_id = NULL,
-				binding_id = EXCLUDED.binding_id,
-					binding_generation = EXCLUDED.binding_generation,
-					updated_at = EXCLUDED.updated_at
-				WHERE session_runtime_status.status <> 'terminated'`,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			eventID,
-			idleSince,
-			cleanupAfter,
-			request.GetScope().GetBinding().GetBindingId(),
-			request.GetScope().GetBinding().GetBindingGeneration(),
-			now,
-		)
-		if err != nil {
-			return err
-		}
-		if !rowsAffected(statusResult) {
-			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime session is already terminal"))
-		}
-		if err := markPublicSessionIdleTx(ctx, tx, request.GetScope(), idleSince, now); err != nil {
-			return err
+		if len(request.GetDrafts()) == 1 {
+			mailEvent, mailMessage, err := appendDeclaredCompletionMailTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				threadScope,
+				key,
+				request.GetDrafts()[0],
+				now,
+			)
+			if err != nil {
+				return err
+			}
+			receipt.Events = append(receipt.Events, mailEvent)
+			receipt.Messages = append(receipt.Messages, mailMessage)
 		}
 		if _, err := rearmPendingCompletionMailForThreadTx(
 			ctx,
@@ -946,76 +1157,57 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		); err != nil {
 			return err
 		}
-		resultJSON, err := marshalBridgeJSON(writeEventResult{EventID: eventID, Sequence: sequence})
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {
 			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpFinishIdle,
-			IdempotencyKey: key,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeWriteID: sql.NullString{String: key, Valid: true},
-			ResultJSON:     resultJSON,
-			Now:            now,
-		}); err != nil {
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpFinishIdle,
+			sourceKind,
+			key,
+			declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
 			return err
 		}
 		ack = committedAck("", key)
 		return nil
-	}, func() {
-		if cleanupCapture != nil {
-			cleanupCapture()
-		}
 	})
 	if err != nil {
-		if cleanupCapture != nil {
-			cleanupCapture()
-		}
 		return nil, err
 	}
-	if finishIdleErr != nil {
-		return nil, finishIdleErr
+	logOutputCaptureSkips(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), adoptedCapture.Skipped)
+	logOutputCaptureScanRecords(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), adoptedCapture.ScanRecords)
+	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
+	if err != nil {
+		return nil, err
 	}
-	logOutputCaptureFailure(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), captureScanFailure)
-	logOutputCaptureSkips(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), skippedCapture)
-	logOutputCaptureScanRecords(s.Logger, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), captureScanRecords)
-	return &bridgev1.FinishIdleResponse{Ack: ack}, nil
-}
-
-func logOutputCaptureFailure(logger *slog.Logger, workspaceID string, sessionID string, captureErr *outputcapture.CaptureScanError) {
-	if logger == nil || captureErr == nil {
-		return
-	}
-	logger.Error("bridge.output_capture.scan_failed",
-		slog.String("operation", "output_capture.finish_idle"),
-		slog.String("event.kind", "output_capture.scan_failed"),
-		slog.String("component", ServiceNameBridgeAPI),
-		slog.String("workspace.id", workspaceID),
-		slog.String("session.id", sessionID),
-		slog.String("error.class", "output_capture_scan_error"),
-		slog.String("error.code", captureErr.Kind()),
-		slog.String("error.capture_kind", captureErr.CaptureKind),
-		slog.String("error.capture_detail", boundedOutputCaptureFailureDetail(captureErr.CaptureDetail)),
-		slog.Bool("retryable", true),
-		slog.String("alert.family", "output_capture"),
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpFinishIdle,
+		sourceKind,
+		key,
+		declarationDigest,
+		ack,
+		observation,
 	)
+	return &bridgev1.FinishIdleResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
-const outputCaptureFailureDetailMaxBytes = 512
-
-func boundedOutputCaptureFailureDetail(detail string) string {
-	if len(detail) <= outputCaptureFailureDetailMaxBytes {
-		return detail
-	}
-	end := outputCaptureFailureDetailMaxBytes
-	for end > 0 && !utf8.ValidString(detail[:end]) {
-		end--
-	}
-	return detail[:end]
-}
-
-func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID string, skipped []outputcapture.SkippedFile) {
+func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID string, skipped []stagedOutputCaptureSkipped) {
 	if logger == nil {
 		return
 	}
@@ -1033,7 +1225,7 @@ func logOutputCaptureSkips(logger *slog.Logger, workspaceID string, sessionID st
 	}
 }
 
-func logOutputCaptureScanRecords(logger *slog.Logger, workspaceID string, sessionID string, records []outputcapture.ScanRecord) {
+func logOutputCaptureScanRecords(logger *slog.Logger, workspaceID string, sessionID string, records []stagedOutputCaptureScanRecord) {
 	if logger == nil {
 		return
 	}
@@ -1059,9 +1251,51 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	const sourceKind = "runtime_termination"
+	declarationDigest, err := runtimeTerminationDeclarationDigest(request, failureJSON)
+	if err != nil {
+		return nil, err
+	}
 	now := s.now()
-	var ack *bridgev1.BridgeWriteAck
+	var (
+		ack     *bridgev1.BridgeWriteAck
+		receipt *bridgev1.DeclarationReceipt
+	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_runtime_termination", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(
+			ctx,
+			tx,
+			request.GetScope().GetWorkspaceId(),
+			request.GetScope().GetSessionId(),
+		); err != nil {
+			return err
+		}
+		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
+			return err
+		}
+		if existing, ok, err := readBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitRuntimeTermination,
+			sourceKind,
+			request.GetRuntimeWriteId(),
+		); err != nil {
+			return err
+		} else if ok {
+			if existing.DeclarationDigest == "" || existing.ReceiptJSON == "" {
+				return status.Error(codes.FailedPrecondition, "runtime termination receipt is invalid")
+			}
+			if existing.DeclarationDigest != declarationDigest {
+				return status.Error(codes.AlreadyExists, "runtime termination idempotency conflict")
+			}
+			receipt, err = unmarshalDeclarationReceipt(existing.ReceiptJSON)
+			if err != nil {
+				return status.Error(codes.FailedPrecondition, "runtime termination receipt is invalid")
+			}
+			ack = duplicateAck("", request.GetRuntimeWriteId())
+			return nil
+		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
@@ -1069,53 +1303,62 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		target := "thread:" + request.GetScope().GetSessionThreadId()
-		if threadScope.role == "main" {
-			target = "session"
-		}
-		key := target + ":" + request.GetRuntimeWriteId()
-		requestHash := bridgeRequestHash(bridgeOpCommitRuntimeTermination, key, failureJSON)
-		if existing, ok, err := readBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOpCommitRuntimeTermination, key); err != nil {
-			return err
-		} else if ok {
-			if existing.RequestHash != requestHash {
-				return status.Error(codes.AlreadyExists, "runtime termination idempotency conflict")
-			}
-			ack = duplicateAck("", request.GetRuntimeWriteId())
-			return nil
-		}
-		sessionWide := threadScope.role == "main"
-		if err := closeRuntimeTerminationSpansTx(ctx, tx, request.GetScope(), sessionWide, failure, now); err != nil {
+		openDurableTurnID, err := loadOpenDurableTurnIDTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
-		if err := settleRuntimeTerminationToolUsesTx(ctx, tx, request.GetScope(), sessionWide, now); err != nil {
+		if openDurableTurnID == nil || *openDurableTurnID != request.GetRuntimeWriteId() {
+			return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime termination durable turn is not open"))
+		}
+		if err := closeRuntimeTerminationSpansTx(ctx, tx, request.GetScope(), failure, now); err != nil {
 			return err
 		}
-		if err := settleRuntimeTerminationPendingWaitsTx(ctx, tx, request.GetScope(), sessionWide, now); err != nil {
+		receipt, err = commitRuntimeTerminationDeclarationsTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			threadScope,
+			request.GetRuntimeWriteId(),
+			request.GetDrafts(),
+			request.GetPendingToolCancellations(),
+			request.GetSandboxExecutionToolUseEventIds(),
+			now,
+		)
+		if err != nil {
 			return err
 		}
-		if err := appendRuntimeTerminationErrorTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failureJSON, now); err != nil {
+		orphanToolUses, err := runtimeTerminationOrphanToolUsesTx(ctx, tx, request.GetScope(), false)
+		if err != nil {
 			return err
 		}
-		if err := appendRuntimeTerminatedStatusTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), now); err != nil {
+		if len(orphanToolUses) != 0 {
+			return status.Error(codes.FailedPrecondition, "runtime termination has an undeclared live tool use")
+		}
+		errorStamp, err := appendRuntimeTerminationErrorTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failureJSON, now)
+		if err != nil {
 			return err
 		}
-		if threadScope.role == "subagent" && threadScope.status != "closed_for_runtime" {
-			if err := appendCompletionMailTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), completionMailDecision{
-				Kind:   completionMailErrored,
-				Reason: failure.Message,
-			}, now); err != nil {
-				return err
-			}
+		statusStamp, err := appendRuntimeTerminatedStatusTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), now)
+		if err != nil {
+			return err
 		}
-		if err := insertBridgeOperationTx(ctx, tx, request.GetScope(), bridgeOperationInsert{
-			Operation:      bridgeOpCommitRuntimeTermination,
-			IdempotencyKey: key,
-			RequestHash:    requestHash,
-			AckStatus:      bridgeAckCommitted,
-			RuntimeWriteID: sql.NullString{String: request.GetRuntimeWriteId(), Valid: true},
-			Now:            now,
-		}); err != nil {
+		receipt.Events = append(receipt.Events, errorStamp, statusStamp)
+		receipt.DeclarationDigest = declarationDigest
+		receiptJSON, err := marshalDeclarationReceipt(receipt)
+		if err != nil {
+			return err
+		}
+		if err := insertBridgeDeclarationOperationTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			bridgeOpCommitRuntimeTermination,
+			sourceKind,
+			request.GetRuntimeWriteId(),
+			declarationDigest,
+			receiptJSON,
+			now,
+		); err != nil {
 			return err
 		}
 		ack = committedAck("", request.GetRuntimeWriteId())
@@ -1123,18 +1366,29 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	}); err != nil {
 		return nil, err
 	}
-	return &bridgev1.CommitRuntimeTerminationResponse{Ack: ack}, nil
-}
-
-type writeEventResult struct {
-	EventID  string `json:"event_id"`
-	Sequence int64  `json:"sequence"`
-}
-
-type writeRequestEndResult struct {
-	EventID               string                       `json:"event_id,omitempty"`
-	Sequence              int64                        `json:"sequence,omitempty"`
-	RescheduleDisposition *requestEndDispositionResult `json:"reschedule_disposition,omitempty"`
+	observation, err := s.declarationApplicationObservation(ctx, request.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	logRuntimeDeclaration(
+		s.Logger,
+		request.GetScope(),
+		bridgeOpCommitRuntimeTermination,
+		sourceKind,
+		request.GetRuntimeWriteId(),
+		declarationDigest,
+		ack,
+		observation,
+	)
+	return &bridgev1.CommitRuntimeTerminationResponse{
+		Ack: ack,
+		Declaration: &bridgev1.DeclarationResponse{
+			Receipts:                  []*bridgev1.DeclarationReceipt{receipt},
+			ObservedBindingId:         observation.BindingID,
+			ObservedBindingGeneration: observation.BindingGeneration,
+			ApplicationDisposition:    observation.Disposition,
+		},
+	}, nil
 }
 
 type requestEndDispositionResult struct {
@@ -1144,14 +1398,23 @@ type requestEndDispositionResult struct {
 	EffectiveDeadline string `json:"effective_deadline,omitempty"`
 }
 
-func requestEndDispositionProto(result *requestEndDispositionResult) *bridgev1.RequestEndRescheduleDisposition {
+func requestEndDispositionStamp(requestKind string, result *requestEndDispositionResult) *bridgev1.RequestRescheduleStamp {
 	if result == nil {
 		return nil
 	}
-	return &bridgev1.RequestEndRescheduleDisposition{
-		Status:            result.Status,
-		DenialReason:      result.DenialReason,
-		Attempt:           result.Attempt,
+	disposition := bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_UNSPECIFIED
+	switch {
+	case result.Status == "accepted":
+		disposition = bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED
+	case result.DenialReason == "attempt_mismatch":
+		disposition = bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_DENIED_ATTEMPT_MISMATCH
+	case result.DenialReason == "budget_exhausted":
+		disposition = bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_DENIED_BUDGET_EXHAUSTED
+	}
+	return &bridgev1.RequestRescheduleStamp{
+		Disposition:       disposition,
+		RequestKind:       requestKind,
+		Attempt:           int64(result.Attempt),
 		EffectiveDeadline: result.EffectiveDeadline,
 	}
 }
@@ -1161,7 +1424,6 @@ type createChildThreadResult struct {
 	ChildThreadID         string `json:"child_thread_id"`
 	ThreadCreatedEventID  string `json:"thread_created_event_id"`
 	ThreadCreatedSequence int64  `json:"thread_created_sequence"`
-	ForkSeedMessageID     string `json:"fork_seed_message_id,omitempty"`
 }
 
 func scopeForThread(scope *bridgev1.RuntimeScope, threadID string) *bridgev1.RuntimeScope {

@@ -78,8 +78,6 @@ func validJobRunnerSchemaEnv() jobRunnerEnvMap {
 		agentruntimebridge.EnvKubernetesNamespace:              "tetral-system",
 		agentruntimebridge.EnvAgentRuntimeLabelSelector:        "app=runtime",
 		agentruntimebridge.EnvRuntimePodServiceTokenPath:       "/runtime-token",
-		agentruntimebridge.EnvSandboxServiceGRPCAddress:        "sandbox:9090",
-		agentruntimebridge.EnvSandboxServiceTokenPath:          "/sandbox-token",
 		agentruntimebridge.EnvJobRunnerMCPConnectorGRPCAddress: "gateway:9091",
 		agentruntimebridge.EnvJobRunnerGatewayTokenPath:        "/gateway-token",
 	}

@@ -14,7 +14,6 @@ import { GrpcStatusError, RuntimeControlService } from "../../src/runtime-servic
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
 import type {
   RuntimeAuthenticator,
-  RuntimeAcceptedInputRegistrar,
   RuntimeControlInputCommitter,
   RuntimeCleanupController,
   RuntimeCommandScope,
@@ -26,6 +25,10 @@ import type { RuntimePodLogRecord } from "../../src/logger.js";
 import {
   buildRuntimeServiceBridgeRuntimeMessage as bridgeRuntimeMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
+import { RuntimeMessageDraftSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type {
+  RuntimeControlInputDeclaration,
+} from "@tetral/agent-runtime-core/src/session/session-state.js";
 
 describe("RuntimeControlService command envelope", () => {
   test("authorizes before validation, lifecycle command runner, logs, or core effects", async () => {
@@ -80,15 +83,15 @@ describe("RuntimeControlService command envelope", () => {
     }
   });
 
-  test("accepts an agent-mail bare poke through its dedicated rescan effect", async () => {
+  test("accepts a declared agent-mail envelope through its dedicated effect", async () => {
     const fixture = runtimeFixture();
     const request = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
       runtimeInputId: "agent_mail:delivery_1",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
-      payloadJson: "{}",
+      eventIds: ["sevt_agent_mail_1"],
+      sequenceFrom: 7,
+      sequenceTo: 7,
+      payloadJson: agentMailPayloadJson("delivery_1"),
     });
 
     const response = await fixture.service.acceptAgentMail(request, authMetadata());
@@ -105,6 +108,23 @@ describe("RuntimeControlService command envelope", () => {
     });
   });
 
+  test("rejects agent-mail content that diverges from its authoritative Runtime parts", async () => {
+    const fixture = runtimeFixture();
+    const payload = JSON.parse(agentMailPayloadJson("delivery_drift")) as {
+      message: { content: Array<{ type: string; text: string }> };
+    };
+    payload.message.content[0]!.text = "different derived text";
+    await expectGrpcCode(fixture.service.acceptAgentMail(validCommand({
+      commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
+      runtimeInputId: "agent_mail:delivery_drift",
+      eventIds: ["sevt_agent_mail_drift"],
+      sequenceFrom: 7,
+      sequenceTo: 7,
+      payloadJson: JSON.stringify(payload),
+    }), authMetadata()), status.INVALID_ARGUMENT);
+    expect(fixture.runHost.agentMailCommands).toEqual([]);
+  });
+
   test("returns a retryable in-band rejection when agent-mail context loading is transiently unavailable", async () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
@@ -114,59 +134,66 @@ describe("RuntimeControlService command envelope", () => {
     const request = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_AGENT_MAIL,
       runtimeInputId: "agent_mail:delivery_retry",
-      eventIds: [],
-      sequenceFrom: 0,
-      sequenceTo: 0,
-      payloadJson: "{}",
+      eventIds: ["sevt_agent_mail_retry"],
+      sequenceFrom: 8,
+      sequenceTo: 8,
+      payloadJson: agentMailPayloadJson("delivery_retry"),
     });
 
     const response = await fixture.service.acceptAgentMail(request, authMetadata());
 
     expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED);
     expect(response.retryable).toBe(true);
-    expect(response.errorCode).toBe(runtimeInputErrorCodeOrGeneric("context_load_failed"));
-  });
-
-  test("registers accepted input scope before waking the run host and keeps it on success", async () => {
-    const acceptedInputRegistrar = new RecordingAcceptedInputRegistrar();
-    const fixture = runtimeFixture({ acceptedInputRegistrar });
-
-    const response = await fixture.service.acceptInput(validCommand(), authMetadata());
-
-    expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED);
-    expect(acceptedInputRegistrar.registered).toEqual([expect.objectContaining({
-      sessionId: "sesn_1",
-      sessionThreadId: "thrd_1",
-      runtimeInputId: "rin_1",
-      eventIds: ["sevt_1"],
-    })]);
-    expect(acceptedInputRegistrar.unregistered).toEqual([]);
-  });
-
-  test("unregisters accepted input scope when the run host rejects wake-run", async () => {
-    const acceptedInputRegistrar = new RecordingAcceptedInputRegistrar();
-    const runHost = new RecordingRunHost({ ok: false, sessionId: "sesn_1", reason: "local_session_capacity_exceeded" });
-    const fixture = runtimeFixture({ runHost, acceptedInputRegistrar });
-
-    await expectGrpcCode(fixture.service.acceptInput(validCommand(), authMetadata()), status.RESOURCE_EXHAUSTED);
-
-    expect(acceptedInputRegistrar.registered).toHaveLength(1);
-    expect(acceptedInputRegistrar.unregistered).toEqual(["rin_1"]);
+    expect(response.errorCode).toBe(runtimeInputErrorCodeOrGeneric("runtime_context_load_failed"));
   });
 
   test("deduplicates the same runtime_input_id across RPC attempt request_id changes", async () => {
-    const fixture = runtimeFixture();
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        acceptInputResults: [
+          { ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false },
+          { ok: true, sessionId: "sesn_1", created: false, started: false, pendingWake: false, duplicate: true },
+        ],
+      }),
+    });
 
     const first = await fixture.service.acceptInput(validCommand(), authMetadata());
     const duplicate = await fixture.service.acceptInput({ ...validCommand(), requestId: "req_2" }, authMetadata());
 
     expect(first.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED);
     expect(duplicate).toEqual({ ...acceptedResponse(), status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE });
-    expect(fixture.runHost.sessionIds).toEqual(["sesn_1"]);
+    expect(fixture.runHost.sessionIds).toEqual(["sesn_1", "sesn_1"]);
+  });
+
+  test("delivers a bounded rejection fact without the rejected input body", async () => {
+    const fixture = runtimeFixture();
+    const response = await fixture.service.acceptInput(validCommand({
+      payloadJson: JSON.stringify({
+        input_kind: "rejection",
+        reason_code: "runtime_command_payload_too_large",
+      }),
+    }), authMetadata());
+
+    expect(response.status).toBe(RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_ACCEPTED);
+    expect(fixture.runHost.messageCommands).toEqual([
+      expect.objectContaining({
+        kind: "rejection",
+        reasonCode: "runtime_command_payload_too_large",
+      }),
+    ]);
+    expect(fixture.runHost.messageCommands[0]).not.toHaveProperty("payloadJson");
   });
 
   test("deduplicates a config patch rebuilt under a fresh active binding by input id and payload", async () => {
-    const fixture = runtimeFixture();
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        runtimeConfigPatchResults: [
+          { ok: true, sessionId: "sesn_1", created: false, applied: true },
+          { ok: true, sessionId: "sesn_1", created: false, applied: true },
+          { ok: true, sessionId: "sesn_1", created: false, applied: false },
+        ],
+      }),
+    });
     const payloadJson = JSON.stringify({ config_generation: 7 });
     const first = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
@@ -206,7 +233,7 @@ describe("RuntimeControlService command envelope", () => {
       status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_DUPLICATE,
       runtimeInputId: "rin_config_rebuilt",
     });
-    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(2);
+    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(3);
 
     const staleBinding = await fixture.service.applyRuntimeConfig({
       ...first,
@@ -217,7 +244,7 @@ describe("RuntimeControlService command envelope", () => {
       retryable: true,
       errorCode: runtimeInputErrorCodeOrGeneric("binding_identity_mismatch"),
     });
-    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(2);
+    expect(fixture.runHost.runtimeConfigPatches).toHaveLength(3);
   });
 
   test("scopes runtime_input_id idempotency by workspace", async () => {
@@ -237,19 +264,29 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.sessionIds).toEqual(["sesn_1", "sesn_2"]);
   });
 
-  test("rejects conflicting runtime_input_id identity without a second core effect", async () => {
-    const fixture = runtimeFixture();
+  test("reports conflicting runtime_input_id identity from the thread-owned receipt", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        acceptInputResults: [
+          { ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false },
+          { ok: false, sessionId: "sesn_1", reason: "control_conflict" },
+        ],
+      }),
+    });
 
     await fixture.service.acceptInput(validCommand(), authMetadata());
-    const conflict = await fixture.service.acceptInput({ ...validCommand(), bindingId: "bind_other" }, authMetadata());
+    const conflict = await fixture.service.acceptInput(
+      { ...validCommand(), payloadJson: JSON.stringify({ changed: true }) },
+      authMetadata(),
+    );
 
     expect(conflict).toEqual({
-      ...acceptedResponse({ bindingId: "bind_other" }),
+      ...acceptedResponse(),
       status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
       retryable: false,
       errorCode: runtimeInputErrorCodeOrGeneric("runtime_input_identity_conflict"),
     });
-    expect(fixture.runHost.sessionIds).toEqual(["sesn_1"]);
+    expect(fixture.runHost.sessionIds).toEqual(["sesn_1", "sesn_1"]);
   });
 
   test("rejects fresh commands for a hot session when binding generation mismatches", async () => {
@@ -423,6 +460,9 @@ describe("RuntimeControlService command envelope", () => {
       );
       expect(response).toEqual(acceptedResponse({ runtimeInputId: command.runtimeInputId }));
     }
+    for (const commit of fixture.runHost.taskNotificationCommits) {
+      await commit();
+    }
 
     expect(fixture.runHost.sessionIds).toEqual([]);
     expect(fixture.runHost.interrupts).toEqual([
@@ -452,7 +492,6 @@ describe("RuntimeControlService command envelope", () => {
             sourceToolUseEventId: "sevt_tool_1",
             status: "completed",
           }),
-          bridgeProjection: bridgeRuntimeMessage(),
         },
       },
       {
@@ -467,11 +506,13 @@ describe("RuntimeControlService command envelope", () => {
             sourceToolUseEventId: "sevt_tool_expired",
             status: "expired",
           }),
-          bridgeProjection: bridgeRuntimeMessage(),
         },
       },
     ]);
-    expect(fixture.taskNotificationCommitter.commits.map((commit) => commit.command)).toEqual([
+    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => {
+      const { draft: _draft, ...fields } = command;
+      return fields;
+    })).toEqual([
       {
         runtimeInputId: "rin_task",
         taskId: "task_1",
@@ -495,7 +536,23 @@ describe("RuntimeControlService command envelope", () => {
         }),
       },
     ]);
-    expect(fixture.controlInputCommitter.commits).toEqual([
+    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => command.draft)).toEqual(
+      fixture.taskNotificationCommitter.commits.map(({ command }) => expect.objectContaining({
+        sourceKind: "task_notification",
+        sourceId: expect.any(String),
+        draftKind: "task_notification",
+        role: "user",
+        origin: "runtime",
+        status: "completed",
+        parts: [expect.objectContaining({
+          type: "text",
+          text: command.payloadJson,
+          truncated: false,
+          status: "completed",
+        })],
+      })),
+    );
+    expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_interrupt" }),
         inputKind: "interrupt_control",
@@ -544,7 +601,7 @@ describe("RuntimeControlService command envelope", () => {
           errorCode: "bridge_commit_unavailable",
           message: "control input durable commit failed",
         },
-        { ok: true },
+        testControlSuccess(commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), "interrupt_control"),
       ], events),
     });
     const command = validCommand({
@@ -570,7 +627,7 @@ describe("RuntimeControlService command envelope", () => {
         command: { ...commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), requestId: "req_retry" },
       },
     ]);
-    expect(fixture.controlInputCommitter.commits).toEqual([
+    expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }),
         inputKind: "interrupt_control",
@@ -590,7 +647,33 @@ describe("RuntimeControlService command envelope", () => {
     ]);
   });
 
-  test("idle interrupt commits its processed marker after the hot-state no-op", async () => {
+  test("preserves a joined interrupt declaration rejection without requesting redelivery", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        interruptResult: {
+          ok: false,
+          sessionId: "sesn_1",
+          reason: "context_load_failed",
+          retryable: false,
+          errorCode: "bridge_commit_rejected",
+        },
+      }),
+    });
+    const command = validCommand({
+      commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
+      runtimeInputId: "rin_joined_interrupt_rejected",
+    });
+
+    await expect(fixture.service.interrupt(command, authMetadata())).resolves.toEqual(
+      rejectedResponse({
+        runtimeInputId: "rin_joined_interrupt_rejected",
+        retryable: false,
+        errorCode: "bridge_commit_rejected",
+      }),
+    );
+  });
+
+  test("idle interrupt commits its admitted declaration through the host callback", async () => {
     const events: string[] = [];
     const fixture = runtimeFixture({
       events,
@@ -612,8 +695,8 @@ describe("RuntimeControlService command envelope", () => {
     );
     expect(events).toEqual([
       "runHost.interrupt:start:rin_idle_interrupt",
-      "runHost.interrupt:end:rin_idle_interrupt",
       "commit.interrupt_control:rin_idle_interrupt",
+      "runHost.interrupt:end:rin_idle_interrupt",
     ]);
   });
 
@@ -652,10 +735,18 @@ describe("RuntimeControlService command envelope", () => {
       }),
     );
 
-    expect(fixture.runHost.toolConfirmations).toHaveLength(0);
-    expect(fixture.controlInputCommitter.commits).toEqual([
+    expect(fixture.runHost.toolConfirmations).toHaveLength(2);
+    expect(fixture.runHost.toolConfirmationCommitResults).toEqual([
+      expect.objectContaining({ ok: false, retryable: false }),
+      expect.objectContaining({ ok: false, retryable: false }),
+    ]);
+    expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_confirm_stale" }),
+        inputKind: "tool_confirmation",
+      },
+      {
+        scope: { ...commandScope({ runtimeInputId: "rin_confirm_stale" }), requestId: "req_2" },
         inputKind: "tool_confirmation",
       },
     ]);
@@ -693,7 +784,7 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.controlInputCommitter.commits).toHaveLength(1);
   });
 
-  test("does not update hot task-notification state when durable Bridge ACK fails", async () => {
+  test("task-notification transport acceptance does not perform the semantic commit", async () => {
     const fixture = runtimeFixture({
       taskNotificationCommitter: new RecordingTaskNotificationCommitter({
         ok: false,
@@ -712,72 +803,14 @@ describe("RuntimeControlService command envelope", () => {
         }),
         authMetadata(),
       ),
-    ).resolves.toEqual(
-      rejectedResponse({
-        runtimeInputId: "rin_task",
-        retryable: true,
-        errorCode: "bridge_commit_unavailable",
-      }),
-    );
+    ).resolves.toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
 
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toEqual([]);
-    expect(fixture.logger.records.at(-1)).toMatchObject({
-      event: "runtime_command_rejected",
-      retryable: true,
-      terminal: false,
-      "error.class": "runtime_command_rejected",
-      "error.code": "bridge_commit_unavailable",
-      "error.message_safe": "runtime command rejected",
-      "workspace.id": "wksp_1",
-      "session.id": "sesn_1",
-      "thread.id": "thrd_1",
-    });
+    expect(fixture.taskNotificationCommitter.commits).toHaveLength(0);
+    expect(fixture.runHost.taskNotifications).toHaveLength(1);
+    expect(fixture.runHost.taskNotificationCommits).toHaveLength(1);
   });
 
-  test("returns in-band rejection when task-notification durable Bridge ACK fails terminally", async () => {
-    const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({
-        ok: false,
-        retryable: false,
-        errorCode: "bridge_commit_rejected",
-        message: "bridge rejected task notification",
-      }),
-    });
-
-    await expect(
-      fixture.service.acceptTaskNotification(
-        validCommand({
-          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-          runtimeInputId: "rin_task_terminal",
-          payloadJson: canonicalTaskNotificationPayloadJson({ taskId: "task_1", sourceToolUseEventId: "sevt_tool_1", status: "completed" }),
-        }),
-        authMetadata(),
-      ),
-    ).resolves.toEqual(
-      rejectedResponse({
-        runtimeInputId: "rin_task_terminal",
-        retryable: false,
-        errorCode: "bridge_commit_rejected",
-      }),
-    );
-
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toEqual([]);
-    expect(fixture.logger.records.at(-1)).toMatchObject({
-      event: "runtime_command_rejected",
-      retryable: false,
-      terminal: true,
-      "error.class": "runtime_command_rejected",
-      "error.code": "bridge_commit_rejected",
-      "error.message_safe": "runtime command rejected",
-      "workspace.id": "wksp_1",
-      "session.id": "sesn_1",
-      "thread.id": "thrd_1",
-    });
-  });
-
-  test("returns in-band terminal rejection when task-notification hot apply is stale", async () => {
+  test("returns in-band terminal rejection when task-notification admission conflicts", async () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
         taskNotificationResult: {
@@ -805,7 +838,7 @@ describe("RuntimeControlService command envelope", () => {
       }),
     );
 
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
+    expect(fixture.taskNotificationCommitter.commits).toHaveLength(0);
     expect(fixture.runHost.taskNotifications).toHaveLength(1);
   });
 
@@ -832,12 +865,67 @@ describe("RuntimeControlService command envelope", () => {
     ).resolves.toEqual(
       rejectedResponse({
         runtimeInputId: "rin_config_context_failed",
-        retryable: false,
+        retryable: true,
         errorCode: "runtime_context_load_failed",
       }),
     );
 
     expect(fixture.runHost.runtimeConfigPatches).toHaveLength(1);
+  });
+
+  test("returns the typed retryable control-busy disposition for deferred runtime config", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        runtimeConfigPatchResult: {
+          ok: false,
+          sessionId: "sesn_1",
+          reason: "control_busy",
+        },
+      }),
+    });
+
+    await expect(
+      fixture.service.applyRuntimeConfig(
+        validCommand({
+          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_RUNTIME_CONFIG_PATCH,
+          runtimeInputId: "rin_config_busy",
+          payloadJson: JSON.stringify({ config_generation: 7 }),
+        }),
+        authMetadata(),
+      ),
+    ).resolves.toMatchObject({
+      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
+      runtimeInputId: "rin_config_busy",
+      retryable: true,
+      errorCode: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
+    });
+  });
+
+  test("returns the typed retryable control-busy disposition for an overlapping interrupt", async () => {
+    const fixture = runtimeFixture({
+      runHost: new RecordingRunHost({
+        interruptResult: {
+          ok: false,
+          sessionId: "sesn_1",
+          reason: "control_busy",
+        },
+      }),
+    });
+
+    await expect(
+      fixture.service.interrupt(
+        validCommand({
+          commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
+          runtimeInputId: "rin_interrupt_busy",
+        }),
+        authMetadata(),
+      ),
+    ).resolves.toMatchObject({
+      status: RuntimeCommandStatus.RUNTIME_COMMAND_STATUS_REJECTED,
+      runtimeInputId: "rin_interrupt_busy",
+      retryable: true,
+      errorCode: RuntimeInputErrorCode.RUNTIME_INPUT_ERROR_CODE_CONTROL_BUSY,
+    });
   });
 
   test("rejects malformed MCP manifest runtime config patch before hot-state mutation", async () => {
@@ -911,25 +999,6 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.runtimeConfigPatches).toEqual([]);
   });
 
-  test("accepts stale task notification ACKs without hot-state mutation", async () => {
-    const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, stale: true }),
-    });
-
-    const response = await fixture.service.acceptTaskNotification(
-      validCommand({
-        commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_TASK_NOTIFICATION,
-        runtimeInputId: "rin_task",
-        payloadJson: canonicalTaskNotificationPayloadJson({ taskId: "task_1", sourceToolUseEventId: "sevt_tool_1", status: "completed" }),
-      }),
-      authMetadata(),
-    );
-
-    expect(response).toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(1);
-    expect(fixture.runHost.taskNotifications).toEqual([]);
-  });
-
   test("rejects task notifications that omit either required stream snapshot", async () => {
     const fixture = runtimeFixture();
 
@@ -964,10 +1033,10 @@ describe("RuntimeControlService command envelope", () => {
     expect(fixture.runHost.taskNotifications).toEqual([]);
   });
 
-  test("canonicalizes task notification payload before Bridge commit and applies Bridge runtime projection to hot state", async () => {
+  test("defers the canonicalized task notification declaration to the owning loop", async () => {
     const runtimeMessage = bridgeRuntimeMessage({ text: "bridge-projected runtime notification" });
     const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, runtimeMessage }),
+      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, committedMessage: runtimeMessage }),
     });
     const payloadJson = JSON.stringify({
       task_id: "task_1",
@@ -1003,6 +1072,9 @@ describe("RuntimeControlService command envelope", () => {
       }),
       authMetadata(),
     );
+    expect(fixture.taskNotificationCommitter.commits).toEqual([]);
+    expect(fixture.runHost.taskNotificationCommits).toHaveLength(1);
+    const commitResult = await fixture.runHost.taskNotificationCommits[0]!();
 
     const expected = {
       task_id: "task_1",
@@ -1016,8 +1088,16 @@ describe("RuntimeControlService command envelope", () => {
     const applied = fixture.runHost.taskNotifications[0]?.command.payloadJson;
     expect(JSON.parse(committed ?? "{}")).toEqual(expected);
     expect(JSON.parse(applied ?? "{}")).toEqual(expected);
-    expect(fixture.runHost.taskNotifications[0]?.command.bridgeProjection).toEqual(runtimeMessage);
-    expect(fixture.runHost.taskNotifications[0]?.command.bridgeProjection.parts[0]).toMatchObject({
+    expect(fixture.taskNotificationCommitter.commits[0]?.command.draft.parts[0]).toMatchObject({
+      type: "text",
+      text: committed,
+      truncated: false,
+      status: "completed",
+    });
+    expect(commitResult).toEqual({ ok: true, committedMessage: runtimeMessage });
+    expect(commitResult.ok === true && "committedMessage" in commitResult
+      ? commitResult.committedMessage.parts[0]
+      : undefined).toMatchObject({
       type: "text",
       text: "bridge-projected runtime notification",
     });
@@ -1050,7 +1130,6 @@ function runtimeFixture(options: {
   readonly auth?: "allow" | "deny";
   readonly runHost?: RecordingRunHost;
   readonly cleanupController?: RecordingCleanupController;
-  readonly acceptedInputRegistrar?: RecordingAcceptedInputRegistrar;
   readonly controlInputCommitter?: RecordingControlInputCommitter;
   readonly taskNotificationCommitter?: RecordingTaskNotificationCommitter;
   readonly commandRunner?: RuntimeCommandRunner;
@@ -1067,7 +1146,6 @@ function runtimeFixture(options: {
     allowedBridge: { namespace: "engine", name: "bridge" },
     authenticator: new FixedAuthenticator(options.auth ?? "allow"),
     runHost,
-    ...(options.acceptedInputRegistrar !== undefined ? { acceptedInputRegistrar: options.acceptedInputRegistrar } : {}),
     controlInputCommitter,
     taskNotificationCommitter,
     cleanupController,
@@ -1129,6 +1207,26 @@ function canonicalTaskNotificationPayloadJson(input: {
     status: input.status,
     stdout: { text: "", truncated: false },
     stderr: { text: "", truncated: false },
+  });
+}
+
+function agentMailPayloadJson(deliveryId: string): string {
+  const message = bridgeRuntimeMessage({
+    text: "child completion",
+  });
+  return JSON.stringify({
+    delivery_id: deliveryId,
+    source_thread_id: "thrd_child",
+    source_tool_use_event_id: "sevt_child_tool",
+    message: {
+      ...message,
+      content: message.parts.map((part) => {
+        if (part.type !== "text") {
+          throw new Error("agent mail fixture requires text parts");
+        }
+        return { type: "text", text: part.text };
+      }),
+    },
   });
 }
 
@@ -1194,13 +1292,106 @@ class FixedAuthenticator implements RuntimeAuthenticator {
   }
 }
 
+function testControlDeclaration(
+  command: RuntimeCommandScope,
+  inputKind: "interrupt_control" | "tool_confirmation",
+): RuntimeControlInputDeclaration {
+  if (inputKind === "interrupt_control") {
+    return { drafts: [], pendingToolCancellations: [], sandboxExecutionToolUseEventIds: [] };
+  }
+  const runtimeLocalId = `draft_${command.runtimeInputId}`;
+  return {
+    drafts: [RuntimeMessageDraftSchema.parse({
+      runtimeLocalId,
+      sourceKind: "tool_confirmation",
+      sourceId: command.runtimeInputId,
+      sourceEventId: command.eventIds[0],
+      draftKind: "approval_input",
+      ordinal: 0,
+      role: "user",
+      origin: "user",
+      status: "completed",
+      parts: [{
+        runtimeLocalPartId: `part_${command.runtimeInputId}`,
+        ordinal: 0,
+        type: "text",
+        text: "Approval allowed",
+        truncated: false,
+        status: "completed",
+      }],
+    })],
+    pendingToolCancellations: [],
+    sandboxExecutionToolUseEventIds: [],
+  };
+}
+
+function testControlReceipt(
+  input: Parameters<RuntimeControlInputCommitter["commitControlInput"]>[0],
+): Extract<Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>, { readonly ok: true; readonly receipt: object }> {
+  return {
+    ok: true,
+    receipt: {
+      sessionThreadId: input.scope.sessionThreadId,
+      operationKind: "commit_inputs",
+      sourceKind: input.inputKind,
+      sourceId: input.scope.runtimeInputId,
+      declarationDigest: "digest_test",
+      events: input.scope.eventIds.map((eventId, index) => ({
+        sessionThreadId: input.scope.sessionThreadId,
+        sourceEventId: eventId,
+        eventId,
+        eventSequence: input.scope.sequenceFrom + index,
+        disposition: "existing" as const,
+      })),
+      messages: input.drafts.map((draft, index) => ({
+        runtimeLocalId: draft.runtimeLocalId,
+        sessionThreadId: input.scope.sessionThreadId,
+        owningEventId: draft.sourceEventId!,
+        messageId: `msg_${index}_${input.scope.runtimeInputId}`,
+        messageSequence: input.scope.sequenceTo + index + 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "",
+        disposition: "created" as const,
+        parts: draft.parts.map((part, partIndex) => ({
+          runtimeLocalPartId: part.runtimeLocalPartId,
+          partId: `part_${partIndex}_${input.scope.runtimeInputId}`,
+          messageId: `msg_${index}_${input.scope.runtimeInputId}`,
+          partSequence: partIndex,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "",
+          disposition: "created" as const,
+        })),
+      })),
+      pendingAttachmentDelta: [],
+      pendingToolDelta: input.pendingToolCancellations.map((cancellation) => JSON.stringify({
+        runtime_local_id: cancellation.runtimeLocalId,
+        tool_use_event_id: cancellation.toolUseEventId,
+        status: "cancelled",
+        result_event_id: input.scope.eventIds[0],
+      })),
+      prefixConsumptions: [],
+      childLifecycle: [],
+    },
+  };
+}
+
+function testControlSuccess(
+  scope: RuntimeCommandScope,
+  inputKind: "interrupt_control" | "tool_confirmation",
+) {
+  const declaration = testControlDeclaration(scope, inputKind);
+  return testControlReceipt({ scope, inputKind, ...declaration });
+}
+
 class RecordingRunHost implements RuntimeSessionRunHost {
   readonly sessionIds: string[] = [];
   readonly messageCommands: Array<Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]> = [];
   readonly agentMailCommands: Array<Parameters<RuntimeSessionRunHost["handleAgentMail"]>[0]> = [];
   readonly interrupts: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleInterruptControl"]>[1] }> = [];
   readonly toolConfirmations: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1] }> = [];
+  readonly toolConfirmationCommitResults: Array<Awaited<ReturnType<Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2]>>> = [];
   readonly taskNotifications: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1] }> = [];
+  readonly taskNotificationCommits: Array<Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2]> = [];
   readonly runtimeConfigPatches: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1] }> = [];
 
   constructor(
@@ -1208,9 +1399,11 @@ class RecordingRunHost implements RuntimeSessionRunHost {
       | Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>
       | {
           readonly acceptInputResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>;
+          readonly acceptInputResults?: readonly Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>[];
           readonly toolConfirmationResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleToolConfirmation"]>>;
           readonly taskNotificationResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleTaskNotification"]>>;
           readonly runtimeConfigPatchResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>>;
+          readonly runtimeConfigPatchResults?: readonly Awaited<ReturnType<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>>[];
           readonly interruptResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleInterruptControl"]>>;
           readonly agentMailResult?: Awaited<ReturnType<RuntimeSessionRunHost["handleAgentMail"]>>;
         } = {},
@@ -1221,9 +1414,11 @@ class RecordingRunHost implements RuntimeSessionRunHost {
       return;
     }
     this.acceptInputResult = result.acceptInputResult ?? this.acceptInputResult;
+    this.acceptInputResults = [...(result.acceptInputResults ?? [])];
     this.toolConfirmationResult = result.toolConfirmationResult ?? this.toolConfirmationResult;
     this.taskNotificationResult = result.taskNotificationResult ?? this.taskNotificationResult;
     this.runtimeConfigPatchResult = result.runtimeConfigPatchResult ?? this.runtimeConfigPatchResult;
+    this.runtimeConfigPatchResults = [...(result.runtimeConfigPatchResults ?? [])];
     this.interruptResult = result.interruptResult ?? this.interruptResult;
     this.agentMailResult = result.agentMailResult ?? this.agentMailResult;
   }
@@ -1235,6 +1430,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     started: true,
     pendingWake: false,
   };
+  private readonly acceptInputResults: Array<Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>> = [];
   private readonly toolConfirmationResult: Awaited<ReturnType<RuntimeSessionRunHost["handleToolConfirmation"]>> = {
     ok: true,
     sessionId: "sesn_1",
@@ -1253,6 +1449,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     created: false,
     applied: true,
   };
+  private readonly runtimeConfigPatchResults: Array<Awaited<ReturnType<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>>> = [];
   private readonly interruptResult: Awaited<ReturnType<RuntimeSessionRunHost["handleInterruptControl"]>> | undefined;
   private readonly agentMailResult: Awaited<ReturnType<RuntimeSessionRunHost["handleAgentMail"]>> = {
     ok: true,
@@ -1263,7 +1460,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   async handleAcceptInput(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]) {
     this.messageCommands.push(command);
     this.sessionIds.push(command.sessionId);
-    return this.acceptInputResult;
+    return this.acceptInputResults.shift() ?? this.acceptInputResult;
   }
 
   async handleAgentMail(command: Parameters<RuntimeSessionRunHost["handleAgentMail"]>[0]) {
@@ -1278,14 +1475,10 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   ) {
     this.interrupts.push({ sessionId, command });
     this.events?.push(`runHost.interrupt:start:${command.runtimeInputId}`);
-    if (this.interruptResult?.ok === true && this.interruptResult.idleInterrupt) {
-      this.events?.push(`runHost.interrupt:end:${command.runtimeInputId}`);
-      return this.interruptResult;
-    }
     if (commitInterruptInput === undefined) {
       throw new Error("missing interrupt input committer");
     }
-    const committed = await commitInterruptInput();
+    const committed = await commitInterruptInput(testControlDeclaration(command, "interrupt_control"));
     this.events?.push(`runHost.interrupt:end:${command.runtimeInputId}`);
     if (!committed.ok) {
       return { ok: false as const, sessionId, reason: "context_load_failed" as const };
@@ -1299,31 +1492,36 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     };
   }
 
-  async handleToolConfirmation(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1]) {
+  async handleToolConfirmation(
+    sessionId: string,
+    command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1],
+    commit: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2],
+  ) {
     this.toolConfirmations.push({ sessionId, command });
+    const committed = await commit(testControlDeclaration(command, "tool_confirmation"));
+    this.toolConfirmationCommitResults.push(committed);
+    if (!committed.ok) {
+      return { ok: false as const, sessionId, reason: "context_load_failed" as const };
+    }
+    if ("stale" in committed) {
+      return { ok: true as const, sessionId, created: false, applied: false as const, stale: true as const };
+    }
     return this.toolConfirmationResult;
   }
 
-  async handleTaskNotification(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1]) {
+  async handleTaskNotification(
+    sessionId: string,
+    command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1],
+    commit: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2],
+  ) {
     this.taskNotifications.push({ sessionId, command });
+    this.taskNotificationCommits.push(commit);
     return this.taskNotificationResult;
   }
 
   async handleRuntimeConfigPatch(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1]) {
     this.runtimeConfigPatches.push({ sessionId, command });
-    return this.runtimeConfigPatchResult;
-  }
-}
-
-class RecordingAcceptedInputRegistrar implements RuntimeAcceptedInputRegistrar {
-  readonly registered: Array<Parameters<RuntimeAcceptedInputRegistrar["registerAcceptedInput"]>[0]> = [];
-  readonly unregistered: string[] = [];
-
-  registerAcceptedInput(command: Parameters<RuntimeAcceptedInputRegistrar["registerAcceptedInput"]>[0]): () => void {
-    this.registered.push(command);
-    return () => {
-      this.unregistered.push(command.runtimeInputId);
-    };
+    return this.runtimeConfigPatchResults.shift() ?? this.runtimeConfigPatchResult;
   }
 }
 
@@ -1333,7 +1531,7 @@ class RecordingTaskNotificationCommitter implements RuntimeTaskNotificationCommi
   constructor(
     private readonly result: Awaited<ReturnType<RuntimeTaskNotificationCommitter["commitTaskNotification"]>> = {
       ok: true,
-      runtimeMessage: bridgeRuntimeMessage(),
+      committedMessage: bridgeRuntimeMessage(),
     },
   ) {}
 
@@ -1349,7 +1547,8 @@ class RecordingControlInputCommitter implements RuntimeControlInputCommitter {
   constructor(
     private readonly result:
       | Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>
-      | readonly Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>[] = { ok: true },
+      | readonly Awaited<ReturnType<RuntimeControlInputCommitter["commitControlInput"]>>[]
+      | undefined = undefined,
     private readonly events?: string[] | undefined,
   ) {}
 
@@ -1357,9 +1556,9 @@ class RecordingControlInputCommitter implements RuntimeControlInputCommitter {
     this.commits.push(input);
     this.events?.push(`commit.${input.inputKind}:${input.scope.runtimeInputId}`);
     if (Array.isArray(this.result)) {
-      return this.result[Math.min(this.commits.length - 1, this.result.length - 1)] ?? { ok: true as const };
+      return this.result[Math.min(this.commits.length - 1, this.result.length - 1)] ?? testControlReceipt(input);
     }
-    return this.result;
+    return this.result ?? testControlReceipt(input);
   }
 }
 

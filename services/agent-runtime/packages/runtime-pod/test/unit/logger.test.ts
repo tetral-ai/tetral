@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createJsonLogger, logWorkloadStarted, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Runtime Pod JSON logger", () => {
   test("emits service identity fields on structured records", () => {
@@ -155,5 +155,56 @@ describe("Runtime Pod JSON logger", () => {
       "error.code": "ack_mismatch",
       "error.message_safe": "runtime_closeout_unrepairable",
     }));
+  });
+
+  test("receipt evidence emits identity-only applied and discarded records", () => {
+    const lines: string[] = [];
+    const outcomes: string[] = [];
+    const logger = createJsonLogger({ write: (line) => lines.push(line) });
+    const common = {
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thrd_1",
+      operation: "write_event",
+      sourceKind: "agent.message",
+      sourceId: "rwrite_1",
+      declarationDigest: "digest_1",
+      bindingId: "bind_1",
+      bindingGeneration: 2,
+    } as const;
+    recordRuntimeReceiptEvidence(logger, {
+      recordReceiptEvidence: (outcome) => outcomes.push(outcome),
+      recordHotState: () => undefined,
+      addActiveToolFibers: () => undefined,
+      addPendingApprovals: () => undefined,
+      observeProviderStreamDuration: () => undefined,
+      observeEventWriteLatency: () => undefined,
+      observeContextLoadLatency: () => undefined,
+      recordCleanupCommandOutcome: () => undefined,
+    }, {
+      ...common,
+      applicationDisposition: "current_custody",
+      outcome: "applied",
+    });
+    recordRuntimeReceiptEvidence(logger, undefined, {
+      ...common,
+      applicationDisposition: "stale_custody",
+      outcome: "stale_custody",
+    });
+
+    const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records[0]).toMatchObject({
+      event: "runtime_receipt_applied",
+      "event.kind": "runtime_receipt_applied",
+      "declaration.source.id": "rwrite_1",
+      "declaration.digest": "digest_1",
+      "receipt.application_disposition": "current_custody",
+    });
+    expect(records[1]).toMatchObject({
+      event: "runtime_receipt_discarded",
+      "receipt.discard_reason": "stale_custody",
+    });
+    expect(JSON.stringify(records)).not.toContain("prompt");
+    expect(outcomes).toEqual(["applied"]);
   });
 });

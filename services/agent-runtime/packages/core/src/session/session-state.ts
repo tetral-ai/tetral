@@ -4,7 +4,7 @@
  * ThreadRun mutates. Not the source of truth; recoverable from durable state.
  * SessionManager, AgentLoop, and tool execution call it; it delegates hot message
  * list changes to ContextManager, performs ordinary in-memory transitions, and owns
- * the injected interrupt-input commit and memoized FinishIdle closeout operations.
+ * the injected interrupt-input commit state and hot agent-mail delivery dedupe.
  *
  * OWNS (hot, per-thread):
  *   - accepted-input queue and the in-flight commit marker;
@@ -48,11 +48,13 @@
  *              services/agent-runtime/packages/core/src/session/session-manager.ts
  */
 import { ContextManager } from "./context-manager.js";
-import type { RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageInfo, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
+import type { ThreadContextPrefix } from "./context-manager.js";
+import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageDraft, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ToolEntry } from "../tools/tool-catalog.js";
 import type { ToolJob } from "../tools/tool-scheduler.js";
+import type { RuntimeConfigurationPatch } from "./session-configuration.js";
 
 /** Combined cap for file-backed and transient attachments on one provider request. */
 export const MaxProviderRequestAttachments = 32;
@@ -82,28 +84,40 @@ export interface RuntimeThreadControlState extends RuntimeCommandScopeState {
   readonly sequenceTo: number;
 }
 
-export type RuntimeInterruptInputCommitResult =
-  | { readonly ok: true }
+export interface RuntimeControlInputDeclaration {
+  readonly drafts: readonly RuntimeMessageDraft[];
+  readonly pendingToolCancellations: readonly {
+    readonly toolUseEventId: string;
+    readonly runtimeLocalId: string;
+  }[];
+  readonly sandboxExecutionToolUseEventIds: readonly string[];
+}
+
+export type RuntimeControlInputCommitResult =
+  | { readonly ok: true; readonly stale: true }
+  | { readonly ok: true; readonly joined: true }
+  | { readonly ok: true; readonly receipt: RuntimeDeclarationReceipt }
   | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number };
 
-export type RuntimeInterruptInputCommit = () => Promise<RuntimeInterruptInputCommitResult>;
+export type RuntimeControlInputCommit = (
+  declaration: RuntimeControlInputDeclaration,
+) => Promise<RuntimeControlInputCommitResult>;
+
+export interface RuntimeControlInputCommitApplication {
+  readonly declaration: RuntimeControlInputDeclaration;
+  readonly result: RuntimeControlInputCommitResult;
+}
 
 interface RuntimeUserInterruptState {
   readonly command: RuntimeThreadControlState;
-  readonly commitInput: RuntimeInterruptInputCommit;
+  readonly commitInput: RuntimeControlInputCommit;
   readonly completeCloseout: () => void;
   closeoutEligible: boolean;
-  commitPromise?: Promise<RuntimeInterruptInputCommitResult> | undefined;
-  commitResult?: RuntimeInterruptInputCommitResult | undefined;
-  finishIdle?: {
-    readonly writeId: string;
-    readonly promise: Promise<RuntimeUserInterruptFinishIdleResult>;
-  } | undefined;
+  receiptApplied: boolean;
+  declaration?: RuntimeControlInputDeclaration | undefined;
+  commitPromise?: Promise<RuntimeControlInputCommitApplication> | undefined;
+  commitResult?: RuntimeControlInputCommitResult | undefined;
 }
-
-type RuntimeUserInterruptFinishIdleResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly error: RuntimeFailure };
 
 export type RuntimeThreadRoleState = "main" | "subagent" | "approval_reviewer";
 export type RuntimeThreadVisibilityState = "public" | "internal";
@@ -134,6 +148,7 @@ export type RuntimeSubAgentTypeState = "general" | "research" | "worker";
 /** Durable thread metadata accepted when a command first makes a thread resident. */
 export interface RuntimeAcceptedThreadMetadataState {
   readonly parentThreadId?: string | undefined;
+  readonly parentTaskName?: string | undefined;
   readonly role?: RuntimeThreadRoleState | undefined;
   readonly visibility?: RuntimeThreadVisibilityState | undefined;
   readonly taskName?: string | undefined;
@@ -147,14 +162,13 @@ export interface RuntimeMessagesAcceptedInputState extends RuntimeThreadControlS
   readonly payloadJson: string;
 }
 
-/** Fenced inter-agent delivery carrying its already-projected user message. */
+/** Fenced inter-agent delivery carrying its durably sourced user-message draft. */
 export interface RuntimeInterAgentAcceptedInputState extends RuntimeThreadControlState {
   readonly kind: "inter_agent_message";
   readonly deliveryId: string;
   readonly sourceThreadId: string;
   readonly sourceToolUseEventId: string;
   readonly message: RuntimeMessage;
-  readonly presentation?: "push" | "pull" | undefined;
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
 }
 
@@ -170,23 +184,43 @@ export interface RuntimeApprovalReviewAcceptedInputState extends RuntimeThreadCo
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
 }
 
+/** Bounded fact authorizing the loop to replace an undeliverable input with one rejection projection. */
+export interface RuntimeRejectionAcceptedInputState extends RuntimeThreadControlState {
+  readonly kind: "rejection";
+  readonly reasonCode: "runtime_command_payload_too_large" | "runtime_command_rejected";
+}
+
 /** Accepted input variants queued for one thread without merging their durable identities. */
 export type RuntimeAcceptedInputState =
   | RuntimeMessagesAcceptedInputState
   | RuntimeInterAgentAcceptedInputState
-  | RuntimeApprovalReviewAcceptedInputState;
+  | RuntimeApprovalReviewAcceptedInputState
+  | RuntimeRejectionAcceptedInputState
+  | RuntimeTaskNotificationAcceptedInputState;
+
+/** Exact durable identities represented by one cold baseline. */
+export interface RuntimeColdCoverage {
+  readonly pendingToolIds: readonly string[];
+  readonly pendingSandboxExecutionIds: readonly string[];
+  readonly pendingAttachmentIdentities: readonly string[];
+  readonly undeliveredMailDeliveryIds: readonly string[];
+}
 
 /** Cold thread state loaded before a resident thread is allowed to serve commands. */
 export interface RuntimeThreadPreloadState extends RuntimeThreadControlState {
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
   readonly messages: readonly RuntimeMessage[];
+  readonly durableTurnId?: string | undefined;
+  readonly threadContextPrefix?: ThreadContextPrefix | undefined;
   readonly runtimeBindingToken: string;
   readonly runtimeConfigPatch?: RuntimeConfigPatchState | undefined;
   readonly mcpManifests?: readonly RuntimeConfigPatchState[] | undefined;
   readonly pendingToolUses?: readonly RuntimePreloadedPendingToolUseState[] | undefined;
+  readonly pendingSandboxExecutions?: readonly RuntimePreloadedSandboxExecutionState[] | undefined;
   readonly backgroundTools?: readonly RuntimePreloadedBackgroundToolState[] | undefined;
   readonly pendingAttachments?: readonly ProviderRequestAttachment[] | undefined;
   readonly pendingAgentMail?: readonly RuntimeInterAgentAcceptedInputState[] | undefined;
+  readonly coldCoverage: RuntimeColdCoverage;
 }
 
 /** Durable pending tool state restored before a cold thread may resume execution. */
@@ -201,6 +235,16 @@ export interface RuntimePreloadedPendingToolUseState {
   readonly denyMessage?: string | undefined;
   readonly status: "pending" | "resolving";
   readonly expiresAt: string;
+}
+
+/** Durable accepted Sandbox execution restored before its Tool Result exists. */
+export interface RuntimePreloadedSandboxExecutionState {
+  readonly toolUseEventId: string;
+  readonly modelRequestId: string;
+  readonly modelToolCallId: string;
+  readonly toolName: string;
+  readonly input: RuntimeJsonValue;
+  readonly executionState: "pending" | "preparing" | "running" | "waiting_activation" | "waiting_materialization" | "terminal_unconsumed";
 }
 
 export interface RuntimePreloadedBackgroundToolState {
@@ -220,7 +264,7 @@ export interface RuntimePendingApprovalToolJobState {
   readonly toolUseEventId: string;
   readonly modelRequestId: string;
   readonly source: RuntimeProcessorSource;
-  readonly assistantMessage: RuntimeMessageInfo;
+  readonly assistantMessage: DurableRuntimeMessage;
   readonly toolPart: Extract<RuntimePart, { readonly type: "tool" }>;
   readonly job: ToolJob;
   readonly entry: ToolEntry;
@@ -228,13 +272,44 @@ export interface RuntimePendingApprovalToolJobState {
   readonly currentModel?: SessionCurrentModel | undefined;
 }
 
-/** Terminal background-task fact and Bridge projection installed together in hot state. */
-export interface RuntimeTaskNotificationState extends RuntimeThreadControlState {
+/** Hot reconstruction of an accepted Sandbox execution that still needs conversation settlement. */
+export interface RuntimePendingSandboxExecutionJobState {
+  readonly recoveryKind: "sandbox_execution";
+  readonly toolUseEventId: string;
+  readonly modelRequestId: string;
+  readonly source: RuntimeProcessorSource;
+  readonly assistantMessage: DurableRuntimeMessage;
+  readonly toolPart: Extract<RuntimePart, { readonly type: "tool" }>;
+  readonly job: ToolJob;
+  readonly entry: ToolEntry;
+  readonly committedMessages: readonly RuntimeMessage[];
+  readonly currentModel?: SessionCurrentModel | undefined;
+}
+
+/** Terminal background-task command before its durable declaration has returned a message stamp. */
+export interface RuntimeTaskNotificationCommandState extends RuntimeThreadControlState {
   readonly taskId: string;
   readonly sourceToolUseEventId: string;
   readonly status: "completed" | "failed" | "cancelled" | "expired";
   readonly payloadJson: string;
-  readonly bridgeProjection: RuntimeMessage;
+}
+
+/** Durable task-notification declaration invoked only by the owning thread run. */
+export type RuntimeTaskNotificationCommit = () => Promise<
+  | { readonly ok: true; readonly stale: true }
+  | { readonly ok: true; readonly committedMessage: RuntimeMessage }
+  | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
+>;
+
+/** Terminal task fact waiting for the next serialized semantic turn. */
+export interface RuntimeTaskNotificationAcceptedInputState extends RuntimeTaskNotificationCommandState {
+  readonly kind: "task_notification";
+  readonly commit: RuntimeTaskNotificationCommit;
+}
+
+/** Terminal background-task fact and its receipt-stamped message installed together in hot state. */
+export interface RuntimeTaskNotificationState extends RuntimeTaskNotificationCommandState {
+  readonly committedMessage: RuntimeMessage;
 }
 
 export interface RuntimeBackgroundToolState {
@@ -245,16 +320,7 @@ export interface RuntimeBackgroundToolState {
 }
 
 /** Generation-fenced runtime or per-server MCP configuration patch. */
-export interface RuntimeConfigPatchState extends RuntimeThreadControlState {
-  readonly generation?: number;
-  readonly mcpServerName?: string;
-  readonly manifestETag?: string;
-  readonly manifestReadiness?: "ready" | "unready";
-  readonly manifestDiagnostic?: string;
-  readonly payloadJson: string;
-  readonly coldLoad?: true;
-  readonly installedBuiltinFamily?: "claude" | "gpt";
-}
+export interface RuntimeConfigPatchState extends RuntimeThreadControlState, RuntimeConfigurationPatch {}
 
 /** Recoverable thread-local working state for input, tools, config, media, and cancellation. */
 export class SessionState {
@@ -263,7 +329,6 @@ export class SessionState {
   #currentModel: SessionCurrentModel | undefined;
   #acceptedInputs: RuntimeAcceptedInputState[] = [];
   #seenAgentMailDeliveryIds = new Set<string>();
-  #interAgentMessageReceiptCommittedInRun = false;
   #committingAcceptedInputId: string | undefined;
   #toolConfirmations: Record<string, RuntimeToolConfirmationState | undefined> = Object.create(null) as Record<
     string,
@@ -273,6 +338,10 @@ export class SessionState {
     string,
     RuntimePendingApprovalToolJobState | undefined
   >;
+  #pendingSandboxExecutionJobs: Record<string, RuntimePendingSandboxExecutionJobState | undefined> = Object.create(null) as Record<
+    string,
+    RuntimePendingSandboxExecutionJobState | undefined
+  >;
   #taskNotifications: Record<string, RuntimeTaskNotificationState | undefined> = Object.create(null) as Record<
     string,
     RuntimeTaskNotificationState | undefined
@@ -281,10 +350,6 @@ export class SessionState {
     string,
     RuntimeBackgroundToolState | undefined
   >;
-  #runtimeConfigPatch: RuntimeConfigPatchState | undefined;
-  #coldRuntimeConfigPatch: RuntimeConfigPatchState | undefined;
-  #installedBuiltinFamily: "claude" | "gpt" | undefined;
-  #runtimeMcpManifestPatches: Record<string, RuntimeConfigPatchState | undefined> = Object.create(null) as Record<string, RuntimeConfigPatchState | undefined>;
   #activeAttachmentRide: ProviderRequestAttachment[] | undefined;
   #pendingAttachments: ProviderRequestAttachment[] = [];
   #pendingAttachmentOverflowCount = 0;
@@ -293,13 +358,10 @@ export class SessionState {
   #lastRequestModelLimits: RuntimeModelLimits | undefined;
   #lastRequestContextAnchorSequence: number | undefined;
   #providerRequestOutputSchemaJson: string | undefined;
-  #runtimeShutdownController = new AbortController();
   #runtimeShutdownRequested = false;
-  #userInterruptController = new AbortController();
-  #cooperativeCancelController = new AbortController();
   #cooperativeCancelRequested = false;
   #userInterrupt: RuntimeUserInterruptState | undefined;
-  #lastUserInterruptCommit: { readonly runtimeInputId: string; readonly result: RuntimeInterruptInputCommitResult } | undefined;
+  #lastUserInterruptCommit: { readonly runtimeInputId: string; readonly result: RuntimeControlInputCommitResult } | undefined;
   #lastCompletedUserInterruptId: string | undefined;
 
   constructor(sessionId: string) {
@@ -332,6 +394,16 @@ export class SessionState {
     if (state.kind === "inter_agent_message" && this.#seenAgentMailDeliveryIds.has(state.deliveryId)) {
       return "duplicate";
     }
+    if (
+      state.eventIds.length > 0 &&
+      state.eventIds.every((eventId) =>
+        this.contextManager.messages().some((message) =>
+          "owningEventId" in message && message.owningEventId === eventId
+        )
+      )
+    ) {
+      return "duplicate";
+    }
     const existing = this.#acceptedInputs.find((input) => input.runtimeInputId === state.runtimeInputId);
     if (existing === undefined) {
       this.#acceptedInputs.push(state);
@@ -358,13 +430,6 @@ export class SessionState {
     this.#acceptedInputs = this.#acceptedInputs.filter((input) => input.runtimeInputId !== runtimeInputId);
   }
 
-  discardAcceptedAgentMail(deliveryId: string): void {
-    this.#seenAgentMailDeliveryIds.add(deliveryId);
-    this.#acceptedInputs = this.#acceptedInputs.filter(
-      (input) => input.kind !== "inter_agent_message" || input.deliveryId !== deliveryId,
-    );
-  }
-
   discardQueuedApprovalReview(reviewId: string): void {
     this.#acceptedInputs = this.#acceptedInputs.filter(
       (input) => input.kind !== "approval_review" || input.reviewId !== reviewId,
@@ -384,6 +449,7 @@ export class SessionState {
   discardQueuedAcceptedInputsBeforeFence(interruptFenceSequence: number): void {
     this.#acceptedInputs = this.#acceptedInputs.filter((input) =>
       input.kind === "inter_agent_message" ||
+      input.kind === "task_notification" ||
       input.runtimeInputId === this.#committingAcceptedInputId ||
       input.sequenceTo >= interruptFenceSequence
     );
@@ -397,14 +463,8 @@ export class SessionState {
     return this.#acceptedInputs.some((input) => input.kind === "inter_agent_message");
   }
 
-  markInterAgentMessageReceiptCommitted(): void {
-    this.#interAgentMessageReceiptCommittedInRun = true;
-  }
-
-  takeInterAgentMessageReceiptCommitted(): boolean {
-    const committed = this.#interAgentMessageReceiptCommittedInRun;
-    this.#interAgentMessageReceiptCommittedInRun = false;
-    return committed;
+  hasQueuedTaskNotification(): boolean {
+    return this.#acceptedInputs.some((input) => input.kind === "task_notification");
   }
 
   resolveToolConfirmation(state: RuntimeToolConfirmationState): "applied" | "duplicate" | "conflict" {
@@ -449,11 +509,39 @@ export class SessionState {
     return Object.values(this.#pendingApprovalToolJobs).some((state) => state !== undefined);
   }
 
+  recordPendingSandboxExecutionJob(state: RuntimePendingSandboxExecutionJobState): void {
+    this.#pendingSandboxExecutionJobs[state.toolUseEventId] = state;
+  }
+
+  pendingSandboxExecutionJobs(): readonly RuntimePendingSandboxExecutionJobState[] {
+    return Object.values(this.#pendingSandboxExecutionJobs)
+      .filter((state): state is RuntimePendingSandboxExecutionJobState => state !== undefined)
+      .sort((left, right) => {
+        if (left.modelRequestId !== right.modelRequestId) {
+          return left.modelRequestId.localeCompare(right.modelRequestId);
+        }
+        return left.job.modelOrder - right.job.modelOrder;
+      });
+  }
+
+  removePendingSandboxExecutionJob(toolUseEventId: string): void {
+    delete this.#pendingSandboxExecutionJobs[toolUseEventId];
+  }
+
   commitTaskNotification(state: RuntimeTaskNotificationState): "applied" | "duplicate" | "conflict" {
     const existing = this.#taskNotifications[state.taskId];
     if (existing === undefined) {
+      const durableMessage = this.contextManager.message(state.committedMessage.id);
+      if (
+        durableMessage !== undefined &&
+        JSON.stringify(durableMessage) !== JSON.stringify(state.committedMessage)
+      ) {
+        return "conflict";
+      }
       this.#taskNotifications[state.taskId] = state;
-      this.contextManager.appendMessage(state.bridgeProjection);
+      if (durableMessage === undefined) {
+        this.contextManager.appendMessage(state.committedMessage);
+      }
       this.settleBackgroundTool(state);
       return "applied";
     }
@@ -620,80 +708,16 @@ export class SessionState {
     return this.#providerRequestOutputSchemaJson;
   }
 
-  applyRuntimeConfigPatch(state: RuntimeConfigPatchState): "applied" | "stale" {
-    if (state.mcpServerName !== undefined || state.manifestETag !== undefined || state.manifestReadiness !== undefined) {
-      if (state.mcpServerName === undefined || state.generation === undefined || state.generation <= 0 ||
-        (state.manifestReadiness !== "unready" && state.manifestETag === undefined)) {
-        return "stale";
-      }
-      const existing = this.#runtimeMcpManifestPatches[state.mcpServerName];
-      if (existing?.generation !== undefined && state.generation <= existing.generation) {
-        return "stale";
-      }
-      this.#runtimeMcpManifestPatches[state.mcpServerName] = state;
-      return "applied";
-    }
-    if (state.generation === undefined) {
-      return "stale";
-    }
-    if (state.coldLoad === true) {
-      if (this.#coldRuntimeConfigPatch !== undefined) {
-        return "stale";
-      }
-      this.#coldRuntimeConfigPatch = state;
-      this.#installedBuiltinFamily = state.installedBuiltinFamily;
-    }
-    if (this.#runtimeConfigPatch?.generation !== undefined && state.generation <= this.#runtimeConfigPatch.generation) {
-      return "stale";
-    }
-    this.#runtimeConfigPatch = state;
-    return "applied";
-  }
-
-  runtimeConfigPatch(): RuntimeConfigPatchState | undefined {
-    return this.#runtimeConfigPatch;
-  }
-
-  runtimeConfigPatches(): readonly RuntimeConfigPatchState[] {
-    return [
-      ...(this.#coldRuntimeConfigPatch !== undefined ? [this.#coldRuntimeConfigPatch] : []),
-      ...(this.#runtimeConfigPatch !== undefined && this.#runtimeConfigPatch !== this.#coldRuntimeConfigPatch
-        ? [this.#runtimeConfigPatch]
-        : []),
-      ...Object.values(this.#runtimeMcpManifestPatches).filter((value): value is RuntimeConfigPatchState => value !== undefined),
-    ];
-  }
-
-  installedBuiltinFamily(): "claude" | "gpt" | undefined {
-    return this.#installedBuiltinFamily;
-  }
-
-  beginRuntimeShutdown(): AbortSignal {
+  beginRuntimeShutdown(): void {
     this.#runtimeShutdownRequested = true;
-    if (!this.#runtimeShutdownController.signal.aborted) {
-      this.#runtimeShutdownController.abort();
-    }
-    return this.#runtimeShutdownController.signal;
-  }
-
-  runtimeShutdownSignal(): AbortSignal {
-    return this.#runtimeShutdownController.signal;
   }
 
   runtimeShutdownRequested(): boolean {
     return this.#runtimeShutdownRequested;
   }
 
-  beginCooperativeCancel(): AbortSignal {
+  beginCooperativeCancel(): void {
     this.#cooperativeCancelRequested = true;
-    if (!this.#cooperativeCancelController.signal.aborted) {
-      this.#cooperativeCancelController.abort();
-    }
-    return this.#cooperativeCancelController.signal;
-  }
-
-  cooperativeCancelSignal(): AbortSignal {
-    return this.#cooperativeCancelController.signal;
   }
 
   cooperativeCancelRequested(): boolean {
@@ -702,28 +726,28 @@ export class SessionState {
 
   finishCooperativeCancel(): void {
     this.#cooperativeCancelRequested = false;
-    this.#cooperativeCancelController = new AbortController();
   }
 
   beginUserInterrupt(
     command: RuntimeThreadControlState,
-    commitInput: RuntimeInterruptInputCommit,
+    commitInput: RuntimeControlInputCommit,
     completeCloseout: () => void = () => {},
   ): "applied" | "duplicate" | "conflict" {
     if (this.#userInterrupt !== undefined) {
       return this.#userInterrupt.command.runtimeInputId === command.runtimeInputId ? "duplicate" : "conflict";
     }
-    this.#userInterrupt = { command, commitInput, completeCloseout, closeoutEligible: false };
-    this.#userInterruptController.abort();
+    this.#userInterrupt = {
+      command,
+      commitInput,
+      completeCloseout,
+      closeoutEligible: false,
+      receiptApplied: false,
+    };
     return "applied";
   }
 
   userInterruptRequested(): boolean {
     return this.#userInterrupt !== undefined;
-  }
-
-  userInterruptSignal(): AbortSignal {
-    return this.#userInterruptController.signal;
   }
 
   userInterruptCommand(): RuntimeThreadControlState | undefined {
@@ -740,37 +764,70 @@ export class SessionState {
     return this.#userInterrupt?.closeoutEligible === true;
   }
 
-  async commitUserInterruptInput(): Promise<RuntimeInterruptInputCommitResult> {
+  userInterruptReceiptApplied(): boolean {
+    return this.#userInterrupt?.receiptApplied === true;
+  }
+
+  markUserInterruptReceiptApplied(): void {
+    if (this.#userInterrupt !== undefined) {
+      this.#userInterrupt.receiptApplied = true;
+    }
+  }
+
+  async commitUserInterruptInput(
+    declaration: RuntimeControlInputDeclaration,
+  ): Promise<RuntimeControlInputCommitApplication> {
     const interrupt = this.#userInterrupt;
     if (interrupt === undefined) {
-      return { ok: false, retryable: true, errorCode: "interrupt_closeout_missing" };
+      return {
+        declaration,
+        result: { ok: false, retryable: true, errorCode: "interrupt_closeout_missing" },
+      };
     }
-    interrupt.commitPromise ??= interrupt.commitInput().then((result) => {
-      interrupt.commitResult = result;
-      this.#lastUserInterruptCommit = { runtimeInputId: interrupt.command.runtimeInputId, result };
-      return result;
-    });
+    interrupt.declaration ??= declaration;
+    if (interrupt.commitResult !== undefined) {
+      return { declaration: interrupt.declaration, result: interrupt.commitResult };
+    }
+    if (interrupt.commitPromise === undefined) {
+      const commitPromise = interrupt.commitInput(interrupt.declaration).then((result) => {
+        if (result.ok || !result.retryable) {
+          interrupt.commitResult = result;
+          this.#lastUserInterruptCommit = { runtimeInputId: interrupt.command.runtimeInputId, result };
+        }
+        return { declaration: interrupt.declaration!, result };
+      }).finally(() => {
+        if (interrupt.commitPromise === commitPromise && interrupt.commitResult === undefined) {
+          interrupt.commitPromise = undefined;
+        }
+      });
+      interrupt.commitPromise = commitPromise;
+    }
     return await interrupt.commitPromise;
   }
 
-  userInterruptCommitResult(runtimeInputId: string): RuntimeInterruptInputCommitResult | undefined {
-    return this.#lastUserInterruptCommit?.runtimeInputId === runtimeInputId ? this.#lastUserInterruptCommit.result : undefined;
-  }
-
-  async joinOrStartUserInterruptFinishIdle(
+  recordJoinedUserInterruptResult(
     runtimeInputId: string,
-    prepare: () => { readonly writeId: string; readonly run: () => Promise<RuntimeUserInterruptFinishIdleResult> },
-  ): Promise<RuntimeUserInterruptFinishIdleResult | undefined> {
+    result: RuntimeControlInputCommitResult = { ok: true, joined: true },
+    declaration: RuntimeControlInputDeclaration = {
+      drafts: [],
+      pendingToolCancellations: [],
+      sandboxExecutionToolUseEventIds: [],
+    },
+  ): boolean {
     const interrupt = this.#userInterrupt;
     if (interrupt?.command.runtimeInputId !== runtimeInputId) {
-      return undefined;
+      return false;
     }
-    if (interrupt.finishIdle === undefined) {
-      const prepared = prepare();
-      const promise = Promise.resolve().then(prepared.run);
-      interrupt.finishIdle = { writeId: prepared.writeId, promise };
-    }
-    return await interrupt.finishIdle.promise;
+    interrupt.declaration = declaration;
+    interrupt.commitResult = result;
+    interrupt.commitPromise = Promise.resolve({ declaration, result });
+    interrupt.receiptApplied = result.ok && "joined" in result;
+    this.#lastUserInterruptCommit = { runtimeInputId, result };
+    return true;
+  }
+
+  userInterruptCommitResult(runtimeInputId: string): RuntimeControlInputCommitResult | undefined {
+    return this.#lastUserInterruptCommit?.runtimeInputId === runtimeInputId ? this.#lastUserInterruptCommit.result : undefined;
   }
 
   completeUserInterrupt(runtimeInputId: string): void {
@@ -780,7 +837,6 @@ export class SessionState {
     this.#userInterrupt.completeCloseout();
     this.#lastCompletedUserInterruptId = runtimeInputId;
     this.#userInterrupt = undefined;
-    this.#userInterruptController = new AbortController();
   }
 
   userInterruptCloseoutCompleted(runtimeInputId: string): boolean {
@@ -793,16 +849,12 @@ export class SessionState {
     this.#currentModel = undefined;
     this.#acceptedInputs = [];
     this.#seenAgentMailDeliveryIds.clear();
-    this.#interAgentMessageReceiptCommittedInRun = false;
     this.#committingAcceptedInputId = undefined;
     this.#toolConfirmations = Object.create(null) as Record<string, RuntimeToolConfirmationState | undefined>;
     this.#pendingApprovalToolJobs = Object.create(null) as Record<string, RuntimePendingApprovalToolJobState | undefined>;
+    this.#pendingSandboxExecutionJobs = Object.create(null) as Record<string, RuntimePendingSandboxExecutionJobState | undefined>;
     this.#taskNotifications = Object.create(null) as Record<string, RuntimeTaskNotificationState | undefined>;
     this.#backgroundTools = Object.create(null) as Record<string, RuntimeBackgroundToolState | undefined>;
-    this.#runtimeConfigPatch = undefined;
-    this.#coldRuntimeConfigPatch = undefined;
-    this.#installedBuiltinFamily = undefined;
-    this.#runtimeMcpManifestPatches = Object.create(null) as Record<string, RuntimeConfigPatchState | undefined>;
     this.#activeAttachmentRide = undefined;
     this.#pendingAttachments = [];
     this.#pendingAttachmentOverflowCount = 0;
@@ -811,9 +863,8 @@ export class SessionState {
     this.#lastRequestModelLimits = undefined;
     this.#lastRequestContextAnchorSequence = undefined;
     this.#providerRequestOutputSchemaJson = undefined;
-    this.#runtimeShutdownController = new AbortController();
     this.#runtimeShutdownRequested = false;
-    this.#userInterruptController = new AbortController();
+    this.#cooperativeCancelRequested = false;
     this.#userInterrupt = undefined;
     this.#lastUserInterruptCommit = undefined;
     this.#lastCompletedUserInterruptId = undefined;
@@ -846,5 +897,6 @@ function cloneRuntimeMessage(message: RuntimeMessage): RuntimeMessage {
 }
 
 function sameAcceptedInput(left: RuntimeAcceptedInputState, right: RuntimeAcceptedInputState): boolean {
+  // Request ids and process-local commit callbacks do not change a durable input's identity.
   return JSON.stringify({ ...left, requestId: "" }) === JSON.stringify({ ...right, requestId: "" });
 }

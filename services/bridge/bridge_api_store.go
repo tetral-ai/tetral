@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
-	"github.com/tetral-ai/tetral/services/bridge/internal/outputcapture"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -57,7 +55,6 @@ const (
 	bridgeAckCommitted = "committed"
 	bridgeAckRejected  = "rejected"
 
-	bridgeOpLoadContext                    = "load_context"
 	bridgeOpCommitInputs                   = "commit_inputs"
 	bridgeOpCommitTaskNotificationResult   = "commit_task_notification_result"
 	runtimeTaskNotificationPayloadMaxBytes = 16 * 1024
@@ -69,20 +66,20 @@ const (
 	bridgeOpListChildThreads               = "list_child_threads"
 	bridgeOpMarkChildThreadClosed          = "mark_child_thread_closed"
 	bridgeOpMarkChildThreadActive          = "mark_child_thread_active"
-	bridgeOpRunTool                        = "run_tool"
 	bridgeOpReadCommandResult              = "read_command_result"
 	bridgeOpSendCommandInput               = "send_command_input"
 	bridgeOpCancelCommand                  = "cancel_command"
 	bridgeOpRunMemory                      = "run_memory"
 	bridgeOpMcpManifestChanged             = "mcp_manifest_changed"
+	bridgeOpCommitMcpToolResult            = "commit_mcp_tool_result"
 	bridgeOpCommitInternalToolRepair       = "commit_internal_tool_repair"
 	bridgeOpCommitRuntimeTermination       = "commit_runtime_termination"
-	bridgeOpSettleSealedAgentMail          = "settle_sealed_agent_mail"
 	mcpManifestAcceptanceLockCategory      = int32(0x6D63_7061) // "mcpa"
 
-	bridgeToolKindSandbox = "sandbox_tool"
-	bridgeToolKindMemory  = "memory"
-	bridgeToolKindMCP     = "mcp"
+	bridgeToolKindSandbox           = "sandbox_tool"
+	bridgeToolKindSandboxBackground = "sandbox_background"
+	bridgeToolKindMemory            = "memory"
+	bridgeToolKindMCP               = "mcp"
 
 	// mcpClaimLeaseTTL bounds an MCP tool-call reservation. Derivation: the
 	// 120s MCP call timeout plus margin, so a connector crash mid-call cannot
@@ -93,6 +90,7 @@ const (
 	// Claim, and a replay after Commit is served from the stored result.
 	mcpClaimStatusStored   = "stored"
 	mcpClaimStatusInFlight = "in_flight"
+	mcpClaimStatusConsumed = "consumed"
 	mcpClaimLeaseTTL       = 180 * time.Second
 	mcpClaimInFlightCode   = "mcp_claim_in_flight"
 	mcpClaimNotOwnedCode   = "mcp_claim_not_owned"
@@ -112,22 +110,22 @@ const (
 	//
 	//   NULL          non-memory result, or a memory result whose refresh plan
 	//                 is empty. Terminal.
-	//   pending       durable mutation committed; projection push not yet
-	//                 confirmed. -> refreshed | skipped_cold.
+	//   pending       durable mutation committed; Sandbox projection job not yet
+	//                 settled. -> refreshed | skipped_cold | failed.
 	//   refreshed     projection push confirmed. Terminal.
 	//   skipped_cold  no reachable sandbox at push time. Terminal, superseded
 	//                 only by cold-return re-materialization.
+	//   failed        projection retries exhausted or failed terminally. Terminal;
+	//                 result_json carries projection_refresh_failed.
 	//
-	//   writers: RunMemory phase 1 sets NULL or pending;
-	//     advancePendingMemoryProjectionState / updateMemoryProjectionStateTx
-	//     move pending -> refreshed | skipped_cold.
+	//   writers: RunMemory sets NULL, pending, or skipped_cold; Sandbox Service
+	//     moves pending to a terminal state.
 	//   reader: completePendingMemoryProjection replay dispatch.
 	memoryProjectionStatePending     = "pending"
 	memoryProjectionStateRefreshed   = "refreshed"
 	memoryProjectionStateSkippedCold = "skipped_cold"
 	memoryToolContentMaxBytes        = 102400
 	transientAttachmentMaxBytes      = 10 * 1024 * 1024
-	internalToolRepairDataMaxBytes   = 64 * 1024
 	providerCommandMetadataMaxBytes  = 4 * 1024
 	internalToolRepairIDMaxBytes     = 128
 	maxResourceHelperRecoveries      = 1
@@ -145,25 +143,17 @@ const (
 	maxRescheduleBackoff          = 120 * time.Second
 )
 
-var errMemoryProjectionPushLockContended = errors.New("memory projection push lock is contended")
-
 type PostgreSQLBridgeAPIStore struct {
-	Client                          *dbconnect.Client
-	Logger                          *slog.Logger
-	Clock                           func() time.Time
-	SandboxToolExecutor             SandboxToolExecutor
-	OutputCapturer                  OutputCapturer
-	AttachmentBlobStore             blob.BlobStore
-	FileBlobStore                   blob.BlobStore
-	MemoryProjectionRefresher       MemoryProjectionRefresher
-	MCPManifestLister               MCPManifestLister
-	SandboxStatusFreshnessWindow    time.Duration
-	ResourceCredentialRefreshMargin time.Duration
-	MemoryProjectionPushTimeout     time.Duration
-	RuntimeBindingTokenHMACKey      []byte
-	RuntimeBindingTokenTTL          time.Duration
-	ProviderRescheduleBudget        int64
-	CompactionRescheduleBudget      int64
+	Client                     *dbconnect.Client
+	Logger                     *slog.Logger
+	Clock                      func() time.Time
+	AttachmentBlobStore        blob.BlobStore
+	FileBlobStore              blob.BlobStore
+	MCPManifestLister          MCPManifestLister
+	RuntimeBindingTokenHMACKey []byte
+	RuntimeBindingTokenTTL     time.Duration
+	ProviderRescheduleBudget   int64
+	CompactionRescheduleBudget int64
 }
 
 type TransientAttachmentGCResult struct {
@@ -179,101 +169,13 @@ type transientAttachmentGCRow struct {
 	PreviousStatus string
 }
 
-type SandboxToolExecutor interface {
-	CheckHealth(context.Context, SandboxToolTarget) error
-	RunTool(context.Context, SandboxToolInvocation) (SandboxToolExecution, error)
-	ReadCommandResult(context.Context, SandboxCommandReference) (SandboxCommandResult, error)
-	SendCommandInput(context.Context, SandboxCommandInput) (SandboxCommandResult, error)
-	CancelCommand(context.Context, SandboxCommandCancel) (SandboxCommandResult, error)
-}
-
-type OutputCapturer interface {
-	CaptureOutputs(context.Context, *dbconnect.Tx, outputcapture.Request) (outputcapture.Result, error)
-}
-
-type MemoryProjectionRefresher interface {
-	RefreshMemoryProjection(context.Context, MemoryProjectionRefresh) error
-}
-
-type SandboxToolTarget struct {
-	WorkspaceID          string
-	SessionID            string
-	SessionThreadID      string
-	BindingID            string
-	BindingGeneration    int64
-	SandboxID            string
-	ProviderSandboxID    string
-	PreparationAttemptID string
-	ResourceRootsJSON    string
-}
-
-type SandboxToolInvocation struct {
-	Target               SandboxToolTarget
-	ToolUseEventID       string
-	ToolName             string
-	InputJSON            string
-	ApprovalDecisionJSON string
-}
-
-type SandboxToolExecution struct {
-	ResultJSON     string
-	BackgroundTask *SandboxBackgroundTask
-}
-
-type SandboxBackgroundTask struct {
-	TaskID                      string
-	SourceToolUseEventID        string
-	ProviderSessionID           string
-	ProviderCommandID           string
-	ProviderCommandMetadataJSON string
-}
-
-type SandboxCommandReference struct {
-	Target          SandboxToolTarget
-	Task            SandboxBackgroundTask
-	OwnerRequestID  string
-	ToolUseEventID  string
-	MaxOutputTokens int
-}
-
-type SandboxCommandInput struct {
-	SandboxCommandReference
-	InputJSON string
-}
-
-type SandboxCommandCancel struct {
-	SandboxCommandReference
-	Reason string
-}
-
-type SandboxCommandResult struct {
-	ResultJSON     string
-	TerminalStatus string
-}
-
-type MemoryProjectionRefresh struct {
-	Target     SandboxToolTarget
-	MountPaths []string
-	Ops        []MemoryProjectionOp
-}
-
-type MemoryProjectionOp struct {
-	Kind          string
-	RelativePath  string
-	Content       string
-	ContentSHA256 string
-}
-
 func NewPostgreSQLBridgeAPIStore(client *dbconnect.Client) *PostgreSQLBridgeAPIStore {
 	return &PostgreSQLBridgeAPIStore{
-		Client:                          client,
-		Clock:                           func() time.Time { return storage.Now() },
-		SandboxStatusFreshnessWindow:    defaultSandboxStatusFreshness,
-		ResourceCredentialRefreshMargin: defaultResourceCredentialRefreshMargin,
-		MemoryProjectionPushTimeout:     defaultMemoryProjectionPushTimeout,
-		RuntimeBindingTokenTTL:          defaultRuntimeBindingTokenTTL,
-		ProviderRescheduleBudget:        defaultProviderRescheduleBudget,
-		CompactionRescheduleBudget:      defaultCompactionRescheduleBudget,
+		Client:                     client,
+		Clock:                      func() time.Time { return storage.Now() },
+		RuntimeBindingTokenTTL:     defaultRuntimeBindingTokenTTL,
+		ProviderRescheduleBudget:   defaultProviderRescheduleBudget,
+		CompactionRescheduleBudget: defaultCompactionRescheduleBudget,
 	}
 }
 
@@ -314,27 +216,6 @@ func (s *PostgreSQLBridgeAPIStore) now() time.Time {
 	return storage.Now()
 }
 
-func (s *PostgreSQLBridgeAPIStore) sandboxStatusFreshnessWindow() time.Duration {
-	if s != nil && s.SandboxStatusFreshnessWindow > 0 {
-		return s.SandboxStatusFreshnessWindow
-	}
-	return defaultSandboxStatusFreshness
-}
-
-func (s *PostgreSQLBridgeAPIStore) resourceCredentialRefreshMargin() time.Duration {
-	if s != nil && s.ResourceCredentialRefreshMargin > 0 {
-		return s.ResourceCredentialRefreshMargin
-	}
-	return defaultResourceCredentialRefreshMargin
-}
-
-func (s *PostgreSQLBridgeAPIStore) memoryProjectionPushTimeout() time.Duration {
-	if s != nil && s.MemoryProjectionPushTimeout > 0 {
-		return s.MemoryProjectionPushTimeout
-	}
-	return defaultMemoryProjectionPushTimeout
-}
-
 func (s *PostgreSQLBridgeAPIStore) providerRescheduleBudget() int64 {
 	if s != nil && s.ProviderRescheduleBudget >= 0 {
 		return s.ProviderRescheduleBudget
@@ -359,6 +240,7 @@ type bridgeOperation struct {
 
 type bridgeOperationInsert struct {
 	Operation      string
+	SourceKind     string
 	IdempotencyKey string
 	RequestHash    string
 	AckStatus      string
@@ -370,18 +252,38 @@ type bridgeOperationInsert struct {
 	Now            time.Time
 }
 
+type bridgeDeclarationOperation struct {
+	DeclarationDigest string
+	ReceiptJSON       string
+}
+
 func readBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operation string, key string) (bridgeOperation, bool, error) {
+	return readBridgeOperationBySourceTx(ctx, tx, scope, operation, operation, key)
+}
+
+func readBridgeOperationBySourceTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operation string,
+	sourceKind string,
+	key string,
+) (bridgeOperation, bool, error) {
 	row := tx.QueryRow(ctx,
 		`SELECT request_hash, ack_status, COALESCE(error_code, ''), result_json, stdin_write_seq
 		   FROM session_bridge_operations
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND operation = $3
-		    AND idempotency_key = $4
+		    AND session_thread_id = $3
+		    AND operation = $4
+		    AND source_kind = $5
+		    AND idempotency_key = $6
 		  FOR UPDATE`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 		operation,
+		sourceKind,
 		key,
 	)
 	var existing bridgeOperation
@@ -397,16 +299,20 @@ func insertBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	if op.ResultJSON == "" {
 		op.ResultJSON = "{}"
 	}
+	if op.SourceKind == "" {
+		op.SourceKind = op.Operation
+	}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO session_bridge_operations (
-			workspace_id, session_id, session_thread_id, operation, idempotency_key,
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
 			request_hash, ack_status, runtime_input_id, runtime_write_id, error_code,
 			result_json, stdin_write_seq, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		op.Operation,
+		op.SourceKind,
 		op.IdempotencyKey,
 		op.RequestHash,
 		op.AckStatus,
@@ -420,25 +326,68 @@ func insertBridgeOperationTx(ctx context.Context, tx *dbconnect.Tx, scope *bridg
 	return err
 }
 
-func updateBridgeOperationResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, operation string, key string, resultJSON string, stdinWriteSeq sql.NullInt64, now time.Time) error {
-	if resultJSON == "" {
-		resultJSON = "{}"
-	}
-	_, err := tx.Exec(ctx,
-		`UPDATE session_bridge_operations
-		    SET result_json = $5,
-		        stdin_write_seq = COALESCE(stdin_write_seq, $6),
-		        updated_at = $7
+func readBridgeDeclarationOperationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operation string,
+	sourceKind string,
+	sourceID string,
+) (bridgeDeclarationOperation, bool, error) {
+	row := tx.QueryRow(ctx,
+		`SELECT COALESCE(declaration_digest, ''), COALESCE(receipt_json, '')
+		   FROM session_bridge_operations
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND operation = $3
-		    AND idempotency_key = $4`,
+		    AND session_thread_id = $3
+		    AND operation = $4
+		    AND source_kind = $5
+		    AND idempotency_key = $6
+		  FOR UPDATE`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 		operation,
-		key,
-		resultJSON,
-		stdinWriteSeq,
+		sourceKind,
+		sourceID,
+	)
+	var existing bridgeDeclarationOperation
+	if err := row.Scan(&existing.DeclarationDigest, &existing.ReceiptJSON); dbconnect.IsNoRows(err) {
+		return bridgeDeclarationOperation{}, false, nil
+	} else if err != nil {
+		return bridgeDeclarationOperation{}, false, err
+	}
+	return existing, true, nil
+}
+
+func insertBridgeDeclarationOperationTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	operation string,
+	sourceKind string,
+	sourceID string,
+	declarationDigest string,
+	receiptJSON string,
+	now time.Time,
+) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO session_bridge_operations (
+			workspace_id, session_id, session_thread_id, operation, source_kind,
+			idempotency_key, request_hash, declaration_digest, receipt_json,
+			ack_status, runtime_input_id, result_json, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $6, '{}', $10, $10
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		operation,
+		sourceKind,
+		sourceID,
+		declarationDigest,
+		receiptJSON,
+		bridgeAckCommitted,
 		now,
 	)
 	return err
@@ -451,6 +400,9 @@ type runtimeToolResult struct {
 	InputJSON              string
 	AckStatus              string
 	ResultJSON             string
+	ResultDigest           string
+	ModelToolCallID        sql.NullString
+	ExecutionState         sql.NullString
 	BackgroundTaskStarted  bool
 	TaskID                 sql.NullString
 	MemoryProjectionState  sql.NullString
@@ -485,11 +437,15 @@ func readRuntimeToolResultReadOnlyTx(ctx context.Context, tx *dbconnect.Tx, scop
 }
 
 func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, forUpdate bool) (runtimeToolResult, bool, error) {
-	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status, result_json, background_task_started, task_id, memory_projection_state, mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
+	query := `SELECT tool_kind, normalized_input_hash, tool_name, input_json, ack_status,
+	               COALESCE(result_json, ''), COALESCE(result_digest, ''), model_tool_call_id, execution_state,
+	               background_task_started, task_id, memory_projection_state,
+	               mcp_claim_status, mcp_claim_owner_request_id, mcp_claim_lease_expires_at
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND tool_use_event_id = $3`
+		    AND session_thread_id = $3
+		    AND tool_use_event_id = $4`
 	if forUpdate {
 		query += `
 		  FOR UPDATE`
@@ -498,10 +454,16 @@ func readRuntimeToolResult(ctx context.Context, tx *dbconnect.Tx, scope *bridgev
 		query,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
 		toolUseEventID,
 	)
 	var existing runtimeToolResult
-	if err := row.Scan(&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON, &existing.AckStatus, &existing.ResultJSON, &existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState, &existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt); dbconnect.IsNoRows(err) {
+	if err := row.Scan(
+		&existing.ToolKind, &existing.NormalizedInputHash, &existing.ToolName, &existing.InputJSON,
+		&existing.AckStatus, &existing.ResultJSON, &existing.ResultDigest, &existing.ModelToolCallID, &existing.ExecutionState,
+		&existing.BackgroundTaskStarted, &existing.TaskID, &existing.MemoryProjectionState,
+		&existing.MCPClaimStatus, &existing.MCPClaimOwnerRequestID, &existing.MCPClaimLeaseExpiresAt,
+	); dbconnect.IsNoRows(err) {
 		return runtimeToolResult{}, false, nil
 	} else if err != nil {
 		return runtimeToolResult{}, false, err
@@ -580,6 +542,13 @@ func verifyRuntimeScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1
 		return scopeSupersededError(status.Error(codes.FailedPrecondition, "runtime binding is stale"))
 	}
 	return nil
+}
+
+func verifyRuntimeDeclarationCaller(ctx context.Context, scope *bridgev1.RuntimeScope) error {
+	if err := validateRuntimeScope(scope); err != nil {
+		return err
+	}
+	return verifyRuntimeCallerPodUID(ctx, scope)
 }
 
 func lockRuntimeMutationSessionTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) error {
@@ -695,34 +664,16 @@ func rejectedAck(errorCode string) *bridgev1.BridgeWriteAck {
 // defaultTime parses a wire timestamp, falling back when the caller omitted it.
 // Wire timestamps are RFC 3339; durable columns are native timestamps, so an
 // unparsable value is rejected here rather than stored.
-func defaultTime(value string, fallback time.Time) (time.Time, error) {
-	if value == "" {
-		return fallback, nil
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, err
-	}
-	// Truncate like a minted timestamp: the column keeps microseconds, so an
-	// untruncated wire value would be echoed and hashed at nanosecond precision
-	// while the stored row holds something else.
-	return storage.Durable(parsed), nil
-}
+
+// Truncate like a minted timestamp: the column keeps microseconds, so an
+// untruncated wire value would be echoed and hashed at nanosecond precision
+// while the stored row holds something else.
 
 func defaultString(value string, fallback string) string {
 	if value == "" {
 		return fallback
 	}
 	return value
-}
-
-func firstNonEmptyJSON(values ...string) string {
-	for _, value := range values {
-		if value != "" && value != "{}" {
-			return value
-		}
-	}
-	return "{}"
 }
 
 func bridgeRawJSON(value string, fallback string) json.RawMessage {

@@ -18,7 +18,7 @@ import (
 
 type Store interface {
 	Lease(context.Context, queue.LeaseRequest) ([]*queue.Job, error)
-	Heartbeat(context.Context, queue.HeartbeatRequest) (bool, error)
+	Heartbeat(context.Context, queue.HeartbeatRequest) (queue.HeartbeatResult, error)
 	Ack(context.Context, queue.AckRequest) (bool, error)
 	Retry(context.Context, queue.RetryRequest) (bool, error)
 	Defer(context.Context, queue.DeferRequest) (bool, error)
@@ -66,7 +66,7 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	return response, nil
 }
 
-func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.TransitionResponse, error) {
+func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
 	if s == nil || s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "queue store is required")
 	}
@@ -74,14 +74,20 @@ func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatReques
 	if err != nil {
 		return nil, err
 	}
-	updated, err := s.store.Heartbeat(ctx, queue.HeartbeatRequest{
+	result, err := s.store.Heartbeat(ctx, queue.HeartbeatRequest{
 		WorkspaceID:   workspace.ID(request.GetWorkspaceId()),
 		JobID:         request.GetJobId(),
 		LeaseToken:    request.GetLeaseToken(),
 		LeaseDuration: leaseDuration,
-		Now:           s.nowUTC(),
 	})
-	return transitionResponse(updated, err)
+	if err != nil {
+		return nil, mapQueueError(err)
+	}
+	response := &queuev1.HeartbeatResponse{Updated: result.Updated}
+	if result.Updated {
+		response.LeasedUntil = result.LeasedUntil.UTC().Format(time.RFC3339Nano)
+	}
+	return response, nil
 }
 
 func (s *Server) Ack(ctx context.Context, request *queuev1.AckRequest) (*queuev1.TransitionResponse, error) {
@@ -120,21 +126,23 @@ func (s *Server) Retry(ctx context.Context, request *queuev1.RetryRequest) (*que
 //	transition                   writer (code path)                   guard                            attempt_count
 //	---------------------------  -----------------------------------  -------------------------------  -------------------
 //	leased -> pending (defer)     internal/queue Defer, via this RPC   lease_token match; only          -1, cancelling the
-//	                                                                   session_prepare is deferrable    lease-time +1
+//	                                                                   runtime_config_update            lease-time +1
 //	leased -> pending (reclaim)   internal/queue                       status = leased AND              unchanged
 //	                              ReclaimExpiredLeases                  leased_until <= now
 //
 // A lease+defer cycle nets zero budget: leaseCandidate adds one to attempt_count and
-// Defer subtracts one. Defer never consults max_attempts, so a session_prepare job
-// may defer without limit -- the loop is bounded by the caller's external readiness
-// condition, not the attempt budget -- and any other kind is rejected. Reclaim never
+// Defer subtracts one. Defer never consults max_attempts, so a runtime configuration
+// update may wait on an active Session without approaching its retry budget; every
+// other kind is rejected. Reclaim never
 // consults max_attempts and never dead-letters on expiry alone: it returns the row to
 // pending with available_at = now under last_error_kind = "lease_expired", so the next
 // owner re-leases, revalidates the durable business row, and stale-ACKs work a crashed
 // consumer already finished. This is the recovery path for runtime_input,
-// session_prepare, and cleanup_session jobs stranded by a lost pod. A job reaches
+// runtime_config_update, cleanup_session, and Sandbox jobs stranded by a lost worker. A job reaches
 // dead_lettered only through Retry, once attempt_count reaches the effective
-// max_attempts, or through an explicit DeadLetter.
+// max_attempts, through an explicit DeadLetter, or after a Sandbox consumer
+// settles the business outcome and conditionally closes a reclaimed,
+// over-budget notification with DeadLetterExhaustedTx.
 //
 // UPDATE-WITH: internal/queue/postgresql_store.go (Defer, ReclaimExpiredLeases,
 // leaseCandidate); services/queue/maintenance.go (RunStalledLeaseMaintenance).

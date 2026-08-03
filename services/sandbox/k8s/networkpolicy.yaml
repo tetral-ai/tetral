@@ -22,13 +22,6 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: bridge
-      ports:
-        - protocol: TCP
-          port: 9090
-    - from:
-        - podSelector:
-            matchLabels:
               app.kubernetes.io/part-of: tetral
       ports:
         - protocol: TCP

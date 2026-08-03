@@ -7,24 +7,22 @@ import (
 	"testing"
 )
 
-func TestTetralSandboxManifestUsesStaticInternalGRPCTokenWithoutKubernetesAPIToken(t *testing.T) {
+func TestTetralSandboxManifestUsesQueueWorkersWithoutKubernetesAPIToken(t *testing.T) {
 	deployment := readServiceLocalManifest(t, "deployment.yaml")
 	for _, required := range []string{
 		"serviceAccountName: sandbox",
 		"automountServiceAccountToken: false",
-		"name: TETRAL_INTERNAL_GRPC_AUDIENCE\n              value: tetral-internal-grpc",
-		"name: TETRAL_INTERNAL_ALLOWED_SERVICE_ACCOUNTS\n              value: tetral-system/bridge",
-		"name: TETRAL_SANDBOX_GRPC_BEARER_TOKEN_PATH\n              value: /var/run/secrets/tetral-internal-grpc/sandbox/token",
 		"name: TETRAL_R2_ACCOUNT_ID",
 		"name: TETRAL_R2_PARENT_API_TOKEN",
 		"name: TETRAL_R2_PARENT_ACCESS_KEY",
+		"name: TETRAL_SANDBOX_JOB_LEASE_DURATION",
+		"name: TETRAL_SANDBOX_PROVIDER_COMMAND_TIMEOUT",
+		"name: TETRAL_SANDBOX_WORKER_CONCURRENCY",
 		"name: TETRAL_RESOURCE_CRED_TTL",
 		"name: TETRAL_RESOURCE_CRED_REFRESH_MARGIN",
 		"name: TETRAL_RCLONE_VFS_CACHE_MAX_SIZE",
 		"name: TETRAL_RCLONE_VFS_MIN_FREE",
 		"name: TETRAL_GIT_PROXY_HOST",
-		"- name: sandbox-internal-grpc-token\n              mountPath: /var/run/secrets/tetral-internal-grpc/sandbox",
-		"- name: sandbox-internal-grpc-token\n          secret:\n            secretName: sandbox-internal-grpc\n            items:\n              - key: token\n                path: token",
 	} {
 		if !strings.Contains(deployment, required) {
 			t.Fatalf("sandbox deployment missing %q", required)
@@ -56,7 +54,6 @@ func TestTetralSandboxConfigMapCarriesResourceProjectionKnobs(t *testing.T) {
 		"TETRAL_RCLONE_VFS_CACHE_MAX_SIZE: 2G",
 		"TETRAL_RCLONE_VFS_MIN_FREE: 1G",
 		"TETRAL_GIT_PROXY_HOST: git.tetral.example",
-		"TETRAL_SANDBOX_CLEANUP_LEASE_DURATION: 3m",
 	} {
 		if !strings.Contains(configMap, required) {
 			t.Fatalf("sandbox configmap missing %q", required)
@@ -67,11 +64,9 @@ func TestTetralSandboxConfigMapCarriesResourceProjectionKnobs(t *testing.T) {
 	}
 }
 
-func TestTetralSandboxSecretExampleCarriesStaticInternalGRPCToken(t *testing.T) {
+func TestTetralSandboxSecretExampleCarriesProviderCredentials(t *testing.T) {
 	secret := readServiceLocalManifest(t, "secret.example.yaml")
 	for _, required := range []string{
-		"name: sandbox-internal-grpc",
-		"token: replace-me-with-shared-bridge-sandbox-token",
 		"TETRAL_POSTGRES_DSN:",
 		"name: sandbox-r2-parent",
 		"TETRAL_R2_PARENT_API_TOKEN:",
