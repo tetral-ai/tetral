@@ -1,7 +1,7 @@
 import type { AcceptedInputCommitResult } from "../../src/context/context-loader.js";
 import { acceptedInputDeclarationKind, acceptedInputDrafts } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeDeclarationReceipt } from "../../src/runtime/runtime-declaration.js";
-import type { RuntimeAcceptedInputState } from "../../src/session/session-state.js";
+import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
 
 const committedAt = "2026-07-28T00:00:00.000Z";
 

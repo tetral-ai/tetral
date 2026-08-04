@@ -24,11 +24,12 @@ import type {
 import type { RuntimePodLogRecord } from "../../src/logger.js";
 import {
   buildRuntimeServiceBridgeRuntimeMessage as bridgeRuntimeMessage,
+  buildRuntimeServiceDurableBridgeRuntimeMessage as durableBridgeRuntimeMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
 import { RuntimeMessageDraftSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeControlInputDeclaration,
-} from "@tetral/agent-runtime-core/src/session/session-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 
 describe("RuntimeControlService command envelope", () => {
   test("authorizes before validation, lifecycle command runner, logs, or core effects", async () => {
@@ -1034,7 +1035,7 @@ describe("RuntimeControlService command envelope", () => {
   });
 
   test("defers the canonicalized task notification declaration to the owning loop", async () => {
-    const runtimeMessage = bridgeRuntimeMessage({ text: "bridge-projected runtime notification" });
+    const runtimeMessage = durableBridgeRuntimeMessage({ text: "bridge-projected runtime notification" });
     const fixture = runtimeFixture({
       taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, committedMessage: runtimeMessage }),
     });
@@ -1531,7 +1532,7 @@ class RecordingTaskNotificationCommitter implements RuntimeTaskNotificationCommi
   constructor(
     private readonly result: Awaited<ReturnType<RuntimeTaskNotificationCommitter["commitTaskNotification"]>> = {
       ok: true,
-      committedMessage: bridgeRuntimeMessage(),
+      committedMessage: durableBridgeRuntimeMessage(),
     },
   ) {}
 

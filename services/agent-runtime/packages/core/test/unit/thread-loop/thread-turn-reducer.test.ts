@@ -4,6 +4,7 @@ import {
   initializeThreadTurnReduction,
   reconcileThreadTurnSeal,
   reduceThreadTurn,
+  ThreadTurnContractError,
 } from "../../../src/thread-loop/thread-turn-reducer.js";
 import type {
   ThreadToolRouteView,
@@ -21,6 +22,156 @@ describe("Thread-turn reducer", () => {
     expect(deriveThreadTurnDecision({
       pendingInputMessageIds: ["msg_1", "msg_2"],
     }, noRoutes)).toEqual({
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+  });
+
+  test("a durable run-open fact clears a prior final closeout before new input is committed", () => {
+    const closed = initializeThreadTurnReduction({
+      pendingInputMessageIds: [],
+      request: {
+        modelRequestId: "request_closed",
+        requestStartEventId: "event_start_closed",
+        requestKind: "agent_provider_request",
+        contextThroughMessageSequence: 1,
+        requestEnd: {
+          eventId: "event_end_closed",
+          isError: true,
+          errorKind: "provider_stream_error",
+          rescheduled: false,
+        },
+        toolMembers: [],
+      },
+      terminalCloseout: {
+        failureEventId: "event_failure_closed",
+        closeoutEventId: "event_idle_closed",
+        disposition: "retries_exhausted",
+      },
+      idleCloseout: { eventId: "event_idle_closed", stopReason: "retries_exhausted" },
+    }, noRoutes);
+    const opened = reduceThreadTurn(closed, {
+      fact: "run_opened",
+      eventId: "event_running_new",
+    }, noRoutes);
+    expect(opened.checkpoint).toEqual({
+      executionRunId: "event_running_new",
+      pendingInputMessageIds: [],
+    });
+    expect(reduceThreadTurn(opened, {
+      fact: "inputs_committed",
+      eventId: "event_input_new",
+      messageIds: ["message_input_new"],
+    }, noRoutes)).toMatchObject({
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+  });
+
+  test("a duplicate run-open fact preserves the action already derived for that run", () => {
+    const initial = initializeThreadTurnReduction({
+      pendingInputMessageIds: [],
+    }, noRoutes);
+    const opened = reduceThreadTurn(initial, {
+      fact: "run_opened",
+      eventId: "event_running_replayed",
+    }, noRoutes);
+    expect(opened).toMatchObject({
+      state: { state: "ready_to_finish" },
+      action: { action: "finish_idle", stopReason: { type: "end_turn" } },
+    });
+
+    const replayed = reduceThreadTurn(opened, {
+      fact: "run_opened",
+      eventId: "event_running_replayed",
+    }, noRoutes);
+    expect(replayed).toMatchObject({
+      state: { state: "ready_to_finish" },
+      action: { action: "finish_idle", stopReason: { type: "end_turn" } },
+    });
+
+    expect(reduceThreadTurn(replayed, {
+      fact: "finish_idle_committed",
+      eventId: "event_idle_replayed",
+      stopReason: { type: "end_turn" },
+    }, noRoutes)).toMatchObject({
+      state: { state: "idle" },
+      action: { action: "await_input" },
+    });
+  });
+
+  test("a confirmation run-open preserves the sealed requires-action request", () => {
+    const waiting = initializeThreadTurnReduction({
+      ...sealedCheckpoint([{
+        memberKind: "public_tool_use",
+        modelToolCallId: "call_approval",
+        toolUseEventId: "event_tool_approval",
+        toolName: "Write",
+      }]),
+      idleCloseout: { eventId: "event_idle_approval", stopReason: "requires_action" },
+    }, {
+      routes: [{ toolUseEventId: "event_tool_approval", disposition: "requires_user_action" }],
+    });
+    const opened = reduceThreadTurn(waiting, {
+      fact: "run_opened",
+      eventId: "event_running_confirmation",
+    }, {
+      routes: [{ toolUseEventId: "event_tool_approval", disposition: "requires_user_action" }],
+    });
+    expect(opened.checkpoint).toMatchObject({
+      executionRunId: "event_running_confirmation",
+      request: { modelRequestId: "request_1" },
+    });
+    expect(opened.checkpoint.idleCloseout).toBeUndefined();
+  });
+
+  test("a recovery run-open preserves any sealed request with an outstanding durable member", () => {
+    const routes = {
+      routes: [{ toolUseEventId: "event_tool_recovery", disposition: "resume_sandbox_execution" as const }],
+    };
+    const waiting = initializeThreadTurnReduction(sealedCheckpoint([{
+      memberKind: "public_tool_use",
+      modelToolCallId: "call_recovery",
+      toolUseEventId: "event_tool_recovery",
+      toolName: "Bash",
+    }]), routes);
+    const opened = reduceThreadTurn(waiting, {
+      fact: "run_opened",
+      eventId: "event_running_recovery",
+    }, routes);
+    expect(opened.checkpoint).toMatchObject({
+      executionRunId: "event_running_recovery",
+      request: { modelRequestId: "request_1" },
+    });
+    expect(opened).toMatchObject({
+      state: { state: "waiting_for_tool_results" },
+      action: { action: "resume_tool_routes", toolUseEventIds: ["event_tool_recovery"] },
+    });
+  });
+
+  test("a recovery run-open preserves a sealed request whose tool results are ready to continue", () => {
+    const { executionRunId: _closedRun, ...recoveredCheckpoint } = sealedCheckpoint([{
+      memberKind: "public_tool_use",
+      modelToolCallId: "call_completed",
+      toolUseEventId: "event_tool_completed",
+      toolName: "Read",
+      terminalResult: { resultEventId: "event_result_completed", outcome: "success" },
+    }]);
+    const ready = initializeThreadTurnReduction(recoveredCheckpoint, noRoutes);
+    expect(ready).toMatchObject({
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+
+    const opened = reduceThreadTurn(ready, {
+      fact: "run_opened",
+      eventId: "event_running_continuation",
+    }, noRoutes);
+    expect(opened).toMatchObject({
+      checkpoint: {
+        executionRunId: "event_running_continuation",
+        request: { modelRequestId: "request_1" },
+      },
       state: { state: "ready_to_request" },
       action: { action: "prepare_next_request" },
     });
@@ -186,15 +337,103 @@ describe("Thread-turn reducer", () => {
     });
 
     const readyToFinish = initializeThreadTurnReduction(emptySeal, noRoutes);
-    expect(reduceThreadTurn(readyToFinish, {
+    const finished = reduceThreadTurn(readyToFinish, {
       fact: "finish_idle_committed",
       eventId: "event_idle",
       stopReason: { type: "end_turn" },
-    }, noRoutes)).toMatchObject({
+    }, noRoutes);
+    expect(finished).toMatchObject({
       checkpoint: { idleCloseout: { eventId: "event_idle", stopReason: "end_turn" } },
       state: { state: "idle" },
       action: { action: "await_input" },
     });
+    expect(finished.checkpoint.request).toBeUndefined();
+  });
+
+  test("a final idle closeout keeps pre-request committed input dormant until a later run opens", () => {
+    const closed = initializeThreadTurnReduction({
+      pendingInputMessageIds: ["message_interrupted_before_start"],
+      idleCloseout: { eventId: "event_idle_interrupted", stopReason: "end_turn" },
+    }, noRoutes);
+    expect(closed).toMatchObject({
+      state: { state: "idle" },
+      action: { action: "await_input" },
+    });
+
+    const reopened = reduceThreadTurn(closed, {
+      fact: "run_opened",
+      eventId: "event_running_after_explicit_input",
+    }, noRoutes);
+    expect(reopened).toMatchObject({
+      checkpoint: {
+        executionRunId: "event_running_after_explicit_input",
+        pendingInputMessageIds: ["message_interrupted_before_start"],
+      },
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+  });
+
+  test("a later run discards the request closed by an idle interruption", () => {
+    const interrupted = initializeThreadTurnReduction({
+      pendingInputMessageIds: ["message_after_interrupt"],
+      interruptEventId: "event_interrupt_idle",
+      request: {
+        modelRequestId: "model_request_interrupted_idle",
+        requestStartEventId: "event_start_interrupted_idle",
+        requestKind: "agent_provider_request",
+        contextThroughMessageSequence: 0,
+        requestEnd: {
+          eventId: "event_end_interrupted_idle",
+          isError: false,
+          rescheduled: false,
+        },
+        toolMembers: [{
+          memberKind: "public_tool_use",
+          modelToolCallId: "tool_call_interrupted_idle",
+          toolUseEventId: "event_tool_interrupted_idle",
+          toolName: "Write",
+        }],
+      },
+    }, noRoutes);
+    expect(interrupted).toMatchObject({
+      state: { state: "idle" },
+      action: { action: "await_input" },
+    });
+
+    const reopened = reduceThreadTurn(interrupted, {
+      fact: "run_opened",
+      eventId: "event_running_after_idle_interrupt",
+    }, noRoutes);
+    expect(reopened).toMatchObject({
+      checkpoint: {
+        executionRunId: "event_running_after_idle_interrupt",
+        pendingInputMessageIds: ["message_after_interrupt"],
+      },
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+    expect(reopened.checkpoint.request).toBeUndefined();
+    expect(reopened.checkpoint.interruptEventId).toBeUndefined();
+  });
+
+  test("rejects end-turn closeout while a sealed tool continuation is ready", () => {
+    const ready = initializeThreadTurnReduction(sealedCheckpoint([{
+      memberKind: "public_tool_use",
+      modelToolCallId: "call_completed",
+      toolUseEventId: "event_tool_completed",
+      toolName: "Read",
+      terminalResult: { resultEventId: "event_result_completed", outcome: "success" },
+    }]), noRoutes);
+    expect(ready).toMatchObject({
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+    expect(() => reduceThreadTurn(ready, {
+      fact: "finish_idle_committed",
+      eventId: "event_idle_illegal",
+      stopReason: { type: "end_turn" },
+    }, noRoutes)).toThrow("cannot finish end_turn from ready_to_request");
   });
 
   test("treats internal invalid-tool repair as a terminal synthetic member", () => {
@@ -403,6 +642,7 @@ describe("Thread-turn reducer", () => {
       },
     });
     expect(finished.checkpoint.executionRunId).toBeUndefined();
+    expect(finished.checkpoint.request).toBeUndefined();
     expect(deriveThreadTurnDecision(finished.checkpoint, noRoutes)).toEqual({
       state: finished.state,
       action: finished.action,
@@ -461,7 +701,7 @@ describe("Thread-turn reducer", () => {
       eventId: "event_result",
       toolUseEventId: "event_missing",
       outcome: "success",
-    }, noRoutes)).toThrow("Tool Result does not name a request member");
+    }, noRoutes)).toThrow(ThreadTurnContractError);
 
     const sealed = initializeThreadTurnReduction(sealedCheckpoint([]), noRoutes);
     expect(() => reduceThreadTurn(sealed, {

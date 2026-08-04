@@ -570,6 +570,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		if err := verifyModelToolCallIDUniqueTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			request.GetModelRequestId(),
+			request.GetModelToolCallId(),
+		); err != nil {
+			return err
+		}
 		receipt.DeclarationDigest = declarationDigest
 		receiptJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {

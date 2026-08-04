@@ -111,6 +111,7 @@ func loadThreadTurnFactsTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	messages []bridgeLoadContextMessageDescriptor,
+	durableTurnID *string,
 ) (bridgeLoadContextTurnFacts, error) {
 	facts := bridgeLoadContextTurnFacts{
 		Events:         make([]bridgeLoadContextTurnEvent, 0),
@@ -120,9 +121,13 @@ func loadThreadTurnFactsTx(
 	if err != nil {
 		return facts, err
 	}
-	eventFloor, err := loadContextTurnEventFloorTx(ctx, tx, scope, messages)
+	eventFloor, err := loadContextTurnEventFloorTx(ctx, tx, scope, messages, durableTurnID)
 	if err != nil {
 		return facts, err
+	}
+	durableTurnEventID := ""
+	if durableTurnID != nil {
+		durableTurnEventID = *durableTurnID
 	}
 	rows, err := tx.Query(ctx,
 		`SELECT event_id, sequence, type, model_request_id, payload_json, projection_json, runtime_write_id
@@ -130,7 +135,7 @@ func loadThreadTurnFactsTx(
 		  WHERE workspace_id = $1
 		    AND session_id = $2
 		    AND session_thread_id = $3
-		    AND sequence >= $4
+		    AND (sequence >= $4 OR event_id = $5)
 		    AND type IN (
 		      'session.status_running',
 		      'session.thread_status_running',
@@ -154,6 +159,7 @@ func loadThreadTurnFactsTx(
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
 		eventFloor,
+		durableTurnEventID,
 	)
 	if err != nil {
 		return facts, err
@@ -204,7 +210,9 @@ func loadContextTurnEventFloorTx(
 	tx *dbconnect.Tx,
 	scope *bridgev1.RuntimeScope,
 	messages []bridgeLoadContextMessageDescriptor,
+	durableTurnID *string,
 ) (int64, error) {
+	var compactionFloor int64
 	for _, message := range messages {
 		if message.Kind != "compaction" {
 			continue
@@ -229,9 +237,30 @@ func loadContextTurnEventFloorTx(
 		if err != nil {
 			return 0, err
 		}
-		return sequence, nil
+		compactionFloor = sequence
+		break
 	}
-	return 0, nil
+	if durableTurnID == nil {
+		return compactionFloor, nil
+	}
+	var durableTurnFloor int64
+	err := tx.QueryRow(ctx,
+		`SELECT sequence
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND event_id = $4
+		    AND type IN ('session.status_running', 'session.thread_status_running')`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), *durableTurnID,
+	).Scan(&durableTurnFloor)
+	if dbconnect.IsNoRows(err) {
+		return 0, status.Error(codes.FailedPrecondition, "durable turn has no running event")
+	}
+	if err != nil {
+		return 0, err
+	}
+	return compactionFloor, nil
 }
 
 type bridgeContextToolPart struct {
@@ -360,7 +389,7 @@ func bridgeTurnEventFact(
 		}
 		event.ToolUse = &bridgeLoadContextToolUse{ModelToolCallID: parts[0].ToolCallID, ToolName: parts[0].ToolName}
 	case "agent.tool_result", "agent.mcp_tool_result":
-		result, err := bridgeTurnToolResultFact(eventType, payloadJSON, toolParts[eventID])
+		result, err := bridgeTurnToolResultFact(eventType, payloadJSON, toolParts)
 		if err != nil {
 			return event, err
 		}
@@ -413,6 +442,8 @@ func bridgeTurnEventFact(
 			return event, status.Error(codes.FailedPrecondition, "failure projection is malformed")
 		}
 		event.Failure = &bridgeLoadContextFailure{ErrorType: payload.Error.Type, RetryStatus: payload.Error.RetryStatus.Type}
+	case "session.status_rescheduled", "session.thread_status_rescheduled":
+		event.ModelRequestID = nil
 	default:
 		if !bridgeTurnEventTypeAllowed(eventType) {
 			return event, status.Error(codes.FailedPrecondition, "turn fact type is not recognized")
@@ -460,7 +491,7 @@ func loadContextRequestEndRescheduledTx(ctx context.Context, tx *dbconnect.Tx, s
 	return receipt.GetRequestReschedule().GetDisposition() == bridgev1.RequestRescheduleDisposition_REQUEST_RESCHEDULE_DISPOSITION_ACCEPTED, nil
 }
 
-func bridgeTurnToolResultFact(eventType string, payloadJSON string, parts []bridgeContextToolPart) (*bridgeLoadContextToolResult, error) {
+func bridgeTurnToolResultFact(eventType string, payloadJSON string, toolParts map[string][]bridgeContextToolPart) (*bridgeLoadContextToolResult, error) {
 	var payload struct {
 		ToolUseEventID  string `json:"tool_use_event_id"`
 		ToolUseID       string `json:"tool_use_id"`
@@ -485,16 +516,15 @@ func bridgeTurnToolResultFact(eventType string, payloadJSON string, parts []brid
 			Outcome:         "error",
 		}, nil
 	}
-	toolUseEventID := payload.ToolUseEventID
-	if toolUseEventID == "" {
-		toolUseEventID = payload.ToolUseID
+	toolUseEventID, err := runtimeToolResultUseEventID(eventType, runtimeToolResultEventPayload{
+		ToolUseEventID: payload.ToolUseEventID,
+		ToolUseID:      payload.ToolUseID,
+		MCPToolUseID:   payload.MCPToolUseID,
+	})
+	if err != nil {
+		return nil, err
 	}
-	if toolUseEventID == "" {
-		toolUseEventID = payload.MCPToolUseID
-	}
-	if toolUseEventID == "" {
-		return nil, status.Error(codes.FailedPrecondition, "tool result projection has no tool use identity")
-	}
+	parts := toolParts[toolUseEventID]
 	outcome := "unknown"
 	if len(parts) == 1 {
 		switch parts[0].Status {

@@ -5,7 +5,7 @@
  * call its builders and policy parsers directly. Startup validates configuration and authentication
  * material before readiness opens, the assembled hosts share one scoped Runtime Core lifetime, and shutdown
  * stops the app before closing that scope. Runtime policy helpers turn ordered cold-load and patch
- * payloads into the tool catalog and provider behavior consumed by Agent Loop.
+ * payloads into the tool catalog and provider behavior consumed by ThreadLoop.
  */
 import type { Metadata } from "@grpc/grpc-js";
 import { RuntimeInternalToolRepairStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
@@ -14,12 +14,12 @@ import type {
   RuntimeInternalToolRepairCommitResult,
   RuntimeDeclarationOperationControls,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/agent-loop/provider-call-assembly.js";
-import type { MemoryStorePromptEntry, SkillGuidanceIndexEntry } from "@tetral/agent-runtime-core/src/agent-loop/provider-call-assembly.js";
+import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
+import type { MemoryStorePromptEntry, SkillGuidanceIndexEntry } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { createApprovalReviewerToolCatalog, createToolCatalog } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolApprovalMode } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import type { InstalledBuiltinFamily, MCPManifest, MCPManifestToolConfig, ToolCatalog, ToolConfig, ToolPermissionPolicy } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
-import type { RuntimeThreadRoleState } from "@tetral/agent-runtime-core/src/session/session-state.js";
+import type { RuntimeThreadRoleState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { buildOutboundBearerMetadata, KubernetesTokenReviewClient, validateKubernetesTokenReviewReviewerMaterial } from "./auth.js";
 import type { RuntimeTokenReviewClient, ServiceAccountTokenConfig } from "./auth.js";
@@ -200,7 +200,7 @@ export async function buildRuntimePodCommandDependencies(input: {
         // A metrics or logging sink cannot participate in closeout custody.
       }
     },
-    agentLoop: {
+    threadLoop: {
       internalToolRepairStore: new BridgeInternalToolRepairStore(internalToolRepairCommitter),
       sessionEventWriter: new BridgeAPIEventWriter({
         address: input.config.bridgeApiGrpcAddress,
@@ -553,7 +553,7 @@ export function runtimeToolPolicyForThread(
 /**
  * Resolves the thread model from immutable Runtime configuration. Reviewer threads use the
  * configured reviewer model; all other roles inspect the cold agent config payload. Malformed or
- * absent configuration returns undefined so Agent Loop can settle the run through its model gate.
+ * absent configuration returns undefined so ThreadLoop can settle the run through its model gate.
  */
 export function runtimeModelForThread(
   threadRole: RuntimeThreadRoleState | undefined,

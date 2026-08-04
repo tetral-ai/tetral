@@ -16,7 +16,7 @@ export interface RequestExecutionSnapshot {
     readonly providerId: string;
     readonly modelId: string;
   };
-  readonly approvalMode: string;
+  readonly approvalMode: "full_access" | "ask_for_approval" | "approve_for_me";
   readonly toolPolicyJson: string;
   readonly installedBuiltinFamily: "claude" | "gpt" | undefined;
   readonly mcpManifests: Readonly<Record<string, RuntimeConfigurationPatch | undefined>>;
@@ -25,7 +25,7 @@ export interface RequestExecutionSnapshot {
 
 export interface RequestExecutionSnapshotInput {
   readonly currentModel: RequestExecutionSnapshot["currentModel"];
-  readonly approvalMode: string;
+  readonly approvalMode: RequestExecutionSnapshot["approvalMode"];
   readonly toolPolicyJson: string;
   readonly toolCatalogJson: string;
 }

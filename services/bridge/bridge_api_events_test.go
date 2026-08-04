@@ -243,6 +243,11 @@ func TestPostgreSQLBridgeAPIStoreWriteEventStampsPrivateRequestStartBoundary(t *
 	if projectionJSON != `{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}` {
 		t.Fatalf("private request-start projection = %s", projectionJSON)
 	}
+	duplicateStart := proto.Clone(request).(*bridgev1.WriteEventRequest)
+	duplicateStart.RuntimeWriteId = "rwrite_request_start_duplicate_identity"
+	if _, err := store.WriteEvent(context.Background(), duplicateStart); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("second Request Start for one model request err = %v; want AlreadyExists", err)
+	}
 
 	missing := proto.Clone(request).(*bridgev1.WriteEventRequest)
 	missing.RuntimeWriteId = "rwrite_request_start_missing"
@@ -272,6 +277,55 @@ func TestPostgreSQLBridgeAPIStoreWriteEventStampsPrivateRequestStartBoundary(t *
 				t.Fatalf("invalid request-start metadata err = %v; want InvalidArgument", err)
 			}
 		})
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_tool_result_membership", "thr_tool_result_membership")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_tool_result_membership", "bind_tool_result_membership", 1, "pod_tool_result_membership")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_tool_result_membership", "thr_tool_result_membership", "bind_tool_result_membership", 1, "pod_tool_result_membership")
+
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_tool_result_membership_start", "mreq_tool_result_membership", "agent_provider_request", 0)
+	orphan := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_orphan_tool_result", ModelRequestId: "mreq_tool_result_membership",
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"sevt_missing_tool_use","content":[{"type":"text","text":"done"}],"is_error":false}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_orphan_tool_result", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_missing","toolName":"Read","toolUseEventId":"sevt_missing_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{}},"output":{"text":"done","truncated":false}}}`},
+		)},
+	}
+	if _, err := store.WriteEvent(context.Background(), orphan); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("orphan Tool Result err = %v; want FailedPrecondition", err)
+	}
+
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_tool_result_membership_use", ModelRequestId: "mreq_tool_result_membership",
+		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_tool_result_membership_use", "agent.tool_use", "streaming",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{}}}}`},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent Tool Use: %v", err)
+	}
+	resultRequest := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_tool_result_membership_first", ModelRequestId: "mreq_tool_result_membership",
+		EventType: "agent.tool_result", PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}],"is_error":false}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_tool_result_membership_first", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{}},"output":{"text":"done","truncated":false}}}`},
+		)},
+	}
+	if _, err := store.WriteEvent(context.Background(), resultRequest); err != nil {
+		t.Fatalf("WriteEvent first Tool Result: %v", err)
+	}
+	duplicateResult := proto.Clone(resultRequest).(*bridgev1.WriteEventRequest)
+	duplicateResult.RuntimeWriteId = "rwrite_tool_result_membership_second"
+	if _, err := store.WriteEvent(context.Background(), duplicateResult); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("second Tool Result err = %v; want AlreadyExists", err)
 	}
 }
 

@@ -33,7 +33,7 @@
  *     and a documented join or finalizer path.
  *
  * UPDATE-WITH: services/agent-runtime/packages/core/src/session/session-manager.ts,
- *              services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts,
+ *              services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts,
  *              services/agent-runtime/packages/core/src/tools/tool-scheduler.ts
  *
  * The unit suite currently calls make() directly to exercise this generic coordinator. The

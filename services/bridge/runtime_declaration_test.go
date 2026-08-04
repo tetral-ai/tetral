@@ -45,6 +45,7 @@ type runtimeDeclarationVector struct {
 	FinishReason             string                          `json:"finish_reason"`
 	UsageJSON                string                          `json:"usage_json"`
 	RequestKind              string                          `json:"request_kind"`
+	ContextThroughSequence   int64                           `json:"context_through_message_sequence"`
 	DurableTurnID            string                          `json:"durable_turn_id"`
 	StopReasonJSON           string                          `json:"stop_reason_json"`
 	FailureJSON              string                          `json:"failure_json"`
@@ -104,6 +105,7 @@ func TestRuntimeDeclarationDigestsMatchSharedVectors(t *testing.T) {
 	families := []string{
 		"commit_inputs",
 		"write_event",
+		"write_event_request_start",
 		"write_request_end",
 		"finish_idle",
 		"runtime_termination",
@@ -152,13 +154,17 @@ func runtimeDeclarationDigestForVector(t *testing.T, family string, vector runti
 			Drafts:         []*bridgev1.RuntimeMessageDraft{runtimeDeclarationDraftForVector(t, vector.Draft, bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT)},
 		}
 		digest, err = commitInputsDeclarationDigest(request, request.GetInputKind())
-	case "write_event":
+	case "write_event", "write_event_request_start":
 		request := &bridgev1.WriteEventRequest{
 			Scope:          scope,
 			RuntimeWriteId: vector.RuntimeWriteID,
 			ModelRequestId: vector.ModelRequestID,
 			EventType:      vector.EventType,
 			PayloadJson:    vector.PayloadJSON,
+		}
+		if family == "write_event_request_start" {
+			request.ContextThroughMessageSequence = &vector.ContextThroughSequence
+			request.RequestKind = vector.RequestKind
 		}
 		stableReasoning := mustNormalizeStableReasoning(t, request)
 		serverToolUse, normalizeErr := normalizeServerToolUseUsage(request)

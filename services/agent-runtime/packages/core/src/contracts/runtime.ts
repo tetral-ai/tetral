@@ -2,7 +2,7 @@
  * This module provides Runtime Core's shared domain and integration-port boundary definitions.
  * It guards validated message, part, event, failure, settlement, and store shapes
  * plus the byte bounds imposed at stable-write and transport edges. The session
- * processor, agent loop, tool runner, context loader, and Bridge adapters consume
+ * processor, ThreadLoop, tool runner, context loader, and Bridge adapters consume
  * it; it composes provider schemas and invokes injected store operations through
  * validating wrappers.
  *

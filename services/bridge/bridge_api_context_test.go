@@ -142,22 +142,26 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCutsTurnFactsAtLatestCompaction(t *t
 	)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("context-compaction-cut-key-32byte")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "evt_rwrite_context_compaction_running")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, runtime_write_id, projection_json, created_at, updated_at
 		) VALUES
-		('default', $1, $2, 'evt_context_old_start', 1, 'span.model_request_start',
+		('default', $1, $2, 'evt_context_old_start', 2, 'span.model_request_start',
 		 '{"type":"span.model_request_start","model_request_id":"mreq_context_old"}',
 		 'internal', false, 'mreq_context_old', NULL,
 		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', NOW(), NOW()),
-		('default', $1, $2, 'evt_context_old_tool', 2, 'agent.tool_use',
+		('default', $1, $2, 'evt_context_old_tool', 3, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}',
 		 'public', true, 'mreq_context_old', NULL, '{}', NOW(), NOW()),
-		('default', $1, $2, 'evt_context_old_end', 3, 'span.model_request_end',
+		('default', $1, $2, 'evt_context_old_end', 4, 'span.model_request_end',
 		 '{"type":"span.model_request_end","model_request_id":"mreq_context_old","model_request_start_id":"evt_context_old_start","is_error":false}',
 		 'internal', false, 'mreq_context_old', NULL, '{}', NOW(), NOW()),
-		('default', $1, $2, 'evt_context_old_repair', 4, 'agent.tool_result',
+		('default', $1, $2, 'evt_context_old_repair', 5, 'agent.tool_result',
 		 '{"type":"agent.tool_result","tool_use_id":"evt_context_old_tool","is_error":true,"reason":"runtime_pod_lost"}',
 		 'public', true, 'mreq_context_old', 'rwrite_runtime_pod_lost_tool_old', '{}', NOW(), NOW())`,
 		sessionID, threadID,
@@ -181,9 +185,6 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCutsTurnFactsAtLatestCompaction(t *t
 		t.Fatalf("project pre-compaction pod-loss repair: %v", err)
 	}
 
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.RuntimeBindingTokenHMACKey = []byte("context-compaction-cut-key-32byte")
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 	start := seedBridgeAPIRequestStart(
 		t, store, scope, "rwrite_context_compaction_start", "mreq_context_compaction",
 		"compaction_summary", 1,
@@ -223,10 +224,14 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCutsTurnFactsAtLatestCompaction(t *t
 	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode compacted context: %v", err)
 	}
-	if len(payload.Messages) != 1 || len(payload.TurnFacts.Events) != 2 {
-		t.Fatalf("compacted context = messages %d events %+v; want checkpoint plus compaction Start/End", len(payload.Messages), payload.TurnFacts.Events)
+	if payload.DurableTurnID == nil || *payload.DurableTurnID != "evt_rwrite_context_compaction_running" {
+		t.Fatalf("durable turn id = %v; want open compaction run", payload.DurableTurnID)
 	}
-	for _, event := range payload.TurnFacts.Events {
+	if len(payload.Messages) != 1 || len(payload.TurnFacts.Events) != 3 ||
+		payload.TurnFacts.Events[0].EventID != *payload.DurableTurnID {
+		t.Fatalf("compacted context = messages %d events %+v; want running plus compaction Start/End", len(payload.Messages), payload.TurnFacts.Events)
+	}
+	for _, event := range payload.TurnFacts.Events[1:] {
 		if event.ModelRequestID == nil || *event.ModelRequestID != "mreq_context_compaction" {
 			t.Fatalf("historical turn fact leaked past compaction: %+v", event)
 		}
@@ -433,6 +438,8 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("context-idle-cleanup-key-32bytes!!")
 	scope := bridgeAPIScope(sessionID, threadID, "bind_context_idle_cleanup", 1, "pod_context_idle_cleanup")
+	const durableTurnID = "evt_context_idle_cleanup_running"
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
 	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_context_cleanup_start", modelRequestID, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_context_cleanup_tool", ModelRequestId: modelRequestID,
@@ -452,6 +459,12 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 		RequestKind: "agent_provider_request",
 	}); err != nil {
 		t.Fatalf("seal cleanup request: %v", err)
+	}
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, &bridgev1.FinishIdleRequest{
+		Scope: scope, DurableTurnId: durableTurnID,
+		StopReasonJson: `{"type":"requires_action","event_ids":["` + toolUse.GetEventId() + `"]}`,
+	}); err != nil {
+		t.Fatalf("finish requires-action turn: %v", err)
 	}
 	var resultEventID string
 	client := dbconnect.NewClientForTesting(runtime)
@@ -1331,7 +1344,13 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result")
-	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result", "evt_public_tool_use", 1)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.Clock = func() time.Time { return now }
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
+	scope := bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_tool_result_start", "mrq_pending_approval", "agent_provider_request", 0)
+	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result", "evt_public_tool_use", 2)
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_pending_tool_uses
 		    SET status = 'resolving',
@@ -1342,20 +1361,16 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		t.Fatalf("seed resolving pending approval: %v", err)
 	}
 
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	store.Clock = func() time.Time { return now }
-	store.RuntimeBindingTokenHMACKey = []byte("bridge-runtime-binding-token-test-key-32")
 	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope:          bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result"),
+		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_tool_result",
-		ModelRequestId: "mreq_bridge_tool_result",
+		ModelRequestId: "mrq_pending_approval",
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"done"}]}`,
 		SessionVisible: true,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t,
-			bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result"),
+			scope,
 			"rwrite_bridge_tool_result",
 			"agent.tool_result",
 			"completed",
@@ -1398,9 +1413,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	if err != nil {
 		t.Fatalf("LoadContext after tool result: %v", err)
 	}
-	var contextPayload struct {
-		Messages []json.RawMessage `json:"messages"`
-	}
+	var contextPayload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(contextResponse.GetContextJson()), &contextPayload); err != nil {
 		t.Fatalf("parse context JSON: %v", err)
 	}
@@ -1408,6 +1421,31 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		t.Fatalf("LoadContext messages = %d; want 1 in %s", len(contextPayload.Messages), contextResponse.GetContextJson())
 	}
 	assertToolResultRuntimeMessage(t, string(contextPayload.Messages[0]), "tool-call-result", "search", "evt_public_tool_use", "completed", "done")
+	var resultFact *bridgeLoadContextToolResult
+	for _, event := range contextPayload.TurnFacts.Events {
+		if event.Type == "agent.tool_result" {
+			resultFact = event.ToolResult
+		}
+	}
+	if resultFact == nil || resultFact.ToolUseEventID != "evt_public_tool_use" || resultFact.Outcome != "success" {
+		t.Fatalf("LoadContext Tool Result fact = %+v; want successful projected outcome", resultFact)
+	}
+}
+
+func TestBridgeTurnToolResultFactUsesToolUseProjectionIdentity(t *testing.T) {
+	result, err := bridgeTurnToolResultFact(
+		"agent.tool_result",
+		`{"type":"agent.tool_result","tool_use_id":"evt_cancelled_tool"}`,
+		map[string][]bridgeContextToolPart{
+			"evt_cancelled_tool": {{Status: "cancelled"}},
+		},
+	)
+	if err != nil {
+		t.Fatalf("build cancelled Tool Result fact: %v", err)
+	}
+	if result.ToolUseEventID != "evt_cancelled_tool" || result.Outcome != "cancelled" {
+		t.Fatalf("cancelled Tool Result fact = %+v; want Tool Use keyed cancelled outcome", result)
+	}
 }
 
 func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *testing.T) {
@@ -1466,6 +1504,30 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 		t.Fatalf("CommitMcpToolResult: %v", err)
 	}
 
+	_, err = store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:                    scope,
+		RuntimeWriteId:           "rwrite_bridge_mcp_result_conflicting_identity",
+		ModelRequestId:           "mreq_bridge_mcp",
+		EventType:                "agent.mcp_tool_result",
+		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","tool_use_event_id":"evt_conflicting_mcp_alias","content":[{"type":"text","text":"done"}]}`,
+		SessionVisible:           true,
+		McpMaterializationHandle: materialized.MaterializationHandle,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_bridge_mcp_result_conflicting_identity",
+			"agent.mcp_tool_result",
+			"completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_bridge_mcp","toolName":"search_code","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
+			},
+		)},
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent conflicting MCP identity err = %v; want FailedPrecondition", err)
+	}
+
 	result, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:                    scope,
 		RuntimeWriteId:           "rwrite_bridge_mcp_result",
@@ -1519,5 +1581,18 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 	}
 	if !strings.Contains(contextResponse.GetContextJson(), `"toolEvent":{"kind":"mcp","mcpServerName":"github"}`) {
 		t.Fatalf("LoadContext lost MCP result identity: %s", contextResponse.GetContextJson())
+	}
+	var contextPayload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(contextResponse.GetContextJson()), &contextPayload); err != nil {
+		t.Fatalf("parse MCP context JSON: %v", err)
+	}
+	var resultFact *bridgeLoadContextToolResult
+	for _, event := range contextPayload.TurnFacts.Events {
+		if event.Type == "agent.mcp_tool_result" {
+			resultFact = event.ToolResult
+		}
+	}
+	if resultFact == nil || resultFact.ToolUseEventID != toolUse.GetEventId() || resultFact.Outcome != "success" {
+		t.Fatalf("LoadContext MCP Tool Result fact = %+v; want successful projected outcome", resultFact)
 	}
 }

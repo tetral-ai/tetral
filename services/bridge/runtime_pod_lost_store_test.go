@@ -19,6 +19,62 @@ import (
 
 // This file owns PostgreSQL delivery-store pod-loss repair tests.
 
+func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_runtime_repair_thread_scope"
+		mainThreadID   = "thr_runtime_repair_thread_scope_main"
+		childThreadID  = "thr_runtime_repair_thread_scope_child"
+		modelRequestID = "mreq_runtime_repair_shared"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		) VALUES
+		('default', $1, $2, 'evt_repair_main_start', 1, 'span.model_request_start', '{}',
+		 'internal', false, $4, '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		('default', $1, $3, 'evt_repair_child_start', 1, 'span.model_request_start', '{}',
+		 'internal', false, $4, '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		('default', $1, $3, 'evt_repair_child_end', 2, 'span.model_request_end', '{}',
+		 'internal', false, $4, '{}', now(), now())`,
+		sessionID, mainThreadID, childThreadID, modelRequestID,
+	); err != nil {
+		t.Fatalf("seed same-request-id sibling events: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtime)
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_thread_scope", func(tx *dbconnect.Tx) error {
+		starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", sessionID)
+		if err != nil {
+			return err
+		}
+		if len(starts) != 1 || starts[0].SessionThreadID != mainThreadID || starts[0].EventID != "evt_repair_main_start" {
+			t.Fatalf("pod-loss open starts = %+v; want only main-thread start", starts)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("query pod-loss open starts: %v", err)
+	}
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.termination_thread_scope", func(tx *dbconnect.Tx) error {
+		starts, err := runtimeTerminationOpenRequestStartsTx(
+			context.Background(),
+			tx,
+			bridgeAPIScope(sessionID, mainThreadID, "bind_unused", 1, "pod_unused"),
+		)
+		if err != nil {
+			return err
+		}
+		if len(starts) != 1 || starts[0].SessionThreadID != mainThreadID || starts[0].EventID != "evt_repair_main_start" {
+			t.Fatalf("runtime-termination open starts = %+v; want main-thread start", starts)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("query runtime-termination open starts: %v", err)
+	}
+}
+
 func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplacement(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss")
@@ -281,7 +337,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	}
 }
 
-func TestRuntimePodLossSettlesMCPToolWithoutConnectorReplay(t *testing.T) {
+func TestRuntimePodLossSettlesMCPToolNamedLikeSubAgentToolWithoutConnectorReplay(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID      = "sesn_mcp_pod_loss"
@@ -303,13 +359,13 @@ func TestRuntimePodLossSettlesMCPToolWithoutConnectorReplay(t *testing.T) {
 		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}',
 		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
 		('default', $1, $2, $4, 2, 'agent.mcp_tool_use',
-		 '{"type":"agent.mcp_tool_use","name":"search_code","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}',
+		 '{"type":"agent.mcp_tool_use","name":"spawn_agent","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}',
 		 'public', true, $3, '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		sessionID, threadID, modelRequestID, toolUseEventID,
 	); err != nil {
 		t.Fatalf("seed MCP pod-loss events: %v", err)
 	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, "call_mcp_pod_loss", "search_code")
+	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, "call_mcp_pod_loss", "spawn_agent")
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_messages
 		    SET data_json = jsonb_set(
@@ -354,8 +410,9 @@ func TestRuntimePodLossSettlesMCPToolWithoutConnectorReplay(t *testing.T) {
 	).Scan(&lastEventID, &messageJSON); err != nil {
 		t.Fatalf("read repaired MCP message: %v", err)
 	}
-	if lastEventID != resultEventID || !strings.Contains(messageJSON, `"status":"error"`) {
-		t.Fatalf("repaired MCP message last event/data = %q/%s", lastEventID, messageJSON)
+	if lastEventID != resultEventID || !strings.Contains(messageJSON, `"status":"error"`) ||
+		!strings.Contains(messageJSON, `"retryable":false`) {
+		t.Fatalf("repaired MCP message last event/data = %q/%s; want non-retryable terminal error", lastEventID, messageJSON)
 	}
 	if _, err := runRuntimePodLostRepairTransaction(
 		context.Background(), runtime, sessionID, binding, time.Date(2026, 1, 1, 0, 6, 0, 0, time.UTC),
@@ -374,6 +431,54 @@ func TestRuntimePodLossSettlesMCPToolWithoutConnectorReplay(t *testing.T) {
 	}
 	if resultCount != 1 {
 		t.Fatalf("MCP pod-loss result count = %d; want exactly one", resultCount)
+	}
+}
+
+func TestRuntimePodLossDetectsInternalApprovalReviewerToolUse(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_reviewer_pod_loss"
+		mainThreadID   = "thr_reviewer_pod_loss_main"
+		reviewerID     = "thr_reviewer_pod_loss"
+		modelRequestID = "mreq_reviewer_pod_loss"
+		toolUseEventID = "evt_reviewer_pod_loss_tool"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainThreadID, reviewerID)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		) VALUES
+		('default', $1, $2, 'evt_reviewer_pod_loss_start', 1, 'span.model_request_start',
+		 '{"type":"span.model_request_start","model_request_id":"mreq_reviewer_pod_loss","request_kind":"approval_reviewer"}',
+		 'internal', false, $3,
+		 '{"context_through_message_sequence":0,"request_kind":"approval_reviewer"}',
+		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+		('default', $1, $2, $4, 2, 'agent.tool_use',
+		 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
+		 'internal', false, $3, '{}',
+		 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		sessionID, reviewerID, modelRequestID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("seed reviewer pod-loss events: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(
+		t, admin, "default", sessionID, reviewerID, modelRequestID,
+		toolUseEventID, "call_reviewer_pod_loss", "Read",
+	)
+
+	client := dbconnect.NewClientForTesting(runtime)
+	var orphans []runtimeOrphanToolUse
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.reviewer_pod_loss", func(tx *dbconnect.Tx) error {
+		var err error
+		orphans, err = runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID)
+		return err
+	}); err != nil {
+		t.Fatalf("load reviewer pod-loss Tool Uses: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].EventID != toolUseEventID || orphans[0].SessionThreadID != reviewerID {
+		t.Fatalf("reviewer orphan Tool Uses = %+v; want internal reviewer Read", orphans)
 	}
 }
 
@@ -467,6 +572,63 @@ func TestRuntimePodLossUsesDurablePrivateRequestKind(t *testing.T) {
 	}
 	if !strings.Contains(payloadJSON, `"request_kind":"compaction_summary"`) {
 		t.Fatalf("repaired Request End = %s; want durable compaction request kind", payloadJSON)
+	}
+}
+
+func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_pod_loss_pending_approval"
+		threadID       = "thr_pod_loss_pending_approval"
+		modelRequestID = "mreq_pod_loss_pending_approval"
+		toolUseEventID = "evt_pod_loss_pending_approval_tool"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		) VALUES
+		('default', $1, $2, 'evt_pod_loss_pending_approval_start', 1, 'span.model_request_start',
+		 '{"type":"span.model_request_start","model_request_id":"mreq_pod_loss_pending_approval"}',
+		 'internal', false, $3, '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		('default', $1, $2, $4, 2, 'agent.tool_use',
+		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}',
+		 'public', true, $3, '{}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_pending_approval_end', 3, 'span.model_request_end',
+		 '{"type":"span.model_request_end","model_request_id":"mreq_pod_loss_pending_approval","finish_reason":"tool_calls"}',
+		 'internal', false, $3, '{}', now(), now())`,
+		sessionID, threadID, modelRequestID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("seed pending-approval request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(
+		t, admin, "default", sessionID, threadID, modelRequestID,
+		toolUseEventID, "tool-call-pending-approval", "Write",
+	)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_pending_tool_uses (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+			tool_name, kind, input_json, status, expires_at, created_at, updated_at
+		) VALUES ('default', $1, $2, $3, 'tool-call-pending-approval', 'Write', 'approval',
+			'{"file_path":"src/a.ts"}', 'pending', now() + interval '30 minutes', now(), now())`,
+		sessionID, threadID, toolUseEventID,
+	); err != nil {
+		t.Fatalf("seed pending approval: %v", err)
+	}
+
+	client := dbconnect.NewClientForTesting(runtime)
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_pending_approval", func(tx *dbconnect.Tx) error {
+		toolUses, err := runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID)
+		if err != nil {
+			return err
+		}
+		if len(toolUses) != 0 {
+			t.Fatalf("pod-loss orphan Tool Uses = %+v; want pending approval preserved", toolUses)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("query pod-loss orphan Tool Uses: %v", err)
 	}
 }
 

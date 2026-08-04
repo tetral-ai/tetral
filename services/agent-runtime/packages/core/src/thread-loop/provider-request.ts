@@ -4,14 +4,15 @@
  * It guards request-kind-specific system composition and schema coupling, system-segment ordering
  * and cache hints, provider-visible tool projection, and the byte and identity bounds that must hold
  * before a Gateway call is attempted.
- * The agent loop calls this module with cold runtime configuration; it calls the tool catalog's
- * projection helper and the generated Gateway protocol types without performing I/O itself.
+ * ThreadLoop calls this module with cold runtime configuration; request assembly stays pure,
+ * while the scoped provider Fiber lifecycle is owned here and supplied an already-built Effect.
  */
 import {
   ProviderRequestKind,
   SystemCacheHint,
   SystemSegmentKind,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { Cause, Effect, Exit, Fiber, Scope } from "effect";
 import type {
   ProviderRequest,
   ProviderRequestAttachment,
@@ -20,11 +21,23 @@ import type {
   SystemSegment,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
-import type { RuntimeFailure } from "../contracts/runtime.js";
-import type { RuntimeSessionIdentity } from "../session/session.js";
-import { normalizeRuntimeFailure } from "../contracts/runtime.js";
+import type {
+  RuntimeFailure,
+  RuntimeJsonValue,
+  RuntimeMessageDraft,
+  RuntimeRequestErrorKind,
+  SessionEventWriterAppendResult,
+  SessionEventWriterRequestEndEnvelope,
+} from "../contracts/runtime.js";
+import type { RuntimeThreadIdentity, ThreadRuntime } from "./thread-runtime.js";
+import { normalizeRuntimeFailure, normalizeSessionEventWriterError } from "../contracts/runtime.js";
+import type { LLMRequest } from "../llm/llm-service.js";
+import type { RuntimeAttachmentRejection } from "../llm/llm-event.js";
+import type { RuntimeMetricOutcome, RuntimeProviderStreamKind } from "../runtime/metrics.js";
+import { NoopRuntimeMetricsSink } from "../runtime/metrics.js";
 import type { ToolCatalog } from "../tools/tool-catalog.js";
 import { providerToolDefinitions } from "../tools/tool-catalog.js";
+import type { ThreadLoopRuntimeOptions, ThreadLoopRuntimePolicy } from "./thread-loop.js";
 
 /** Describes one resolved skill version rendered into deterministic provider guidance. */
 export interface SkillGuidanceIndexEntry {
@@ -68,7 +81,7 @@ export interface ProviderCallRuntimeConfig {
 
 /** Supplies the durable identity, model selection, message view, and runtime config for one call. */
 export interface ProviderCallAssemblyInput {
-  readonly identity: RuntimeSessionIdentity;
+  readonly identity: RuntimeThreadIdentity;
   readonly requestId: string;
   readonly modelRequestId: string;
   readonly currentModel: {
@@ -97,10 +110,349 @@ export interface ProviderCallAssemblyFailure {
 
 export type ProviderCallAssemblyResult = ProviderCallAssemblySuccess | ProviderCallAssemblyFailure;
 
-/** Allows the agent loop to inject an equivalent synchronous or asynchronous request assembler. */
+/** Allows ThreadLoop to inject an equivalent synchronous or asynchronous request assembler. */
 export type ProviderCallAssembler = (
   input: ProviderCallAssemblyInput,
 ) => ProviderCallAssemblyResult | Promise<ProviderCallAssemblyResult>;
+
+/** One provider attachment excluded after a normalized Gateway rejection. */
+export interface RejectedProviderAttachment {
+  readonly attachment: ProviderRequestAttachment;
+  readonly reason: RuntimeAttachmentRejection["reason"];
+}
+
+interface RequestEndProjection {
+  stableReasoningParts(): readonly NonNullable<SessionEventWriterRequestEndEnvelope["stableReasoningParts"]>[number][];
+  applyRequestEndSeal(
+    eventId: string,
+    seal: RuntimeMessageDraft | undefined,
+    declaration: NonNullable<Extract<SessionEventWriterAppendResult, { readonly ok: true }>["declaration"]>,
+  ): boolean;
+}
+
+export type EffectRestore = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+
+/** Runs one provider stream Fiber inside its Thread-turn scope and joins it interruptibly. */
+export function runProviderStreamLifecycle<A, E, R>(
+  restore: EffectRestore,
+  providerStream: Effect.Effect<A, E, R>,
+  requestScope: Scope.Closeable,
+  abortProvider: () => void,
+): Effect.Effect<{
+  readonly streamExit: Exit.Exit<A, E>;
+  readonly interruptProvider: Effect.Effect<void, never>;
+}, never, R> {
+  return Effect.gen(function* () {
+    const providerFiber = yield* restore(providerStream).pipe(Effect.forkIn(requestScope));
+    const interruptProvider = Effect.sync(abortProvider).pipe(
+      Effect.andThen(Fiber.interrupt(providerFiber)),
+      Effect.exit,
+      Effect.asVoid,
+    );
+    const streamExit = yield* restore(
+      Fiber.join(providerFiber).pipe(Effect.onInterrupt(() => interruptProvider)),
+    ).pipe(Effect.exit);
+    return { streamExit, interruptProvider };
+  });
+}
+
+export function recordProviderStreamDuration(
+  options: ThreadLoopRuntimeOptions,
+  kind: RuntimeProviderStreamKind,
+  startedAt: number,
+  outcome: RuntimeMetricOutcome,
+): void {
+  (options.metrics ?? NoopRuntimeMetricsSink).observeProviderStreamDuration(
+    kind,
+    options.runtime.monotonicMs() - startedAt,
+    outcome,
+  );
+}
+
+export function providerStreamMetricOutcome(
+  exit: Exit.Exit<unknown, unknown>,
+  runtimeShutdownRequested: boolean,
+): RuntimeMetricOutcome {
+  if (runtimeShutdownRequested) {
+    return "cancelled";
+  }
+  if (Exit.isSuccess(exit)) {
+    return "success";
+  }
+  return Cause.hasInterruptsOnly(exit.cause) ? "cancelled" : "error";
+}
+
+export async function assembleLLMRequest(
+  session: ThreadRuntime,
+  options: ThreadLoopRuntimeOptions,
+  currentModel: { readonly providerId: string; readonly modelId: string },
+  runtimeMessages: readonly GatewayRuntimeMessage[],
+  executionPolicy: Readonly<ThreadLoopRuntimePolicy>,
+): Promise<{ readonly ok: true; readonly request: LLMRequest } | { readonly ok: false; readonly error: RuntimeFailure }> {
+  const assembler = options.providerCallAssembler ?? assembleProviderCallRequest;
+  try {
+    const result = await assembler({
+      identity: session.identity,
+      requestId: options.runtime.createId("provider_request"),
+      modelRequestId: options.runtime.createId("model_request"),
+      currentModel,
+      runtimeMessages,
+      runtime: providerCallRuntimeForSession(session, options, executionPolicy),
+    });
+    return result.ok ? { ok: true, request: result.request } : { ok: false, error: result.error };
+  } catch (error) {
+    return {
+      ok: false,
+      error: normalizeRuntimeFailure({
+        type: "runtime",
+        code: "runtime_invalid_sequence",
+        retryable: false,
+        fatal: true,
+        reason: "runtime_contract_validation",
+        rawError: error,
+        sessionId: session.sessionId,
+        providerId: currentModel.providerId,
+        modelId: currentModel.modelId,
+      }),
+    };
+  }
+}
+
+export function recordAttachmentRejections(
+  requestAttachments: readonly ProviderRequestAttachment[],
+  rejectedAttachments: RejectedProviderAttachment[],
+  rejections: readonly RuntimeAttachmentRejection[],
+): void {
+  for (const rejection of rejections) {
+    const identity = attachmentRejectionOriginIdentity(rejection.origin);
+    const attachment = requestAttachments.find((candidate) =>
+      providerRequestAttachmentIdentity(candidate) === identity
+    );
+    if (
+      attachment === undefined
+      || rejectedAttachments.some((existing) =>
+        providerRequestAttachmentIdentity(existing.attachment) === identity
+      )
+    ) {
+      continue;
+    }
+    rejectedAttachments.push({ attachment, reason: rejection.reason });
+  }
+}
+
+export function attachmentConsumptionUnion(
+  carriedAttachments: readonly ProviderRequestAttachment[],
+  rejectedAttachments: Iterable<RejectedProviderAttachment>,
+): readonly ProviderRequestAttachment[] {
+  const union: ProviderRequestAttachment[] = [];
+  const identities = new Set<string>();
+  for (const attachment of carriedAttachments) {
+    const identity = providerRequestAttachmentIdentity(attachment);
+    if (!identities.has(identity)) {
+      identities.add(identity);
+      union.push(attachment);
+    }
+  }
+  for (const rejection of rejectedAttachments) {
+    const identity = providerRequestAttachmentIdentity(rejection.attachment);
+    if (!identities.has(identity)) {
+      identities.add(identity);
+      union.push(rejection.attachment);
+    }
+  }
+  return union;
+}
+
+function attachmentRejectionOriginIdentity(origin: RuntimeAttachmentRejection["origin"]): string {
+  return origin.type === "transient"
+    ? JSON.stringify([
+        "transient",
+        origin.attachmentRef,
+        origin.sourceToolUseEventId,
+        origin.sourcePath,
+        origin.pageRange,
+        origin.detail,
+      ])
+    : JSON.stringify(["file-backed", origin.sourceEventId, origin.fileId]);
+}
+
+export function providerCallRuntimeForSession(
+  session: ThreadRuntime,
+  options: ThreadLoopRuntimeOptions,
+  policy: Readonly<ThreadLoopRuntimePolicy>,
+): ProviderCallRuntimeConfig {
+  const runtime = options.providerCallRuntime ?? DefaultProviderCallRuntimeConfig;
+  const { outputSchemaJson: _discardedGlobalOutputSchema, ...runtimeWithoutOutputSchema } = runtime;
+  const outputSchemaJson = session.state.providerRequestOutputSchemaJson();
+  const toolsetFamily = session.configuration.installedBuiltinFamily();
+  const attachments = [
+    ...(runtime.attachments ?? []),
+    ...session.state.beginPendingAttachmentRide(),
+  ];
+  return {
+    ...runtimeWithoutOutputSchema,
+    ...(toolsetFamily === undefined ? {} : { toolsetFamily }),
+    ...(session.identity.threadRole === "approval_reviewer"
+      ? {
+          requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+          ...(outputSchemaJson === undefined ? {} : { outputSchemaJson }),
+        }
+      : {}),
+    ...(policy.toolCatalog === undefined ? {} : { toolCatalog: policy.toolCatalog }),
+    ...(policy.system === undefined ? {} : { agentSystem: policy.system }),
+    ...(policy.skillsIndex === undefined ? {} : { skillsIndex: policy.skillsIndex }),
+    ...(policy.memoryStores === undefined ? {} : { memoryStores: policy.memoryStores }),
+    ...(attachments.length === 0 ? {} : { attachments }),
+  };
+}
+
+export function requestEndKindForSession(
+  session: ThreadRuntime,
+): NonNullable<SessionEventWriterRequestEndEnvelope["requestKind"]> | undefined {
+  return session.identity.threadRole === "approval_reviewer" ? "approval_reviewer" : undefined;
+}
+
+export function requestErrorKindFromFailure(failure: RuntimeFailure): RuntimeRequestErrorKind {
+  if (failure.type === "provider") {
+    return "provider_error";
+  }
+  if (failure.reason === "runtime_shutdown") {
+    return "runtime_interrupted";
+  }
+  if (failure.code === "gateway_stream_error" || failure.code === "gateway_unavailable") {
+    return "gateway_stream_error";
+  }
+  if (failure.code === "gateway_protocol_error") {
+    return "gateway_protocol_error";
+  }
+  if (
+    failure.type === "runtime"
+    && failure.code === "runtime_invalid_sequence"
+    && failure.reason === "runtime_contract_validation"
+  ) {
+    return "runtime_semantic_error";
+  }
+  return "runtime_persistence_error";
+}
+
+export function stableReasoningParts(
+  processor: RequestEndProjection,
+): NonNullable<SessionEventWriterRequestEndEnvelope["stableReasoningParts"]> {
+  return [...processor.stableReasoningParts()];
+}
+
+export type RequestEndSealApplication =
+  | { readonly type: "applied" }
+  | { readonly type: "stale_custody" }
+  | { readonly type: "failed"; readonly error: RuntimeFailure };
+
+export function applyRequestEndSeal(
+  processor: RequestEndProjection,
+  seal: RuntimeMessageDraft | undefined,
+  result: {
+    readonly eventId: string;
+    readonly declaration?: NonNullable<Extract<SessionEventWriterAppendResult, { readonly ok: true }>["declaration"]> | undefined;
+  },
+): RequestEndSealApplication {
+  if (result.declaration?.applicationDisposition === "stale_custody") {
+    return { type: "stale_custody" };
+  }
+  try {
+    if (result.declaration !== undefined && processor.applyRequestEndSeal(result.eventId, seal, result.declaration)) {
+      return { type: "applied" };
+    }
+  } catch {
+    // The normalized failure below owns malformed acknowledgement details.
+  }
+  const error = normalizeSessionEventWriterError({ code: "schema_mismatch" });
+  const runtimeCode = error.code === "superseded" || error.code === "unrepairable"
+    ? "runtime_invalid_sequence"
+    : error.code;
+  return {
+    type: "failed",
+    error: normalizeRuntimeFailure({
+      type: "session-event-writer",
+      code: runtimeCode,
+      retryable: error.retryable,
+      fatal: error.fatal,
+      sessionId: error.sessionId,
+    }),
+  };
+}
+
+export function providerRequestWithoutRejectedAttachments(
+  request: LLMRequest,
+  rejectedAttachments: readonly RejectedProviderAttachment[],
+): LLMRequest {
+  if (rejectedAttachments.length === 0) {
+    return request;
+  }
+  return {
+    ...request,
+    attachments: request.attachments.filter((attachment) =>
+      !rejectedAttachments.some((rejection) =>
+        providerRequestAttachmentIdentity(rejection.attachment) === providerRequestAttachmentIdentity(attachment)
+      )
+    ),
+  };
+}
+
+export function providerRequestAttachmentIdentity(attachment: ProviderRequestAttachment): string {
+  if (attachment.transient !== undefined) {
+    return JSON.stringify([
+      "transient",
+      attachment.transient.attachmentRef,
+      attachment.transient.sourceToolUseEventId,
+      attachment.transient.sourcePath,
+      attachment.transient.pageRange,
+      attachment.transient.detail,
+    ]);
+  }
+  if (attachment.fileBacked !== undefined) {
+    return JSON.stringify(["file-backed", attachment.fileBacked.sourceEventId, attachment.fileBacked.fileId]);
+  }
+  return JSON.stringify(["invalid"]);
+}
+
+export function runtimeProviderStreamKindFromRequest(request: LLMRequest): RuntimeProviderStreamKind {
+  switch (request.requestKind) {
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST:
+      return "agent_provider_request";
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER:
+      return "approval_reviewer";
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION:
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY:
+      return "compaction_summary";
+    default:
+      throw new Error("provider request kind is not supported");
+  }
+}
+
+export function requestEndKindFromRequest(
+  request: LLMRequest,
+): NonNullable<SessionEventWriterRequestEndEnvelope["requestKind"]> | undefined {
+  switch (request.requestKind) {
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER:
+      return "approval_reviewer";
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION:
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY:
+      return "compaction_summary";
+    default:
+      return undefined;
+  }
+}
+
+export function providerStreamExhaustedFailure(request: LLMRequest): RuntimeFailure {
+  return normalizeRuntimeFailure({
+    type: "runtime",
+    code: "gateway_stream_error",
+    retryable: false,
+    fatal: true,
+    retryStatus: { type: "terminal" },
+    providerId: request.model?.providerId,
+    modelId: request.model?.modelId,
+  });
+}
 
 // The platform base prompt is a stable environment-facts slot. Its former
 // cross-tool-discipline slot is deliberately empty; tool-specific guidance

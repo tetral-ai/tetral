@@ -433,6 +433,7 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 		          FROM session_events ended
 		         WHERE ended.workspace_id = e.workspace_id
 		           AND ended.session_id = e.session_id
+		           AND ended.session_thread_id = e.session_thread_id
 		           AND ended.model_request_id = e.model_request_id
 		           AND ended.type = 'span.model_request_end'
 		    )
@@ -469,6 +470,10 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 	rows, err := tx.Query(ctx,
 		`SELECT e.session_thread_id, e.event_id, e.type, e.model_request_id, e.payload_json
 		   FROM session_events e
+		   JOIN session_threads thread_scope
+		     ON thread_scope.workspace_id = e.workspace_id
+		    AND thread_scope.session_id = e.session_id
+		    AND thread_scope.id = e.session_thread_id
 		   JOIN session_messages m
 		     ON m.workspace_id = e.workspace_id
 		    AND m.session_id = e.session_id
@@ -478,9 +483,25 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
 		    AND e.type IN ('agent.tool_use', 'agent.mcp_tool_use')
-		    AND e.visibility = 'public'
-		    AND COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
-		    AND EXISTS (
+		    AND (
+		      e.visibility = 'public'
+		      OR (e.visibility = 'internal' AND thread_scope.role = 'approval_reviewer')
+		    )
+			    AND (
+			      e.type <> 'agent.tool_use'
+			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
+			    )
+			    AND NOT EXISTS (
+			        SELECT 1
+			          FROM session_pending_tool_uses pending_approval
+			         WHERE pending_approval.workspace_id = e.workspace_id
+			           AND pending_approval.session_id = e.session_id
+			           AND pending_approval.session_thread_id = e.session_thread_id
+			           AND pending_approval.tool_use_event_id = e.event_id
+			           AND pending_approval.kind = 'approval'
+			           AND pending_approval.status = 'pending'
+			    )
+			    AND EXISTS (
 		        SELECT 1
 		          FROM jsonb_array_elements(
 		               CASE
@@ -538,7 +559,7 @@ func insertRuntimePodLostRequestEndTx(ctx context.Context, tx *dbconnect.Tx, wor
 
 func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, start runtimeOpenRequestStart, errorKind string, writeIDPrefix string, now time.Time) (bool, error) {
 	scope := runtimePodLostRepairScope(workspaceID, sessionID, start.SessionThreadID, binding, start.ModelRequestID)
-	if _, ok, err := modelRequestEndExistsTx(ctx, tx, workspaceID, sessionID, start.ModelRequestID); err != nil || ok {
+	if _, ok, err := modelRequestEndExistsTx(ctx, tx, workspaceID, sessionID, start.SessionThreadID, start.ModelRequestID); err != nil || ok {
 		return false, err
 	}
 	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
@@ -615,7 +636,7 @@ func insertRuntimePodLostToolResultTx(ctx context.Context, tx *dbconnect.Tx, wor
 		Reason:        "runtime_pod_lost",
 		ErrorType:     "runtime_pod_lost",
 		Message:       "Tool result unavailable because the runtime pod was lost.",
-		Retryable:     true,
+		Retryable:     false,
 	}, now)
 }
 
@@ -1013,19 +1034,21 @@ func settleRuntimeTerminalToolPartTx(
 	return nil
 }
 
-func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, modelRequestID string) (string, bool, error) {
+func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, sessionThreadID string, modelRequestID string) (string, bool, error) {
 	var eventID string
 	err := tx.QueryRow(ctx,
 		`SELECT event_id
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND model_request_id = $3
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
 		    AND type = 'span.model_request_end'
 		  ORDER BY sequence ASC
 		  LIMIT 1`,
 		workspaceID,
 		sessionID,
+		sessionThreadID,
 		modelRequestID,
 	).Scan(&eventID)
 	if dbconnect.IsNoRows(err) {

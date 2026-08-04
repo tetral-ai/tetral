@@ -3,7 +3,7 @@
  * Defines tool-job scheduling state, route run-policy inference, and the session-wide permit
  * coordinator used by active request turns. It schedules and projects jobs by caller-assigned model
  * order, and guards bounded concurrency, keyed and session-wide exclusion, approval waits without
- * live-fiber ownership, and permit release on completion or interruption. AgentLoop creates per-turn
+ * live-fiber ownership, and permit release on completion or interruption. ThreadLoop creates per-turn
  * ToolSchedulers and runs route Effects through the SessionToolCoordinator owned by SessionManager;
  * this module calls Effect Deferred primitives and path normalization but no tool route, Bridge,
  * database, queue, or sandbox helper.
@@ -62,7 +62,7 @@ interface SessionToolPermitWaiter {
 
 /**
  * Coordinates tool permits across every active request turn in one session.
- * SessionManager owns one instance per session, and AgentLoop runs each route Effect through it so
+ * SessionManager owns one instance per session, and ThreadLoop runs each route Effect through it so
  * aggregate limits and conflict keys remain effective across concurrent thread runs.
  */
 export class SessionToolCoordinator {
@@ -149,7 +149,7 @@ export class SessionToolCoordinator {
 // no databases, consumes no queue jobs, and does not own Bridge — it only starts
 // ToolFibers when gate state and run policy permit, bounded by maxConcurrentTools
 // (default 8) across the whole scheduled-running set. settled() means this scheduler's
-// running-id bookkeeping is empty; AgentLoop separately owns and joins the actual
+// running-id bookkeeping is empty; ThreadLoop separately owns and joins the actual
 // ToolFibers, and a job may sit in waiting_approval after its fiber exits.
 // Here "starts" means marks and returns eligible jobs. Normal settlement calls back
 // into finishJob; interruption and repair paths settle their fibers outside this

@@ -1686,6 +1686,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_request_retry", "bind_bridge_request_retry", 1, "pod_uid_request_retry")
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("request-reschedule-load-key-32b")
 	store.Clock = func() time.Time { return now }
 	store.ProviderRescheduleBudget = 1
 	store.CompactionRescheduleBudget = 2
@@ -1738,6 +1739,11 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
 		replay.GetDeclaration().GetReceipts()[0].GetRequestReschedule().GetEffectiveDeadline() != disposition.GetEffectiveDeadline() {
 		t.Fatalf("replay = %+v; want duplicate with stored disposition", replay)
+	}
+	if _, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_request_retry_load",
+	}); err != nil {
+		t.Fatalf("LoadContext after accepted reschedule: %v", err)
 	}
 
 	var providerAttempts, compactionAttempts int64
@@ -2151,6 +2157,57 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 	invalid.RequestKind = "model"
 	if _, err := store.WriteRequestEnd(context.Background(), invalid); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("WriteRequestEnd invalid request_kind err = %v; want InvalidArgument", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsRequestKindMismatch(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_kind_mismatch", "thr_bridge_request_kind_mismatch")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_request_kind_mismatch", "bind_bridge_request_kind_mismatch", 1, "pod_bridge_request_kind_mismatch")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_request_kind_mismatch", "thr_bridge_request_kind_mismatch", "bind_bridge_request_kind_mismatch", 1, "pod_bridge_request_kind_mismatch")
+	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_request_kind_mismatch_start", "mreq_bridge_request_kind_mismatch", "compaction_summary", 0)
+
+	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_request_kind_mismatch_end",
+		ModelRequestId: "mreq_bridge_request_kind_mismatch", ModelRequestStartEventId: start.GetEventId(),
+		RequestKind: "agent_provider_request", FinishReason: "stop", UsageJson: `{}`,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteRequestEnd mismatched request kind err = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreWriteRequestEndScopesDuplicateCheckToThread(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_bridge_request_end_thread_scope"
+		mainThreadID   = "thr_bridge_request_end_thread_scope_main"
+		childThreadID  = "thr_bridge_request_end_thread_scope_child"
+		modelRequestID = "mreq_bridge_request_end_shared"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_request_end_thread_scope", 1, "pod_bridge_request_end_thread_scope")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	mainScope := bridgeAPIScope(sessionID, mainThreadID, "bind_bridge_request_end_thread_scope", 1, "pod_bridge_request_end_thread_scope")
+	childScope := bridgeAPIScope(sessionID, childThreadID, "bind_bridge_request_end_thread_scope", 1, "pod_bridge_request_end_thread_scope")
+	mainStart := seedBridgeAPIRequestStart(t, store, mainScope, "rwrite_request_end_thread_scope_main_start", modelRequestID, "agent_provider_request", 0)
+	childStart := seedBridgeAPIRequestStart(t, store, childScope, "rwrite_request_end_thread_scope_child_start", modelRequestID, "agent_provider_request", 0)
+
+	for _, request := range []*bridgev1.WriteRequestEndRequest{
+		{
+			Scope: mainScope, RuntimeWriteId: "rwrite_request_end_thread_scope_main_end", ModelRequestId: modelRequestID,
+			ModelRequestStartEventId: mainStart.GetEventId(), RequestKind: "agent_provider_request", FinishReason: "stop", UsageJson: `{}`,
+		},
+		{
+			Scope: childScope, RuntimeWriteId: "rwrite_request_end_thread_scope_child_end", ModelRequestId: modelRequestID,
+			ModelRequestStartEventId: childStart.GetEventId(), RequestKind: "agent_provider_request", FinishReason: "stop", UsageJson: `{}`,
+		},
+	} {
+		if _, err := store.WriteRequestEnd(context.Background(), request); err != nil {
+			t.Fatalf("WriteRequestEnd thread %s: %v", request.GetScope().GetSessionThreadId(), err)
+		}
 	}
 }
 

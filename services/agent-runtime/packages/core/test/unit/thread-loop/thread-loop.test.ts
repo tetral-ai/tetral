@@ -1,0 +1,1414 @@
+import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { Effect, Layer, Stream } from "effect";
+import { ProviderRequestKind, RuntimeMessageRole, SystemCacheHint, SystemSegmentKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import type { PendingInputResult, RuntimeMessage, SessionEvent, SessionEventWriter } from "../../../src/contracts/runtime.js";
+import { DurableRuntimeMessageSchema, normalizeContextLoaderError, normalizeSessionEventWriterError, RuntimeMessageSchema } from "../../../src/contracts/runtime.js";
+import { runtimeFailureFromProviderError } from "../../../src/llm/llm-event.js";
+import type { Interface as LLMServiceInterface, LLMRequest } from "../../../src/llm/llm-service.js";
+import type { ProviderCallRuntimeConfig } from "../../../src/thread-loop/provider-request.js";
+import { DefaultProviderCallRuntimeConfig } from "../../../src/thread-loop/provider-request.js";
+import * as ThreadLoop from "../../../src/thread-loop/thread-loop.js";
+import { normalizeProviderError } from "../../../src/contracts/provider.js";
+import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
+import type { RuntimeAcceptedInputState, RuntimeTaskNotificationState } from "../../../src/thread-loop/thread-state.js";
+import { MaxProviderRequestAttachments, ThreadState } from "../../../src/thread-loop/thread-state.js";
+import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
+import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
+import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
+import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, catalogForTest, createdAt, failingEventWriter, installLoaderStateForTest, llmService, runtimeThreadLoopLayer, testRunCustody, threadLoopRuntime, writerFrom } from "./thread-loop-test-support.js";
+import type { PackageJson, TestContextLoader } from "./thread-loop-test-support.js";
+
+describe("ThreadLoop", () => {
+test("the ThreadLoop action interpreter exhaustively classifies the closed action union", () => {
+    const activeActions: ThreadTurnAction[] = [
+        { action: "prepare_next_request" },
+        { action: "start_provider_request", modelRequestId: "mrq_start" },
+        { action: "dispatch_tool_use", toolUseEventId: "sevt_tool" },
+        { action: "reconcile_request_seal", modelRequestId: "mrq_seal" },
+        { action: "resume_tool_routes", modelRequestId: "mrq_resume", toolUseEventIds: ["sevt_tool"] },
+        { action: "finish_idle", stopReason: { type: "end_turn" } },
+        { action: "continue_after_compaction", modelRequestId: "mrq_compaction" },
+        { action: "complete_reviewer", modelRequestId: "mrq_reviewer" },
+        { action: "apply_request_retry_or_reschedule", modelRequestId: "mrq_retry" },
+        { action: "close_interrupted" },
+        { action: "close_failed" },
+    ];
+    const passiveActions: ThreadTurnAction[] = [
+        { action: "none" },
+        { action: "await_input" },
+        { action: "await_request_end", modelRequestId: "mrq_open" },
+        { action: "await_tool_results", modelRequestId: "mrq_wait", toolUseEventIds: ["sevt_tool"] },
+    ];
+    expect(activeActions.map((action) => ThreadLoop.interpretThreadTurnAction(action).runDisposition)).toEqual(
+        activeActions.map(() => "active"),
+    );
+    expect(passiveActions.map((action) => ThreadLoop.interpretThreadTurnAction(action).runDisposition)).toEqual(
+        passiveActions.map(() => "passive"),
+    );
+});
+test("pins effect to the approved beta version in package metadata", async () => {
+    const packageJson = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8")) as PackageJson;
+    const lockfileText = await readFile(new URL("../../../../../bun.lock", import.meta.url), "utf8");
+    expect(packageJson.dependencies?.effect).toBe("4.0.0-beta.66");
+    expect(lockfileText).toContain('"effect": "4.0.0-beta.66"');
+    expect(lockfileText).toContain('"effect": ["effect@4.0.0-beta.66"');
+    expect(lockfileText).not.toContain('"effect": "^4.0.0-beta.66"');
+    expect(lockfileText).not.toContain('"effect": "4.0.0-beta.74"');
+    expect(lockfileText).not.toContain('"effect": "3.');
+});
+test("default layer resolves a void session run frame", async () => {
+    const loader = new RecordingContextLoader([], { type: "empty" });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(new ThreadRuntime("sesn_1"), testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, { runtimeModel: () => undefined }))));
+    expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
+});
+test("refreshes the binding token without advancing the request anchor past its committed snapshot", async () => {
+    const session = new ThreadRuntime("sesn_1");
+    const requests: LLMRequest[] = [];
+    const identities: string[] = [];
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-refresh", 0, "refresh token")] });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        events: [
+            { type: "text-start", id: "text-1" },
+            { type: "text-delta", id: "text-1", text_delta: "ok" },
+            { type: "text-end", id: "text-1" },
+            {
+                type: "finish",
+                finishReason: "stop",
+                usage: { inputTokens: 10, outputTokens: 2, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+                modelLimits: { contextWindowTokens: 320, outputTokenLimit: 120 },
+            },
+        ],
+        onStream: (request) => requests.push(request),
+        refreshRuntimeBindingToken: async (identity) => {
+            identities.push(identity.runtimeBindingToken);
+            session.state.contextManager.appendMessage({
+                ...runtimeNotificationMessage("msg_task_during_refresh", "committed after request snapshot"),
+                sequence: 1,
+            });
+            return "runtime-binding-token-refreshed";
+        },
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(identities).toEqual(["runtime-binding-token-test"]);
+    expect(requests[0]?.runtimeBindingToken).toBe("runtime-binding-token-refreshed");
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("committed after request snapshot");
+    expect(session.identity.runtimeBindingToken).toBe("runtime-binding-token-refreshed");
+    expect(session.state.lastRequestContextAnchorSequence()).toBe(session.state.contextManager.messages().find((message) => message.role === "user")?.sequence);
+});
+test("loads cold context and pending messages without deriving the configured model from either message list", async () => {
+    const history = [userMessage("user-1", 0, "first")];
+    const pending = {
+        type: "messages",
+        messages: [
+            userMessage("user-2", 1, "second"),
+            userMessage("user-3", 2, "third"),
+        ],
+    } as const satisfies PendingInputResult;
+    const loader = new RecordingContextLoader(history, pending);
+    const session = new ThreadRuntime("sesn_1");
+    // The supplier returns a model no message in either fixture list carries,
+    // so a reintroduced derivation from ANY message (first-wins or last-wins)
+    // produces a mismatch here instead of passing by coincidence.
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        runtimeModel: () => ({ providerId: "resolved", modelId: "from-config" }),
+    }))));
+    expect(result).toEqual({
+        type: "completed",
+        currentModel: { providerId: "resolved", modelId: "from-config" },
+        modelMessageCount: 3,
+    });
+    expect(loader.buildCalls).toEqual(["sesn_1"]);
+    expect(loader.pendingCalls).toEqual(["sesn_1"]);
+    expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user", "user", "user", "assistant"]);
+    expect(JSON.stringify(session.state.contextManager.messages())).not.toContain("system prompt");
+    expect(JSON.stringify(session.state.contextManager.messages())).not.toContain("toolDefinitions");
+});
+test("assembles non-persistent runtime inputs into LLMRequest without storing them in hot or durable messages", async () => {
+    const session = new ThreadRuntime("sesn_1");
+    const writtenPayloads: unknown[] = [];
+    const store = new ThreadLoopRuntimeStore([], false, false, (_operation, payload) => {
+        writtenPayloads.push(payload);
+    });
+    const capturedRequests: LLMRequest[] = [];
+    const systemCanary = "third group system instruction canary";
+    const toolDescriptionCanary = "third group tool description canary";
+    const toolSchemaCanary = "third group schema canary";
+    const providerConfigCanary = "third group provider config canary";
+    const dummyTokenCanary = "dummy-thirdgroup-token";
+    const tools = [
+        {
+            name: "third_group_lookup",
+            description: toolDescriptionCanary,
+            inputSchema: {
+                type: "object",
+                properties: {
+                    query: { type: "string", description: toolSchemaCanary },
+                    providerConfigMarker: { const: providerConfigCanary },
+                    dummyTokenMarker: { const: dummyTokenCanary },
+                },
+            },
+        },
+    ];
+    const runtimeBoundary: ProviderCallRuntimeConfig = {
+        systemInstructions: systemCanary,
+        toolCatalog: catalogForTest(tools[0]!),
+        maxOutputTokens: 321,
+        timeoutMs: 777,
+    };
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        store,
+        providerCallRuntime: runtimeBoundary,
+        onStream: (request) => {
+            capturedRequests.push(request);
+        },
+    }))));
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0]).toMatchObject({
+        requestKind: ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
+        workspaceId: "workspace-test",
+        sessionId: "sesn_1",
+        sessionThreadId: "thread-test",
+        bindingId: "binding-test",
+        bindingGeneration: 1,
+        runtimeBindingToken: "runtime-binding-token-test",
+        model: { providerId: "fake", modelId: "fake-chat", variant: "" },
+        system: [
+            {
+                kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE,
+                text: systemCanary,
+                cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
+            },
+        ],
+        messages: [
+            {
+                role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+                status: "completed",
+                origin: "user",
+                parts: [{ text: { text: "hello" } }],
+            },
+        ],
+        tools: [
+            {
+                name: "third_group_lookup",
+                description: toolDescriptionCanary,
+                inputSchemaJson: JSON.stringify(tools[0]?.inputSchema),
+            },
+        ],
+        attachments: [],
+        limits: { maxOutputTokens: 321, timeoutMs: 777 },
+    });
+    const hotContext = JSON.stringify(session.state.contextManager.messages());
+    const durableWrites = JSON.stringify(writtenPayloads);
+    for (const canary of [systemCanary, toolDescriptionCanary, toolSchemaCanary, providerConfigCanary, dummyTokenCanary, "maxOutputTokens", "timeoutMs"]) {
+        expect(hotContext).not.toContain(canary);
+        expect(durableWrites).not.toContain(canary);
+    }
+});
+test("empty cold history still processes pending input", async () => {
+    const pendingLoader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const pendingResult = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(new ThreadRuntime("sesn_1"), testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(pendingLoader))));
+    expect(pendingResult).toMatchObject({ type: "completed", modelMessageCount: 1 });
+});
+test("lost Request Start acknowledgement retries one write identity and starts the provider once", async () => {
+    const session = new ThreadRuntime("sesn_request_start_ack_loss");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_request_start_ack_loss", session.sessionId));
+    const requestStartWriteIds: string[] = [];
+    let providerCalls = 0;
+    const writer = writerFrom((envelope) => {
+        if (envelope.event.type === "span.model_request_start") {
+            requestStartWriteIds.push(envelope.writeId);
+            if (requestStartWriteIds.length === 1) {
+                return {
+                    ok: false,
+                    error: normalizeSessionEventWriterError({
+                        code: "timeout",
+                        sessionId: envelope.sessionId,
+                        writeId: envelope.writeId,
+                    }),
+                };
+            }
+        }
+        return {
+            ok: true,
+            writeId: envelope.writeId,
+            eventId: envelope.event.type === "span.model_request_start"
+                ? "sevt_request_start_ack_loss"
+                : `bridge-${envelope.writeId}`,
+            processedAt: createdAt,
+        };
+    });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+        writer,
+        onStream: () => {
+            providerCalls += 1;
+        },
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requestStartWriteIds).toHaveLength(2);
+    expect(new Set(requestStartWriteIds).size).toBe(1);
+    expect(providerCalls).toBe(1);
+});
+test("input accepted during an empty provider response prevents premature idle closeout", async () => {
+    const session = new ThreadRuntime("sesn_late_input_before_idle");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_initial_before_idle", session.sessionId));
+    const requests: LLMRequest[] = [];
+    const appended: SessionEvent[] = [];
+    const llm: LLMServiceInterface = {
+        stream(request) {
+            requests.push(request);
+            if (requests.length === 1) {
+                expect(session.state.enqueueAcceptedInput(
+                    acceptedInput("rin_late_before_idle", session.sessionId),
+                )).toBe("applied");
+            }
+            return Stream.fromIterable([
+                { type: "text-start", id: `text-${requests.length}` },
+                { type: "text-delta", id: `text-${requests.length}`, text_delta: `answer ${requests.length}` },
+                { type: "text-end", id: `text-${requests.length}` },
+                { type: "finish", finishReason: "stop" },
+            ]);
+        },
+    };
+    const writer = writerFrom((envelope) => {
+        appended.push(envelope.event);
+        return {
+            ok: true,
+            writeId: envelope.writeId,
+            eventId: `bridge-${envelope.writeId}`,
+            processedAt: createdAt,
+        };
+    });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+        llmService: llm,
+        writer,
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.messages.map((message) => message.role)).toEqual([
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    ]);
+    expect(requests[1]?.messages.map((message) => message.role)).toEqual([
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    ]);
+    expect(appended.filter((event) => event.type === "session.status_idle")).toHaveLength(1);
+});
+test("lost CommitInputs response retries the frozen declaration without duplicating hot input", async () => {
+    const session = new ThreadRuntime("sesn_lost_commit_response");
+    const input = acceptedInput("rin_lost_commit_response", session.sessionId);
+    session.state.enqueueAcceptedInput(input);
+    const submittedDrafts: string[] = [];
+    let attempts = 0;
+    const loader: TestContextLoader = {
+        buildContext: async () => [],
+        loadPendingInput: async () => ({ type: "empty" }),
+        commitAcceptedInput: async (accepted, options) => {
+            attempts += 1;
+            submittedDrafts.push(JSON.stringify(options?.drafts ?? []));
+            if (attempts === 1) {
+                throw normalizeContextLoaderError({
+                    code: "unavailable",
+                    sessionId: accepted.sessionId,
+                    reason: "commit response was lost",
+                });
+            }
+            return acceptedInputReceipt(accepted, "duplicate");
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(attempts).toBe(2);
+    expect(new Set(submittedDrafts).size).toBe(1);
+    expect(session.state.contextManager.messages().filter((message) => message.origin === "user")).toHaveLength(1);
+});
+test("one request cut commits every input accepted before the boundary", async () => {
+    const session = new ThreadRuntime("sesn_plural_input_cut");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_plural_first", session.sessionId));
+    session.state.enqueueAcceptedInput(acceptedInput("rin_plural_second", session.sessionId));
+    const loader = new QueuedContextLoader([], []);
+    const requests: LLMRequest[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        installLoaderState: false,
+        onStream: (request) => requests.push(request),
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+        "rin_plural_first",
+        "rin_plural_second",
+    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages.map((message) => message.role)).toEqual([
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    ]);
+});
+test("inputs accepted during CommitInputs wait for a later finite request cut", async () => {
+    const session = new ThreadRuntime("sesn_dynamic_input_cut");
+    const first = acceptedInput("rin_dynamic_first", session.sessionId);
+    const second = acceptedInput("rin_dynamic_second", session.sessionId);
+    const third = acceptedInput("rin_dynamic_third", session.sessionId);
+    session.state.enqueueAcceptedInput(first);
+    const loader = new QueuedContextLoader([], [], [
+        (input: RuntimeAcceptedInputState) => {
+            expect(session.state.enqueueAcceptedInput(second)).toBe("applied");
+            return acceptedInputReceipt(input, "committed", 1);
+        },
+        (input: RuntimeAcceptedInputState) => {
+            expect(session.state.enqueueAcceptedInput(third)).toBe("applied");
+            return acceptedInputReceipt(input, "committed", 2);
+        },
+        (input: RuntimeAcceptedInputState) => acceptedInputReceipt(input, "committed", 3),
+    ]);
+    const requests: LLMRequest[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        installLoaderState: false,
+        onStream: (request) => requests.push(request),
+    }))));
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+        first.runtimeInputId,
+        second.runtimeInputId,
+        third.runtimeInputId,
+    ]);
+    expect(requests).toHaveLength(3);
+    expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(1);
+    expect(requests[1]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(2);
+    expect(requests[2]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(3);
+});
+test("lost CommitInputs acknowledgement cold-loads the database-stamped input exactly once", async () => {
+    const session = new ThreadRuntime("sesn_cold_committed_input");
+    const committed = userMessage("msg_cold_committed_input", 1, "resume this durable input");
+    session.state.contextManager.replaceMessages([committed]);
+    session.state.markPersistentContextLoaded();
+    session.state.installThreadTurn({
+        pendingInputMessageIds: [committed.id],
+    }, { routes: [] });
+    const requests: LLMRequest[] = [];
+    const loader = new QueuedContextLoader([], []);
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        installLoaderState: false,
+        onStream: (request) => requests.push(request),
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(loader.commitCalls).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(1);
+    expect(requests[0]?.messages.map((message) => message.role)).toEqual([
+        RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+    ]);
+});
+test("cold recovery opens a run before continuing a sealed request with terminal tool results", async () => {
+    const session = new ThreadRuntime("sesn_cold_tool_continuation");
+    const committed = userMessage("msg_cold_tool_continuation", 1, "continue after the durable tool result");
+    session.state.contextManager.replaceMessages([committed]);
+    session.state.markPersistentContextLoaded();
+    session.state.installThreadTurn({
+        pendingInputMessageIds: [],
+        request: {
+            modelRequestId: "request_cold_tool_continuation",
+            requestStartEventId: "event_start_cold_tool_continuation",
+            requestKind: "agent_provider_request",
+            contextThroughMessageSequence: 1,
+            requestEnd: {
+                eventId: "event_end_cold_tool_continuation",
+                isError: false,
+                rescheduled: false,
+            },
+            toolMembers: [{
+                memberKind: "public_tool_use",
+                modelToolCallId: "call_cold_tool_continuation",
+                toolUseEventId: "event_tool_cold_tool_continuation",
+                toolName: "Read",
+                terminalResult: {
+                    resultEventId: "event_result_cold_tool_continuation",
+                    outcome: "success",
+                },
+            }],
+        },
+    }, { routes: [] });
+    const requests: LLMRequest[] = [];
+    const appended: SessionEvent[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+        installLoaderState: false,
+        onStream: (request) => requests.push(request),
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return {
+                ok: true,
+                writeId: envelope.writeId,
+                eventId: `bridge-${envelope.writeId}`,
+                processedAt: createdAt,
+            };
+        }),
+    }))));
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requests).toHaveLength(1);
+    expect(appended[0]).toEqual({ type: "session.status_running" });
+    expect(appended.filter((event) => event.type === "span.model_request_start")).toHaveLength(1);
+});
+test("cold interrupt closeout consumes the typed action before releasing the run", async () => {
+    const session = new ThreadRuntime("sesn_cold_interrupt_closeout");
+    session.state.markPersistentContextLoaded();
+    session.state.installThreadTurn({
+        executionRunId: "sevt_cold_interrupt_running",
+        pendingInputMessageIds: [],
+        interruptEventId: "sevt_cold_interrupt",
+    }, { routes: [] });
+    const appended: SessionEvent[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(
+            session,
+            testRunCustody("sevt_cold_interrupt_running"),
+        );
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+        installLoaderState: false,
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+    }))));
+
+    expect(result).toEqual({ type: "interrupted" });
+    expect(appended).toEqual([{ type: "session.status_idle", stop_reason: { type: "end_turn" } }]);
+    expect(session.state.threadTurnReduction()).toMatchObject({
+        checkpoint: {
+            idleCloseout: {
+                eventId: expect.any(String),
+                stopReason: "end_turn",
+            },
+        },
+        state: { state: "idle" },
+        action: { action: "await_input" },
+    });
+});
+test("a cold open request fails closed before accepting a later input", async () => {
+    const session = new ThreadRuntime("sesn_cold_open_request");
+    session.state.markPersistentContextLoaded();
+    session.state.installThreadTurn({
+        executionRunId: "event_cold_open_running",
+        pendingInputMessageIds: [],
+        request: {
+            modelRequestId: "request_cold_open",
+            requestStartEventId: "event_cold_open_start",
+            requestKind: "agent_provider_request",
+            contextThroughMessageSequence: 0,
+            toolMembers: [],
+        },
+    }, { routes: [] });
+    expect(session.state.enqueueAcceptedInput(acceptedInput("rin_after_cold_open"))).toBe("applied");
+    const loader = new QueuedContextLoader([], [{ type: "empty" }]);
+    let providerCalls = 0;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(
+            session,
+            testRunCustody("event_cold_open_running"),
+        );
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        installLoaderState: false,
+        onStream: () => {
+            providerCalls += 1;
+        },
+    }))));
+
+    expect(result).toMatchObject({
+        type: "failed",
+        error: {
+            code: "runtime_invalid_sequence",
+            retryStatus: { type: "terminal" },
+        },
+    });
+    expect(loader.commitCalls ?? []).toEqual([]);
+    expect(providerCalls).toBe(0);
+    expect(session.state.threadTurnReduction()).toMatchObject({
+        checkpoint: { terminalCloseout: { disposition: "terminated" } },
+        state: { state: "idle" },
+        action: { action: "await_input" },
+    });
+});
+test("cold retry action that escaped pod-loss fencing fails closed instead of ending normally", async () => {
+    const session = new ThreadRuntime("sesn_cold_reschedule_fence");
+    const message = userMessage("msg_cold_reschedule_fence", 1, "retry this request");
+    session.state.contextManager.replaceMessages([message]);
+    session.state.markPersistentContextLoaded();
+    session.state.installThreadTurn({
+        executionRunId: "sevt_cold_reschedule_running",
+        pendingInputMessageIds: [],
+        request: {
+            modelRequestId: "mreq_cold_reschedule",
+            requestStartEventId: "sevt_cold_reschedule_start",
+            requestKind: "agent_provider_request",
+            contextThroughMessageSequence: 1,
+            requestEnd: {
+                eventId: "sevt_cold_reschedule_end",
+                isError: true,
+                errorKind: "provider_error",
+                rescheduled: true,
+            },
+            toolMembers: [],
+        },
+    }, { routes: [] });
+    const appended: SessionEvent[] = [];
+    let providerCalls = 0;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(
+            session,
+            testRunCustody("sevt_cold_reschedule_running"),
+        );
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+        installLoaderState: false,
+        onStream: () => {
+            providerCalls += 1;
+        },
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+    }))));
+
+    expect(result).toMatchObject({
+        type: "failed",
+        error: {
+            code: "runtime_invalid_sequence",
+            reason: "runtime_contract_validation",
+            retryStatus: { type: "exhausted" },
+        },
+    });
+    expect(providerCalls).toBe(0);
+    expect(appended.map((event) => event.type)).toEqual(["session.error", "session.status_idle"]);
+    expect(appended.at(-1)).toEqual({
+        type: "session.status_idle",
+        stop_reason: { type: "retries_exhausted" },
+    });
+    expect(session.state.threadTurnReduction()).toMatchObject({
+        state: { state: "idle" },
+        action: { action: "await_input" },
+    });
+});
+test("accepted input without a resolvable runtime model settles an explicit exhausted error", async () => {
+    const session = new ThreadRuntime("sesn_missing_config_model");
+    session.state.enqueueAcceptedInput(acceptedInput("rin_missing_config_model", session.sessionId));
+    const loader = new QueuedContextLoader([], []);
+    const appended: SessionEvent[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        runtimeModel: () => undefined,
+        writer: writerFrom((envelope) => {
+            appended.push(envelope.event);
+            return {
+                ok: true,
+                writeId: envelope.writeId,
+                eventId: `bridge-${envelope.writeId}`,
+                processedAt: createdAt,
+            };
+        }),
+    }))));
+    expect(result).toMatchObject({
+        type: "failed",
+        error: {
+            code: "runtime_invalid_sequence",
+            fatal: true,
+            reason: "runtime_contract_validation",
+        },
+    });
+    expect(appended).toEqual([
+        { type: "session.status_running" },
+        expect.objectContaining({
+            type: "session.error",
+            error: expect.objectContaining({
+                code: "runtime_invalid_sequence",
+                retryStatus: { type: "exhausted" },
+            }),
+        }),
+        { type: "session.status_idle", stop_reason: { type: "retries_exhausted" } },
+    ]);
+});
+test("no accepted pending input performs no durable turn transition", async () => {
+    const loader = new RecordingContextLoader([], { type: "empty" });
+    const session = new ThreadRuntime("sesn_1");
+    const appendedTypes: string[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        runtimeModel: () => undefined,
+        writer: writerFrom((envelope) => {
+            appendedTypes.push(envelope.event.type);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+    }))));
+    expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
+    expect(appendedTypes).toEqual([]);
+});
+test("cold reviewer completion settles its durable run and converges to idle", async () => {
+    const session = new ThreadRuntime({
+        workspaceId: "wksp_reviewer_recovery",
+        sessionId: "sesn_reviewer_recovery",
+        sessionThreadId: "thrd_reviewer_recovery",
+        parentThreadId: "thrd_main",
+        threadRole: "approval_reviewer",
+        bindingId: "bind_reviewer_recovery",
+        bindingGeneration: 1,
+        targetPodUid: "pod_reviewer_recovery",
+        runtimeBindingToken: "token_reviewer_recovery",
+    });
+    session.state.installThreadTurn({
+        executionRunId: "event_running_reviewer",
+        pendingInputMessageIds: [],
+        request: {
+            modelRequestId: "request_reviewer",
+            requestStartEventId: "event_start_reviewer",
+            requestKind: "approval_reviewer",
+            contextThroughMessageSequence: 0,
+            requestEnd: {
+                eventId: "event_end_reviewer",
+                isError: false,
+                rescheduled: false,
+            },
+            toolMembers: [],
+        },
+    }, { routes: [] });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(
+            session,
+            testRunCustody("event_running_reviewer"),
+        );
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], [])))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(session.state.threadTurnReduction()).toMatchObject({
+        checkpoint: {
+            pendingInputMessageIds: [],
+            idleCloseout: {
+                eventId: expect.any(String),
+                stopReason: "end_turn",
+            },
+        },
+        state: { state: "idle" },
+        action: { action: "await_input" },
+    });
+});
+test("a second warm turn preserves model and ContextManager state without context reads", async () => {
+    const loader = new QueuedContextLoader([], []);
+    const session = new ThreadRuntime("sesn_1");
+    const layer = runtimeThreadLoopLayer(loader, { installLoaderState: false });
+    session.state.enqueueAcceptedInput(acceptedInput("rin_warm_first"));
+    const first = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(layer)));
+    session.state.enqueueAcceptedInput(acceptedInput("rin_warm_second"));
+    const second = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(layer)));
+    const third = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(layer)));
+    expect(first).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
+    expect(second).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
+    expect(third).toMatchObject({ type: "completed", currentModel: { providerId: "fake", modelId: "fake-chat" } });
+    expect(loader.buildCalls).toEqual([]);
+    expect(loader.pendingCalls).toEqual([]);
+    expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
+});
+test("projection failure returns a failed run instead of masking invalid context as completed", async () => {
+    const loader = new RecordingContextLoader([], { type: "empty" });
+    const session = new ThreadRuntime("sesn_1");
+    session.state.contextManager.appendMessage({
+        id: "system-1",
+        sessionId: "sesn_1",
+        role: "system",
+        sequence: 0,
+        status: "completed",
+        createdAt,
+        parts: [
+            {
+                id: "system-1-text",
+                sessionId: "sesn_1",
+                messageId: "system-1",
+                sequence: 0,
+                type: "text",
+                text: "system prompt",
+                truncated: false,
+                status: "completed",
+                createdAt,
+            },
+        ],
+    } as unknown as RuntimeMessage);
+    session.state.markPersistentContextLoaded();
+    const appendedTypes: string[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer: writerFrom((envelope) => {
+            appendedTypes.push(envelope.event.type);
+            return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+        }),
+    }))));
+    expect(result).toMatchObject({
+        type: "failed",
+        releaseSession: { reason: "crashed" },
+        error: {
+            code: "provider_invalid_request",
+            message: "Runtime context is not valid for Gateway ProviderRequest: schema.",
+        },
+    });
+    expect(appendedTypes).toEqual([]);
+    expect(session.state.contextManager.messages()).toEqual([]);
+});
+test("runtime layer gates assistant progress hot context on durable event ACKs", async () => {
+    const order: string[] = [];
+    const session = new ThreadRuntime("sesn_1");
+    const store = new ThreadLoopRuntimeStore(order);
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    let providerSawShell = false;
+    const writer = writerFrom((envelope) => {
+        const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
+        order.push(`event:${envelope.event.type}:context_parts_${assistant?.parts.length ?? 0}`);
+        return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    });
+    await installLoaderStateForTest(loader, session);
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(ThreadLoop.runtimeLayer({
+        internalToolRepairStore: store,
+        sessionEventWriter: writer,
+        runtime: threadLoopRuntime(),
+        llmService: llmService([
+            { type: "text-start", id: "text-1" },
+            { type: "text-delta", id: "text-1", text_delta: "hello" },
+            { type: "text-end", id: "text-1" },
+            { type: "finish", finishReason: "tool-calls" },
+        ], () => {
+            const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
+            providerSawShell = assistant?.status === "streaming" && assistant.parts.length === 0;
+            order.push("provider:stream");
+        }),
+        storeOperationTimeoutMs: 1000,
+        providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1800000 },
+        runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
+    }).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(loader))))));
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
+    expect(providerSawShell).toBe(false);
+    expect(order).toEqual([
+        "event:session.status_running:context_parts_0",
+        "event:span.model_request_start:context_parts_0",
+        "provider:stream",
+        "event:agent.message:context_parts_0",
+        "event:span.model_request_end:context_parts_1",
+        "event:session.status_idle:context_parts_1",
+    ]);
+    expect(session.state.contextManager.messages().map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(session.state.contextManager.messages().at(-1)?.parts).toEqual([
+        expect.objectContaining({ type: "text", text: "hello", status: "completed" }),
+    ]);
+});
+test("hot input reconciliation preserves a full retry ride and queues new media for the next request", async () => {
+    const session = new ThreadRuntime("sesn_hot_attachment_reconcile");
+    const activeRide = Array.from({ length: 32 }, (_, index) => ({
+        transient: {
+            attachmentRef: `att_hot_active_${index}`,
+            sourceToolUseEventId: `sevt_hot_active_${index}`,
+            sourcePath: `mcp:github/hot-active-${index}.png`,
+            pageRange: "",
+            detail: "auto" as const,
+        },
+        fileBacked: undefined,
+        mime: "image/png",
+        filename: `hot-active-${index}.png`,
+    }));
+    const nextRide = {
+        transient: {
+            attachmentRef: "att_hot_next",
+            sourceToolUseEventId: "sevt_hot_next",
+            sourcePath: "mcp:github/hot-next.png",
+            pageRange: "",
+            detail: "auto" as const,
+        },
+        fileBacked: undefined,
+        mime: "image/png",
+        filename: "hot-next.png",
+    };
+    session.state.addPendingAttachments(activeRide);
+    const followUp = acceptedInput("rin_hot_attachment_follow_up");
+    const firstMessage = userMessage("user-hot-1", 0, "first");
+    const loader = new QueuedContextLoader([], [{ type: "messages", messages: [firstMessage] }], []);
+    const requests: LLMRequest[] = [];
+    const llm: LLMServiceInterface = {
+        stream(request) {
+            requests.push(request);
+            if (requests.length === 1) {
+                session.state.addPendingAttachments([nextRide]);
+                session.state.enqueueAcceptedInput(followUp);
+                return Stream.fromIterable([{
+                        type: "provider-error",
+                        error: runtimeFailureFromProviderError(normalizeProviderError({
+                            code: "provider_unavailable",
+                            message: "retry after hot input",
+                            retryable: true,
+                            fatal: false,
+                        })),
+                    }]);
+            }
+            return Stream.fromIterable([
+                { type: "text-start", id: "text-hot-retry" },
+                { type: "text-delta", id: "text-hot-retry", text_delta: "done" },
+                { type: "text-end", id: "text-hot-retry" },
+                { type: "finish", finishReason: "stop" },
+            ]);
+        },
+    };
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => await baseWriter.writeRequestEnd(envelope),
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        llmService: llm,
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requests.map((request) => request.attachments)).toEqual([activeRide, activeRide]);
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+        expect.stringMatching(/^rin_test_harness_/),
+    ]);
+    expect(session.state.peekAcceptedInput()).toEqual(followUp);
+    expect(session.state.pendingAttachments()).toEqual([nextRide]);
+});
+test("running status append failure stops before accepted input commit", async () => {
+    const session = new ThreadRuntime("sesn_1");
+    const followUp = acceptedInput();
+    session.state.enqueueAcceptedInput(followUp);
+    const loader = new QueuedContextLoader([], [], [
+        { type: "messages", messages: [userMessage("user-accepted", 2, "accepted")] },
+    ]);
+    const appendedTypes: string[] = [];
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer: failingEventWriter(appendedTypes, (event) => event.type === "session.status_running"),
+    }))));
+    expect(result).toMatchObject({
+        type: "failed",
+        error: { type: "session-event-writer", code: "unavailable" },
+        releaseSession: { reason: "event_write_failed" },
+    });
+    expect(appendedTypes).toEqual(["session.status_running"]);
+    expect(loader.commitCalls).toEqual([]);
+    expect(session.state.peekAcceptedInput()).toEqual(followUp);
+});
+test("runtime layer admits an input accepted during an empty request before idle closeout", async () => {
+    const session = new ThreadRuntime("sesn_1");
+    const followUp = acceptedInput();
+    const loader = new QueuedContextLoader([], [{ type: "messages", messages: [userMessage("user-1", 0, "first")] }], []);
+    const capturedRequests: LLMRequest[] = [];
+    const runtimeBoundary: ProviderCallRuntimeConfig = {
+        systemInstructions: "third group hot follow-up system",
+        toolCatalog: catalogForTest({ name: "third_group_follow_up", description: "follow-up tool", inputSchema: { type: "object", properties: {} } }),
+        maxOutputTokens: 222,
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        providerCallRuntime: runtimeBoundary,
+        onStream: (request) => {
+            capturedRequests.push(request);
+            if (capturedRequests.length === 1) {
+                session.state.enqueueAcceptedInput(followUp);
+            }
+        },
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(capturedRequests).toHaveLength(2);
+    for (const request of capturedRequests) {
+        expect(request.system).toEqual([
+            {
+                kind: SystemSegmentKind.SYSTEM_SEGMENT_KIND_BASE,
+                text: runtimeBoundary.systemInstructions,
+                cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
+            },
+        ]);
+        expect(request.tools).toEqual([
+            {
+                name: "third_group_follow_up",
+                description: "follow-up tool",
+                inputSchemaJson: "{\"type\":\"object\",\"properties\":{}}",
+            },
+        ]);
+        expect(request.limits?.maxOutputTokens).toBe(222);
+    }
+    expect(capturedRequests[0]?.messages.map((message) => message.role)).toEqual([RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER]);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
+    expect(loader.pendingCalls).toEqual(["sesn_1"]);
+    expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
+        expect.stringMatching(/^rin_test_harness_/),
+        followUp.runtimeInputId,
+    ]);
+});
+test("runtime layer updates non-text hot context only after the matching ACK boundary", async () => {
+    const order: string[] = [];
+    const session = new ThreadRuntime("sesn_1");
+    const store = new ThreadLoopRuntimeStore(order);
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const writer = writerFrom((envelope) => {
+        const assistant = session.state.contextManager.messages().find((message) => message.role === "assistant");
+        const toolPart = assistant?.parts.find((part) => part.type === "tool");
+        order.push(`event:${envelope.event.type}:tool_${toolPart?.type === "tool" ? toolPart.state.status : "missing"}`);
+        return {
+            ok: true,
+            writeId: envelope.writeId,
+            eventId: envelope.event.type === "agent.tool_use" ? "bridge-tool" : `bridge-${envelope.writeId}`,
+            processedAt: createdAt,
+        };
+    });
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        store,
+        writer,
+        events: [
+            { type: "step-start", stepIndex: 1 },
+            { type: "step-finish", finishReason: "tool-calls" },
+            { type: "reasoning-start", id: "reasoning-1" },
+            { type: "reasoning-delta", id: "reasoning-1", text_delta: "thinking" },
+            { type: "reasoning-end", id: "reasoning-1" },
+            {
+                type: "tool-call",
+                id: "tool-1",
+                toolName: "search",
+                input: { q: "x" },
+                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+            },
+            { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+            systemInstructions: "tool test system",
+            toolCatalog: catalogForTest({ name: "search", description: "Search test tool", inputSchema: { type: "object", properties: { q: { type: "string" } } } }),
+        },
+        runTool: () => ({ type: "completed", output: { text: "done", truncated: false } }),
+    }))));
+    expect(result).toMatchObject({ type: "completed" });
+    expect(order).toEqual([
+        "event:session.status_running:tool_missing",
+        "event:span.model_request_start:tool_missing",
+        "event:agent.thinking:tool_missing",
+        "event:agent.tool_use:tool_missing",
+        "event:span.model_request_end:tool_running",
+        "event:agent.tool_result:tool_running",
+        "event:span.model_request_start:tool_completed",
+        "event:agent.message:tool_completed",
+        "event:span.model_request_end:tool_completed",
+        "event:session.status_idle:tool_completed",
+    ]);
+    expect(session.state.contextManager.messages().find((message) => message.parts.some((part) => part.type === "tool" && part.toolUseEventId === "bridge-tool"))).toMatchObject({
+        role: "assistant",
+        status: "completed",
+        parts: expect.arrayContaining([
+            expect.objectContaining({ type: "step-start" }),
+            expect.objectContaining({ type: "step-finish" }),
+            expect.objectContaining({ type: "reasoning", text: "thinking" }),
+            expect.objectContaining({ type: "tool", state: expect.objectContaining({ status: "completed" }) }),
+        ]),
+    });
+});
+test("runtime layer keeps unacked progress out of hot context and requests hot-state discard", async () => {
+    const order: string[] = [];
+    const session = new ThreadRuntime("sesn_1");
+    const store = new ThreadLoopRuntimeStore(order);
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
+    const appendedTypes: string[] = [];
+    const writer = failingEventWriter(appendedTypes, (event) => event.type === "agent.message");
+    await installLoaderStateForTest(loader, session);
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(ThreadLoop.runtimeLayer({
+        internalToolRepairStore: store,
+        sessionEventWriter: writer,
+        runtime: threadLoopRuntime(),
+        llmService: llmService([
+            { type: "text-start", id: "text-1" },
+            { type: "text-delta", id: "text-1", text_delta: "hello" },
+            { type: "text-end", id: "text-1" },
+        ]),
+        storeOperationTimeoutMs: 1000,
+        providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, timeoutMs: 1800000 },
+        runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
+    }).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(loader))))));
+    expect(result).toMatchObject({
+        type: "failed",
+        error: { type: "session-event-writer", code: "unavailable" },
+        releaseSession: { reason: "event_write_failed" },
+    });
+    expect(appendedTypes).toEqual([
+        "session.status_running",
+        "span.model_request_start",
+        "agent.message",
+        "span.model_request_end",
+        "session.error",
+    ]);
+    expect(session.state.contextManager.messages().some((message) => message.role === "assistant")).toBe(false);
+});
+});
+
+const timestamp = "2026-01-01T00:00:00.000Z";
+
+describe("ThreadState", () => {
+  test("successful request hints stay paired and an actual model change invalidates both", () => {
+    const state = new ThreadState("sesn_compaction_hints");
+    state.updateCurrentModel({ providerId: "openai", modelId: "gpt-5.5" });
+    state.recordLastRequestCompletion({
+      inputTokens: 300_000,
+      outputTokens: 2_000,
+      reasoningTokens: 50_000,
+      cacheReadTokens: 1_000,
+      cacheWriteTokens: 500,
+    }, {
+      contextWindowTokens: 400_000,
+      inputLimitTokens: 272_000,
+      outputTokenLimit: 128_000,
+    }, 41);
+
+    state.updateCurrentModel({ providerId: "openai", modelId: "gpt-5.5" });
+    expect(state.lastRequestUsage()).toMatchObject({ inputTokens: 300_000 });
+    expect(state.lastRequestModelLimits()).toEqual({
+      contextWindowTokens: 400_000,
+      inputLimitTokens: 272_000,
+      outputTokenLimit: 128_000,
+    });
+    expect(state.lastRequestContextAnchorSequence()).toBe(41);
+
+    state.updateCurrentModel({ providerId: "anthropic", modelId: "claude-fable-5" });
+    expect(state.lastRequestUsage()).toBeUndefined();
+    expect(state.lastRequestModelLimits()).toBeUndefined();
+    expect(state.lastRequestContextAnchorSequence()).toBeUndefined();
+  });
+
+  test("caps pending provider attachments", () => {
+    const state = new ThreadState("sesn_attachments");
+    state.addPendingAttachments(Array.from({ length: MaxProviderRequestAttachments + 3 }, (_, index) => ({
+      transient: {
+        attachmentRef: `att_${index}`,
+        sourceToolUseEventId: `sevt_tool_${index}`,
+        sourcePath: `/tmp/image-${index}.png`,
+        pageRange: "",
+        detail: "auto",
+      },
+      fileBacked: undefined,
+      mime: "image/png",
+      filename: `image-${index}.png`,
+    })));
+
+    expect(state.pendingAttachments()).toHaveLength(MaxProviderRequestAttachments);
+    expect(state.pendingAttachments().at(-1)?.transient?.attachmentRef).toBe("att_31");
+  });
+
+  test("owns pending attachment origins independently of caller snapshots", () => {
+    const state = new ThreadState("sesn_attachment_ownership");
+    const attachment = {
+      transient: {
+        attachmentRef: "att_original",
+        sourceToolUseEventId: "sevt_tool_1",
+        sourcePath: "/tmp/image.png",
+        pageRange: "",
+        detail: "auto",
+      },
+      fileBacked: undefined,
+      mime: "image/png",
+      filename: "image.png",
+    };
+
+    state.addPendingAttachments([attachment]);
+    attachment.transient.attachmentRef = "att_mutated_input";
+    const snapshot = state.pendingAttachments();
+    snapshot[0]!.transient!.attachmentRef = "att_mutated_output";
+
+    expect(state.pendingAttachments()[0]?.transient?.attachmentRef).toBe("att_original");
+  });
+
+  test("keeps a full active ride separate from attachments queued for the next request", () => {
+    const state = new ThreadState("sesn_attachment_rides");
+    const activeRide = Array.from({ length: MaxProviderRequestAttachments }, (_, index) => ({
+      transient: {
+        attachmentRef: `att_active_${index}`,
+        sourceToolUseEventId: `sevt_active_${index}`,
+        sourcePath: `/tmp/active-${index}.png`,
+        pageRange: "",
+        detail: "auto" as const,
+      },
+      fileBacked: undefined,
+      mime: "image/png",
+      filename: `active-${index}.png`,
+    }));
+    const nextRide = {
+      transient: {
+        attachmentRef: "att_next",
+        sourceToolUseEventId: "sevt_next",
+        sourcePath: "/tmp/next.png",
+        pageRange: "",
+        detail: "auto" as const,
+      },
+      fileBacked: undefined,
+      mime: "image/png",
+      filename: "next.png",
+    };
+
+    state.addPendingAttachments(activeRide);
+    expect(state.beginPendingAttachmentRide()).toEqual(activeRide);
+    state.addPendingAttachments([nextRide]);
+    state.reconcilePendingAttachments([...activeRide, nextRide]);
+    expect(state.pendingAttachments()).toEqual([...activeRide, nextRide]);
+
+    state.settlePendingAttachmentRide();
+    expect(state.beginPendingAttachmentRide()).toEqual([nextRide]);
+  });
+
+  test("agent-mail delivery identity deduplicates hot enqueue and cold resolution after ACK", () => {
+    const state = new ThreadState("sesn_agent_mail_dedup");
+    const message = RuntimeMessageSchema.parse({
+      id: "msg_agent_mail",
+      sessionId: "sesn_agent_mail_dedup",
+      role: "user",
+      origin: "runtime",
+      sequence: 0,
+      status: "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      parts: [{
+        id: "part_agent_mail",
+        sessionId: "sesn_agent_mail_dedup",
+        messageId: "msg_agent_mail",
+        sequence: 0,
+        type: "text",
+        text: "Message Type: FINAL_ANSWER\nTask name: main\nSender: worker\nPayload:\ndone",
+        truncated: false,
+        status: "completed",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: timestamp,
+      }],
+    });
+    const mail = {
+      requestId: "req_agent_mail",
+      workspaceId: "wksp_agent_mail",
+      sessionId: "sesn_agent_mail_dedup",
+      sessionThreadId: "thrd_agent_mail_main",
+      bindingId: "bind_agent_mail",
+      bindingGeneration: 1,
+      targetPodUid: "pod_agent_mail",
+      runtimeInputId: "agent_mail:delivery_agent_mail",
+      eventIds: ["sevt_agent_mail_received"],
+      sequenceFrom: 2,
+      sequenceTo: 2,
+      kind: "inter_agent_message",
+      deliveryId: "delivery_agent_mail",
+      sourceThreadId: "thrd_agent_mail_child",
+      sourceToolUseEventId: "sevt_agent_mail_spawn",
+      message,
+    } satisfies RuntimeAcceptedInputState;
+
+    expect(state.enqueueAcceptedInput(mail)).toBe("applied");
+    expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+    state.acknowledgeAcceptedInput(mail.runtimeInputId);
+    expect(state.peekAcceptedInput()).toBeUndefined();
+    expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+  });
+
+  test("interrupt fence preserves queued stamped completion mail", () => {
+    const state = new ThreadState("sesn_agent_mail_interrupt_fence");
+    const message = RuntimeMessageSchema.parse({
+      id: "msg_agent_mail_interrupt_fence",
+      sessionId: "sesn_agent_mail_interrupt_fence",
+      role: "user",
+      origin: "runtime",
+      sequence: 1,
+      status: "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      parts: [{
+        id: "part_agent_mail_interrupt_fence",
+        sessionId: "sesn_agent_mail_interrupt_fence",
+        messageId: "msg_agent_mail_interrupt_fence",
+        sequence: 0,
+        type: "text",
+        text: "completion",
+        truncated: false,
+        status: "completed",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: timestamp,
+      }],
+    });
+    const mail = {
+      requestId: "req_agent_mail_interrupt_fence",
+      workspaceId: "wksp_agent_mail_interrupt_fence",
+      sessionId: "sesn_agent_mail_interrupt_fence",
+      sessionThreadId: "thrd_agent_mail_main",
+      bindingId: "bind_agent_mail_interrupt_fence",
+      bindingGeneration: 1,
+      targetPodUid: "pod_agent_mail_interrupt_fence",
+      runtimeInputId: "agent_mail:delivery_interrupt_fence",
+      eventIds: ["sevt_agent_mail_interrupt_received"],
+      sequenceFrom: 2,
+      sequenceTo: 2,
+      kind: "inter_agent_message",
+      deliveryId: "delivery_interrupt_fence",
+      sourceThreadId: "thrd_agent_mail_child",
+      sourceToolUseEventId: "sevt_agent_mail_spawn",
+      message,
+    } satisfies RuntimeAcceptedInputState;
+
+    expect(state.enqueueAcceptedInput(mail)).toBe("applied");
+    state.discardQueuedAcceptedInputsBeforeFence(10);
+
+    expect(state.peekAcceptedInput()).toEqual(mail);
+    expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+  });
+
+  test("task-notification identity deduplicates while the accepted fact remains queued", () => {
+    const state = new ThreadState("sesn_task_notification_queued");
+    const notification = {
+      requestId: "req_task_notification_queued",
+      workspaceId: "wksp_task_notification_queued",
+      sessionId: "sesn_task_notification_queued",
+      sessionThreadId: "thrd_task_notification_queued",
+      bindingId: "bind_task_notification_queued",
+      bindingGeneration: 1,
+      targetPodUid: "pod_task_notification_queued",
+      runtimeInputId: "rin_task_notification_queued",
+      eventIds: ["sevt_task_notification_queued"],
+      sequenceFrom: 3,
+      sequenceTo: 3,
+      kind: "task_notification",
+      taskId: "task_notification_queued",
+      sourceToolUseEventId: "sevt_task_notification_source",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      commit: async () => ({ ok: true, stale: true }),
+    } satisfies RuntimeAcceptedInputState;
+
+    expect(state.enqueueAcceptedInput(notification)).toBe("applied");
+    expect(state.enqueueAcceptedInput(notification)).toBe("duplicate");
+    expect(state.peekAcceptedInput()).toBe(notification);
+  });
+
+  test("task-notification identity deduplicates after its durable message is committed", () => {
+    const state = new ThreadState("sesn_task_notification_committed");
+    const committedMessage = DurableRuntimeMessageSchema.parse({
+      id: "msg_task_notification_committed",
+      sessionId: "sesn_task_notification_committed",
+      role: "user",
+      origin: "runtime",
+      sequence: 4,
+      owningEventId: "sevt_task_notification_committed",
+      eventSequence: 4,
+      status: "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      parts: [{
+        id: "part_task_notification_committed",
+        sessionId: "sesn_task_notification_committed",
+        messageId: "msg_task_notification_committed",
+        sequence: 0,
+        type: "text",
+        text: "Task completed.",
+        truncated: false,
+        status: "completed",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: timestamp,
+      }],
+    });
+    const notification = {
+      requestId: "req_task_notification_committed",
+      workspaceId: "wksp_task_notification_committed",
+      sessionId: "sesn_task_notification_committed",
+      sessionThreadId: "thrd_task_notification_committed",
+      bindingId: "bind_task_notification_committed",
+      bindingGeneration: 1,
+      targetPodUid: "pod_task_notification_committed",
+      runtimeInputId: "rin_task_notification_committed",
+      eventIds: ["sevt_task_notification_committed"],
+      sequenceFrom: 4,
+      sequenceTo: 4,
+      taskId: "task_notification_committed",
+      sourceToolUseEventId: "sevt_task_notification_source",
+      status: "completed",
+      payloadJson: "{\"status\":\"completed\"}",
+      committedMessage,
+    } satisfies RuntimeTaskNotificationState;
+
+    expect(state.commitTaskNotification(notification)).toBe("applied");
+    expect(state.commitTaskNotification(notification)).toBe("duplicate");
+    expect(state.contextManager.messages()).toEqual([committedMessage]);
+  });
+
+  test("clear removes pending attachments", () => {
+    const state = new ThreadState("sesn_clear");
+    state.addPendingAttachments([{
+      transient: {
+        attachmentRef: "att_1",
+        sourceToolUseEventId: "sevt_tool_1",
+        sourcePath: "/tmp/image.png",
+        pageRange: "",
+        detail: "auto",
+      },
+      fileBacked: undefined,
+      mime: "image/png",
+      filename: "image.png",
+    }]);
+    state.clear();
+
+    expect(state.pendingAttachments()).toEqual([]);
+  });
+});

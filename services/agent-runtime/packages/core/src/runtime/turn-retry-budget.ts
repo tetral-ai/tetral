@@ -3,7 +3,7 @@
  * Evaluates the run-local mirror of provider and compaction retry budgets.
  * It guards non-negative counters, separate retry classes, and the transition from an available
  * next attempt to retries_exhausted without claiming ownership of the durable Bridge ceiling.
- * AgentLoop calls this helper with counters from the active run and deployment maxima; the helper
+ * ThreadLoop calls this helper with counters from the active run and deployment maxima; the helper
  * performs a pure decision and calls no transport or persistence service.
  */
 /** Retry class whose run-local counter is being evaluated. */
@@ -16,7 +16,7 @@ export type RuntimeTurnRetryKind = "provider" | "compaction";
 // close that owns the reschedule decision) and are reset by EVERY turn-settling
 // idle write; there is no compaction-specific reset — one settling idle clears both.
 // maxAttempts is supplied by the caller from deployment policy, never hardcoded here.
-// UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts
+// UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts
 /** Run-local provider and compaction attempt counts. */
 export interface RuntimeTurnRetryCounters {
   readonly providerAttempts: number;

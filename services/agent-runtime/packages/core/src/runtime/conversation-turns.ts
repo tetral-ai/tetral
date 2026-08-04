@@ -35,7 +35,7 @@ export interface RuntimeConversationTurn {
 // mid-entry. `compactable` separately classifies user-led turns containing neither a
 // checkpoint nor an internal tool-repair record; selectRecentUserLedTurns does not
 // consult that field.
-// UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts
+// UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts
 /** Partitions committed history at user-led boundaries without splitting tool exchanges. */
 export function partitionRuntimeConversationTurns(
   messages: readonly RuntimeMessage[],

@@ -1,8 +1,8 @@
 /**
  * This module owns the ordered hot message view and rewrite generation for one
  * Runtime thread. It guards copy-on-read ownership, append-versus-rewrite cursor
- * semantics, and compaction preservation above a sequence boundary. SessionState
- * and AgentLoop call it after write acknowledgements and while hydrating already
+ * semantics, and compaction preservation above a sequence boundary. ThreadState
+ * and ThreadLoop call it after write acknowledgements and while hydrating already
  * durable cold state; SessionManager supplies preload data, and this module performs
  * only in-memory message-list transformations.
  *
@@ -24,7 +24,7 @@ export interface ThreadContextPrefix {
 // ContextManager owns the hot RuntimeMessage list for one ThreadEntry. New writes are
 // projected only after durable ACK; cold hydration may append projections already read
 // from durable state. These methods carry the hot mutation, but the discipline
-// permitting each one lives at the AgentLoop/SessionManager call site:
+// permitting each one lives at the ThreadLoop/SessionManager call site:
 //
 // | hot mutation                       | gated on durable ACK            |
 // | ---------------------------------- | ------------------------------- |
@@ -33,7 +33,7 @@ export interface ThreadContextPrefix {
 // | replace terminal assistant message | WriteRequestEnd ACK             |
 // | apply compaction (prefix replace)  | compaction event/projection ACK |
 //
-// SessionState separately owns the last-request usage hint and route-effective
+// ThreadState separately owns the last-request usage hint and route-effective
 // limits. A terminal RuntimeMessage may also carry its own usage when the
 // WriteRequestEnd-gated projection replaces that message in this list.
 //
@@ -45,7 +45,7 @@ export interface ThreadContextPrefix {
 // update) so the approval-reviewer feed cursor can detect invalidation within one hot
 // lifetime. A cold return creates a successor reviewer manager and trunk, which starts
 // with a full feed instead of inheriting this generation.
-// UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts,
+// UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts,
 //              services/agent-runtime/packages/core/src/session/session-manager.ts
 /** Mutable hot message list whose generation invalidates reviewer feed cursors on rewrites. */
 export class ContextManager {

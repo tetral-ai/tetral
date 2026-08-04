@@ -58,11 +58,11 @@ import type {
   RuntimePreloadedSandboxExecutionState,
   RuntimeThreadControlState,
   RuntimeColdCoverage,
-} from "@tetral/agent-runtime-core/src/session/session-state.js";
-import type { RuntimeSessionIdentity } from "@tetral/agent-runtime-core/src/session/session.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import type { ThreadContextPrefix } from "@tetral/agent-runtime-core/src/session/context-manager.js";
-import { ThreadTurnLoadFactsSchema } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-extractor.js";
-import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-extractor.js";
+import { ThreadTurnLoadFactsSchema } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import {
   DurableRuntimeMessageSchema,
   RuntimeMessageSchema,
@@ -686,7 +686,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
    * Concurrent refreshes for the same thread and binding share one in-flight request.
    */
   async refreshRuntimeBindingToken(
-    identity: RuntimeSessionIdentity,
+    identity: RuntimeThreadIdentity,
     options: { readonly force?: boolean | undefined } = {},
   ): Promise<string> {
     if (options.force !== true && !bindingTokenNeedsRefresh(identity.runtimeBindingToken, this.nowEpochMs(), this.refreshMarginMs)) {
@@ -708,7 +708,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     }
   }
 
-  private async refreshRuntimeBindingTokenOnce(identity: RuntimeSessionIdentity): Promise<string> {
+  private async refreshRuntimeBindingTokenOnce(identity: RuntimeThreadIdentity): Promise<string> {
     for (let attempt = 1; attempt <= RuntimeBindingTokenRefreshPolicy.attempts; attempt += 1) {
       try {
         const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
@@ -2424,7 +2424,7 @@ function bridgeScope(input: {
   };
 }
 
-function bindingTokenRefreshScope(identity: RuntimeSessionIdentity): RuntimeScope {
+function bindingTokenRefreshScope(identity: RuntimeThreadIdentity): RuntimeScope {
   return {
     requestId: `binding-token-refresh:${identity.sessionThreadId}`,
     workspaceId: identity.workspaceId,
@@ -2438,7 +2438,7 @@ function bindingTokenRefreshScope(identity: RuntimeSessionIdentity): RuntimeScop
   };
 }
 
-function bindingTokenRefreshKey(identity: RuntimeSessionIdentity): string {
+function bindingTokenRefreshKey(identity: RuntimeThreadIdentity): string {
   return [
     identity.workspaceId,
     identity.sessionId,

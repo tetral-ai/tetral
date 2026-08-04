@@ -109,7 +109,7 @@ export function sessionEventForDurableWrite(event: SessionEvent): SessionEvent {
 // (MCP members pass through unchanged elsewhere; billing/credential-host failures
 // have no member and fall through to unknown_error.)
 //
-// retry_status (publicRetryStatus): AgentLoop stamps exhausted on RuntimeFailure
+// retry_status (publicRetryStatus): ThreadLoop stamps exhausted on RuntimeFailure
 // values when its retry lifecycle spends the budget; this mapper preserves that
 // stamp, recognizes real termination as terminal, and otherwise defaults to
 // retrying because it has no settlement-disposition input. Bridge-owned exhaustion

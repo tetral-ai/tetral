@@ -388,7 +388,7 @@ func loadThreadContextJSONTx(
 	if err := rows.Close(); err != nil {
 		return "", err
 	}
-	turnFacts, err := loadThreadTurnFactsTx(ctx, tx, scope, messageDescriptors)
+	turnFacts, err := loadThreadTurnFactsTx(ctx, tx, scope, messageDescriptors, durableTurnID)
 	if err != nil {
 		return "", err
 	}

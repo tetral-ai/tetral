@@ -158,7 +158,22 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 		}
+		if request.GetEventType() == "agent.tool_result" || request.GetEventType() == "agent.mcp_tool_result" {
+			if err := verifyToolResultMembershipTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetModelRequestId(),
+				request.GetEventType(),
+				payloadJSON,
+			); err != nil {
+				return err
+			}
+		}
 		if requestStart != nil {
+			if err := verifyRequestStartUniqueTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
+				return err
+			}
 			if err := verifyRequestStartMessageBoundaryTx(ctx, tx, request.GetScope(), requestStart.GetContextThroughMessageSequence()); err != nil {
 				return err
 			}
@@ -260,6 +275,17 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		)
 		if err != nil {
 			return err
+		}
+		if eventType == "agent.tool_use" || eventType == "agent.mcp_tool_use" {
+			if err := verifyModelToolCallIDUniqueTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetModelRequestId(),
+				toolProjection.ModelToolCallID,
+			); err != nil {
+				return err
+			}
 		}
 		if serverToolUse.Present {
 			if err := verifyWebToolResultUsageTx(ctx, tx, request.GetScope(), eventType, eventPayloadJSON, toolProjection); err != nil {
@@ -373,6 +399,102 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	}, nil
 }
 
+func verifyRequestStartUniqueTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+) error {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_events
+			 WHERE workspace_id = $1
+			   AND session_id = $2
+			   AND session_thread_id = $3
+			   AND model_request_id = $4
+			   AND type = 'span.model_request_start'
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		modelRequestID,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return status.Error(codes.AlreadyExists, "model request already has a durable start")
+	}
+	return nil
+}
+
+func verifyToolResultMembershipTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	resultEventType string,
+	payloadJSON string,
+) error {
+	if modelRequestID == "" {
+		return status.Error(codes.InvalidArgument, "model request id is required")
+	}
+	var payload runtimeToolResultEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
+	}
+	toolUseEventID, err := runtimeToolResultUseEventID(resultEventType, payload)
+	if err != nil {
+		return err
+	}
+	toolUseEventType := "agent.tool_use"
+	if resultEventType == "agent.mcp_tool_result" {
+		toolUseEventType = "agent.mcp_tool_use"
+	}
+	if toolUseEventID == "" {
+		return status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_events
+			 WHERE workspace_id = $1
+			   AND session_id = $2
+			   AND session_thread_id = $3
+			   AND event_id = $4
+			   AND model_request_id = $5
+			   AND type = $6
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventID,
+		modelRequestID,
+		toolUseEventType,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return status.Error(codes.FailedPrecondition, "tool result has no matching Tool Use")
+	}
+	if _, settled, err := toolResultForToolUseExistsTx(
+		ctx,
+		tx,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventType,
+		toolUseEventID,
+	); err != nil {
+		return err
+	} else if settled {
+		return status.Error(codes.AlreadyExists, "Tool Use already has a terminal result")
+	}
+	return nil
+}
+
 func verifyModelRequestAcceptsMembersTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
@@ -404,6 +526,54 @@ func verifyModelRequestAcceptsMembersTx(
 	}
 	if ends != 0 {
 		return status.Error(codes.FailedPrecondition, "model request is already sealed")
+	}
+	return nil
+}
+
+func verifyModelToolCallIDUniqueTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	modelToolCallID string,
+) error {
+	if modelToolCallID == "" {
+		return status.Error(codes.FailedPrecondition, "model tool call id is missing")
+	}
+	var occurrences int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM session_messages AS message
+		   JOIN session_events AS event
+		     ON event.workspace_id = message.workspace_id
+		    AND event.session_id = message.session_id
+		    AND event.session_thread_id = message.session_thread_id
+		    AND event.event_id = message.source_event_id
+		  CROSS JOIN LATERAL jsonb_array_elements(
+		    CASE
+		      WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
+		      THEN message.data_json::jsonb -> 'parts'
+		      ELSE '[]'::jsonb
+		    END
+		  ) AS part
+		  WHERE event.workspace_id = $1
+		    AND event.session_id = $2
+		    AND event.session_thread_id = $3
+		    AND event.model_request_id = $4
+		    AND part ->> 'toolCallId' = $5`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		modelRequestID,
+		modelToolCallID,
+	).Scan(&occurrences); err != nil {
+		return err
+	}
+	if occurrences == 0 {
+		return status.Error(codes.FailedPrecondition, "model tool call projection is missing")
+	}
+	if occurrences != 1 {
+		return status.Error(codes.AlreadyExists, "model tool call id already has a durable declaration")
 	}
 	return nil
 }
@@ -847,9 +1017,9 @@ func sessionThreadCallableTaskNameTx(
 	return taskName, nil
 }
 
-func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, startEventID string, modelRequestID string) error {
+func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, startEventID string, modelRequestID string, requestKind string) error {
 	row := tx.QueryRow(ctx,
-		`SELECT event_id
+		`SELECT event_id, projection_json::jsonb ->> 'request_kind'
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -864,11 +1034,14 @@ func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		startEventID,
 		modelRequestID,
 	)
-	var eventID string
-	if err := row.Scan(&eventID); dbconnect.IsNoRows(err) {
+	var eventID, durableRequestKind string
+	if err := row.Scan(&eventID, &durableRequestKind); dbconnect.IsNoRows(err) {
 		return status.Error(codes.FailedPrecondition, "model request start span is missing")
 	} else if err != nil {
 		return err
+	}
+	if durableRequestKind != requestKind {
+		return status.Error(codes.FailedPrecondition, "model request kind does not match its start span")
 	}
 	return nil
 }
@@ -1136,6 +1309,28 @@ type runtimeToolResultEventPayload struct {
 	IsError bool `json:"is_error"`
 }
 
+func runtimeToolResultUseEventID(eventType string, payload runtimeToolResultEventPayload) (string, error) {
+	switch eventType {
+	case "agent.tool_result":
+		if payload.MCPToolUseID != "" ||
+			(payload.ToolUseEventID != "" && payload.ToolUseID != "" && payload.ToolUseEventID != payload.ToolUseID) {
+			return "", status.Error(codes.FailedPrecondition, "tool result event identity is invalid")
+		}
+		toolUseEventID := defaultString(payload.ToolUseEventID, payload.ToolUseID)
+		if toolUseEventID == "" {
+			return "", status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
+		}
+		return toolUseEventID, nil
+	case "agent.mcp_tool_result":
+		if payload.MCPToolUseID == "" || payload.ToolUseEventID != "" || payload.ToolUseID != "" {
+			return "", status.Error(codes.FailedPrecondition, "MCP tool result event identity is invalid")
+		}
+		return payload.MCPToolUseID, nil
+	default:
+		return "", status.Error(codes.FailedPrecondition, "tool result event type is invalid")
+	}
+}
+
 type runtimeToolProjectionPayload struct {
 	MessageID       string          `json:"message_id"`
 	PartID          string          `json:"part_id"`
@@ -1185,9 +1380,10 @@ func runtimeToolProjectionFromDeclaration(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
 		}
-		targetToolUseEventID = defaultString(payload.MCPToolUseID, defaultString(payload.ToolUseEventID, payload.ToolUseID))
-		if targetToolUseEventID == "" {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
+		var err error
+		targetToolUseEventID, err = runtimeToolResultUseEventID(eventType, payload)
+		if err != nil {
+			return runtimeToolProjectionPayload{}, err
 		}
 	default:
 		return runtimeToolProjectionPayload{}, nil
@@ -1318,8 +1514,11 @@ func applyWriteEventToolBookkeepingTx(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
 		}
-		toolUseEventID := defaultString(payload.MCPToolUseID, defaultString(payload.ToolUseEventID, payload.ToolUseID))
-		if toolUseEventID == "" || projection.ModelToolCallID == "" {
+		toolUseEventID, err := runtimeToolResultUseEventID(eventType, payload)
+		if err != nil {
+			return err
+		}
+		if projection.ModelToolCallID == "" {
 			return status.Error(codes.FailedPrecondition, "tool result declaration is incomplete")
 		}
 		if projection.State != "completed" && projection.State != "error" && projection.State != "cancelled" {

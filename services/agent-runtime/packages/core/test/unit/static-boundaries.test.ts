@@ -49,7 +49,7 @@ describe("static Runtime Pod Gateway boundaries", () => {
       expect(packageJson.dependencies?.["@tetral/gateway-protocol"]).toBeString();
       expect(buildScript.startsWith("rm -rf dist && bun build ")).toBe(true);
       expect(packageJson.scripts?.build).toContain("src/llm/llm-service.ts");
-      expect(packageJson.scripts?.build).toContain("src/agent-loop/provider-call-assembly.ts");
+      expect(packageJson.scripts?.build).toContain("src/thread-loop/provider-request.ts");
     }
   });
 
@@ -124,39 +124,37 @@ describe("static Runtime Pod Gateway boundaries", () => {
     expect(violations).toEqual([]);
   });
 
-  test("RequestTurn scope owns provider stream and tool fibers", async () => {
-    const text = await readFile(new URL("../../src/agent-loop/agent-loop.ts", import.meta.url), "utf8");
-    const requestTurnStart = text.indexOf("const requestTurnScope = yield* Scope.make()");
-    const providerStart = text.indexOf("const providerStream =", requestTurnStart);
-    const streamExit = text.indexOf("const streamExit =", providerStart);
-    expect(requestTurnStart).toBeGreaterThanOrEqual(0);
-    expect(providerStart).toBeGreaterThanOrEqual(0);
-    expect(streamExit).toBeGreaterThan(providerStart);
-
-    const providerFiberSection = text.slice(providerStart, streamExit);
-    expect(providerFiberSection).toContain("Effect.forkIn(requestTurnScope)");
-    expect(providerFiberSection).not.toContain("forkDetach");
-    expect(text).toContain("requestTurnScope,");
-    expect(text).toContain("Effect.forkIn(state.requestTurnScope)");
-    expect(text).toContain("Scope.close(requestTurnScope, Exit.void)");
-    expect(text).toContain("const RequestTurnScopeCloseTimeoutMs = ToolRouteCancelJoinTimeoutMs + 50");
-    expect(text).toContain("Effect.timeoutOption(`${RequestTurnScopeCloseTimeoutMs} millis`)");
+  test("provider-request owns the scoped provider stream lifecycle", async () => {
+    const coordinator = await readFile(new URL("../../src/thread-loop/thread-loop.ts", import.meta.url), "utf8");
+    const provider = await readFile(new URL("../../src/thread-loop/provider-request.ts", import.meta.url), "utf8");
+    expect(provider).toContain("export function runProviderStreamLifecycle");
+    expect(provider).toContain("Effect.forkIn(requestScope)");
+    expect(provider).not.toContain("forkDetach");
+    expect(coordinator).toContain("runProviderStreamLifecycle(");
+    expect(coordinator).not.toContain("Effect.forkIn(providerRequestScope)");
+    expect(coordinator).toContain("Scope.close(providerRequestScope, Exit.void)");
   });
 
-  test("compaction owns its provider stream without creating a RequestTurn", async () => {
-    const text = await readFile(new URL("../../src/agent-loop/agent-loop.ts", import.meta.url), "utf8");
-    const compactionStart = text.indexOf("const compactionScope = yield* Scope.make()");
-    const providerStart = text.indexOf("const providerStream =", compactionStart);
-    const requestTurnStart = text.indexOf("const requestTurnScope = yield* Scope.make()", compactionStart);
-    expect(compactionStart).toBeGreaterThanOrEqual(0);
-    expect(providerStart).toBeGreaterThan(compactionStart);
-    expect(requestTurnStart).toBeGreaterThan(providerStart);
+  test("compaction owns its provider stream without creating an agent-request scope", async () => {
+    const coordinator = await readFile(new URL("../../src/thread-loop/thread-loop.ts", import.meta.url), "utf8");
+    const compaction = await readFile(new URL("../../src/thread-loop/compaction.ts", import.meta.url), "utf8");
+    expect(compaction).toContain("export function runCompactionStreamLifecycle");
+    expect(compaction).toContain("Effect.forkIn(compactionScope)");
+    expect(compaction).not.toContain("providerRequestScope");
+    expect(compaction).not.toContain("forkDetach");
+    expect(coordinator).toContain("runCompactionStreamLifecycle(");
+    expect(coordinator).not.toContain("Effect.forkIn(compactionScope)");
+    expect(coordinator).toContain("Scope.close(compactionScope, Exit.void)");
+  });
 
-    const compactionSection = text.slice(compactionStart, requestTurnStart);
-    expect(compactionSection).toContain("Effect.forkIn(compactionScope)");
-    expect(compactionSection).toContain("Scope.close(compactionScope, Exit.void)");
-    expect(compactionSection).not.toContain("requestTurnScope");
-    expect(compactionSection).not.toContain("forkDetach");
+  test("tool settlement and failed-run closeout live in their responsibility modules", async () => {
+    const coordinator = await readFile(new URL("../../src/thread-loop/thread-loop.ts", import.meta.url), "utf8");
+    const tools = await readFile(new URL("../../src/thread-loop/tool-execution.ts", import.meta.url), "utf8");
+    const closeout = await readFile(new URL("../../src/thread-loop/closeout.ts", import.meta.url), "utf8");
+    expect(tools).toContain("export async function commitRuntimeToolSettlement");
+    expect(closeout).toContain("export async function closeFailedThreadRun");
+    expect(coordinator).not.toContain("processor.commitToolSettlement(");
+    expect(coordinator).not.toContain("async function closeFailedThreadRun");
   });
 
   test("Runtime package build roots include every production TS file outside deleted provider paths", async () => {

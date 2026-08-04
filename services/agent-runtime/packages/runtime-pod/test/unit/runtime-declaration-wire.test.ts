@@ -18,6 +18,7 @@ import {
 const podFamilies = [
   "commit_inputs",
   "write_event",
+  "write_event_request_start",
   "write_request_end",
   "finish_idle",
   "runtime_termination",
@@ -61,6 +62,7 @@ interface SharedDeclarationVector {
   readonly finish_reason: string;
   readonly usage_json: string;
   readonly request_kind: string;
+  readonly context_through_message_sequence: number;
   readonly durable_turn_id: string;
   readonly stop_reason_json: string;
   readonly failure_json: string;
@@ -157,6 +159,7 @@ function productionDigest(family: PodDeclarationFamily, vector: SharedDeclaratio
         sandboxExecutionToolUseEventIds: [],
       });
     case "write_event":
+    case "write_event_request_start":
       return writeEventDeclarationDigest({
         scope,
         runtimeWriteId: vector.runtime_write_id,
@@ -167,8 +170,10 @@ function productionDigest(family: PodDeclarationFamily, vector: SharedDeclaratio
         serverToolUse: undefined,
         drafts: [],
         mcpMaterializationHandle: undefined,
-        contextThroughMessageSequence: undefined,
-        requestKind: "",
+        contextThroughMessageSequence: family === "write_event_request_start"
+          ? vector.context_through_message_sequence
+          : undefined,
+        requestKind: family === "write_event_request_start" ? vector.request_kind : "",
       });
     case "write_request_end":
       return writeRequestEndDeclarationDigest({

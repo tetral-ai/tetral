@@ -56,7 +56,19 @@ export interface ThreadTurnReduction extends ThreadTurnDecision {
   readonly appliedEventIds: readonly string[];
 }
 
+/** Identifies an impossible durable fact or Thread-turn transition. */
+export class ThreadTurnContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ThreadTurnContractError";
+  }
+}
+
 export type ThreadTurnFact =
+  | {
+      readonly fact: "run_opened";
+      readonly eventId: string;
+    }
   | {
       readonly fact: "inputs_committed";
       readonly eventId: string;
@@ -102,9 +114,13 @@ export type ThreadTurnFact =
       readonly fact: "finish_idle_committed";
       readonly eventId: string;
       readonly stopReason:
-        | { readonly type: "end_turn" }
+        | { readonly type: "end_turn"; readonly failedRun?: true }
         | { readonly type: "requires_action"; readonly eventIds: readonly string[] }
-        | { readonly type: "retries_exhausted"; readonly failureEventId: string };
+        | {
+            readonly type: "retries_exhausted";
+            readonly failureEventId: string;
+            readonly failedRun?: true;
+          };
     }
   | {
       readonly fact: "interrupt_committed";
@@ -126,6 +142,9 @@ export function deriveThreadTurnDecision(
   const modelRequestId = checkpoint.request?.modelRequestId;
 
   if (checkpoint.interruptEventId !== undefined) {
+    if (checkpoint.executionRunId === undefined) {
+      return { state: { state: "idle" }, action: { action: "await_input" } };
+    }
     return {
       state: controlState(checkpoint),
       action: optionalModelRequestAction("close_interrupted", modelRequestId),
@@ -137,8 +156,17 @@ export function deriveThreadTurnDecision(
 
   const request = checkpoint.request;
   if (request === undefined) {
+    if (checkpoint.idleCloseout?.stopReason === "end_turn") {
+      return { state: { state: "idle" }, action: { action: "await_input" } };
+    }
     if (checkpoint.pendingInputMessageIds.length > 0) {
       return readyToRequest();
+    }
+    if (checkpoint.executionRunId !== undefined) {
+      return {
+        state: { state: "ready_to_finish" },
+        action: { action: "finish_idle", stopReason: { type: "end_turn" } },
+      };
     }
     return { state: { state: "idle" }, action: { action: "await_input" } };
   }
@@ -160,12 +188,6 @@ export function deriveThreadTurnDecision(
     return {
       state: { state: "ready_to_request" },
       action: { action: "continue_after_compaction", modelRequestId: request.modelRequestId },
-    };
-  }
-  if (request.requestKind === "approval_reviewer") {
-    return {
-      state: { state: "request_sealed", modelRequestId: request.modelRequestId },
-      action: { action: "complete_reviewer", modelRequestId: request.modelRequestId },
     };
   }
   const publicMembers = request.toolMembers.filter((member) => member.memberKind === "public_tool_use");
@@ -231,6 +253,13 @@ export function deriveThreadTurnDecision(
     return readyToRequest();
   }
 
+  if (request.requestKind === "approval_reviewer") {
+    return {
+      state: { state: "request_sealed", modelRequestId: request.modelRequestId },
+      action: { action: "complete_reviewer", modelRequestId: request.modelRequestId },
+    };
+  }
+
   if (checkpoint.idleCloseout?.stopReason === "end_turn") {
     return { state: { state: "idle" }, action: { action: "await_input" } };
   }
@@ -259,30 +288,60 @@ export function reduceThreadTurn(
 ): ThreadTurnReduction {
   assertDurableIdentity(fact.eventId, "eventId");
   if (current.appliedEventIds.includes(fact.eventId)) {
+    if (fact.fact === "run_opened") {
+      return current;
+    }
     return { ...current, action: { action: "none" } };
   }
 
   const appliedEventIds = [...current.appliedEventIds, fact.eventId];
   switch (fact.fact) {
+    case "run_opened": {
+      if (current.checkpoint.executionRunId === fact.eventId) {
+        return stableReduction(current.checkpoint, appliedEventIds, routeView);
+      }
+      const request = current.checkpoint.request;
+      const preserveActiveRequest = current.checkpoint.interruptEventId === undefined &&
+        request?.requestEnd !== undefined &&
+        !request.requestEnd.isError &&
+        (
+          request.toolMembers.some((member) =>
+            member.memberKind === "public_tool_use" && member.terminalResult === undefined
+          ) ||
+          current.action.action === "prepare_next_request" ||
+          current.action.action === "continue_after_compaction" ||
+          current.action.action === "complete_reviewer"
+        );
+      const checkpoint = parseThreadTurnCheckpoint({
+        executionRunId: fact.eventId,
+        pendingInputMessageIds: current.checkpoint.pendingInputMessageIds,
+        ...(preserveActiveRequest && request !== undefined
+          ? { request }
+          : {}),
+      });
+      return stableReduction(checkpoint, appliedEventIds, routeView);
+    }
     case "inputs_committed": {
       const checkpoint = applyCommittedInputs(current.checkpoint, fact.messageIds);
       return stableReduction(checkpoint, appliedEventIds, routeView);
     }
     case "request_started": {
-      if (current.state.state !== "ready_to_request") {
-        throw new Error(`cannot start Request from ${current.state.state}`);
+      const startAuthorized = current.state.state === "ready_to_request" ||
+        current.action.action === "apply_request_retry_or_reschedule";
+      if (!startAuthorized) {
+        throw new ThreadTurnContractError(`cannot start Request from ${current.state.state}`);
       }
       assertDurableIdentity(fact.modelRequestId, "modelRequestId");
       if (!Number.isSafeInteger(fact.contextThroughMessageSequence) || fact.contextThroughMessageSequence < 0) {
-        throw new Error("contextThroughMessageSequence must be a non-negative safe integer");
+        throw new ThreadTurnContractError("contextThroughMessageSequence must be a non-negative safe integer");
       }
       const consumed = new Set(fact.consumedInputMessageIds);
       if (consumed.size !== fact.consumedInputMessageIds.length) {
-        throw new Error("consumedInputMessageIds must be unique");
+        throw new ThreadTurnContractError("consumedInputMessageIds must be unique");
       }
       for (const messageId of consumed) {
         if (!current.checkpoint.pendingInputMessageIds.includes(messageId)) {
-          throw new Error("Request Start consumed an unknown input message");
+          throw new ThreadTurnContractError("Request Start consumed an unknown input message");
         }
       }
       const checkpoint = parseThreadTurnCheckpoint({
@@ -308,12 +367,12 @@ export function reduceThreadTurn(
     case "tool_use_committed": {
       const request = currentRequest(current.checkpoint, fact.modelRequestId);
       if (request.requestEnd !== undefined) {
-        throw new Error("cannot append Tool Use after Request End");
+        throw new ThreadTurnContractError("cannot append Tool Use after Request End");
       }
       assertDurableIdentity(fact.modelToolCallId, "modelToolCallId");
       assertDurableIdentity(fact.toolName, "toolName");
       if (request.toolMembers.some((member) => member.modelToolCallId === fact.modelToolCallId)) {
-        throw new Error("modelToolCallId must be unique within a request");
+        throw new ThreadTurnContractError("modelToolCallId must be unique within a request");
       }
       const checkpoint = replaceRequest(current.checkpoint, {
         ...request,
@@ -340,10 +399,10 @@ export function reduceThreadTurn(
     case "internal_tool_repair_committed": {
       const request = currentRequest(current.checkpoint, fact.modelRequestId);
       if (request.requestEnd !== undefined) {
-        throw new Error("cannot append internal Tool repair after Request End");
+        throw new ThreadTurnContractError("cannot append internal Tool repair after Request End");
       }
       if (request.toolMembers.some((member) => member.modelToolCallId === fact.modelToolCallId)) {
-        throw new Error("modelToolCallId must be unique within a request");
+        throw new ThreadTurnContractError("modelToolCallId must be unique within a request");
       }
       const checkpoint = replaceRequest(current.checkpoint, {
         ...request,
@@ -363,7 +422,7 @@ export function reduceThreadTurn(
     case "tool_result_committed": {
       const request = current.checkpoint.request;
       if (request === undefined) {
-        throw new Error("Tool Result does not name a request member");
+        throw new ThreadTurnContractError("Tool Result does not name a request member");
       }
       let matched = false;
       const toolMembers = request.toolMembers.map((member) => {
@@ -372,7 +431,7 @@ export function reduceThreadTurn(
         }
         matched = true;
         if (member.terminalResult !== undefined) {
-          throw new Error("Tool Use already has a terminal Tool Result");
+          throw new ThreadTurnContractError("Tool Use already has a terminal Tool Result");
         }
         return {
           ...member,
@@ -380,10 +439,16 @@ export function reduceThreadTurn(
         } as const;
       });
       if (!matched) {
-        throw new Error("Tool Result does not name a request member");
+        throw new ThreadTurnContractError("Tool Result does not name a request member");
       }
+      const activeCheckpoint = current.checkpoint.idleCloseout === undefined
+        ? current.checkpoint
+        : parseThreadTurnCheckpoint({
+            ...current.checkpoint,
+            idleCloseout: undefined,
+          });
       return stableReduction(
-        replaceRequest(current.checkpoint, { ...request, toolMembers }),
+        replaceRequest(activeCheckpoint, { ...request, toolMembers }),
         appliedEventIds,
         routeView,
       );
@@ -391,7 +456,7 @@ export function reduceThreadTurn(
     case "request_ended": {
       const request = currentRequest(current.checkpoint, fact.modelRequestId);
       if (request.requestEnd !== undefined) {
-        throw new Error("Request already has a durable End");
+        throw new ThreadTurnContractError("Request already has a durable End");
       }
       const checkpoint = replaceRequest(current.checkpoint, {
         ...request,
@@ -412,13 +477,13 @@ export function reduceThreadTurn(
     case "finish_idle_committed": {
       if (fact.stopReason.type === "requires_action") {
         if (current.state.state !== "waiting_for_tool_results") {
-          throw new Error(`cannot finish requires_action from ${current.state.state}`);
+          throw new ThreadTurnContractError(`cannot finish requires_action from ${current.state.state}`);
         }
         if (current.action.action !== "finish_idle" || current.action.stopReason.type !== "requires_action") {
-          throw new Error("requires_action ACK does not match the current FinishIdle action");
+          throw new ThreadTurnContractError("requires_action ACK does not match the current FinishIdle action");
         }
         if (!sameIdentitySet(fact.stopReason.eventIds, current.action.stopReason.eventIds)) {
-          throw new Error("requires_action ACK event IDs do not match the declared closeout");
+          throw new ThreadTurnContractError("requires_action ACK event IDs do not match the declared closeout");
         }
         const checkpoint = parseThreadTurnCheckpoint({
           ...checkpointWithoutExecutionRun(current.checkpoint),
@@ -426,7 +491,7 @@ export function reduceThreadTurn(
         });
         const request = checkpoint.request;
         if (request === undefined) {
-          throw new Error("requires_action closeout has no request");
+          throw new ThreadTurnContractError("requires_action closeout has no request");
         }
         return {
           checkpoint,
@@ -445,12 +510,12 @@ export function reduceThreadTurn(
         };
       }
       if (fact.stopReason.type === "retries_exhausted") {
-        if (current.state.state !== "request_sealed") {
-          throw new Error(`cannot finish retries_exhausted from ${current.state.state}`);
+        if (current.state.state !== "request_sealed" && fact.stopReason.failedRun !== true) {
+          throw new ThreadTurnContractError(`cannot finish retries_exhausted from ${current.state.state}`);
         }
         assertDurableIdentity(fact.stopReason.failureEventId, "failureEventId");
         const checkpoint = parseThreadTurnCheckpoint({
-          ...checkpointWithoutExecutionRun(current.checkpoint),
+          pendingInputMessageIds: current.checkpoint.pendingInputMessageIds,
           terminalCloseout: {
             failureEventId: fact.stopReason.failureEventId,
             closeoutEventId: fact.eventId,
@@ -460,11 +525,18 @@ export function reduceThreadTurn(
         });
         return stableReduction(checkpoint, appliedEventIds, routeView);
       }
-      if (fact.stopReason.type === "end_turn" && current.state.state !== "ready_to_finish") {
-        throw new Error(`cannot finish end_turn from ${current.state.state}`);
+      const closesCurrentAction = (
+        current.action.action === "finish_idle" && current.action.stopReason.type === "end_turn"
+      ) || current.action.action === "complete_reviewer" ||
+        current.action.action === "close_interrupted" ||
+        current.action.action === "apply_request_retry_or_reschedule" ||
+        (current.state.state === "idle" && current.action.action === "await_input") ||
+        fact.stopReason.failedRun === true;
+      if (!closesCurrentAction) {
+        throw new ThreadTurnContractError(`cannot finish end_turn from ${current.state.state}`);
       }
       const checkpoint = parseThreadTurnCheckpoint({
-        ...checkpointWithoutExecutionRun(current.checkpoint),
+        pendingInputMessageIds: current.checkpoint.pendingInputMessageIds,
         idleCloseout: { eventId: fact.eventId, stopReason: fact.stopReason.type },
       });
       return {
@@ -483,7 +555,7 @@ export function reduceThreadTurn(
     }
     case "terminal_closeout_committed": {
       const checkpoint = parseThreadTurnCheckpoint({
-        ...current.checkpoint,
+        pendingInputMessageIds: current.checkpoint.pendingInputMessageIds,
         terminalCloseout: {
           failureEventId: fact.failureEventId,
           closeoutEventId: fact.eventId,
@@ -500,7 +572,18 @@ export function reconcileThreadTurnSeal(
   routeView: ThreadToolRouteView,
 ): ThreadTurnReduction {
   if (current.state.state !== "request_sealed" || current.action.action !== "reconcile_request_seal") {
-    throw new Error("only a newly sealed request can be reconciled");
+    throw new ThreadTurnContractError("only a newly sealed request can be reconciled");
+  }
+  return stableReduction(current.checkpoint, current.appliedEventIds, routeView);
+}
+
+/** Consumes a one-shot hot dispatch edge and exposes its durable stable action. */
+export function consumeThreadTurnEdge(
+  current: ThreadTurnReduction,
+  routeView: ThreadToolRouteView,
+): ThreadTurnReduction {
+  if (current.action.action !== "start_provider_request" && current.action.action !== "dispatch_tool_use") {
+    throw new ThreadTurnContractError("only a one-shot Thread-turn edge can be consumed");
   }
   return stableReduction(current.checkpoint, current.appliedEventIds, routeView);
 }
@@ -525,7 +608,7 @@ function applyCommittedInputs(
   for (const messageId of messageIds) {
     assertDurableIdentity(messageId, "messageId");
     if (nextIds.includes(messageId)) {
-      throw new Error("committed input message is already pending");
+      throw new ThreadTurnContractError("committed input message is already pending");
     }
     nextIds.push(messageId);
   }
@@ -557,7 +640,7 @@ function currentRequest(
 ): NonNullable<ThreadTurnCheckpoint["request"]> {
   const request = checkpoint.request;
   if (request === undefined || request.modelRequestId !== modelRequestId) {
-    throw new Error("durable fact does not belong to the current model request");
+    throw new ThreadTurnContractError("durable fact does not belong to the current model request");
   }
   return request;
 }
@@ -577,13 +660,13 @@ function validateRouteOwnership(
   );
   for (const route of routeView.routes) {
     if (!publicMemberIds.has(route.toolUseEventId)) {
-      throw new Error("tool route does not name a request member");
+      throw new ThreadTurnContractError("tool route does not name a request member");
     }
   }
   for (const member of incompleteMembers) {
     const count = routeView.routes.filter((route) => route.toolUseEventId === member.toolUseEventId).length;
     if (count !== 1) {
-      throw new Error("sealed non-terminal Tool Use has no route");
+      throw new ThreadTurnContractError("sealed non-terminal Tool Use has no route");
     }
   }
 }
@@ -594,7 +677,7 @@ function routeDisposition(
 ): ThreadToolRouteView["routes"][number]["disposition"] {
   const route = routeView.routes.find((candidate) => candidate.toolUseEventId === toolUseEventId);
   if (route === undefined) {
-    throw new Error("sealed non-terminal Tool Use has no route");
+    throw new ThreadTurnContractError("sealed non-terminal Tool Use has no route");
   }
   return route.disposition;
 }
@@ -626,7 +709,7 @@ function optionalModelRequestAction(
 
 function assertDurableIdentity(value: string, label: string): void {
   if (value.length === 0) {
-    throw new Error(`${label} must be non-empty`);
+    throw new ThreadTurnContractError(`${label} must be non-empty`);
   }
 }
 

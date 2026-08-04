@@ -4,7 +4,7 @@
  * boundary used by Runtime orchestration. It guards the separation between a
  * database-stamped cold baseline and typed commands applied during one hot
  * residency. SessionManager calls the cold loader once per ThreadEntry;
- * AgentLoop calls the declaration writer and binding-token adapter.
+ * ThreadLoop calls the declaration writer and binding-token adapter.
  */
 import { Context, Layer } from "effect";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -23,10 +23,10 @@ import type {
   RuntimePreloadedBackgroundToolState,
   RuntimePreloadedSandboxExecutionState,
   RuntimeThreadControlState,
-} from "../session/session-state.js";
-import type { RuntimeSessionIdentity } from "../session/session.js";
+} from "../thread-loop/thread-state.js";
+import type { RuntimeThreadIdentity } from "../thread-loop/thread-runtime.js";
 import type { ThreadContextPrefix } from "../session/context-manager.js";
-import type { ThreadTurnLoadFacts } from "../thread-loop/thread-turn-extractor.js";
+import type { ThreadTurnLoadFacts } from "../thread-loop/thread-turn-checkpoint.js";
 
 /** Operations through which session orchestration cold-loads and commits thread state. */
 export interface ContextLoader {
@@ -54,7 +54,7 @@ export interface ContextLoader {
   }>;
   /** Refreshes the binding credential without changing durable declaration state; stale custody rejects as superseded. */
   readonly refreshRuntimeBindingToken?: (
-    identity: RuntimeSessionIdentity,
+    identity: RuntimeThreadIdentity,
     options?: { readonly force?: boolean | undefined },
   ) => Promise<string>;
   /**

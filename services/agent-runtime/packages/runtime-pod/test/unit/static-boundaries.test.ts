@@ -291,14 +291,15 @@ describe("Runtime Pod static boundaries", () => {
 
   test("approval reviewer work is Effect-owned with no detached Promise launch", async () => {
     const reviewer = await readFile(new URL("src/approval-reviewer.ts", podRoot), "utf8");
-    const agentLoop = await readFile(new URL("src/agent-loop/agent-loop.ts", coreRoot), "utf8");
+    const threadLoop = await readFile(new URL("src/thread-loop/thread-loop.ts", coreRoot), "utf8");
+    const toolExecution = await readFile(new URL("src/thread-loop/tool-execution.ts", coreRoot), "utf8");
 
     expect(reviewer).toContain("return (request) => Effect.gen(function* ()");
     expect(reviewer).toContain("yield* manager.fork(");
     expect(reviewer).not.toContain("return async (request)");
     expect(reviewer).not.toMatch(/\bvoid\s*\(\s*async\s*\(/);
-    expect(agentLoop).toContain(") => Effect.Effect<ApprovalReviewerOutcome, never>;");
-    expect(agentLoop).not.toContain("yield* Effect.promise(async () =>");
+    expect(toolExecution).toContain(") => Effect.Effect<ApprovalReviewerOutcome, never>;");
+    expect(threadLoop).not.toContain("yield* Effect.promise(async () =>");
   });
 });
 

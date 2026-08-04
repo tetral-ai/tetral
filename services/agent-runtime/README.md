@@ -1,7 +1,7 @@
 # agent-runtime
 
-The runtime's hot half: the TypeScript/Effect process that runs the agent
-loop. Everything it holds lives in memory and is disposable by construction —
+The runtime's hot half: the TypeScript/Effect process that runs ThreadLoop.
+Everything it holds lives in memory and is disposable by construction —
 durable truth stays in the database behind Bridge, and the pod mutates hot
 state only after the matching Bridge ACK (one named exception: the interrupt
 closeout is hot-first by design and commits its snapshot last). Its wires are
@@ -19,7 +19,7 @@ The package is three Bun/TypeScript workspaces:
 
 | Workspace | Path | Owns |
 | --- | --- | --- |
-| core | `packages/core` | Agent Loop, hot-state model, tool system, provider/runtime contracts — no process, no transport |
+| core | `packages/core` | ThreadLoop, hot-state model, tool system, provider/runtime contracts — no process, no transport |
 | protocol | `packages/protocol` | generated pod and Bridge gRPC types plus shared bound constants |
 | runtime-pod | `packages/runtime-pod` | process entrypoint, gRPC/HTTP servers, Bridge/Gateway clients, TokenReview auth, tool runner |
 
@@ -38,12 +38,12 @@ invariants stated with them.
 | Object | Anchor | Holds | Disposability |
 | --- | --- | --- | --- |
 | `SessionEntry` | `session-manager.ts` | `threads: Map<session_thread_id, ThreadEntry>` — a residency map, not a durable parent-child index | rebuilt from Bridge reads over `session_threads` |
-| `ThreadEntry` | `session-state.ts` | one entry shape for `role = main \| subagent \| approval_reviewer`; `status`, `session_state`, `accepted_input_queue`, `control_queue`, `run_slot` | released whole on cleanup — no orphan fibers, timers, or maps survive |
+| `ThreadEntry` | `session-manager.ts` | one resident thread with role, status, `ThreadRuntime`, command channel, and `run_slot` | released whole on cleanup — no orphan fibers, timers, or maps survive |
 | `ThreadRunSlot` | `session-manager.ts` | the single-owner run guard (below) | hot memory only; durable truth is `session_events` / `session_messages` / `session_pending_tool_uses` / `session_threads` |
-| `SessionState` | `session-state.ts` | profile keys, installed tool definitions/routes/formatters, availability + approval policy, skill guidance index, pending attachments, last-request usage hint, held route-effective limits | reloaded on cold start; held limits and usage hint are never durable |
+| `ThreadState` | `thread-loop/thread-state.ts` | accepted inputs, pending tool and approval work, attachments, configuration views, and request usage hints for one resident thread | rebuilt from durable state on cold start; held limits and usage hints are never durable |
 | `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
-| `SessionProcessor` | `accumulator.ts` | the request-turn accumulator (assistant shell, part/tool maps, tool-use ids, terminal state) | created per provider turn at the Agent-Loop boundary, discarded when the turn settles; state never leaks across turns |
-| `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-request-turn coordination over `toolJobs[]` | belongs to the active `RequestTurn`; reads no database, owns no Bridge |
+| `SessionProcessor` | `accumulator.ts` | the request-turn accumulator (assistant shell, part/tool maps, tool-use ids, terminal state) | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; state never leaks across turns |
+| `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
 | `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | recoverable hot state on the parent thread; durable truth is the trunk ledger |
 
 Invariants a replacement must preserve:
@@ -67,11 +67,10 @@ signals coalesce while it is active.
 | `pending_wake` | coalescing flag (not a counter): any number of inputs arriving while active yield exactly one follow-up run |
 | `pending_wake_after_stop` | input accepted after an interrupt fence; owner cleanup must not drop it |
 | `stopping` | interrupt installed; the owner is unwinding |
-| `start_reason` | `resume \| wake \| follow_up` |
 
 | Event | Idle thread | Active, `stopping = false` | Active, `stopping = true` |
 | --- | --- | --- | --- |
-| `resume` | create `run_slot(resume)` | join `done_deferred` | await done, then retry `resume` |
+| `resume` | mark the resident Thread idle and receivable; later input performs the wake | reject as busy | reject as busy |
 | `wake` | create `run_slot(wake)` | set `pending_wake` | set `pending_wake_after_stop` |
 | `interrupt` | mark accepted, start no provider request | `stopping = true`, clear `pending_wake`, interrupt owner, close scopes | already stopping |
 | owner exits clean | — | if `pending_wake`: one follow-up run; else clear slot and complete `done_deferred` | if `pending_wake_after_stop`: clear `stopping`, start one follow-up after cleanup finalizers |
@@ -84,29 +83,22 @@ single-owner.
 
 ### The ThreadRun loop
 
-One fixed algorithm per run: write the running status if the durable status was
-idle, commit any accepted input (hot context appends only after the ACK), then
-loop — handle an installed interrupt, enter `requires_action` when an external
-wait remains, finish idle when nothing is pending, wait out a pending
-reschedule until its Bridge-effective deadline, run the compaction cycle when
-the trigger fires, otherwise run one request turn and sweep.
+One fixed algorithm per run freezes and commits a finite input cut, then drives
+the durable Thread-turn reduction. Hot context changes only after the matching
+ACK. Compaction, approval, reviewer, retry, interrupt, and failure are typed
+actions around the six states rather than extra top-level states.
 
 | Loop state | Owner | Durable boundary |
 | --- | --- | --- |
-| `accepting_input` | command handler + `SessionManager` | none until a later `CommitInputs`; the queue ACK is safe |
-| `committing_input` | ThreadRun owner fiber | `CommitInputs` ACK gates hot context/control/tool mutation |
+| `idle` | ThreadRun owner fiber | `CommitInputs` ACK makes a request eligible |
 | `ready_to_request` | ThreadRun owner fiber | pure hot decision point |
-| `compacting` | ThreadRun owner fiber | request-start, request-end, and `agent.thread_context_compacted` ACK |
-| `provider_request_start` | ThreadRun owner fiber | `WriteEvent(span.model_request_start)` ACK is RequestTurn birth |
-| `provider_streaming` | RequestTurn scope | Gateway stream; stable events still go through `WriteEvent` |
-| `request_end_write` | RequestTurn scope | `WriteRequestEnd` ACK closes the turn and gates the usage hint |
-| `tool_settlement` | RequestTurn tool-fiber set | every public tool use settles by `agent.tool_result` or an external wait |
-| `waiting_external` | durable pending rows + hot ToolJobs | `FinishIdle(requires_action)` ACK; no live fiber owns the wait |
-| `finish_idle` | ThreadRun owner fiber | `FinishIdle` ACK gates local idle |
-| `stop_error` | ThreadRun owner fiber | terminal error / repair writes when required |
+| `request_open` | provider-request scope | Tool Use ACKs and then `WriteRequestEnd` ACK |
+| `request_sealed` | ThreadRun owner fiber | typed seal reconciliation |
+| `waiting_for_tool_results` | provider-request tool-fiber set or durable pending routes | every named terminal Tool Result ACK |
+| `ready_to_finish` | ThreadRun owner fiber | `FinishIdle` ACK gates local idle |
 
-The loop state is an implementation contract for tests and logs, never a public
-enum. Every run exit settles its scope exactly once, by exactly one writer with
+The Thread-turn state is an internal typed contract, never a public status enum.
+Every run exit settles its scope exactly once, by exactly one writer with
 disjoint triggers (`FinishIdle`, terminal commit, pod-loss repair, or the
 cooperative cancellation closeout for internal child scopes on a healthy pod) —
 with two registered, record-bearing exceptions from the closeout-failure path:
@@ -172,7 +164,7 @@ Gateway owns all provider lowering and credential injection.
 - Interface: `GatewayClient.streamProviderRequest` in `core/src/llm/llm-service.ts`,
   implemented by `RuntimePodGatewayClient` (`runtime-pod/src/gateway-client.ts`)
   over `ProviderGatewayService`. The request is built by
-  `provider-call-assembly.ts`; the provider error codes are in
+  `core/src/thread-loop/provider-request.ts`; the provider error codes are in
   `core/src/contracts/provider.ts`; stream validation and normalization
   (`validateProviderStreamEvent`, consumed in `llm-service.ts`) reject any
   malformed or misidentified `ProviderStreamEvent`.
@@ -190,7 +182,7 @@ Gateway owns all provider lowering and credential injection.
   the Session's immutable Agent version and durable skill-version rows; Sandbox
   materialization uses the same resolver, so prompt paths and mounted packages
   describe the same pinned versions.
-- Lifecycle: a RequestTurn is born at the `span.model_request_start` ACK; before
+- Lifecycle: a provider request begins at the `span.model_request_start` ACK; before
   that ACK no request end is owed. After it, every terminal success, provider
   error, cancellation, or repairable failure closes with `WriteRequestEnd`.
 
@@ -214,11 +206,9 @@ Invariants a replacement must preserve:
 - The reviewer model and provider credentials are platform-owned; Gateway injects
   credentials but never chooses or replaces the model.
 - Media attachments obey `MaxProviderRequestAttachments` = 32
-  (`core/src/session/session-state.ts`); the cap is enforced at Runtime
-  pending-accumulation, not by a silent drop. Attachments past 32 are held as an
-  overflow count and surface as a model-only transient note before request
-  assembly. Attachments that expire before the Gateway request likewise become a
-  model-only transient note, never a user-visible event.
+  (`core/src/thread-loop/thread-state.ts`). Runtime admits at most that many
+  attachments into a pending request ride; it does not synthesize model-only
+  advisory messages for attachments outside the ride.
 - Attachment consumption is settled-output-only: the pending media rides the
   request and is consumed only when that request end settles. A failed,
   interrupted, or rescheduled request consumes nothing, and the same media
@@ -226,7 +216,7 @@ Invariants a replacement must preserve:
   attachments).
 
 Conformance tests: `core/test/unit/llm-service.test.ts`,
-`core/test/unit/provider-call-assembly.test.ts`,
+`core/test/unit/thread-loop/provider-request.test.ts`,
 `runtime-pod/test/unit/gateway-client.test.ts`.
 
 ### Tool route table
@@ -314,7 +304,7 @@ Conformance tests: `core/test/unit/tool-system.test.ts`,
 
 ### Sub-agent host
 
-Sub-agent tools are the same Agent Loop under child thread ids. There is no
+Sub-agent tools use the same ThreadLoop under child thread ids. There is no
 specialized sub-agent loop and no reviewer-only model-call path. The parent
 thread sees tool use/result; child work stays child-thread-local.
 
@@ -374,11 +364,13 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 
 | Suite | Proves |
 | --- | --- |
-| `core/test/unit/session-manager.test.ts` | `run_slot` single-owner, `wake` coalescing, `resume` join, interrupt/stop fences, concurrent distinct threads, sub-agent delivery and lifecycle |
-| `core/test/unit/agent-loop.test.ts` | the ThreadRun loop algorithm and state transitions |
-| `core/test/unit/session-state.test.ts` | thread hot-state shape and release |
+| `core/test/unit/session-manager.test.ts` | `run_slot` single-owner, `wake` coalescing, idle-only resume, interrupt/stop fences, concurrent distinct threads, sub-agent delivery and lifecycle |
+| `core/test/unit/thread-loop/thread-loop.test.ts` | ThreadLoop coordination and recoverable ThreadState behavior |
+| `core/test/unit/thread-loop/thread-turn-checkpoint.test.ts`, `thread-turn-reducer.test.ts` | durable turn reconstruction and the closed transition table |
+| `core/test/unit/thread-loop/tool-execution.test.ts`, `closeout.test.ts` | post-ACK tool execution, continuation, interruption, and settlement |
+| `core/test/unit/thread-loop/compaction.test.ts` | proactive and reactive compaction lifecycle |
 | `core/test/unit/context-loader.test.ts` | cold load of durable context, pending waits, and background handles |
-| `core/test/unit/provider-call-assembly.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
+| `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
 | `core/test/unit/llm-service.test.ts` | provider-stream ordering/identity validation and normalization |
 | `core/test/unit/runtime-accumulator.test.ts` | per-turn `SessionProcessor` accumulation that never leaks across turns |
 | `core/test/unit/session-event-writer.test.ts`, `runtime-message-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |

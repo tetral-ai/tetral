@@ -21,7 +21,7 @@ import { buildRuntimeControlCommitResult } from "./runtime-message-builders.js";
 import type {
   RuntimeAcceptedInputState,
   RuntimePendingApprovalToolJobState,
-} from "../../src/session/session-state.js";
+} from "../../src/thread-loop/thread-state.js";
 
 describe("runtime declaration identity and message shapes", () => {
   test("derives the shared framed stable ids", () => {

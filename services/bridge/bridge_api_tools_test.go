@@ -1053,18 +1053,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_repair_start", "mreq_repair", "agent_provider_request", 0)
-	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_bridge_repair_tool", ModelRequestId: "mreq_repair",
-		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"unknown_tool","input":{},"evaluated_permission":"allow"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t, scope, "rwrite_bridge_repair_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_repair","toolName":"unknown_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-		)},
-	})
-	if err != nil {
-		t.Fatalf("WriteEvent invalid tool use: %v", err)
-	}
-	toolMessageID := toolUse.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetMessageId()
 	repairKey := internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool")
 	request := &bridgev1.CommitInternalToolRepairRequest{
 		Scope:           scope,
@@ -1143,10 +1131,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if err := json.Unmarshal([]byte(contextResponse.GetContextJson()), &payload); err != nil {
 		t.Fatalf("parse LoadContext after repair: %v", err)
 	}
-	if len(payload.Messages) != 2 ||
-		!strings.Contains(string(payload.Messages[0]), `"id":"`+toolMessageID+`"`) ||
-		!strings.Contains(string(payload.Messages[1]), `"id":"`+messageID+`"`) ||
-		!strings.Contains(string(payload.Messages[1]), `"toolCallId":"call_repair"`) {
+	if len(payload.Messages) != 1 ||
+		!strings.Contains(string(payload.Messages[0]), `"id":"`+messageID+`"`) ||
+		!strings.Contains(string(payload.Messages[0]), `"toolCallId":"call_repair"`) {
 		t.Fatalf("LoadContext repair messages = %s; want invalid call followed by durable repair row", contextResponse.GetContextJson())
 	}
 
@@ -1158,6 +1145,62 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	)
 	if _, err := store.CommitInternalToolRepair(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInternalToolRepair err = %v; want AlreadyExists", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision(t *testing.T) {
+	for _, order := range []string{"public_then_repair", "repair_then_public"} {
+		t.Run(order, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_bridge_tool_collision_" + order
+			threadID := "thr_bridge_tool_collision_" + order
+			bindingID := "bind_bridge_tool_collision_" + order
+			podUID := "pod_bridge_tool_collision_" + order
+			modelRequestID := "mreq_bridge_tool_collision_" + order
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_tool_collision_start_"+order, modelRequestID, "agent_provider_request", 0)
+
+			writePublic := func(writeID string) error {
+				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+					Scope: scope, RuntimeWriteId: writeID, ModelRequestId: modelRequestID,
+					EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"unknown_tool","input":{},"evaluated_permission":"allow"}`,
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+						t, scope, writeID, "agent.tool_use", "streaming",
+						bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_collision","toolName":"unknown_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+					)},
+				})
+				return err
+			}
+			writeRepair := func() error {
+				repairKey := internalToolRepairKey(modelRequestID, "call_collision", "unknown_tool")
+				_, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
+					Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: "call_collision", ToolName: "unknown_tool",
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInternalToolRepairDraftForTest(
+						"default", sessionID, threadID, repairKey, "call_collision", "unknown_tool", "invalid tool",
+					)},
+				})
+				return err
+			}
+
+			if order == "public_then_repair" {
+				if err := writePublic("rwrite_tool_collision_public_first"); err != nil {
+					t.Fatalf("first public Tool Use: %v", err)
+				}
+				if err := writeRepair(); status.Code(err) != codes.AlreadyExists {
+					t.Fatalf("colliding internal repair err = %v; want AlreadyExists", err)
+				}
+				return
+			}
+			if err := writeRepair(); err != nil {
+				t.Fatalf("first internal repair: %v", err)
+			}
+			if err := writePublic("rwrite_tool_collision_public_second"); status.Code(err) != codes.AlreadyExists {
+				t.Fatalf("colliding public Tool Use err = %v; want AlreadyExists", err)
+			}
+		})
 	}
 }
 

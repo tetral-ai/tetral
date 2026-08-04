@@ -1,8 +1,8 @@
 /**
  * @packageDocumentation
- * Thread-local hot SessionState for one ThreadEntry: the in-pod working state a
+ * Thread-local hot ThreadState for one ThreadEntry: the in-pod working state a
  * ThreadRun mutates. Not the source of truth; recoverable from durable state.
- * SessionManager, AgentLoop, and tool execution call it; it delegates hot message
+ * SessionManager, ThreadLoop, and tool execution call it; it delegates hot message
  * list changes to ContextManager, performs ordinary in-memory transitions, and owns
  * the injected interrupt-input commit state and hot agent-mail delivery dedupe.
  *
@@ -13,7 +13,6 @@
  *   - runtime config patch and installed MCP manifest patches;
  *   - pending file-backed user media and tool-result transient attachments plus the
  *     single active ride;
- *   - transient model-only notes;
  *   - the last-request usage hint and held route-effective model limits;
  *   - interrupt / cooperative-cancel / runtime-shutdown controllers.
  *
@@ -44,18 +43,28 @@
  *   - Hot state is not the source of truth and stays recoverable from durable state.
  *
  * UPDATE-WITH: services/agent-runtime/packages/core/src/runtime/message-projection.ts,
- *              services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts,
+ *              services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts,
  *              services/agent-runtime/packages/core/src/session/session-manager.ts
  */
-import { ContextManager } from "./context-manager.js";
-import type { ThreadContextPrefix } from "./context-manager.js";
-import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "../thread-loop/thread-turn-checkpoint.js";
+import { ContextManager } from "../session/context-manager.js";
+import type { ThreadContextPrefix } from "../session/context-manager.js";
+import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "./thread-turn-checkpoint.js";
+import {
+  consumeThreadTurnEdge,
+  initializeThreadTurnReduction,
+  reconcileThreadTurnSeal,
+  reduceThreadTurn,
+} from "./thread-turn-reducer.js";
+import type {
+  ThreadTurnFact,
+  ThreadTurnReduction,
+} from "./thread-turn-reducer.js";
 import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageDraft, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ToolEntry } from "../tools/tool-catalog.js";
 import type { ToolJob } from "../tools/tool-scheduler.js";
-import type { RuntimeConfigurationPatch } from "./session-configuration.js";
+import type { RuntimeConfigurationPatch } from "../session/session-configuration.js";
 
 /** Combined cap for file-backed and transient attachments on one provider request. */
 export const MaxProviderRequestAttachments = 32;
@@ -300,7 +309,7 @@ export interface RuntimeTaskNotificationCommandState extends RuntimeThreadContro
 /** Durable task-notification declaration invoked only by the owning thread run. */
 export type RuntimeTaskNotificationCommit = () => Promise<
   | { readonly ok: true; readonly stale: true }
-  | { readonly ok: true; readonly committedMessage: RuntimeMessage }
+  | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
   | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
 >;
 
@@ -312,7 +321,7 @@ export interface RuntimeTaskNotificationAcceptedInputState extends RuntimeTaskNo
 
 /** Terminal background-task fact and its receipt-stamped message installed together in hot state. */
 export interface RuntimeTaskNotificationState extends RuntimeTaskNotificationCommandState {
-  readonly committedMessage: RuntimeMessage;
+  readonly committedMessage: DurableRuntimeMessage;
 }
 
 export interface RuntimeBackgroundToolState {
@@ -326,7 +335,7 @@ export interface RuntimeBackgroundToolState {
 export interface RuntimeConfigPatchState extends RuntimeThreadControlState, RuntimeConfigurationPatch {}
 
 /** Recoverable thread-local working state for input, tools, config, media, and cancellation. */
-export class SessionState {
+export class ThreadState {
   readonly contextManager: ContextManager;
   #persistentContextLoaded = false;
   #currentModel: SessionCurrentModel | undefined;
@@ -355,8 +364,8 @@ export class SessionState {
   >;
   #activeAttachmentRide: ProviderRequestAttachment[] | undefined;
   #pendingAttachments: ProviderRequestAttachment[] = [];
-  #pendingAttachmentOverflowCount = 0;
-  #transientModelMessages: RuntimeMessage[] = [];
+  #threadTurnReduction: ThreadTurnReduction | undefined;
+  #threadToolRouteView: ThreadToolRouteView = { routes: [] };
   #lastRequestUsage: RuntimeUsage | undefined;
   #lastRequestModelLimits: RuntimeModelLimits | undefined;
   #lastRequestContextAnchorSequence: number | undefined;
@@ -377,6 +386,82 @@ export class SessionState {
 
   markPersistentContextLoaded(): void {
     this.#persistentContextLoaded = true;
+  }
+
+  installThreadTurn(
+    checkpoint: ThreadTurnCheckpoint | undefined,
+    routeView: ThreadToolRouteView | undefined,
+  ): void {
+    this.#threadToolRouteView = routeView ?? { routes: [] };
+    this.#threadTurnReduction = initializeThreadTurnReduction(
+      checkpoint ?? { pendingInputMessageIds: [] },
+      this.#threadToolRouteView,
+    );
+  }
+
+  threadTurnReduction(): ThreadTurnReduction {
+    if (this.#threadTurnReduction === undefined) {
+      this.installThreadTurn(undefined, undefined);
+    }
+    return this.#threadTurnReduction!;
+  }
+
+  applyThreadTurnFact(fact: ThreadTurnFact): ThreadTurnReduction {
+    const reduction = reduceThreadTurn(
+      this.threadTurnReduction(),
+      fact,
+      this.#threadToolRouteView,
+    );
+    this.#threadTurnReduction = reduction;
+    const currentToolUseEventIds = new Set(
+      reduction.checkpoint.request?.toolMembers.flatMap((member) =>
+        member.memberKind === "public_tool_use" ? [member.toolUseEventId] : []
+      ) ?? [],
+    );
+    this.#threadToolRouteView = {
+      routes: this.#threadToolRouteView.routes.filter((route) =>
+        currentToolUseEventIds.has(route.toolUseEventId)
+      ),
+    };
+    return reduction;
+  }
+
+  reconcileThreadTurnSeal(): ThreadTurnReduction {
+    const reduction = reconcileThreadTurnSeal(
+      this.threadTurnReduction(),
+      this.#threadToolRouteView,
+    );
+    this.#threadTurnReduction = reduction;
+    return reduction;
+  }
+
+  consumeThreadTurnEdge(): ThreadTurnReduction {
+    const reduction = consumeThreadTurnEdge(
+      this.threadTurnReduction(),
+      this.#threadToolRouteView,
+    );
+    this.#threadTurnReduction = reduction;
+    return reduction;
+  }
+
+  recordThreadToolRoute(
+    toolUseEventId: string,
+    disposition: ThreadToolRouteView["routes"][number]["disposition"],
+  ): void {
+    const routes = this.#threadToolRouteView.routes.filter(
+      (route) => route.toolUseEventId !== toolUseEventId,
+    );
+    this.#threadToolRouteView = {
+      routes: [...routes, { toolUseEventId, disposition }],
+    };
+  }
+
+  clearThreadToolRoute(toolUseEventId: string): void {
+    this.#threadToolRouteView = {
+      routes: this.#threadToolRouteView.routes.filter(
+        (route) => route.toolUseEventId !== toolUseEventId,
+      ),
+    };
   }
 
   currentModel(): SessionCurrentModel | undefined {
@@ -423,6 +508,10 @@ export class SessionState {
 
   peekAcceptedInput(): RuntimeAcceptedInputState | undefined {
     return this.#acceptedInputs[0];
+  }
+
+  acceptedInputSnapshot(): readonly RuntimeAcceptedInputState[] {
+    return [...this.#acceptedInputs];
   }
 
   acknowledgeAcceptedInput(runtimeInputId: string): void {
@@ -595,7 +684,6 @@ export class SessionState {
   addPendingAttachments(attachments: readonly ProviderRequestAttachment[]): void {
     const available = Math.max(0, MaxProviderRequestAttachments - this.#pendingAttachments.length);
     this.#pendingAttachments.push(...attachments.slice(0, available).map(cloneProviderRequestAttachment));
-    this.#pendingAttachmentOverflowCount += Math.max(0, attachments.length - available);
   }
 
   pendingAttachments(): readonly ProviderRequestAttachment[] {
@@ -620,7 +708,6 @@ export class SessionState {
   replacePendingAttachments(attachments: readonly ProviderRequestAttachment[]): void {
     this.#activeAttachmentRide = undefined;
     this.#pendingAttachments = [];
-    this.#pendingAttachmentOverflowCount = 0;
     this.addPendingAttachments(attachments);
   }
 
@@ -644,34 +731,7 @@ export class SessionState {
       return false;
     });
     this.#pendingAttachments = [];
-    this.#pendingAttachmentOverflowCount = 0;
     this.addPendingAttachments(nextRide);
-  }
-
-  takePendingAttachmentOverflowCount(): number {
-    if (this.#activeAttachmentRide !== undefined) {
-      return 0;
-    }
-    const count = this.#pendingAttachmentOverflowCount;
-    this.#pendingAttachmentOverflowCount = 0;
-    return count;
-  }
-
-  addTransientModelMessage(message: RuntimeMessage): void {
-    this.#transientModelMessages.push(cloneRuntimeMessage(message));
-  }
-
-  transientModelMessages(): readonly RuntimeMessage[] {
-    return this.#transientModelMessages.map(cloneRuntimeMessage);
-  }
-
-  transientModelMessageCount(): number {
-    return this.#transientModelMessages.length;
-  }
-
-  consumeTransientModelMessages(messages: readonly RuntimeMessage[]): void {
-    const consumedIds = new Set(messages.map((message) => message.id));
-    this.#transientModelMessages = this.#transientModelMessages.filter((message) => !consumedIds.has(message.id));
   }
 
   recordLastRequestCompletion(usage: RuntimeUsage, limits: RuntimeModelLimits, contextAnchorSequence: number): void {
@@ -860,8 +920,8 @@ export class SessionState {
     this.#backgroundTools = Object.create(null) as Record<string, RuntimeBackgroundToolState | undefined>;
     this.#activeAttachmentRide = undefined;
     this.#pendingAttachments = [];
-    this.#pendingAttachmentOverflowCount = 0;
-    this.#transientModelMessages = [];
+    this.#threadTurnReduction = undefined;
+    this.#threadToolRouteView = { routes: [] };
     this.#lastRequestUsage = undefined;
     this.#lastRequestModelLimits = undefined;
     this.#lastRequestContextAnchorSequence = undefined;

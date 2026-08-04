@@ -3,7 +3,7 @@
  * Defines the Runtime Pod metrics vocabulary and its no-op adapter.
  * It guards operation, stream-kind, outcome, and hot-state label sets so instrumentation callers
  * cannot create unbounded metric dimensions through this interface.
- * SessionManager, AgentLoop, and runtime command handlers call the sink; concrete observability
+ * SessionManager, ThreadLoop, and runtime command handlers call the sink; concrete observability
  * wiring implements it, while the fallback calls no external service.
  */
 /** Current in-process ownership counts reported by session orchestration. */

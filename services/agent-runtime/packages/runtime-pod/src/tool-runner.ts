@@ -11,7 +11,7 @@
  *
  * `buildRuntimePodCommandDependencies` constructs this module and installs its
  * general tool callback plus the separate Sandbox acceptance and result-wait
- * callbacks into Agent Loop. The runner calls Agent Runtime Bridge for durable
+ * callbacks into ThreadLoop. The runner calls Agent Runtime Bridge for durable
  * sandbox handoff, memory, command, event, and child-thread operations;
  * Provider Gateway for web tools; MCP Connector for MCP tools; and
  * `RuntimeSubAgentRunHost` for local child-thread execution.
@@ -81,10 +81,10 @@ import type {
   RuntimeSandboxExecutionRequest,
   RuntimeToolExecutionRequest,
   RuntimeToolExecutionResult,
-} from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import type { PublicMcpErrorEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { selectRecentUserLedTurns } from "@tetral/agent-runtime-core/src/runtime/conversation-turns.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadStatusState } from "@tetral/agent-runtime-core/src/session/session-state.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadStatusState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
@@ -162,7 +162,7 @@ interface ChildTaskOperationQueueState {
 }
 
 /**
- * Implements the Agent Loop tool callback across Bridge, Gateway Pod, and
+ * Implements the ThreadLoop tool callback across Bridge, Gateway Pod, and
  * in-process child-thread boundaries.
  *
  * Each instance owns its outbound clients and the ephemeral ordering state for
@@ -210,7 +210,7 @@ export class RuntimePodToolRunner {
   }
 
   /**
-   * Executes one Agent Loop tool request through the route declared by its tool
+   * Executes one ThreadLoop tool request through the route declared by its tool
    * entry and returns the normalized completed, error, or cancelled outcome.
    *
    * Sandbox and memory routes call Bridge, web and MCP routes call Gateway Pod

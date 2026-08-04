@@ -32,6 +32,17 @@
     "canonical_json": "{\"drafts\":[],\"event_type\":\"session.status_running\",\"mcp_materialization_handle\":null,\"model_request_id\":null,\"operation_kind\":\"write_event\",\"payload\":{\"status\":\"running\"},\"runtime_write_id\":\"write_vector\",\"sandbox_result_digest\":null,\"server_tool_use\":null,\"session_thread_id\":\"thr_vector\",\"stable_reasoning\":[]}",
     "digest": "6e5451234da77c6b60fb8f6cbf410ae29ca1c450fff5b97d5c6ee1bba2a305e3"
   },
+  "write_event_request_start": {
+    "session_thread_id": "thr_vector",
+    "runtime_write_id": "write_vector_start",
+    "model_request_id": "mreq_vector_start",
+    "event_type": "span.model_request_start",
+    "payload_json": "{\"type\":\"span.model_request_start\",\"model_request_id\":\"mreq_vector_start\"}",
+    "request_kind": "agent_provider_request",
+    "context_through_message_sequence": 4,
+    "canonical_json": "{\"context_through_message_sequence\":4,\"drafts\":[],\"event_type\":\"span.model_request_start\",\"mcp_materialization_handle\":null,\"model_request_id\":\"mreq_vector_start\",\"operation_kind\":\"write_event\",\"payload\":{\"model_request_id\":\"mreq_vector_start\",\"type\":\"span.model_request_start\"},\"request_kind\":\"agent_provider_request\",\"runtime_write_id\":\"write_vector_start\",\"sandbox_result_digest\":null,\"server_tool_use\":null,\"session_thread_id\":\"thr_vector\",\"stable_reasoning\":[]}",
+    "digest": "49d96f3512227d8f49c567e8817c933b5b900085c07c590af8e179d0fc8cb055"
+  },
   "write_request_end": {
     "session_thread_id": "thr_vector",
     "runtime_write_id": "end_vector",

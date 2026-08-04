@@ -8,8 +8,8 @@ import type {
   SessionEventEnvelope,
   SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-extractor.js";
-import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/src/session/session-state.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
@@ -574,7 +574,7 @@ describe("Runtime core host production assembly", () => {
         taskCommitCalls += 1;
         return {
           ok: true,
-          committedMessage: bridgeRuntimeMessage("sesn_singleflight", "task completed"),
+          committedMessage: durableBridgeRuntimeMessage("sesn_singleflight", "task completed"),
         };
       });
       await Promise.resolve();
@@ -693,7 +693,7 @@ describe("Runtime core host production assembly", () => {
             };
           },
         },
-        agentLoop: {
+        threadLoop: {
           providerCallRuntime: {
             systemInstructions: "cold confirmation system",
           },
@@ -949,6 +949,126 @@ describe("Runtime core host production assembly", () => {
     }
   });
 
+  test("cold installation rejects conflicting durable run identities", async () => {
+    let appendCalls = 0;
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            durableTurnId: "sevt_running_sibling",
+            turnFacts: {
+              events: [{
+                eventId: "sevt_running_checkpoint",
+                eventSequence: 1,
+                type: "session.status_running",
+              }],
+              messageLineage: [],
+            },
+            runtimeBindingToken: "runtime-binding-token-conflicting-run",
+            coldCoverage: emptyColdCoverage,
+          }),
+        },
+        threadLoop: {
+          sessionEventWriter: {
+            append: async (envelope) => {
+              appendCalls += 1;
+              return successfulEventAppend(envelope);
+            },
+            writeRequestEnd: async (envelope) => ({
+              ok: true,
+              writeId: envelope.writeId,
+              eventId: `evt_${envelope.writeId}`,
+              processedAt: "2026-06-16T00:00:00.000Z",
+            }),
+          },
+        },
+      }),
+    });
+    try {
+      expect(await hosts.subAgentRunHost.preloadThread(commandScope("sesn_conflicting_run"))).toMatchObject({
+        ok: false,
+        sessionId: "sesn_conflicting_run",
+        reason: "context_load_failed",
+      });
+      expect(appendCalls).toBe(0);
+      expect(await hosts.subAgentRunHost.inspectThread(commandScope("sesn_conflicting_run"))).toMatchObject({
+        ok: true,
+        observed: false,
+      });
+    } finally {
+      await hosts.close();
+    }
+  });
+
+  test("cold Request Start without Request End remains passive until durable repair", async () => {
+    let providerCalls = 0;
+    let appendCalls = 0;
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-06-16T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            durableTurnId: "sevt_open_running",
+            turnFacts: {
+              events: [
+                { eventId: "sevt_open_running", eventSequence: 1, type: "session.status_running" },
+                {
+                  eventId: "sevt_open_start",
+                  eventSequence: 2,
+                  type: "span.model_request_start",
+                  modelRequestId: "mreq_open_cold",
+                  requestStart: {
+                    requestKind: "agent_provider_request",
+                    contextThroughMessageSequence: 0,
+                  },
+                },
+              ],
+              messageLineage: [],
+            },
+            runtimeBindingToken: "runtime-binding-token-open-cold",
+            coldCoverage: emptyColdCoverage,
+          }),
+        },
+        threadLoop: {
+          llmService: {
+            stream: () => {
+              providerCalls += 1;
+              return Stream.empty;
+            },
+          },
+          sessionEventWriter: {
+            append: async (envelope) => {
+              appendCalls += 1;
+              return successfulEventAppend(envelope);
+            },
+            writeRequestEnd: async (envelope) => ({
+              ok: true,
+              writeId: envelope.writeId,
+              eventId: `evt_${envelope.writeId}`,
+              processedAt: "2026-06-16T00:00:00.000Z",
+            }),
+          },
+        },
+      }),
+    });
+    try {
+      expect(await hosts.subAgentRunHost.preloadThread(commandScope("sesn_open_cold"))).toMatchObject({
+        ok: true,
+        applied: true,
+      });
+      await Promise.resolve();
+      expect(providerCalls).toBe(0);
+      expect(appendCalls).toBe(0);
+    } finally {
+      await hosts.close();
+    }
+  });
+
   test("task notification cold-loads thread context before hot settlement", async () => {
     const observations: string[] = [];
     const committedMessage = durableBridgeRuntimeMessage("sesn_cold_task", "task completed");
@@ -1068,9 +1188,9 @@ function publicAgentMailJSON(message: ReturnType<typeof bridgeRuntimeMessage>): 
 function testCoreDependencies(
   overrides: {
     readonly contextLoader?: Partial<RuntimeCoreHostsOptions["contextLoader"]>;
-    readonly agentLoop?: Partial<RuntimeCoreHostsOptions["agentLoop"]>;
+    readonly threadLoop?: Partial<RuntimeCoreHostsOptions["threadLoop"]>;
   } = {},
-): Pick<RuntimeCoreHostsOptions, "contextLoader" | "agentLoop"> {
+): Pick<RuntimeCoreHostsOptions, "contextLoader" | "threadLoop"> {
   return {
     contextLoader: {
       loadThreadContext: async () => ({
@@ -1082,7 +1202,7 @@ function testCoreDependencies(
       commitAcceptedInput: async (input) => acceptedInputReceipt(input),
       ...overrides.contextLoader,
     },
-    agentLoop: {
+    threadLoop: {
       internalToolRepairStore: new RecordingMessageStore(),
       sessionEventWriter: {
         append: async (envelope) => successfulEventAppend(envelope),
@@ -1111,7 +1231,7 @@ function testCoreDependencies(
       storeOperationTimeoutMs: 100,
       runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
       runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
-      ...overrides.agentLoop,
+      ...overrides.threadLoop,
     },
   };
 }

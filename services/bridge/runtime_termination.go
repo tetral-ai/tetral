@@ -105,6 +105,7 @@ func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx
 		        SELECT 1 FROM session_events ended
 		         WHERE ended.workspace_id = e.workspace_id
 		           AND ended.session_id = e.session_id
+		           AND ended.session_thread_id = e.session_thread_id
 		           AND ended.model_request_id = e.model_request_id
 		           AND ended.type = 'span.model_request_end'
 		    )

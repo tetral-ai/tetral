@@ -884,6 +884,28 @@ describe("SessionProcessor", () => {
     expect(writes).toEqual([]);
   });
 
+  test.each(["stop", "unknown"] as const)(
+    "finish metadata %s does not override an actual Tool Use member",
+    async (finishReason) => {
+      const processor = createProcessor();
+      await processor.process(envelope({
+        type: "tool-call",
+        id: "tool-1",
+        toolName: "search",
+        input: { q: "x" },
+        inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      }));
+
+      const result = await processor.process(envelope({ type: "finish", finishReason }));
+
+      expect(result).toEqual({ ok: true, events: [] });
+      expect(await processor.process(envelope({ type: "finish", finishReason }))).toMatchObject({
+        ok: false,
+        error: { code: "gateway_protocol_error" },
+      });
+    },
+  );
+
   test("post-terminal provider events remain protocol failures", async () => {
     const processor = createProcessor();
     await processor.process(envelope({ type: "finish", finishReason: "stop" }));

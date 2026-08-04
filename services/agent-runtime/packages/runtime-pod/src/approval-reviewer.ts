@@ -1,6 +1,6 @@
 /**
  * Adapts Runtime Core approval requests to isolated internal reviewer-thread
- * execution. The agent loop calls the reviewer returned by this module when
+ * execution. ThreadLoop calls the reviewer returned by this module when
  * ToolGate requires a model decision; Runtime Pod command assembly supplies
  * the platform reviewer model, packaged policy assets, and Bridge-backed thread
  * lifecycle adapter.
@@ -17,10 +17,11 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import type { RuntimeApprovalReviewer, RuntimeApprovalReviewRequest, RuntimeModelRef } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import type { RuntimeModelRef } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
+import type { RuntimeApprovalReviewer, RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeJsonValue, RuntimeMessage, SessionEvent } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/session/session-state.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { ReviewerExecutionToken } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { ApprovalReviewRiskLevel, ApprovalReviewUserAuthorization, ApprovalReviewerOutcome } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { Effect, Fiber } from "effect";
@@ -86,7 +87,7 @@ export interface ApprovalReviewerThreadCreation {
 }
 
 /**
- * Creates the approval callback consumed by the Runtime Core agent loop.
+ * Creates the approval callback consumed by Runtime Core ThreadLoop.
  *
  * The returned effect coordinates review leases through the request's
  * approval-reviewer manager, runs the selected trunk or sidecar through the
@@ -448,7 +449,7 @@ function reviewCacheKey(request: RuntimeApprovalReviewRequest): string {
 }
 
 function approvalReviewCreatedAt(request: RuntimeApprovalReviewRequest, now: () => string): string {
-  return request.currentRequestTurnMessages[0]?.createdAt
+  return request.currentProviderRequestMessages[0]?.createdAt
     ?? request.parentTranscript.messages.at(-1)?.createdAt
     ?? now();
 }
@@ -537,7 +538,7 @@ function approvalReviewPromptMessage(
       ? ParentTranscriptReanchorNote
       : ParentTranscriptDeltaNote,
     parent_transcript_feed: renderTranscriptEvidence(parentTranscriptFeed),
-    current_assistant_draft: renderTranscriptEvidence(request.currentRequestTurnMessages),
+    current_assistant_draft: renderTranscriptEvidence(request.currentProviderRequestMessages),
     sibling_tool_calls: request.siblingToolCalls,
     policy_context: request.policyContext,
   }, null, 2);

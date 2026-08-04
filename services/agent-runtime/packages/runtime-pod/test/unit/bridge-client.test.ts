@@ -26,7 +26,7 @@ import type {
   WriteEventRequest,
   WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { ProviderMetadataSchema } from "@tetral/agent-runtime-core/src/contracts/provider.js";
 import {
   RuntimeMessageDraftSchema,
@@ -39,8 +39,8 @@ import type {
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/session/session-state.js";
-import type { RuntimeSessionIdentity } from "@tetral/agent-runtime-core/src/session/session.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import {
   acceptedInputDrafts,
   runtimeOutputDraft,
@@ -728,6 +728,49 @@ describe("BridgeAPIControlInputCommitter", () => {
 });
 
 describe("BridgeAPIEventWriter", () => {
+  test("returns the original Tool Use receipt when Bridge reports a duplicate write", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.eventWriterAckStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE;
+    const writer = new BridgeAPIEventWriter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const result = await writer.append({
+      ...writerScope(),
+      writeId: "rwrite_duplicate_tool_use",
+      event: {
+        type: "agent.tool_use",
+        name: "Read",
+        input: { path: "a.txt" },
+        evaluated_permission: "allow",
+      },
+      drafts: [outputDraft(
+        "rwrite_duplicate_tool_use",
+        "agent.tool_use",
+        "tool_use",
+        assistantToolMessage("running", { kind: "tool" }),
+      )],
+      modelRequestId: "req_duplicate_tool_use",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      writeId: "rwrite_duplicate_tool_use",
+      declaration: {
+        applicationDisposition: "current_custody",
+        receipt: {
+          operationKind: "write_event",
+          sourceKind: "agent.tool_use",
+          events: [{ disposition: "created" }],
+        },
+      },
+    });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+  });
+
   test("rejects a compaction boundary on an ordinary WriteEvent receipt", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.eventWriterCompactedThroughMessageSequence = 0;
@@ -1119,7 +1162,7 @@ describe("BridgeAPIEventWriter", () => {
       actionJson: {},
       approvalReviewerManager: new AutoApprovalReviewerManager(),
       parentTranscript: { generation: 1, messages: [] },
-      currentRequestTurnMessages: [],
+      currentProviderRequestMessages: [],
       siblingToolCalls: [],
       policyContext: {},
     };
@@ -2000,7 +2043,7 @@ function assistantToolMessage(
   });
 }
 
-function bindingIdentity(runtimeBindingToken: string): RuntimeSessionIdentity {
+function bindingIdentity(runtimeBindingToken: string): RuntimeThreadIdentity {
   return {
     workspaceId: "wksp_1",
     sessionId: "sesn_1",
