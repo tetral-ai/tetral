@@ -3,10 +3,12 @@ import { status } from "@grpc/grpc-js";
 import { Stream } from "effect";
 import { RuntimeInternalToolRepairStore } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
+  DurableRuntimeMessage,
   SessionEvent,
   SessionEventEnvelope,
   SessionEventWriterAppendResult,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-extractor.js";
 import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
@@ -16,6 +18,7 @@ import {
   buildCoreHostsUserMessage as userMessage,
   buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
   buildCoreHostsBridgeRuntimeMessage as bridgeRuntimeMessage,
+  buildCoreHostsDurableBridgeRuntimeMessage as durableBridgeRuntimeMessage,
   buildRuntimeControlCommitResult,
 } from "../../../core/test/unit/runtime-message-builders.js";
 import { acceptedInputReceipt } from "../../../core/test/unit/runtime-declaration-fixtures.js";
@@ -26,6 +29,90 @@ const emptyColdCoverage = {
   pendingAttachmentIdentities: [],
   undeliveredMailDeliveryIds: [],
 } as const;
+
+const emptyTurnFacts: ThreadTurnLoadFacts = { events: [], messageLineage: [] };
+
+function turnFactsFor(messages: readonly DurableRuntimeMessage[]): ThreadTurnLoadFacts {
+  return {
+    events: [],
+    messageLineage: messages.map((message) => ({
+      messageId: message.id,
+      messageSequence: message.sequence,
+      owningEventId: message.owningEventId,
+      entries: [{
+        lineageKind: "declaration_receipt",
+        operationKind: message.origin === "agent" ? "write_event" : "commit_inputs",
+        sourceKind: message.origin === "agent" ? "runtime_event" : message.origin === "runtime" ? "agent_mail" : "messages",
+        sourceId: `source_${message.id}`,
+        eventId: message.owningEventId,
+        eventSequence: message.eventSequence,
+        disposition: "created",
+      }],
+    })),
+  };
+}
+
+function turnFactsForPendingTool(input: {
+  readonly messages: readonly DurableRuntimeMessage[];
+  readonly modelRequestId: string;
+  readonly toolUseEventId: string;
+  readonly modelToolCallId: string;
+  readonly toolName: string;
+  readonly family: "agent.tool_use" | "agent.mcp_tool_use";
+}): ThreadTurnLoadFacts {
+  const toolMessage = input.messages.find((message) => message.owningEventId === input.toolUseEventId);
+  if (toolMessage === undefined || toolMessage.eventSequence < 2) {
+    throw new Error("pending Tool Use fixture requires an ordered assistant projection");
+  }
+  const startSequence = toolMessage.eventSequence - 1;
+  return {
+    events: [
+      {
+        eventId: `start_${input.modelRequestId}`,
+        eventSequence: startSequence,
+        type: "span.model_request_start",
+        modelRequestId: input.modelRequestId,
+        requestStart: {
+          requestKind: "agent_provider_request",
+          contextThroughMessageSequence: 1,
+        },
+      },
+      {
+        eventId: input.toolUseEventId,
+        eventSequence: toolMessage.eventSequence,
+        type: input.family,
+        modelRequestId: input.modelRequestId,
+        toolUse: {
+          modelToolCallId: input.modelToolCallId,
+          toolName: input.toolName,
+        },
+      },
+      {
+        eventId: `end_${input.modelRequestId}`,
+        eventSequence: toolMessage.eventSequence + 1,
+        type: "span.model_request_end",
+        modelRequestId: input.modelRequestId,
+        requestEnd: {
+          requestStartEventId: `start_${input.modelRequestId}`,
+          isError: false,
+          rescheduled: false,
+        },
+      },
+    ],
+    messageLineage: turnFactsFor(input.messages).messageLineage.map((lineage) =>
+      lineage.messageId === toolMessage.id
+        ? {
+            ...lineage,
+            modelRequestId: input.modelRequestId,
+            entries: lineage.entries.map((entry) => ({
+              ...entry,
+              sourceKind: input.family,
+            })),
+          }
+        : lineage
+    ),
+  };
+}
 
 describe("Runtime core host production assembly", () => {
   test("resident threads admit stored completion envelopes through the local command channel", async () => {
@@ -72,6 +159,7 @@ describe("Runtime core host production assembly", () => {
             observations.push("load");
             return {
               messages: [],
+              turnFacts: emptyTurnFacts,
               thread: {
                 role: "main",
                 visibility: "public",
@@ -141,6 +229,7 @@ describe("Runtime core host production assembly", () => {
         contextLoader: {
           loadThreadContext: async () => ({
             messages: [],
+            turnFacts: emptyTurnFacts,
             thread: {
               parentThreadId,
               role: "subagent",
@@ -207,6 +296,7 @@ describe("Runtime core host production assembly", () => {
         contextLoader: {
           loadThreadContext: async () => ({
             messages: [],
+            turnFacts: emptyTurnFacts,
             runtimeBindingToken: "runtime-binding-token-cold-no-lineage",
             pendingAgentMail: [{
               deliveryId: "delivery_cold_no_lineage",
@@ -257,6 +347,7 @@ describe("Runtime core host production assembly", () => {
         contextLoader: {
           loadThreadContext: async () => ({
             messages: [],
+            turnFacts: emptyTurnFacts,
             thread: {
               role: "main",
               visibility: "public",
@@ -323,6 +414,7 @@ describe("Runtime core host production assembly", () => {
             observations.push("load");
             return {
               messages: [],
+              turnFacts: emptyTurnFacts,
               runtimeBindingToken: "runtime-binding-token-pull",
               coldCoverage: emptyColdCoverage,
             };
@@ -391,6 +483,7 @@ describe("Runtime core host production assembly", () => {
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [],
+              turnFacts: emptyTurnFacts,
               runtimeBindingToken: "runtime-binding-token-cold",
               coldCoverage: emptyColdCoverage,
             };
@@ -433,6 +526,7 @@ describe("Runtime core host production assembly", () => {
             await releaseLoad.promise;
             return {
               messages: [],
+              turnFacts: emptyTurnFacts,
               runtimeBindingToken: "runtime-binding-token-singleflight",
               backgroundTools: [{ taskId: "task_singleflight", sourceToolUseEventId: "sevt_tool_singleflight" }],
               coldCoverage: emptyColdCoverage,
@@ -511,17 +605,20 @@ describe("Runtime core host production assembly", () => {
     const terminalResultAppended = deferred<void>();
     const pendingInput = { query: "tetral" };
     const loadedMessages = [
-      userMessage("sesn_cold_confirm", "user-cold-confirm", 0, "hello"),
-      assistantRunningToolMessage(
-        "sesn_cold_confirm",
-        "assistant-cold-confirm",
-        1,
-        "tool-1",
-        "github_search",
-        "sevt_tool_1",
-        pendingInput,
-        { kind: "mcp", mcpServerName: "github" },
-      ),
+      userMessage("sesn_cold_confirm", "user-cold-confirm", 1, "hello"),
+      {
+        ...assistantRunningToolMessage(
+          "sesn_cold_confirm",
+          "assistant-cold-confirm",
+          2,
+          "tool-1",
+          "github_search",
+          "sevt_tool_1",
+          pendingInput,
+          { kind: "mcp", mcpServerName: "github" },
+        ),
+        eventSequence: 3,
+      },
     ];
     const replacementScope = {
       ...commandScope("sesn_cold_confirm"),
@@ -539,6 +636,14 @@ describe("Runtime core host production assembly", () => {
             observations.push(`load:${command.bindingId}:${command.bindingGeneration}`);
             return {
               messages: loadedMessages,
+              turnFacts: turnFactsForPendingTool({
+                messages: loadedMessages,
+                modelRequestId: "mrq_cold_confirm",
+                toolUseEventId: "sevt_tool_1",
+                modelToolCallId: "tool-1",
+                toolName: "github_search",
+                family: "agent.mcp_tool_use",
+              }),
               runtimeBindingToken: "runtime-binding-token-cold-confirm",
               runtimeConfigPatch: {
                 ...command,
@@ -682,8 +787,11 @@ describe("Runtime core host production assembly", () => {
     const observations: string[] = [];
     const pendingInput = { file_path: "src/a.ts", content: "ok" };
     const loadedMessages = [
-      userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 0, "hello"),
-      assistantRunningToolMessage("sesn_interrupt_confirm", "assistant-interrupt-confirm", 1, "tool-1", "Write", "sevt_tool_1", pendingInput),
+      userMessage("sesn_interrupt_confirm", "user-interrupt-confirm", 1, "hello"),
+      {
+        ...assistantRunningToolMessage("sesn_interrupt_confirm", "assistant-interrupt-confirm", 2, "tool-1", "Write", "sevt_tool_1", pendingInput),
+        eventSequence: 3,
+      },
     ];
 
     const hosts = await buildRuntimeCoreHosts({
@@ -695,6 +803,14 @@ describe("Runtime core host production assembly", () => {
             observations.push(`load:${command.runtimeInputId}`);
             return {
               messages: loadedMessages,
+              turnFacts: turnFactsForPendingTool({
+                messages: loadedMessages,
+                modelRequestId: "mrq_interrupt_confirm",
+                toolUseEventId: "sevt_tool_1",
+                modelToolCallId: "tool-1",
+                toolName: "Write",
+                family: "agent.tool_use",
+              }),
               runtimeBindingToken: "runtime-binding-token-interrupt-confirm",
               runtimeConfigPatch: {
                 ...command,
@@ -801,6 +917,7 @@ describe("Runtime core host production assembly", () => {
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [],
+              turnFacts: emptyTurnFacts,
               runtimeBindingToken: "runtime-binding-token-config",
               coldCoverage: emptyColdCoverage,
             };
@@ -834,7 +951,7 @@ describe("Runtime core host production assembly", () => {
 
   test("task notification cold-loads thread context before hot settlement", async () => {
     const observations: string[] = [];
-    const committedMessage = bridgeRuntimeMessage("sesn_cold_task", "task completed");
+    const committedMessage = durableBridgeRuntimeMessage("sesn_cold_task", "task completed");
     let hosts: Awaited<ReturnType<typeof buildRuntimeCoreHosts>> | undefined;
     hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -847,6 +964,7 @@ describe("Runtime core host production assembly", () => {
             observations.push(`observed:${inspected?.ok === true ? inspected.observed : "unavailable"}`);
             return {
               messages: [committedMessage],
+              turnFacts: turnFactsFor([committedMessage]),
               runtimeBindingToken: "runtime-binding-token-task",
               coldCoverage: emptyColdCoverage,
             };
@@ -957,6 +1075,7 @@ function testCoreDependencies(
     contextLoader: {
       loadThreadContext: async () => ({
         messages: [],
+        turnFacts: emptyTurnFacts,
         runtimeBindingToken: "runtime-binding-token-test",
         coldCoverage: emptyColdCoverage,
       }),

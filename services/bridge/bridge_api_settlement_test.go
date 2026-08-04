@@ -39,7 +39,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 		Scope:          bridgeAPIScope("sesn_bridge_request_end", "thr_bridge_request_end", "bind_bridge_request_end", 1, "pod_uid_request_end"),
 		RuntimeWriteId: "rwrite_bridge_request_start",
 		ModelRequestId: "mreq_bridge_request",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request"}`,
 		SessionVisible: false,
 	})
@@ -222,8 +222,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndSettlesOpenInterruptAtomically(t
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_request_interrupt_start",
 		ModelRequestId: modelRequestID,
-		EventType:      "span.model_request_start",
-		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -361,8 +361,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsWebToolCounters(t *testin
 		Scope:          bridgeAPIScope("sesn_bridge_request_end_web_usage", "thr_bridge_request_end_web_usage", "bind_bridge_request_end_web_usage", 1, "pod_uid_request_end_web_usage"),
 		RuntimeWriteId: "rwrite_bridge_request_start_web_usage",
 		ModelRequestId: "mreq_bridge_request_web_usage",
-		EventType:      "span.model_request_start",
-		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request_web_usage"}`,
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request_web_usage"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -393,8 +393,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_reasoning_settle_start",
 		ModelRequestId: "mreq_bridge_reasoning_settle",
-		EventType:      "span.model_request_start",
-		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_reasoning_settle"}`,
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_reasoning_settle"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -703,7 +703,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTextAndToolConvergeOnModelReques
 
 			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_start_" + suffix, ModelRequestId: modelRequestID,
-				EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
@@ -928,6 +928,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 		json: `{"type":"tool","toolCallId":"call_shared_anchor","toolName":"Read","state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`,
 	})
 	scope := bridgeAPIScope("sesn_shared_anchor", "thr_shared_anchor", "bind_shared_anchor", 1, "pod_shared_anchor")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_shared_anchor_start", fixture.ModelRequestID, "agent_provider_request", 0)
 	draft := bridgeRuntimeOutputDraftForTest(
 		t,
 		scope,
@@ -1118,7 +1119,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningRejectsToolEventWithoutModelRequ
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstRejectsPostSealToolAnchor(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_reasoning_settlement_first", "thr_reasoning_settlement_first")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_reasoning_settlement_first", "bind_reasoning_settlement_first", 1, "pod_reasoning_settlement_first")
@@ -1128,7 +1129,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t
 	scope := bridgeAPIScope("sesn_reasoning_settlement_first", "thr_reasoning_settlement_first", "bind_reasoning_settlement_first", 1, "pod_reasoning_settlement_first")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_settlement_first_start", ModelRequestId: "mreq_settlement_first",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_settlement_first"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_settlement_first"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1172,8 +1173,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t
 				json: `{"type":"tool","toolCallId":"call_settlement","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`,
 			},
 		)},
-	}); err != nil {
-		t.Fatalf("WriteEvent anchor after settlement: %v", err)
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent anchor after settlement err = %v; want FailedPrecondition", err)
 	}
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND model_request_id = 'mreq_settlement_first'`).Scan(&dataJSON); err != nil {
@@ -1224,7 +1225,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementCannotOmitAnchor(t *te
 	scope := bridgeAPIScope("sesn_reasoning_missing_anchor", "thr_reasoning_missing_anchor", "bind_reasoning_missing_anchor", 1, "pod_reasoning_missing_anchor")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_missing_anchor_start", ModelRequestId: "mreq_missing_anchor",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_missing_anchor"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_missing_anchor"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1293,7 +1294,7 @@ func TestPostgreSQLBridgeAPIStoreFailedRequestEndPreservesToolAnchoredReasoning(
 	scope := bridgeAPIScope("sesn_reasoning_failed_end", "thr_reasoning_failed_end", "bind_reasoning_failed_end", 1, "pod_reasoning_failed_end")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_failed_start", ModelRequestId: "mreq_reasoning_failed",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_failed"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_failed"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1409,6 +1410,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningUnifiesBudgetAcrossAnchors(t *te
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_reasoning_unified")
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_reasoning_unified")
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_unified_start", modelRequestID, "agent_provider_request", 0)
 			anchoredParts := make([]*bridgev1.StableReasoningPart, 0, len(test.first)+len(test.second))
 			writeTool := func(writeID, callID string, parts []*bridgev1.StableReasoningPart) error {
 				allParts := append(append([]*bridgev1.StableReasoningPart{}, anchoredParts...), parts...)
@@ -1476,7 +1478,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningLaterMergeFailureRollsBackWholeS
 	attachment := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_reasoning_rollback", "sevt_reasoning_rollback", []byte("image"))
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_rollback_start", ModelRequestId: "mreq_reasoning_rollback",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_rollback"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_rollback"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1600,7 +1602,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningInvalidSetsWriteNothing(t *testi
 			modelRequestID := "mreq_reasoning_invalid_" + test.name
 			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reasoning_invalid_start_" + test.name, ModelRequestId: modelRequestID,
-				EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
@@ -1638,7 +1640,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningExactAggregateBoundCommits(t *te
 	scope := bridgeAPIScope("sesn_reasoning_exact_bytes", "thr_reasoning_exact_bytes", "bind_reasoning_exact_bytes", 1, "pod_reasoning_exact_bytes")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_exact_start", ModelRequestId: "mreq_reasoning_exact",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_exact"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_exact"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1695,8 +1697,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 			Scope:          scope,
 			RuntimeWriteId: writeID,
 			ModelRequestId: requestID,
-			EventType:      "span.model_request_start",
-			PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + requestID + `"}`,
+			EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+			PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + requestID + `"}`,
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent start %s: %v", requestID, err)
@@ -1812,7 +1814,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsDivergentCloseAfterExisti
 	scope := bridgeAPIScope("sesn_bridge_request_divergent_close", "thr_bridge_request_divergent_close", "bind_bridge_request_divergent_close", 1, "pod_uid_request_divergent_close")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_stale_start", ModelRequestId: "mreq_bridge_stale",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_stale"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_stale"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1875,7 +1877,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 		start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: "rwrite_reasoning_race_start_" + suffix, ModelRequestId: modelRequestID,
-			EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `","request_kind":"agent_provider_request"}`,
+			EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `","request_kind":"agent_provider_request"}`,
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent start: %v", err)
@@ -2038,7 +2040,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_compaction_usage_start",
 		ModelRequestId: "mreq_bridge_compaction_usage",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "compaction_summary",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_compaction_usage"}`,
 		SessionVisible: false,
 	})
@@ -2184,8 +2186,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsCompactionAttachmentConsu
 				Scope:          scope,
 				RuntimeWriteId: "rwrite_bridge_compaction_attachment_start_" + suffix,
 				ModelRequestId: "mreq_bridge_compaction_attachment_" + suffix,
-				EventType:      "span.model_request_start",
-				PayloadJson:    `{"type":"span.model_request_start"}`,
+				EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "compaction_summary",
+				PayloadJson: `{"type":"span.model_request_start"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
@@ -2232,7 +2234,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndValidatesErrorKind(t *testing.T)
 		Scope:          bridgeAPIScope("sesn_bridge_request_error_kind", "thr_bridge_request_error_kind", "bind_bridge_request_error_kind", 1, "pod_uid_request_error_kind"),
 		RuntimeWriteId: "rwrite_bridge_request_error_start",
 		ModelRequestId: "mreq_bridge_request_error",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request_error"}`,
 		SessionVisible: false,
 	})
@@ -2995,13 +2997,13 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	seedBridgeAPIOpenDurableTurn(t, admin, siblingScope, "rwrite_terminate_sibling")
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sibling_start", ModelRequestId: "mreq_terminate_sibling",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate_sibling"}`, SessionVisible: true,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate_sibling"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent sibling request start: %v", err)
 	}
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_start", ModelRequestId: "mreq_terminate",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate"}`, SessionVisible: true,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent request start: %v", err)
 	}
@@ -3238,6 +3240,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate_sandbox")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_terminate_sandbox_start", "mreq_terminate_sandbox", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox_tool", ModelRequestId: "mreq_terminate_sandbox",
 		EventType:      "agent.tool_use",
@@ -3323,7 +3326,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_child_terminate")
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_child_terminate_start", ModelRequestId: "mreq_child_terminate",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_child_terminate"}`, SessionVisible: true,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_child_terminate"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent child request start: %v", err)
 	}
@@ -3529,7 +3532,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndConsumesOnlyActiveTransientAttac
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_attachment_consumed_start",
 		ModelRequestId: "mreq_bridge_attachment_consumed",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_consumed"}`,
 		SessionVisible: false,
 	})
@@ -3617,7 +3620,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndErrorKeepsBothAttachmentChannels
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_attachment_error"}}]}`)
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_error_start", ModelRequestId: "mreq_bridge_attachment_error",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_error"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_error"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent error start: %v", err)
@@ -3683,7 +3686,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsServedFileAttachmentConsu
 	scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_file_consumed", 1, "pod_bridge_file_consumed")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_file_consumed_start", ModelRequestId: "mreq_bridge_file_consumed",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_file_consumed"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_file_consumed"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -3777,7 +3780,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndConsumesDeletedFileAttachmentRid
 	}
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_deleted_file_consumed_start", ModelRequestId: "mreq_bridge_deleted_file_consumed",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_deleted_file_consumed"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_deleted_file_consumed"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -3844,7 +3847,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndDoesNotConsumeAttachmentsOnResch
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_attachment_reschedule"}}]}`)
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_reschedule_start", ModelRequestId: "mreq_bridge_attachment_reschedule",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_reschedule"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_reschedule"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent reschedule start: %v", err)
@@ -3913,7 +3916,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRescheduleStillValidatesAttachme
 			scope := bridgeAPIScope(sessionID, threadID, "bind_reschedule_scope", 1, "pod_reschedule_scope")
 			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reschedule_scope_start_" + suffix,
-				ModelRequestId: "mreq_reschedule_scope_" + suffix, EventType: "span.model_request_start",
+				ModelRequestId: "mreq_reschedule_scope_" + suffix, EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 				PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reschedule_scope_` + suffix + `"}`,
 			})
 			if err != nil {
@@ -3996,8 +3999,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsUnknownAttachmentRefsAtom
 			Scope:          scope,
 			RuntimeWriteId: "rwrite_bridge_attachment_unknown_start_" + strconv.Itoa(index),
 			ModelRequestId: modelRequestID,
-			EventType:      "span.model_request_start",
-			PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+			EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+			PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent start %d: %v", index, err)
@@ -4068,8 +4071,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndBoundsConsumedAttachmentsAtomica
 				Scope:          scope,
 				RuntimeWriteId: "rwrite_bridge_attachment_bound_start_" + strconv.Itoa(count),
 				ModelRequestId: modelRequestID,
-				EventType:      "span.model_request_start",
-				PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+				PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)

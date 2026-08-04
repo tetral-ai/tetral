@@ -2,6 +2,7 @@
 // schema construction in one auditable test module.
 
 import type {
+  DurableRuntimeMessage,
   RuntimeJsonValue,
   RuntimeMessage,
   RuntimeMessageDraft,
@@ -701,11 +702,13 @@ export function buildBridgeClientRuntimeRepairMessage(): RuntimeMessage {
   };
 }
 
-export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string): RuntimeMessage {
+export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string): DurableRuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id,
     sessionId,
+    owningEventId: `sevt_${id}`,
+    eventSequence: sequence,
     role: "user",
     origin: "user",
     sequence,
@@ -739,7 +742,7 @@ export function buildCoreHostsAssistantRunningToolMessage(
     readonly kind: "mcp";
     readonly mcpServerName: string;
   } = { kind: "tool" },
-): RuntimeMessage {
+): DurableRuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
   return DurableRuntimeMessageSchema.parse({
     id,
@@ -800,6 +803,15 @@ export function buildCoreHostsBridgeRuntimeMessage(sessionId: string, text: stri
         createdAt: "2026-06-16T00:00:00.000Z",
       },
     ],
+  });
+}
+
+export function buildCoreHostsDurableBridgeRuntimeMessage(sessionId: string, text: string): DurableRuntimeMessage {
+  return DurableRuntimeMessageSchema.parse({
+    ...buildCoreHostsBridgeRuntimeMessage(sessionId, text),
+    sequence: 1,
+    owningEventId: `sevt_${sessionId}_task_notification`,
+    eventSequence: 1,
   });
 }
 

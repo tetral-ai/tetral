@@ -871,7 +871,7 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 				TargetPodUid:      claim.PodUID,
 			},
 		}
-		eventID, settled, err := toolResultForToolUseExistsTx(ctx, tx, claim.WorkspaceID, claim.SessionID, execution.ToolUseEventID)
+		eventID, settled, err := toolResultForToolUseExistsTx(ctx, tx, claim.WorkspaceID, claim.SessionID, execution.ThreadID, execution.EventType, execution.ToolUseEventID)
 		if err != nil {
 			return err
 		}

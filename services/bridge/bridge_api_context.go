@@ -82,6 +82,7 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 
 type bridgeLoadContextPayload struct {
 	Messages                 []json.RawMessage                    `json:"messages"`
+	TurnFacts                bridgeLoadContextTurnFacts           `json:"turnFacts"`
 	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
 	DurableTurnID            *string                              `json:"durableTurnId"`
 	Thread                   bridgeLoadContextThread              `json:"thread"`
@@ -93,6 +94,15 @@ type bridgeLoadContextPayload struct {
 	PendingAttachments       []bridgeLoadContextPendingAttachment `json:"pendingAttachments"`
 	PendingAgentMail         []bridgeLoadContextAgentMail         `json:"pendingAgentMail"`
 	ColdCoverage             bridgeLoadContextColdCoverage        `json:"coldCoverage"`
+}
+
+type bridgeLoadContextMessageDescriptor struct {
+	Kind            string
+	MessageID       string
+	MessageSequence int64
+	OwningEventID   string
+	ModelRequestID  *string
+	DataJSON        json.RawMessage
 }
 
 type bridgeLoadContextColdCoverage struct {
@@ -284,6 +294,7 @@ func loadThreadContextJSONTx(
 			       m.sequence,
 			       m.data_json,
 			       COALESCE(m.last_event_id, m.source_event_id),
+		       COALESCE(m.model_request_id, e.model_request_id),
 		       m.created_at,
 		       m.updated_at,
 		       e.sequence
@@ -308,12 +319,14 @@ func loadThreadContextJSONTx(
 	}
 	defer func() { _ = rows.Close() }()
 	messages := make([]json.RawMessage, 0)
+	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
 		var messageID string
 		var sequence int64
 		var raw string
 		var owningEventID sql.NullString
+		var modelRequestID sql.NullString
 		var createdAt time.Time
 		var updatedAt time.Time
 		var eventSequence sql.NullInt64
@@ -323,6 +336,7 @@ func loadThreadContextJSONTx(
 			&sequence,
 			&raw,
 			&owningEventID,
+			&modelRequestID,
 			&createdAt,
 			&updatedAt,
 			&eventSequence,
@@ -356,12 +370,31 @@ func loadThreadContextJSONTx(
 			return "", err
 		}
 		messages = append(messages, stamped)
+		descriptor := bridgeLoadContextMessageDescriptor{
+			Kind:            kind,
+			MessageID:       messageID,
+			MessageSequence: sequence,
+			OwningEventID:   owningEventID.String,
+			DataJSON:        stamped,
+		}
+		if modelRequestID.Valid {
+			descriptor.ModelRequestID = &modelRequestID.String
+		}
+		messageDescriptors = append(messageDescriptors, descriptor)
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+	turnFacts, err := loadThreadTurnFactsTx(ctx, tx, scope, messageDescriptors)
+	if err != nil {
+		return "", err
+	}
 	return marshalBridgeJSON(bridgeLoadContextPayload{
 		Messages:                 messages,
+		TurnFacts:                turnFacts,
 		ThreadContextPrefix:      threadContextPrefix,
 		DurableTurnID:            durableTurnID,
 		Thread:                   thread,

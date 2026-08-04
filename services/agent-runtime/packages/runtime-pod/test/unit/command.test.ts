@@ -634,6 +634,7 @@ describe("Runtime Pod command entrypoint", () => {
           contextLoader: {
             loadThreadContext: async () => ({
               messages: [],
+              turnFacts: { events: [], messageLineage: [] },
               runtimeBindingToken: "runtime-binding-token-command-test",
               coldCoverage: {
                 pendingToolIds: [],

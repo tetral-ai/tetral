@@ -9,6 +9,7 @@
 import { Context, Layer } from "effect";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type {
+  DurableRuntimeMessage,
   RuntimeJsonValue,
   RuntimeMessage,
   RuntimeMessageDraft,
@@ -25,6 +26,7 @@ import type {
 } from "../session/session-state.js";
 import type { RuntimeSessionIdentity } from "../session/session.js";
 import type { ThreadContextPrefix } from "../session/context-manager.js";
+import type { ThreadTurnLoadFacts } from "../thread-loop/thread-turn-extractor.js";
 
 /** Operations through which session orchestration cold-loads and commits thread state. */
 export interface ContextLoader {
@@ -35,7 +37,8 @@ export interface ContextLoader {
   readonly loadThreadContext?: (
     command: RuntimeThreadControlState,
   ) => Promise<{
-    readonly messages: readonly RuntimeMessage[];
+    readonly messages: readonly DurableRuntimeMessage[];
+    readonly turnFacts: ThreadTurnLoadFacts;
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
     readonly durableTurnId?: string | undefined;
     readonly runtimeBindingToken: string;

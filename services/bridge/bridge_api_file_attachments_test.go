@@ -219,12 +219,29 @@ func TestPostgreSQLBridgeAPIStoreLoadContextDerivesProjectedUnconsumedFileAttach
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_pending_later"}}]}`)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_first", "sevt_file_pending_first", 1)
 	seedBridgeAPIProjectedUserMessage(t, admin, sessionID, threadID, "msg_file_pending_later", "sevt_file_pending_later", 2)
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "sevt_file_pending_request_end", 4, "span.model_request_end", `{"type":"span.model_request_end"}`)
+	requestStart := seedBridgeAPIRequestStart(t, store, scope, "rwrite_file_pending_start", "mreq_file_pending", "agent_provider_request", 2)
+	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_file_pending_end", ModelRequestId: "mreq_file_pending",
+		ModelRequestStartEventId: requestStart.GetEventId(), FinishReason: "stop", UsageJson: `{}`,
+		RequestKind: "agent_provider_request",
+	})
+	if err != nil {
+		t.Fatalf("seed request end: %v", err)
+	}
+	var requestEndEventID string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT event_id FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+		    AND model_request_id = 'mreq_file_pending' AND type = 'span.model_request_end'`,
+		sessionID, threadID,
+	).Scan(&requestEndEventID); err != nil {
+		t.Fatalf("read request end event: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_file_attachment_consumptions (
 			workspace_id, session_id, session_thread_id, request_end_event_id, source_event_id, file_id
-		) VALUES ('default', $1, $2, 'sevt_file_pending_request_end', 'sevt_file_pending_first', 'file_pending_consumed')`,
-		sessionID, threadID); err != nil {
+		) VALUES ('default', $1, $2, $3, 'sevt_file_pending_first', 'file_pending_consumed')`,
+		sessionID, threadID, requestEndEventID); err != nil {
 		t.Fatalf("seed consumed file attachment: %v", err)
 	}
 
@@ -384,6 +401,11 @@ func seedBridgeAPIProjectedUserMessage(t *testing.T, db *sql.DB, sessionID, thre
 		sessionID, threadID, messageID, sequence, dataJSON, sourceEventID); err != nil {
 		t.Fatalf("seed projected user message %s: %v", sourceEventID, err)
 	}
+	seedBridgeAPIMessageLineage(
+		t, db, "default", sessionID, threadID,
+		bridgeOpCommitInputs, "messages", "rin_fixture_"+sourceEventID,
+		sourceEventID, messageID, sequence,
+	)
 }
 
 type rangeRecordingBlobStore struct {

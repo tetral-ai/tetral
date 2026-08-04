@@ -94,7 +94,7 @@ func writeEventDeclarationDigest(
 	if err != nil {
 		return "", err
 	}
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+	declaration := map[string]any{
 		"drafts":     drafts,
 		"event_type": request.GetEventType(),
 		"mcp_materialization_handle": nullableDeclarationString(
@@ -110,7 +110,12 @@ func writeEventDeclarationDigest(
 		"server_tool_use":   json.RawMessage(serverToolUseJSON),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
 		"stable_reasoning":  json.RawMessage(stableReasoningJSON),
-	})
+	}
+	if request.GetEventType() == "span.model_request_start" {
+		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
+		declaration["request_kind"] = nullableDeclarationString(request.GetRequestKind())
+	}
+	raw, err := marshalRuntimeDeclarationObject(declaration)
 	if err != nil {
 		return "", err
 	}
@@ -460,6 +465,13 @@ func nullableDeclarationString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func nullableDeclarationInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func commitInputDraftsTx(

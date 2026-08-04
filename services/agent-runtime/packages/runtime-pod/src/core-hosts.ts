@@ -17,6 +17,7 @@ import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host
 import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/session/session-state.js";
 import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-extractor.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
@@ -41,7 +42,7 @@ export interface RuntimeCoreHosts {
  */
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
-  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
+  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "turnCheckpoint" | "turnToolRouteView" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptThread: (command: Parameters<SessionRunHost.Interface["handleInterruptThread"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
@@ -114,10 +115,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               );
               pendingAgentMail.push(acceptedResolvedAgentMail(command, resolved, context.thread));
             }
+            const turnCheckpoint = extractThreadTurnCheckpoint({ messages: context.messages, facts: context.turnFacts });
+            const turnToolRouteView = extractColdThreadToolRouteView({
+              checkpoint: turnCheckpoint,
+              pendingToolUses: context.pendingToolUses ?? [],
+              pendingSandboxExecutions: context.pendingSandboxExecutions ?? [],
+            });
             return {
               ...command,
               ...(context.thread !== undefined ? { thread: context.thread } : {}),
               messages: context.messages,
+              turnCheckpoint,
+              turnToolRouteView,
               ...(context.threadContextPrefix !== undefined ? { threadContextPrefix: context.threadContextPrefix } : {}),
               ...(context.durableTurnId !== undefined ? { durableTurnId: context.durableTurnId } : {}),
               runtimeBindingToken: context.runtimeBindingToken,

@@ -41,6 +41,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if request.GetEventType() == "span.model_request_start" && request.GetModelRequestId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "model request id is required")
 	}
+	requestStart, err := normalizeRequestStartStamp(request)
+	if err != nil {
+		return nil, err
+	}
 	if request.GetEventType() == "agent.mcp_tool_result" {
 		if request.GetMcpMaterializationHandle() == "" {
 			return nil, status.Error(codes.InvalidArgument, "mcp tool result requires a materialization handle")
@@ -149,6 +153,16 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
+		if request.GetEventType() == "agent.tool_use" || request.GetEventType() == "agent.mcp_tool_use" {
+			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
+				return err
+			}
+		}
+		if requestStart != nil {
+			if err := verifyRequestStartMessageBoundaryTx(ctx, tx, request.GetScope(), requestStart.GetContextThroughMessageSequence()); err != nil {
+				return err
+			}
+		}
 		if len(stableReasoning.Parts) > 0 {
 			if err := validateStableReasoningAnchorBudgetTx(
 				ctx,
@@ -183,6 +197,16 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
+		projectionJSON := `{}`
+		if requestStart != nil {
+			projectionJSON, err = marshalBridgeJSON(map[string]any{
+				"context_through_message_sequence": requestStart.GetContextThroughMessageSequence(),
+				"request_kind":                     requestStart.GetRequestKind(),
+			})
+			if err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -201,7 +225,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			key,
 			request.GetModelRequestId(),
 			stableReasoning.ledgerJSON(),
-			`{}`,
+			projectionJSON,
 			now,
 		); err != nil {
 			return err
@@ -226,6 +250,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return err
 		}
 		receipt.DeclarationDigest = declarationDigest
+		receipt.RequestStart = requestStart
 		toolProjection, err := runtimeToolProjectionFromDeclaration(
 			eventID,
 			eventType,
@@ -346,6 +371,41 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			ApplicationDisposition:    observation.Disposition,
 		},
 	}, nil
+}
+
+func verifyModelRequestAcceptsMembersTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+) error {
+	if modelRequestID == "" {
+		return status.Error(codes.InvalidArgument, "model request id is required")
+	}
+	var starts, ends int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE type = 'span.model_request_start'),
+		        count(*) FILTER (WHERE type = 'span.model_request_end')
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND type IN ('span.model_request_start', 'span.model_request_end')`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		modelRequestID,
+	).Scan(&starts, &ends); err != nil {
+		return err
+	}
+	if starts != 1 {
+		return status.Error(codes.FailedPrecondition, "model request start is not durable")
+	}
+	if ends != 0 {
+		return status.Error(codes.FailedPrecondition, "model request is already sealed")
+	}
+	return nil
 }
 
 func writeEventOperationSourceKindTx(
@@ -658,6 +718,51 @@ func writeEventTypeAllowed(eventType string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeRequestStartStamp(request *bridgev1.WriteEventRequest) (*bridgev1.RequestStartStamp, error) {
+	if request.GetEventType() != "span.model_request_start" {
+		if request.ContextThroughMessageSequence != nil || request.GetRequestKind() != "" {
+			return nil, status.Error(codes.InvalidArgument, "request-start metadata requires a model request start")
+		}
+		return nil, nil
+	}
+	if request.ContextThroughMessageSequence == nil || request.GetContextThroughMessageSequence() < 0 || request.GetRequestKind() == "" {
+		return nil, status.Error(codes.InvalidArgument, "model request start metadata is required")
+	}
+	requestKind, err := normalizeRequestKind(request.GetRequestKind())
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.RequestStartStamp{
+		RequestKind:                   requestKind,
+		ContextThroughMessageSequence: request.GetContextThroughMessageSequence(),
+	}, nil
+}
+
+func verifyRequestStartMessageBoundaryTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	boundary int64,
+) error {
+	var current int64
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(MAX(sequence), 0)
+		   FROM session_messages
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	).Scan(&current); err != nil {
+		return err
+	}
+	if boundary != current {
+		return status.Error(codes.InvalidArgument, "model request start message boundary is not current")
+	}
+	return nil
 }
 
 type threadMutationScope struct {

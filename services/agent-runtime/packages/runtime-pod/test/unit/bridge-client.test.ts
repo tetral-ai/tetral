@@ -86,6 +86,7 @@ describe("BridgeAPIContextLoader", () => {
     const bridge = new RecordingBridgeClient();
     bridge.loadContextJSON = JSON.stringify({
       messages: [],
+      turnFacts: { events: [], messageLineage: [] },
       coldCoverage: {
         pendingToolIds: [],
         pendingSandboxExecutionIds: [],
@@ -2408,6 +2409,23 @@ class RecordingBridgeClient {
       },
       contextJson: this.loadContextJSON ?? JSON.stringify({
         messages: [durableRuntimeMessage(`msg_context_${request.scope?.sessionThreadId ?? "unknown"}`, "context")],
+        turnFacts: {
+          events: [],
+          messageLineage: [{
+            messageId: `msg_context_${request.scope?.sessionThreadId ?? "unknown"}`,
+            messageSequence: 1,
+            owningEventId: `evt_msg_context_${request.scope?.sessionThreadId ?? "unknown"}`,
+            entries: [{
+              lineageKind: "declaration_receipt",
+              operationKind: "commit_inputs",
+              sourceKind: "messages",
+              sourceId: `rin_context_${request.scope?.sessionThreadId ?? "unknown"}`,
+              eventId: `evt_msg_context_${request.scope?.sessionThreadId ?? "unknown"}`,
+              eventSequence: 1,
+              disposition: "created",
+            }],
+          }],
+        },
         thread: request.scope?.sessionThreadId === "thr_child"
           ? {
               parentThreadId: "thr_main",

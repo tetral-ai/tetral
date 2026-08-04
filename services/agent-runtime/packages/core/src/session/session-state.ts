@@ -49,6 +49,7 @@
  */
 import { ContextManager } from "./context-manager.js";
 import type { ThreadContextPrefix } from "./context-manager.js";
+import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "../thread-loop/thread-turn-checkpoint.js";
 import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageDraft, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
@@ -210,6 +211,8 @@ export interface RuntimeColdCoverage {
 export interface RuntimeThreadPreloadState extends RuntimeThreadControlState {
   readonly thread?: RuntimeAcceptedThreadMetadataState | undefined;
   readonly messages: readonly RuntimeMessage[];
+  readonly turnCheckpoint?: ThreadTurnCheckpoint | undefined;
+  readonly turnToolRouteView?: ThreadToolRouteView | undefined;
   readonly durableTurnId?: string | undefined;
   readonly threadContextPrefix?: ThreadContextPrefix | undefined;
   readonly runtimeBindingToken: string;

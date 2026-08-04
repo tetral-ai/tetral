@@ -1302,6 +1302,8 @@ async function writeThreadMessageSent(
     sessionVisible: true,
     stableReasoningParts: [],
     serverToolUse: undefined,
+    contextThroughMessageSequence: undefined,
+    requestKind: "",
     drafts: [],
   }, metadata, abortSignal);
 }

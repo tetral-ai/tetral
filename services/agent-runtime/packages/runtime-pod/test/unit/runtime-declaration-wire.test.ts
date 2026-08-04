@@ -96,6 +96,45 @@ describe("Runtime Pod shared declaration vectors", () => {
   });
 });
 
+describe("Request Start declaration identity", () => {
+  test("includes the private request kind and consumed message boundary", () => {
+    const base = {
+      scope: {
+        requestId: "request_1",
+        workspaceId: "workspace_1",
+        sessionId: "session_1",
+        sessionThreadId: "thread_1",
+        binding: undefined,
+      },
+      runtimeWriteId: "write_1",
+      modelRequestId: "model_request_1",
+      eventType: "span.model_request_start",
+      payloadJson: JSON.stringify({
+        type: "span.model_request_start",
+        model_request_id: "model_request_1",
+      }),
+      sessionVisible: false,
+      stableReasoningParts: [],
+      serverToolUse: undefined,
+      drafts: [],
+      mcpMaterializationHandle: undefined,
+      sandboxResultDigest: undefined,
+      contextThroughMessageSequence: 4,
+      requestKind: "agent_provider_request",
+    };
+
+    const digest = writeEventDeclarationDigest(base);
+    expect(writeEventDeclarationDigest({
+      ...base,
+      contextThroughMessageSequence: 5,
+    })).not.toBe(digest);
+    expect(writeEventDeclarationDigest({
+      ...base,
+      requestKind: "compaction_summary",
+    })).not.toBe(digest);
+  });
+});
+
 function productionDigest(family: PodDeclarationFamily, vector: SharedDeclarationVector): string {
   const scope = {
     requestId: "",
@@ -128,6 +167,8 @@ function productionDigest(family: PodDeclarationFamily, vector: SharedDeclaratio
         serverToolUse: undefined,
         drafts: [],
         mcpMaterializationHandle: undefined,
+        contextThroughMessageSequence: undefined,
+        requestKind: "",
       });
     case "write_request_end":
       return writeRequestEndDeclarationDigest({

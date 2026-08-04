@@ -194,6 +194,128 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreWriteEventStampsPrivateRequestStartBoundary(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_request_start_stamp", "thr_request_start_stamp")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_request_start_stamp", "bind_request_start_stamp", 1, "pod_request_start_stamp")
+	seedBridgeAPIRuntimeInput(t, admin, "default", "sesn_request_start_stamp", "thr_request_start_stamp", "rin_request_input", "bind_request_start_stamp", "pod_request_start_stamp", "evt_request_input")
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_request_start_stamp", "thr_request_start_stamp", "bind_request_start_stamp", 1, "pod_request_start_stamp")
+	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_request_input", InputKind: "messages",
+		EventIds: []string{"evt_request_input"}, SequenceFrom: 1, SequenceTo: 1,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInputDraftForTest(
+			"default", "sesn_request_start_stamp", "thr_request_start_stamp", "messages",
+			"rin_request_input", "evt_request_input", bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
+			"user", "hello",
+		)},
+	}); err != nil {
+		t.Fatalf("CommitInputs: %v", err)
+	}
+	request := &bridgev1.WriteEventRequest{
+		Scope:                         scope,
+		RuntimeWriteId:                "rwrite_request_start_stamp",
+		ModelRequestId:                "mreq_request_start_stamp",
+		EventType:                     "span.model_request_start",
+		PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"mreq_request_start_stamp"}`,
+		ContextThroughMessageSequence: func() *int64 { value := int64(1); return &value }(),
+		RequestKind:                   "agent_provider_request",
+	}
+	response, err := store.WriteEvent(context.Background(), request)
+	if err != nil {
+		t.Fatalf("WriteEvent request start: %v", err)
+	}
+	stamp := response.GetDeclaration().GetReceipts()[0].GetRequestStart()
+	if stamp.GetRequestKind() != "agent_provider_request" || stamp.GetContextThroughMessageSequence() != 1 {
+		t.Fatalf("request start stamp = %+v; want agent request through message 1", stamp)
+	}
+	var payloadJSON, projectionJSON string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json, projection_json FROM session_events WHERE workspace_id = 'default' AND event_id = $1`,
+		response.GetEventId(),
+	).Scan(&payloadJSON, &projectionJSON); err != nil {
+		t.Fatalf("read request start projection: %v", err)
+	}
+	if payloadJSON != `{"model_request_id":"mreq_request_start_stamp","type":"span.model_request_start"}` {
+		t.Fatalf("public request-start payload changed: %s", payloadJSON)
+	}
+	if projectionJSON != `{"context_through_message_sequence":1,"request_kind":"agent_provider_request"}` {
+		t.Fatalf("private request-start projection = %s", projectionJSON)
+	}
+
+	missing := proto.Clone(request).(*bridgev1.WriteEventRequest)
+	missing.RuntimeWriteId = "rwrite_request_start_missing"
+	missing.ContextThroughMessageSequence = nil
+	if _, err := store.WriteEvent(context.Background(), missing); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("missing request-start boundary err = %v; want InvalidArgument", err)
+	}
+
+	for name, mutate := range map[string]func(*bridgev1.WriteEventRequest){
+		"stale boundary": func(candidate *bridgev1.WriteEventRequest) {
+			candidate.ContextThroughMessageSequence = bridgeAPIInt64(0)
+		},
+		"future boundary": func(candidate *bridgev1.WriteEventRequest) {
+			candidate.ContextThroughMessageSequence = bridgeAPIInt64(2)
+		},
+		"unknown request kind": func(candidate *bridgev1.WriteEventRequest) {
+			candidate.RequestKind = "invented_request"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := proto.Clone(request).(*bridgev1.WriteEventRequest)
+			candidate.RuntimeWriteId = "rwrite_request_start_invalid_" + strings.ReplaceAll(name, " ", "_")
+			candidate.ModelRequestId = "mreq_request_start_invalid_" + strings.ReplaceAll(name, " ", "_")
+			candidate.PayloadJson = `{"type":"span.model_request_start","model_request_id":"` + candidate.ModelRequestId + `"}`
+			mutate(candidate)
+			if _, err := store.WriteEvent(context.Background(), candidate); status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("invalid request-start metadata err = %v; want InvalidArgument", err)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreWriteEventRejectsToolUseAfterRequestEnd(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_tool_use_after_end"
+		threadID       = "thr_tool_use_after_end"
+		modelRequestID = "mreq_tool_use_after_end"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_tool_use_after_end", 1, "pod_tool_use_after_end")
+	scope := bridgeAPIScope(sessionID, threadID, "bind_tool_use_after_end", 1, "pod_tool_use_after_end")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	boundary := int64(0)
+	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_tool_use_after_end_start", ModelRequestId: modelRequestID,
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+		ContextThroughMessageSequence: &boundary, RequestKind: "agent_provider_request",
+	})
+	if err != nil {
+		t.Fatalf("write request start: %v", err)
+	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_tool_use_after_end_close", ModelRequestId: modelRequestID,
+		ModelRequestStartEventId: start.GetEventId(), FinishReason: "tool_calls", UsageJson: `{}`,
+		RequestKind: "agent_provider_request",
+	}); err != nil {
+		t.Fatalf("write request end: %v", err)
+	}
+	request := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_tool_use_after_end", ModelRequestId: modelRequestID,
+		EventType:   "agent.tool_use",
+		PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_tool_use_after_end", "agent.tool_use", "streaming",
+			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_after_end","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+		)},
+	}
+	if _, err := store.WriteEvent(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("post-seal tool use err = %v; want FailedPrecondition", err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_web_usage", "thr_bridge_web_usage")
@@ -206,6 +328,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventSettlesWebUsageExactlyOnce(t *testing
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_web_usage", "thr_bridge_web_usage", "bind_bridge_web_usage", 1, "pod_uid_web_usage")
 	const modelRequestID = "mreq_bridge_web_usage"
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_web_start", modelRequestID, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_web_tool_use",
@@ -303,6 +426,7 @@ func TestPostgreSQLBridgeAPIStoreConcurrentWebUsageReplayReturnsOneCommitAndOneI
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_web_usage_concurrent", "thr_bridge_web_usage_concurrent", "bind_bridge_web_usage_concurrent", 1, "pod_uid_web_usage_concurrent")
 	const modelRequestID = "mreq_bridge_web_usage_concurrent"
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_web_start_concurrent", modelRequestID, "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_web_tool_use_concurrent",
@@ -433,6 +557,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 			t.Fatalf("WriteEvent over-limit usage %+v err = %v; want InvalidArgument", usage, err)
 		}
 	}
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_read_start", "mreq_bridge_read_tool", "agent_provider_request", 0)
 	readUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_read_tool_use",
@@ -478,7 +603,9 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsUnauthorizedWebUsageBeforeWrit
 	}
 	var count int
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_web_usage_reject'`).Scan(&count); err != nil {
+		`SELECT count(*) FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_web_usage_reject'
+		    AND type = 'agent.tool_use'`).Scan(&count); err != nil {
 		t.Fatalf("count rejected events: %v", err)
 	}
 	if count != 1 {
@@ -607,6 +734,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return now }
 	scope := bridgeAPIScope("sesn_bridge_tool_ask", "thr_bridge_tool_ask", "bind_bridge_tool_ask", 1, "pod_uid_tool_ask")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_tool_ask_start", "mreq_bridge_tool_ask", "agent_provider_request", 0)
 	request := &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_tool_ask",
@@ -683,6 +811,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventToolUseAllowDenyDoNotOpenPendingAppro
 
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_tool_"+permission, 1, "pod_uid_tool_"+permission)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_tool_start_"+permission, "mreq_bridge_tool_"+permission, "agent_provider_request", 0)
 			runtimeWriteID := "rwrite_bridge_tool_" + permission
 			if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope:          scope,
@@ -726,6 +855,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableSandboxExecution(t *te
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	store.Clock = func() time.Time { return now }
 	scope := bridgeAPIScope("sesn_bridge_sandbox_consume", "thr_bridge_sandbox_consume", "bind_bridge_sandbox_consume", 1, "pod_uid_bridge_sandbox_consume")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_sandbox_consume_start", "mreq_bridge_sandbox_consume", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_consume_use", ModelRequestId: "mreq_bridge_sandbox_consume",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"file_path":"a.txt","content":"ok"},"evaluated_permission":"allow"}`,
@@ -936,6 +1066,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventConsumesDurableBackgroundResult(t *te
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_background_consume", "bind_bridge_background_consume", 1, "pod_uid_bridge_background_consume")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_background_consume", "thr_bridge_background_consume", "bind_bridge_background_consume", 1, "pod_uid_bridge_background_consume")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_background_consume_start", "mreq_bridge_background_consume", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_background_consume_use", ModelRequestId: "mreq_bridge_background_consume",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"write_stdin","input":{"task_id":"task_background","chars":"ok"},"evaluated_permission":"allow"}`,

@@ -19,6 +19,13 @@ import type {
 } from "../../src/agent-loop/provider-call-assembly.js";
 
 describe("provider call skill guidance", () => {
+  test("rejects an unspecified provider request kind", () => {
+    expect(assembleProviderCallRequest(providerInput(
+      [],
+      ProviderRequestKind.PROVIDER_REQUEST_KIND_UNSPECIFIED,
+    ))).toMatchObject({ ok: false, error: { reason: "runtime_contract_validation" } });
+  });
+
   test("adds a stable deterministic SKILL segment only to agent requests", () => {
     const skillsIndex = [
       skillEntry("sk_zeta", "2.0.0", "Zeta", "zeta", "Zeta guidance."),

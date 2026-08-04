@@ -120,6 +120,8 @@ export function writeEventDeclarationDigest(
     | "serverToolUse"
     | "mcpMaterializationHandle"
     | "sandboxResultDigest"
+    | "contextThroughMessageSequence"
+    | "requestKind"
     | "drafts"
   >,
 ): string {
@@ -151,6 +153,12 @@ export function writeEventDeclarationDigest(
       text: part.text,
       truncated: part.truncated,
     })),
+    ...(request.eventType === "span.model_request_start"
+      ? {
+          context_through_message_sequence: request.contextThroughMessageSequence ?? null,
+          request_kind: request.requestKind ?? null,
+        }
+      : {}),
   };
   const canonical = canonicalRunToolJSON(JSON.stringify(declaration));
   return createHash("sha256").update(canonical, "utf8").digest("hex");

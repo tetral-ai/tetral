@@ -596,6 +596,7 @@ func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *t
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_cancelled_once_start", "mreq_interrupt_cancelled_once", "agent_provider_request", 0)
 	written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_interrupt_cancelled_once", ModelRequestId: "mreq_interrupt_cancelled_once",
 		EventType:   "agent.tool_use",
@@ -621,7 +622,7 @@ func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *t
 	firstEventID := "evt_interrupt_cancelled_once_first"
 	firstInputID := "rin_interrupt_cancelled_once_first"
 	localID := stableRuntimeID("runtime_message_draft", "default", sessionID, threadID, "interrupt_control", firstInputID, "cancellation", "0")
-	if err := commitInterrupt(firstEventID, firstInputID, 2, []*bridgev1.RuntimeMessageDraft{{
+	if err := commitInterrupt(firstEventID, firstInputID, 3, []*bridgev1.RuntimeMessageDraft{{
 		RuntimeLocalId: localID, SourceKind: "interrupt_control", SourceId: firstInputID,
 		SourceEventId: firstEventID, DraftKind: bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
 		MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
@@ -632,7 +633,7 @@ func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *t
 	}}); err != nil {
 		t.Fatalf("commit first interrupt: %v", err)
 	}
-	if err := commitInterrupt("evt_interrupt_cancelled_once_second", "rin_interrupt_cancelled_once_second", 3, nil); err != nil {
+	if err := commitInterrupt("evt_interrupt_cancelled_once_second", "rin_interrupt_cancelled_once_second", 4, nil); err != nil {
 		t.Fatalf("commit later interrupt: %v", err)
 	}
 	var cancellations int
@@ -1357,6 +1358,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_generated_start", "mreq_bridge_generated_tool_use", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_generated_tool_use",
@@ -1380,16 +1382,16 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		t.Fatalf("WriteEvent generated tool use: %v", err)
 	}
 	setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", toolUse.GetEventId(), "resolving")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "evt_bridge_generated_confirm", 2, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"`+toolUse.GetEventId()+`","result":"allow"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "tool_confirmation", `["evt_bridge_generated_confirm"]`, "accepted", "bind_bridge_generated_confirm", "pod_uid_generated_confirm", 2, 2)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "evt_bridge_generated_confirm", 3, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"`+toolUse.GetEventId()+`","result":"allow"}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "tool_confirmation", `["evt_bridge_generated_confirm"]`, "accepted", "bind_bridge_generated_confirm", "pod_uid_generated_confirm", 3, 3)
 
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm"),
 		RuntimeInputId: "rin_bridge_generated_confirm",
 		InputKind:      "tool_confirmation",
 		EventIds:       []string{"evt_bridge_generated_confirm"},
-		SequenceFrom:   2,
-		SequenceTo:     2,
+		SequenceFrom:   3,
+		SequenceTo:     3,
 		Drafts: []*bridgev1.RuntimeMessageDraft{
 			bridgeApprovalInputDraftForTest("default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "evt_bridge_generated_confirm", "Approval allowed"),
 		},

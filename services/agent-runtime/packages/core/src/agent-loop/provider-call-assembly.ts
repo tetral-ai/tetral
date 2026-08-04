@@ -228,6 +228,14 @@ function assemblyFailure(
  */
 export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): ProviderCallAssemblyResult {
   const requestKind = input.runtime.requestKind ?? ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST;
+  if (![
+    ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST,
+    ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
+    ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY,
+    ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION,
+  ].includes(requestKind)) {
+    return assemblyFailure(input, "runtime_contract_validation");
+  }
   const compactionRequest =
     requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY ||
     requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION;

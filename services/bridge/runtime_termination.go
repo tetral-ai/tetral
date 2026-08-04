@@ -94,7 +94,7 @@ func closeRuntimeTerminationSpansTx(ctx context.Context, tx *dbconnect.Tx, scope
 
 func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope) ([]runtimeOpenRequestStart, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.payload_json
+		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.projection_json
 		   FROM session_events e
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
@@ -118,11 +118,15 @@ func runtimeTerminationOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx
 	starts := make([]runtimeOpenRequestStart, 0)
 	for rows.Next() {
 		var start runtimeOpenRequestStart
-		var payloadJSON string
-		if err := rows.Scan(&start.SessionThreadID, &start.EventID, &start.ModelRequestID, &payloadJSON); err != nil {
+		var projectionJSON string
+		if err := rows.Scan(&start.SessionThreadID, &start.EventID, &start.ModelRequestID, &projectionJSON); err != nil {
 			return nil, err
 		}
-		start.RequestKind = requestKindFromModelRequestStartPayload(payloadJSON)
+		requestKind, err := requestKindFromModelRequestStartProjection(projectionJSON)
+		if err != nil {
+			return nil, err
+		}
+		start.RequestKind = requestKind
 		starts = append(starts, start)
 	}
 	return starts, rows.Err()
@@ -143,8 +147,9 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 		    AND e.visibility = 'public'
 		    AND NOT EXISTS (
 		        SELECT 1 FROM session_events result
-		         WHERE result.workspace_id = e.workspace_id
-		           AND result.session_id = e.session_id
+			         WHERE result.workspace_id = e.workspace_id
+			           AND result.session_id = e.session_id
+			           AND result.session_thread_id = e.session_thread_id
 		           AND result.type = 'agent.tool_result'
 		           AND (result.payload_json::jsonb ->> 'tool_use_event_id' = e.event_id
 		             OR result.payload_json::jsonb ->> 'tool_use_id' = e.event_id)
@@ -162,6 +167,7 @@ func runtimeTerminationOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, s
 		if err := rows.Scan(&toolUse.SessionThreadID, &toolUse.EventID, &toolUse.ModelRequestID, &toolUse.PayloadJSON); err != nil {
 			return nil, err
 		}
+		toolUse.EventType = "agent.tool_use"
 		toolUses = append(toolUses, toolUse)
 	}
 	return toolUses, rows.Err()

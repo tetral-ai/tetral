@@ -1723,6 +1723,9 @@ function runOwnedCompactionSummaryAttemptEffect(
         const startAppend = yield* Effect.promise(() => appendEvent(options, session, {
           type: "span.model_request_start",
           model_request_id: request.modelRequestId,
+        }, undefined, undefined, undefined, undefined, undefined, undefined, {
+          contextThroughMessageSequence: compactionBoundaryMessageSequence(messages),
+          requestKind: "compaction_summary",
         }));
         if (!startAppend.ok) {
           return {
@@ -2744,6 +2747,9 @@ function runProviderTurnEffect(
     const spanStartAppend = yield* nonAbandonablePromise(() => appendEvent(options, session, {
       type: "span.model_request_start",
       model_request_id: request.modelRequestId,
+    }, undefined, undefined, undefined, undefined, undefined, undefined, {
+      contextThroughMessageSequence: requestContextAnchorSequence,
+      requestKind: runtimeProviderStreamKindFromRequest(request),
     }));
     if (!spanStartAppend.ok) {
       return providerTurnFailed(runtimeFailureFromEventWriter(spanStartAppend.error), "event_write_failed");
@@ -4975,13 +4981,15 @@ function providerCallRuntimeForSession(
 
 function runtimeProviderStreamKindFromRequest(request: LLMRequest): RuntimeProviderStreamKind {
   switch (request.requestKind) {
+    case ProviderRequestKind.PROVIDER_REQUEST_KIND_AGENT_PROVIDER_REQUEST:
+      return "agent_provider_request";
     case ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER:
       return "approval_reviewer";
     case ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION:
     case ProviderRequestKind.PROVIDER_REQUEST_KIND_COMPACTION_SUMMARY:
       return "compaction_summary";
     default:
-      return "agent_provider_request";
+      throw new Error("provider request kind is not supported");
   }
 }
 
@@ -6483,9 +6491,13 @@ async function appendEvent(
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
   sandboxResultDigest?: string,
+  requestStart?: {
+    readonly contextThroughMessageSequence: number;
+    readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
+  },
 ): Promise<SessionEventWriterAppendResult> {
   const writeId = options.runtime.createId("event_write");
-  return await appendEventWithWriteId(options, session, writeId, event, output, stableReasoningParts, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest);
+  return await appendEventWithWriteId(options, session, writeId, event, output, stableReasoningParts, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest, requestStart);
 }
 
 async function appendRunningEvent(
@@ -6632,6 +6644,10 @@ async function appendEventWithWriteId(
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
   sandboxResultDigest?: string,
+  requestStart?: {
+    readonly contextThroughMessageSequence: number;
+    readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
+  },
 ): Promise<SessionEventWriterAppendResult> {
   const startedAt = options.runtime.monotonicMs();
   try {
@@ -6662,6 +6678,7 @@ async function appendEventWithWriteId(
       ...(serverToolUse !== undefined ? { serverToolUse } : {}),
       ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
       ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
+      ...(requestStart !== undefined ? requestStart : {}),
     });
     runtimeMetrics(options).observeEventWriteLatency("append", options.runtime.monotonicMs() - startedAt, result.ok ? "success" : "error");
     return result;
