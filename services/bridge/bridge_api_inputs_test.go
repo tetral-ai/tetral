@@ -2178,14 +2178,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-		seedBridgeAPIEvent(t, admin, "default", sessionID, reviewerID, eventID, 1, "approval_review.decision", `{"decision":"approve"}`)
 		request := &bridgev1.CommitInputsRequest{
 			Scope:          bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
 			RuntimeInputId: inputID,
 			InputKind:      "approval_review",
 			EventIds:       []string{eventID},
-			SequenceFrom:   1,
-			SequenceTo:     1,
 			Drafts: []*bridgev1.RuntimeMessageDraft{
 				bridgeInputDraftForTest(
 					"default",
@@ -2200,11 +2197,72 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 				),
 			},
 		}
-		response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
+		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		response, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
 			t.Fatalf("CommitInputs reviewer input: %v", err)
 		}
 		assertSingleCommitInputReceipt(t, response, "approval_review", inputID, eventID)
+		eventStamp := response.GetDeclaration().GetReceipts()[0].GetEvents()[0]
+		if eventStamp.GetDisposition() != bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED || eventStamp.GetEventSequence() <= 0 {
+			t.Fatalf("reviewer input event stamp = %+v; want newly created durable event", eventStamp)
+		}
+
+		var eventType string
+		var payloadJSON string
+		var visibility string
+		var sessionVisible bool
+		var processed bool
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT type, payload_json, visibility, session_visible, processed_at IS NOT NULL
+			   FROM session_events
+			  WHERE workspace_id = 'default'
+			    AND session_id = $1
+			    AND session_thread_id = $2
+			    AND event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&eventType, &payloadJSON, &visibility, &sessionVisible, &processed); err != nil {
+			t.Fatalf("read reviewer input event: %v", err)
+		}
+		if eventType != "approval_review.input" || visibility != "internal" || sessionVisible || !processed {
+			t.Fatalf("reviewer input event = type %q visibility %q session_visible %v processed %v; want internal processed approval_review.input", eventType, visibility, sessionVisible, processed)
+		}
+		if got := testJSONPathString(t, payloadJSON, "runtime_input_id"); got != inputID {
+			t.Fatalf("reviewer input runtime_input_id = %q; want %q", got, inputID)
+		}
+
+		replay, err := store.CommitInputs(context.Background(), request)
+		if err != nil {
+			t.Fatalf("replay CommitInputs reviewer input: %v", err)
+		}
+		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+			t.Fatalf("reviewer input ACKs = %s/%s; want committed/duplicate", response.GetAck().GetStatus(), replay.GetAck().GetStatus())
+		}
+		assertSingleCommitInputReceipt(t, replay, "approval_review", inputID, eventID)
+		var eventCount int
+		var messageCount int
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM session_events WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&eventCount); err != nil {
+			t.Fatalf("count reviewer input events: %v", err)
+		}
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM session_messages WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND source_event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&messageCount); err != nil {
+			t.Fatalf("count reviewer input messages: %v", err)
+		}
+		if eventCount != 1 || messageCount != 1 {
+			t.Fatalf("reviewer input durable rows = %d events/%d messages; want 1/1", eventCount, messageCount)
+		}
 	})
 
 	t.Run("rejection", func(t *testing.T) {

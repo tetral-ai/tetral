@@ -238,6 +238,7 @@ export function applyAcceptedInputReceipt(
   }
   const expectedEventIDs = new Set(input.eventIds);
   const eventByID = uniqueMap(receipt.events, (event) => event.eventId, "event");
+  const expectedEventDisposition = input.kind === "approval_review" ? "created" : "existing";
   if (eventByID.size !== expectedEventIDs.size) {
     throw new Error("declaration receipt event stamp set is incomplete");
   }
@@ -245,7 +246,7 @@ export function applyAcceptedInputReceipt(
     if (
       event.sessionThreadId !== input.sessionThreadId ||
       event.sourceEventId !== event.eventId ||
-      event.disposition !== "existing" ||
+      event.disposition !== expectedEventDisposition ||
       !expectedEventIDs.has(event.eventId)
     ) {
       throw new Error("declaration receipt contains an invalid event stamp");

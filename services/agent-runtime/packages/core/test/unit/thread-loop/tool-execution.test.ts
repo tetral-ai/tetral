@@ -205,6 +205,41 @@ test("approval reviewer sessions mark provider requests, request-end events, and
         outputTokenLimit: 4096,
     });
 });
+test("approval reviewer waits for its created input receipt before starting the provider request", async () => {
+    const session = new ThreadRuntime({
+        workspaceId: "wksp_reviewer_receipt",
+        sessionId: "sesn_reviewer_receipt",
+        sessionThreadId: "thrd_reviewer_receipt",
+        parentThreadId: "thrd_main",
+        threadRole: "approval_reviewer",
+        bindingId: "bind_reviewer_receipt",
+        bindingGeneration: 1,
+        targetPodUid: "pod_reviewer_receipt",
+        runtimeBindingToken: "binding-token-reviewer-receipt",
+    });
+    session.state.enqueueAcceptedInput(approvalReviewAcceptedInput("rin_reviewer_receipt"));
+    const releaseCommit = deferred<void>();
+    const loader = new QueuedContextLoader([], [], [
+        async (input: RuntimeAcceptedInputState) => {
+            await releaseCommit.promise;
+            return acceptedInputReceipt(input);
+        },
+    ]);
+    const requests: LLMRequest[] = [];
+    const run = Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        onStream: (request) => requests.push(request),
+    }))));
+
+    await waitForCondition(() => loader.commitCalls.length === 1, "reviewer CommitInputs call");
+    expect(requests).toHaveLength(0);
+    releaseCommit.resolve(undefined);
+    await run;
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.requestKind).toBe(ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER);
+});
 test("approval reviewer tools settle before the reviewer produces its final decision", async () => {
     const session = new ThreadRuntime({
         workspaceId: "wksp_reviewer_tools",

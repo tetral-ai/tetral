@@ -27,8 +27,10 @@ export function acceptedInputReceipt(
       sessionThreadId: input.sessionThreadId,
       sourceEventId: eventId,
       eventId,
-      eventSequence: input.sequenceFrom + index,
-      disposition: "existing",
+      eventSequence: input.kind === "approval_review"
+        ? messageSequenceStart + index
+        : input.sequenceFrom + index,
+      disposition: input.kind === "approval_review" ? "created" : "existing",
     })),
     messages: drafts.map((draft, messageIndex) => {
       if (draft.sourceEventId === undefined) {

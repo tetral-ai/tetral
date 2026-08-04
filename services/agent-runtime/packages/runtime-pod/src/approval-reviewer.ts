@@ -474,7 +474,7 @@ function reviewThreadControl(request: RuntimeApprovalReviewRequest, reviewerThre
     bindingGeneration: request.bindingGeneration,
     targetPodUid: request.targetPodUid,
     runtimeInputId: stableId("rin", "approval-review", reviewId),
-    eventIds: [stableId("sevt", "approval-review", reviewId)],
+    eventIds: [stableId("sevt", "approval-review", reviewId, reviewerThreadId)],
     sequenceFrom: 0,
     sequenceTo: 0,
   };

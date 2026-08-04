@@ -901,7 +901,7 @@ describe("Runtime approval reviewer", () => {
       .not.toBe((host.inputs[1] as Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>).reviewId);
   });
 
-  test("manager loss re-reviews the same target with a byte-stable idempotent input", async () => {
+  test("manager loss preserves review identity while scoping the source event to the new trunk", async () => {
     const host = new RecordingReviewerHost([
       assistantDecision("sesn_1", "allow", "replayed target"),
     ]);
@@ -929,6 +929,8 @@ describe("Runtime approval reviewer", () => {
     const second = host.inputs[1] as Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>;
     expect(second.reviewId).toBe(first.reviewId);
     expect(second.runtimeInputId).toBe(first.runtimeInputId);
+    expect(second.sessionThreadId).not.toBe(first.sessionThreadId);
+    expect(second.eventIds).not.toEqual(first.eventIds);
     expect(second.promptItems).toEqual(first.promptItems);
     expect(host.decisions).toHaveLength(2);
   });

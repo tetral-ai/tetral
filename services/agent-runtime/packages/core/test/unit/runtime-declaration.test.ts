@@ -411,6 +411,60 @@ describe("runtime declaration identity and message shapes", () => {
     })).toThrow("duplicate message stamp");
   });
 
+  test("applies a reviewer input receipt whose internal source event was created with its message", () => {
+    const prompt = {
+      id: "msg_reviewer_prompt",
+      sessionId: "ses_1",
+      role: "user" as const,
+      origin: "runtime" as const,
+      sequence: 0,
+      status: "completed" as const,
+      createdAt: "2026-08-04T00:00:00.000Z",
+      parts: [{
+        id: "part_reviewer_prompt",
+        sessionId: "ses_1",
+        messageId: "msg_reviewer_prompt",
+        sequence: 0,
+        type: "text" as const,
+        text: "review this tool call",
+        truncated: false,
+        status: "completed" as const,
+        createdAt: "2026-08-04T00:00:00.000Z",
+      }],
+    };
+    const input: RuntimeAcceptedInputState = {
+      requestId: "req_reviewer",
+      workspaceId: "ws_1",
+      sessionId: "ses_1",
+      sessionThreadId: "thr_reviewer",
+      bindingId: "bind_1",
+      bindingGeneration: 1,
+      targetPodUid: "pod_1",
+      runtimeInputId: "rin_reviewer",
+      eventIds: ["sevt_reviewer"],
+      sequenceFrom: 0,
+      sequenceTo: 0,
+      kind: "approval_review",
+      reviewId: "arvw_1",
+      parentThreadId: "thr_main",
+      targetModelToolCallId: "call_1",
+      targetToolName: "Write",
+      promptItems: [prompt],
+      outputSchemaJson: "{}",
+    };
+    const drafts = acceptedInputDrafts(input);
+    const receipt = acceptedInputReceipt(input).receipt;
+
+    expect(receipt.events).toEqual([
+      expect.objectContaining({
+        eventId: "sevt_reviewer",
+        sourceEventId: "sevt_reviewer",
+        disposition: "created",
+      }),
+    ]);
+    expect(applyAcceptedInputReceipt(input, drafts, receipt)).toHaveLength(1);
+  });
+
   test("authors one fixed assistant rejection draft for every source in a rejected batch", () => {
     const input: RuntimeAcceptedInputState = {
       requestId: "req_rejection",
