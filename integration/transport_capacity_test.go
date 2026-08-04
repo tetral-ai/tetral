@@ -220,7 +220,7 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 		"user_input",
 		"0",
 	)
-	if _, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
+	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
 		Scope:          scope,
 		RuntimeInputId: request.GetRuntimeInputId(),
 		EventIds:       request.GetEventIds(),
@@ -239,16 +239,27 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 				PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, payload.Messages[0].Parts[0].Text),
 			}},
 		}},
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
+	receipts := committed.GetDeclaration().GetReceipts()
+	if len(receipts) != 1 || len(receipts[0].GetMessages()) != 1 {
+		return nil, fmt.Errorf("runtime input commit did not return one durable message")
+	}
 	modelRequestID := "mreq_transport_" + s.suffix
+	contextThroughMessageSequence := receipts[0].GetMessages()[0].GetMessageSequence()
+	if contextThroughMessageSequence <= 0 {
+		return nil, fmt.Errorf("runtime input commit returned invalid message sequence")
+	}
 	start, err := s.bridge.WriteEvent(ctx, &bridgev1.WriteEventRequest{
-		Scope:          scope,
-		RuntimeWriteId: "rwrite_transport_start_" + s.suffix,
-		ModelRequestId: modelRequestID,
-		EventType:      "span.model_request_start",
-		PayloadJson:    fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
+		Scope:                         scope,
+		RuntimeWriteId:                "rwrite_transport_start_" + s.suffix,
+		ModelRequestId:                modelRequestID,
+		EventType:                     "span.model_request_start",
+		PayloadJson:                   fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
+		RequestKind:                   "agent_provider_request",
+		ContextThroughMessageSequence: &contextThroughMessageSequence,
 	})
 	if err != nil {
 		return nil, err
