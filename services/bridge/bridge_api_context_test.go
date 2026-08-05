@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -442,13 +443,40 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 	const durableTurnID = "evt_context_idle_cleanup_running"
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
 	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_context_cleanup_start", modelRequestID, "agent_provider_request", 0)
+	toolInput := map[string]any{
+		"path":    "a.txt",
+		"content": "头" + strings.Repeat("界", 3000) + "尾",
+	}
+	toolInputJSON, err := json.Marshal(toolInput)
+	if err != nil {
+		t.Fatalf("marshal cleanup tool input: %v", err)
+	}
+	if len(toolInputJSON) <= cleanupRuntimeInputPreviewMaxBytes {
+		t.Fatalf("cleanup tool input bytes = %d; want above %d", len(toolInputJSON), cleanupRuntimeInputPreviewMaxBytes)
+	}
+	toolPartJSON, err := json.Marshal(map[string]any{
+		"type":       "tool",
+		"toolCallId": "call_context_cleanup",
+		"toolName":   "Write",
+		"state": map[string]any{
+			"status": "running",
+			"input": map[string]any{
+				"value":     toolInput,
+				"preview":   "large write input",
+				"truncated": true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal cleanup tool part: %v", err)
+	}
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_context_cleanup_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"path":"a.txt"},"evaluated_permission":"ask"}`,
+		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(toolInputJSON) + `,"evaluated_permission":"ask"}`,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t, scope, "rwrite_context_cleanup_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_cleanup","toolName":"Write","state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`},
+			bridgeRuntimePartDraftForTest{kind: "tool", json: string(toolPartJSON)},
 		)},
 	})
 	if err != nil {
@@ -475,7 +503,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 			context.Background(), tx, scope,
 			cleanupPendingWait{
 				ThreadID: threadID, ToolUseEventID: toolUse.GetEventId(), ModelToolCallID: "call_context_cleanup",
-				ToolName: "Write", InputJSON: `{"path":"a.txt"}`, EventType: "agent.tool_use",
+				ToolName: "Write", InputJSON: string(toolInputJSON), EventType: "agent.tool_use",
 			},
 			pendingToolTerminal{PartStatus: "error", ErrorType: "cleanup_expired", Message: "expired"},
 			time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC),
@@ -494,6 +522,43 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 	var payload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode idle-cleanup context: %v", err)
+	}
+	foundTerminalPart := false
+	for _, rawMessage := range payload.Messages {
+		var message struct {
+			Parts []struct {
+				ToolCallID string `json:"toolCallId"`
+				State      struct {
+					Status string `json:"status"`
+					Input  struct {
+						Value     map[string]any `json:"value"`
+						Preview   string         `json:"preview"`
+						Truncated bool           `json:"truncated"`
+					} `json:"input"`
+				} `json:"state"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal(rawMessage, &message); err != nil {
+			t.Fatalf("decode idle-cleanup message: %v", err)
+		}
+		for _, part := range message.Parts {
+			if part.ToolCallID != "call_context_cleanup" || part.State.Status != "error" {
+				continue
+			}
+			foundTerminalPart = true
+			if !reflect.DeepEqual(part.State.Input.Value, toolInput) {
+				t.Fatalf("idle-cleanup terminal input changed: got %#v want %#v", part.State.Input.Value, toolInput)
+			}
+			previewBytes := len([]byte(part.State.Input.Preview))
+			if previewBytes > cleanupRuntimeInputPreviewMaxBytes || !utf8.ValidString(part.State.Input.Preview) || !part.State.Input.Truncated {
+				t.Fatalf("idle-cleanup terminal preview bytes/UTF-8/truncated = %d/%v/%v; want <=%d/true/true",
+					previewBytes, utf8.ValidString(part.State.Input.Preview), part.State.Input.Truncated,
+					cleanupRuntimeInputPreviewMaxBytes)
+			}
+		}
+	}
+	if !foundTerminalPart {
+		t.Fatal("LoadContext omitted cleanup terminal tool part")
 	}
 	var repair *bridgeLoadContextMessageLineageEntry
 	for _, lineage := range payload.TurnFacts.MessageLineage {

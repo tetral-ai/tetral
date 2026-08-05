@@ -693,6 +693,9 @@ export class RuntimePodToolRunner {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent spawn was cancelled.");
       }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+      }
       if (isGrpcStatus(error, status.ALREADY_EXISTS)) {
         return toolFailure(request, `Sub-agent task_name ${taskName} already exists under this parent thread.`, false);
       }
@@ -773,6 +776,9 @@ export class RuntimePodToolRunner {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent send was cancelled.");
       }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+      }
       return toolFailure(request, "Sub-agent send route is unavailable.", true);
     }
   }
@@ -819,6 +825,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent wait was cancelled.");
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, "Sub-agent wait route is unavailable.", true);
     }
@@ -1016,7 +1025,10 @@ export class RuntimePodToolRunner {
           agent_type: child.agentType,
         })),
       }, null, 2));
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+      }
       return toolFailure(request, "Sub-agent list route is unavailable.", true);
     }
   }
@@ -1043,6 +1055,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, `${toolName} was cancelled.`);
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, `${toolName} route is unavailable.`, true);
     }

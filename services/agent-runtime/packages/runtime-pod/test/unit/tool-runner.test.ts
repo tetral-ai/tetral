@@ -1933,6 +1933,26 @@ describe("RuntimePodToolRunner", () => {
     }]);
   });
 
+  test("wait_agent settles an oversized child final message as a non-retryable tool failure", async () => {
+    const bridge = new RecordingBridgeClient();
+    const subAgentHost = new RecordingSubAgentHost();
+    subAgentHost.pulledAgentMail = {
+      deliveryId: "delivery_child_oversized",
+      finalMessage: "\u0001".repeat(90_000),
+    };
+    const runner = makeRunner({ bridge, subAgentHost });
+
+    const result = await runner.runTool(toolRequest("wait_agent", { task_name: "worker" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Tool result exceeds the 512 KiB model-visible output limit.",
+        retryable: false,
+      },
+    });
+  });
+
   test("wait_agent surfaces observed hot wait timeouts as completed results", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.childStatus = "running";
@@ -2092,6 +2112,23 @@ describe("RuntimePodToolRunner", () => {
       expect(result.output.text).toContain("run_outcome: completed_clean");
     }
     expect(subAgentHost.actions).toEqual(["interrupt"]);
+  });
+
+  test("withResolvedChild settles an oversized route result as a non-retryable tool failure", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    bridge.childTaskName = "\u0001".repeat(90_000);
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest("interrupt_agent", { task_name: bridge.childTaskName }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Tool result exceeds the 512 KiB model-visible output limit.",
+        retryable: false,
+      },
+    });
   });
 
   test("wait_agent cancellation detaches the hot waiter without a late result", async () => {
@@ -2412,6 +2449,7 @@ class RecordingBridgeClient {
   deferFirstListChildThreads = false;
   deferResolveInterAgentDelivery = false;
   createChildThreadErrorCode: GrpcStatus | undefined;
+  childTaskName = "worker";
   childStatus = "idle";
   awaitSandboxExecutionResultJson = '{"status":"success","result":{"text":"ok"}}';
   awaitSandboxExecutionResultDigest = sha256(this.awaitSandboxExecutionResultJson);
@@ -2607,7 +2645,7 @@ class RecordingBridgeClient {
     this.resolveChildThreadRequests.push(request);
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      threadJson: childThreadJson("worker", this.childStatus),
+      threadJson: childThreadJson(this.childTaskName, this.childStatus),
     });
     return grpcCall();
   }
@@ -2616,7 +2654,7 @@ class RecordingBridgeClient {
     this.listChildThreadsRequests.push(request);
     const response = {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      threadJson: [childThreadJson("worker", this.childStatus)],
+      threadJson: [childThreadJson(this.childTaskName, this.childStatus)],
     };
     if (this.deferFirstListChildThreads && this.listChildThreadsRequests.length === 1) {
       this.deferredListChildThreads = (deferredResponse) => callback(null, deferredResponse);
@@ -2635,7 +2673,7 @@ class RecordingBridgeClient {
     this.deferredListChildThreads = undefined;
     complete({
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      threadJson: [childThreadJson("worker", this.childStatus)],
+      threadJson: [childThreadJson(this.childTaskName, this.childStatus)],
     });
   }
 
