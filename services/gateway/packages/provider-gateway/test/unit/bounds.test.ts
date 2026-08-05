@@ -22,13 +22,21 @@ describe("Gateway process bounds", () => {
       ...validRunWebRequest(),
       input: { searchQuery: [], open: [{ url: "https://example.test", refId: "ref_1", lineno: undefined }], find: [] },
     }));
+    expectInvalid(validateRunWebRequest({
+      ...validRunWebRequest(),
+      input: { searchQuery: Array.from({ length: 9 }, () => ({ q: "tetral", domains: [] })), open: [], find: [] },
+    }));
+    expectInvalid(validateRunWebRequest({
+      ...validRunWebRequest(),
+      input: { searchQuery: [{ q: "tetral", domains: Array.from({ length: 5 }, () => "example.test") }], open: [], find: [] },
+    }));
     expectInvalid(validateRunWebRequest({ ...validRunWebRequest(), toolUseEventId: "" }));
   });
 
   test("keeps grpc-js server options in the Gateway process package", () => {
     expect(grpcServerOptions()).toEqual({
       "grpc.max_receive_message_length": 32 * 1024 * 1024,
-      "grpc.max_send_message_length": 512 * 1024,
+      "grpc.max_send_message_length": 8 * 1024 * 1024,
       "grpc.max_connection_age_ms": 5 * 60 * 1000,
       "grpc.max_connection_age_grace_ms": 30 * 60 * 1000,
       "grpc.keepalive_time_ms": GatewayGrpcKeepaliveTimeMs,

@@ -17,6 +17,7 @@ import type {
   ProviderRequest,
   ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { MaxProviderErrorMessageBytes, truncateUtf8Bytes } from "@tetral/gateway-protocol/src/bounds.js";
 
 /** Public provider-error fields accepted before defaults and numeric bounds are applied. */
 export interface ProviderErrorInput {
@@ -205,7 +206,7 @@ function boundedMessage(value: string | undefined): string | undefined {
   if (value === undefined || value.length === 0) {
     return undefined;
   }
-  return value.length > 64 * 1024 ? value.slice(0, 64 * 1024) : value;
+  return truncateUtf8Bytes(value, MaxProviderErrorMessageBytes);
 }
 
 function defaultProviderErrorMessage(code: string): string {

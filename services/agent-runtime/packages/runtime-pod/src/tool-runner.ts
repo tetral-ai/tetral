@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import { credentials, status } from "@grpc/grpc-js";
 import type { CallOptions, ClientUnaryCall, Metadata, ServiceError } from "@grpc/grpc-js";
-import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions } from "./bounds.js";
+import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions, webGrpcChannelOptions } from "./bounds.js";
 import {
   AgentRuntimeBridgeServiceClient,
   BridgeWriteStatus,
@@ -89,6 +89,7 @@ import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import { MaxIdBytes, MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { validateChildLifecycleDeclarationResponse } from "./bridge-client.js";
 
 // Durable tool-route transport retries rejoin one accepted identity. This
@@ -109,6 +110,11 @@ const DURABLE_TOOL_REJOIN_DELAY_MS = 300;
 //   types.go (maxOperations=8, maxSearchDomains=4 — the caps these mirror).
 const WEB_SEARCH_REQUESTS_MAX = 32;
 const WEB_FETCH_REQUESTS_MAX = 8;
+// UPDATE-WITH: services/web-connector/types.go; services/gateway/packages/
+// provider-gateway/src/bounds.ts.
+const WEB_OPERATIONS_MAX = 8;
+const WEB_SEARCH_DOMAINS_MAX = 4;
+const WEB_DOMAIN_MAX_BYTES = 253;
 
 /**
  * Supplies the service endpoints, current accepted-input scope, and injectable
@@ -202,7 +208,7 @@ export class RuntimePodToolRunner {
     this.bridgeClient =
       options.bridgeClient ?? new AgentRuntimeBridgeServiceClient(options.bridgeAddress, credentials.createInsecure(), bridgeAttachmentGrpcChannelOptions());
     this.webClient =
-      options.webClient ?? new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), grpcClientChannelOptions());
+      options.webClient ?? new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), webGrpcChannelOptions());
     this.mcpConnectorClient =
       options.mcpConnectorClient ?? new McpConnectorServiceClient(options.mcpConnectorAddress, credentials.createInsecure(), grpcClientChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
@@ -2323,52 +2329,89 @@ function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined 
   if (!isRecord(input)) {
     return undefined;
   }
-  const searchQuery = arrayField(input, "search_query")
-    .map((item) => isRecord(item) && typeof item.q === "string"
-      ? { q: item.q, domains: stringArrayField(item, "domains") }
-      : undefined)
-    .filter((item): item is { readonly q: string; readonly domains: string[] } => item !== undefined);
-  const open = arrayField(input, "open")
-    .map((item) => {
-      if (!isRecord(item)) {
-        return undefined;
-      }
-      const url = stringField(item, "url");
-      const refId = stringField(item, "ref_id");
-      const lineno = numberField(item, "lineno");
-      if ((url === undefined || url.length === 0) && (refId === undefined || refId.length === 0)) {
-        return undefined;
-      }
-      return {
-        ...(url !== undefined ? { url } : {}),
-        ...(refId !== undefined ? { refId } : {}),
-        ...(lineno !== undefined ? { lineno } : {}),
-      };
-    })
-    .filter((item): item is { readonly url?: string; readonly refId?: string; readonly lineno?: number } => item !== undefined);
-  const find = arrayField(input, "find")
-    .map((item) => {
-      if (!isRecord(item)) {
-        return undefined;
-      }
-      const refId = stringField(item, "ref_id");
-      const pattern = stringField(item, "pattern");
-      return refId !== undefined && pattern !== undefined ? { refId, pattern } : undefined;
-    })
-    .filter((item): item is { readonly refId: string; readonly pattern: string } => item !== undefined);
-  if (searchQuery.length + open.length + find.length === 0) {
+  const rawSearchQuery = arrayField(input, "search_query");
+  const rawOpen = arrayField(input, "open");
+  const rawFind = arrayField(input, "find");
+  const operationCount = rawSearchQuery.length + rawOpen.length + rawFind.length;
+  if (operationCount === 0 || operationCount > WEB_OPERATIONS_MAX) {
     return undefined;
   }
+
+  const searchQuery: Array<{ readonly q: string; readonly domains: string[] }> = [];
+  for (const item of rawSearchQuery) {
+    if (!isRecord(item)) {
+      return undefined;
+    }
+    const q = stringField(item, "q");
+    const rawDomains = arrayField(item, "domains");
+    if (
+      q === undefined ||
+      invalidUtf8Bytes(q, MaxTextBytes) ||
+      rawDomains.length > WEB_SEARCH_DOMAINS_MAX ||
+      rawDomains.some((domain) => typeof domain !== "string" || invalidUtf8Bytes(domain, WEB_DOMAIN_MAX_BYTES))
+    ) {
+      return undefined;
+    }
+    const domains = rawDomains.filter((domain): domain is string => typeof domain === "string");
+    searchQuery.push({ q, domains });
+  }
+
+  const open: Array<{ readonly url?: string; readonly refId?: string; readonly lineno?: number }> = [];
+  for (const item of rawOpen) {
+    if (!isRecord(item)) {
+      return undefined;
+    }
+    const url = stringField(item, "url");
+    const refId = stringField(item, "ref_id");
+    const lineno = numberField(item, "lineno");
+    const hasUrl = url !== undefined && url !== "";
+    const hasRef = refId !== undefined && refId !== "";
+    if (
+      hasUrl === hasRef ||
+      (url !== undefined && invalidUtf8Bytes(url, MaxTextBytes)) ||
+      (refId !== undefined && invalidUtf8Bytes(refId, MaxIdBytes)) ||
+      (lineno !== undefined && lineno < 1)
+    ) {
+      return undefined;
+    }
+    open.push({
+      ...(url !== undefined ? { url } : {}),
+      ...(refId !== undefined ? { refId } : {}),
+      ...(lineno !== undefined ? { lineno } : {}),
+    });
+  }
+
+  const find: Array<{ readonly refId: string; readonly pattern: string }> = [];
+  for (const item of rawFind) {
+    if (!isRecord(item)) {
+      return undefined;
+    }
+    const refId = stringField(item, "ref_id");
+    const pattern = stringField(item, "pattern");
+    if (
+      refId === undefined ||
+      pattern === undefined ||
+      invalidUtf8Bytes(refId, MaxIdBytes) ||
+      encodedBytes(pattern) > MaxTextBytes
+    ) {
+      return undefined;
+    }
+    find.push({ refId, pattern });
+  }
   return { searchQuery, open, find };
+}
+
+function invalidUtf8Bytes(value: string, maxBytes: number): boolean {
+  return value.length === 0 || encodedBytes(value) > maxBytes;
+}
+
+function encodedBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function arrayField(input: Record<string, RuntimeJsonValue>, field: string): readonly RuntimeJsonValue[] {
   const value = input[field];
   return Array.isArray(value) ? value : [];
-}
-
-function stringArrayField(input: Record<string, RuntimeJsonValue>, field: string): string[] {
-  return arrayField(input, field).filter((item): item is string => typeof item === "string");
 }
 
 function numberField(input: Record<string, RuntimeJsonValue>, field: string): number | undefined {

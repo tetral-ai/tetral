@@ -456,7 +456,7 @@ func validateSemanticEnvelope(r *providergatewayv1.RunWebRequest) string {
 }
 func validStructuralRequest(r *providergatewayv1.RunWebRequest) bool {
 	for _, v := range []string{r.GetWorkspaceId(), r.GetSessionId(), r.GetSessionThreadId(), r.GetToolUseEventId(), r.GetBindingId()} {
-		if len([]byte(v)) > 128 || !utf8.ValidString(v) {
+		if len([]byte(v)) > maxIdentityBytes || !utf8.ValidString(v) {
 			return false
 		}
 	}
@@ -464,11 +464,11 @@ func validStructuralRequest(r *providergatewayv1.RunWebRequest) bool {
 		return false
 	}
 	for _, q := range r.GetInput().GetSearchQuery() {
-		if q.GetQ() == "" || len([]byte(q.GetQ())) > 64*1024 {
+		if q.GetQ() == "" || len([]byte(q.GetQ())) > maxRequestTextBytes {
 			return false
 		}
 		for _, d := range q.GetDomains() {
-			if d == "" || len([]byte(d)) > 253 {
+			if d == "" || len([]byte(d)) > maxDomainBytes {
 				return false
 			}
 		}
@@ -479,15 +479,15 @@ func validStructuralRequest(r *providergatewayv1.RunWebRequest) bool {
 		if hasURL == hasRef {
 			return false
 		}
-		if o.Url != nil && len([]byte(o.GetUrl())) > 64*1024 {
+		if o.Url != nil && len([]byte(o.GetUrl())) > maxRequestTextBytes {
 			return false
 		}
-		if o.RefId != nil && len([]byte(o.GetRefId())) > 128 {
+		if o.RefId != nil && len([]byte(o.GetRefId())) > maxIdentityBytes {
 			return false
 		}
 	}
 	for _, f := range r.GetInput().GetFind() {
-		if f.GetRefId() == "" || len([]byte(f.GetRefId())) > 128 {
+		if f.GetRefId() == "" || len([]byte(f.GetRefId())) > maxIdentityBytes || len([]byte(f.GetPattern())) > maxPatternBytes {
 			return false
 		}
 	}

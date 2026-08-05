@@ -14,9 +14,13 @@ import {
 import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
   MaxMetadataBytes,
+  MaxProviderRequestToolOutputJsonBytes,
   MaxProviderRequestAttachments,
   MaxProviderRequestMessagePartBytes,
+  MaxProviderToolCallInputJsonBytes,
+  MaxProviderUsageJsonBytes,
   MaxTextBytes,
+  truncateUtf8Bytes,
   validateProviderRequest,
   validateProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/bounds.js";
@@ -192,6 +196,73 @@ describe("Gateway protocol bounds", () => {
     }
   });
 
+  test("uses independent byte ceilings for provider tool input, tool output, and usage JSON", () => {
+    const base = validProviderRequest();
+    const message = base.messages[0]!;
+    const toolPart = {
+      id: "part_tool",
+      tool: {
+        callId: "call_1",
+        name: "Read",
+        toolUseEventId: "sevt_tool_1",
+        state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
+        inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes),
+        outputOrErrorJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes),
+      },
+    };
+    expect(validateProviderRequest({
+      ...base,
+      messages: [{ ...message, parts: [toolPart] }],
+    })).toEqual({ ok: true });
+    expectInvalid(validateProviderRequest({
+      ...base,
+      messages: [{
+        ...message,
+        parts: [{
+          ...toolPart,
+          tool: { ...toolPart.tool, outputOrErrorJson: jsonObjectAtBytes(MaxProviderRequestToolOutputJsonBytes + 1) },
+        }],
+      }],
+    }));
+
+    const eventBase = {
+      requestId: base.requestId,
+      modelRequestId: base.modelRequestId,
+      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+    };
+    expect(validateProviderStreamEvent({
+      ...eventBase,
+      toolCall: { id: "call_large", name: "memory", inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes), metadataJson: "{}" },
+    }, base)).toEqual({ ok: true });
+    expectInvalid(validateProviderStreamEvent({
+      ...eventBase,
+      toolCall: { id: "call_large", name: "memory", inputJson: jsonObjectAtBytes(MaxProviderToolCallInputJsonBytes + 1), metadataJson: "{}" },
+    }, base));
+
+    const finish = (providerUsageJson: string): ProviderStreamEvent => ({
+      requestId: base.requestId,
+      modelRequestId: base.modelRequestId,
+      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+      finish: {
+        reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
+        usage: {
+          inputTotalTokens: 1,
+          inputUncachedTokens: 1,
+          outputTotalTokens: 1,
+          providerUsageJson,
+        },
+        metadataJson: "{}",
+      },
+    });
+    expect(validateProviderStreamEvent(finish(jsonObjectAtBytes(MaxProviderUsageJsonBytes)), base)).toEqual({ ok: true });
+    expectInvalid(validateProviderStreamEvent(finish(jsonObjectAtBytes(MaxProviderUsageJsonBytes + 1)), base));
+  });
+
+  test("truncates provider errors by UTF-8 bytes without splitting code points", () => {
+    expect(truncateUtf8Bytes(`${"a".repeat(5)}éé`, 8)).toBe("aaaaaé");
+    expect(new TextEncoder().encode(truncateUtf8Bytes("你".repeat(4), 8)).byteLength).toBe(6);
+  });
+
   test("allows an absent tool use event id only for internal error repairs", () => {
     const base = validProviderRequest();
     const message = base.messages[0]!;
@@ -218,7 +289,12 @@ describe("Gateway protocol bounds", () => {
           tool: { ...repairPart.tool, state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED },
         }],
       }],
-    }))).toEqual({ ok: false, message: "invalid internal request" });
+    }))).toEqual({
+      ok: false,
+      message: "invalid internal request",
+      code: "invalid_message_part",
+      member: "messages.parts",
+    });
   });
 
   test("validates ProviderRequest attachment lowering hints", () => {
@@ -628,4 +704,9 @@ function expectInvalid(result: { readonly ok: boolean; readonly message?: string
   if (!result.ok) {
     expect(result.message).toBe("invalid internal request");
   }
+}
+
+function jsonObjectAtBytes(bytes: number): string {
+  const fixedBytes = new TextEncoder().encode('{"x":""}').byteLength;
+  return `{"x":"${"x".repeat(bytes - fixedBytes)}"}`;
 }

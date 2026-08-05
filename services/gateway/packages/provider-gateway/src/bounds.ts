@@ -31,6 +31,10 @@ import {
 } from "@tetral/gateway-protocol/src/bounds.js";
 import type { ValidationResult } from "@tetral/gateway-protocol/src/bounds.js";
 
+// UPDATE-WITH: services/web-connector/types.go; services/agent-runtime/packages/
+// runtime-pod/src/tool-runner.ts.
+const MaxWebOperations = 8;
+const MaxSearchDomains = 4;
 const MaxDomainBytes = 253;
 // The Runtime->Gateway request-channel fuse. 32 MiB is sized to the catalog's
 // largest full-context request (largest context window serialized plus envelope
@@ -41,7 +45,7 @@ const MaxDomainBytes = 253;
 // the smaller wall in force on the model path.
 // UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
 const MaxGrpcInboundMessageBytes = 32 * 1024 * 1024;
-const MaxGrpcOutboundMessageBytes = 512 * 1024;
+const MaxGrpcOutboundMessageBytes = 8 * 1024 * 1024;
 // Connection-lifecycle bounds that drive per-call load balancing across replicas.
 // max_connection_age (5 min) forces clients to periodically drop and re-resolve
 // DNS so newly scaled-out replicas start receiving traffic; the grace (30 min)
@@ -79,11 +83,15 @@ export function validateRunWebRequest(request: RunWebRequest): ValidationResult 
     request.input.searchQuery.length +
     request.input.open.length +
     request.input.find.length;
-  if (operations <= 0) {
+  if (operations <= 0 || operations > MaxWebOperations) {
     return invalidRequest();
   }
   for (const search of request.input.searchQuery) {
-    if (invalidBytes(search.q, MaxTextBytes) || search.domains.some((domain) => invalidBytes(domain, MaxDomainBytes))) {
+    if (
+      invalidBytes(search.q, MaxTextBytes) ||
+      search.domains.length > MaxSearchDomains ||
+      search.domains.some((domain) => invalidBytes(domain, MaxDomainBytes))
+    ) {
       return invalidRequest();
     }
   }

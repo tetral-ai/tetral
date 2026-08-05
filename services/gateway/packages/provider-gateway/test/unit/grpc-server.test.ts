@@ -62,6 +62,55 @@ describe("Gateway gRPC streaming transport", () => {
     }
   });
 
+  test("carries the largest advertised tool-input shapes across the real stream", async () => {
+    const cases = [
+      {
+        name: "memory-create",
+        inputJson: JSON.stringify({ path: "notes.txt", content: "\u0001".repeat(102_400) }),
+      },
+      {
+        name: "memory-replace",
+        inputJson: JSON.stringify({
+          path: "notes.txt",
+          old_text: "\u0001".repeat(102_400),
+          new_text: "\u0001".repeat(102_400),
+        }),
+      },
+      {
+        name: "web-eight-operations",
+        inputJson: JSON.stringify({
+          search_query: Array.from({ length: 8 }, () => ({ q: "\u0001".repeat(64 * 1024), domains: ["example.test"] })),
+        }),
+      },
+    ];
+    for (const scenario of cases) {
+      const request = validAnthropicProviderRequest();
+      const service = createService({
+        stream: async function* () {
+          yield {
+            requestId: request.requestId,
+            modelRequestId: request.modelRequestId,
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+            toolCall: { id: `call_${scenario.name}`, name: "bounded_tool", inputJson: scenario.inputJson, metadataJson: "{}" },
+          };
+        },
+      });
+      const server = createGatewayGrpcServer(service);
+      const port = await server.bind("127.0.0.1:0");
+      const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure(), {
+        "grpc.max_receive_message_length": 8 * 1024 * 1024,
+      });
+      try {
+        const events = await readStream(client.streamProviderRequest(request, metadata()));
+        expect(events, scenario.name).toHaveLength(1);
+        expect(events[0]?.toolCall?.inputJson, scenario.name).toBe(scenario.inputJson);
+      } finally {
+        await server.shutdown();
+        client.close();
+      }
+    }
+  }, 15_000);
+
   test("honors writable backpressure before consuming the next provider event", async () => {
     const first = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
     const second = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "two");

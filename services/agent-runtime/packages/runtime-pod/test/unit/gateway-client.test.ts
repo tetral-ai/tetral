@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { Metadata, status } from "@grpc/grpc-js";
 import {
   ProviderRequestKind,
@@ -78,46 +77,6 @@ describe("Runtime Pod Gateway client", () => {
     expect(transportCalls).toBe(0);
   });
 
-  test("treats grpc-js framed receive-limit exhaustion as a local protocol failure", async () => {
-    expectGrpcJSVersion("1.14.4");
-    const error = await collectGatewayError(new RuntimePodGatewayClient({
-      address: "gateway.test:9090",
-      tokenPath: "/var/run/token",
-      client: failingGatewayClient(
-        status.RESOURCE_EXHAUSTED,
-        "Received message larger than max (524289 vs 524288)",
-      ),
-      metadataFactory: async () => new Metadata(),
-    }), providerRequest());
-
-    expect(error).toMatchObject({
-      code: "gateway_protocol_error",
-      retryable: false,
-      fatal: true,
-      statusCode: status.RESOURCE_EXHAUSTED,
-    });
-  });
-
-  test("treats grpc-js decompressed receive-limit exhaustion as a local protocol failure", async () => {
-    expectGrpcJSVersion("1.14.4");
-    const error = await collectGatewayError(new RuntimePodGatewayClient({
-      address: "gateway.test:9090",
-      tokenPath: "/var/run/token",
-      client: failingGatewayClient(
-        status.RESOURCE_EXHAUSTED,
-        "Received message that decompresses to a size larger than 524288",
-      ),
-      metadataFactory: async () => new Metadata(),
-    }), providerRequest());
-
-    expect(error).toMatchObject({
-      code: "gateway_protocol_error",
-      retryable: false,
-      fatal: true,
-      statusCode: status.RESOURCE_EXHAUSTED,
-    });
-  });
-
   test("keeps peer receive-limit details in the remote retryable arm", async () => {
     for (const details of [
       "Received message larger than max (33554433 vs 33554432)",
@@ -150,13 +109,6 @@ function failingGatewayClient(code: number, details = "gateway request failed"):
   return recordingGatewayClient(() => {
     throw Object.assign(new Error(details), { code, details });
   });
-}
-
-function expectGrpcJSVersion(want: string): void {
-  const manifest = JSON.parse(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")) as {
-    readonly dependencies?: Readonly<Record<string, string>>;
-  };
-  expect(manifest.dependencies?.["@grpc/grpc-js"]).toBe(want);
 }
 
 function recordingGatewayClient(onIterate: () => void): ProviderGatewayServiceClient {

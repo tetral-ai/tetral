@@ -2,18 +2,22 @@
 // protocol validation is covered by the protocol package's bounds tests.
 
 import { describe, expect, test } from "bun:test";
+import { RunWebRequest as RunWebRequestMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
   MaxAttachmentGrpcMessageBytes,
   MaxGatewayRequestGrpcMessageBytes,
   MaxGatewayStreamEventGrpcMessageBytes,
   MaxGrpcInboundMessageBytes,
   MaxGrpcOutboundMessageBytes,
+  MaxWebRequestGrpcMessageBytes,
+  MaxWebResponseGrpcMessageBytes,
   GrpcKeepaliveTimeMs,
   GrpcKeepaliveTimeoutMs,
   bridgeAttachmentGrpcChannelOptions,
   gatewayGrpcChannelOptions,
   grpcClientChannelOptions,
   grpcServerOptions,
+  webGrpcChannelOptions,
 } from "../../src/bounds.js";
 
 describe("Runtime Pod transport bounds", () => {
@@ -50,8 +54,17 @@ describe("Runtime Pod transport bounds", () => {
       "grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
       "grpc.keepalive_permit_without_calls": 0,
     });
+    expect(webGrpcChannelOptions()).toEqual({
+      "grpc.max_receive_message_length": MaxWebResponseGrpcMessageBytes,
+      "grpc.max_send_message_length": MaxWebRequestGrpcMessageBytes,
+      "grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
+      "grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
+      "grpc.keepalive_permit_without_calls": 0,
+    });
     expect(MaxGatewayRequestGrpcMessageBytes).toBe(32 * 1024 * 1024);
-    expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(512 * 1024);
+    expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(8 * 1024 * 1024);
+    expect(MaxWebRequestGrpcMessageBytes).toBe(1024 * 1024);
+    expect(MaxWebResponseGrpcMessageBytes).toBe(512 * 1024);
   });
 
   test("assigns each Bridge adapter the smallest sufficient channel class", async () => {
@@ -71,5 +84,24 @@ describe("Runtime Pod transport bounds", () => {
     expect(channelFactoryFor("BridgeAPIContextLoader")).toBe("bridgeAttachmentGrpcChannelOptions");
     expect(channelFactoryFor("BridgeAPIEventWriter")).toBe("grpcClientChannelOptions");
     expect(channelFactoryFor("BridgeAPIInternalToolRepairCommitter")).toBe("grpcClientChannelOptions");
+  });
+
+  test("carries eight maximum Web text operations through the paired request fuse", () => {
+    const requestBytes = RunWebRequestMessage.encode({
+      workspaceId: "wksp_web_capacity",
+      sessionId: "sesn_web_capacity",
+      sessionThreadId: "thr_web_capacity",
+      toolUseEventId: "event_web_capacity",
+      bindingId: "bind_web_capacity",
+      bindingGeneration: 1,
+      runtimeBindingToken: "binding-token",
+      input: {
+        searchQuery: Array.from({ length: 8 }, () => ({ q: "x".repeat(64 * 1024), domains: ["example.test"] })),
+        open: [],
+        find: [],
+      },
+    }).finish().byteLength;
+
+    expect(requestBytes).toBeLessThan(MaxWebRequestGrpcMessageBytes);
   });
 });

@@ -43,6 +43,8 @@ import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/s
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
+import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
@@ -445,7 +447,7 @@ describe("RuntimePodToolRunner", () => {
   });
 
   test("keeps maximal numbered Read parts below the fatal context byte bound at deep line numbers", async () => {
-    const content = `${Array.from({ length: 2000 }, () => "x".repeat(99)).join("\n")}\n`;
+    const content = `${Array.from({ length: 2000 }, () => "\\\"".repeat(24)).join("\n")}\n`;
     for (const startLine of [1, 1_000_000, 1_000_000_000, Number.MAX_SAFE_INTEGER]) {
       const bridge = new RecordingBridgeClient();
       bridge.awaitSandboxExecutionResultJson = JSON.stringify({
@@ -458,6 +460,8 @@ describe("RuntimePodToolRunner", () => {
           line_truncations: 0,
         },
       });
+      expect(Buffer.byteLength(bridge.awaitSandboxExecutionResultJson, "utf8")).toBeGreaterThan(190_000);
+      expect(Buffer.byteLength(bridge.awaitSandboxExecutionResultJson, "utf8")).toBeLessThanOrEqual(200_000);
 
       const result = await makeRunner({ bridge }).runTool(toolRequest("Read", {
         file_path: "notes/deep.txt",
@@ -471,16 +475,16 @@ describe("RuntimePodToolRunner", () => {
       if (startLine === Number.MAX_SAFE_INTEGER) {
         expect(result.output.text).toContain(`${(BigInt(startLine) + 1n).toString()}\t`);
       }
-      const state = {
-        status: "completed",
-        input: {
-          value: { file_path: "notes/deep.txt", offset: startLine, limit: 2000 },
-          preview: JSON.stringify({ file_path: "notes/deep.txt", offset: startLine, limit: 2000 }),
-          truncated: false,
-        },
-        output: result.output,
-      };
-      expect(new TextEncoder().encode(JSON.stringify(state)).length, String(startLine)).toBeLessThan(256_000);
+      const projected = toGatewayRuntimeMessages([completedToolMessage(
+        "Read",
+        { file_path: "notes/deep.txt", offset: startLine, limit: 2000 },
+        result.output.text,
+      )]);
+      expect(projected.ok, String(startLine)).toBe(true);
+      if (!projected.ok) throw new Error("expected projected Read result");
+      const outputJson = projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson ?? "";
+      expect(Buffer.byteLength(outputJson, "utf8"), String(startLine)).toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
+      expect(JSON.parse(outputJson).text, String(startLine)).toBe(result.output.text);
     }
 
     const unsafeStartBridge = new RecordingBridgeClient();
@@ -1035,6 +1039,27 @@ describe("RuntimePodToolRunner", () => {
         },
       }),
     ]);
+  });
+
+  test("rejects Web requests outside the shared semantic envelope before transport", async () => {
+    const gateway = new RecordingGatewayClient();
+    const runner = makeRunner({ gateway });
+    const cases = [
+      { search_query: Array.from({ length: 9 }, () => ({ q: "tetral" })) },
+      { search_query: [{ q: "x".repeat(64 * 1024 + 1) }] },
+      { search_query: [{ q: "tetral", domains: Array.from({ length: 5 }, () => "example.com") }] },
+      { open: [{ url: "https://example.com", ref_id: "ref_1" }] },
+      { find: [{ ref_id: "ref_1", pattern: "x".repeat(64 * 1024 + 1) }] },
+    ];
+
+    for (const input of cases) {
+      const result = await runner.runTool(toolRequest("web", input));
+      expect(result).toMatchObject({
+        type: "error",
+        error: { retryable: false, message: "web requires at least one valid search, open, or find operation." },
+      });
+    }
+    expect(gateway.runWebRequests).toHaveLength(0);
   });
 
   test("web ignores the undeclared refId alias", async () => {

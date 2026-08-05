@@ -383,7 +383,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `runtime-pod/test/unit/gateway-client.test.ts` | the Gateway provider-stream client |
 | `runtime-pod/test/unit/tool-runner.test.ts` | route dispatch across sandbox / gateway / bridge / subagent |
 | `runtime-pod/test/unit/bridge-client.test.ts` | Bridge RPC clients and input committers |
-| `runtime-pod/test/integration/app.test.ts` | full process wiring through `gateway-transport-harness` and `grpc-harness` |
+| `runtime-pod/test/integration/app.test.ts`, `gateway-capacity.test.ts` | full process wiring plus maximum-context projection, protobuf, real gRPC, and provider-lowering capacity proof |
 | `protocol/test/unit/bounds.test.ts` | shared bound constants |
 
 Production dependency factories never return fake, mock, or fallback clients;

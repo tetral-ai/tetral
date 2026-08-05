@@ -39,7 +39,8 @@ const (
 	// magic-matches PNG/JPEG/GIF/WebP/PDF (checked before the binary sniff).
 	// That envelope is transport-only and never model-visible — the runtime
 	// converts it to a transient attachment — and it is exempt from text
-	// windowing and the 256 KiB envelope cap. For PDF the cap applies to the
+	// windowing and the Read-specific 200,000-byte encoded-envelope cap. For PDF
+	// the cap applies to the
 	// TRIMMED page slice, not the source.
 	//
 	// pdfSourceReadMaxBytes (32 MiB) caps the PDF SOURCE read. It is larger than
@@ -48,7 +49,12 @@ const (
 	// maxReadMediaBytes. Beyond this, too_large names the source.
 	defaultReadLines      = 2000
 	maxReadLines          = 2000
-	readByteBudget        = 200_000
+	readByteBudget = 200_000
+	// maxReadEnvelopeBytes bounds the complete json.Marshal output after string
+	// escaping. Runtime decodes this envelope before adding line numbers, then
+	// re-encodes the visible provider part under its paired 256 KiB fuse.
+	// UPDATE-WITH: services/gateway/packages/protocol/src/bounds.ts
+	//   (MaxProviderRequestToolOutputJsonBytes).
 	maxReadEnvelopeBytes  = 200_000
 	maxReadLineRunes      = 2000
 	binarySniffBytes      = 4096

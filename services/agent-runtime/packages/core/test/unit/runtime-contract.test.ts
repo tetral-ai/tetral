@@ -550,24 +550,24 @@ describe("runtime boundary contracts", () => {
     }).success).toBe(false);
   });
 
-  test("keeps reasoning stream admission at the narrower 8 KiB text and 4 KiB metadata bounds", () => {
-    const metadataAtLimit = { x: "m".repeat(4_096 - 8) };
+  test("matches reasoning stream admission to the shared 64 KiB text and 16 KiB metadata bounds", () => {
+    const metadataAtLimit = { x: "m".repeat(16 * 1024 - 8) };
     expect(LLMEventSchema.safeParse({
       type: "reasoning-delta",
       id: "reasoning_1",
-      text_delta: "x".repeat(8_192),
+      text_delta: "x".repeat(64 * 1024),
       providerMetadata: metadataAtLimit,
     }).success).toBe(true);
     expect(LLMEventSchema.safeParse({
       type: "reasoning-delta",
       id: "reasoning_1",
-      text_delta: "x".repeat(8_193),
+      text_delta: "x".repeat(64 * 1024 + 1),
     }).success).toBe(false);
     expect(LLMEventSchema.safeParse({
       type: "reasoning-delta",
       id: "reasoning_1",
       text_delta: "x",
-      providerMetadata: { x: "m".repeat(4_096 - 7) },
+      providerMetadata: { x: "m".repeat(16 * 1024 - 7) },
     }).success).toBe(false);
   });
   test("maps internal RuntimeFailure session errors to fork-SDK durable payloads", () => {

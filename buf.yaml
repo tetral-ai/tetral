@@ -7,6 +7,19 @@ modules:
 lint:
   use:
     - STANDARD
+  # These internal services intentionally share semantic command/transition
+  # envelopes; keep every unrelated STANDARD rule enabled.
+  ignore_only:
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - services/agent-runtime/proto/tetral/agent_runtime/v1/agent_runtime.proto
+      - services/queue/proto/tetral/queue/v1/queue.proto
+    RPC_REQUEST_STANDARD_NAME:
+      - services/agent-runtime/proto/tetral/agent_runtime/v1/agent_runtime.proto
+      - services/gateway/proto/tetral/provider_gateway/v1/provider_gateway.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - services/agent-runtime/proto/tetral/agent_runtime/v1/agent_runtime.proto
+      - services/gateway/proto/tetral/provider_gateway/v1/provider_gateway.proto
+      - services/queue/proto/tetral/queue/v1/queue.proto
 breaking:
   use:
     - FILE

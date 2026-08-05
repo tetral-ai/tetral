@@ -15,16 +15,24 @@ const (
 	// stored line, so every window advances, next_lineno strictly increases, and
 	// every continuation chain terminates. Windows never split a stored line.
 	// UPDATE-WITH: storage.go normalizeContent, format.go formatWindow.
-	MaxStoredLineBytes = 4 * 1024
-	maxSnapshotBytes   = 1024 * 1024
-	maxWindowLines     = 2000
-	maxWindowBytes     = 50 * 1024
-	maxOperations      = 8
-	maxSearchHits      = 10
-	maxSearchDomains   = 4
-	maxFindMatches     = 250
-	maxFindMatchChars  = 250
-	maxPatternBytes    = 1024
+	MaxStoredLineBytes  = 4 * 1024
+	maxSnapshotBytes    = 1024 * 1024
+	maxWindowLines      = 2000
+	maxWindowBytes      = 50 * 1024
+	maxOperations       = 8
+	maxSearchHits       = 10
+	maxSearchDomains    = 4
+	maxRequestTextBytes = 64 * 1024
+	maxDomainBytes      = 253
+	maxIdentityBytes    = 128
+	maxFindMatches      = 250
+	maxFindMatchChars   = 250
+	maxPatternBytes     = maxRequestTextBytes
+
+	// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
+	// (MaxWebRequestGrpcMessageBytes, MaxWebResponseGrpcMessageBytes).
+	maxRunWebRequestGRPCMessageBytes  = 1024 * 1024
+	maxRunWebResponseGRPCMessageBytes = 512 * 1024
 )
 
 type Scope struct {

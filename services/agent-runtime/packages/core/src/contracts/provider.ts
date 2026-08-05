@@ -9,6 +9,7 @@
  */
 
 import { z } from "zod/v4";
+import { MaxProviderErrorMessageBytes, truncateUtf8Bytes } from "@tetral/gateway-protocol/src/bounds.js";
 
 /** Provider identifier carried through Runtime without selecting a provider implementation. */
 export type ProviderId = string;
@@ -91,7 +92,10 @@ export const ProviderMetadataSchema = z.custom<ProviderMetadata>(isProviderMetad
  */
 export const ProviderErrorSchema = z.strictObject({
   code: ProviderErrorCodeSchema,
-  message: z.string().min(1).max(8_192),
+  message: z.string().min(1).refine(
+    (value) => new TextEncoder().encode(value).byteLength <= MaxProviderErrorMessageBytes,
+    `provider error message must be at most ${MaxProviderErrorMessageBytes} UTF-8 bytes`,
+  ),
   retryable: z.boolean(),
   fatal: z.boolean(),
   providerId: ProviderIdentifierSchema.optional(),
@@ -147,7 +151,7 @@ function providerErrorCode(value: string | undefined): ProviderErrorCode {
 
 function boundedProviderErrorMessage(message: string | undefined, code: ProviderErrorCode): string {
   const text = message ?? defaultProviderErrorMessage(code);
-  return text.length > 8_192 ? text.slice(0, 8_192) : text;
+  return truncateUtf8Bytes(text, MaxProviderErrorMessageBytes);
 }
 
 function defaultProviderErrorMessage(code: ProviderErrorCode): string {
