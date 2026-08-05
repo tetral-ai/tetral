@@ -903,20 +903,6 @@ func workflowJobForStaticTest(t *testing.T, text string, jobName string) string 
 	return strings.Join(jobLines, "\n")
 }
 
-// workflowStepRunningGovulncheck returns, scoped to a single job block, the
-// `- name:` step whose body invokes govulncheck, plus whether one was found.
-// Splitting on the step boundary keeps a last-in-job govulncheck step from
-// bleeding into the next step's body.
-func workflowStepRunningGovulncheck(job string) (string, bool) {
-	const stepBoundary = "\n      - name:"
-	for _, step := range splitJobIntoSteps(job, stepBoundary) {
-		if strings.Contains(step, "name: Govulncheck") {
-			return step, true
-		}
-	}
-	return "", false
-}
-
 // splitJobIntoSteps slices a job block into its individual `- name:` steps.
 func splitJobIntoSteps(job string, stepBoundary string) []string {
 	indices := allIndices(job, stepBoundary)
