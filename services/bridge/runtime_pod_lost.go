@@ -31,12 +31,21 @@ type runtimeOrphanToolUse struct {
 	PayloadJSON     string
 }
 
+type runtimePodLostAffectedThreads struct {
+	MainThreadID string
+	ThreadIDs    []string
+}
+
 func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
-	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID)
+	affected, err := runtimePodLostAffectedThreadsTx(ctx, tx, workspaceID, sessionID, binding)
 	if err != nil {
 		return 0, err
 	}
-	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID)
+	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
+	if err != nil {
+		return 0, err
+	}
+	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
 	if err != nil {
 		return 0, err
 	}
@@ -59,12 +68,12 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 			repaired++
 		}
 	}
-	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, binding, now)
+	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs, binding, now)
 	if err != nil {
 		return 0, err
 	}
 	repaired += deliveryRepaired
-	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, binding, now)
+	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, affected, binding, now)
 	if err != nil {
 		return 0, err
 	}
@@ -72,14 +81,13 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 	return repaired, nil
 }
 
-func settleRuntimePodLostLiveScopesTx(
+func runtimePodLostAffectedThreadsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	workspaceID string,
 	sessionID string,
 	binding runtimeBindingForDelivery,
-	now time.Time,
-) (int, error) {
+) (runtimePodLostAffectedThreads, error) {
 	var mainThreadID, sessionStatus string
 	if err := tx.QueryRow(ctx,
 		`SELECT main_thread_id, status
@@ -90,9 +98,9 @@ func settleRuntimePodLostLiveScopesTx(
 		workspaceID,
 		sessionID,
 	).Scan(&mainThreadID, &sessionStatus); dbconnect.IsNoRows(err) {
-		return 0, runtimePodLostStaleFenceError("runtime pod-loss session is stale")
+		return runtimePodLostAffectedThreads{}, runtimePodLostStaleFenceError("runtime pod-loss session is stale")
 	} else if err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
 	var runtimeStatus string
 	if err := tx.QueryRow(ctx,
@@ -108,9 +116,9 @@ func settleRuntimePodLostLiveScopesTx(
 		binding.BindingID,
 		binding.BindingGeneration,
 	).Scan(&runtimeStatus); dbconnect.IsNoRows(err) {
-		return 0, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
+		return runtimePodLostAffectedThreads{}, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
 	} else if err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
 
 	threadIDs := make([]string, 0)
@@ -131,26 +139,37 @@ func settleRuntimePodLostLiveScopesTx(
 		mainThreadID,
 	)
 	if err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var threadID string
 		if err := rows.Scan(&threadID); err != nil {
-			return 0, err
+			return runtimePodLostAffectedThreads{}, err
 		}
 		threadIDs = append(threadIDs, threadID)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
+	return runtimePodLostAffectedThreads{MainThreadID: mainThreadID, ThreadIDs: threadIDs}, nil
+}
 
-	for _, threadID := range threadIDs {
-		if err := settleRuntimePodLostLiveScopeTx(ctx, tx, workspaceID, sessionID, mainThreadID, threadID, binding, now); err != nil {
+func settleRuntimePodLostLiveScopesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	affected runtimePodLostAffectedThreads,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) (int, error) {
+	for _, threadID := range affected.ThreadIDs {
+		if err := settleRuntimePodLostLiveScopeTx(ctx, tx, workspaceID, sessionID, affected.MainThreadID, threadID, binding, now); err != nil {
 			return 0, err
 		}
 	}
-	return len(threadIDs), nil
+	return len(affected.ThreadIDs), nil
 }
 
 func settleRuntimePodLostLiveScopeTx(
@@ -379,6 +398,9 @@ func insertRuntimePodLostSettlementEventTx(
 
 func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Context, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) error {
 	return s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+			return err
+		}
 		current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, workspaceID, sessionID)
 		if err != nil {
 			return err
@@ -420,12 +442,17 @@ func runtimePodLostStaleFenceError(message string) runtimeDeliveryPrepareError {
 	return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_claim_stale", message: message, retryable: true}
 }
 
-func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimeOpenRequestStart, error) {
+func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOpenRequestStart, error) {
+	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.projection_json
 		   FROM session_events e
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
+		    AND e.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
 		    AND e.type = 'span.model_request_start'
 		    AND COALESCE(e.model_request_id, '') <> ''
 			    AND NOT EXISTS (
@@ -441,6 +468,7 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 		  FOR UPDATE OF e`,
 		workspaceID,
 		sessionID,
+		string(threadIDsJSON),
 	)
 	if err != nil {
 		return nil, err
@@ -466,7 +494,11 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 	return starts, nil
 }
 
-func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimeOrphanToolUse, error) {
+func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOrphanToolUse, error) {
+	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT e.session_thread_id, e.event_id, e.type, e.model_request_id, e.payload_json
 		   FROM session_events e
@@ -482,6 +514,7 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 		    AND m.kind = 'assistant'
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
+		    AND e.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
 		    AND e.type IN ('agent.tool_use', 'agent.mcp_tool_use')
 		    AND (
 		      e.visibility = 'public'
@@ -490,16 +523,6 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 			    AND (
 			      e.type <> 'agent.tool_use'
 			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
-			    )
-			    AND NOT EXISTS (
-			        SELECT 1
-			          FROM session_pending_tool_uses pending_approval
-			         WHERE pending_approval.workspace_id = e.workspace_id
-			           AND pending_approval.session_id = e.session_id
-			           AND pending_approval.session_thread_id = e.session_thread_id
-			           AND pending_approval.tool_use_event_id = e.event_id
-			           AND pending_approval.kind = 'approval'
-			           AND pending_approval.status = 'pending'
 			    )
 			    AND EXISTS (
 		        SELECT 1
@@ -534,6 +557,7 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 		  FOR UPDATE OF e`,
 		workspaceID,
 		sessionID,
+		string(threadIDsJSON),
 	)
 	if err != nil {
 		return nil, err
@@ -647,8 +671,8 @@ type runtimePodLostSubAgentDelivery struct {
 	Delivery  string
 }
 
-func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
-	deliveries, err := runtimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID)
+func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
+	deliveries, err := runtimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs)
 	if err != nil {
 		return 0, err
 	}
@@ -751,7 +775,11 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 	return repaired, nil
 }
 
-func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimePodLostSubAgentDelivery, error) {
+func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimePodLostSubAgentDelivery, error) {
+	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT tool_use.session_thread_id,
 		        tool_use.event_id,
@@ -774,6 +802,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		   ) sent ON TRUE
 		  WHERE tool_use.workspace_id = $1
 		    AND tool_use.session_id = $2
+		    AND tool_use.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
 		    AND tool_use.type = 'agent.tool_use'
 		    AND tool_use.visibility = 'public'
 		    AND COALESCE(tool_use.payload_json::jsonb ->> 'name', '') IN ('spawn_agent', 'send_message')
@@ -793,6 +822,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		  FOR UPDATE OF tool_use`,
 		workspaceID,
 		sessionID,
+		string(threadIDsJSON),
 	)
 	if err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 // This file owns PostgreSQL delivery-store pod-loss repair tests.
@@ -47,7 +49,7 @@ func TestRuntimeRepairOpenRequestDetectionScopesEndsToTheirThread(t *testing.T) 
 	}
 	client := dbconnect.NewClientForTesting(runtime)
 	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_thread_scope", func(tx *dbconnect.Tx) error {
-		starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", sessionID)
+		starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", sessionID, []string{mainThreadID, childThreadID})
 		if err != nil {
 			return err
 		}
@@ -473,7 +475,7 @@ func TestRuntimePodLossDetectsInternalApprovalReviewerToolUse(t *testing.T) {
 	var orphans []runtimeOrphanToolUse
 	if err := client.WithWorkspaceTx(context.Background(), "default", "test.reviewer_pod_loss", func(tx *dbconnect.Tx) error {
 		var err error
-		orphans, err = runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID)
+		orphans, err = runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID, []string{reviewerID})
 		return err
 	}); err != nil {
 		t.Fatalf("load reviewer pod-loss Tool Uses: %v", err)
@@ -519,7 +521,7 @@ func TestRuntimePodLossOrphanDetectionKeepsToolFamilyAndThreadClosed(t *testing.
 	var orphans []runtimeOrphanToolUse
 	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_closed_result_identity", func(tx *dbconnect.Tx) error {
 		var err error
-		orphans, err = runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID)
+		orphans, err = runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID, []string{threadID})
 		return err
 	}); err != nil {
 		t.Fatalf("load orphan Tool Uses: %v", err)
@@ -576,60 +578,397 @@ func TestRuntimePodLossUsesDurablePrivateRequestKind(t *testing.T) {
 	}
 }
 
-func TestRuntimePodLossPreservesToolUseAwaitingApproval(t *testing.T) {
+func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
+	for _, testCase := range []struct {
+		name             string
+		approvalStatus   string
+		withRequestEnd   bool
+		wantEndIsError   bool
+		raceConfirmation bool
+	}{
+		{name: "existing successful Request End", approvalStatus: "pending", withRequestEnd: true},
+		{name: "missing Request End", approvalStatus: "resolving", wantEndIsError: true},
+		{name: "confirmation race", approvalStatus: "resolving", withRequestEnd: true, raceConfirmation: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(testCase.approvalStatus, "_", "")
+			if testCase.withRequestEnd {
+				suffix += "_sealed"
+			} else {
+				suffix += "_open"
+			}
+			if testCase.raceConfirmation {
+				suffix += "_race"
+			}
+			sessionID := "sesn_pod_loss_approval_" + suffix
+			threadID := "thr_pod_loss_approval_" + suffix
+			modelRequestID := "mreq_pod_loss_approval_" + suffix
+			toolUseEventID := "evt_pod_loss_approval_tool_" + suffix
+			bindingID := "bind_pod_loss_approval_" + suffix
+			binding := runtimePodLostBinding(sessionID, bindingID, 1)
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
+			seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+			if _, err := admin.ExecContext(context.Background(),
+				`INSERT INTO session_events (
+					workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+					visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+				) VALUES
+				('default', $1, $2, $5, 1, 'span.model_request_start',
+				 $6, 'internal', false, $3,
+				 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+				('default', $1, $2, $4, 2, 'agent.tool_use',
+				 $7, 'public', true, $3, '{}', now(), now())`,
+				sessionID,
+				threadID,
+				modelRequestID,
+				toolUseEventID,
+				"evt_pod_loss_approval_start_"+suffix,
+				`{"type":"span.model_request_start","model_request_id":"`+modelRequestID+`"}`,
+				`{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}`,
+			); err != nil {
+				t.Fatalf("seed pending-approval request: %v", err)
+			}
+			if testCase.withRequestEnd {
+				if _, err := admin.ExecContext(context.Background(),
+					`INSERT INTO session_events (
+						workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+						visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+					) VALUES ('default', $1, $2, $4, 3, 'span.model_request_end', $5,
+						'internal', false, $3, '{}', now(), now())`,
+					sessionID,
+					threadID,
+					modelRequestID,
+					"evt_pod_loss_approval_end_"+suffix,
+					`{"type":"span.model_request_end","model_request_id":"`+modelRequestID+`","model_request_start_id":"evt_pod_loss_approval_start_`+suffix+`","finish_reason":"tool_calls","is_error":false}`,
+				); err != nil {
+					t.Fatalf("seed approval Request End: %v", err)
+				}
+			}
+			seedBridgeAPIDurableToolMessage(
+				t, admin, "default", sessionID, threadID, modelRequestID,
+				toolUseEventID, "tool-call-pod-loss-approval-"+suffix, "Write",
+			)
+			if _, err := admin.ExecContext(context.Background(),
+				`INSERT INTO session_pending_tool_uses (
+					workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+					tool_name, kind, input_json, status, expires_at, created_at, updated_at
+				) VALUES ('default', $1, $2, $3, $4, 'Write', 'approval',
+					'{"file_path":"src/a.ts"}', $5, now() + interval '30 minutes', now(), now())`,
+				sessionID, threadID, toolUseEventID, "tool-call-pod-loss-approval-"+suffix, testCase.approvalStatus,
+			); err != nil {
+				t.Fatalf("seed pending approval: %v", err)
+			}
+
+			apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-pod-loss-approval-key!!")
+			if testCase.raceConfirmation {
+				confirmationWriteID := "rwrite_pod_loss_approval_confirm_" + suffix
+				confirmationRequest := &bridgev1.WriteEventRequest{
+					Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
+					RuntimeWriteId: confirmationWriteID,
+					ModelRequestId: modelRequestID,
+					EventType:      "agent.tool_result",
+					PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUseEventID + `","content":[{"type":"text","text":"Approval denied: cancel"}],"is_error":true}`,
+					SessionVisible: true,
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+						t,
+						bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
+						confirmationWriteID,
+						"agent.tool_result",
+						"completed",
+						bridgeRuntimePartDraftForTest{
+							kind: "tool",
+							json: `{"type":"tool","toolCallId":"tool-call-pod-loss-approval-` + suffix + `","toolName":"Write","toolUseEventId":"` + toolUseEventID + `","toolEvent":{"kind":"tool"},"state":{"status":"error","input":{"value":{"file_path":"src/a.ts"},"preview":"{\"file_path\":\"src/a.ts\"}","truncated":false},"error":{"type":"tool_denied","message":"Approval denied: cancel","retryable":false}}}`,
+						},
+					)},
+				}
+				start := make(chan struct{})
+				repairResult := make(chan error, 1)
+				confirmationResult := make(chan error, 1)
+				go func() {
+					<-start
+					_, err := runRuntimePodLostRepairTransaction(
+						context.Background(), runtime, sessionID, binding,
+						time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
+					)
+					repairResult <- err
+				}()
+				go func() {
+					<-start
+					_, err := apiStore.WriteEvent(context.Background(), confirmationRequest)
+					confirmationResult <- err
+				}()
+				close(start)
+				if err := <-repairResult; err != nil {
+					t.Fatalf("repair pending approval during confirmation race: %v", err)
+				}
+				if err := <-confirmationResult; err != nil && status.Code(err) != codes.FailedPrecondition && status.Code(err) != codes.AlreadyExists {
+					t.Fatalf("confirmation race result: %v", err)
+				}
+			} else if _, err := runRuntimePodLostRepairTransaction(
+				context.Background(), runtime, sessionID, binding,
+				time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
+			); err != nil {
+				t.Fatalf("repair pending approval after pod loss: %v", err)
+			}
+
+			var resultCount int
+			var resultEventID string
+			var resultPayload string
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*), COALESCE(MAX(event_id), ''), COALESCE(MAX(payload_json), '')
+				   FROM session_events
+				  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+				    AND type = 'agent.tool_result'
+				    AND payload_json::jsonb ->> 'tool_use_event_id' = $3`,
+				sessionID, threadID, toolUseEventID,
+			).Scan(&resultCount, &resultEventID, &resultPayload); err != nil {
+				t.Fatalf("read approval pod-loss result: %v", err)
+			}
+			if resultCount != 1 || !strings.Contains(resultPayload, `"is_error":true`) {
+				t.Fatalf("approval pod-loss result = %d/%s; want one terminal error", resultCount, resultPayload)
+			}
+			var pendingStatus string
+			var pendingResultEventID sql.NullString
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT status, result_event_id FROM session_pending_tool_uses
+				  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+				    AND tool_use_event_id = $3`,
+				sessionID, threadID, toolUseEventID,
+			).Scan(&pendingStatus, &pendingResultEventID); err != nil {
+				t.Fatalf("read repaired approval row: %v", err)
+			}
+			wantPendingStatus := "cancelled"
+			if testCase.raceConfirmation && !strings.Contains(resultPayload, `"reason":"runtime_pod_lost"`) {
+				wantPendingStatus = "resolved"
+			}
+			if pendingStatus != wantPendingStatus || !pendingResultEventID.Valid || pendingResultEventID.String != resultEventID {
+				t.Fatalf("approval row = %q/%v; want %s linked to %s", pendingStatus, pendingResultEventID, wantPendingStatus, resultEventID)
+			}
+			var requestEndCount int
+			var requestEndIsError bool
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT count(*), COALESCE(bool_or(COALESCE((payload_json::jsonb ->> 'is_error')::boolean, false)), false)
+				   FROM session_events
+				  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+				    AND type = 'span.model_request_end' AND model_request_id = $3`,
+				sessionID, threadID, modelRequestID,
+			).Scan(&requestEndCount, &requestEndIsError); err != nil {
+				t.Fatalf("read approval Request End: %v", err)
+			}
+			if requestEndCount != 1 || requestEndIsError != testCase.wantEndIsError {
+				t.Fatalf("approval Request End count/error = %d/%v; want 1/%v", requestEndCount, requestEndIsError, testCase.wantEndIsError)
+			}
+			var failureCount int
+			var retriesExhaustedCount int
+			if err := admin.QueryRowContext(context.Background(),
+				`SELECT
+					count(*) FILTER (WHERE type = 'session.error'),
+					count(*) FILTER (WHERE type = 'session.status_idle' AND payload_json::jsonb #>> '{stop_reason,type}' = 'retries_exhausted')
+				   FROM session_events
+				  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2`,
+				sessionID, threadID,
+			).Scan(&failureCount, &retriesExhaustedCount); err != nil {
+				t.Fatalf("read approval pod-loss closeout: %v", err)
+			}
+			if failureCount != 1 || retriesExhaustedCount != 1 {
+				t.Fatalf("approval pod-loss closeout error/idle = %d/%d; want 1/1", failureCount, retriesExhaustedCount)
+			}
+
+			loaded, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+				Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
+				RuntimeInputId: "rin_pod_loss_approval_cold_" + suffix,
+			})
+			if err != nil {
+				t.Fatalf("LoadContext after approval pod loss: %v", err)
+			}
+			var payload bridgeLoadContextPayload
+			if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+				t.Fatalf("decode approval pod-loss context: %v", err)
+			}
+			if len(payload.PendingToolUses) != 0 || len(payload.ColdCoverage.PendingToolIDs) != 0 {
+				t.Fatalf("approval pod-loss pending context = %+v/%+v; want no live approval route", payload.PendingToolUses, payload.ColdCoverage.PendingToolIDs)
+			}
+		})
+	}
+}
+
+func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
-		sessionID      = "sesn_pod_loss_pending_approval"
-		threadID       = "thr_pod_loss_pending_approval"
-		modelRequestID = "mreq_pod_loss_pending_approval"
-		toolUseEventID = "evt_pod_loss_pending_approval_tool"
+		sessionID             = "sesn_pod_loss_multiple_approvals"
+		threadID              = "thr_pod_loss_multiple_approvals"
+		siblingThreadID       = "thr_pod_loss_unaffected_approval"
+		modelRequestID        = "mreq_pod_loss_multiple_approvals"
+		siblingModelRequestID = "mreq_pod_loss_unaffected_approval"
+		bindingID             = "bind_pod_loss_multiple_approvals"
 	)
+	binding := runtimePodLostBinding(sessionID, bindingID, 1)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingThreadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
+	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 		) VALUES
-		('default', $1, $2, 'evt_pod_loss_pending_approval_start', 1, 'span.model_request_start',
-		 '{"type":"span.model_request_start","model_request_id":"mreq_pod_loss_pending_approval"}',
-		 'internal', false, $3, '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
-		('default', $1, $2, $4, 2, 'agent.tool_use',
+		('default', $1, $2, 'evt_pod_loss_multiple_start', 1, 'span.model_request_start',
+		 $4, 'internal', false, $3,
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_multiple_tool_pending', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}',
 		 'public', true, $3, '{}', now(), now()),
-		('default', $1, $2, 'evt_pod_loss_pending_approval_end', 3, 'span.model_request_end',
-		 '{"type":"span.model_request_end","model_request_id":"mreq_pod_loss_pending_approval","finish_reason":"tool_calls"}',
-		 'internal', false, $3, '{}', now(), now())`,
-		sessionID, threadID, modelRequestID, toolUseEventID,
+		('default', $1, $2, 'evt_pod_loss_multiple_tool_resolving', 3, 'agent.tool_use',
+		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/b.ts"},"evaluated_permission":"ask"}',
+		 'public', true, $3, '{}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_multiple_end', 4, 'span.model_request_end',
+		 $5, 'internal', false, $3, '{}', now(), now())`,
+		sessionID,
+		threadID,
+		modelRequestID,
+		`{"type":"span.model_request_start","model_request_id":"`+modelRequestID+`"}`,
+		`{"type":"span.model_request_end","model_request_id":"`+modelRequestID+`","model_request_start_id":"evt_pod_loss_multiple_start","finish_reason":"tool_calls","is_error":false}`,
 	); err != nil {
-		t.Fatalf("seed pending-approval request: %v", err)
+		t.Fatalf("seed multiple pending approvals request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(
 		t, admin, "default", sessionID, threadID, modelRequestID,
-		toolUseEventID, "tool-call-pending-approval", "Write",
+		"evt_pod_loss_multiple_tool_pending", "tool-call-pod-loss-multiple-pending", "Write",
+	)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_messages
+		    SET data_json = jsonb_set(
+				data_json::jsonb,
+				'{parts}',
+				(data_json::jsonb -> 'parts') || $4::jsonb
+			)::text
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+		    AND model_request_id = $3 AND kind = 'assistant'`,
+		sessionID,
+		threadID,
+		modelRequestID,
+		`[{"type":"tool","toolCallId":"tool-call-pod-loss-multiple-resolving","toolName":"Write","toolUseEventId":"evt_pod_loss_multiple_tool_resolving","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}]`,
+	); err != nil {
+		t.Fatalf("append second durable tool part: %v", err)
+	}
+	for _, tool := range []struct {
+		eventID    string
+		toolCallID string
+		status     string
+		path       string
+	}{
+		{eventID: "evt_pod_loss_multiple_tool_pending", toolCallID: "tool-call-pod-loss-multiple-pending", status: "pending", path: "src/a.ts"},
+		{eventID: "evt_pod_loss_multiple_tool_resolving", toolCallID: "tool-call-pod-loss-multiple-resolving", status: "resolving", path: "src/b.ts"},
+	} {
+		if _, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_pending_tool_uses (
+				workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
+				tool_name, kind, input_json, status, expires_at, created_at, updated_at
+			) VALUES ('default', $1, $2, $3, $4, 'Write', 'approval', $5, $6,
+				now() + interval '30 minutes', now(), now())`,
+			sessionID, threadID, tool.eventID, tool.toolCallID,
+			`{"file_path":"`+tool.path+`"}`, tool.status,
+		); err != nil {
+			t.Fatalf("seed %s approval: %v", tool.status, err)
+		}
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		) VALUES
+		('default', $1, $2, 'evt_pod_loss_unaffected_start', 1, 'span.model_request_start',
+		 $4, 'internal', false, $3,
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_unaffected_tool', 2, 'agent.tool_use',
+		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/sibling.ts"},"evaluated_permission":"ask"}',
+		 'public', true, $3, '{}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_unaffected_end', 3, 'span.model_request_end',
+		 $5, 'internal', false, $3, '{}', now(), now())`,
+		sessionID,
+		siblingThreadID,
+		siblingModelRequestID,
+		`{"type":"span.model_request_start","model_request_id":"`+siblingModelRequestID+`"}`,
+		`{"type":"span.model_request_end","model_request_id":"`+siblingModelRequestID+`","model_request_start_id":"evt_pod_loss_unaffected_start","finish_reason":"tool_calls","is_error":false}`,
+	); err != nil {
+		t.Fatalf("seed unaffected sibling approval request: %v", err)
+	}
+	seedBridgeAPIDurableToolMessage(
+		t, admin, "default", sessionID, siblingThreadID, siblingModelRequestID,
+		"evt_pod_loss_unaffected_tool", "tool-call-pod-loss-unaffected", "Write",
 	)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
 			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, 'tool-call-pending-approval', 'Write', 'approval',
-			'{"file_path":"src/a.ts"}', 'pending', now() + interval '30 minutes', now(), now())`,
-		sessionID, threadID, toolUseEventID,
+		) VALUES ('default', $1, $2, 'evt_pod_loss_unaffected_tool', 'tool-call-pod-loss-unaffected',
+			'Write', 'approval', '{"file_path":"src/sibling.ts"}', 'pending',
+			now() + interval '30 minutes', now(), now())`,
+		sessionID,
+		siblingThreadID,
 	); err != nil {
-		t.Fatalf("seed pending approval: %v", err)
+		t.Fatalf("seed unaffected sibling approval: %v", err)
 	}
 
-	client := dbconnect.NewClientForTesting(runtime)
-	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_pending_approval", func(tx *dbconnect.Tx) error {
-		toolUses, err := runtimePodLostOrphanToolUsesTx(context.Background(), tx, "default", sessionID)
-		if err != nil {
-			return err
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := runRuntimePodLostRepairTransaction(
+			context.Background(), runtime, sessionID, binding,
+			time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC),
+		); err != nil {
+			t.Fatalf("repair multiple approvals attempt %d: %v", attempt, err)
 		}
-		if len(toolUses) != 0 {
-			t.Fatalf("pod-loss orphan Tool Uses = %+v; want pending approval preserved", toolUses)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("query pod-loss orphan Tool Uses: %v", err)
+	}
+
+	var terminalResults int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+		    AND type = 'agent.tool_result'
+		    AND payload_json::jsonb ->> 'reason' = 'runtime_pod_lost'`,
+		sessionID, threadID,
+	).Scan(&terminalResults); err != nil {
+		t.Fatalf("count multiple approval pod-loss results: %v", err)
+	}
+	if terminalResults != 2 {
+		t.Fatalf("multiple approval pod-loss results = %d; want exactly 2", terminalResults)
+	}
+	var cancelledAndLinked int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*)
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
+		    AND kind = 'approval' AND status = 'cancelled' AND result_event_id IS NOT NULL`,
+		sessionID, threadID,
+	).Scan(&cancelledAndLinked); err != nil {
+		t.Fatalf("count cancelled multiple approvals: %v", err)
+	}
+	if cancelledAndLinked != 2 {
+		t.Fatalf("cancelled and linked approvals = %d; want exactly 2", cancelledAndLinked)
+	}
+	var siblingApprovalStatus string
+	var siblingResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT p.status,
+		        (SELECT count(*) FROM session_events result
+		          WHERE result.workspace_id = p.workspace_id
+		            AND result.session_id = p.session_id
+		            AND result.session_thread_id = p.session_thread_id
+		            AND result.type = 'agent.tool_result'
+		            AND result.payload_json::jsonb ->> 'tool_use_event_id' = p.tool_use_event_id)
+		   FROM session_pending_tool_uses p
+		  WHERE p.workspace_id = 'default' AND p.session_id = $1 AND p.session_thread_id = $2
+		    AND p.tool_use_event_id = 'evt_pod_loss_unaffected_tool'`,
+		sessionID,
+		siblingThreadID,
+	).Scan(&siblingApprovalStatus, &siblingResultCount); err != nil {
+		t.Fatalf("read unaffected sibling approval: %v", err)
+	}
+	if siblingApprovalStatus != "pending" || siblingResultCount != 0 {
+		t.Fatalf("unaffected sibling approval = %q/results %d; want pending/0", siblingApprovalStatus, siblingResultCount)
 	}
 }
 

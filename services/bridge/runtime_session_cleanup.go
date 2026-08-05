@@ -745,6 +745,7 @@ func expireCleanupPendingWaitsTx(ctx context.Context, tx *dbconnect.Tx, claim cl
 		  WHERE p.workspace_id = $1
 		    AND p.session_id = $2
 		    AND p.status = 'pending'
+		    AND p.kind <> 'approval'
 		    AND e.latest_stream_position <= $3
 		  ORDER BY e.latest_stream_position ASC, p.tool_use_event_id ASC
 		  FOR UPDATE OF p`,
@@ -832,6 +833,16 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 		    AND r.session_id = $2
 		    AND r.tool_kind = 'sandbox_tool'
 		    AND r.execution_state <> 'consumed'
+		    AND NOT EXISTS (
+		        SELECT 1
+		          FROM session_pending_tool_uses pending_approval
+		         WHERE pending_approval.workspace_id = r.workspace_id
+		           AND pending_approval.session_id = r.session_id
+		           AND pending_approval.session_thread_id = r.session_thread_id
+		           AND pending_approval.tool_use_event_id = r.tool_use_event_id
+		           AND pending_approval.kind = 'approval'
+		           AND pending_approval.status IN ('pending', 'resolving')
+		    )
 		    AND e.latest_stream_position <= $3
 		  ORDER BY e.latest_stream_position ASC, r.tool_use_event_id ASC`,
 		claim.WorkspaceID,

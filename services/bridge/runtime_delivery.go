@@ -1092,11 +1092,7 @@ func insertRuntimeDeliveryExhaustionEventWithThreadScopeTx(ctx context.Context, 
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return err
 	}
-	messageJSON, err := runtimeDeliveryExhaustionMessageJSON(scope, message)
-	if err != nil {
-		return err
-	}
-	return insertSessionMessageProjectionTx(ctx, tx, scope, eventID, "assistant", messageJSON, now)
+	return nil
 }
 
 func runtimeDeliveryExhaustionEventExistsTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob) (bool, error) {
@@ -1133,19 +1129,6 @@ func runtimeDeliveryExhaustionPayloadJSON(message string) (string, error) {
 				"type": "exhausted",
 			},
 		},
-	})
-}
-
-func runtimeDeliveryExhaustionMessageJSON(scope *bridgev1.RuntimeScope, message string) (string, error) {
-	return marshalBridgeJSON(map[string]any{
-		"id":                id.New("msg_"),
-		"session_id":        scope.GetSessionId(),
-		"session_thread_id": scope.GetSessionThreadId(),
-		"role":              "assistant",
-		"content": []map[string]any{{
-			"type": "text",
-			"text": message,
-		}},
 	})
 }
 

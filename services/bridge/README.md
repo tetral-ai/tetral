@@ -125,7 +125,7 @@ independent of Runtime Pod loss. Provider text is never reconstructed
 ### Cleanup order (hot Runtime state only)
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
-2. `pending`-status external waits expire by terminal projection;
+2. durable `approval` waits and their recoverable Sandbox receipts remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
 3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
 4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
 

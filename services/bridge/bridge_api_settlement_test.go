@@ -1922,7 +1922,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		inserted := false
 		client := dbconnect.NewClientForTesting(f.runtime)
 		if err := client.WithWorkspaceTx(context.Background(), "default", "test.reasoning_terminal_repair", func(tx *dbconnect.Tx) error {
-			starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", f.sessionID)
+			starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", f.sessionID, []string{f.scope.GetSessionThreadId()})
 			if err != nil {
 				return err
 			}

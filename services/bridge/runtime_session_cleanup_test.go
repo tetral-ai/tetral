@@ -995,11 +995,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		    AND tool_use_event_id = 'sevt_cleanup_gone_wait'`).Scan(&pendingStatus); err != nil {
 		t.Fatalf("read pending wait: %v", err)
 	}
-	if pendingStatus != "expired" {
-		t.Fatalf("gone cleanup pending wait status = %q; want expired", pendingStatus)
+	if pendingStatus != "pending" {
+		t.Fatalf("gone cleanup pending wait status = %q; want preserved pending approval", pendingStatus)
 	}
-	var executionState, consumptionReason string
+	var executionState string
 	var storedResult sql.NullString
+	var consumptionReason sql.NullString
 	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, result_json, consumption_reason
 		FROM session_runtime_tool_results
 		WHERE workspace_id='default' AND session_id='sesn_bridge_cleanup_gone' AND tool_use_event_id='sevt_cleanup_gone_wait'`).Scan(
@@ -1007,15 +1008,15 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	); err != nil {
 		t.Fatalf("read cleanup-wait execution receipt: %v", err)
 	}
-	if executionState != "consumed" || storedResult.Valid || consumptionReason != "cleanup_wait_expired" {
-		t.Fatalf("cleanup-wait execution = %q/%v/%q; want consumed thin receipt", executionState, storedResult, consumptionReason)
+	if executionState != "terminal_unconsumed" || !storedResult.Valid || storedResult.String != resultJSON || consumptionReason.Valid {
+		t.Fatalf("cleanup-wait execution = %q/%v/%v; want recoverable terminal receipt", executionState, storedResult, consumptionReason)
 	}
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	if result, err := bridgeStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
-		t.Fatalf("reconcile cleanup-wait attachment = %+v, %v; want one deleted", result, err)
+	if result, err := bridgeStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 0 {
+		t.Fatalf("reconcile cleanup-wait attachment = %+v, %v; want retained recoverable attachment", result, err)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
-		t.Fatalf("cleanup-wait attachment status = %q; want deleted", got)
+	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "staged" {
+		t.Fatalf("cleanup-wait attachment status = %q; want staged", got)
 	}
 }
 
