@@ -1683,9 +1683,10 @@ func consumeSandboxExecutionForTerminalWriterTx(
 	).Scan(&terminalPayloadJSON); err != nil {
 		return err
 	}
-	// Alternate terminal writers preserve a provider result digest when one
-	// exists; otherwise the terminal event they just authored is the result
-	// evidence retained by the thin execution receipt.
+	// A staged provider result is not the conversation's terminal Tool Result.
+	// The first terminal session event owns settlement; alternate terminal
+	// writers clear staged output and retain only its digest and receipt so a
+	// late provider result cannot rewrite terminal conversation history.
 	fallbackDigest := sha256Hex(terminalPayloadJSON)
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results

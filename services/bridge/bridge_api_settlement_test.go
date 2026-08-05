@@ -3363,22 +3363,27 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandboxExecution(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndStagedSandboxResults(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox_sibling")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "thr_bridge_terminate_mcp_sibling")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	siblingScope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox_sibling", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	mcpSiblingScope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_mcp_sibling", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate_sandbox")
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_terminate_sandbox_start", "mreq_terminate_sandbox", "agent_provider_request", 0)
+	seedBridgeAPIRequestStart(t, store, siblingScope, "rwrite_terminate_sandbox_start", "mreq_terminate_sandbox", "agent_provider_request", 0)
+	seedBridgeAPIRequestStart(t, store, mcpSiblingScope, "rwrite_terminate_mcp_start", "mreq_terminate_mcp", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox_tool", ModelRequestId: "mreq_terminate_sandbox",
+		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sandbox_tool", ModelRequestId: "mreq_terminate_sandbox",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"allow"}`,
 		SessionVisible: true,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t,
-			scope,
+			siblingScope,
 			"rwrite_terminate_sandbox_tool",
 			"agent.tool_use",
 			"streaming",
@@ -3391,54 +3396,110 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool use: %v", err)
 	}
+	mcpToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: mcpSiblingScope, RuntimeWriteId: "rwrite_terminate_sandbox_mcp", ModelRequestId: "mreq_terminate_mcp",
+		EventType:      "agent.mcp_tool_use",
+		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"search_code","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			mcpSiblingScope,
+			"rwrite_terminate_sandbox_mcp",
+			"agent.mcp_tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_sandbox_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sibling MCP tool use: %v", err)
+	}
+	const stagedResultJSON = `{"status":"success","result":{"summary":"command completed"}}`
+	stagedResultDigest := sha256Hex(stagedResultJSON)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
 			model_tool_call_id, execution_state, execution_attempt_generation,
-			created_at, updated_at
-		) VALUES ('default', 'sesn_bridge_terminate_sandbox', 'thr_bridge_terminate_sandbox',
-			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', NULL,
-			'call_terminate_sandbox', 'running', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`,
+			result_digest, created_at, updated_at
+		) VALUES ('default', 'sesn_bridge_terminate_sandbox', 'thr_bridge_terminate_sandbox_sibling',
+			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', $4,
+			'call_terminate_sandbox', 'terminal_unconsumed', 1, $5,
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`, stagedResultJSON, stagedResultDigest,
 	); err != nil {
-		t.Fatalf("seed dispatched sandbox execution: %v", err)
+		t.Fatalf("seed staged sandbox execution: %v", err)
 	}
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	response, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox", FailureJson: failureJSON,
-		SandboxExecutionToolUseEventIds: []string{toolUse.GetEventId()},
 	})
 	if err != nil {
-		t.Fatalf("CommitRuntimeTermination dispatched sandbox execution: %v", err)
+		t.Fatalf("CommitRuntimeTermination sibling tool executions: %v", err)
 	}
 	var executionState string
 	var resultJSON sql.NullString
-	var terminalEventID, consumptionReason string
+	var resultDigest, terminalEventID, consumptionReason string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT execution_state, result_json, consumed_by_terminal_event_id, consumption_reason
+		`SELECT execution_state, result_json, result_digest, consumed_by_terminal_event_id, consumption_reason
 		   FROM session_runtime_tool_results
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
-		    AND session_thread_id = 'thr_bridge_terminate_sandbox' AND tool_use_event_id = $1`,
+		    AND session_thread_id = 'thr_bridge_terminate_sandbox_sibling' AND tool_use_event_id = $1`,
 		toolUse.GetEventId(),
-	).Scan(&executionState, &resultJSON, &terminalEventID, &consumptionReason); err != nil {
+	).Scan(&executionState, &resultJSON, &resultDigest, &terminalEventID, &consumptionReason); err != nil {
 		t.Fatalf("read terminated sandbox execution: %v", err)
 	}
+	var toolResultEventID, toolResultPayload string
 	var toolResultCount int
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT count(*) FROM session_events
+		`SELECT event_id, payload_json, count(*) OVER () FROM session_events
 		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_sandbox_sibling'
 		    AND type = 'agent.tool_result'
 		    AND payload_json::jsonb ->> 'tool_use_event_id' = $1`,
 		toolUse.GetEventId(),
-	).Scan(&toolResultCount); err != nil {
-		t.Fatalf("count terminated sandbox Tool Results: %v", err)
+	).Scan(&toolResultEventID, &toolResultPayload, &toolResultCount); err != nil {
+		t.Fatalf("read terminated sibling sandbox Tool Result: %v", err)
+	}
+	var mcpResultPayload string
+	var mcpResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json, count(*) OVER () FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_mcp_sibling'
+		    AND type = 'agent.mcp_tool_result'
+		    AND payload_json::jsonb ->> 'mcp_tool_use_id' = $1`,
+		mcpToolUse.GetEventId(),
+	).Scan(&mcpResultPayload, &mcpResultCount); err != nil {
+		t.Fatalf("read terminated sibling MCP Tool Result: %v", err)
+	}
+	var siblingStatus, mcpSiblingStatus string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_threads
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND id = 'thr_bridge_terminate_sandbox_sibling'`,
+	).Scan(&siblingStatus); err != nil {
+		t.Fatalf("read terminated sibling status: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_threads
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND id = 'thr_bridge_terminate_mcp_sibling'`,
+	).Scan(&mcpSiblingStatus); err != nil {
+		t.Fatalf("read terminated MCP sibling status: %v", err)
 	}
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-		executionState != "consumed" || resultJSON.Valid || terminalEventID == "" ||
-		consumptionReason != "runtime_terminated" || toolResultCount != 1 {
-		t.Fatalf("termination ack=%s execution=%q result=%v terminal=%q reason=%q events=%d; want committed consumed thin receipt and one Tool Result",
-			response.GetAck().GetStatus(), executionState, resultJSON, terminalEventID, consumptionReason, toolResultCount)
+		siblingStatus != "terminated" || mcpSiblingStatus != "terminated" || executionState != "consumed" || resultJSON.Valid ||
+		resultDigest != stagedResultDigest || terminalEventID != toolResultEventID ||
+		consumptionReason != "runtime_terminated" ||
+		toolResultCount != 1 || mcpResultCount != 1 ||
+		testJSONPathString(t, toolResultPayload, "reason") != "runtime_terminated" ||
+		testJSONPathString(t, mcpResultPayload, "reason") != "runtime_terminated" {
+		t.Fatalf("termination ack=%s siblings=%q/%q execution=%q result=%v digest=%q terminal=%q event=%q reason=%q counts=%d/%d sandbox=%s mcp=%s; want sibling terminal settlement and consumed thin receipt",
+			response.GetAck().GetStatus(), siblingStatus, mcpSiblingStatus, executionState, resultJSON, resultDigest,
+			terminalEventID, toolResultEventID, consumptionReason, toolResultCount, mcpResultCount, toolResultPayload, mcpResultPayload)
 	}
 }
 

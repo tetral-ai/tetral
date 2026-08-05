@@ -771,15 +771,16 @@ function expectNoHostileFragments(value: unknown): void {
   }
 }
 
-function fatalRunResult(reason: "persistence_failed" | "event_write_failed" | "crashed"): ThreadLoop.ThreadLoopRunResult {
+function fatalRunResult(reason: "terminated" | "persistence_failed" | "event_write_failed" | "crashed"): ThreadLoop.ThreadLoopRunResult {
+  const runtimeFailure = reason === "terminated" || reason === "crashed";
   return {
     type: "failed",
     error: normalizeRuntimeFailure({
       type: reason === "persistence_failed" ? "message-store" : reason === "event_write_failed" ? "session-event-writer" : "runtime",
-      code: reason === "crashed" ? "runtime_invalid_sequence" : "unavailable",
-      retryable: true,
-      fatal: false,
-      ...(reason === "crashed" ? { reason: "runtime_contract_validation" } : {}),
+      code: runtimeFailure ? "runtime_invalid_sequence" : "unavailable",
+      retryable: reason !== "terminated",
+      fatal: reason === "terminated",
+      ...(runtimeFailure ? { reason: "runtime_contract_validation" } : {}),
     }),
     releaseSession: { reason },
   };
@@ -2944,7 +2945,7 @@ describe("SessionManager", () => {
     });
   });
 
-  test("fatal public parent release closes its active reviewer resident through run settlement", async () => {
+  test("terminal public parent release closes its active reviewer resident through run settlement", async () => {
     const sessionId = "sesn_parent_reviewer_release";
     const parentThreadId = "thrd_parent_release";
     const reviewerThreadId = "thrd_reviewer_trunk_release";
@@ -2974,7 +2975,7 @@ describe("SessionManager", () => {
       }));
       await waitForRuns(threadLoop, 2);
 
-      threadLoop.runs[0]?.release(fatalRunResult("crashed"));
+      threadLoop.runs[0]?.release(fatalRunResult("terminated"));
       expect(await Promise.race([
         threadLoop.reviewerCleanupStarted.then(() => true),
         new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
