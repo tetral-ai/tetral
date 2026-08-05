@@ -80,6 +80,28 @@ describe("Gateway protocol bounds", () => {
     }));
   });
 
+  test("rejects empty text parts while retaining signed empty reasoning", () => {
+    const base = validProviderRequest();
+    expectInvalid(validateProviderRequest({
+      ...base,
+      messages: [{
+        ...base.messages[0]!,
+        parts: [{ id: "part_empty_text", text: { text: "" } }],
+      }],
+    }));
+    expect(validateProviderRequest({
+      ...base,
+      messages: [{
+        ...base.messages[0]!,
+        role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
+        parts: [{
+          id: "part_signed_empty_reasoning",
+          reasoning: { text: "", metadataJson: JSON.stringify({ anthropic: { signature: "sig_1" } }) },
+        }],
+      }],
+    })).toEqual({ ok: true });
+  });
+
   test("admits signed empty reasoning while retaining the reasoning byte ceiling", () => {
     const base = validProviderRequest();
     const withReasoning = (text: string) => ({

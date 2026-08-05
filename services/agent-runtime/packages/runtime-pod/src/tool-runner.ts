@@ -75,7 +75,7 @@ import {
   SessionEventWriterRetryPolicy,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeBoundedText, RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeSandboxExecutionAcceptanceResult,
   RuntimeSandboxExecutionRequest,
@@ -115,6 +115,14 @@ const WEB_FETCH_REQUESTS_MAX = 8;
 const WEB_OPERATIONS_MAX = 8;
 const WEB_SEARCH_DOMAINS_MAX = 4;
 const WEB_DOMAIN_MAX_BYTES = 253;
+const TOOL_RESULT_BOUND_FAILURE = "Tool result exceeds the 512 KiB model-visible output limit.";
+
+class ToolResultContractError extends Error {
+  constructor() {
+    super(TOOL_RESULT_BOUND_FAILURE);
+    this.name = "ToolResultContractError";
+  }
+}
 
 /**
  * Supplies the service endpoints, current accepted-input scope, and injectable
@@ -304,6 +312,9 @@ export class RuntimePodToolRunner {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Sandbox tool execution was cancelled.");
         }
+        if (error instanceof ToolResultContractError) {
+          return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+        }
         if (isDurableBridgeRejection(error)) {
           return { type: "stale_custody" };
         }
@@ -483,7 +494,7 @@ export class RuntimePodToolRunner {
         return toolFailure(request, "Gateway web execution returned malformed usage.", true);
       }
       if (response.status === RunWebStatus.RUN_WEB_STATUS_COMPLETED) {
-        return { type: "completed", output: capturedToolText(webResponseText(response)), serverToolUse };
+        return { type: "completed", output: capturedToolText(response.resultText), serverToolUse };
       }
       return toolFailure(
         request,
@@ -497,6 +508,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Gateway web execution was cancelled.");
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, "Gateway web execution is unavailable.", true);
     }
@@ -557,6 +571,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "MCP tool execution was cancelled.");
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, "MCP connector route is unavailable.", true);
     }
@@ -1246,7 +1263,11 @@ function completedText(text: string): RuntimeToolExecutionResult {
 }
 
 function capturedToolText(text: string) {
-  return RuntimeBoundedTextSchema.parse({ text, truncated: false });
+  const parsed = RuntimeBoundedTextSchema.safeParse({ text, truncated: false });
+  if (!parsed.success) {
+    throw new ToolResultContractError();
+  }
+  return parsed.data;
 }
 
 function stableId(prefix: string, seed: string): string {
@@ -1822,12 +1843,24 @@ function resultJsonToExecutionResult(
   }
   if (status === "success" || status === "completed" || status === "running" || status === "accepted") {
     const backgroundTask = status === "running" ? backgroundTaskFromResult(visible) : undefined;
-    return {
-      type: "completed",
-      output: RuntimeBoundedTextSchema.parse({
+    let output: RuntimeBoundedText;
+    try {
+      output = RuntimeBoundedTextSchema.parse({
         ...capturedToolText(formatToolResult(request, visible)),
         truncated: resultIsTruncated(parsed),
-      }),
+      });
+    } catch (error) {
+      if (error instanceof ToolResultContractError) {
+        return {
+          ...toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false),
+          ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
+        };
+      }
+      throw error;
+    }
+    return {
+      type: "completed",
+      output,
       ...(backgroundTask !== undefined ? { backgroundTask } : {}),
       ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
@@ -2107,27 +2140,6 @@ function forbiddenResultField(key: string): boolean {
     normalized === "binding_id" ||
     normalized === "bindingid" ||
     normalized === "runtimebindingtoken";
-}
-
-function webResponseText(response: RunWebResponse): string {
-  const refs = response.refs.map((ref) => ({
-    ref_id: ref.refId,
-    url: ref.url,
-    ...(ref.title !== undefined ? { title: ref.title } : {}),
-    ...(ref.lineStart !== undefined ? { line_start: ref.lineStart } : {}),
-    ...(ref.lineEnd !== undefined ? { line_end: ref.lineEnd } : {}),
-    ...(ref.totalLines !== undefined ? { total_lines: ref.totalLines } : {}),
-  }));
-  if (refs.length === 0 && response.nextLineno === undefined && !response.windowTruncated && !response.sourceIncomplete) {
-    return response.resultText;
-  }
-  return JSON.stringify({
-    text: response.resultText,
-    refs,
-    ...(response.nextLineno !== undefined ? { next_lineno: response.nextLineno } : {}),
-    window_truncated: response.windowTruncated,
-    source_incomplete: response.sourceIncomplete,
-  }, null, 2);
 }
 
 function webServerToolUse(response: RunWebResponse): { readonly webSearchRequests: number; readonly webFetchRequests: number } | undefined {

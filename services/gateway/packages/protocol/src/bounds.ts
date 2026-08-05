@@ -63,7 +63,10 @@ export const MaxProviderRequestMessagePartJsonBytes = 16 * 1024 * 1024;
 // serializes the visible text once. 512 KiB also carries the MCP formatter's
 // 50 KiB raw result under worst-case JSON escaping without truncation.
 // UPDATE-WITH: internal/sandbox/helper/internal/filetool/read.go
-//   (maxReadEnvelopeBytes); validRuntimePart below.
+//   (maxReadEnvelopeBytes); validRuntimePart below;
+//   services/agent-runtime/packages/core/src/contracts/runtime.ts
+//   (RuntimeBoundedTextSchema); services/web-connector/types.go
+//   (maxModelVisibleToolOutputJSONBytes, maxVisibleResultBytes).
 /** Maximum UTF-8 size of provider-request tool output/error JSON. */
 export const MaxProviderRequestToolOutputJsonBytes = 512 * 1024;
 /** Maximum UTF-8 size of one provider-produced tool-call input JSON value. */
@@ -426,7 +429,7 @@ function validRuntimePart(part: RuntimePart): boolean {
     return false;
   }
   if (part.text !== undefined) {
-    return validJsonString(part.text.text, MaxProviderRequestMessagePartJsonBytes);
+    return part.text.text.length > 0 && validJsonString(part.text.text, MaxProviderRequestMessagePartJsonBytes);
   }
   if (part.reasoning !== undefined) {
     return validJsonString(part.reasoning.text, MaxProviderRequestMessagePartJsonBytes) && validMetadata(part.reasoning.metadataJson);

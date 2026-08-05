@@ -26,5 +26,8 @@ const (
 	MaxAttachmentGRPCMessageBytes = 32 * 1024 * 1024
 	// MaxBridgeAPIGRPCMessageBytes carries complete durable declarations and
 	// cold context. Attachment clients retain their narrower semantic fuse.
+	// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
+	// (MaxBridgeDurableContextGrpcMessageBytes);
+	// services/bridge/cmd/bridge-api/main.go.
 	MaxBridgeAPIGRPCMessageBytes = 64 * 1024 * 1024
 )

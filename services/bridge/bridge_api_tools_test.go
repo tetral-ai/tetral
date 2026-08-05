@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -858,6 +859,124 @@ func seedReadySandboxForSharedToolExecution(t *testing.T, db *sql.DB, workspaceI
 		clock_timestamp()+interval '2 hours', '[]', '{}', clock_timestamp(), clock_timestamp(), clock_timestamp())`,
 		workspaceID, sessionID, "sbox_"+sessionID, environmentID, "provider_"+sessionID); err != nil {
 		t.Fatalf("seed ready shared-tool Sandbox binding: %v", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreMemoryInputsRoundTripThroughWriteAndLoadContext(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID    = "default"
+		sessionID      = "sesn_bridge_memory_input_roundtrip"
+		threadID       = "thr_bridge_memory_input_roundtrip"
+		bindingID      = "bind_bridge_memory_input_roundtrip"
+		podUID         = "pod_bridge_memory_input_roundtrip"
+		modelRequestID = "mreq_bridge_memory_input_roundtrip"
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-memory-input-roundtrip-key")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_memory_input_roundtrip_start", modelRequestID, "agent_provider_request", 0)
+
+	inputs := []map[string]any{
+		{"action": "create", "path": "notes/large.md", "content": "CREATE_HEAD" + strings.Repeat("\x01", 9_000) + "CREATE_TAIL"},
+		{
+			"action": "replace", "path": "notes/large.md",
+			"old_text": "OLD_HEAD" + strings.Repeat("<", 5_000) + "OLD_TAIL",
+			"new_text": "NEW_HEAD" + strings.Repeat("\\", 5_000) + "NEW_TAIL",
+		},
+	}
+	draftParts := make([]bridgeRuntimePartDraftForTest, 0, len(inputs))
+	for index, input := range inputs {
+		inputBytes, err := json.Marshal(input)
+		if err != nil {
+			t.Fatalf("marshal memory input %d: %v", index, err)
+		}
+		canonicalInput, _, err := canonicalRunToolInput(string(inputBytes))
+		if err != nil {
+			t.Fatalf("canonical memory input %d: %v", index, err)
+		}
+		preview := canonicalInput
+		truncated := false
+		if len(preview) > 8_192 {
+			preview = preview[:8_192]
+			truncated = true
+		}
+		callID := fmt.Sprintf("call_memory_input_roundtrip_%d", index)
+		partJSON, err := json.Marshal(map[string]any{
+			"type": "tool", "toolCallId": callID, "toolName": "memory",
+			"state": map[string]any{
+				"status": "running",
+				"input":  map[string]any{"value": input, "preview": preview, "truncated": truncated},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal memory part %d: %v", index, err)
+		}
+		draftParts = append(draftParts, bridgeRuntimePartDraftForTest{kind: "tool", json: string(partJSON)})
+		runtimeWriteID := fmt.Sprintf("rwrite_memory_input_roundtrip_%d", index)
+		written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: runtimeWriteID, ModelRequestId: modelRequestID,
+			EventType:   "agent.tool_use",
+			PayloadJson: `{"type":"agent.tool_use","name":"memory","input":` + canonicalInput + `,"evaluated_permission":"allow"}`,
+			Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+				t, scope, runtimeWriteID, "agent.tool_use", "streaming", draftParts...,
+			)},
+		})
+		if err != nil {
+			t.Fatalf("WriteEvent memory input %d: %v", index, err)
+		}
+		var stamped map[string]any
+		if err := json.Unmarshal(partJSON, &stamped); err != nil {
+			t.Fatalf("decode memory part %d: %v", index, err)
+		}
+		stamped["toolUseEventId"] = written.GetEventId()
+		stamped["toolEvent"] = map[string]any{"kind": "tool"}
+		stampedJSON, err := json.Marshal(stamped)
+		if err != nil {
+			t.Fatalf("stamp memory part %d: %v", index, err)
+		}
+		draftParts[len(draftParts)-1].json = string(stampedJSON)
+	}
+
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_memory_input_roundtrip",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext memory inputs: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("parse memory input context: %v", err)
+	}
+	if len(payload.Messages) != 1 {
+		t.Fatalf("memory input context messages = %d; want 1", len(payload.Messages))
+	}
+	var message struct {
+		Parts []struct {
+			State struct {
+				Input struct {
+					Value     map[string]any `json:"value"`
+					Preview   string         `json:"preview"`
+					Truncated bool           `json:"truncated"`
+				} `json:"input"`
+			} `json:"state"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal(payload.Messages[0], &message); err != nil {
+		t.Fatalf("parse memory input message: %v", err)
+	}
+	if len(message.Parts) != len(inputs) {
+		t.Fatalf("memory input parts = %d; want %d", len(message.Parts), len(inputs))
+	}
+	for index, part := range message.Parts {
+		if !reflect.DeepEqual(part.State.Input.Value, inputs[index]) {
+			t.Fatalf("memory input %d changed across WriteEvent/PostgreSQL/LoadContext", index)
+		}
+		if len(part.State.Input.Preview) > 8_192 || !part.State.Input.Truncated {
+			t.Fatalf("memory input %d preview bytes/truncated = %d/%v; want <=8192/true", index, len(part.State.Input.Preview), part.State.Input.Truncated)
+		}
 	}
 }
 

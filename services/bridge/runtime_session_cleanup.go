@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -19,6 +20,10 @@ import (
 )
 
 // This file owns cleanup-session and delete-cleanup state transitions.
+
+// UPDATE-WITH: services/agent-runtime/packages/core/src/llm/llm-event.ts
+// (RuntimePreviewTextMaxBytes); cleanupRuntimeBoundedJSON.
+const cleanupRuntimeInputPreviewMaxBytes = 8 * 1024
 
 func (s *PostgreSQLRuntimeDeliveryStore) cleanupTargetProvenGone(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, claim cleanupSessionClaim) (bool, error) {
 	prover, ok := s.TargetResolver.(RuntimeCleanupTargetProver)
@@ -865,19 +870,28 @@ func finalizeCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, claim clean
 }
 
 func cleanupRuntimeBoundedJSON(inputJSON string) map[string]any {
-	preview := inputJSON
-	if preview == "" {
-		preview = "{}"
+	canonical := inputJSON
+	if canonical == "" {
+		canonical = "{}"
 	}
 	var value any
-	if err := json.Unmarshal([]byte(preview), &value); err != nil {
+	if err := json.Unmarshal([]byte(canonical), &value); err != nil {
 		value = map[string]any{}
-		preview = "{}"
+		canonical = "{}"
+	}
+	preview := canonical
+	truncated := len([]byte(preview)) > cleanupRuntimeInputPreviewMaxBytes
+	if truncated {
+		previewBytes := []byte(preview)[:cleanupRuntimeInputPreviewMaxBytes]
+		for len(previewBytes) > 0 && !utf8.Valid(previewBytes) {
+			previewBytes = previewBytes[:len(previewBytes)-1]
+		}
+		preview = string(previewBytes)
 	}
 	return map[string]any{
 		"value":     value,
 		"preview":   preview,
-		"truncated": false,
+		"truncated": truncated,
 	}
 }
 

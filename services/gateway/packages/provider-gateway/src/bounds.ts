@@ -43,7 +43,11 @@ const MaxDomainBytes = 253;
 // size check) must carry the same value — setting one without the other leaves
 // the smaller wall in force on the model path.
 // UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
+// (MaxGatewayRequestGrpcMessageBytes).
 const MaxGrpcInboundMessageBytes = 64 * 1024 * 1024;
+// Provider stream events must fit the Runtime client's receive fuse.
+// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
+// (MaxGatewayStreamEventGrpcMessageBytes).
 const MaxGrpcOutboundMessageBytes = 8 * 1024 * 1024;
 // Connection-lifecycle bounds that drive per-call load balancing across replicas.
 // max_connection_age (5 min) forces clients to periodically drop and re-resolve

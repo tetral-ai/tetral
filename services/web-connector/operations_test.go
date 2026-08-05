@@ -664,8 +664,8 @@ func TestMultiItemResponseReducesSingularFieldsWithoutLastItemWins(t *testing.T)
 	if !response.GetSourceIncomplete() {
 		t.Fatal("source_incomplete=false; want logical OR across items")
 	}
-	if response.NextLineno != nil || response.GetWindowTruncated() {
-		t.Fatalf("next_lineno=%v window_truncated=%v; want unset/false for two applicable windows", response.NextLineno, response.GetWindowTruncated())
+	if response.NextLineno != nil || !response.GetWindowTruncated() {
+		t.Fatalf("next_lineno=%v window_truncated=%v; want unset/true for two windows with any truncated member", response.NextLineno, response.GetWindowTruncated())
 	}
 	if response.GetUsage().TargetHttpStatus != nil {
 		t.Fatalf("target_http_status=%v; want unset for two applicable fetches", response.GetUsage().TargetHttpStatus)

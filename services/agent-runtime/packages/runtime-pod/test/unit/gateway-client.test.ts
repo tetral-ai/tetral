@@ -136,22 +136,34 @@ describe("Runtime Pod Gateway client", () => {
     })]);
   });
 
-  test("keeps peer receive-limit details in the remote retryable arm", async () => {
-    for (const details of [
-      "Received message larger than max (33554433 vs 33554432)",
-      "Received message that decompresses to a size larger than 33554432",
-    ]) {
+  test("classifies local-send and Gateway-receive size failures precisely", async () => {
+    const cases = [
+      {
+        details: "Attempted to send message with a size larger than 4194304",
+        message: "Gateway request exceeded the local transport fuse.",
+      },
+      {
+        details: "Received message larger than max (33554433 vs 33554432)",
+        message: "Gateway rejected the request above its transport fuse.",
+      },
+      {
+        details: "Received message that decompresses to a size larger than 33554432",
+        message: "Gateway rejected the request above its transport fuse.",
+      },
+    ];
+    for (const testCase of cases) {
       const error = await collectGatewayError(new RuntimePodGatewayClient({
         address: "gateway.test:9090",
         tokenPath: "/var/run/token",
-        client: failingGatewayClient(status.RESOURCE_EXHAUSTED, details),
+        client: failingGatewayClient(status.RESOURCE_EXHAUSTED, testCase.details),
         metadataFactory: async () => new Metadata(),
       }), providerRequest());
 
       expect(error).toMatchObject({
-        code: "gateway_unavailable",
-        retryable: true,
-        fatal: false,
+        code: "gateway_protocol_error",
+        message: testCase.message,
+        retryable: false,
+        fatal: true,
         statusCode: status.RESOURCE_EXHAUSTED,
       });
     }

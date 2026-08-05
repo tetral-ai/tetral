@@ -78,7 +78,7 @@ func normalizeStableReasoningParts(request stableReasoningCarrier) (normalizedSt
 				return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part is not UTF-8")
 			}
 		}
-		if len(part.GetText()) > 1024*1024 || len(part.GetMetadataJson()) > 64*1024 {
+		if len(part.GetMetadataJson()) > 64*1024 {
 			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part exceeds size bounds")
 		}
 		if _, exists := partIDs[part.GetReasoningPartId()]; exists {
@@ -99,14 +99,18 @@ func normalizeStableReasoningParts(request stableReasoningCarrier) (normalizedSt
 		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil || metadata == nil {
 			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning metadata must be a JSON object")
 		}
-		canonicalMetadata, err := json.Marshal(metadata)
+		canonicalMetadata, err := marshalBridgeDataJSON(metadata)
 		if err != nil {
 			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning metadata must be a JSON object")
 		}
 		if len(canonicalMetadata) > 64*1024 {
 			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part exceeds size bounds")
 		}
-		aggregateBytes += len(part.GetText()) + len(canonicalMetadata)
+		// Runtime's stableReasoningMetadataJSON encoder produces metadataJSON;
+		// count those exact transported bytes so both sides enforce one aggregate.
+		// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+		// (stableReasoningMetadataJSON).
+		aggregateBytes += len(part.GetText()) + len(metadataJSON)
 		if aggregateBytes > MaxStableReasoningBytesPerRequest {
 			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning set exceeds aggregate size bound")
 		}
@@ -119,11 +123,11 @@ func normalizeStableReasoningParts(request stableReasoningCarrier) (normalizedSt
 			Truncated:       part.GetTruncated(),
 		})
 	}
-	canonicalSet, err := json.Marshal(normalized.Parts)
+	canonicalSet, err := marshalBridgeDataJSON(normalized.Parts)
 	if err != nil {
 		return normalizedStableReasoningSet{}, err
 	}
-	normalized.CanonicalJSON = string(canonicalSet)
+	normalized.CanonicalJSON = canonicalSet
 	return normalized, nil
 }
 
@@ -137,7 +141,15 @@ func validateStableReasoningBudget(parts []any) error {
 		}
 		count++
 		text, _ := part["text"].(string)
-		metadata, err := json.Marshal(part["providerMetadata"])
+		metadataValue := part["providerMetadata"]
+		if metadataValue == nil {
+			metadataValue = map[string]any{}
+		}
+		// Keep durable-draft accounting byte-identical to the transported
+		// metadata contract; HTML escaping would create a second size policy.
+		// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+		// (stableReasoningMetadataJSON).
+		metadata, err := marshalBridgeDataJSON(metadataValue)
 		if err != nil {
 			return status.Error(codes.FailedPrecondition, "stable reasoning metadata is invalid")
 		}

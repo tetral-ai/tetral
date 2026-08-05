@@ -13,10 +13,16 @@ export const MaxGrpcOutboundMessageBytes = 4 * 1024 * 1024;
 /** Symmetric message ceiling for Bridge attachment transfers. */
 export const MaxAttachmentGrpcMessageBytes = 32 * 1024 * 1024;
 /** Symmetric message ceiling for durable declarations and complete cold context. */
+// UPDATE-WITH: internal/sessionrpc/bounds.go (MaxBridgeAPIGRPCMessageBytes);
+// services/bridge/cmd/bridge-api/main.go.
 export const MaxBridgeDurableContextGrpcMessageBytes = 64 * 1024 * 1024;
 /** Maximum serialized provider request the Runtime Pod sends to Gateway. */
+// UPDATE-WITH: services/gateway/packages/provider-gateway/src/bounds.ts
+// (MaxGrpcInboundMessageBytes).
 export const MaxGatewayRequestGrpcMessageBytes = 64 * 1024 * 1024;
 /** Maximum provider stream event the Runtime Pod accepts from Gateway. */
+// UPDATE-WITH: services/gateway/packages/provider-gateway/src/bounds.ts
+// (MaxGrpcOutboundMessageBytes).
 export const MaxGatewayStreamEventGrpcMessageBytes = 8 * 1024 * 1024;
 /** Maximum encoded Web request sent from Runtime to web-connector. */
 export const MaxWebRequestGrpcMessageBytes = 1024 * 1024;

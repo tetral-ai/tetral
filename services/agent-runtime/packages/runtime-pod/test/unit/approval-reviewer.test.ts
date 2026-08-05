@@ -13,6 +13,7 @@ import {
   buildApprovalReviewerAssistantDraftMessage as assistantDraftMessage,
   buildApprovalReviewerAssistantDecision as assistantDecision,
   buildApprovalReviewerAssistantReviewerText as assistantReviewerText,
+  buildToolRunnerCompletedToolMessage as completedToolMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
 
 const createdAt = "2026-07-06T00:00:00.000Z";
@@ -132,6 +133,33 @@ describe("Runtime approval reviewer", () => {
     expect(JSON.parse(input.outputSchemaJson)).toMatchObject({
       additionalProperties: false,
       required: ["risk_level", "user_authorization", "outcome", "rationale"],
+    });
+  });
+
+  test("labels a shortened tool input preview without claiming the input value was truncated", async () => {
+    const host = new RecordingReviewerHost([assistantDecision("sesn_1", "allow", "safe")]);
+    const reviewer = createRuntimeApprovalReviewer(() => host, {
+      model: platformReviewerModel,
+      threadCreator: new RecordingReviewerThreadCreator(),
+      now: () => createdAt,
+      waitTimeoutMs: 10,
+    });
+    const evidence = completedToolMessage("Write", { path: "src/a.ts", content: "complete input" }, "ok");
+    const currentProviderRequestMessages: RuntimeMessage[] = [{
+      ...evidence,
+      parts: evidence.parts.map((part) => part.type === "tool" && "input" in part.state && part.state.input !== undefined
+        ? { ...part, state: { ...part.state, input: { ...part.state.input, preview: "short", truncated: true } } }
+        : part),
+    }];
+
+    await reviewer(validReviewRequest({ currentProviderRequestMessages }));
+
+    const draft = promptJSON(host.inputs[0]).current_assistant_draft[0] as {
+      readonly tool_calls: readonly Readonly<Record<string, unknown>>[];
+    };
+    expect(draft.tool_calls[0]).toMatchObject({
+      input: { path: "src/a.ts", content: "complete input" },
+      input_preview_truncated: true,
     });
   });
 

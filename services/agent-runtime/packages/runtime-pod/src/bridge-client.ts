@@ -72,6 +72,7 @@ import {
   normalizeContextLoaderError,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
+  stableReasoningMetadataJSON,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
@@ -1087,7 +1088,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           providerPartId: part.providerPartId ?? "",
           partSequence: part.partSequence,
           text: part.text,
-          metadataJson: JSON.stringify(part.providerMetadata ?? {}),
+          metadataJson: stableReasoningMetadataJSON(part.providerMetadata),
           truncated: part.truncated,
         })),
         serverToolUse: envelope.serverToolUse,
@@ -1255,7 +1256,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           providerPartId: part.providerPartId ?? "",
           partSequence: part.partSequence,
           text: part.text,
-          metadataJson: JSON.stringify(part.providerMetadata ?? {}),
+          metadataJson: stableReasoningMetadataJSON(part.providerMetadata),
           truncated: part.truncated,
         })),
         usageJson: JSON.stringify({

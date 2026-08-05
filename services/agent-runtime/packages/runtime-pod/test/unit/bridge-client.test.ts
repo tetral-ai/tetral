@@ -39,6 +39,7 @@ import type {
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
+import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import {
@@ -154,6 +155,100 @@ describe("BridgeAPIContextLoader", () => {
     expect(Buffer.byteLength(bridge.loadContextJSON, "utf8")).toBeGreaterThan(32 * 1024 * 1024);
     expect(Buffer.byteLength(bridge.loadContextJSON, "utf8")).toBeLessThan(MaxBridgeDurableContextGrpcMessageBytes);
     expect(loaded.messages.map((message) => message.parts[0]?.type === "text" ? message.parts[0].text : "")).toEqual(texts);
+  });
+
+  test("loads cleanup-shaped tool inputs and projects their complete values", async () => {
+    const bridge = new RecordingBridgeClient();
+    const inputs = [
+      { action: "create", path: "notes/large.md", content: `CREATE_HEAD${"\u0001".repeat(9_000)}CREATE_TAIL` },
+      {
+        action: "replace",
+        path: "notes/large.md",
+        old_text: `OLD_HEAD${"<".repeat(5_000)}OLD_TAIL`,
+        new_text: `NEW_HEAD${"\\".repeat(5_000)}NEW_TAIL`,
+      },
+    ] as const;
+    bridge.loadContextJSON = JSON.stringify({
+      messages: [{
+        id: "msg_cleanup_inputs",
+        sessionId: "sesn_1",
+        owningEventId: "evt_cleanup_inputs",
+        eventSequence: 1,
+        role: "assistant",
+        origin: "agent",
+        sequence: 1,
+        status: "streaming",
+        createdAt: "2026-08-05T00:00:00.000Z",
+        parts: inputs.map((input, index) => ({
+          id: `part_cleanup_input_${index}`,
+          sessionId: "sesn_1",
+          messageId: "msg_cleanup_inputs",
+          sequence: index,
+          type: "tool",
+          toolCallId: `call_cleanup_input_${index}`,
+          toolName: "memory",
+          toolUseEventId: `evt_cleanup_input_${index}`,
+          toolEvent: { kind: "tool" },
+          state: {
+            status: "running",
+            input: {
+              value: input,
+              preview: JSON.stringify(input).slice(0, 8_192),
+              truncated: true,
+            },
+          },
+          createdAt: "2026-08-05T00:00:00.000Z",
+        })),
+      }],
+      turnFacts: { events: [], messageLineage: [] },
+      coldCoverage: {
+        pendingToolIds: inputs.map((_, index) => `evt_cleanup_input_${index}`),
+        pendingSandboxExecutionIds: [],
+        pendingAttachmentIdentities: [],
+        undeliveredMailDeliveryIds: [],
+      },
+      thread: {
+        parentThreadId: null,
+        role: "main",
+        visibility: "public",
+        taskName: null,
+        agentType: "general",
+        status: "idle",
+      },
+    });
+    const loader = new BridgeAPIContextLoader({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const loaded = await loader.loadThreadContext(control("thr_main", "rin_cleanup_inputs", 1));
+    expect(loaded.messages[0]?.parts.map((part) =>
+      part.type === "tool" && "input" in part.state ? part.state.input?.value : undefined)).toEqual([...inputs]);
+    const settledMessages = loaded.messages.map((message) => {
+      const { owningEventId: _owningEventId, eventSequence: _eventSequence, ...runtimeMessage } = message;
+      return RuntimeMessageSchema.parse({
+        ...runtimeMessage,
+        status: "completed",
+        parts: message.parts.map((part) => part.type === "tool" ? {
+          ...part,
+          state: {
+            ...part.state,
+            status: "completed",
+            output: { text: "settled", truncated: false },
+          },
+          completedAt: "2026-08-05T00:00:01.000Z",
+        } : part),
+      });
+    });
+    const projected = toGatewayRuntimeMessages(settledMessages);
+
+    expect(projected.ok).toBe(true);
+    if (!projected.ok) throw new Error(`cleanup input projection failed: ${projected.error.message}`);
+    expect(projected.messages[0]?.parts.map((part) => part.tool?.inputJson)).toEqual(
+      inputs.map((input) => JSON.stringify(input)),
+    );
   });
 
   test("refreshes binding tokens on expiry margin with per-thread single-flight", async () => {

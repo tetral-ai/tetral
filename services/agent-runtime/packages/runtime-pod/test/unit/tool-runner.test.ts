@@ -1041,6 +1041,43 @@ describe("RuntimePodToolRunner", () => {
     ]);
   });
 
+  test("uses the Web connector's model-visible text without encoding the response twice", async () => {
+    const gateway = new RecordingGatewayClient();
+    gateway.runWebResponse = {
+      ...gateway.runWebResponse,
+      resultText: "quoted \\\"window\\\" with \\\\slashes",
+      refs: [{ refId: "ref_1", url: "https://example.com", title: "Example" }],
+      windowTruncated: true,
+      nextLineno: 42,
+    };
+
+    const result = await makeRunner({ gateway }).runTool(toolRequest("web", { open: [{ ref_id: "ref_1" }] }));
+
+    expect(result).toMatchObject({
+      type: "completed",
+      output: { text: gateway.runWebResponse.resultText, truncated: false },
+    });
+    expect(JSON.stringify(result)).not.toContain("window_truncated");
+  });
+
+  test("settles a genuine Web result bound violation as a deterministic tool failure", async () => {
+    const gateway = new RecordingGatewayClient();
+    gateway.runWebResponse = {
+      ...gateway.runWebResponse,
+      resultText: "\u0001".repeat(87_380),
+    };
+
+    const result = await makeRunner({ gateway }).runTool(toolRequest("web", { open: [{ ref_id: "ref_1" }] }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Tool result exceeds the 512 KiB model-visible output limit.",
+        retryable: false,
+      },
+    });
+  });
+
   test("rejects Web requests outside the shared semantic envelope before transport", async () => {
     const gateway = new RecordingGatewayClient();
     const runner = makeRunner({ gateway });
@@ -1183,6 +1220,88 @@ describe("RuntimePodToolRunner", () => {
         runtimeBindingToken: "binding-token",
       },
     ]);
+  });
+
+  test("accepts the true 50 KiB escape-dense MCP result without a line-cap shortcut", async () => {
+    const mcp = new RecordingMcpConnectorClient();
+    const resultText = "\u0001".repeat(50 * 1024);
+    mcp.runMcpToolResponse = {
+      ...mcp.runMcpToolResponse,
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText,
+    };
+
+    const result = await makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }));
+
+    expect(result).toMatchObject({ type: "completed", output: { text: resultText, truncated: false } });
+    expect(resultText).not.toContain("\n");
+    expect(Buffer.byteLength(JSON.stringify({ text: resultText }), "utf8")).toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
+  });
+
+  test("uses one model-visible output contract for Web, MCP, and command results", async () => {
+    const web = new RecordingGatewayClient();
+    web.runWebResponse = { ...web.runWebResponse, resultText: "\u0001".repeat(87_379) };
+    const webResult = await makeRunner({ gateway: web }).runTool(toolRequest("web", { open: [{ ref_id: "ref_1" }] }));
+
+    const mcp = new RecordingMcpConnectorClient();
+    mcp.runMcpToolResponse = {
+      ...mcp.runMcpToolResponse,
+      status: RunMcpToolStatus.RUN_MCP_TOOL_STATUS_COMPLETED,
+      resultText: "\u0001".repeat(50 * 1024),
+    };
+    const mcpResult = await makeRunner({ mcp }).runTool(mcpToolRequest({ query: "issues" }));
+
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
+      status: "running",
+      result: { task_id: "task_contract", stdout: { text: `COMMAND_HEAD${"x".repeat(20_000)}COMMAND_TAIL`, truncated: false } },
+    });
+    bridge.awaitSandboxExecutionBackgroundTaskStarted = true;
+    bridge.awaitSandboxExecutionTaskId = "task_contract";
+    const commandResult = await makeRunner({ bridge }).runTool(toolRequest("exec_command", { cmd: "build" }));
+
+    for (const [toolName, input, result] of [
+      ["web", { open: [{ ref_id: "ref_1" }] }, webResult],
+      ["mcp", { query: "issues" }, mcpResult],
+      ["exec_command", { cmd: "build" }, commandResult],
+    ] as const) {
+      expect(result.type, toolName).toBe("completed");
+      if (result.type !== "completed") throw new Error(`expected completed ${toolName} result`);
+      const projected = toGatewayRuntimeMessages([completedToolMessage(toolName, input, result.output.text)]);
+      expect(projected.ok, toolName).toBe(true);
+      if (!projected.ok) throw new Error(`expected projected ${toolName} result`);
+      expect(projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson, toolName).toBe(
+        JSON.stringify({ text: result.output.text }),
+      );
+      expect(Buffer.byteLength(projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson ?? "", "utf8"), toolName)
+        .toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
+    }
+  });
+
+  test("does not rejoin the sandbox result wait after a deterministic output bound violation", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.awaitSandboxExecutionResultJson = JSON.stringify({
+      status: "success",
+      result: { content: "\u0001".repeat(87_380) },
+    });
+    bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
+    const sleep = new ControlledSleep();
+
+    const result = await makeRunner({ bridge, sleep: sleep.sleep }).runTool(
+      toolRequest("Read", { file_path: "notes/a.txt" }),
+    );
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "Tool result exceeds the 512 KiB model-visible output limit.",
+        retryable: false,
+      },
+      sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
+    });
+    expect(bridge.acceptSandboxExecutionRequests).toHaveLength(1);
+    expect(bridge.awaitSandboxExecutionRequests).toHaveLength(1);
+    expect(sleep.calls).toHaveLength(0);
   });
 
   test("maps MCP tool_error to a model-visible tool error", async () => {

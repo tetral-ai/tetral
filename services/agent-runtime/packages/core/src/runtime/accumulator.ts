@@ -43,6 +43,7 @@ import {
   RuntimeBoundedTextSchema,
   MaxStableReasoningBytesPerRequest,
   MaxStableReasoningPartsPerRequest,
+  stableReasoningMetadataJSON,
   normalizeSessionEventWriterError,
   normalizeRuntimeMessageStoreError,
   boundRuntimeText,
@@ -928,6 +929,9 @@ export class SessionProcessor {
       status: "completed",
       completedAt: this.options.now(),
     });
+    if (!this.reasoningSetFits(completed)) {
+      return await this.terminalFailure(envelope, "failed", boundedSemanticFailure());
+    }
     this.reasoningParts.delete(envelope.event.id);
     return await this.writePart(completed, envelope);
   }
@@ -1342,7 +1346,7 @@ export class SessionProcessor {
     }
     let aggregateBytes = 0;
     for (const part of parts.values()) {
-      aggregateBytes += byteLength(part.text) + byteLength(JSON.stringify(part.providerMetadata ?? {}));
+      aggregateBytes += byteLength(part.text) + byteLength(stableReasoningMetadataJSON(part.providerMetadata));
     }
     return aggregateBytes <= MaxStableReasoningBytesPerRequest;
   }

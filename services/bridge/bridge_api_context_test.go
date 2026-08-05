@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1431,6 +1432,114 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	if resultFact == nil || resultFact.ToolUseEventID != "evt_public_tool_use" || resultFact.Outcome != "success" {
 		t.Fatalf("LoadContext Tool Result fact = %+v; want successful projected outcome", resultFact)
 	}
+}
+
+func TestPostgreSQLBridgeAPIStoreLoadContextCarriesEscapeDenseToolHistoryWithHeadroom(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_escape_dense_history"
+		threadID    = "thr_bridge_escape_dense_history"
+		bindingID   = "bind_bridge_escape_dense_history"
+		podUID      = "pod_bridge_escape_dense_history"
+		historySize = 48
+		outputBytes = 80 * 1024
+		contextFuse = 64 * 1024 * 1024
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+
+	for index := range historySize {
+		toolUseEventID := fmt.Sprintf("evt_escape_dense_use_%02d", index)
+		resultEventID := fmt.Sprintf("evt_escape_dense_result_%02d", index)
+		modelRequestID := fmt.Sprintf("mreq_escape_dense_%02d", index)
+		messageID := fmt.Sprintf("msg_escape_dense_%02d", index)
+		toolCallID := fmt.Sprintf("call_escape_dense_%02d", index)
+		head := ""
+		tail := ""
+		if index == 0 {
+			head = "TETRAL_ESCAPE_OUTPUT_FIRST"
+		}
+		if index == historySize-1 {
+			tail = "TETRAL_ESCAPE_OUTPUT_LAST"
+		}
+		output := head + strings.Repeat("\x01", outputBytes-len(head)-len(tail)) + tail
+		seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, int64(index*2+1), "agent.tool_use",
+			fmt.Sprintf(`{"type":"agent.tool_use","name":"Read","input":{"index":%d},"evaluated_permission":"allow"}`, index))
+		seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, resultEventID, int64(index*2+2), "agent.tool_result",
+			fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":"settled"}],"is_error":false}`, toolUseEventID))
+		if _, err := admin.ExecContext(context.Background(),
+			`UPDATE session_events
+			    SET model_request_id = $6
+			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+			    AND event_id IN ($4, $5)`,
+			workspaceID, sessionID, threadID, toolUseEventID, resultEventID, modelRequestID,
+		); err != nil {
+			t.Fatalf("stamp escape-dense event identity %d: %v", index, err)
+		}
+
+		dataJSON, err := json.Marshal(map[string]any{
+			"id": messageID, "sessionId": sessionID, "role": "assistant", "origin": "agent",
+			"sequence": index + 1, "status": "completed", "createdAt": "2026-01-01T00:00:00Z",
+			"updatedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:00:00Z",
+			"parts": []map[string]any{{
+				"id": "part_" + resultEventID, "sessionId": sessionID, "messageId": messageID,
+				"sequence": 0, "type": "tool", "toolCallId": toolCallID, "toolName": "Read",
+				"toolUseEventId": toolUseEventID, "toolEvent": map[string]any{"kind": "tool"},
+				"createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+				"completedAt": "2026-01-01T00:00:00Z",
+				"state": map[string]any{
+					"status": "completed",
+					"input":  map[string]any{"value": map[string]any{"index": index}, "preview": fmt.Sprintf(`{"index":%d}`, index), "truncated": false},
+					"output": map[string]any{"text": output, "truncated": false},
+				},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("marshal escape-dense message %d: %v", index, err)
+		}
+		if _, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_messages (
+				workspace_id, session_id, session_thread_id, message_id, sequence, kind,
+				data_json, source_event_id, last_event_id, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7,
+				'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			workspaceID, sessionID, threadID, messageID, index+1, string(dataJSON), resultEventID,
+		); err != nil {
+			t.Fatalf("insert escape-dense message %d: %v", index, err)
+		}
+		seedBridgeAPIMessageLineage(
+			t, admin, workspaceID, sessionID, threadID,
+			bridgeOpWriteEvent, "agent.tool_result", "rwrite_"+resultEventID,
+			resultEventID, messageID, int64(index+1),
+		)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-escape-dense-context-key")
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		RuntimeInputId: "rin_bridge_escape_dense_history",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext escape-dense history: %v", err)
+	}
+	contextBytes := len([]byte(loaded.GetContextJson()))
+	if contextBytes > contextFuse*80/100 {
+		t.Fatalf("LoadContext context_json bytes = %d; want at least 20 percent headroom below %d", contextBytes, contextFuse)
+	}
+	if !strings.Contains(loaded.GetContextJson(), "TETRAL_ESCAPE_OUTPUT_FIRST") ||
+		!strings.Contains(loaded.GetContextJson(), "TETRAL_ESCAPE_OUTPUT_LAST") {
+		t.Fatal("LoadContext escape-dense history lost a boundary sentinel")
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("parse escape-dense LoadContext: %v", err)
+	}
+	if len(payload.Messages) != historySize {
+		t.Fatalf("LoadContext escape-dense messages = %d; want %d", len(payload.Messages), historySize)
+	}
+	t.Logf("escape-dense LoadContext context_json bytes=%d fuse=%d headroom=%.2f%%", contextBytes, contextFuse, 100*float64(contextFuse-contextBytes)/float64(contextFuse))
 }
 
 func TestBridgeTurnToolResultFactUsesToolUseProjectionIdentity(t *testing.T) {

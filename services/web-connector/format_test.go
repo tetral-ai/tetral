@@ -37,6 +37,10 @@ func TestFormatterGoldensMatchSearchOpenFindAndErrorVocabulary(t *testing.T) {
 	if _, err := formatWindow("r_example", Page{Lines: []string{"only"}}, 2); err == nil || err.Error() != "lineno out of range: document has 1 lines" {
 		t.Fatalf("range error=%v", err)
 	}
+	secretPattern := "(?P<private-token>"
+	if _, err := formatFind("r_example", secretPattern, Page{Lines: []string{"only"}}); err == nil || err.Error() != "pattern is invalid" || strings.Contains(err.Error(), secretPattern) {
+		t.Fatalf("regex error=%q; want fixed safe reason", err)
+	}
 	for _, text := range []string{search, open.text, find, "URL could not be fetched", "web backend temporarily unavailable", "tool delivery conflict"} {
 		for _, forbidden := range []string{"jina.ai", "TETRAL_BLOB", "fixture-key", "base64"} {
 			if containsFold(text, forbidden) {

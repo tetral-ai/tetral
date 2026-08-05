@@ -598,7 +598,7 @@ function renderTranscriptEvidence(messages: readonly RuntimeMessage[]): readonly
           ...("input" in part.state && part.state.input !== undefined
             ? {
                 input: part.state.input.value,
-                input_truncated: part.state.input.truncated,
+                input_preview_truncated: part.state.input.truncated,
               }
             : {}),
         })),

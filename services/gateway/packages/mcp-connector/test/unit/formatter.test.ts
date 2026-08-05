@@ -113,11 +113,12 @@ describe("MCP formatter", () => {
   });
 
   test("keeps escape-dense maximum text inside the canonical tool-result bound", () => {
-    const escapeDense = "\u0000\"\\\b\f\n\r\t".repeat(MCP_RESULT_TEXT_MAX_BYTES);
+    const escapeDense = `${"\u0000".repeat(MCP_RESULT_TEXT_MAX_BYTES - 2)}\"\\`;
     const formatted = formatMcpToolResult({ content: [{ type: "text", text: escapeDense }] });
     const canonicalBytes = Buffer.byteLength(JSON.stringify({ text: formatted.resultText }), "utf8");
 
-    expect(Buffer.byteLength(formatted.resultText, "utf8")).toBeLessThanOrEqual(MCP_RESULT_TEXT_MAX_BYTES);
+    expect(formatted.resultText).toBe(escapeDense);
+    expect(Buffer.byteLength(formatted.resultText, "utf8")).toBe(MCP_RESULT_TEXT_MAX_BYTES);
     expect(canonicalBytes).toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
   });
 

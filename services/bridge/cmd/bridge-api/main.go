@@ -95,6 +95,9 @@ func run(ctx context.Context, env envReader) error {
 		GRPCListenDefault: ":9090",
 		Register:          func(server *grpc.Server) { agentruntimebridge.RegisterBridgeAPI(server, store) },
 		MethodAuthorizer:  agentruntimebridge.BridgeAPIMethodAuthorizer,
+		// UPDATE-WITH: internal/sessionrpc/bounds.go
+		// (MaxBridgeAPIGRPCMessageBytes); services/agent-runtime/packages/
+		// runtime-pod/src/bounds.ts (MaxBridgeDurableContextGrpcMessageBytes).
 		ServerOptions: []grpc.ServerOption{
 			grpc.MaxRecvMsgSize(sessionrpc.MaxBridgeAPIGRPCMessageBytes),
 			grpc.MaxSendMsgSize(sessionrpc.MaxBridgeAPIGRPCMessageBytes),

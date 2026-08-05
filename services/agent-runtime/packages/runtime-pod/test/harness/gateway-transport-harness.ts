@@ -36,6 +36,7 @@ import type { ProviderCredentialResolver } from "../../../../../gateway/packages
 import { MaxGatewayRequestGrpcMessageBytes, gatewayGrpcChannelOptions } from "../../src/bounds.js";
 import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
+import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 import { createLLMService } from "../../../core/src/llm/llm-service.js";
 
 const CapacityTargetTokens = 1_050_000;
@@ -57,6 +58,7 @@ export interface GatewayCapacityMeasurement {
   readonly configuredFuseBytes: number;
   readonly headroomRatio: number;
   readonly loweredBytesByFamily: Readonly<Record<string, number>>;
+  readonly loadedContextBytes?: number;
 }
 
 const CapacityRoutes = [
@@ -69,7 +71,7 @@ type CapacityRoute = (typeof CapacityRoutes)[number];
 
 /** Runs the catalog-capacity proof through production projection, assembly, transport, and lowering. */
 export async function runGatewayCapacityProof(): Promise<readonly GatewayCapacityMeasurement[]> {
-  const vectors = capacityVectors();
+  const vectors = await capacityVectors();
   const receivedBytes = new Map<string, number>();
   const wireBytes = new Map<string, number>();
   let activeCapture: string | undefined;
@@ -153,6 +155,7 @@ export async function runGatewayCapacityProof(): Promise<readonly GatewayCapacit
         configuredFuseBytes: MaxGatewayRequestGrpcMessageBytes,
         headroomRatio: (MaxGatewayRequestGrpcMessageBytes - encodedRequestBytes) / MaxGatewayRequestGrpcMessageBytes,
         loweredBytesByFamily,
+        ...(vector.loadedContextBytes === undefined ? {} : { loadedContextBytes: vector.loadedContextBytes }),
       });
     }
     return measurements;
@@ -163,7 +166,7 @@ export async function runGatewayCapacityProof(): Promise<readonly GatewayCapacit
 
 /** Proves a smaller Runtime request carrier rejects a production-path maximum vector. */
 export async function runGatewayCapacityFuseMutation(): Promise<void> {
-  const vector = capacityVectors()[0];
+  const vector = (await capacityVectors())[0];
   if (vector === undefined) {
     throw new Error("capacity proof vector is absent");
   }
@@ -196,7 +199,7 @@ export async function runGatewayCapacityFuseMutation(): Promise<void> {
 
 /** Proves a smaller Gateway receive carrier rejects the same otherwise-valid maximum vector. */
 export async function runGatewayReceiveCapacityFuseMutation(): Promise<void> {
-  const vector = capacityVectors()[0];
+  const vector = (await capacityVectors())[0];
   if (vector === undefined) {
     throw new Error("capacity proof vector is absent");
   }
@@ -260,7 +263,7 @@ export async function runGatewayReceiveCapacityFuseMutation(): Promise<void> {
 
 /** Carries a large complete tool call through production Gateway transport and Runtime mapping. */
 export async function runLargeToolInputMappingProof() {
-  const input = { content: "\u0001".repeat(200_000), file_path: "notes/large.txt" };
+  const inputs = largeMemoryToolInputs();
   const base = assembledVector("large_tool_input", [textMessage("large_tool_prompt", 1, "write it")]);
   const request = requestForRoute(base.request, CapacityRoutes[1]);
   const service = new ProviderGatewayServiceShell({
@@ -275,12 +278,14 @@ export async function runLargeToolInputMappingProof() {
     logger: { info: () => undefined, error: () => undefined },
     providerStreamer: {
       stream: async function* () {
-        yield {
-          requestId: request.requestId,
-          modelRequestId: request.modelRequestId,
-          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
-          toolCall: { id: "call_large", name: "Write", inputJson: JSON.stringify(input), metadataJson: "{}" },
-        };
+        for (const [index, input] of inputs.entries()) {
+          yield {
+            requestId: request.requestId,
+            modelRequestId: request.modelRequestId,
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+            toolCall: { id: `call_large_memory_${index}`, name: "memory", inputJson: JSON.stringify(input), metadataJson: "{}" },
+          };
+        }
         yield {
           requestId: request.requestId,
           modelRequestId: request.modelRequestId,
@@ -309,6 +314,18 @@ export async function runLargeToolInputMappingProof() {
   } finally {
     await server.shutdown();
   }
+}
+
+function largeMemoryToolInputs() {
+  return [
+    { action: "create", path: "notes/large.md", content: `CREATE_HEAD${"\u0001".repeat(9_000)}CREATE_TAIL` },
+    {
+      action: "replace",
+      path: "notes/large.md",
+      old_text: `OLD_HEAD${"<".repeat(5_000)}OLD_TAIL`,
+      new_text: `NEW_HEAD${"\\".repeat(5_000)}NEW_TAIL`,
+    },
+  ] as const;
 }
 
 /** Carries an exact maximum Read envelope through the real formatter, projection, transport, and provider lowering. */
@@ -593,12 +610,13 @@ async function* successfulCapacityStream(request: ProviderRequest) {
   };
 }
 
-function capacityVectors(): readonly {
+async function capacityVectors(): Promise<readonly {
   readonly name: string;
   readonly estimatedTokens: number;
   readonly request: ProviderRequest;
   readonly wireMarkers: readonly string[];
-}[] {
+  readonly loadedContextBytes?: number;
+}[]> {
   const ordinaryMarkers = ["TETRAL_ORDINARY_FIRST", "TETRAL_ORDINARY_LAST"] as const;
   const ordinary = fitMessagesToTokenTarget((budget) => [
     textMessage("ordinary_ascii", 1, markedText(Math.floor(budget / 2), ordinaryMarkers[0], "", "x")),
@@ -633,14 +651,77 @@ function capacityVectors(): readonly {
     ...escapeDenseToolMessages,
     textMessage("escape_dense_filler", escapeDenseToolMessages.length + 1, "x".repeat(budget)),
   ]);
+  const loadedEscapeDense = await loadCapacityContext(escapeDenseOutputs);
 
   return [
     assembledVector("ordinary_ascii_and_utf8", ordinary, undefined, ordinaryMarkers),
     assembledVector("escaped_tool_input_and_max_output", withTools, undefined, toolMarkers),
     assembledVector("maximum_mcp_catalog", withCatalog, maximumMcpCatalog(), mcpMarkers),
     assembledVector("fragmented_history", fragmented, undefined, fragmentMarkers),
-    assembledVector("escape_dense_output_history", escapeDenseOutputs, undefined, escapeDenseMarkers),
+    {
+      ...assembledVector("escape_dense_output_history", loadedEscapeDense.messages, undefined, escapeDenseMarkers),
+      loadedContextBytes: loadedEscapeDense.contextBytes,
+    },
   ];
+}
+
+async function loadCapacityContext(messages: readonly RuntimeMessage[]) {
+  const contextJson = JSON.stringify({
+    messages: messages.map((message, index) => ({
+      ...message,
+      owningEventId: `evt_capacity_context_${index}`,
+      eventSequence: index + 1,
+    })),
+    turnFacts: { events: [], messageLineage: [] },
+    coldCoverage: {
+      pendingToolIds: [],
+      pendingSandboxExecutionIds: [],
+      pendingAttachmentIdentities: [],
+      undeliveredMailDeliveryIds: [],
+    },
+    thread: {
+      parentThreadId: null,
+      role: "main",
+      visibility: "public",
+      taskName: null,
+      agentType: "general",
+      status: "idle",
+    },
+  });
+  const client = {
+    loadContext(
+      _request: unknown,
+      _metadata: Metadata,
+      callback: (error: Error | null, response?: unknown) => void,
+    ) {
+      callback(null, {
+        ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED },
+        contextJson,
+        runtimeBindingToken: "binding-token",
+      });
+      return noopUnaryCall();
+    },
+  } as unknown as AgentRuntimeBridgeServiceClient;
+  const loader = new BridgeAPIContextLoader({
+    address: "unused",
+    tokenPath: "/unused",
+    client,
+    metadataFactory: async () => new Metadata(),
+  });
+  const loaded = await loader.loadThreadContext({
+    requestId: "req_capacity_context",
+    workspaceId: "wksp_capacity",
+    sessionId: "sesn_capacity",
+    sessionThreadId: "thr_capacity",
+    bindingId: "bind_capacity",
+    bindingGeneration: 1,
+    targetPodUid: "pod_capacity",
+    runtimeInputId: "rin_capacity_context",
+    eventIds: [],
+    sequenceFrom: 0,
+    sequenceTo: 0,
+  });
+  return { messages: loaded.messages, contextBytes: Buffer.byteLength(contextJson, "utf8") };
 }
 
 function assembledVector(

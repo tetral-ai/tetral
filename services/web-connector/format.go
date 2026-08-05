@@ -40,6 +40,10 @@ type windowResult struct {
 }
 
 func formatWindow(id string, page Page, lineno int32) (windowResult, error) {
+	return formatWindowWithin(id, page, lineno, maxVisibleResultBytes)
+}
+
+func formatWindowWithin(id string, page Page, lineno int32, resultBytes int) (windowResult, error) {
 	lines := page.Lines
 	if len(lines) == 0 {
 		lines, _ = normalizeContent(page.Content)
@@ -50,17 +54,28 @@ func formatWindow(id string, page Page, lineno int32) (windowResult, error) {
 	}
 	start := int(lineno - 1)
 	end := start
-	used := 0
+	bodyBytes := 0
 	for end < len(lines) && end-start < maxWindowLines {
 		extra := len([]byte(lines[end]))
 		if end > start {
 			extra++
 		}
-		if end > start && used+extra > maxWindowBytes {
+		if end > start && bodyBytes+extra > maxWindowBytes {
 			break
 		}
-		used += extra
-		end++
+		candidateEnd := end + 1
+		candidate := formatWindowText(id, page, lines, start, candidateEnd, lineno)
+		if len([]byte(candidate)) > resultBytes {
+			if end == start {
+				return windowResult{}, fmt.Errorf("web result window exceeds visible output budget")
+			}
+			break
+		}
+		bodyBytes += extra
+		end = candidateEnd
+	}
+	if end == start {
+		return windowResult{}, fmt.Errorf("web result window exceeds visible output budget")
 	}
 	lineEnd := int32(end)
 	truncated := end < len(lines)
@@ -69,6 +84,11 @@ func formatWindow(id string, page Page, lineno int32) (windowResult, error) {
 		value := lineEnd + 1
 		next = &value
 	}
+	text := formatWindowText(id, page, lines, start, end, lineno)
+	return windowResult{text: text, ref: Ref{ID: id, URL: page.URL, Title: page.Title, LineStart: lineno, LineEnd: lineEnd, TotalLines: total}, next: next, truncated: truncated}, nil
+}
+
+func formatWindowText(id string, page Page, lines []string, start int, end int, lineno int32) string {
 	title := page.Title
 	if title == "" {
 		title = page.URL
@@ -77,12 +97,12 @@ func formatWindow(id string, page Page, lineno int32) (windowResult, error) {
 	if page.SourceIncomplete {
 		suffix = "; source truncated at capture"
 	}
-	body := strings.Join(lines[start:end], "\n")
-	text := fmt.Sprintf("[%s] %s\nlines %d-%d of %d%s\n\n%s", id, title, lineno, lineEnd, total, suffix, body)
-	if truncated {
-		text += fmt.Sprintf("\n\n[truncated — continue with open(ref_id: %s, lineno: %d)]", id, *next)
+	lineEnd := int32(end)
+	text := fmt.Sprintf("[%s] %s\nlines %d-%d of %d%s\n\n%s", id, title, lineno, lineEnd, len(lines), suffix, strings.Join(lines[start:end], "\n"))
+	if end < len(lines) {
+		text += fmt.Sprintf("\n\n[truncated — continue with open(ref_id: %s, lineno: %d)]", id, lineEnd+1)
 	}
-	return windowResult{text: text, ref: Ref{ID: id, URL: page.URL, Title: page.Title, LineStart: lineno, LineEnd: lineEnd, TotalLines: total}, next: next, truncated: truncated}, nil
+	return text
 }
 
 func formatFind(id, pattern string, page Page) (string, error) {
@@ -91,7 +111,7 @@ func formatFind(id, pattern string, page Page) (string, error) {
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("pattern is invalid")
 	}
 	lines := page.Lines
 	if len(lines) == 0 {

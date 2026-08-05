@@ -190,7 +190,9 @@ function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncI
 //  CANCELLED           | local abort / stream cancel     | gateway_cancelled      | no        | no
 //  UNAVAILABLE         | transient infra outage          | gateway_unavailable    | yes       | no
 //  DEADLINE_EXCEEDED   | transient infra outage          | gateway_unavailable    | yes       | no
-//  RESOURCE_EXHAUSTED  | local receive fuse              | gateway_protocol_error | no        | yes
+//  RESOURCE_EXHAUSTED  | local request send fuse         | gateway_protocol_error | no        | yes
+//  RESOURCE_EXHAUSTED  | Gateway request receive fuse    | gateway_protocol_error | no        | yes
+//  RESOURCE_EXHAUSTED  | local response receive fuse     | gateway_protocol_error | no        | yes
 //  RESOURCE_EXHAUSTED  | remote resource exhaustion      | gateway_unavailable    | yes       | no
 //  INVALID_ARGUMENT    | deterministic request-shape rej | gateway_protocol_error | no        | yes
 //  INTERNAL            | deterministic fatal             | gateway_stream_error   | no        | yes
@@ -201,9 +203,9 @@ function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncI
 //  (any other status)  | unenumerated -> fail fast       | gateway_stream_error   | no        | no
 //
 // INVARIANTS:
-// - Retryable is a closed set: only UNAVAILABLE, DEADLINE_EXCEEDED, and remote
-//   RESOURCE_EXHAUSTED classify retryable. grpc-js's two local receive-fuse
-//   detail prefixes classify as deterministic protocol failures. Every other status, INCLUDING any
+// - Retryable is a closed set: only UNAVAILABLE, DEADLINE_EXCEEDED, and generic
+//   RESOURCE_EXHAUSTED classify retryable. grpc-js's send/receive size details
+//   classify as deterministic protocol failures. Every other status, INCLUDING any
 //   unenumerated one, falls through the final arm as non-retryable and fails
 //   fast. There is deliberately no default-retryable catch-all arm: retrying a
 //   doomed request would burn the whole reschedule budget plus minutes of
@@ -233,15 +235,18 @@ function gatewayClientError(error: unknown): GatewayClientError {
       statusCode: code,
     };
   }
-  if (code === status.RESOURCE_EXHAUSTED && isLocalReceiveFuseError(serviceError)) {
-    return {
-      type: "gateway-client",
-      code: "gateway_protocol_error",
-      message: "Gateway response exceeded the transport fuse.",
-      retryable: false,
-      fatal: true,
-      statusCode: code,
-    };
+  if (code === status.RESOURCE_EXHAUSTED) {
+    const sizeFailure = gatewayTransportSizeFailure(serviceError);
+    if (sizeFailure !== undefined) {
+      return {
+        type: "gateway-client",
+        code: "gateway_protocol_error",
+        message: sizeFailure,
+        retryable: false,
+        fatal: true,
+        statusCode: code,
+      };
+    }
   }
   if (code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED || code === status.RESOURCE_EXHAUSTED) {
     return {
@@ -291,13 +296,22 @@ function isGatewayClientError(error: unknown): error is GatewayClientError {
     typeof candidate.fatal === "boolean";
 }
 
-function isLocalReceiveFuseError(error: Partial<ServiceError>): boolean {
+function gatewayTransportSizeFailure(error: Partial<ServiceError>): string | undefined {
   const details = typeof error.details === "string"
     ? error.details
     : error instanceof Error
       ? error.message
       : "";
+  if (/Attempted to send message with a size larger than \d+/.test(details)) {
+    return "Gateway request exceeded the local transport fuse.";
+  }
   const framedLimit = /Received message larger than max \(\d+ vs (\d+)\)/.exec(details)?.[1];
   const decompressedLimit = /Received message that decompresses to a size larger than (\d+)/.exec(details)?.[1];
-  return Number(framedLimit ?? decompressedLimit) === MaxGatewayStreamEventGrpcMessageBytes;
+  const limit = Number(framedLimit ?? decompressedLimit);
+  if (!Number.isFinite(limit)) {
+    return undefined;
+  }
+  return limit === MaxGatewayStreamEventGrpcMessageBytes
+    ? "Gateway response exceeded the transport fuse."
+    : "Gateway rejected the request above its transport fuse.";
 }

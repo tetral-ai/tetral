@@ -81,6 +81,13 @@ const RuntimeProviderMetadataMaxBytes = 16 * 1024;
 //              services/bridge/bridge_api_settlement.go
 export const MaxStableReasoningPartsPerRequest = 16;
 export const MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024;
+
+/** Encodes the exact reasoning metadata bytes sent to and counted by Bridge. */
+// UPDATE-WITH: services/bridge/bridge_api_settlement.go
+// (normalizeStableReasoningParts metadataJSON aggregate accounting).
+export function stableReasoningMetadataJSON(metadata: RuntimeJsonValue | undefined): string {
+  return JSON.stringify(metadata ?? {});
+}
 const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
@@ -198,6 +205,10 @@ export const RuntimeMessageStatusSchema = z.enum(["streaming", "completed", "fai
 
 export const RuntimePartStatusSchema = z.enum(["streaming", "completed", "failed", "cancelled"]);
 
+// Measures the exact one-time {text} JSON shape projected to Gateway.
+// UPDATE-WITH: services/gateway/packages/protocol/src/bounds.ts
+// (MaxProviderRequestToolOutputJsonBytes); services/web-connector/types.go
+// (maxModelVisibleToolOutputJSONBytes, maxVisibleResultBytes).
 export const RuntimeBoundedTextSchema = z.strictObject({
   text: RuntimeTextSchema,
   truncated: z.boolean(),
@@ -964,7 +975,7 @@ function validateStableReasoningSet(
     ids.add(part.reasoningPartId);
     sequences.add(part.partSequence);
     previousSequence = part.partSequence;
-    aggregateBytes += byteLength(part.text) + byteLength(JSON.stringify(part.providerMetadata ?? {}));
+    aggregateBytes += byteLength(part.text) + byteLength(stableReasoningMetadataJSON(part.providerMetadata));
   }
   if (aggregateBytes > MaxStableReasoningBytesPerRequest) {
     context.addIssue({ code: "custom", message: "stable reasoning exceeds aggregate byte bound" });

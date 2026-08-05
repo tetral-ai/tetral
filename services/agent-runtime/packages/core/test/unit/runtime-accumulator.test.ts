@@ -1051,6 +1051,7 @@ describe("SessionProcessor", () => {
 
   test("keeps complete tool input when only its display preview is truncated", async () => {
     const drafts: RuntimeMessageDraft[] = [];
+    let toolUseSequence = 0;
     const processor = createProcessor({
       appendEvent: async (event, output) => {
         if (output !== undefined) {
@@ -1059,27 +1060,58 @@ describe("SessionProcessor", () => {
         return {
           ok: true,
           writeId: `write-${drafts.length}`,
-          eventId: event.type === "agent.tool_use" ? "bridge-tool-use-large" : "bridge-event-large",
+          eventId: event.type === "agent.tool_use"
+            ? `bridge-tool-use-large-${++toolUseSequence}`
+            : `bridge-event-large-${drafts.length}`,
           processedAt: createdAt,
         };
       },
     });
-    const input = { content: "x".repeat(100 * 1024), file_path: "notes/large.txt" };
+    const inputs = [
+      { action: "create", path: "notes/large.md", content: `CREATE_HEAD${"\u0001".repeat(9_000)}CREATE_TAIL` },
+      {
+        action: "replace",
+        path: "notes/large.md",
+        old_text: `OLD_HEAD${"<".repeat(5_000)}OLD_TAIL`,
+        new_text: `NEW_HEAD${"\\".repeat(5_000)}NEW_TAIL`,
+      },
+    ] as const;
 
-    await processor.process(envelope({
-      type: "tool-call",
-      id: "tool-large-input",
-      toolName: "Write",
-      input,
-      inputPreview: { preview: JSON.stringify(input).slice(0, 8_192), truncated: true },
-    }));
-    await processor.commitPublicToolUse(source, "tool-large-input", input, "allow");
+    for (const [index, input] of inputs.entries()) {
+      const id = `tool-large-input-${index}`;
+      const encoded = JSON.stringify(input);
+      await processor.process(envelope({
+        type: "tool-call",
+        id,
+        toolName: "memory",
+        input,
+        inputPreview: { preview: encoded.slice(0, 8_192), truncated: true },
+      }));
+      await processor.commitPublicToolUse(source, id, input, "allow");
+      await processor.commitToolSettlement(source, id, {
+        type: "completed",
+        output: { text: `memory-${index}-complete`, truncated: false },
+      });
+    }
 
-    const tool = drafts.at(-1)?.parts.find(
-      (part) => part.type === "tool" && part.toolCallId === "tool-large-input",
-    );
-    expect(tool?.type === "tool" && "input" in tool.state ? tool.state.input?.value : undefined).toEqual(input);
-    expect(tool?.type === "tool" && "input" in tool.state ? tool.state.input?.truncated : undefined).toBe(true);
+    const durable = processor.messages()[0];
+    if (durable === undefined) throw new Error("expected durable tool message");
+    const projected = toGatewayRuntimeMessages([{
+      ...durable,
+      status: "completed",
+    }]);
+    if (!projected.ok) throw new Error(`expected provider projection: ${projected.error.code}: ${projected.error.message}`);
+    const projectedInputs = projected.messages[0]?.parts
+      .map((part) => part.tool?.inputJson)
+      .filter((input): input is string => input !== undefined);
+    expect(projectedInputs).toEqual(inputs.map((input) => JSON.stringify(input)));
+    for (const [index, input] of inputs.entries()) {
+      const tool = drafts.at(-1)?.parts.find(
+        (part) => part.type === "tool" && part.toolCallId === `tool-large-input-${index}`,
+      );
+      expect(tool?.type === "tool" && "input" in tool.state ? tool.state.input?.value : undefined).toEqual(input);
+      expect(tool?.type === "tool" && "input" in tool.state ? tool.state.input?.truncated : undefined).toBe(true);
+    }
   });
 
   test("text deltas ignore the preview budget and persist the complete semantic text", async () => {
@@ -1173,6 +1205,32 @@ describe("SessionProcessor", () => {
       type: "reasoning-delta",
       id: "reasoning-boundary",
       text_delta: "x",
+    }));
+
+    expect(rejected.events).toContainEqual(expect.objectContaining({
+      type: "session.error",
+      error: expect.objectContaining({ reason: "bounded", retryable: false, fatal: true }),
+    }));
+    expect(JSON.stringify(rejected.events)).not.toContain('"truncated":true');
+  });
+
+  test("rechecks the stable-reasoning aggregate when reasoning-end adds metadata", async () => {
+    const processor = createProcessor();
+    const exactBeforeEnd = "r".repeat(MaxStableReasoningBytesPerRequest - 2);
+    await processor.process(envelope({ type: "reasoning-start", id: "reasoning-end-boundary" }));
+    for (let offset = 0; offset < exactBeforeEnd.length; offset += MaxTextBytes) {
+      const accepted = await processor.process(envelope({
+        type: "reasoning-delta",
+        id: "reasoning-end-boundary",
+        text_delta: exactBeforeEnd.slice(offset, offset + MaxTextBytes),
+      }));
+      expect(accepted.events).toEqual([]);
+    }
+
+    const rejected = await processor.process(envelope({
+      type: "reasoning-end",
+      id: "reasoning-end-boundary",
+      providerMetadata: { anthropic: { signature: "settlement-metadata" } },
     }));
 
     expect(rejected.events).toContainEqual(expect.objectContaining({
