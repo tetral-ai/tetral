@@ -619,14 +619,17 @@ permissions:
 // govulncheck step must run. The Makefile owns the tool version so local and CI
 // vulnerability scans cannot drift.
 const govulncheckCommand = "make vulncheck"
+const moduleScanCommand = "go tool govulncheck -scan module"
 
-// TestEngineCIWorkflowGatesOnGovulncheck pins the merge-blocking vulnerability
-// gate. govulncheck must run inside the already-required
-// `security` job, with its exit status propagated by STRICT EQUALITY of the final
-// executed line — not a forbidden-token blacklist. The govulncheck step's run
-// scalar must end with exactly the govulncheck command as a standalone
-// top-level command that nothing can append to, background, expand,
-// short-circuit, or absorb.
+// TestEngineCIWorkflowGatesOnGovulncheck pins the vulnerability gate. The
+// whole-repository symbol-level scan needs roughly 20 GiB of resident memory
+// (the sandbox service's kubernetes/AWS import closure dominates the
+// analysis), which no hosted runner offers, so the workflow scans every other
+// package tree at symbol level one process at a time and covers the sandbox
+// closure with a module-level scan. This guard pins the triggers, the
+// module-graph-scoped pull-request paths, the exact slice list, strict
+// exit-status propagation for both scan steps, the runtime slice-coverage
+// sweep, and the Makefile's full symbol-level target for local triage.
 func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 	repoRoot := finalArchitectureEngineRoot(t)
 	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "engine-vulncheck.yml")
@@ -641,63 +644,140 @@ func TestEngineCIWorkflowGatesOnGovulncheck(t *testing.T) {
 			t.Errorf("engine-vulncheck must declare %s so the scan runs on a schedule and on demand", trigger)
 		}
 	}
-	makefilePath := filepath.Join(finalArchitectureEngineRoot(t), "Makefile")
-	makefileContent, err := os.ReadFile(makefilePath) //nolint:gosec // test-only static read of repository Makefile
-	if err != nil {
-		t.Fatalf("read %s: %v", makefilePath, err)
-	}
-	makefileText := string(makefileContent)
-
-	// Scope to the gating job FIRST (the `security` job is in the required gate
-	// ledger), THEN to the govulncheck step within it. A whole-file step
-	// scan would let a last-in-job govulncheck step bleed into the next job.
-	job := workflowJobForStaticTest(t, text, "govulncheck:")
-
-	// (b) the govulncheck step lives inside the gating job.
-	step, found := workflowStepRunningGovulncheck(job)
-	if !found {
-		t.Fatalf("the govulncheck job must contain a step whose run: scalar invokes govulncheck; job was:\n%s", job)
+	// Pull requests run the gate only when the module graph (or the gate
+	// itself) can change; the daily schedule owns newly published advisories.
+	for _, path := range []string{"'go.mod'", "'go.sum'", "'.github/workflows/engine-vulncheck.yml'"} {
+		if !strings.Contains(text, path) {
+			t.Errorf("engine-vulncheck pull_request paths must include %s", path)
+		}
 	}
 
-	// (c) the gating job and the step are not under continue-on-error.
-	if strings.Contains(job, "continue-on-error: true") {
-		t.Errorf("the govulncheck job (or a step in it) must not set continue-on-error: true; job was:\n%s", job)
-	}
-
-	// (d) exit status propagates by STRICT EQUALITY: the step's run scalar must
-	// end with exactly the govulncheck command as a standalone top-level
-	// command, with no trailing tokens and no preceding-line continuation,
-	// operator, compound, subshell, or non-pipefail shell that could neuter it.
-	scalar, ok := extractRunScalar(step)
-	if !ok {
-		t.Fatalf("could not extract the run: scalar from the govulncheck step; step was:\n%s", step)
-	}
-	if scalar != govulncheckCommand {
-		t.Errorf("govulncheck step run scalar = %q; want exactly %q", scalar, govulncheckCommand)
-	}
-	shell := extractStepShell(step)
-	if reason := govulncheckRunPropagatesExit(scalar, shell); reason != "" {
-		t.Errorf("govulncheck gate does not propagate its exit status: %s\nrun scalar was:\n%s", reason, scalar)
-	}
-
-	// (a) go.mod pins the govulncheck version through its tool directive, so the
-	// scanner is resolved and checksummed exactly like every other dependency.
-	// The Makefile routes through that declaration and the workflow delegates to
-	// the Makefile, leaving one place where the version can change.
-	moduleFile, err := os.ReadFile(filepath.Join(finalArchitectureEngineRoot(t), "go.mod")) //nolint:gosec // repository-local static test path.
+	// (a) go.mod pins the govulncheck version through its tool directive, so
+	// the scanner is resolved and checksummed exactly like every other
+	// dependency, and the Makefile keeps the full symbol-level verdict for
+	// module-level triage on a machine with enough memory.
+	moduleFile, err := os.ReadFile(filepath.Join(repoRoot, "go.mod")) //nolint:gosec // repository-local static test path.
 	if err != nil {
 		t.Fatalf("read engine go.mod: %v", err)
 	}
 	if !strings.Contains(string(moduleFile), "tool golang.org/x/vuln/cmd/govulncheck") {
 		t.Error("engine go.mod must declare govulncheck as a tool dependency so its version is pinned and checksummed")
 	}
+	makefileContent, err := os.ReadFile(filepath.Join(repoRoot, "Makefile")) //nolint:gosec // test-only static read of repository Makefile
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
 	const vulncheckTarget = "vulncheck:\n\tgo tool govulncheck ./..."
-	if !strings.Contains(makefileText, vulncheckTarget) {
-		t.Errorf("Makefile must route vulncheck through the module tool over ./...; want:\n%s", vulncheckTarget)
+	if !strings.Contains(string(makefileContent), vulncheckTarget) {
+		t.Errorf("Makefile must keep the full symbol-level verdict over ./...; want:\n%s", vulncheckTarget)
 	}
-	if count := strings.Count(text, govulncheckCommand); count != 1 {
-		t.Errorf("engine-ci workflow %q invocation count = %d; want exactly one", govulncheckCommand, count)
+
+	job := workflowJobForStaticTest(t, text, "govulncheck:")
+	if strings.Contains(job, "continue-on-error: true") {
+		t.Errorf("the govulncheck job (or a step in it) must not set continue-on-error: true; job was:\n%s", job)
 	}
+
+	// (b) the symbol-level step scans the pinned slice list one process per
+	// tree, under a fail-fast shell, with the scan as the sole and standalone
+	// command line so no iteration's failure can be absorbed.
+	const symbolInvocation = `go tool govulncheck "${slice}"`
+	if count := strings.Count(job, symbolInvocation); count != 1 {
+		t.Fatalf("symbol-level scan invocation count = %d; want exactly one %q", count, symbolInvocation)
+	}
+	for _, line := range strings.Split(job, "\n") {
+		if strings.Contains(line, symbolInvocation) && strings.TrimSpace(line) != symbolInvocation {
+			t.Errorf("the symbol-level scan must be a standalone command line; got: %s", strings.TrimSpace(line))
+		}
+	}
+	if !strings.Contains(job, "set -euo pipefail") {
+		t.Error("the symbol-level scan step must run under set -euo pipefail so a failing slice fails the job")
+	}
+	expectedSlices := []string{
+		"./deploy/...",
+		"./integration/...",
+		"./internal/...",
+		"./services/agent-runtime/...",
+		"./services/api/...",
+		"./services/auth/...",
+		"./services/bridge/...",
+		"./services/cleanup/...",
+		"./services/event-stream/...",
+		"./services/gateway/...",
+		"./services/git-proxy/...",
+		"./services/queue/...",
+		"./services/web-connector/...",
+	}
+	slices, ok := extractWorkflowSliceList(job)
+	if !ok {
+		t.Fatalf("could not extract the slices=( ... ) list from the govulncheck job:\n%s", job)
+	}
+	if len(slices) != len(expectedSlices) {
+		t.Errorf("symbol-level slice list = %v; want %v (services/sandbox stays module-level by design)", slices, expectedSlices)
+	} else {
+		for index := range expectedSlices {
+			if slices[index] != expectedSlices[index] {
+				t.Errorf("symbol-level slice[%d] = %q; want %q", index, slices[index], expectedSlices[index])
+			}
+		}
+	}
+
+	// (c) a runtime guard fails the job when a package tree appears outside
+	// the slice list, so the split cannot silently under-cover new code.
+	if !strings.Contains(job, "go list ./...") || !strings.Contains(job, "exit 1") {
+		t.Error("the govulncheck job must sweep go list ./... and exit non-zero on trees missing from the slice list")
+	}
+
+	// (d) the module-level step covers the sandbox closure from a directory
+	// that contains Go files (module mode rejects patterns) and propagates
+	// its exit status by STRICT EQUALITY of the final executed line.
+	moduleStep, found := workflowStepNamed(job, "Module-level scan")
+	if !found {
+		t.Fatalf("the govulncheck job must contain a module-level scan step; job was:\n%s", job)
+	}
+	if !strings.Contains(moduleStep, "working-directory: services/sandbox") {
+		t.Errorf("the module-level scan must run from services/sandbox; step was:\n%s", moduleStep)
+	}
+	scalar, ok := extractRunScalar(moduleStep)
+	if !ok {
+		t.Fatalf("could not extract the run: scalar from the module scan step; step was:\n%s", moduleStep)
+	}
+	if reason := govulncheckRunPropagatesExit(scalar, extractStepShell(moduleStep), moduleScanCommand); reason != "" {
+		t.Errorf("module-level gate does not propagate its exit status: %s\nrun scalar was:\n%s", reason, scalar)
+	}
+}
+
+// extractWorkflowSliceList returns the entries of the symbol-scan step's
+// `slices=( ... )` array in order.
+func extractWorkflowSliceList(job string) ([]string, bool) {
+	start := strings.Index(job, "slices=(")
+	if start < 0 {
+		return nil, false
+	}
+	rest := job[start+len("slices=("):]
+	end := strings.Index(rest, ")")
+	if end < 0 {
+		return nil, false
+	}
+	var entries []string
+	for _, line := range strings.Split(rest[:end], "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		entries = append(entries, trimmed)
+	}
+	return entries, true
+}
+
+// workflowStepNamed returns the job step whose name contains the given label.
+func workflowStepNamed(job string, label string) (string, bool) {
+	const stepBoundary = "\n      - name:"
+	for _, step := range splitJobIntoSteps(job, stepBoundary) {
+		if strings.Contains(step, label) {
+			return step, true
+		}
+	}
+	return "", false
 }
 
 // TestGovulncheckRunPropagatesExitRejectsNeuteredForms proves the structural
@@ -733,7 +813,7 @@ func TestGovulncheckRunPropagatesExitRejectsNeuteredForms(t *testing.T) {
 	}
 	for _, testCase := range accepted {
 		t.Run("accept_"+testCase.name, func(t *testing.T) {
-			if reason := govulncheckRunPropagatesExit(testCase.scalar, testCase.shell); reason != "" {
+			if reason := govulncheckRunPropagatesExit(testCase.scalar, testCase.shell, govulncheckCommand); reason != "" {
 				t.Errorf("expected the bare standalone govulncheck command to be accepted, got rejection: %s", reason)
 			}
 		})
@@ -785,7 +865,7 @@ func TestGovulncheckRunPropagatesExitRejectsNeuteredForms(t *testing.T) {
 	}
 	for _, testCase := range rejected {
 		t.Run("reject_"+testCase.name, func(t *testing.T) {
-			if reason := govulncheckRunPropagatesExit(testCase.scalar, testCase.shell); reason == "" {
+			if reason := govulncheckRunPropagatesExit(testCase.scalar, testCase.shell, govulncheckCommand); reason == "" {
 				t.Errorf("expected the neutered form to be rejected, but it was accepted:\n%s", testCase.scalar)
 			}
 		})
@@ -962,7 +1042,7 @@ func extractStepShell(step string) string {
 // final executed line IS exactly the govulncheck command and that nothing
 // before it leaves the command in a position to be appended to, backgrounded,
 // expanded, short-circuited, or absorbed.
-func govulncheckRunPropagatesExit(scalar string, shell string) string {
+func govulncheckRunPropagatesExit(scalar string, shell string, expectedCommand string) string {
 	// A non-default shell must be bash with pipefail (a non-pipefail shell lets
 	// a pipe-to-truthy swallow govulncheck's failure). GitHub's `bash` keyword
 	// already runs with `set -eo pipefail`, so the bare value `bash` is safe; a
@@ -996,8 +1076,8 @@ func govulncheckRunPropagatesExit(scalar string, shell string) string {
 	}
 
 	finalLine := strings.TrimSpace(rawLines[finalIndex])
-	if finalLine != govulncheckCommand {
-		return "final executed line must be exactly " + govulncheckCommand + ", got: " + finalLine
+	if finalLine != expectedCommand {
+		return "final executed line must be exactly " + expectedCommand + ", got: " + finalLine
 	}
 
 	// The preceding non-empty line must not leave a dangling continuation or
@@ -1020,7 +1100,7 @@ func govulncheckRunPropagatesExit(scalar string, shell string) string {
 	// for ... do|then, or an unmatched `(`/`{`) that encloses the final command,
 	// and the final line must itself be a bare command (no leading keyword, no
 	// trailing operator/expansion/redirect).
-	if reason := finalLineIsBareCommand(finalLine); reason != "" {
+	if reason := finalLineIsBareCommand(finalLine, expectedCommand); reason != "" {
 		return reason
 	}
 	if reason := noEnclosingCompound(rawLines[:finalIndex]); reason != "" {
@@ -1034,8 +1114,8 @@ func govulncheckRunPropagatesExit(scalar string, shell string) string {
 // Because finalLine has already been asserted equal to govulncheckCommand, this
 // is a defensive restatement that keeps the meta-test honest if the equality
 // check is ever loosened.
-func finalLineIsBareCommand(finalLine string) string {
-	if finalLine != govulncheckCommand {
+func finalLineIsBareCommand(finalLine string, expectedCommand string) string {
+	if finalLine != expectedCommand {
 		return "final line is not the bare govulncheck command: " + finalLine
 	}
 	leadingKeywords := []string{"if ", "while ", "until ", "for ", "case ", "{ ", "( "}
