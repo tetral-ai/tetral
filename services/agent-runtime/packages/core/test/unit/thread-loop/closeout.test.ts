@@ -330,7 +330,14 @@ test("idle finalization fails closed when FinishIdle boundary is unavailable", a
 });
 test("idle finalization retries lost ACKs with the same runtime write id", async () => {
     const loader = new RecordingContextLoader([], { type: "empty" });
+    const session = new ThreadRuntime("sesn_1");
+    session.state.markPersistentContextLoaded();
+    session.state.installThreadTurn({
+        executionRunId: "evt_open_idle_retry",
+        pendingInputMessageIds: [],
+    }, { routes: [] });
     const finishIdleWriteIds: string[] = [];
+    const statesBeforeFinishIdleReceipts: string[] = [];
     const writer: SessionEventWriter = {
         append: async (envelope) => ({
             ok: true,
@@ -343,6 +350,7 @@ test("idle finalization retries lost ACKs with the same runtime write id", async
         },
         finishIdle: async (envelope) => {
             finishIdleWriteIds.push(envelope.durableTurnId);
+            statesBeforeFinishIdleReceipts.push(session.state.threadTurnReduction().state.state);
             if (finishIdleWriteIds.length === 1) {
                 return {
                     ok: false,
@@ -367,10 +375,12 @@ test("idle finalization retries lost ACKs with the same runtime write id", async
     };
     const result = await Effect.runPromise(Effect.gen(function* () {
         const threadLoop = yield* ThreadLoop.Service;
-        return yield* threadLoop.run(new ThreadRuntime("sesn_1"), testRunCustody("evt_open_idle_retry"));
-    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, { runtimeModel: () => undefined, writer }))));
+        return yield* threadLoop.run(session, testRunCustody("evt_open_idle_retry"));
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, { installLoaderState: false, runtimeModel: () => undefined, writer }))));
     expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
     expect(finishIdleWriteIds).toEqual(["evt_open_idle_retry", "evt_open_idle_retry"]);
+    expect(statesBeforeFinishIdleReceipts).toEqual(["ready_to_finish", "ready_to_finish"]);
+    expect(session.state.threadTurnReduction().state).toEqual({ state: "idle" });
 });
 test("idle finalization drains the raw FinishIdle call after its local timeout", async () => {
     const rawFinish = deferred<SessionEventWriterAppendResult>();

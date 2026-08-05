@@ -5141,10 +5141,6 @@ function storeControls(
   };
 }
 
-function nextRuntimeMessageSequence(session: ThreadRuntime): number {
-  return highestMessageSequence(session.state.contextManager.messages()) + 1;
-}
-
 function commitProcessorProjection(session: ThreadRuntime, processor: SessionProcessor): void {
   for (const message of processor.messages()) {
     upsertContextMessage(session, message);

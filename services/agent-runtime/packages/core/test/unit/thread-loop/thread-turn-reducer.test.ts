@@ -695,6 +695,40 @@ describe("Thread-turn reducer", () => {
     });
   });
 
+  test("approval reviewer settles terminal members and later input before completing the review", () => {
+    const terminalPublicMember: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"][number] = {
+      memberKind: "public_tool_use",
+      modelToolCallId: "call_public",
+      toolUseEventId: "event_tool_public",
+      toolName: "Read",
+      terminalResult: { resultEventId: "event_result_public", outcome: "success" },
+    };
+    const terminalInternalRepair: NonNullable<ThreadTurnCheckpoint["request"]>["toolMembers"][number] = {
+      memberKind: "internal_tool_repair",
+      modelToolCallId: "call_repair",
+      toolName: "MissingTool",
+      repairEventId: "event_repair",
+      outcome: "error",
+    };
+    for (const checkpoint of [
+      sealedCheckpoint([terminalPublicMember], "approval_reviewer"),
+      sealedCheckpoint([terminalInternalRepair], "approval_reviewer"),
+      {
+        ...sealedCheckpoint([], "approval_reviewer"),
+        pendingInputMessageIds: ["message_later_reviewer_input"],
+      },
+    ]) {
+      expect(deriveThreadTurnDecision(checkpoint, noRoutes)).toEqual({
+        state: { state: "ready_to_request" },
+        action: { action: "prepare_next_request" },
+      });
+    }
+    expect(deriveThreadTurnDecision(sealedCheckpoint([], "approval_reviewer"), noRoutes)).toEqual({
+      state: { state: "request_sealed", modelRequestId: "request_1" },
+      action: { action: "complete_reviewer", modelRequestId: "request_1" },
+    });
+  });
+
   test("fails closed for orphan results, post-seal Tool Uses, and missing sealed routes", () => {
     expect(() => reduceThreadTurn(openRequest(), {
       fact: "tool_result_committed",

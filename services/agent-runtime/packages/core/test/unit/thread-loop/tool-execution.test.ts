@@ -67,6 +67,7 @@ test(`lost Tool Use acknowledgement retries one write identity and continues aft
     const session = new ThreadRuntime("sesn_tool_use_ack_loss");
     session.state.enqueueAcceptedInput(acceptedInput("rin_tool_use_ack_loss", session.sessionId));
     const toolUseWriteIds: string[] = [];
+    const requests: LLMRequest[] = [];
     let toolExecutions = 0;
     const writer = writerFrom((envelope) => {
         if (envelope.event.type === "agent.tool_use") {
@@ -94,20 +95,28 @@ test(`lost Tool Use acknowledgement retries one write identity and continues aft
     const result = await Effect.runPromise(Effect.gen(function* () {
         return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
-        events: [
-            {
-                type: "tool-call",
-                id: "call-tool-use-ack-loss",
-                toolName: "lookup_ack_loss",
-                input: { query: "durable" },
-                inputPreview: {
-                    value: { query: "durable" },
-                    preview: "{\"query\":\"durable\"}",
-                    truncated: false,
+        llmService: queuedLLMService([
+            [
+                {
+                    type: "tool-call",
+                    id: "call-tool-use-ack-loss",
+                    toolName: "lookup_ack_loss",
+                    input: { query: "durable" },
+                    inputPreview: {
+                        value: { query: "durable" },
+                        preview: "{\"query\":\"durable\"}",
+                        truncated: false,
+                    },
                 },
-            },
-            { type: "finish", finishReason },
-        ],
+                { type: "finish", finishReason },
+            ],
+            [
+                { type: "text-start", id: "text-after-tool" },
+                { type: "text-delta", id: "text-after-tool", text_delta: "continued" },
+                { type: "text-end", id: "text-after-tool" },
+                { type: "finish", finishReason: "stop" },
+            ],
+        ], requests),
         writer,
         providerCallRuntime: {
             systemInstructions: "Tool Use acknowledgement recovery test",
@@ -126,6 +135,8 @@ test(`lost Tool Use acknowledgement retries one write identity and continues aft
     expect(toolUseWriteIds).toHaveLength(2);
     expect(new Set(toolUseWriteIds).size).toBe(1);
     expect(toolExecutions).toBe(1);
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1]?.messages)).toContain("found");
 });
 }
 test("approval reviewer sessions mark provider requests, request-end events, and metrics as reviewer work", async () => {
@@ -1493,6 +1504,68 @@ test("absent cross-family builtins take the durable internal invalid-tool repair
         expect(store.repairs[0]?.toolName).toBe(tc.absentTool);
         expect(order).toContain("store:internal-tool-repair");
     }
+});
+test("mixed internal repair and public Tool Use waits for the public terminal receipt before continuing", async () => {
+    const session = new ThreadRuntime("sesn_mixed_repair_public");
+    const store = new ThreadLoopRuntimeStore([]);
+    const requests: LLMRequest[] = [];
+    const publicToolStarted = deferred<void>();
+    const releasePublicTool = deferred<void>();
+    let publicToolCalls = 0;
+    const run = Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(
+        new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-mixed-repair", 0, "run both tools")] }),
+        {
+            store,
+            llmService: queuedLLMService([
+                [
+                    {
+                        type: "tool-call",
+                        id: "call-invalid-cross-family",
+                        toolName: "exec_command",
+                        input: {},
+                        inputPreview: { value: {}, preview: "{}", truncated: false },
+                    },
+                    {
+                        type: "tool-call",
+                        id: "call-public-read",
+                        toolName: "Read",
+                        input: { file_path: "README.md" },
+                        inputPreview: { value: { file_path: "README.md" }, preview: "{\"file_path\":\"README.md\"}", truncated: false },
+                    },
+                    { type: "finish", finishReason: "tool-calls" },
+                ],
+                [
+                    { type: "text-start", id: "text-after-mixed" },
+                    { type: "text-delta", id: "text-after-mixed", text_delta: "continued after both" },
+                    { type: "text-end", id: "text-after-mixed" },
+                    { type: "finish", finishReason: "stop" },
+                ],
+            ], requests),
+            providerCallRuntime: { systemInstructions: "mixed internal repair and public tool test" },
+            runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
+            runTool: async () => {
+                publicToolCalls += 1;
+                publicToolStarted.resolve();
+                await releasePublicTool.promise;
+                return { type: "completed", output: { text: "public tool result", truncated: false } };
+            },
+        },
+    ))));
+
+    await publicToolStarted.promise;
+    await flushMicrotasks();
+    expect(store.repairs).toHaveLength(1);
+    expect(requests).toHaveLength(1);
+    releasePublicTool.resolve();
+
+    expect(await run).toMatchObject({ type: "completed" });
+    expect(publicToolCalls).toBe(1);
+    expect(requests).toHaveLength(2);
+    const continuation = JSON.stringify(requests[1]?.messages);
+    expect(continuation).toContain("exec_command");
+    expect(continuation).toContain("public tool result");
 });
 test("runtime layer schedules same-target tool calls through ToolScheduler", async () => {
     const session = new ThreadRuntime("sesn_1");

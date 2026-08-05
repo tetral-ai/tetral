@@ -301,6 +301,8 @@ function durableIdleCleanupMessage() {
 
 type ToolRouteDisposition = ThreadToolRouteView["routes"][number]["disposition"];
 type ToolOutcome = Extract<ThreadTurnFact, { readonly fact: "tool_result_committed" }>["outcome"];
+type ColdPendingToolUse = Parameters<typeof extractColdThreadToolRouteView>[0]["pendingToolUses"][number];
+type ColdPendingSandboxExecution = Parameters<typeof extractColdThreadToolRouteView>[0]["pendingSandboxExecutions"][number];
 
 interface DurableToolReference {
     readonly modelRequestId: string;
@@ -317,6 +319,9 @@ class DurableTurnPrefixHarness {
     readonly #messages: DurableRuntimeMessage[] = [];
     readonly #messageLineage: ThreadTurnLoadFacts["messageLineage"][number][] = [];
     readonly #routes = new Map<string, ToolRouteDisposition>();
+    readonly #pendingToolUses = new Map<string, ColdPendingToolUse>();
+    readonly #pendingSandboxExecutions = new Map<string, ColdPendingSandboxExecution>();
+    readonly #toolReferences = new Map<string, DurableToolReference>();
     #hot: ThreadTurnReduction = initializeThreadTurnReduction(
         { pendingInputMessageIds: [] },
         { routes: [] },
@@ -325,6 +330,8 @@ class DurableTurnPrefixHarness {
     #messageSequence = 0;
     #identitySequence = 0;
     #prefixSequence = 0;
+    #coldRouteDifferenceCount = 0;
+    #coldResumeActionCount = 0;
 
     constructor(scenario: string) {
         this.#scenario = scenario;
@@ -332,6 +339,14 @@ class DurableTurnPrefixHarness {
 
     get checkpoint(): ThreadTurnReduction["checkpoint"] {
         return this.#hot.checkpoint;
+    }
+
+    get coldRouteDifferenceCount(): number {
+        return this.#coldRouteDifferenceCount;
+    }
+
+    get coldResumeActionCount(): number {
+        return this.#coldResumeActionCount;
     }
 
     openRun(): void {
@@ -469,6 +484,24 @@ class DurableTurnPrefixHarness {
             toolUse: { modelToolCallId, toolName },
         });
         this.#routes.set(eventId, disposition);
+        if (disposition === "requires_user_action" || disposition === "resume_approval_settlement") {
+            this.#pendingToolUses.set(eventId, {
+                toolUseEventId: eventId,
+                modelRequestId,
+                modelToolCallId,
+                toolName,
+                status: disposition === "requires_user_action" ? "pending" : "resolving",
+                ...(disposition === "resume_approval_settlement" ? { decision: "allow" as const } : {}),
+            });
+        } else {
+        this.#pendingSandboxExecutions.set(eventId, {
+                toolUseEventId: eventId,
+                modelRequestId,
+                modelToolCallId,
+                toolName,
+            });
+        }
+        this.#toolReferences.set(eventId, { modelRequestId, modelToolCallId, toolUseEventId: eventId, toolName, messageId });
         this.#hot = reduceThreadTurn(this.#hot, {
             fact: "tool_use_committed",
             eventId,
@@ -541,6 +574,9 @@ class DurableTurnPrefixHarness {
             toolResult: { toolUseEventId: tool.toolUseEventId, outcome },
         });
         this.#routes.delete(tool.toolUseEventId);
+        this.#pendingToolUses.delete(tool.toolUseEventId);
+        this.#pendingSandboxExecutions.delete(tool.toolUseEventId);
+        this.#toolReferences.delete(tool.toolUseEventId);
         this.#hot = reduceThreadTurn(this.#hot, {
             fact: "tool_result_committed",
             eventId,
@@ -625,6 +661,17 @@ class DurableTurnPrefixHarness {
     }
 
     terminate(errorType = "runtime_pod_lost"): void {
+        const request = this.#hot.checkpoint.request;
+        if (request !== undefined && request.requestEnd === undefined) {
+            this.endRequest({
+                modelRequestId: request.modelRequestId,
+                isError: true,
+                errorKind: errorType,
+            });
+        }
+        for (const tool of [...this.#toolReferences.values()]) {
+            this.commitToolResult(tool, "error");
+        }
         const failureEventId = this.#nextIdentity("failure");
         this.#events.push({
             eventId: failureEventId,
@@ -680,7 +727,7 @@ class DurableTurnPrefixHarness {
 
     #assertConverges(prefix: string): void {
         this.#prefixSequence += 1;
-        const routeView = this.#routeView();
+        const hotRouteView = this.#routeView();
         const coldCheckpoint = extractThreadTurnCheckpoint({
             messages: this.#messages,
             facts: ThreadTurnLoadFactsSchema.parse({
@@ -688,7 +735,24 @@ class DurableTurnPrefixHarness {
                 messageLineage: this.#messageLineage,
             }),
         });
-        const cold = initializeThreadTurnReduction(coldCheckpoint, routeView);
+        const coldRouteView = extractColdThreadToolRouteView({
+            checkpoint: coldCheckpoint,
+            pendingToolUses: [...this.#pendingToolUses.values()],
+            pendingSandboxExecutions: [...this.#pendingSandboxExecutions.values()],
+        });
+        let cold = initializeThreadTurnReduction(coldCheckpoint, coldRouteView);
+        if (JSON.stringify(coldRouteView) !== JSON.stringify(hotRouteView)) {
+            this.#coldRouteDifferenceCount += 1;
+        }
+        if (cold.action.action === "resume_tool_routes") {
+            this.#coldResumeActionCount += 1;
+            const resumed = new Set(cold.action.toolUseEventIds);
+            cold = initializeThreadTurnReduction(coldCheckpoint, {
+                routes: coldRouteView.routes.map((route) => resumed.has(route.toolUseEventId)
+                    ? { ...route, disposition: "hot_execution" as const }
+                    : route),
+            });
+        }
         const label = `${this.#scenario}:${this.#prefixSequence}:${prefix}`;
         expect({ label, value: coldCheckpoint }).toEqual({ label, value: this.#hot.checkpoint });
         expect({ label, value: cold.state }).toEqual({ label, value: this.#hot.state });
@@ -747,6 +811,8 @@ describe("Thread turn cold extraction", () => {
         const finalRequest = trace.startRequest();
         trace.endRequest({ modelRequestId: finalRequest });
         trace.finishIdle({ type: "end_turn" });
+        expect(trace.coldRouteDifferenceCount).toBeGreaterThan(0);
+        expect(trace.coldResumeActionCount).toBeGreaterThan(0);
     });
 
     test("every durable prefix converges through approval and reviewer routes", () => {
@@ -1837,6 +1903,235 @@ describe("Thread turn cold extraction", () => {
             messageLineage: [],
         });
         expect(() => extractThreadTurnCheckpoint({ messages: [], facts })).toThrow("Tool Use cannot follow Request End");
+    });
+    test("fails closed when durable request and tool facts cannot form one checkpoint", () => {
+        const endWithoutStart = ThreadTurnLoadFactsSchema.parse({
+            events: [{
+                eventId: "event_end",
+                eventSequence: 1,
+                type: "span.model_request_end",
+                modelRequestId: "model_request_1",
+                requestEnd: {
+                    requestStartEventId: "event_missing_start",
+                    isError: false,
+                    rescheduled: false,
+                },
+            }],
+            messageLineage: [],
+        });
+        expect(() => extractThreadTurnCheckpoint({
+            messages: [],
+            facts: endWithoutStart,
+        })).toThrow("Request End has no matching Request Start");
+
+        const resultWithoutUse = ThreadTurnLoadFactsSchema.parse({
+            events: [
+                {
+                    eventId: "event_start",
+                    eventSequence: 1,
+                    type: "span.model_request_start",
+                    modelRequestId: "model_request_1",
+                    requestStart: {
+                        requestKind: "agent_provider_request",
+                        contextThroughMessageSequence: 0,
+                    },
+                },
+                {
+                    eventId: "event_orphan_result",
+                    eventSequence: 2,
+                    type: "agent.tool_result",
+                    modelRequestId: "model_request_1",
+                    toolResult: {
+                        toolUseEventId: "event_missing_tool_use",
+                        outcome: "error",
+                    },
+                },
+            ],
+            messageLineage: [],
+        });
+        expect(() => extractThreadTurnCheckpoint({
+            messages: [],
+            facts: resultWithoutUse,
+        })).toThrow("Tool Result has no matching Tool Use");
+
+        const duplicateResultMessage = DurableRuntimeMessageSchema.parse({
+            ...durableToolMessage(),
+            owningEventId: "event_result_1",
+            eventSequence: 4,
+        });
+        const duplicateResults = ThreadTurnLoadFactsSchema.parse({
+            events: [
+                {
+                    eventId: "event_start",
+                    eventSequence: 1,
+                    type: "span.model_request_start",
+                    modelRequestId: "model_request_1",
+                    requestStart: {
+                        requestKind: "agent_provider_request",
+                        contextThroughMessageSequence: 0,
+                    },
+                },
+                {
+                    eventId: "event_tool_use",
+                    eventSequence: 2,
+                    type: "agent.tool_use",
+                    modelRequestId: "model_request_1",
+                    toolUse: { modelToolCallId: "tool_call_1", toolName: "Read" },
+                },
+                {
+                    eventId: "event_end",
+                    eventSequence: 3,
+                    type: "span.model_request_end",
+                    modelRequestId: "model_request_1",
+                    requestEnd: {
+                        requestStartEventId: "event_start",
+                        isError: false,
+                        rescheduled: false,
+                    },
+                },
+                {
+                    eventId: "event_result_1",
+                    eventSequence: 4,
+                    type: "agent.tool_result",
+                    modelRequestId: "model_request_1",
+                    toolResult: { toolUseEventId: "event_tool_use", outcome: "success" },
+                },
+                {
+                    eventId: "event_result_2",
+                    eventSequence: 5,
+                    type: "agent.tool_result",
+                    modelRequestId: "model_request_1",
+                    toolResult: { toolUseEventId: "event_tool_use", outcome: "error" },
+                },
+            ],
+            messageLineage: [{
+                messageId: duplicateResultMessage.id,
+                messageSequence: duplicateResultMessage.sequence,
+                owningEventId: duplicateResultMessage.owningEventId,
+                modelRequestId: "model_request_1",
+                entries: [
+                    {
+                        lineageKind: "declaration_receipt",
+                        operationKind: "write_event",
+                        sourceKind: "agent.tool_use",
+                        sourceId: "write_tool_use",
+                        eventId: "event_tool_use",
+                        eventSequence: 2,
+                        disposition: "created",
+                    },
+                    {
+                        lineageKind: "declaration_receipt",
+                        operationKind: "write_event",
+                        sourceKind: "agent.tool_result",
+                        sourceId: "write_result_1",
+                        eventId: "event_result_1",
+                        eventSequence: 4,
+                        disposition: "updated",
+                    },
+                ],
+            }],
+        });
+        expect(() => extractThreadTurnCheckpoint({
+            messages: [duplicateResultMessage],
+            facts: duplicateResults,
+        })).toThrow("Tool Use has duplicate terminal results");
+
+        const publicMessage = DurableRuntimeMessageSchema.parse({
+            ...durableOpenToolMessage(),
+            sequence: 1,
+            owningEventId: "event_tool_use",
+            eventSequence: 2,
+        });
+        const repairMessage = DurableRuntimeMessageSchema.parse({
+            ...durableInternalRepairMessage(),
+            sequence: 2,
+            owningEventId: "event_repair",
+            eventSequence: 3,
+            parts: durableInternalRepairMessage().parts.map((part) => ({
+                ...part,
+                toolCallId: "tool_call_1",
+            })),
+        });
+        const duplicateCallId = ThreadTurnLoadFactsSchema.parse({
+            events: [
+                {
+                    eventId: "event_start",
+                    eventSequence: 1,
+                    type: "span.model_request_start",
+                    modelRequestId: "model_request_1",
+                    requestStart: {
+                        requestKind: "agent_provider_request",
+                        contextThroughMessageSequence: 0,
+                    },
+                },
+                {
+                    eventId: "event_tool_use",
+                    eventSequence: 2,
+                    type: "agent.tool_use",
+                    modelRequestId: "model_request_1",
+                    toolUse: { modelToolCallId: "tool_call_1", toolName: "Read" },
+                },
+                {
+                    eventId: "event_repair",
+                    eventSequence: 3,
+                    type: "agent.tool_result",
+                    modelRequestId: "model_request_1",
+                    toolResult: {
+                        modelToolCallId: "tool_call_1",
+                        toolName: "unknown_tool",
+                        repairKind: "invalid_tool",
+                        outcome: "error",
+                    },
+                },
+                {
+                    eventId: "event_end",
+                    eventSequence: 4,
+                    type: "span.model_request_end",
+                    modelRequestId: "model_request_1",
+                    requestEnd: {
+                        requestStartEventId: "event_start",
+                        isError: false,
+                        rescheduled: false,
+                    },
+                },
+            ],
+            messageLineage: [
+                {
+                    messageId: publicMessage.id,
+                    messageSequence: publicMessage.sequence,
+                    owningEventId: publicMessage.owningEventId,
+                    modelRequestId: "model_request_1",
+                    entries: [{
+                        lineageKind: "declaration_receipt",
+                        operationKind: "write_event",
+                        sourceKind: "agent.tool_use",
+                        sourceId: "write_tool_use",
+                        eventId: "event_tool_use",
+                        eventSequence: 2,
+                        disposition: "created",
+                    }],
+                },
+                {
+                    messageId: repairMessage.id,
+                    messageSequence: repairMessage.sequence,
+                    owningEventId: repairMessage.owningEventId,
+                    modelRequestId: "model_request_1",
+                    entries: [{
+                        lineageKind: "declaration_receipt",
+                        operationKind: "commit_internal_tool_repair",
+                        sourceKind: "internal_tool_repair",
+                        sourceId: "repair_1",
+                        eventId: "event_repair",
+                        eventSequence: 3,
+                        disposition: "created",
+                    }],
+                },
+            ],
+        });
+        expect(() => extractThreadTurnCheckpoint({
+            messages: [publicMessage, repairMessage],
+            facts: duplicateCallId,
+        })).toThrow("modelToolCallId is duplicated within the request");
     });
     test("joins each cold non-terminal Tool Use to exactly one durable route", () => {
         const checkpoint = {

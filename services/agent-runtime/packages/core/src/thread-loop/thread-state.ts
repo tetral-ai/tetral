@@ -952,13 +952,6 @@ function providerRequestAttachmentIdentity(attachment: ProviderRequestAttachment
   return JSON.stringify(["invalid", attachment]);
 }
 
-function cloneRuntimeMessage(message: RuntimeMessage): RuntimeMessage {
-  return {
-    ...message,
-    parts: message.parts.map((part) => ({ ...part })),
-  };
-}
-
 function sameAcceptedInput(left: RuntimeAcceptedInputState, right: RuntimeAcceptedInputState): boolean {
   // Request ids and process-local commit callbacks do not change a durable input's identity.
   return JSON.stringify({ ...left, requestId: "" }) === JSON.stringify({ ...right, requestId: "" });
