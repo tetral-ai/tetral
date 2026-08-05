@@ -93,8 +93,10 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
     health: state.health,
     ready: state.ready,
     start: async () => {
+      let causeCategory: "dependency_readiness" | "listener" = "dependency_readiness";
       try {
         await options.bootstrap?.();
+        causeCategory = "listener";
         grpcServer = createGatewayGrpcServer(service);
         boundGrpcPort = await grpcServer.bind(options.config.grpcBindAddress);
         httpServer = createGatewayHttpServer(options.config.httpBindAddress, state);
@@ -102,7 +104,11 @@ export function createProviderGatewayApp(options: ProviderGatewayAppOptions): Pr
         logWorkloadStarted(options.logger);
       } catch {
         readyFlag = false;
-        options.logger.error(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed" }));
+        options.logger.error(startupFailureLogRecord({
+          kind: "startup_error",
+          message: "gateway service startup failed",
+          causeCategory,
+        }));
         throw new Error("gateway service startup failed");
       }
       if (boundGrpcPort === undefined || httpServer === undefined) {

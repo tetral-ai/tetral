@@ -20,12 +20,16 @@ import (
 	"github.com/tetral-ai/tetral/internal/sandbox/helper/protocol"
 )
 
-func (e *DaytonaHelperExecutor) runPreparedToolForTest(ctx context.Context, invocation ToolInvocation) (ToolExecution, error) {
+func (e *DaytonaHelperExecutor) runToolLifecycleForTest(ctx context.Context, invocation ToolInvocation) (ToolExecution, error) {
 	prepared, err := e.PrepareTool(ctx, invocation)
 	if err != nil {
 		return ToolExecution{}, err
 	}
-	return e.ExecutePreparedTool(ctx, prepared)
+	result, err := e.SubmitPreparedTool(ctx, prepared)
+	for err == nil && result.ForegroundObservation != nil {
+		result, err = e.ObserveForegroundTool(ctx, *result.ForegroundObservation)
+	}
+	return result, err
 }
 
 func TestDaytonaTransientRetryIsBoundedAndStatusScoped(t *testing.T) {
@@ -85,7 +89,7 @@ func TestDaytonaHelperUploadRetryReplaysTheCompletePayload(t *testing.T) {
 	}
 	executor := NewDaytonaHelperExecutorForClient(client)
 
-	result, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+	result, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 		ToolUseEventID: "evt_retry_upload",
 		ToolName:       "Read",
@@ -111,7 +115,7 @@ func TestDaytonaHelperDoesNotReplayThePayloadConsumingCommand(t *testing.T) {
 	client.process.errors = []error{nil, serverErr}
 	executor := NewDaytonaHelperExecutorForClient(client)
 
-	_, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+	_, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 		ToolUseEventID: "evt_single_execute",
 		ToolName:       "Read",
@@ -147,8 +151,8 @@ func TestDaytonaHelperPreparationDoesNotInvokeUserTool(t *testing.T) {
 	if len(client.process.commands) != 1 || strings.Contains(client.process.commands[0], "--payload") {
 		t.Fatalf("daytona commands = %v; want only permission freeze", client.process.commands)
 	}
-	if _, err := executor.ExecutePreparedTool(context.Background(), prepared); err != nil {
-		t.Fatalf("ExecutePreparedTool: %v", err)
+	if _, err := executor.SubmitPreparedTool(context.Background(), prepared); err != nil {
+		t.Fatalf("SubmitPreparedTool: %v", err)
 	}
 	if len(client.process.commands) != 2 || !strings.Contains(client.process.commands[1], "--payload") {
 		t.Fatalf("commands after execution = %v; want one user-facing helper invocation", client.process.commands)
@@ -172,8 +176,8 @@ func TestDaytonaPreparedToolDoesNotReinspectProviderBeforeSubmission(t *testing.
 		t.Fatalf("PrepareTool: %v", err)
 	}
 	client.err = errors.New("provider inspection unavailable after authorization")
-	if _, err := executor.ExecutePreparedTool(context.Background(), prepared); err != nil {
-		t.Fatalf("ExecutePreparedTool performed a second provider inspection: %v", err)
+	if _, err := executor.SubmitPreparedTool(context.Background(), prepared); err != nil {
+		t.Fatalf("SubmitPreparedTool performed a second provider inspection: %v", err)
 	}
 	if len(client.process.commands) != 2 || !strings.Contains(client.process.commands[1], "--payload") {
 		t.Fatalf("commands after execution = %v; want exactly one prepared user command", client.process.commands)
@@ -351,7 +355,7 @@ func TestDaytonaHelperExecutorReturnsHelperFailureForNonAuthoritativeEnvelope(t 
 			client.process.results = []string{"", tc.stdout}
 			executor := NewDaytonaHelperExecutorForClient(client)
 
-			_, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+			_, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 				Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 				ToolUseEventID: "evt_read",
 				ToolName:       "Read",
@@ -453,7 +457,7 @@ func TestDaytonaRunToolReturnsUnsupportedArgumentWithoutHelperExecution(t *testi
 	client := newRecordingMemoryProjectionClient()
 	executor := NewDaytonaHelperExecutorForClient(client)
 
-	result, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+	result, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 		ToolUseEventID: "evt_exec",
 		ToolName:       "exec_command",
@@ -581,61 +585,6 @@ func TestHelperRunToolInputStrictlyRejectsInvalidBashFieldValues(t *testing.T) {
 	}
 }
 
-func TestDaytonaRunToolPollsLongForegroundBashToTerminal(t *testing.T) {
-	client := newRecordingMemoryProjectionClient()
-	client.process.results = []string{
-		"",
-		`{"schema_version":1,"tool":"exec","status":"running","truncated":false,"error":null,"result":{"task_id":"evt_bash"}}`,
-		"",
-		`{"schema_version":1,"tool":"poll","status":"success","truncated":false,"error":null,"result":{"exit_code":0,"stdout":{"text":"done","total_bytes":4,"total_lines":0,"returned_bytes":4,"truncated":false},"stderr":{"text":"","total_bytes":0,"total_lines":0,"returned_bytes":0,"truncated":false}}}`,
-	}
-	executor := NewDaytonaHelperExecutorForClient(client)
-
-	result, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
-		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
-		ToolUseEventID: "evt_bash",
-		ToolName:       "Bash",
-		InputJSON:      `{"command":"sleep 120","timeout":120000}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool long Bash: %v", err)
-	}
-	if result.BackgroundTask != nil {
-		t.Fatalf("background task = %+v; want foreground composition to return terminal result", result.BackgroundTask)
-	}
-	if !strings.Contains(result.ResultJSON, `"status":"success"`) || !strings.Contains(result.ResultJSON, `"text":"done"`) {
-		t.Fatalf("result = %s; want terminal poll result", result.ResultJSON)
-	}
-	if len(client.fileSystem.uploads) != 2 {
-		t.Fatalf("uploads = %d; want exec payload plus poll payload", len(client.fileSystem.uploads))
-	}
-	execPayload := client.fileSystem.uploads[0].body
-	for _, required := range []string{
-		`"tool":"exec"`,
-		`"wait_ms":50000`,
-		`"on_wait_expiry":"detach"`,
-		`"task_lifetime_ms":120000`,
-		`"task_id":"evt_bash"`,
-	} {
-		if !strings.Contains(execPayload, required) {
-			t.Fatalf("exec payload missing %s in %s", required, execPayload)
-		}
-	}
-	pollPayload := client.fileSystem.uploads[1].body
-	for _, required := range []string{
-		`"tool":"poll"`,
-		`"wait_ms":50000`,
-		`"task_id":"evt_bash"`,
-	} {
-		if !strings.Contains(pollPayload, required) {
-			t.Fatalf("poll payload missing %s in %s", required, pollPayload)
-		}
-	}
-	if !strings.Contains(strings.Join(client.process.commands, "\n"), shellQuote(helperPath)+" "+shellQuote("poll")) {
-		t.Fatalf("commands = %v; want helper poll after detached exec", client.process.commands)
-	}
-}
-
 func TestDaytonaPreparedForegroundSubmissionExposesDurableObservationState(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	client.process.results = []string{
@@ -671,84 +620,6 @@ func TestDaytonaPreparedForegroundSubmissionExposesDurableObservationState(t *te
 	}
 }
 
-func TestDaytonaRunToolCancelsHiddenForegroundBashTaskWhenPollContextCancels(t *testing.T) {
-	client := newRecordingMemoryProjectionClient()
-	ctx, cancel := context.WithCancel(context.Background())
-	client.process.results = []string{
-		"",
-		`{"schema_version":1,"tool":"exec","status":"running","truncated":false,"error":null,"result":{"task_id":"evt_bash"}}`,
-		"",
-		`{"schema_version":1,"tool":"cancel","status":"success","truncated":false,"error":null,"result":{"task_id":"evt_bash","signal":"TERM","cancelled":true}}`,
-	}
-	client.process.afterExecute = func(index int, command string) {
-		if index == 1 && strings.Contains(command, shellQuote(helperPath)+" "+shellQuote("exec")) {
-			cancel()
-		}
-	}
-	executor := NewDaytonaHelperExecutorForClient(client)
-
-	_, err := executor.runPreparedToolForTest(ctx, ToolInvocation{
-		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
-		ToolUseEventID: "evt_bash",
-		ToolName:       "Bash",
-		InputJSON:      `{"command":"sleep 120","timeout":120000}`,
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunTool cancelled long Bash error = %v; want context.Canceled", err)
-	}
-	if len(client.fileSystem.uploads) != 2 {
-		t.Fatalf("uploads = %d; want exec payload plus best-effort cancel payload", len(client.fileSystem.uploads))
-	}
-	cancelPayload := client.fileSystem.uploads[1].body
-	for _, required := range []string{
-		`"tool":"cancel"`,
-		`"task_id":"evt_bash"`,
-	} {
-		if !strings.Contains(cancelPayload, required) {
-			t.Fatalf("cancel payload missing %s in %s", required, cancelPayload)
-		}
-	}
-	if !strings.Contains(strings.Join(client.process.commands, "\n"), shellQuote(helperPath)+" "+shellQuote("cancel")) {
-		t.Fatalf("commands = %v; want helper cancel after poll context cancellation", client.process.commands)
-	}
-}
-
-func TestDaytonaRunToolCancelsHiddenForegroundTaskWhenBlockedPollReturnsContextError(t *testing.T) {
-	client := newRecordingMemoryProjectionClient()
-	ctx, cancel := context.WithCancel(context.Background())
-	client.process.results = []string{
-		"",
-		`{"schema_version":1,"tool":"exec","status":"running","truncated":false,"error":null,"result":{"task_id":"evt_bash_blocked_poll"}}`,
-		"",
-		"",
-		"",
-		`{"schema_version":1,"tool":"cancel","status":"success","truncated":false,"error":null,"result":{"task_id":"evt_bash_blocked_poll","signal":"TERM","cancelled":true}}`,
-	}
-	client.process.errors = []error{nil, nil, nil, context.Canceled}
-	client.process.afterExecute = func(index int, command string) {
-		if index == 3 && strings.Contains(command, shellQuote(helperPath)+" "+shellQuote("poll")) {
-			cancel()
-		}
-	}
-	executor := NewDaytonaHelperExecutorForClient(client)
-
-	_, err := executor.runPreparedToolForTest(ctx, ToolInvocation{
-		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
-		ToolUseEventID: "evt_bash_blocked_poll",
-		ToolName:       "Bash",
-		InputJSON:      `{"command":"sleep 120","timeout":120000}`,
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunTool blocked-poll cancellation error = %v; want context.Canceled", err)
-	}
-	if len(client.fileSystem.uploads) != 3 {
-		t.Fatalf("uploads = %d; want exec, poll, and best-effort cancel payloads", len(client.fileSystem.uploads))
-	}
-	if cancelPayload := client.fileSystem.uploads[2].body; !strings.Contains(cancelPayload, `"tool":"cancel"`) || !strings.Contains(cancelPayload, `"task_id":"evt_bash_blocked_poll"`) {
-		t.Fatalf("cancel payload = %s; want hidden task cancellation", cancelPayload)
-	}
-}
-
 func TestDaytonaRunToolAggregatesAllForegroundDetachSnapshotsWithBoundedHeadAndLatestTail(t *testing.T) {
 	client := newRecordingMemoryProjectionClient()
 	initial := strings.Repeat("a", 30000)
@@ -764,7 +635,7 @@ func TestDaytonaRunToolAggregatesAllForegroundDetachSnapshotsWithBoundedHeadAndL
 	}
 	executor := NewDaytonaHelperExecutorForClient(client)
 
-	result, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+	result, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 		ToolUseEventID: "evt_bash_aggregate",
 		ToolName:       "Bash",
@@ -818,69 +689,6 @@ func TestForegroundStreamAccumulatorBoundsInitialHeadAndLatestTailByLines(t *tes
 	}
 	if strings.Contains(got.Text, "middle") {
 		t.Fatal("line-bounded snapshot retained intermediate output instead of the latest tail")
-	}
-}
-
-func TestDaytonaRunToolCancelsAfterNonContextForegroundPollFailure(t *testing.T) {
-	client := newRecordingMemoryProjectionClient()
-	pollErr := errors.New("poll transport failed")
-	client.process.results = []string{
-		"",
-		testHelperCommandEnvelope(t, "exec", "running", "evt_bash_poll_failure", nil, "started\n", 8),
-		"",
-		"",
-		"",
-		`{"schema_version":1,"tool":"cancel","status":"success","truncated":false,"error":null,"result":{"task_id":"evt_bash_poll_failure","signal":"TERM","cancelled":true}}`,
-	}
-	client.process.errors = []error{nil, nil, nil, pollErr}
-	executor := NewDaytonaHelperExecutorForClient(client)
-
-	_, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
-		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
-		ToolUseEventID: "evt_bash_poll_failure",
-		ToolName:       "Bash",
-		InputJSON:      `{"command":"sleep 120","timeout":120000}`,
-	})
-	if !errors.Is(err, pollErr) {
-		t.Fatalf("RunTool poll failure error = %v; want original poll error", err)
-	}
-	if len(client.fileSystem.uploads) != 3 || !strings.Contains(client.fileSystem.uploads[2].body, `"tool":"cancel"`) {
-		t.Fatalf("uploads = %+v; want exec, failed poll, and independent cancel attempt", client.fileSystem.uploads)
-	}
-}
-
-func TestDaytonaRunToolReturnsRecoveryTaskWhenForegroundCancelCannotBeConfirmed(t *testing.T) {
-	client := newRecordingMemoryProjectionClient()
-	pollErr := errors.New("poll transport failed")
-	cancelErr := errors.New("cancel transport failed")
-	client.process.results = []string{
-		"",
-		testHelperCommandEnvelope(t, "exec", "running", "evt_bash_recovery", nil, "started\n", 8),
-	}
-	client.process.errors = []error{nil, nil, nil, pollErr, nil, cancelErr}
-	executor := NewDaytonaHelperExecutorForClient(client)
-
-	result, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
-		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
-		ToolUseEventID: "evt_bash_recovery",
-		ToolName:       "Bash",
-		InputJSON:      `{"command":"sleep 120","timeout":120000}`,
-	})
-	if err != nil {
-		t.Fatalf("RunTool unconfirmed cancel returned error instead of recovery task: %v", err)
-	}
-	if result.BackgroundTask == nil || result.BackgroundTask.TaskID != "evt_bash_recovery" ||
-		result.BackgroundTask.SourceToolUseEventID != "evt_bash_recovery" ||
-		result.BackgroundTask.ProviderSessionID != "provider_sandbox" ||
-		result.BackgroundTask.ProviderCommandID != "evt_bash_recovery" ||
-		result.BackgroundTask.ProviderCommandMetadataJSON != `{}` {
-		t.Fatalf("background task = %+v; want complete authorized recovery identity", result.BackgroundTask)
-	}
-	if !strings.Contains(result.ResultJSON, `"status":"running"`) || !strings.Contains(result.ResultJSON, `"text":"started\n"`) {
-		t.Fatalf("recovery result = %s; want latest aggregate running snapshot", result.ResultJSON)
-	}
-	if len(client.fileSystem.uploads) != 3 || !strings.Contains(client.fileSystem.uploads[2].body, `"tool":"cancel"`) {
-		t.Fatalf("uploads = %+v; want cancel attempted before recovery metadata is returned", client.fileSystem.uploads)
 	}
 }
 
@@ -1089,7 +897,7 @@ func TestDaytonaHelperExecutorRejectsInvalidPayloadIDBeforeSandboxFilesystem(t *
 	client := newRecordingMemoryProjectionClient()
 	executor := NewDaytonaHelperExecutorForClient(client)
 
-	_, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+	_, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 		ToolUseEventID: "../escape",
 		ToolName:       "Read",
@@ -1108,7 +916,7 @@ func TestDaytonaHelperExecutorFailsBeforeHelperWhenPayloadPermissionCommandFails
 	client.process.exitCodes = []int{7}
 	executor := NewDaytonaHelperExecutorForClient(client)
 
-	_, err := executor.runPreparedToolForTest(context.Background(), ToolInvocation{
+	_, err := executor.runToolLifecycleForTest(context.Background(), ToolInvocation{
 		Target:         ToolTarget{ProviderSandboxID: "provider_sandbox"},
 		ToolUseEventID: "evt_read",
 		ToolName:       "Read",

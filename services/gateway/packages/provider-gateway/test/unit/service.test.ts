@@ -69,7 +69,7 @@ describe("ProviderGatewayServiceShell", () => {
     expect(pool.selectCalls).toBe(0);
   });
 
-  test("invalid requests log bounded classification without unvalidated identity fields", async () => {
+  test("invalid requests log each independently bounded identity and validation class", async () => {
     const hostileIdentity = `https://example.invalid/${"x".repeat(300)}`;
     const logs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
@@ -86,13 +86,16 @@ describe("ProviderGatewayServiceShell", () => {
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
-        "error.class": "grpc_status",
-        "error.code": "3",
+        "error.class": "request_validation",
+        "error.code": "invalid_identifier",
+        "validation.member": "workspace_id",
+        "session.id": "sesn_1",
+        "thread.id": "thrd_1",
+        "request.id": "req_1",
+        "provider.request.id": "mreq_1",
       }),
     ]);
     expect(logs[0]).not.toHaveProperty("workspace.id");
-    expect(logs[0]).not.toHaveProperty("request.id");
-    expect(logs[0]).not.toHaveProperty("provider.request.id");
   });
 
   test("valid ProviderRequest streams catalog-gated provider-unavailable terminal event", async () => {

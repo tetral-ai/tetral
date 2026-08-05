@@ -105,15 +105,23 @@ export class RuntimePodLifecycle {
       this.accepting = false;
       return;
     }
+    let causeCategory: "dependency_readiness" | "listener" = "dependency_readiness";
     try {
       await this.options.bootstrap.runtime();
       await this.options.bootstrap.core();
+      causeCategory = "listener";
       await this.options.bootstrap.grpc();
+      causeCategory = "dependency_readiness";
       await this.options.bootstrap.authClient();
       this.readyFlag = true;
       this.accepting = true;
     } catch (error) {
-      this.options.logger.error(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed", cause: error }));
+      this.options.logger.error(startupFailureLogRecord({
+        kind: "startup_error",
+        message: "runtime pod startup failed",
+        cause: error,
+        causeCategory,
+      }));
       this.readyFlag = false;
       this.accepting = false;
     }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	apiclient "github.com/daytonaio/daytona/libs/api-client-go"
@@ -39,11 +40,13 @@ const (
 )
 
 type ProviderOutcome[T any] struct {
-	Value          T
-	EffectBoundary ProviderEffectBoundary
-	Disposition    ProviderDisposition
-	ErrorKind      string
-	SafeMessage    string
+	Value               T
+	EffectBoundary      ProviderEffectBoundary
+	Disposition         ProviderDisposition
+	ErrorKind           string
+	SafeMessage         string
+	ProviderSafeMessage string
+	ProviderStatusCode  int
 }
 
 func (o ProviderOutcome[T]) Failed() bool {
@@ -190,6 +193,7 @@ type DaytonaAdapter struct {
 	Resources DaytonaResourceMaterialization
 	Artifacts sandbox.ArtifactBuilder
 	BlobStore blob.BlobStore
+	Logger    *slog.Logger
 }
 
 func (a *DaytonaAdapter) validateAlphaCapabilities() error {
@@ -226,18 +230,21 @@ func (a *DaytonaAdapter) BuildEnvironmentArtifact(ctx context.Context, request s
 	if a == nil || a.Artifacts == nil {
 		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_configuration_invalid", "daytona artifact builder is unavailable")
 	}
-	result, err := a.Artifacts.BuildArtifact(ctx, request)
-	if err != nil {
-		boundary := ProviderSubmitted
-		if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
-			boundary = ProviderProvedNotStarted
+	identity := providerOperationIdentity{workspaceID: string(request.WorkspaceID), environmentID: request.EnvironmentID}
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.build_artifact", identity, func() ProviderOutcome[sandbox.BuildArtifactResult] {
+		result, err := a.Artifacts.BuildArtifact(ctx, request)
+		if err != nil {
+			boundary := ProviderSubmitted
+			if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
+				boundary = ProviderProvedNotStarted
+			}
+			return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary)
 		}
-		return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary)
-	}
-	if strings.TrimSpace(result.ProviderArtifactRef) == "" {
-		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no provider reference")
-	}
-	return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}
+		if strings.TrimSpace(result.ProviderArtifactRef) == "" {
+			return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no provider reference")
+		}
+		return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}
+	})
 }
 
 type DaytonaSandboxResolver interface {
@@ -246,7 +253,6 @@ type DaytonaSandboxResolver interface {
 
 type DaytonaToolExecutor interface {
 	PrepareTool(context.Context, sandboxdriver.ToolInvocation) (sandboxdriver.PreparedToolExecution, error)
-	ExecutePreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error)
 	SubmitPreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error)
 	ObserveForegroundTool(context.Context, sandboxdriver.ForegroundCommandObservation) (sandboxdriver.ToolExecution, error)
 	ReadCommandResult(context.Context, sandboxdriver.CommandReference) (sandboxdriver.CommandResult, error)
@@ -258,42 +264,60 @@ func (a *DaytonaAdapter) PollBackground(ctx context.Context, reference sandboxdr
 	if a == nil || a.Tools == nil {
 		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_configuration_invalid", "daytona background command adapter is unavailable")
 	}
-	result, err := a.Tools.ReadCommandResult(ctx, reference)
-	if err != nil {
-		var helperFailure *sandboxdriver.HelperFailureError
-		if errors.As(err, &helperFailure) {
-			return ProviderOutcome[sandboxdriver.CommandResult]{
-				EffectBoundary: ProviderProvedNotStarted,
-				Disposition:    ProviderRetryable,
-				ErrorKind:      "provider_observation_unavailable",
-				SafeMessage:    "sandbox task observation is temporarily unavailable",
+	identity := providerIdentityForTool(
+		reference.Target.ProviderSandboxID, reference.Target.WorkspaceID, reference.Target.SessionID,
+		reference.Target.SessionThreadID, reference.ToolUseEventID,
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.poll_background", identity, func() ProviderOutcome[sandboxdriver.CommandResult] {
+		result, err := a.Tools.ReadCommandResult(ctx, reference)
+		if err != nil {
+			var helperFailure *sandboxdriver.HelperFailureError
+			if errors.As(err, &helperFailure) {
+				return ProviderOutcome[sandboxdriver.CommandResult]{
+					EffectBoundary: ProviderProvedNotStarted,
+					Disposition:    ProviderRetryable,
+					ErrorKind:      "provider_observation_unavailable",
+					SafeMessage:    "sandbox task observation is temporarily unavailable",
+				}
 			}
+			return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderProvedNotStarted)
 		}
-		return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderProvedNotStarted)
-	}
-	return normalizeBackgroundCommandResult(result)
+		return normalizeBackgroundCommandResult(result)
+	})
 }
 
 func (a *DaytonaAdapter) SendBackgroundInput(ctx context.Context, input sandboxdriver.CommandInput) ProviderOutcome[sandboxdriver.CommandResult] {
 	if a == nil || a.Tools == nil {
 		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_configuration_invalid", "daytona background command adapter is unavailable")
 	}
-	result, err := a.Tools.SendCommandInput(ctx, input)
-	if err != nil {
-		return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderOutcomeUnknown)
-	}
-	return normalizeBackgroundCommandResult(result)
+	identity := providerIdentityForTool(
+		input.Target.ProviderSandboxID, input.Target.WorkspaceID, input.Target.SessionID,
+		input.Target.SessionThreadID, input.ToolUseEventID,
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.send_background_input", identity, func() ProviderOutcome[sandboxdriver.CommandResult] {
+		result, err := a.Tools.SendCommandInput(ctx, input)
+		if err != nil {
+			return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderOutcomeUnknown)
+		}
+		return normalizeBackgroundCommandResult(result)
+	})
 }
 
 func (a *DaytonaAdapter) CancelBackground(ctx context.Context, cancel sandboxdriver.CommandCancel) ProviderOutcome[sandboxdriver.CommandResult] {
 	if a == nil || a.Tools == nil {
 		return terminalProviderFailure[sandboxdriver.CommandResult]("provider_configuration_invalid", "daytona background command adapter is unavailable")
 	}
-	result, err := a.Tools.CancelCommand(ctx, cancel)
-	if err != nil {
-		return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderOutcomeUnknown)
-	}
-	return normalizeBackgroundCommandResult(result)
+	identity := providerIdentityForTool(
+		cancel.Target.ProviderSandboxID, cancel.Target.WorkspaceID, cancel.Target.SessionID,
+		cancel.Target.SessionThreadID, cancel.ToolUseEventID,
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.cancel_background", identity, func() ProviderOutcome[sandboxdriver.CommandResult] {
+		result, err := a.Tools.CancelCommand(ctx, cancel)
+		if err != nil {
+			return outcomeFromProviderError[sandboxdriver.CommandResult](err, ProviderOutcomeUnknown)
+		}
+		return normalizeBackgroundCommandResult(result)
+	})
 }
 
 func normalizeBackgroundCommandResult(result sandboxdriver.CommandResult) ProviderOutcome[sandboxdriver.CommandResult] {
@@ -311,7 +335,12 @@ func (a *DaytonaAdapter) RefreshMemoryProjection(ctx context.Context, refresh sa
 	if !ok {
 		return terminalProviderFailure[struct{}]("provider_configuration_invalid", "daytona memory projection adapter is unavailable")
 	}
-	if err := refresher.RefreshMemoryProjection(ctx, refresh); err != nil {
+	if err := observeProviderAction(ctx, a.Logger, "sandbox.provider.refresh_memory_projection", providerIdentityForTool(
+		refresh.Target.ProviderSandboxID, refresh.Target.WorkspaceID, refresh.Target.SessionID,
+		refresh.Target.SessionThreadID, "",
+	), func() error {
+		return refresher.RefreshMemoryProjection(ctx, refresh)
+	}); err != nil {
 		boundary := ProviderOutcomeUnknown
 		if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
 			boundary = ProviderProvedNotStarted
@@ -329,19 +358,24 @@ func (a *DaytonaAdapter) CaptureOutputs(ctx context.Context, target sandboxdrive
 	if !ok {
 		return terminalProviderFailure[sandboxdriver.OutputCaptureScan]("provider_configuration_invalid", "daytona output capture adapter is unavailable")
 	}
-	scan, err := capturer.CaptureOutputs(ctx, target)
-	if err == nil {
-		return ProviderOutcome[sandboxdriver.OutputCaptureScan]{Value: scan}
-	}
-	var captureErr *sandboxdriver.OutputCaptureEntryError
-	if errors.As(err, &captureErr) {
-		kind := strings.TrimSpace(captureErr.Kind)
-		if kind == "" {
-			kind = "capture_failed"
+	identity := providerIdentityForTool(
+		target.ProviderSandboxID, target.WorkspaceID, target.SessionID, target.SessionThreadID, "",
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.capture_outputs", identity, func() ProviderOutcome[sandboxdriver.OutputCaptureScan] {
+		scan, err := capturer.CaptureOutputs(ctx, target)
+		if err == nil {
+			return ProviderOutcome[sandboxdriver.OutputCaptureScan]{Value: scan}
 		}
-		return terminalProviderFailure[sandboxdriver.OutputCaptureScan]("output_capture_scan_"+kind, captureErr.Message)
-	}
-	return outcomeFromProviderError[sandboxdriver.OutputCaptureScan](err, ProviderProvedNotStarted)
+		var captureErr *sandboxdriver.OutputCaptureEntryError
+		if errors.As(err, &captureErr) {
+			kind := strings.TrimSpace(captureErr.Kind)
+			if kind == "" {
+				kind = "capture_failed"
+			}
+			return terminalProviderFailure[sandboxdriver.OutputCaptureScan]("output_capture_scan_"+kind, captureErr.Message)
+		}
+		return outcomeFromProviderError[sandboxdriver.OutputCaptureScan](err, ProviderProvedNotStarted)
+	})
 }
 
 // DaytonaResourceMaterialization owns Daytona-specific credentials, mounts,
@@ -355,7 +389,11 @@ func (a *DaytonaAdapter) ResolveActivation(ctx context.Context, request Activati
 	if a == nil || a.Resolver == nil || request.StableName == "" || len(request.Labels) == 0 {
 		return terminalProviderFailure[ActivationResolution]("provider_configuration_invalid", "daytona activation resolution is unavailable")
 	}
-	handle, found, err := a.Resolver.ResolveSandbox(ctx, request.StableName, request.Labels)
+	handle, found, err := observeProviderLookup(ctx, a.Logger, "sandbox.provider.resolve_activation", providerOperationIdentity{
+		providerResourceID: request.StableName,
+	}, func() (sandbox.ProviderHandle, bool, error) {
+		return a.Resolver.ResolveSandbox(ctx, request.StableName, request.Labels)
+	})
 	if err != nil {
 		return outcomeFromProviderError[ActivationResolution](err, ProviderProvedNotStarted)
 	}
@@ -366,51 +404,57 @@ func (a *DaytonaAdapter) InspectForExecution(ctx context.Context, providerResour
 	if a == nil || a.Lifecycle == nil || providerResourceID == "" {
 		return terminalProviderFailure[ExecutionReadiness]("provider_configuration_invalid", "daytona adapter is unavailable")
 	}
-	state, err := a.Lifecycle.InspectState(ctx, providerResourceID)
-	if err != nil {
-		var providerErr *sandbox.ProviderError
-		if errors.As(err, &providerErr) && providerErr.Kind == sandbox.ProviderErrorNotFound {
+	identity := providerOperationIdentity{providerResourceID: providerResourceID}
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.inspect_execution", identity, func() ProviderOutcome[ExecutionReadiness] {
+		state, err := a.Lifecycle.InspectState(ctx, providerResourceID)
+		if err != nil {
+			var providerErr *sandbox.ProviderError
+			if errors.As(err, &providerErr) && providerErr.Kind == sandbox.ProviderErrorNotFound {
+				return ProviderOutcome[ExecutionReadiness]{Value: ExecutionNeedsCreation}
+			}
+			return outcomeFromProviderError[ExecutionReadiness](err, ProviderProvedNotStarted)
+		}
+		switch state {
+		case string(apiclient.SANDBOXSTATE_STARTED):
+			return ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady}
+		case string(apiclient.SANDBOXSTATE_STOPPED), string(apiclient.SANDBOXSTATE_ARCHIVED), "paused":
+			return ProviderOutcome[ExecutionReadiness]{Value: ExecutionNeedsActivation}
+		case string(apiclient.SANDBOXSTATE_DESTROYED), "deleted":
 			return ProviderOutcome[ExecutionReadiness]{Value: ExecutionNeedsCreation}
+		case string(apiclient.SANDBOXSTATE_CREATING), string(apiclient.SANDBOXSTATE_PENDING_BUILD),
+			string(apiclient.SANDBOXSTATE_BUILDING_SNAPSHOT), string(apiclient.SANDBOXSTATE_PULLING_SNAPSHOT),
+			string(apiclient.SANDBOXSTATE_RESIZING), string(apiclient.SANDBOXSTATE_SNAPSHOTTING),
+			string(apiclient.SANDBOXSTATE_FORKING), string(apiclient.SANDBOXSTATE_RESTORING),
+			string(apiclient.SANDBOXSTATE_STARTING), string(apiclient.SANDBOXSTATE_STOPPING),
+			string(apiclient.SANDBOXSTATE_ARCHIVING), string(apiclient.SANDBOXSTATE_DESTROYING),
+			"pausing", "resuming", "deleting":
+			return ProviderOutcome[ExecutionReadiness]{
+				EffectBoundary: ProviderProvedNotStarted,
+				Disposition:    ProviderRetryable,
+				ErrorKind:      "provider_transition_in_progress",
+				SafeMessage:    fmt.Sprintf("daytona sandbox state: %s", state),
+			}
+		default:
+			return terminalProviderFailure[ExecutionReadiness]("provider_response_malformed", "daytona returned an unusable execution state")
 		}
-		return outcomeFromProviderError[ExecutionReadiness](err, ProviderProvedNotStarted)
-	}
-	switch state {
-	case string(apiclient.SANDBOXSTATE_STARTED):
-		return ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady}
-	case string(apiclient.SANDBOXSTATE_STOPPED), string(apiclient.SANDBOXSTATE_ARCHIVED), "paused":
-		return ProviderOutcome[ExecutionReadiness]{Value: ExecutionNeedsActivation}
-	case string(apiclient.SANDBOXSTATE_DESTROYED), "deleted":
-		return ProviderOutcome[ExecutionReadiness]{Value: ExecutionNeedsCreation}
-	case string(apiclient.SANDBOXSTATE_CREATING), string(apiclient.SANDBOXSTATE_PENDING_BUILD),
-		string(apiclient.SANDBOXSTATE_BUILDING_SNAPSHOT), string(apiclient.SANDBOXSTATE_PULLING_SNAPSHOT),
-		string(apiclient.SANDBOXSTATE_RESIZING), string(apiclient.SANDBOXSTATE_SNAPSHOTTING),
-		string(apiclient.SANDBOXSTATE_FORKING), string(apiclient.SANDBOXSTATE_RESTORING),
-		string(apiclient.SANDBOXSTATE_STARTING), string(apiclient.SANDBOXSTATE_STOPPING),
-		string(apiclient.SANDBOXSTATE_ARCHIVING), string(apiclient.SANDBOXSTATE_DESTROYING),
-		"pausing", "resuming", "deleting":
-		return ProviderOutcome[ExecutionReadiness]{
-			EffectBoundary: ProviderProvedNotStarted,
-			Disposition:    ProviderRetryable,
-			ErrorKind:      "provider_transition_in_progress",
-			SafeMessage:    fmt.Sprintf("daytona sandbox state: %s", state),
-		}
-	default:
-		return terminalProviderFailure[ExecutionReadiness]("provider_response_malformed", "daytona returned an unusable execution state")
-	}
+	})
 }
 
 func (a *DaytonaAdapter) InspectForRelease(ctx context.Context, providerResourceID string) ProviderOutcome[bool] {
 	if a == nil || a.Lifecycle == nil || providerResourceID == "" {
 		return terminalProviderFailure[bool]("provider_configuration_invalid", "daytona adapter is unavailable")
 	}
-	if _, err := a.Lifecycle.InspectState(ctx, providerResourceID); err != nil {
-		var providerErr *sandbox.ProviderError
-		if errors.As(err, &providerErr) && providerErr.Kind == sandbox.ProviderErrorNotFound {
-			return ProviderOutcome[bool]{Value: false}
+	identity := providerOperationIdentity{providerResourceID: providerResourceID}
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.inspect_release", identity, func() ProviderOutcome[bool] {
+		if _, err := a.Lifecycle.InspectState(ctx, providerResourceID); err != nil {
+			var providerErr *sandbox.ProviderError
+			if errors.As(err, &providerErr) && providerErr.Kind == sandbox.ProviderErrorNotFound {
+				return ProviderOutcome[bool]{Value: false}
+			}
+			return outcomeFromProviderError[bool](err, ProviderProvedNotStarted)
 		}
-		return outcomeFromProviderError[bool](err, ProviderProvedNotStarted)
-	}
-	return ProviderOutcome[bool]{Value: true}
+		return ProviderOutcome[bool]{Value: true}
+	})
 }
 
 func (a *DaytonaAdapter) Activate(ctx context.Context, request ActivationRequest) ProviderOutcome[sandbox.ProviderHandle] {
@@ -419,7 +463,9 @@ func (a *DaytonaAdapter) Activate(ctx context.Context, request ActivationRequest
 	}
 	switch request.Kind {
 	case ActivationCreate, ActivationReplace:
-		handle, err := a.Lifecycle.CreateSandbox(ctx, sandbox.CreateSandboxRequest{Setup: request.Setup})
+		handle, err := observeProviderCall(ctx, a.Logger, "sandbox.provider.create", providerIdentityForSetup(request.Setup, ""), func() (sandbox.ProviderHandle, error) {
+			return a.Lifecycle.CreateSandbox(ctx, sandbox.CreateSandboxRequest{Setup: request.Setup})
+		})
 		if err != nil {
 			boundary := ProviderOutcomeUnknown
 			if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
@@ -432,7 +478,9 @@ func (a *DaytonaAdapter) Activate(ctx context.Context, request ActivationRequest
 		if request.CurrentHandle.SandboxID == "" {
 			return terminalProviderFailure[sandbox.ProviderHandle]("provider_request_invalid", "daytona start requires a provider resource")
 		}
-		if err := a.Lifecycle.StartSandbox(ctx, request.CurrentHandle); err != nil {
+		if err := observeProviderAction(ctx, a.Logger, "sandbox.provider.start", providerIdentityForSetup(request.Setup, request.CurrentHandle.SandboxID), func() error {
+			return a.Lifecycle.StartSandbox(ctx, request.CurrentHandle)
+		}); err != nil {
 			boundary := ProviderOutcomeUnknown
 			if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
 				boundary = ProviderProvedNotStarted
@@ -449,10 +497,15 @@ func (a *DaytonaAdapter) MaterializeResources(ctx context.Context, request Mater
 	if a == nil || a.Lifecycle == nil || a.Resources == nil || request.Handle.SandboxID == "" {
 		return terminalProviderFailure[MaterializationResult]("provider_configuration_invalid", "daytona materialization is unavailable")
 	}
-	if err := a.Lifecycle.CheckBaseTemplateHealth(ctx, request.Handle); err != nil {
+	identity := providerIdentityForSetup(request.Setup, request.Handle.SandboxID)
+	if err := observeProviderAction(ctx, a.Logger, "sandbox.materialization.helper_health", identity, func() error {
+		return a.Lifecycle.CheckBaseTemplateHealth(ctx, request.Handle)
+	}); err != nil {
 		return outcomeFromProviderError[MaterializationResult](err, ProviderProvedNotStarted)
 	}
-	if err := a.Lifecycle.PrepareBaseDirectories(ctx, request.Handle); err != nil {
+	if err := observeProviderAction(ctx, a.Logger, "sandbox.materialization.base_directories", identity, func() error {
+		return a.Lifecycle.PrepareBaseDirectories(ctx, request.Handle)
+	}); err != nil {
 		return materializationOutcomeFromProviderError[MaterializationResult](err)
 	}
 	resources, err := a.Resources.MaterializeResources(ctx, request.Setup, request.Handle)
@@ -467,7 +520,9 @@ func (a *DaytonaAdapter) MaterializeResources(ctx context.Context, request Mater
 			SafeMessage:    "daytona materialization returned an incomplete receipt",
 		}
 	}
-	if err := a.Lifecycle.CheckBaseTemplateHealth(ctx, request.Handle); err != nil {
+	if err := observeProviderAction(ctx, a.Logger, "sandbox.materialization.helper_health", identity, func() error {
+		return a.Lifecycle.CheckBaseTemplateHealth(ctx, request.Handle)
+	}); err != nil {
 		return materializationOutcomeFromProviderError[MaterializationResult](err)
 	}
 	return ProviderOutcome[MaterializationResult]{Value: MaterializationResult{
@@ -482,15 +537,21 @@ func (a *DaytonaAdapter) PrepareTool(ctx context.Context, request ToolExecutionR
 		return terminalProviderFailure[ToolPreparationResult]("provider_configuration_invalid", "daytona tool preparation is unavailable")
 	}
 	request.Invocation.Target.ProviderSandboxID = request.Handle.SandboxID
-	prepared, err := a.Tools.PrepareTool(ctx, request.Invocation)
-	if err != nil {
-		return outcomeFromProviderError[ToolPreparationResult](err, ProviderProvedNotStarted)
-	}
-	result := ToolPreparationResult{Prepared: daytonaPreparedTool{value: prepared}, ImmediateResult: prepared.ImmediateResult()}
-	if result.ImmediateResult != nil && (strings.TrimSpace(result.ImmediateResult.ResultJSON) == "" || !json.Valid([]byte(result.ImmediateResult.ResultJSON))) {
-		return terminalProviderFailure[ToolPreparationResult]("provider_response_malformed", "daytona returned a malformed pre-execution result")
-	}
-	return ProviderOutcome[ToolPreparationResult]{Value: result}
+	identity := providerIdentityForTool(
+		request.Handle.SandboxID, request.Invocation.Target.WorkspaceID, request.Invocation.Target.SessionID,
+		request.Invocation.Target.SessionThreadID, request.Invocation.ToolUseEventID,
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.prepare_tool", identity, func() ProviderOutcome[ToolPreparationResult] {
+		prepared, err := a.Tools.PrepareTool(ctx, request.Invocation)
+		if err != nil {
+			return outcomeFromProviderError[ToolPreparationResult](err, ProviderProvedNotStarted)
+		}
+		result := ToolPreparationResult{Prepared: daytonaPreparedTool{value: prepared}, ImmediateResult: prepared.ImmediateResult()}
+		if result.ImmediateResult != nil && (strings.TrimSpace(result.ImmediateResult.ResultJSON) == "" || !json.Valid([]byte(result.ImmediateResult.ResultJSON))) {
+			return terminalProviderFailure[ToolPreparationResult]("provider_response_malformed", "daytona returned a malformed pre-execution result")
+		}
+		return ProviderOutcome[ToolPreparationResult]{Value: result}
+	})
 }
 
 func (a *DaytonaAdapter) ExecuteTool(ctx context.Context, request ToolExecutionRequest) ProviderOutcome[sandboxdriver.ToolExecution] {
@@ -501,24 +562,33 @@ func (a *DaytonaAdapter) ExecuteTool(ctx context.Context, request ToolExecutionR
 	if !ok {
 		return terminalProviderFailure[sandboxdriver.ToolExecution]("provider_request_invalid", "daytona tool execution requires a prepared payload")
 	}
-	result, err := a.Tools.SubmitPreparedTool(ctx, prepared.value)
-	if err != nil {
-		return ProviderOutcome[sandboxdriver.ToolExecution]{
-			EffectBoundary: ProviderOutcomeUnknown,
-			Disposition:    ProviderTerminal,
-			ErrorKind:      "sandbox_execution_outcome_unknown",
-			SafeMessage:    "daytona tool execution outcome is unknown",
+	identity := providerIdentityForTool(
+		request.Handle.SandboxID, request.Invocation.Target.WorkspaceID, request.Invocation.Target.SessionID,
+		request.Invocation.Target.SessionThreadID, request.Invocation.ToolUseEventID,
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.execute_tool", identity, func() ProviderOutcome[sandboxdriver.ToolExecution] {
+		result, err := a.Tools.SubmitPreparedTool(ctx, prepared.value)
+		if err != nil {
+			providerFailure := outcomeFromProviderError[sandboxdriver.ToolExecution](err, ProviderOutcomeUnknown)
+			return ProviderOutcome[sandboxdriver.ToolExecution]{
+				EffectBoundary:      ProviderOutcomeUnknown,
+				Disposition:         ProviderTerminal,
+				ErrorKind:           "sandbox_execution_outcome_unknown",
+				SafeMessage:         "daytona tool execution outcome is unknown",
+				ProviderSafeMessage: providerFailure.ProviderSafeMessage,
+				ProviderStatusCode:  providerFailure.ProviderStatusCode,
+			}
 		}
-	}
-	if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
-		return ProviderOutcome[sandboxdriver.ToolExecution]{
-			EffectBoundary: ProviderSubmitted,
-			Disposition:    ProviderTerminal,
-			ErrorKind:      "provider_response_malformed",
-			SafeMessage:    "daytona returned a malformed tool result",
+		if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
+			return ProviderOutcome[sandboxdriver.ToolExecution]{
+				EffectBoundary: ProviderSubmitted,
+				Disposition:    ProviderTerminal,
+				ErrorKind:      "provider_response_malformed",
+				SafeMessage:    "daytona returned a malformed tool result",
+			}
 		}
-	}
-	return ProviderOutcome[sandboxdriver.ToolExecution]{Value: result}
+		return ProviderOutcome[sandboxdriver.ToolExecution]{Value: result}
+	})
 }
 
 func (a *DaytonaAdapter) ObserveTool(ctx context.Context, observation sandboxdriver.ForegroundCommandObservation) ProviderOutcome[sandboxdriver.ToolExecution] {
@@ -529,26 +599,37 @@ func (a *DaytonaAdapter) ObserveTool(ctx context.Context, observation sandboxdri
 		observation.Reference.Task.TaskID == "" || observation.Reference.Task.ProviderCommandID == "" {
 		return terminalProviderFailure[sandboxdriver.ToolExecution]("provider_response_malformed", "daytona command reference is malformed")
 	}
-	result, err := a.Tools.ObserveForegroundTool(ctx, observation)
-	if err != nil {
-		return outcomeFromProviderError[sandboxdriver.ToolExecution](err, ProviderSubmitted)
-	}
-	if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
-		return ProviderOutcome[sandboxdriver.ToolExecution]{
-			EffectBoundary: ProviderSubmitted,
-			Disposition:    ProviderTerminal,
-			ErrorKind:      "provider_response_malformed",
-			SafeMessage:    "daytona returned a malformed observed tool result",
+	identity := providerIdentityForTool(
+		observation.Reference.Target.ProviderSandboxID, observation.Reference.Target.WorkspaceID,
+		observation.Reference.Target.SessionID, observation.Reference.Target.SessionThreadID,
+		observation.Reference.ToolUseEventID,
+	)
+	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.observe_tool", identity, func() ProviderOutcome[sandboxdriver.ToolExecution] {
+		result, err := a.Tools.ObserveForegroundTool(ctx, observation)
+		if err != nil {
+			return outcomeFromProviderError[sandboxdriver.ToolExecution](err, ProviderSubmitted)
 		}
-	}
-	return ProviderOutcome[sandboxdriver.ToolExecution]{Value: result}
+		if strings.TrimSpace(result.ResultJSON) == "" || !json.Valid([]byte(result.ResultJSON)) {
+			return ProviderOutcome[sandboxdriver.ToolExecution]{
+				EffectBoundary: ProviderSubmitted,
+				Disposition:    ProviderTerminal,
+				ErrorKind:      "provider_response_malformed",
+				SafeMessage:    "daytona returned a malformed observed tool result",
+			}
+		}
+		return ProviderOutcome[sandboxdriver.ToolExecution]{Value: result}
+	})
 }
 
 func (a *DaytonaAdapter) Release(ctx context.Context, request ReleaseRequest) ProviderOutcome[ReleaseResult] {
 	if a == nil || a.Lifecycle == nil || request.Handle.SandboxID == "" {
 		return terminalProviderFailure[ReleaseResult]("provider_request_invalid", "daytona release requires a provider resource")
 	}
-	if err := a.Lifecycle.ReleaseSandbox(ctx, request.Handle); err != nil {
+	if err := observeProviderAction(ctx, a.Logger, "sandbox.provider.release", providerOperationIdentity{
+		providerResourceID: request.Handle.SandboxID,
+	}, func() error {
+		return a.Lifecycle.ReleaseSandbox(ctx, request.Handle)
+	}); err != nil {
 		boundary := ProviderSubmitted
 		if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
 			boundary = ProviderProvedNotStarted
@@ -595,10 +676,12 @@ func outcomeFromProviderError[T any](err error, boundary ProviderEffectBoundary)
 		disposition = ProviderRetryable
 	}
 	return ProviderOutcome[T]{
-		EffectBoundary: boundary,
-		Disposition:    disposition,
-		ErrorKind:      string(providerErr.Kind),
-		SafeMessage:    providerErr.SafeMessage,
+		EffectBoundary:      boundary,
+		Disposition:         disposition,
+		ErrorKind:           string(providerErr.Kind),
+		SafeMessage:         providerErr.SafeMessage,
+		ProviderSafeMessage: providerErr.SafeMessage,
+		ProviderStatusCode:  providerErr.StatusCode,
 	}
 }
 

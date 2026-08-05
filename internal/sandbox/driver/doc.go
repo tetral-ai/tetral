@@ -10,15 +10,15 @@
 //     interval policy, and the Daytona SDK error ->
 //     sandbox.ProviderError classification (mapDaytonaError).
 //   - Helper transport: DaytonaHelperExecutor (daytona.go) — PrepareTool,
-//     ExecutePreparedTool, SubmitPreparedTool, ReadCommandResult,
+//     SubmitPreparedTool, ObserveForegroundTool, ReadCommandResult,
 //     SendCommandInput, CancelCommand, CheckHealth,
 //     RunDaytonaCommand, StageDaytonaFile. Each helper subcommand stages
 //     one payload file under payloadRootPath, chowns it root-owned and chmods it
 //     0600 (its directory 0700), then runs it via
 //     `sudo -n -u root <helperPath> <sub> --payload <path>`; the reply stdout is
 //     parsed as a protocol.Envelope, has its provider metadata stripped, and, for
-//     a foreground task, is accumulated head+tail-bounded across poll rounds
-//     until the task settles.
+//     a foreground task, returns durable observation state that callers persist
+//     before advancing it through bounded ObserveForegroundTool calls.
 //   - Detached-task settlement authority: terminalStatusFromResult,
 //     synthesizeHelperBackgroundTask, and runningTaskIDFromResult — turning a
 //     running helper envelope into a BackgroundTask handle for later
@@ -71,10 +71,9 @@
 //     invalid.
 //   - terminalStatusFromResult returns "" for a running envelope, so a task that
 //     is still running is never recorded as settled.
-//   - Foreground poll-until-terminal accumulates bounded stdout/stderr across
-//     poll rounds; on context cancellation or a poll failure it attempts a
-//     best-effort cancel and, if the task did not settle, surfaces it as a
-//     BackgroundTask rather than dropping it.
+//   - Foreground observation accumulates bounded stdout/stderr across calls;
+//     the provider command is submitted once and its durable observation state
+//     is advanced without replaying the command.
 //   - InspectState returns the provider-native state. DaytonaAdapter owns the
 //     single fail-closed conversion from that state to an execution outcome.
 //
@@ -83,7 +82,7 @@
 //     mapDaytonaError) and services/sandbox/provider_adapter.go (the native
 //     Daytona-state to execution-outcome table).
 //   - internal/sandbox/driver/daytona.go (DaytonaHelperExecutor; executeHelper
-//     payload staging; pollForegroundTaskUntilTerminal; terminalStatusFromResult;
+//     payload staging; SubmitPreparedTool; ObserveForegroundTool; terminalStatusFromResult;
 //     synthesizeHelperBackgroundTask; runningTaskIDFromResult).
 //   - internal/sandbox/driver/helper_failure.go (HelperFailureError).
 //   - internal/sandbox/helper/protocol/envelope.go and payload.go (the envelope

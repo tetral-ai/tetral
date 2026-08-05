@@ -91,21 +91,32 @@ describe("Provider Gateway logger", () => {
       component: "gateway",
       kind: "config_error",
       message: "invalid gateway config",
+      "startup.cause_category": "configuration",
       "error.class": "config_error",
       "error.code": "config_error",
       "error.message_safe": "invalid gateway config",
     });
-    expect(startupFailureLogRecord({ kind: "startup_error", message: "raw provider body" })).toMatchObject({
+    expect(startupFailureLogRecord({
+      kind: "startup_error",
+      message: "raw provider body",
+      causeCategory: "listener",
+    })).toMatchObject({
       event: "startup_failed",
       "event.kind": "startup_failed",
       operation: "startup",
       component: "gateway",
       kind: "startup_error",
       message: "gateway service startup failed",
+      "startup.cause_category": "listener",
       "error.class": "startup_error",
       "error.code": "startup_error",
       "error.message_safe": "gateway service startup failed",
     });
+    expect(startupFailureLogRecord({
+      kind: "startup_error",
+      message: "raw schema driver detail",
+      causeCategory: "schema",
+    })["startup.cause_category"]).toBe("schema");
   });
 
   test("started logging uses workload vocabulary and cannot change readiness", () => {

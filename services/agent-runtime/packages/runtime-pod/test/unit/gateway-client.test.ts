@@ -16,6 +16,30 @@ import { MaxGatewayRequestGrpcMessageBytes } from "../../src/bounds.js";
 import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
 
 describe("Runtime Pod Gateway client", () => {
+  test("logs one bounded identity record for a failure before the first event", async () => {
+    const records: unknown[] = [];
+    const request = providerRequest();
+    const error = await collectGatewayError(new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: failingGatewayClient(status.INVALID_ARGUMENT, "secret raw rejection"),
+      metadataFactory: async () => new Metadata(),
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+    }), request);
+
+    expect(error).toMatchObject({ code: "gateway_protocol_error", fatal: true });
+    expect(records).toEqual([expect.objectContaining({
+      event: "provider_stream_failed_before_first_event",
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "thread.id": request.sessionThreadId,
+      "request.id": request.requestId,
+      "provider.request.id": request.modelRequestId,
+      "error.code": "gateway_protocol_error",
+    })]);
+    expect(JSON.stringify(records)).not.toContain("secret raw rejection");
+  });
+
   test("classifies the closed set of remote gRPC statuses", async () => {
     for (const scenario of [
       { code: status.INVALID_ARGUMENT, wantCode: "gateway_protocol_error", retryable: false, fatal: true },
@@ -49,6 +73,7 @@ describe("Runtime Pod Gateway client", () => {
   test("rejects an oversized ProviderRequest before metadata or transport work", async () => {
     let metadataCalls = 0;
     let transportCalls = 0;
+    const records: unknown[] = [];
     const request = providerRequest();
     request.messages[0]!.parts = [{
       id: "part_oversized",
@@ -64,6 +89,7 @@ describe("Runtime Pod Gateway client", () => {
         metadataCalls++;
         return new Metadata();
       },
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
     });
 
     const error = await collectGatewayError(client, request);
@@ -75,6 +101,12 @@ describe("Runtime Pod Gateway client", () => {
     });
     expect(metadataCalls).toBe(0);
     expect(transportCalls).toBe(0);
+    expect(records).toEqual([expect.objectContaining({
+      event: "provider_stream_failed_before_first_event",
+      "request.id": request.requestId,
+      "provider.request.id": request.modelRequestId,
+      "error.code": "gateway_protocol_error",
+    })]);
   });
 
   test("keeps peer receive-limit details in the remote retryable arm", async () => {

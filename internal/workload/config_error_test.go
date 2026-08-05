@@ -88,6 +88,7 @@ func TestStartupFailureAttrsUsesSharedLogFieldNames(t *testing.T) {
 	}
 	if fields["error.class"] != "config_error" ||
 		fields["error.code"] != "config_error" ||
+		fields["startup.cause"] != "configuration" ||
 		fields["error.message_safe"] != "ENGINE_API_KEY is required" ||
 		fields["operation"] != "workload.startup" ||
 		fields["event.kind"] != "startup_failed" {
@@ -98,13 +99,17 @@ func TestStartupFailureAttrsUsesSharedLogFieldNames(t *testing.T) {
 	}
 
 	buffer.Reset()
-	logger.Error("startup.failed", workload.StartupFailureAttrs(errors.New("dial tcp: secret database dsn"))...)
+	logger.Error("startup.failed", workload.StartupFailureAttrs(workload.WithStartupFailureCause(
+		workload.StartupFailureCauseDependencyReadiness,
+		errors.New("dial tcp: secret database dsn"),
+	))...)
 	fields = map[string]any{}
 	if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
 		t.Fatalf("decode dependency startup log: %v; line=%s", err, buffer.String())
 	}
 	if fields["error.class"] != "startup_error" ||
 		fields["error.code"] != "startup_error" ||
+		fields["startup.cause"] != "dependency_readiness" ||
 		fields["error.message_safe"] != "startup failed" ||
 		fields["operation"] != "workload.startup" ||
 		fields["event.kind"] != "startup_failed" {
@@ -112,5 +117,31 @@ func TestStartupFailureAttrsUsesSharedLogFieldNames(t *testing.T) {
 	}
 	if strings.Contains(buffer.String(), "secret database dsn") {
 		t.Fatalf("dependency startup log leaked dependency text: %s", buffer.String())
+	}
+}
+
+func TestStartupFailureAttrsPreservesEverySafeCauseCategory(t *testing.T) {
+	for _, cause := range []workload.StartupFailureCause{
+		workload.StartupFailureCauseSchema,
+		workload.StartupFailureCauseListener,
+		workload.StartupFailureCauseDependencyReadiness,
+		workload.StartupFailureCauseUnknown,
+	} {
+		var buffer bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buffer, nil))
+		logger.Error("startup.failed", workload.StartupFailureAttrs(
+			workload.WithStartupFailureCause(cause, errors.New("private lower-layer detail")),
+		)...)
+
+		var fields map[string]any
+		if err := json.Unmarshal(buffer.Bytes(), &fields); err != nil {
+			t.Fatalf("decode %s startup log: %v", cause, err)
+		}
+		if fields["startup.cause"] != string(cause) {
+			t.Fatalf("startup cause = %v; want %s", fields["startup.cause"], cause)
+		}
+		if strings.Contains(buffer.String(), "private lower-layer detail") {
+			t.Fatalf("startup log leaked lower-layer detail: %s", buffer.String())
+		}
 	}
 }

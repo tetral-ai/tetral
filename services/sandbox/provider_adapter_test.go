@@ -286,6 +286,42 @@ func TestDaytonaAdapterRejectsMalformedToolResultAfterSubmission(t *testing.T) {
 	}
 }
 
+func TestDaytonaAdapterLogsProviderExecutionFailureDetailWithoutChangingDurableResult(t *testing.T) {
+	var logs bytes.Buffer
+	adapter := &DaytonaAdapter{
+		Tools: &adapterToolExecutorFake{submitErr: &sandbox.ProviderError{
+			Provider:    sandboxdriver.DaytonaProviderName,
+			Stage:       sandbox.StageExecuteTool,
+			Kind:        sandbox.ProviderErrorUnavailable,
+			StatusCode:  503,
+			SafeMessage: "daytona tool service unavailable",
+		}},
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	outcome := adapter.ExecuteTool(context.Background(), ToolExecutionRequest{
+		Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider-sandbox"},
+		Prepared: daytonaPreparedTool{},
+	})
+	if outcome.EffectBoundary != ProviderOutcomeUnknown || outcome.Disposition != ProviderTerminal ||
+		outcome.ErrorKind != "sandbox_execution_outcome_unknown" || outcome.SafeMessage != "daytona tool execution outcome is unknown" {
+		t.Fatalf("execution outcome = %+v; want durable unknown-outcome failure", outcome)
+	}
+	got := logs.String()
+	for _, want := range []string{
+		`"operation":"sandbox.provider.execute_tool"`,
+		`"outcome":"error"`,
+		`"provider.status_code":503`,
+		`"error.message_safe":"daytona tool service unavailable"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("provider execution log missing %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, `"outcome":"success"`) {
+		t.Fatalf("provider execution failure also logged success: %s", got)
+	}
+}
+
 func TestProviderRegistryIsClosedToDaytona(t *testing.T) {
 	if _, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &DaytonaAdapter{}}); err == nil {
 		t.Fatal("registry accepted an incomplete Daytona adapter")
@@ -354,6 +390,7 @@ func (f *adapterResourceMaterializerFake) MaterializeResources(context.Context, 
 
 type adapterToolExecutorFake struct {
 	result     sandboxdriver.ToolExecution
+	submitErr  error
 	memoryErr  error
 	commandErr error
 }
@@ -362,12 +399,8 @@ func (f *adapterToolExecutorFake) PrepareTool(context.Context, sandboxdriver.Too
 	return sandboxdriver.PreparedToolExecution{}, nil
 }
 
-func (f *adapterToolExecutorFake) ExecutePreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error) {
-	return f.result, nil
-}
-
 func (f *adapterToolExecutorFake) SubmitPreparedTool(context.Context, sandboxdriver.PreparedToolExecution) (sandboxdriver.ToolExecution, error) {
-	return f.result, nil
+	return f.result, f.submitErr
 }
 
 func (f *adapterToolExecutorFake) ObserveForegroundTool(context.Context, sandboxdriver.ForegroundCommandObservation) (sandboxdriver.ToolExecution, error) {

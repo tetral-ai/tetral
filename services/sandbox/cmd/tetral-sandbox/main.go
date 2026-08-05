@@ -42,35 +42,35 @@ func run(ctx context.Context, env envReader) error {
 	logger := workload.NewLogger(os.Stderr, tetralsandbox.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
 	cfg, err := tetralsandbox.ConfigFromEnv(env)
 	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	openResult, err := openDatabase(ctx, tetralsandbox.EnvPostgresDSN, cfg.PostgresDSN)
 	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = openResult.Client.Close() }()
 	if err := verifySchema(ctx, openResult.Client); err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	dialOptions := append([]grpc.DialOption{}, internalgrpc.QueueRPCDialOptions()...)
 	dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	queueConn, err := grpc.NewClient(cfg.QueueGRPCAddress, dialOptions...)
 	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = queueConn.Close() }()
 	providerAdapter, err := tetralsandbox.NewDaytonaAdapter(ctx, cfg, openResult.Client)
 	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	providerRegistry, err := tetralsandbox.NewProviderRegistry(map[string]tetralsandbox.ProviderAdapter{
 		"daytona": providerAdapter,
 	})
 	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	store := sandbox.NewPostgreSQLStore(openResult.Client)
 	queueClient := tetralsandbox.SandboxQueueFromGRPC(queuev1.NewQueueServiceClient(queueConn))
@@ -86,7 +86,7 @@ func run(ctx context.Context, env envReader) error {
 	environmentStore := tetralsandbox.NewEnvironmentArtifactStore(openResult.Client)
 	workerPool, err := tetralsandbox.NewWorkspaceConsumerPool(cfg.WorkerConcurrency)
 	if err != nil {
-		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, err)
+		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	overLimitLoopCtx, cancelOverLimitLoop := context.WithCancel(ctx)
 	defer cancelOverLimitLoop()

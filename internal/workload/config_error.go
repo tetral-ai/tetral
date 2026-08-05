@@ -15,6 +15,35 @@ const startupErrorClassConfig = "config_error"
 const startupErrorClassConstant = "startup_error"
 const startupErrorMessageSafe = "startup failed"
 
+// StartupFailureCause identifies the startup boundary that failed without
+// exposing dependency error text.
+type StartupFailureCause string
+
+const (
+	StartupFailureCauseConfiguration       StartupFailureCause = "configuration"
+	StartupFailureCauseSchema              StartupFailureCause = "schema"
+	StartupFailureCauseListener            StartupFailureCause = "listener"
+	StartupFailureCauseDependencyReadiness StartupFailureCause = "dependency_readiness"
+	StartupFailureCauseUnknown             StartupFailureCause = "unknown"
+)
+
+type startupFailureCauseError struct {
+	cause StartupFailureCause
+	err   error
+}
+
+func (e *startupFailureCauseError) Error() string { return e.err.Error() }
+func (e *startupFailureCauseError) Unwrap() error { return e.err }
+
+// WithStartupFailureCause marks the safe startup boundary classification that
+// the caller knows at the point of failure.
+func WithStartupFailureCause(cause StartupFailureCause, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &startupFailureCauseError{cause: cause, err: err}
+}
+
 // ConfigError marks a startup failure that came from parsing or validating an
 // env-derived configuration value. Its message is operator-safe and is the only
 // startup error text any workload emits to logs or stderr.
@@ -76,11 +105,13 @@ func StartupFailureFields(err error) (class string, message string, hasMessage b
 // a divergent copy.
 func StartupFailureAttrs(err error, base ...any) []any {
 	class, message, hasMessage := StartupFailureFields(err)
+	cause := startupFailureCause(err)
 	attrs := append([]any{
 		slog.String("operation", "workload.startup"),
 		slog.String("event.kind", "startup_failed"),
 	}, base...)
 	attrs = append(attrs,
+		slog.String("startup.cause", string(cause)),
 		slog.String("error.class", class),
 		slog.String("error.code", class),
 	)
@@ -88,6 +119,17 @@ func StartupFailureAttrs(err error, base ...any) []any {
 		attrs = append(attrs, slog.String("error.message_safe", message))
 	}
 	return attrs
+}
+
+func startupFailureCause(err error) StartupFailureCause {
+	if _, ok := AsConfigError(err); ok {
+		return StartupFailureCauseConfiguration
+	}
+	var caused *startupFailureCauseError
+	if errors.As(err, &caused) {
+		return caused.cause
+	}
+	return StartupFailureCauseUnknown
 }
 
 // LogStartupFailure emits the shared structured startup-failure record and

@@ -116,7 +116,12 @@ export async function runRuntimePodCommand(options: RuntimePodCommandOptions = {
       logger,
     });
   } catch (error) {
-    logger.error(startupFailureLogRecord({ kind: "startup_error", message: "runtime pod startup failed", cause: error }));
+    logger.error(startupFailureLogRecord({
+      kind: "startup_error",
+      message: "runtime pod startup failed",
+      cause: error,
+      causeCategory: "dependency_readiness",
+    }));
     throw new Error("runtime pod startup error");
   }
   const shutdown = async (): Promise<void> => {
@@ -153,6 +158,7 @@ export async function buildRuntimePodCommandDependencies(input: {
     tokenPath: input.config.outboundInternalGrpcTokenPath,
     metadataFactory: outboundMetadataFactory,
     channelOptions: gatewayGrpcChannelOptions(),
+    logger: input.logger,
   });
   const approvalReviewerToolCatalog = createApprovalReviewerToolCatalog();
   const approvalReviewerAssets = loadApprovalReviewerAssets();

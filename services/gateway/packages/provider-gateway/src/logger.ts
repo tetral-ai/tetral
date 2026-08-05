@@ -17,7 +17,11 @@ import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability
 export type GatewayLogRecord = TetralLogRecord & {
   readonly event?: string;
   readonly kind?: string;
+  readonly "startup.cause_category"?: GatewayStartupCauseCategory;
 };
+
+/** Closed, non-sensitive categories for provider-gateway startup failures. */
+export type GatewayStartupCauseCategory = "configuration" | "schema" | "listener" | "dependency_readiness" | "unknown";
 
 /** Defines the shared JSON logger specialized for provider-gateway records. */
 export type GatewayLogger = TetralJsonLogger<GatewayLogRecord>;
@@ -44,8 +48,10 @@ export function createJsonLogger(options: {
 export function startupFailureLogRecord(input: {
   readonly kind: "config_error" | "startup_error";
   readonly message: string;
+  readonly causeCategory?: GatewayStartupCauseCategory;
 }): GatewayLogRecord {
   const safeMessage = input.kind === "config_error" ? input.message : "gateway service startup failed";
+  const causeCategory = input.kind === "config_error" ? "configuration" : input.causeCategory ?? "unknown";
   return {
     event: "startup_failed",
     "event.kind": "startup_failed",
@@ -53,9 +59,11 @@ export function startupFailureLogRecord(input: {
     component: "gateway",
     kind: input.kind,
     message: safeMessage,
+    "startup.cause_category": causeCategory,
     ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: safeMessage }),
   };
 }
+
 
 /** Builds the lifecycle record emitted after both Gateway listeners are ready. */
 export function workloadStartedLogRecord(): GatewayLogRecord {

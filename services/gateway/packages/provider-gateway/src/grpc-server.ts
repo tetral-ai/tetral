@@ -93,7 +93,7 @@ async function streamProviderRequest(
     }
   } catch (error) {
     if (!call.cancelled) {
-      call.destroy(toServiceError(error));
+      call.emit("error", toServiceError(error));
     }
   } finally {
     call.off("cancelled", abort);

@@ -57,8 +57,30 @@ describe("Gateway gRPC streaming transport", () => {
       expect(finalStatus.metadata).toBeInstanceOf(Metadata);
       expect(finalStatus.metadata.getMap()).toEqual({});
     } finally {
-      await server.shutdown();
       client.close();
+      await server.shutdown();
+    }
+  });
+
+  test("delivers pre-event INVALID_ARGUMENT as terminal grpc status", async () => {
+    const service = createService({ stream: async function* () {} });
+    const server = createGatewayGrpcServer(service);
+    const port = await server.bind("127.0.0.1:0");
+    const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure());
+    try {
+      const request = { ...validAnthropicProviderRequest(), requestId: "" };
+      const error = await Promise.race([
+        readStream(client.streamProviderRequest(request, metadata())).then(
+          () => undefined,
+          (failure: unknown) => failure,
+        ),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("timed out waiting for terminal grpc status")), 1_000)),
+      ]);
+      expect(error).toMatchObject({ code: grpcStatus.INVALID_ARGUMENT });
+    } finally {
+      client.close();
+      await server.shutdown();
     }
   });
 
@@ -146,6 +168,7 @@ describe("Gateway gRPC streaming transport", () => {
   test("client cancellation aborts the upstream provider stream", async () => {
     let aborted = false;
     let release: (() => void) | undefined;
+    const statuses: StatusObject[] = [];
     const request = validAnthropicProviderRequest();
     const service = createService({
       stream: async function* (input) {
@@ -165,10 +188,13 @@ describe("Gateway gRPC streaming transport", () => {
     try {
       const call = client.streamProviderRequest(request, metadata());
       call.on("error", () => undefined);
+      call.on("status", (value) => statuses.push(value));
       await onceData(call);
       call.cancel();
-      await waitUntil(() => aborted);
+      await waitUntil(() => aborted && statuses.length > 0);
       expect(aborted).toBe(true);
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]?.code).toBe(grpcStatus.CANCELLED);
     } finally {
       await server.shutdown();
       client.close();

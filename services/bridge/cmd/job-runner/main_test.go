@@ -141,8 +141,33 @@ func TestJobRunnerCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 		`"msg":"startup.failed"`,
 		`"service.name":"bridge-job-runner"`,
 		`"component":"bridge-job-runner"`,
+		`"startup.cause":"configuration"`,
 		`"error.class":"config_error"`,
 		agentruntimebridge.EnvQueueGRPCAddress,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("startup log missing %s: %s", want, output)
+		}
+	}
+}
+
+func TestJobRunnerDatabaseOpenFailureUsesDependencyReadinessCause(t *testing.T) {
+	previousOpen := openDatabase
+	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+		return dbconnect.OpenResult{}, errors.New("database unavailable")
+	}
+	t.Cleanup(func() { openDatabase = previousOpen })
+
+	stderr, finish := captureStderr(t)
+	err := run(context.Background(), validJobRunnerSchemaEnv())
+	if err == nil {
+		t.Fatal("run returned nil for database open failure")
+	}
+	finish()
+	output := stderr.String()
+	for _, want := range []string{
+		`"msg":"startup.failed"`,
+		`"startup.cause":"dependency_readiness"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("startup log missing %s: %s", want, output)

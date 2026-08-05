@@ -446,6 +446,44 @@ func TestDaytonaFileResourceMaterializerCommandFailureCleansMaterializedSkills(t
 	}
 }
 
+func TestDaytonaFileResourceMaterializerSkillUploadFailureLogsCleanup(t *testing.T) {
+	ctx := context.Background()
+	blobStore := blob.NewFakeBlobStore()
+	skillZip := buildSkillPackageZip(t, "finance")
+	const skillBlobKey = "skills/ws_test/skill_finance/versions/1/package.zip"
+	if err := blobStore.Put(ctx, skillBlobKey, bytes.NewReader(skillZip), int64(len(skillZip))); err != nil {
+		t.Fatalf("put skill package: %v", err)
+	}
+	runner := &recordingDaytonaCommandRunner{stageErr: errors.New("skill upload failed")}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	var logs bytes.Buffer
+	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	setup := testResourceProjectionSetup()
+	setup.Resources.Files = nil
+	setup.Resources.MemoryStores = nil
+	setup.Resources.GitHubRepositories = nil
+	setup.Resources.Skills = []sandbox.SkillMount{{
+		SkillID:        "skill_finance",
+		SkillVersionID: "skill_version_finance",
+		Version:        "1",
+		Directory:      "finance",
+		BlobKey:        skillBlobKey,
+		SizeBytes:      int64(len(skillZip)),
+		SHA256:         sha256Hex(skillZip),
+	}}
+
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	if err == nil || !strings.Contains(err.Error(), "skill upload failed") {
+		t.Fatalf("MaterializeFileResources err = %v; want skill upload failure", err)
+	}
+	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0].command, "rm -rf -- '/skills/finance'") {
+		t.Fatalf("cleanup calls = %+v; want one skill cleanup", runner.calls)
+	}
+	if got := strings.Count(logs.String(), `"operation":"sandbox.materialization.skills_cleanup"`); got != 1 {
+		t.Fatalf("skill cleanup completion logs = %d; want exactly one: %s", got, logs.String())
+	}
+}
+
 func TestDaytonaFileResourceMaterializerLiveRotationWithoutCarriedExpiryTearsDownBeforeRemount(t *testing.T) {
 	ctx := context.Background()
 	blobStore := blob.NewFakeBlobStore()

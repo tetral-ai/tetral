@@ -102,7 +102,7 @@ type ForegroundStreamObservationState struct {
 
 // PreparedToolExecution is the opaque, repeatable Daytona payload-staging
 // result. Creating it never invokes the user-authored tool command; callers
-// must cross their durable submission fence before ExecutePreparedTool.
+// must cross their durable submission fence before SubmitPreparedTool.
 type PreparedToolExecution struct {
 	target            ToolTarget
 	process           daytonaProcess

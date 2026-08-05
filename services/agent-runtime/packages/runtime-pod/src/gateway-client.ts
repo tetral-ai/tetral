@@ -28,6 +28,8 @@ import type { GatewayClient, GatewayClientError } from "@tetral/agent-runtime-co
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "./bounds.js";
+import { semanticErrorFields } from "@tetral/ts-observability";
+import type { RuntimePodLogger } from "./logger.js";
 
 /** Configures Gateway addressing, workload authentication, transport, and injectable test boundaries. */
 export interface RuntimePodGatewayClientOptions {
@@ -41,6 +43,8 @@ export interface RuntimePodGatewayClientOptions {
   readonly client?: ProviderGatewayServiceClient;
   /** Extends or overrides the default round-robin channel configuration. */
   readonly channelOptions?: ChannelOptions;
+  /** Receives bounded identity-only transport diagnostics. */
+  readonly logger?: RuntimePodLogger;
 }
 
 const GatewayRoundRobinChannelOptions: ChannelOptions = {
@@ -79,16 +83,25 @@ export class RuntimePodGatewayClient implements GatewayClient {
     options: { readonly abortSignal?: AbortSignal } = {},
   ): Stream.Stream<ProviderStreamEvent, GatewayClientError> {
     if (ProviderRequestMessage.encode(request).finish().byteLength > MaxGatewayRequestGrpcMessageBytes) {
-      return Stream.fail({
+      const error: GatewayClientError = {
         type: "gateway-client",
         code: "gateway_protocol_error",
         message: "Gateway provider request exceeds the transport fuse.",
         retryable: false,
         fatal: true,
-      });
+      };
+      logProviderStreamFailureBeforeFirstEvent(this.options.logger, request, error);
+      return Stream.fail(error);
     }
     return Stream.fromAsyncIterable(
-      streamProviderRequest(this.client, this.metadataFactory, this.options.tokenPath, request, options.abortSignal),
+      streamProviderRequest(
+        this.client,
+        this.metadataFactory,
+        this.options.tokenPath,
+        request,
+        options.abortSignal,
+        this.options.logger,
+      ),
       (error): GatewayClientError => gatewayClientError(error),
     );
   }
@@ -100,25 +113,65 @@ async function* streamProviderRequest(
   tokenPath: string,
   request: ProviderRequest,
   abortSignal: AbortSignal | undefined,
+  logger?: RuntimePodLogger,
 ): AsyncGenerator<ProviderStreamEvent> {
-  const metadata = await metadataFactory({ tokenPath });
-  const call = client.streamProviderRequest(request, metadata);
-  const cancel = (): void => {
-    call.cancel();
-  };
-  if (abortSignal !== undefined) {
-    if (abortSignal.aborted) {
-      cancel();
-      throw gatewayClientError({ code: status.CANCELLED });
-    }
-    abortSignal.addEventListener("abort", cancel, { once: true });
-  }
+  let receivedEvent = false;
   try {
-    for await (const event of readableEvents(call)) {
-      yield event;
+    const metadata = await metadataFactory({ tokenPath });
+    const call = client.streamProviderRequest(request, metadata);
+    const cancel = (): void => {
+      call.cancel();
+    };
+    if (abortSignal !== undefined) {
+      if (abortSignal.aborted) {
+        cancel();
+        throw gatewayClientError({ code: status.CANCELLED });
+      }
+      abortSignal.addEventListener("abort", cancel, { once: true });
     }
-  } finally {
-    abortSignal?.removeEventListener("abort", cancel);
+    try {
+      for await (const event of readableEvents(call)) {
+        receivedEvent = true;
+        yield event;
+      }
+    } finally {
+      abortSignal?.removeEventListener("abort", cancel);
+    }
+  } catch (error) {
+    const classified = gatewayClientError(error);
+    if (!receivedEvent && classified.code !== "gateway_cancelled") {
+      logProviderStreamFailureBeforeFirstEvent(logger, request, classified);
+    }
+    throw error;
+  }
+}
+
+function logProviderStreamFailureBeforeFirstEvent(
+  logger: RuntimePodLogger | undefined,
+  request: ProviderRequest,
+  error: GatewayClientError,
+): void {
+  try {
+    logger?.error({
+      event: "provider_stream_failed_before_first_event",
+      "event.kind": "provider_stream_failed_before_first_event",
+      operation: "StreamProviderRequest",
+      component: "agent-runtime",
+      message: "provider stream failed before first event",
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "thread.id": request.sessionThreadId,
+      "request.id": request.requestId,
+      "provider.request.id": request.modelRequestId,
+      "model_request.id": request.modelRequestId,
+      ...semanticErrorFields({
+        errorClass: "gateway_client",
+        errorCode: error.code,
+        messageSafe: "provider stream failed before first event",
+      }),
+    });
+  } catch {
+    // Observability cannot replace provider-stream settlement.
   }
 }
 
