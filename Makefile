@@ -19,7 +19,13 @@ lint:
 	go vet ./...
 	golangci-lint run ./...
 
-# vulncheck runs the same merge-blocking vulnerability gate as Engine CI.
+# vulncheck is the full symbol-level vulnerability gate. It needs roughly
+# 24 GiB of free memory (the sandbox service's kubernetes/AWS import closure
+# dominates the analysis), so CI runs a split instead: symbol-level per tree
+# except the sandbox closure, which a module-level scan covers as a
+# detection superset. A module-level CI finding is triaged by running this
+# target locally for the reachability verdict; prefer fixing by bumping the
+# dependency.
 vulncheck:
 	go tool govulncheck ./...
 

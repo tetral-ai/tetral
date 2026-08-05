@@ -1,18 +1,30 @@
 name: engine-vulncheck
 
 # Go dependency vulnerabilities track upstream advisories, not pull requests: a
-# change to this repository cannot introduce one, and an advisory published
-# tomorrow applies to code that merged last week. Running the scan on a schedule
-# reports it when it actually changes.
+# change to this repository cannot introduce one unless it changes the module
+# graph, and an advisory published tomorrow applies to code that merged last
+# week. Pull requests therefore run this gate only when go.mod/go.sum (or this
+# workflow) change, and the daily schedule reports new advisories when they
+# actually appear.
 #
-# It also has to live here because the scan kept taking the hosted runner down
-# with it inside the pull-request gate, and while it did, the dependency audits
-# and secret guards that share that job never ran at all.
-#
-# The same gate runs locally through the Makefile's vulncheck target.
+# Why the scan is split: symbol-level analysis of the whole repository peaks
+# around 20 GiB of resident memory (measured 2026-08-05), and the sandbox
+# service's import closure (kubernetes and AWS SDKs) accounts for almost all of
+# it on its own — far beyond the hosted runner. Every other package tree fits
+# comfortably, so those keep full symbol-level precision here, one tree per
+# process so peaks never stack. The sandbox closure is covered by a
+# module-level scan instead: it reports every advisory affecting any pinned
+# dependency version (a superset of symbol-level detection, without
+# reachability pruning). Triage for a module-level finding: run the Makefile's
+# vulncheck target on a machine with ~24 GiB free for the full symbol-level
+# verdict, and prefer fixing by bumping the dependency.
 
 on:
   pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/engine-vulncheck.yml'
   schedule:
     - cron: '23 6 * * *'
   workflow_dispatch:
@@ -28,6 +40,8 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
     steps:
       - name: Checkout
         # actions/checkout@v6
@@ -42,5 +56,39 @@ jobs:
           go-version: '1.25.12'
           cache-dependency-path: go.sum
 
-      - name: Govulncheck
-        run: make vulncheck
+      - name: Slice coverage guard
+        run: |
+          set -euo pipefail
+          uncovered=$(go list ./... | grep -vE '^github.com/tetral-ai/tetral/(deploy|integration|internal|services/(agent-runtime|api|auth|bridge|cleanup|event-stream|gateway|git-proxy|queue|web-connector|sandbox))(/|$)' || true)
+          if [ -n "${uncovered}" ]; then
+            echo "package trees missing from the vulncheck slice list:"
+            echo "${uncovered}"
+            exit 1
+          fi
+
+      - name: Symbol-level scan (every tree except the sandbox closure)
+        run: |
+          set -euo pipefail
+          slices=(
+            ./deploy/...
+            ./integration/...
+            ./internal/...
+            ./services/agent-runtime/...
+            ./services/api/...
+            ./services/auth/...
+            ./services/bridge/...
+            ./services/cleanup/...
+            ./services/event-stream/...
+            ./services/gateway/...
+            ./services/git-proxy/...
+            ./services/queue/...
+            ./services/web-connector/...
+          )
+          for slice in "${slices[@]}"; do
+            echo "== govulncheck ${slice} =="
+            go tool govulncheck "${slice}"
+          done
+
+      - name: Module-level scan (covers the sandbox closure)
+        working-directory: services/sandbox
+        run: go tool govulncheck -scan module
