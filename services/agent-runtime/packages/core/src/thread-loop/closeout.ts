@@ -203,7 +203,10 @@ export async function closeFailedThreadRun(
     session.state.removePendingApprovalToolJob(pending.toolUseEventId);
   }
   custody.closeDurableTurn(durableTurnId);
-  return result;
+  return {
+    ...result,
+    releaseSession: result.releaseSession ?? { reason: "terminated" },
+  };
 }
 
 export function runtimeFailureFromEventWriter(

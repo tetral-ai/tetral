@@ -283,8 +283,8 @@ export type ThreadLoopRunResult =
       };
     };
 
-/** Classifies ownership failures that require resident session state to be released. */
-export type ThreadLoopSessionReleaseReason = "crashed" | "persistence_failed" | "event_write_failed";
+/** Classifies terminal outcomes that require resident Thread state to be released. */
+export type ThreadLoopSessionReleaseReason = "terminated" | "crashed" | "persistence_failed" | "event_write_failed";
 
 /** Identifies the provider and model selected from immutable Runtime configuration. */
 export interface RuntimeModelRef {

@@ -1807,7 +1807,11 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
             { type: "provider-error", error: failure },
         ],
     }))));
-    expect(result).toMatchObject({ type: "failed", error: failure });
+    expect(result).toMatchObject({
+        type: "failed",
+        error: failure,
+        releaseSession: { reason: "terminated" },
+    });
     expect(terminations).toHaveLength(1);
     expect(terminations[0]?.requestId).toBe(terminations[0]?.writeId);
     expect(terminations[0]?.writeId).toMatch(/^bridge-stid_/);
@@ -1904,7 +1908,11 @@ test("runtime layer seals a terminal stream failure before atomic termination", 
         const threadLoop = yield* ThreadLoop.Service;
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, { writer, llmService: service }))));
-    expect(result).toMatchObject({ type: "failed", error: failure });
+    expect(result).toMatchObject({
+        type: "failed",
+        error: failure,
+        releaseSession: { reason: "terminated" },
+    });
     expect(closeoutOrder).toEqual(["write_request_end", "commit_runtime_termination"]);
     expect(requestEnds).toEqual([
         expect.objectContaining({

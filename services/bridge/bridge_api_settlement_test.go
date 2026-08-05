@@ -3034,6 +3034,17 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate")
 	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_sibling")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_idle_sibling")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_failed_sibling")
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status = 'failed'
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_failed_sibling'`,
+	); err != nil {
+		t.Fatalf("seed failed sibling: %v", err)
+	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate", "bind_bridge_terminate", 1, "pod_uid_terminate")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
@@ -3057,6 +3068,26 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate_sibling"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent sibling request start: %v", err)
+	}
+	siblingToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sibling_tool", ModelRequestId: "mreq_terminate_sibling",
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"Write","input":{"file_path":"sibling.txt"},"evaluated_permission":"ask"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			siblingScope,
+			"rwrite_terminate_sibling_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_sibling","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"sibling.txt"},"preview":"{\"file_path\":\"sibling.txt\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sibling tool use: %v", err)
 	}
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_start", ModelRequestId: "mreq_terminate",
@@ -3159,7 +3190,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	if sessionStatus != "terminated" || threadStatus != "failed" || waitStatus != "cancelled" {
 		t.Fatalf("terminal states = session:%q thread:%q wait:%q; want terminated/failed/cancelled", sessionStatus, threadStatus, waitStatus)
 	}
-	var siblingStatus string
+	var siblingStatus, idleSiblingStatus, failedSiblingStatus string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT status
 		   FROM session_threads
@@ -3169,8 +3200,26 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	).Scan(&siblingStatus); err != nil {
 		t.Fatalf("read live sibling status: %v", err)
 	}
-	if siblingStatus != "running" {
-		t.Fatalf("live sibling status = %q; want running until its custody is lost", siblingStatus)
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_idle_sibling'`,
+	).Scan(&idleSiblingStatus); err != nil {
+		t.Fatalf("read idle sibling status: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_failed_sibling'`,
+	).Scan(&failedSiblingStatus); err != nil {
+		t.Fatalf("read failed sibling status: %v", err)
+	}
+	if siblingStatus != "terminated" || idleSiblingStatus != "terminated" || failedSiblingStatus != "failed" {
+		t.Fatalf("sibling statuses = live:%q idle:%q failed:%q; want terminated/terminated/failed", siblingStatus, idleSiblingStatus, failedSiblingStatus)
 	}
 	var siblingRequestEnds int
 	if err := admin.QueryRowContext(context.Background(),
@@ -3184,19 +3233,43 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	).Scan(&siblingRequestEnds); err != nil {
 		t.Fatalf("count live sibling request ends: %v", err)
 	}
-	if siblingRequestEnds != 0 {
-		t.Fatalf("live sibling request ends = %d; want zero", siblingRequestEnds)
+	if siblingRequestEnds != 1 {
+		t.Fatalf("live sibling request ends = %d; want one terminal closeout", siblingRequestEnds)
+	}
+	var siblingPendingStatus string
+	var siblingToolResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status,
+		        (SELECT count(*)
+		           FROM session_events result
+		          WHERE result.workspace_id = pending.workspace_id
+		            AND result.session_id = pending.session_id
+		            AND result.session_thread_id = pending.session_thread_id
+		            AND result.type = 'agent.tool_result'
+		            AND result.payload_json::jsonb ->> 'tool_use_event_id' = pending.tool_use_event_id)
+		   FROM session_pending_tool_uses pending
+		  WHERE pending.workspace_id = 'default'
+		    AND pending.session_id = 'sesn_bridge_terminate'
+		    AND pending.session_thread_id = 'thr_bridge_terminate_sibling'
+		    AND pending.tool_use_event_id = $1`,
+		siblingToolUse.GetEventId(),
+	).Scan(&siblingPendingStatus, &siblingToolResultCount); err != nil {
+		t.Fatalf("read sibling terminal tool settlement: %v", err)
+	}
+	if siblingPendingStatus != "cancelled" || siblingToolResultCount != 1 {
+		t.Fatalf("sibling terminal tool settlement = %q/results %d; want cancelled/1", siblingPendingStatus, siblingToolResultCount)
 	}
 
 	for eventType, want := range map[string]int{
-		"agent.thread_message_sent":  0,
-		"span.model_request_end":     1,
-		"agent.tool_result":          1,
-		"session.error":              1,
-		"session.status_terminated":  1,
-		"session.thread_status_idle": 0,
-		"session.status_idle":        0,
-		"session.status_rescheduled": 0,
+		"agent.thread_message_sent":        0,
+		"span.model_request_end":           2,
+		"agent.tool_result":                2,
+		"session.error":                    1,
+		"session.status_terminated":        1,
+		"session.thread_status_terminated": 2,
+		"session.thread_status_idle":       0,
+		"session.status_idle":              0,
+		"session.status_rescheduled":       0,
 	} {
 		var count int
 		if err := admin.QueryRowContext(context.Background(),

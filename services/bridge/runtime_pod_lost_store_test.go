@@ -800,16 +800,26 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	const (
 		sessionID             = "sesn_pod_loss_multiple_approvals"
 		threadID              = "thr_pod_loss_multiple_approvals"
-		siblingThreadID       = "thr_pod_loss_unaffected_approval"
+		siblingThreadID       = "thr_pod_loss_sibling_approval"
+		idleSiblingThreadID   = "thr_pod_loss_idle_sibling"
 		modelRequestID        = "mreq_pod_loss_multiple_approvals"
-		siblingModelRequestID = "mreq_pod_loss_unaffected_approval"
+		siblingModelRequestID = "mreq_pod_loss_sibling_approval"
 		bindingID             = "bind_pod_loss_multiple_approvals"
 	)
 	binding := runtimePodLostBinding(sessionID, bindingID, 1)
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, siblingThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, idleSiblingThreadID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, binding.PodUID)
 	seedRuntimePodLostStatusFence(t, admin, sessionID, bindingID, 1)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_status
+		    SET status = 'idle', running_since = NULL
+		  WHERE workspace_id = 'default' AND session_id = $1`,
+		sessionID,
+	); err != nil {
+		t.Fatalf("seed idle Runtime status with durable pending work: %v", err)
+	}
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -880,37 +890,37 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
 		) VALUES
-		('default', $1, $2, 'evt_pod_loss_unaffected_start', 1, 'span.model_request_start',
+		('default', $1, $2, 'evt_pod_loss_sibling_start', 1, 'span.model_request_start',
 		 $4, 'internal', false, $3,
 		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
-		('default', $1, $2, 'evt_pod_loss_unaffected_tool', 2, 'agent.tool_use',
+		('default', $1, $2, 'evt_pod_loss_sibling_tool', 2, 'agent.tool_use',
 		 '{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/sibling.ts"},"evaluated_permission":"ask"}',
 		 'public', true, $3, '{}', now(), now()),
-		('default', $1, $2, 'evt_pod_loss_unaffected_end', 3, 'span.model_request_end',
+		('default', $1, $2, 'evt_pod_loss_sibling_end', 3, 'span.model_request_end',
 		 $5, 'internal', false, $3, '{}', now(), now())`,
 		sessionID,
 		siblingThreadID,
 		siblingModelRequestID,
 		`{"type":"span.model_request_start","model_request_id":"`+siblingModelRequestID+`"}`,
-		`{"type":"span.model_request_end","model_request_id":"`+siblingModelRequestID+`","model_request_start_id":"evt_pod_loss_unaffected_start","finish_reason":"tool_calls","is_error":false}`,
+		`{"type":"span.model_request_end","model_request_id":"`+siblingModelRequestID+`","model_request_start_id":"evt_pod_loss_sibling_start","finish_reason":"tool_calls","is_error":false}`,
 	); err != nil {
-		t.Fatalf("seed unaffected sibling approval request: %v", err)
+		t.Fatalf("seed sibling approval request: %v", err)
 	}
 	seedBridgeAPIDurableToolMessage(
 		t, admin, "default", sessionID, siblingThreadID, siblingModelRequestID,
-		"evt_pod_loss_unaffected_tool", "tool-call-pod-loss-unaffected", "Write",
+		"evt_pod_loss_sibling_tool", "tool-call-pod-loss-sibling", "Write",
 	)
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
 			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ('default', $1, $2, 'evt_pod_loss_unaffected_tool', 'tool-call-pod-loss-unaffected',
+		) VALUES ('default', $1, $2, 'evt_pod_loss_sibling_tool', 'tool-call-pod-loss-sibling',
 			'Write', 'approval', '{"file_path":"src/sibling.ts"}', 'pending',
 			now() + interval '30 minutes', now(), now())`,
 		sessionID,
 		siblingThreadID,
 	); err != nil {
-		t.Fatalf("seed unaffected sibling approval: %v", err)
+		t.Fatalf("seed sibling approval: %v", err)
 	}
 
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -961,14 +971,33 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		            AND result.payload_json::jsonb ->> 'tool_use_event_id' = p.tool_use_event_id)
 		   FROM session_pending_tool_uses p
 		  WHERE p.workspace_id = 'default' AND p.session_id = $1 AND p.session_thread_id = $2
-		    AND p.tool_use_event_id = 'evt_pod_loss_unaffected_tool'`,
+		    AND p.tool_use_event_id = 'evt_pod_loss_sibling_tool'`,
 		sessionID,
 		siblingThreadID,
 	).Scan(&siblingApprovalStatus, &siblingResultCount); err != nil {
-		t.Fatalf("read unaffected sibling approval: %v", err)
+		t.Fatalf("read sibling approval: %v", err)
 	}
-	if siblingApprovalStatus != "pending" || siblingResultCount != 0 {
-		t.Fatalf("unaffected sibling approval = %q/results %d; want pending/0", siblingApprovalStatus, siblingResultCount)
+	if siblingApprovalStatus != "cancelled" || siblingResultCount != 1 {
+		t.Fatalf("sibling approval = %q/results %d; want cancelled/1", siblingApprovalStatus, siblingResultCount)
+	}
+	var idleSiblingStatus string
+	var idleSiblingEventCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status,
+		        (SELECT count(*) FROM session_events event
+		          WHERE event.workspace_id = thread.workspace_id
+		            AND event.session_id = thread.session_id
+		            AND event.session_thread_id = thread.id
+		            AND event.type IN ('session.error', 'session.thread_status_idle'))
+		   FROM session_threads thread
+		  WHERE thread.workspace_id = 'default' AND thread.session_id = $1 AND thread.id = $2`,
+		sessionID,
+		idleSiblingThreadID,
+	).Scan(&idleSiblingStatus, &idleSiblingEventCount); err != nil {
+		t.Fatalf("read idle sibling after pod loss: %v", err)
+	}
+	if idleSiblingStatus != "idle" || idleSiblingEventCount != 0 {
+		t.Fatalf("idle sibling = %q/events %d; want idle/0", idleSiblingStatus, idleSiblingEventCount)
 	}
 }
 
