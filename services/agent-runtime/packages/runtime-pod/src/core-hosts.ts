@@ -10,13 +10,14 @@
 import { status } from "@grpc/grpc-js";
 import type { ServiceError } from "@grpc/grpc-js";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
-import * as AgentLoop from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import * as ThreadLoop from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import * as ContextLoader from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import * as SessionRunHost from "@tetral/agent-runtime-core/src/session-run-host/session-run-host.js";
-import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/session/session-state.js";
+import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
@@ -41,7 +42,7 @@ export interface RuntimeCoreHosts {
  */
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
-  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
+  readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "turnCheckpoint" | "turnToolRouteView" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptThread: (command: Parameters<SessionRunHost.Interface["handleInterruptThread"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
@@ -58,31 +59,31 @@ export interface RuntimeSubAgentRunHost {
   readonly commitApprovalReviewFailure: (command: RuntimeApprovalReviewAcceptedInputState, event: Extract<SessionEvent, { readonly type: "approval_review.failure" }>) => Promise<SessionEventWriterAppendResult>;
 }
 
-/** Configures capacity, time, context, Agent Loop, and metrics for one Runtime Core host scope. */
+/** Configures capacity, time, context, ThreadLoop, and metrics for one Runtime Core host scope. */
 export interface RuntimeCoreHostsOptions {
   readonly maxLocalSessions: number;
   readonly maxConcurrentTools?: number | undefined;
   readonly now: () => string;
   readonly contextLoader: ContextLoader.ContextLoader;
-  readonly agentLoop: AgentLoop.AgentLoopRuntimeOptions;
+  readonly threadLoop: ThreadLoop.ThreadLoopRuntimeOptions;
   readonly metrics?: RuntimeMetricsSink | undefined;
   readonly recordCloseoutEvent?: ((event: RuntimeCloseoutEvent) => void) | undefined;
 }
 
 /**
- * Builds the Agent Loop, Session Manager, and SessionRunHost layers in one explicit Effect scope and
+ * Builds the ThreadLoop, Session Manager, and SessionRunHost layers in one explicit Effect scope and
  * returns promise adapters for network commands and in-process tools. Cold installation is owned by
  * SessionManager, accepted messages are converted to Runtime Core input only after installation, and
  * callers close the returned hosts to release the layer scope.
  */
 export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): Promise<RuntimeCoreHosts> {
-  const agentLoopLayer = AgentLoop.layer({
-    ...options.agentLoop,
+  const threadLoopLayer = ThreadLoop.layer({
+    ...options.threadLoop,
     ...(options.contextLoader.refreshRuntimeBindingToken !== undefined
       ? { refreshRuntimeBindingToken: (identity, refreshOptions) => options.contextLoader.refreshRuntimeBindingToken?.(identity, refreshOptions) ?? Promise.resolve(identity.runtimeBindingToken) }
       : {}),
     ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
-  }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(options.contextLoader)));
+  }).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(options.contextLoader)));
   const managerLayer = SessionManager.layer({
     maxLocalSessions: options.maxLocalSessions,
     maxConcurrentTools: options.maxConcurrentTools ?? 8,
@@ -114,10 +115,21 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               );
               pendingAgentMail.push(acceptedResolvedAgentMail(command, resolved, context.thread));
             }
+            const turnCheckpoint = extractThreadTurnCheckpoint({ messages: context.messages, facts: context.turnFacts });
+            if (context.durableTurnId !== turnCheckpoint.executionRunId) {
+              throw new Error("durable turn identity conflicts with the reconstructed Thread turn");
+            }
+            const turnToolRouteView = extractColdThreadToolRouteView({
+              checkpoint: turnCheckpoint,
+              pendingToolUses: context.pendingToolUses ?? [],
+              pendingSandboxExecutions: context.pendingSandboxExecutions ?? [],
+            });
             return {
               ...command,
               ...(context.thread !== undefined ? { thread: context.thread } : {}),
               messages: context.messages,
+              turnCheckpoint,
+              turnToolRouteView,
               ...(context.threadContextPrefix !== undefined ? { threadContextPrefix: context.threadContextPrefix } : {}),
               ...(context.durableTurnId !== undefined ? { durableTurnId: context.durableTurnId } : {}),
               runtimeBindingToken: context.runtimeBindingToken,
@@ -137,10 +149,10 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       ? { refreshRuntimeBindingToken: (identity, refreshOptions) => options.contextLoader.refreshRuntimeBindingToken?.(identity, refreshOptions) ?? Promise.resolve(identity.runtimeBindingToken) }
       : {}),
     ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
-    closeoutMonotonicMs: options.agentLoop.runtime.monotonicMs,
-    closeoutSleep: options.agentLoop.runtime.sleep,
+    closeoutMonotonicMs: options.threadLoop.runtime.monotonicMs,
+    closeoutSleep: options.threadLoop.runtime.sleep,
     ...(options.recordCloseoutEvent !== undefined ? { recordCloseoutEvent: options.recordCloseoutEvent } : {}),
-  }).pipe(Layer.provide(agentLoopLayer));
+  }).pipe(Layer.provide(threadLoopLayer));
   const hostLayer = SessionRunHost.layer.pipe(Layer.provide(managerLayer));
   const { host, scope } = await Effect.runPromise(
     Effect.gen(function* () {
@@ -233,7 +245,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       ),
       inspectThread: async (command) => await Effect.runPromise(host.handleInspectThread(command)),
       inspectReviewerExecution: async (command, token) => await Effect.runPromise(host.handleInspectReviewerExecution(command, token)),
-      commitApprovalReviewDecision: async (command, event) => await options.agentLoop.sessionEventWriter.append({
+      commitApprovalReviewDecision: async (command, event) => await options.threadLoop.sessionEventWriter.append({
         requestId: command.requestId,
         workspaceId: command.workspaceId,
         sessionId: command.sessionId,
@@ -245,7 +257,7 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         event,
         drafts: [],
       }),
-      commitApprovalReviewFailure: async (command, event) => await options.agentLoop.sessionEventWriter.append({
+      commitApprovalReviewFailure: async (command, event) => await options.threadLoop.sessionEventWriter.append({
         requestId: command.requestId,
         workspaceId: command.workspaceId,
         sessionId: command.sessionId,

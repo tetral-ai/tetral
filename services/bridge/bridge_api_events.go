@@ -41,6 +41,10 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 	if request.GetEventType() == "span.model_request_start" && request.GetModelRequestId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "model request id is required")
 	}
+	requestStart, err := normalizeRequestStartStamp(request)
+	if err != nil {
+		return nil, err
+	}
 	if request.GetEventType() == "agent.mcp_tool_result" {
 		if request.GetMcpMaterializationHandle() == "" {
 			return nil, status.Error(codes.InvalidArgument, "mcp tool result requires a materialization handle")
@@ -149,6 +153,31 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
+		if request.GetEventType() == "agent.tool_use" || request.GetEventType() == "agent.mcp_tool_use" {
+			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
+				return err
+			}
+		}
+		if request.GetEventType() == "agent.tool_result" || request.GetEventType() == "agent.mcp_tool_result" {
+			if err := verifyToolResultMembershipTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetModelRequestId(),
+				request.GetEventType(),
+				payloadJSON,
+			); err != nil {
+				return err
+			}
+		}
+		if requestStart != nil {
+			if err := verifyRequestStartUniqueTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
+				return err
+			}
+			if err := verifyRequestStartMessageBoundaryTx(ctx, tx, request.GetScope(), requestStart.GetContextThroughMessageSequence()); err != nil {
+				return err
+			}
+		}
 		if len(stableReasoning.Parts) > 0 {
 			if err := validateStableReasoningAnchorBudgetTx(
 				ctx,
@@ -183,6 +212,16 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
+		projectionJSON := `{}`
+		if requestStart != nil {
+			projectionJSON, err = marshalBridgeJSON(map[string]any{
+				"context_through_message_sequence": requestStart.GetContextThroughMessageSequence(),
+				"request_kind":                     requestStart.GetRequestKind(),
+			})
+			if err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_events (
 				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
@@ -201,7 +240,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			key,
 			request.GetModelRequestId(),
 			stableReasoning.ledgerJSON(),
-			`{}`,
+			projectionJSON,
 			now,
 		); err != nil {
 			return err
@@ -226,6 +265,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return err
 		}
 		receipt.DeclarationDigest = declarationDigest
+		receipt.RequestStart = requestStart
 		toolProjection, err := runtimeToolProjectionFromDeclaration(
 			eventID,
 			eventType,
@@ -235,6 +275,17 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		)
 		if err != nil {
 			return err
+		}
+		if eventType == "agent.tool_use" || eventType == "agent.mcp_tool_use" {
+			if err := verifyModelToolCallIDUniqueTx(
+				ctx,
+				tx,
+				request.GetScope(),
+				request.GetModelRequestId(),
+				toolProjection.ModelToolCallID,
+			); err != nil {
+				return err
+			}
 		}
 		if serverToolUse.Present {
 			if err := verifyWebToolResultUsageTx(ctx, tx, request.GetScope(), eventType, eventPayloadJSON, toolProjection); err != nil {
@@ -346,6 +397,185 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			ApplicationDisposition:    observation.Disposition,
 		},
 	}, nil
+}
+
+func verifyRequestStartUniqueTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+) error {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_events
+			 WHERE workspace_id = $1
+			   AND session_id = $2
+			   AND session_thread_id = $3
+			   AND model_request_id = $4
+			   AND type = 'span.model_request_start'
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		modelRequestID,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return status.Error(codes.AlreadyExists, "model request already has a durable start")
+	}
+	return nil
+}
+
+func verifyToolResultMembershipTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	resultEventType string,
+	payloadJSON string,
+) error {
+	if modelRequestID == "" {
+		return status.Error(codes.InvalidArgument, "model request id is required")
+	}
+	var payload runtimeToolResultEventPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
+	}
+	toolUseEventID, err := runtimeToolResultUseEventID(resultEventType, payload)
+	if err != nil {
+		return err
+	}
+	toolUseEventType := "agent.tool_use"
+	if resultEventType == "agent.mcp_tool_result" {
+		toolUseEventType = "agent.mcp_tool_use"
+	}
+	if toolUseEventID == "" {
+		return status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1
+			  FROM session_events
+			 WHERE workspace_id = $1
+			   AND session_id = $2
+			   AND session_thread_id = $3
+			   AND event_id = $4
+			   AND model_request_id = $5
+			   AND type = $6
+		)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventID,
+		modelRequestID,
+		toolUseEventType,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return status.Error(codes.FailedPrecondition, "tool result has no matching Tool Use")
+	}
+	if _, settled, err := toolResultForToolUseExistsTx(
+		ctx,
+		tx,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		toolUseEventType,
+		toolUseEventID,
+	); err != nil {
+		return err
+	} else if settled {
+		return status.Error(codes.AlreadyExists, "Tool Use already has a terminal result")
+	}
+	return nil
+}
+
+func verifyModelRequestAcceptsMembersTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+) error {
+	if modelRequestID == "" {
+		return status.Error(codes.InvalidArgument, "model request id is required")
+	}
+	var starts, ends int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE type = 'span.model_request_start'),
+		        count(*) FILTER (WHERE type = 'span.model_request_end')
+		   FROM session_events
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
+		    AND type IN ('span.model_request_start', 'span.model_request_end')`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		modelRequestID,
+	).Scan(&starts, &ends); err != nil {
+		return err
+	}
+	if starts != 1 {
+		return status.Error(codes.FailedPrecondition, "model request start is not durable")
+	}
+	if ends != 0 {
+		return status.Error(codes.FailedPrecondition, "model request is already sealed")
+	}
+	return nil
+}
+
+func verifyModelToolCallIDUniqueTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	modelRequestID string,
+	modelToolCallID string,
+) error {
+	if modelToolCallID == "" {
+		return status.Error(codes.FailedPrecondition, "model tool call id is missing")
+	}
+	var occurrences int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*)
+		   FROM session_messages AS message
+		   JOIN session_events AS event
+		     ON event.workspace_id = message.workspace_id
+		    AND event.session_id = message.session_id
+		    AND event.session_thread_id = message.session_thread_id
+		    AND event.event_id = message.source_event_id
+		  CROSS JOIN LATERAL jsonb_array_elements(
+		    CASE
+		      WHEN jsonb_typeof(message.data_json::jsonb -> 'parts') = 'array'
+		      THEN message.data_json::jsonb -> 'parts'
+		      ELSE '[]'::jsonb
+		    END
+		  ) AS part
+		  WHERE event.workspace_id = $1
+		    AND event.session_id = $2
+		    AND event.session_thread_id = $3
+		    AND event.model_request_id = $4
+		    AND part ->> 'toolCallId' = $5`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		modelRequestID,
+		modelToolCallID,
+	).Scan(&occurrences); err != nil {
+		return err
+	}
+	if occurrences == 0 {
+		return status.Error(codes.FailedPrecondition, "model tool call projection is missing")
+	}
+	if occurrences != 1 {
+		return status.Error(codes.AlreadyExists, "model tool call id already has a durable declaration")
+	}
+	return nil
 }
 
 func writeEventOperationSourceKindTx(
@@ -660,6 +890,51 @@ func writeEventTypeAllowed(eventType string) bool {
 	}
 }
 
+func normalizeRequestStartStamp(request *bridgev1.WriteEventRequest) (*bridgev1.RequestStartStamp, error) {
+	if request.GetEventType() != "span.model_request_start" {
+		if request.ContextThroughMessageSequence != nil || request.GetRequestKind() != "" {
+			return nil, status.Error(codes.InvalidArgument, "request-start metadata requires a model request start")
+		}
+		return nil, nil
+	}
+	if request.ContextThroughMessageSequence == nil || request.GetContextThroughMessageSequence() < 0 || request.GetRequestKind() == "" {
+		return nil, status.Error(codes.InvalidArgument, "model request start metadata is required")
+	}
+	requestKind, err := normalizeRequestKind(request.GetRequestKind())
+	if err != nil {
+		return nil, err
+	}
+	return &bridgev1.RequestStartStamp{
+		RequestKind:                   requestKind,
+		ContextThroughMessageSequence: request.GetContextThroughMessageSequence(),
+	}, nil
+}
+
+func verifyRequestStartMessageBoundaryTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	boundary int64,
+) error {
+	var current int64
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(MAX(sequence), 0)
+		   FROM session_messages
+		  WHERE workspace_id = $1
+		    AND session_id = $2
+		    AND session_thread_id = $3`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+	).Scan(&current); err != nil {
+		return err
+	}
+	if boundary != current {
+		return status.Error(codes.InvalidArgument, "model request start message boundary is not current")
+	}
+	return nil
+}
+
 type threadMutationScope struct {
 	visibility string
 	role       string
@@ -742,9 +1017,9 @@ func sessionThreadCallableTaskNameTx(
 	return taskName, nil
 }
 
-func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, startEventID string, modelRequestID string) error {
+func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, startEventID string, modelRequestID string, requestKind string) error {
 	row := tx.QueryRow(ctx,
-		`SELECT event_id
+		`SELECT event_id, projection_json::jsonb ->> 'request_kind'
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
@@ -759,11 +1034,14 @@ func verifyModelRequestStartTx(ctx context.Context, tx *dbconnect.Tx, scope *bri
 		startEventID,
 		modelRequestID,
 	)
-	var eventID string
-	if err := row.Scan(&eventID); dbconnect.IsNoRows(err) {
+	var eventID, durableRequestKind string
+	if err := row.Scan(&eventID, &durableRequestKind); dbconnect.IsNoRows(err) {
 		return status.Error(codes.FailedPrecondition, "model request start span is missing")
 	} else if err != nil {
 		return err
+	}
+	if durableRequestKind != requestKind {
+		return status.Error(codes.FailedPrecondition, "model request kind does not match its start span")
 	}
 	return nil
 }
@@ -1031,6 +1309,28 @@ type runtimeToolResultEventPayload struct {
 	IsError bool `json:"is_error"`
 }
 
+func runtimeToolResultUseEventID(eventType string, payload runtimeToolResultEventPayload) (string, error) {
+	switch eventType {
+	case "agent.tool_result":
+		if payload.MCPToolUseID != "" ||
+			(payload.ToolUseEventID != "" && payload.ToolUseID != "" && payload.ToolUseEventID != payload.ToolUseID) {
+			return "", status.Error(codes.FailedPrecondition, "tool result event identity is invalid")
+		}
+		toolUseEventID := defaultString(payload.ToolUseEventID, payload.ToolUseID)
+		if toolUseEventID == "" {
+			return "", status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
+		}
+		return toolUseEventID, nil
+	case "agent.mcp_tool_result":
+		if payload.MCPToolUseID == "" || payload.ToolUseEventID != "" || payload.ToolUseID != "" {
+			return "", status.Error(codes.FailedPrecondition, "MCP tool result event identity is invalid")
+		}
+		return payload.MCPToolUseID, nil
+	default:
+		return "", status.Error(codes.FailedPrecondition, "tool result event type is invalid")
+	}
+}
+
 type runtimeToolProjectionPayload struct {
 	MessageID       string          `json:"message_id"`
 	PartID          string          `json:"part_id"`
@@ -1080,9 +1380,10 @@ func runtimeToolProjectionFromDeclaration(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
 		}
-		targetToolUseEventID = defaultString(payload.MCPToolUseID, defaultString(payload.ToolUseEventID, payload.ToolUseID))
-		if targetToolUseEventID == "" {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "tool result event is missing its tool-use identity")
+		var err error
+		targetToolUseEventID, err = runtimeToolResultUseEventID(eventType, payload)
+		if err != nil {
+			return runtimeToolProjectionPayload{}, err
 		}
 	default:
 		return runtimeToolProjectionPayload{}, nil
@@ -1213,8 +1514,11 @@ func applyWriteEventToolBookkeepingTx(
 		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 			return status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
 		}
-		toolUseEventID := defaultString(payload.MCPToolUseID, defaultString(payload.ToolUseEventID, payload.ToolUseID))
-		if toolUseEventID == "" || projection.ModelToolCallID == "" {
+		toolUseEventID, err := runtimeToolResultUseEventID(eventType, payload)
+		if err != nil {
+			return err
+		}
+		if projection.ModelToolCallID == "" {
 			return status.Error(codes.FailedPrecondition, "tool result declaration is incomplete")
 		}
 		if projection.State != "completed" && projection.State != "error" && projection.State != "cancelled" {
@@ -1379,9 +1683,10 @@ func consumeSandboxExecutionForTerminalWriterTx(
 	).Scan(&terminalPayloadJSON); err != nil {
 		return err
 	}
-	// Alternate terminal writers preserve a provider result digest when one
-	// exists; otherwise the terminal event they just authored is the result
-	// evidence retained by the thin execution receipt.
+	// A staged provider result is not the conversation's terminal Tool Result.
+	// The first terminal session event owns settlement; alternate terminal
+	// writers clear staged output and retain only its digest and receipt so a
+	// late provider result cannot rewrite terminal conversation history.
 	fallbackDigest := sha256Hex(terminalPayloadJSON)
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
@@ -1466,17 +1771,15 @@ func upsertPendingToolApprovalTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 	_, err := tx.Exec(ctx,
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'approval', $7, 'pending', $8, $9, $9)
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $8)
 		ON CONFLICT (workspace_id, session_id, session_thread_id, tool_use_event_id)
 		DO UPDATE SET
 			model_tool_call_id = EXCLUDED.model_tool_call_id,
 			tool_name = EXCLUDED.tool_name,
 			input_json = EXCLUDED.input_json,
-			expires_at = EXCLUDED.expires_at,
 			updated_at = EXCLUDED.updated_at
-		WHERE session_pending_tool_uses.kind = 'approval'
-		  AND session_pending_tool_uses.status IN ('pending', 'resolving')`,
+		WHERE session_pending_tool_uses.status IN ('pending', 'resolving')`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -1484,7 +1787,6 @@ func upsertPendingToolApprovalTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		projection.ModelToolCallID,
 		projection.ToolName,
 		inputJSON,
-		now.Add(defaultPendingToolApprovalTTL),
 		now,
 	)
 	return err
@@ -1501,7 +1803,6 @@ func markPendingToolResultResolvedTx(ctx context.Context, tx *dbconnect.Tx, scop
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4
-		    AND kind = 'approval'
 		    AND status = 'resolving'`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
@@ -1514,86 +1815,6 @@ func markPendingToolResultResolvedTx(ctx context.Context, tx *dbconnect.Tx, scop
 		return err
 	}
 	return nil
-}
-
-func insertSessionMessageProjectionTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, eventID string, kind string, dataJSON string, now time.Time) error {
-	dataJSON = stripInternalProviderFields(dataJSON)
-	storedKind := kind
-	if kind == "accepted_user" {
-		storedKind = "user"
-	}
-	var existing string
-	err := tx.QueryRow(ctx,
-		`SELECT message_id
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND source_event_id = $2
-		  LIMIT 1`,
-		scope.GetWorkspaceId(),
-		eventID,
-	).Scan(&existing)
-	if err == nil {
-		return nil
-	}
-	if !dbconnect.IsNoRows(err) {
-		return err
-	}
-	var sequence int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_messages
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-	).Scan(&sequence); err != nil {
-		return err
-	}
-	if !json.Valid([]byte(dataJSON)) {
-		dataJSON = "{}"
-	}
-	messageID := id.New("msg_")
-	switch kind {
-	case "accepted_user":
-		var err error
-		dataJSON, err = userMessageDataJSON(scope, messageID, sequence, dataJSON, now)
-		if err != nil {
-			return err
-		}
-	case "assistant":
-		var err error
-		dataJSON, err = agentMessageDataJSON(scope, messageID, sequence, dataJSON, now)
-		if err != nil {
-			return err
-		}
-	case "runtime_notification":
-		var err error
-		dataJSON, err = runtimeNotificationMessageDataJSON(scope, messageID, sequence, dataJSON, now)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(ctx,
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $9)
-		ON CONFLICT (workspace_id, session_id, session_thread_id, source_event_id)
-		WHERE source_event_id IS NOT NULL
-		DO NOTHING`,
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		messageID,
-		sequence,
-		storedKind,
-		dataJSON,
-		eventID,
-		now,
-	)
-	return err
 }
 
 func userMessageDataJSON(scope *bridgev1.RuntimeScope, messageID string, sequence int64, payloadJSON string, now time.Time) (string, error) {
@@ -1654,99 +1875,5 @@ func userMessageDataJSON(scope *bridgev1.RuntimeScope, messageID string, sequenc
 		"createdAt": timestamp,
 		"updatedAt": timestamp,
 		"parts":     parts,
-	})
-}
-
-func agentMessageDataJSON(scope *bridgev1.RuntimeScope, messageID string, sequence int64, payloadJSON string, now time.Time) (string, error) {
-	var payload struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-		return "", err
-	}
-	timestamp := now
-	parts := make([]map[string]any, 0, len(payload.Content))
-	for _, item := range payload.Content {
-		if item.Type != "text" || item.Text == "" {
-			continue
-		}
-		partID := fmt.Sprintf("%s_text_%d", messageID, len(parts))
-		parts = append(parts, map[string]any{
-			"id":          partID,
-			"sessionId":   scope.GetSessionId(),
-			"messageId":   messageID,
-			"sequence":    len(parts),
-			"createdAt":   timestamp,
-			"updatedAt":   timestamp,
-			"type":        "text",
-			"text":        item.Text,
-			"truncated":   false,
-			"status":      "completed",
-			"completedAt": timestamp,
-		})
-	}
-	return marshalBridgeJSON(map[string]any{
-		"id":        messageID,
-		"sessionId": scope.GetSessionId(),
-		"role":      "assistant",
-		"origin":    "agent",
-		"sequence":  sequence - 1,
-		"status":    "completed",
-		"createdAt": timestamp,
-		"updatedAt": timestamp,
-		"parts":     parts,
-	})
-}
-
-func runtimeNotificationMessageDataJSON(scope *bridgev1.RuntimeScope, messageID string, sequence int64, notificationJSON string, now time.Time) (string, error) {
-	var notification struct {
-		TaskID               string          `json:"task_id"`
-		SourceToolUseEventID string          `json:"source_tool_use_event_id"`
-		Status               string          `json:"status"`
-		Result               json.RawMessage `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(notificationJSON), &notification); err != nil {
-		return "", err
-	}
-	text := string(notification.Result)
-	if text == "" || !json.Valid([]byte(text)) {
-		fallback, err := marshalBridgeJSON(map[string]any{
-			"task_id":                  notification.TaskID,
-			"source_tool_use_event_id": notification.SourceToolUseEventID,
-			"status":                   notification.Status,
-		})
-		if err != nil {
-			return "", err
-		}
-		text = fallback
-	}
-	timestamp := now
-	return marshalBridgeJSON(map[string]any{
-		"id":        messageID,
-		"sessionId": scope.GetSessionId(),
-		"role":      "user",
-		"origin":    "runtime",
-		"sequence":  sequence - 1,
-		"status":    "completed",
-		"createdAt": timestamp,
-		"updatedAt": timestamp,
-		"parts": []map[string]any{
-			{
-				"id":          messageID + "_text",
-				"sessionId":   scope.GetSessionId(),
-				"messageId":   messageID,
-				"sequence":    0,
-				"createdAt":   timestamp,
-				"updatedAt":   timestamp,
-				"type":        "text",
-				"text":        text,
-				"truncated":   false,
-				"status":      "completed",
-				"completedAt": timestamp,
-			},
-		},
 	})
 }

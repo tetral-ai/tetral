@@ -3,9 +3,9 @@
  * Implements SessionProcessor, the stable-part and event accumulator for one assistant shell.
  * It guards provider event ordering, stable message and tool projections, reasoning durability,
  * public event identity, and exactly-once terminalization without owning thread lifecycle state.
- * AgentLoop feeds it validated LLM events and tool settlements during a provider turn and may
+ * ThreadLoop feeds it validated LLM events and tool settlements during a provider turn and may
  * rehydrate it later to settle a pending approval. It calls the injected message, event, and
- * repair writers and returns the hot projection and durable-ACK outcomes to AgentLoop.
+ * repair writers and returns the hot projection and durable-ACK outcomes to ThreadLoop.
  */
 import { createHash } from "node:crypto";
 import type {
@@ -55,7 +55,11 @@ import { stableRuntimeID } from "./runtime-identity.js";
 
 /** Result of applying one provider event to the current request-turn projection. */
 export type SessionProcessorResult =
-  | { readonly ok: true; readonly events: readonly SessionEvent[] }
+  | {
+      readonly ok: true;
+      readonly events: readonly SessionEvent[];
+      readonly durableEventIds?: readonly string[];
+    }
   | { readonly ok: false; readonly events: readonly SessionEvent[]; readonly error: RuntimeFailure; readonly messageId?: string };
 
 /** Result of durably anchoring a public tool-use event. */
@@ -121,6 +125,17 @@ export interface SessionProcessorOptions {
   readonly maxNormalizedTextPreviewBytes?: number;
   readonly now: () => string;
   readonly writer: SessionProcessorWriter;
+  readonly onInternalToolRepairCommitted?: (fact: {
+    readonly eventId: string;
+    readonly modelRequestId: string;
+    readonly modelToolCallId: string;
+    readonly toolName: string;
+  }) => void;
+  readonly onToolResultCommitted?: (fact: {
+    readonly eventId: string;
+    readonly toolUseEventId: string;
+    readonly outcome: "success" | "error" | "cancelled";
+  }) => void;
 }
 
 interface TextAppendResult {
@@ -157,7 +172,7 @@ type EnsureToolPartResult =
 
 /**
  * Accumulates stable Runtime parts and public events for one assistant shell.
- * AgentLoop creates it for a live model request or rehydrates it around an outstanding approved
+ * ThreadLoop creates it for a live model request or rehydrates it around an outstanding approved
  * tool use, and discards the instance after that bounded operation settles.
  */
 export class SessionProcessor {
@@ -328,19 +343,19 @@ export class SessionProcessor {
   // arms below encode:
   //
   // attachment-rejections (per-ref): NON-terminal here — the arm returns ok with no
-  //   events, so the provider request proceeds with the valid subset. The agent loop
-  //   adds one model-only note per rejected origin and EXCLUDES those origins from any
-  //   same-turn re-assembly, which makes deterministic rejection loop-free.
+  //   events, so the provider request proceeds with the valid subset. ThreadLoop
+  //   excludes those origins from same-turn re-assembly, which makes deterministic
+  //   rejection loop-free without adding transient conversation content.
   //
   // provider-error / stream error after span start: the accumulator terminalizes the
   //   in-flight assistant draft and discards only UNCOMMITTED draft parts; COMPLETED
   //   committed tools and their anchored reasoning are already durable and carry
-  //   forward. Active tools are closed only after AgentLoop joins durable acceptance
+  //   forward. Active tools are closed only after ThreadLoop joins durable acceptance
   //   writes, because an accepted Sandbox execution remains owned by its durable
   //   result path. A re-issue rebases on the durably-committed view. A divergent
   //   request close is rejected by Bridge and the Runtime discards hot state before
   //   cold recovery.
-  // UPDATE-WITH: services/agent-runtime/packages/core/src/agent-loop/agent-loop.ts,
+  // UPDATE-WITH: services/agent-runtime/packages/core/src/thread-loop/thread-loop.ts,
   //              services/agent-runtime/packages/core/src/runtime/message-projection.ts
   async process(envelope: LLMEventEnvelope): Promise<SessionProcessorResult> {
     if (this.terminal) {
@@ -633,7 +648,9 @@ export class SessionProcessor {
         completedAt: this.options.now(),
       });
       this.toolParts.set(toolCallId, completed);
-      return await this.writePart(completed, source, settlement.serverToolUse, settlement.mcpMaterializationHandle, settlement.sandboxResultDigest);
+      const result = await this.writePart(completed, source, settlement.serverToolUse, settlement.mcpMaterializationHandle, settlement.sandboxResultDigest);
+      this.notifyToolResultCommitted(existing, result, "success");
+      return result;
     }
     if (settlement.type === "error") {
       const errored = parseToolPart({
@@ -647,6 +664,7 @@ export class SessionProcessor {
       });
       this.toolParts.set(toolCallId, errored);
       const result = await this.writePart(errored, source, settlement.serverToolUse, settlement.mcpMaterializationHandle, settlement.sandboxResultDigest);
+      this.notifyToolResultCommitted(existing, result, "error");
       return await this.appendPublicMcpErrorEvent(result, settlement.publicErrorEvent, source);
     }
     const cancelled = parseToolPart({
@@ -659,7 +677,9 @@ export class SessionProcessor {
       completedAt: this.options.now(),
     });
     this.toolParts.set(toolCallId, cancelled);
-    return await this.writePart(cancelled, source, undefined, undefined, settlement.sandboxResultDigest);
+    const result = await this.writePart(cancelled, source, undefined, undefined, settlement.sandboxResultDigest);
+    this.notifyToolResultCommitted(existing, result, "cancelled");
+    return result;
   }
 
   async commitInternalToolRepair(
@@ -742,7 +762,13 @@ export class SessionProcessor {
       })));
     }
     this.durableProjection = upsertMessage(this.durableProjection, repairMessage);
-    return { ok: true, events: [] };
+    this.options.onInternalToolRepairCommitted?.({
+      eventId: commit.eventId,
+      modelRequestId,
+      modelToolCallId: toolCallId,
+      toolName: existing.toolName,
+    });
+    return { ok: true, events: [], durableEventIds: [commit.eventId] };
   }
 
   private async startStep(
@@ -943,7 +969,7 @@ export class SessionProcessor {
   private async finish(
     envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { readonly type: "finish" }> },
   ): Promise<SessionProcessorResult> {
-    const invalidFinish = (this.hasIncompleteParts() && envelope.event.finishReason !== "tool-calls") || this.currentParts().length === 0;
+    const invalidFinish = this.hasIncompleteProviderParts() || this.currentParts().length === 0;
     if (invalidFinish) {
       return await this.terminalFailure(envelope, "failed", semanticSequenceFailure());
     }
@@ -1106,6 +1132,7 @@ export class SessionProcessor {
   ): Promise<SessionProcessorResult> {
     const events = sessionEventsForStablePart(part, this.toolUseEventIds, this.toolEvents);
     const appendedEvents: SessionEvent[] = [];
+    const durableEventIds: string[] = [];
     for (const event of events) {
       const anchoredReasoning = part.type === "tool" && (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")
         ? this.stableReasoningPrefixForTool(part)
@@ -1149,6 +1176,7 @@ export class SessionProcessor {
         };
       }
       this.markStableReasoningDurable(anchoredReasoning);
+      durableEventIds.push(appendResult.eventId);
       if (part.type === "tool" && (event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use")) {
         this.toolUseEventIds.set(part.toolCallId, appendResult.eventId);
         const toolEvent = event.type === "agent.mcp_tool_use"
@@ -1164,6 +1192,7 @@ export class SessionProcessor {
         return {
           ok: true,
           events: [...appendedEvents, event],
+          durableEventIds,
         };
       }
       appendedEvents.push(event);
@@ -1171,7 +1200,27 @@ export class SessionProcessor {
     return {
       ok: true,
       events: appendedEvents,
+      ...(durableEventIds.length > 0 ? { durableEventIds } : {}),
     };
+  }
+
+  private notifyToolResultCommitted(
+    existing: Extract<RuntimePartDraft, { readonly type: "tool" }>,
+    result: SessionProcessorResult,
+    outcome: "success" | "error" | "cancelled",
+  ): void {
+    if (!result.ok) {
+      return;
+    }
+    const eventId = result.durableEventIds?.[0];
+    if (eventId === undefined || existing.toolUseEventId === undefined) {
+      throw new Error("durable Tool Result is missing its event identity");
+    }
+    this.options.onToolResultCommitted?.({
+      eventId,
+      toolUseEventId: existing.toolUseEventId,
+      outcome,
+    });
   }
 
   private async appendPublicMcpErrorEvent(
@@ -1194,6 +1243,9 @@ export class SessionProcessor {
     return {
       ok: true,
       events: [...result.events, event],
+      ...(result.durableEventIds !== undefined
+        ? { durableEventIds: result.durableEventIds }
+        : {}),
     };
   }
 
@@ -1355,11 +1407,11 @@ export class SessionProcessor {
     return true;
   }
 
-  private hasIncompleteParts(): boolean {
+  private hasIncompleteProviderParts(): boolean {
     if (this.activeTextPart !== undefined || this.reasoningParts.size > 0) {
       return true;
     }
-    return this.currentParts().some((part) => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"));
+    return this.currentParts().some((part) => part.type === "tool" && part.state.status === "pending");
   }
 
   private partBase(partKind: RuntimePartDraft["type"]): RuntimePartDraftBase {

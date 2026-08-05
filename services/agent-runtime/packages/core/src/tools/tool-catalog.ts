@@ -4,7 +4,7 @@
  * tools, session policy, and ready MCP manifests. It guards family-exact builtin installation,
  * required-tool availability, route and formatter pairing, permission defaults, and the absence
  * of execution metadata from provider-visible definitions. Runtime Pod command handling builds
- * catalogs; provider-call assembly, AgentLoop, ToolGate, and session hot state consume them. This
+ * catalogs; provider-call assembly, ThreadLoop, ToolGate, and session hot state consume them. This
  * module calls the provider-copy accessors in tool-copy and otherwise performs no I/O or route
  * execution.
  */

@@ -875,6 +875,104 @@ func bridgeAPIScope(sessionID string, threadID string, bindingID string, generat
 	}
 }
 
+func bridgeAPIInt64(value int64) *int64 {
+	return &value
+}
+
+func seedBridgeAPIRequestStart(
+	t *testing.T,
+	store *PostgreSQLBridgeAPIStore,
+	scope *bridgev1.RuntimeScope,
+	writeID string,
+	modelRequestID string,
+	requestKind string,
+	messageBoundary int64,
+) *bridgev1.WriteEventResponse {
+	t.Helper()
+	response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:                         scope,
+		RuntimeWriteId:                writeID,
+		ModelRequestId:                modelRequestID,
+		EventType:                     "span.model_request_start",
+		PayloadJson:                   fmt.Sprintf(`{"type":"span.model_request_start","model_request_id":%q}`, modelRequestID),
+		ContextThroughMessageSequence: bridgeAPIInt64(messageBoundary),
+		RequestKind:                   requestKind,
+	})
+	if err != nil {
+		t.Fatalf("seed request start: %v", err)
+	}
+	return response
+}
+
+func seedBridgeAPIMessageLineage(
+	t *testing.T,
+	db *sql.DB,
+	workspaceID string,
+	sessionID string,
+	threadID string,
+	operation string,
+	sourceKind string,
+	sourceID string,
+	eventID string,
+	messageID string,
+	messageSequence int64,
+) {
+	t.Helper()
+	var eventSequence int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT sequence FROM session_events
+		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
+		workspaceID, sessionID, threadID, eventID,
+	).Scan(&eventSequence); err != nil {
+		t.Fatalf("read lineage event sequence: %v", err)
+	}
+	receiptJSON, err := marshalDeclarationReceipt(&bridgev1.DeclarationReceipt{
+		SessionThreadId:   threadID,
+		OperationKind:     operation,
+		SourceKind:        sourceKind,
+		SourceId:          sourceID,
+		DeclarationDigest: "fixture_digest_" + sourceID,
+		Events: []*bridgev1.DurableEventStamp{{
+			SessionThreadId: threadID,
+			SourceEventId:   eventID,
+			EventId:         eventID,
+			EventSequence:   eventSequence,
+			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+		}},
+		Messages: []*bridgev1.DurableMessageStamp{{
+			RuntimeLocalId:  "fixture_" + messageID,
+			SessionThreadId: threadID,
+			OwningEventId:   eventID,
+			MessageId:       messageID,
+			MessageSequence: messageSequence,
+			Disposition:     bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal message lineage receipt: %v", err)
+	}
+	var runtimeInputID any
+	var runtimeWriteID any
+	if operation == bridgeOpCommitInputs {
+		runtimeInputID = sourceID
+	}
+	if operation == bridgeOpWriteEvent {
+		runtimeWriteID = sourceID
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO session_bridge_operations (
+			workspace_id, session_id, session_thread_id, operation, source_kind, idempotency_key,
+			request_hash, declaration_digest, receipt_json, ack_status, runtime_input_id, runtime_write_id,
+			created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'committed', $10, $11,
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		workspaceID, sessionID, threadID, operation, sourceKind, sourceID,
+		"fixture_hash_"+sourceID, "fixture_digest_"+sourceID, receiptJSON, runtimeInputID, runtimeWriteID,
+	); err != nil {
+		t.Fatalf("seed message lineage operation: %v", err)
+	}
+}
+
 func bridgeInternalToolRepairDraftForTest(
 	workspaceID string,
 	sessionID string,
@@ -912,45 +1010,6 @@ func bridgeInternalToolRepairDraftForTest(
 			),
 		}},
 	}
-}
-
-func bridgeInternalToolCallMessageJSON(t *testing.T, sessionID string, messageID string, partID string, toolCallID string, toolName string) string {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"id":        messageID,
-		"sessionId": sessionID,
-		"role":      "assistant",
-		"origin":    "agent",
-		"sequence":  float64(1),
-		"status":    "completed",
-		"createdAt": "2026-01-01T00:00:00Z",
-		"updatedAt": "2026-01-01T00:00:00Z",
-		"parts": []map[string]any{
-			{
-				"id":         partID,
-				"sessionId":  sessionID,
-				"messageId":  messageID,
-				"sequence":   float64(0),
-				"createdAt":  "2026-01-01T00:00:00Z",
-				"updatedAt":  "2026-01-01T00:00:00Z",
-				"type":       "tool",
-				"toolCallId": toolCallID,
-				"toolName":   toolName,
-				"state": map[string]any{
-					"status": "running",
-					"input": map[string]any{
-						"value":     map[string]any{"q": "x"},
-						"preview":   `{"q":"x"}`,
-						"truncated": false,
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal internal tool call message: %v", err)
-	}
-	return string(raw)
 }
 
 func testJSONPathString(t *testing.T, raw string, path string) string {
@@ -1410,48 +1469,6 @@ func seedBridgeAPISession(t *testing.T, db *sql.DB, workspaceID string, sessionI
 	}
 }
 
-func seedBridgeAPIInternalToolCallMessage(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, messageID string, partID string, toolCallID string, toolName string, sequence int64) {
-	t.Helper()
-	eventID := "evt_" + messageID
-	var eventSequence int64
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT COALESCE(MAX(sequence), 0) + 1
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3`,
-		workspaceID, sessionID, threadID,
-	).Scan(&eventSequence); err != nil {
-		t.Fatalf("allocate internal tool call event sequence: %v", err)
-	}
-	seedBridgeAPIEvent(
-		t,
-		db,
-		workspaceID,
-		sessionID,
-		threadID,
-		eventID,
-		eventSequence,
-		"agent.tool_use",
-		fmt.Sprintf(`{"type":"agent.tool_use","model_tool_call_id":%q,"tool_name":%q}`, toolCallID, toolName),
-	)
-	if _, err := db.ExecContext(context.Background(),
-		`INSERT INTO session_messages (
-			workspace_id, session_id, session_thread_id, message_id, sequence, kind,
-			data_json, source_event_id, last_event_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		workspaceID,
-		sessionID,
-		threadID,
-		messageID,
-		sequence,
-		bridgeInternalToolCallMessageJSON(t, sessionID, messageID, partID, toolCallID, toolName),
-		eventID,
-	); err != nil {
-		t.Fatalf("seed bridge api internal tool call message: %v", err)
-	}
-}
-
 func seedBridgeAPIDurableToolMessage(
 	t *testing.T,
 	db *sql.DB,
@@ -1529,6 +1546,11 @@ func seedBridgeAPIDurableToolMessage(
 	); err != nil {
 		t.Fatalf("seed durable tool message: %v", err)
 	}
+	seedBridgeAPIMessageLineage(
+		t, db, workspaceID, sessionID, threadID,
+		bridgeOpWriteEvent, "agent.tool_use", "rwrite_fixture_"+toolUseEventID,
+		toolUseEventID, messageID, messageSequence,
+	)
 }
 
 func seedBridgeAPIAgentConfig(t *testing.T, db *sql.DB, workspaceID string, sessionID string, configJSON string) {
@@ -1881,9 +1903,9 @@ func seedBridgeAPIPendingApproval(t *testing.T, db *sql.DB, workspaceID string, 
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'toolu_cleanup_wait', 'dangerous_tool', 'approval', '{}', 'pending',
-			'2026-01-01T00:30:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, 'toolu_cleanup_wait', 'dangerous_tool', '{}', 'pending',
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		sessionID,
 		threadID,

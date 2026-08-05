@@ -4,7 +4,7 @@
  * It guards explicit local-schema parsing and sanitizes normalized failure fields;
  * ordinary stream text and metadata retain the bounds already enforced at the
  * shared Gateway protocol boundary. LLMService maps those validated Gateway frames
- * into these shapes, while SessionProcessor and AgentLoop consume them.
+ * into these shapes, while SessionProcessor and ThreadLoop consume them.
  */
 import { z } from "zod/v4";
 import { MaxJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
@@ -243,7 +243,7 @@ export const RuntimeAttachmentRejectionSchema = z.strictObject({
   ]),
   reason: z.enum(["deleted", "over_envelope"]),
 });
-/** Normalized attachment rejection delivered to AgentLoop. */
+/** Normalized attachment rejection delivered to ThreadLoop. */
 export type RuntimeAttachmentRejection = z.infer<typeof RuntimeAttachmentRejectionSchema>;
 
 /** Sanitized Runtime failure carried by terminal stream and persistence paths. */

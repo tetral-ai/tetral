@@ -92,12 +92,14 @@ func TestBridgeAPIServerWriteEventReturnsSupersededForEveryInitialCustodyEnd(t *
 			fixture := newCloseoutSentinelFixture(t, test.name)
 			modelRequestID := "mreq_" + fixture.sessionID
 			start, err := fixture.store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-				Scope:          bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
-				RuntimeWriteId: "rwrite_start_" + fixture.sessionID,
-				ModelRequestId: modelRequestID,
-				EventType:      "span.model_request_start",
-				PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
-				SessionVisible: false,
+				Scope:                         bridgeAPIScope(fixture.sessionID, fixture.threadID, fixture.bindingID, 1, fixture.podUID),
+				RuntimeWriteId:                "rwrite_start_" + fixture.sessionID,
+				ModelRequestId:                modelRequestID,
+				EventType:                     "span.model_request_start",
+				PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				ContextThroughMessageSequence: bridgeAPIInt64(0),
+				RequestKind:                   "agent_provider_request",
+				SessionVisible:                false,
 			})
 			if err != nil {
 				t.Fatalf("seed request start: %v", err)

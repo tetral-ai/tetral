@@ -27,7 +27,7 @@
  * UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts,
  *              services/agent-runtime/packages/core/src/runtime/accumulator.ts
  *
- * AgentLoop calls toGatewayRuntimeMessages while assembling provider requests.
+ * ThreadLoop calls toGatewayRuntimeMessages while assembling provider requests.
  * Lowering calls the generated Gateway message protocol shapes for provider
  * request assembly.
  */

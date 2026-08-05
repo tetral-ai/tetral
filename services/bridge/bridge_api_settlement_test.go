@@ -39,7 +39,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 		Scope:          bridgeAPIScope("sesn_bridge_request_end", "thr_bridge_request_end", "bind_bridge_request_end", 1, "pod_uid_request_end"),
 		RuntimeWriteId: "rwrite_bridge_request_start",
 		ModelRequestId: "mreq_bridge_request",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request"}`,
 		SessionVisible: false,
 	})
@@ -222,8 +222,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndSettlesOpenInterruptAtomically(t
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_request_interrupt_start",
 		ModelRequestId: modelRequestID,
-		EventType:      "span.model_request_start",
-		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -361,8 +361,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsWebToolCounters(t *testin
 		Scope:          bridgeAPIScope("sesn_bridge_request_end_web_usage", "thr_bridge_request_end_web_usage", "bind_bridge_request_end_web_usage", 1, "pod_uid_request_end_web_usage"),
 		RuntimeWriteId: "rwrite_bridge_request_start_web_usage",
 		ModelRequestId: "mreq_bridge_request_web_usage",
-		EventType:      "span.model_request_start",
-		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request_web_usage"}`,
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request_web_usage"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -393,8 +393,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_reasoning_settle_start",
 		ModelRequestId: "mreq_bridge_reasoning_settle",
-		EventType:      "span.model_request_start",
-		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_reasoning_settle"}`,
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+		PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_reasoning_settle"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -703,7 +703,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTextAndToolConvergeOnModelReques
 
 			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_start_" + suffix, ModelRequestId: modelRequestID,
-				EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
@@ -928,6 +928,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSharedAnchorVector(t *testing.T)
 		json: `{"type":"tool","toolCallId":"call_shared_anchor","toolName":"Read","state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`,
 	})
 	scope := bridgeAPIScope("sesn_shared_anchor", "thr_shared_anchor", "bind_shared_anchor", 1, "pod_shared_anchor")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_shared_anchor_start", fixture.ModelRequestID, "agent_provider_request", 0)
 	draft := bridgeRuntimeOutputDraftForTest(
 		t,
 		scope,
@@ -1118,7 +1119,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningRejectsToolEventWithoutModelRequ
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstRejectsPostSealToolAnchor(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_reasoning_settlement_first", "thr_reasoning_settlement_first")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_reasoning_settlement_first", "bind_reasoning_settlement_first", 1, "pod_reasoning_settlement_first")
@@ -1128,7 +1129,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t
 	scope := bridgeAPIScope("sesn_reasoning_settlement_first", "thr_reasoning_settlement_first", "bind_reasoning_settlement_first", 1, "pod_reasoning_settlement_first")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_settlement_first_start", ModelRequestId: "mreq_settlement_first",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_settlement_first"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_settlement_first"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1172,8 +1173,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementFirstToolAnchorNoOps(t
 				json: `{"type":"tool","toolCallId":"call_settlement","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`,
 			},
 		)},
-	}); err != nil {
-		t.Fatalf("WriteEvent anchor after settlement: %v", err)
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteEvent anchor after settlement err = %v; want FailedPrecondition", err)
 	}
 	var dataJSON string
 	if err := admin.QueryRowContext(context.Background(), `SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND model_request_id = 'mreq_settlement_first'`).Scan(&dataJSON); err != nil {
@@ -1224,7 +1225,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementCannotOmitAnchor(t *te
 	scope := bridgeAPIScope("sesn_reasoning_missing_anchor", "thr_reasoning_missing_anchor", "bind_reasoning_missing_anchor", 1, "pod_reasoning_missing_anchor")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_missing_anchor_start", ModelRequestId: "mreq_missing_anchor",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_missing_anchor"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_missing_anchor"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1293,7 +1294,7 @@ func TestPostgreSQLBridgeAPIStoreFailedRequestEndPreservesToolAnchoredReasoning(
 	scope := bridgeAPIScope("sesn_reasoning_failed_end", "thr_reasoning_failed_end", "bind_reasoning_failed_end", 1, "pod_reasoning_failed_end")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_failed_start", ModelRequestId: "mreq_reasoning_failed",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_failed"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_failed"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1409,6 +1410,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningUnifiesBudgetAcrossAnchors(t *te
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_reasoning_unified")
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, "pod_reasoning_unified")
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_unified_start", modelRequestID, "agent_provider_request", 0)
 			anchoredParts := make([]*bridgev1.StableReasoningPart, 0, len(test.first)+len(test.second))
 			writeTool := func(writeID, callID string, parts []*bridgev1.StableReasoningPart) error {
 				allParts := append(append([]*bridgev1.StableReasoningPart{}, anchoredParts...), parts...)
@@ -1476,7 +1478,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningLaterMergeFailureRollsBackWholeS
 	attachment := createBridgeTransientAttachmentForTest(t, store, scope, "attachment_reasoning_rollback", "sevt_reasoning_rollback", []byte("image"))
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_rollback_start", ModelRequestId: "mreq_reasoning_rollback",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_rollback"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_rollback"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1600,7 +1602,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningInvalidSetsWriteNothing(t *testi
 			modelRequestID := "mreq_reasoning_invalid_" + test.name
 			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reasoning_invalid_start_" + test.name, ModelRequestId: modelRequestID,
-				EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
@@ -1638,7 +1640,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningExactAggregateBoundCommits(t *te
 	scope := bridgeAPIScope("sesn_reasoning_exact_bytes", "thr_reasoning_exact_bytes", "bind_reasoning_exact_bytes", 1, "pod_reasoning_exact_bytes")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_reasoning_exact_start", ModelRequestId: "mreq_reasoning_exact",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_exact"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reasoning_exact"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1684,6 +1686,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_request_retry", "bind_bridge_request_retry", 1, "pod_uid_request_retry")
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("request-reschedule-load-key-32b")
 	store.Clock = func() time.Time { return now }
 	store.ProviderRescheduleBudget = 1
 	store.CompactionRescheduleBudget = 2
@@ -1695,8 +1698,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 			Scope:          scope,
 			RuntimeWriteId: writeID,
 			ModelRequestId: requestID,
-			EventType:      "span.model_request_start",
-			PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + requestID + `"}`,
+			EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+			PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + requestID + `"}`,
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent start %s: %v", requestID, err)
@@ -1736,6 +1739,11 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsRescheduleDispositionAnd
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
 		replay.GetDeclaration().GetReceipts()[0].GetRequestReschedule().GetEffectiveDeadline() != disposition.GetEffectiveDeadline() {
 		t.Fatalf("replay = %+v; want duplicate with stored disposition", replay)
+	}
+	if _, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_request_retry_load",
+	}); err != nil {
+		t.Fatalf("LoadContext after accepted reschedule: %v", err)
 	}
 
 	var providerAttempts, compactionAttempts int64
@@ -1812,7 +1820,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsDivergentCloseAfterExisti
 	scope := bridgeAPIScope("sesn_bridge_request_divergent_close", "thr_bridge_request_divergent_close", "bind_bridge_request_divergent_close", 1, "pod_uid_request_divergent_close")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_stale_start", ModelRequestId: "mreq_bridge_stale",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_stale"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_stale"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -1875,7 +1883,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
 		start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 			Scope: scope, RuntimeWriteId: "rwrite_reasoning_race_start_" + suffix, ModelRequestId: modelRequestID,
-			EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `","request_kind":"agent_provider_request"}`,
+			EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `","request_kind":"agent_provider_request"}`,
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent start: %v", err)
@@ -1914,7 +1922,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTerminalRaceIsSymmetric(t *testi
 		inserted := false
 		client := dbconnect.NewClientForTesting(f.runtime)
 		if err := client.WithWorkspaceTx(context.Background(), "default", "test.reasoning_terminal_repair", func(tx *dbconnect.Tx) error {
-			starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", f.sessionID)
+			starts, err := runtimePodLostOpenRequestStartsTx(context.Background(), tx, "default", f.sessionID, []string{f.scope.GetSessionThreadId()})
 			if err != nil {
 				return err
 			}
@@ -2038,7 +2046,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_compaction_usage_start",
 		ModelRequestId: "mreq_bridge_compaction_usage",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "compaction_summary",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_compaction_usage"}`,
 		SessionVisible: false,
 	})
@@ -2152,6 +2160,57 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsCompactionRequestKind(t *
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsRequestKindMismatch(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_kind_mismatch", "thr_bridge_request_kind_mismatch")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_request_kind_mismatch", "bind_bridge_request_kind_mismatch", 1, "pod_bridge_request_kind_mismatch")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_request_kind_mismatch", "thr_bridge_request_kind_mismatch", "bind_bridge_request_kind_mismatch", 1, "pod_bridge_request_kind_mismatch")
+	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_request_kind_mismatch_start", "mreq_bridge_request_kind_mismatch", "compaction_summary", 0)
+
+	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_request_kind_mismatch_end",
+		ModelRequestId: "mreq_bridge_request_kind_mismatch", ModelRequestStartEventId: start.GetEventId(),
+		RequestKind: "agent_provider_request", FinishReason: "stop", UsageJson: `{}`,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("WriteRequestEnd mismatched request kind err = %v; want FailedPrecondition", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreWriteRequestEndScopesDuplicateCheckToThread(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_bridge_request_end_thread_scope"
+		mainThreadID   = "thr_bridge_request_end_thread_scope_main"
+		childThreadID  = "thr_bridge_request_end_thread_scope_child"
+		modelRequestID = "mreq_bridge_request_end_shared"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, mainThreadID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, mainThreadID, childThreadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_bridge_request_end_thread_scope", 1, "pod_bridge_request_end_thread_scope")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	mainScope := bridgeAPIScope(sessionID, mainThreadID, "bind_bridge_request_end_thread_scope", 1, "pod_bridge_request_end_thread_scope")
+	childScope := bridgeAPIScope(sessionID, childThreadID, "bind_bridge_request_end_thread_scope", 1, "pod_bridge_request_end_thread_scope")
+	mainStart := seedBridgeAPIRequestStart(t, store, mainScope, "rwrite_request_end_thread_scope_main_start", modelRequestID, "agent_provider_request", 0)
+	childStart := seedBridgeAPIRequestStart(t, store, childScope, "rwrite_request_end_thread_scope_child_start", modelRequestID, "agent_provider_request", 0)
+
+	for _, request := range []*bridgev1.WriteRequestEndRequest{
+		{
+			Scope: mainScope, RuntimeWriteId: "rwrite_request_end_thread_scope_main_end", ModelRequestId: modelRequestID,
+			ModelRequestStartEventId: mainStart.GetEventId(), RequestKind: "agent_provider_request", FinishReason: "stop", UsageJson: `{}`,
+		},
+		{
+			Scope: childScope, RuntimeWriteId: "rwrite_request_end_thread_scope_child_end", ModelRequestId: modelRequestID,
+			ModelRequestStartEventId: childStart.GetEventId(), RequestKind: "agent_provider_request", FinishReason: "stop", UsageJson: `{}`,
+		},
+	} {
+		if _, err := store.WriteRequestEnd(context.Background(), request); err != nil {
+			t.Fatalf("WriteRequestEnd thread %s: %v", request.GetScope().GetSessionThreadId(), err)
+		}
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsCompactionAttachmentConsumption(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -2184,8 +2243,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsCompactionAttachmentConsu
 				Scope:          scope,
 				RuntimeWriteId: "rwrite_bridge_compaction_attachment_start_" + suffix,
 				ModelRequestId: "mreq_bridge_compaction_attachment_" + suffix,
-				EventType:      "span.model_request_start",
-				PayloadJson:    `{"type":"span.model_request_start"}`,
+				EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "compaction_summary",
+				PayloadJson: `{"type":"span.model_request_start"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)
@@ -2232,7 +2291,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndValidatesErrorKind(t *testing.T)
 		Scope:          bridgeAPIScope("sesn_bridge_request_error_kind", "thr_bridge_request_error_kind", "bind_bridge_request_error_kind", 1, "pod_uid_request_error_kind"),
 		RuntimeWriteId: "rwrite_bridge_request_error_start",
 		ModelRequestId: "mreq_bridge_request_error",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_request_error"}`,
 		SessionVisible: false,
 	})
@@ -2975,6 +3034,17 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate")
 	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_sibling")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_idle_sibling")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate", "thr_bridge_terminate", "thr_bridge_terminate_failed_sibling")
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_threads
+		    SET status = 'failed'
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_failed_sibling'`,
+	); err != nil {
+		t.Fatalf("seed failed sibling: %v", err)
+	}
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate", "bind_bridge_terminate", 1, "pod_uid_terminate")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
@@ -2995,13 +3065,33 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	seedBridgeAPIOpenDurableTurn(t, admin, siblingScope, "rwrite_terminate_sibling")
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sibling_start", ModelRequestId: "mreq_terminate_sibling",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate_sibling"}`, SessionVisible: true,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate_sibling"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent sibling request start: %v", err)
 	}
+	siblingToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sibling_tool", ModelRequestId: "mreq_terminate_sibling",
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"Write","input":{"file_path":"sibling.txt"},"evaluated_permission":"ask"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			siblingScope,
+			"rwrite_terminate_sibling_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_sibling","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"sibling.txt"},"preview":"{\"file_path\":\"sibling.txt\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sibling tool use: %v", err)
+	}
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_start", ModelRequestId: "mreq_terminate",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate"}`, SessionVisible: true,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_terminate"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent request start: %v", err)
 	}
@@ -3100,7 +3190,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	if sessionStatus != "terminated" || threadStatus != "failed" || waitStatus != "cancelled" {
 		t.Fatalf("terminal states = session:%q thread:%q wait:%q; want terminated/failed/cancelled", sessionStatus, threadStatus, waitStatus)
 	}
-	var siblingStatus string
+	var siblingStatus, idleSiblingStatus, failedSiblingStatus string
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT status
 		   FROM session_threads
@@ -3110,8 +3200,26 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	).Scan(&siblingStatus); err != nil {
 		t.Fatalf("read live sibling status: %v", err)
 	}
-	if siblingStatus != "running" {
-		t.Fatalf("live sibling status = %q; want running until its custody is lost", siblingStatus)
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_idle_sibling'`,
+	).Scan(&idleSiblingStatus); err != nil {
+		t.Fatalf("read idle sibling status: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status
+		   FROM session_threads
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_terminate'
+		    AND id = 'thr_bridge_terminate_failed_sibling'`,
+	).Scan(&failedSiblingStatus); err != nil {
+		t.Fatalf("read failed sibling status: %v", err)
+	}
+	if siblingStatus != "terminated" || idleSiblingStatus != "terminated" || failedSiblingStatus != "failed" {
+		t.Fatalf("sibling statuses = live:%q idle:%q failed:%q; want terminated/terminated/failed", siblingStatus, idleSiblingStatus, failedSiblingStatus)
 	}
 	var siblingRequestEnds int
 	if err := admin.QueryRowContext(context.Background(),
@@ -3125,19 +3233,43 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	).Scan(&siblingRequestEnds); err != nil {
 		t.Fatalf("count live sibling request ends: %v", err)
 	}
-	if siblingRequestEnds != 0 {
-		t.Fatalf("live sibling request ends = %d; want zero", siblingRequestEnds)
+	if siblingRequestEnds != 1 {
+		t.Fatalf("live sibling request ends = %d; want one terminal closeout", siblingRequestEnds)
+	}
+	var siblingPendingStatus string
+	var siblingToolResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status,
+		        (SELECT count(*)
+		           FROM session_events result
+		          WHERE result.workspace_id = pending.workspace_id
+		            AND result.session_id = pending.session_id
+		            AND result.session_thread_id = pending.session_thread_id
+		            AND result.type = 'agent.tool_result'
+		            AND result.payload_json::jsonb ->> 'tool_use_event_id' = pending.tool_use_event_id)
+		   FROM session_pending_tool_uses pending
+		  WHERE pending.workspace_id = 'default'
+		    AND pending.session_id = 'sesn_bridge_terminate'
+		    AND pending.session_thread_id = 'thr_bridge_terminate_sibling'
+		    AND pending.tool_use_event_id = $1`,
+		siblingToolUse.GetEventId(),
+	).Scan(&siblingPendingStatus, &siblingToolResultCount); err != nil {
+		t.Fatalf("read sibling terminal tool settlement: %v", err)
+	}
+	if siblingPendingStatus != "cancelled" || siblingToolResultCount != 1 {
+		t.Fatalf("sibling terminal tool settlement = %q/results %d; want cancelled/1", siblingPendingStatus, siblingToolResultCount)
 	}
 
 	for eventType, want := range map[string]int{
-		"agent.thread_message_sent":  0,
-		"span.model_request_end":     1,
-		"agent.tool_result":          1,
-		"session.error":              1,
-		"session.status_terminated":  1,
-		"session.thread_status_idle": 0,
-		"session.status_idle":        0,
-		"session.status_rescheduled": 0,
+		"agent.thread_message_sent":        0,
+		"span.model_request_end":           2,
+		"agent.tool_result":                2,
+		"session.error":                    1,
+		"session.status_terminated":        1,
+		"session.thread_status_terminated": 2,
+		"session.thread_status_idle":       0,
+		"session.status_idle":              0,
+		"session.status_rescheduled":       0,
 	} {
 		var count int
 		if err := admin.QueryRowContext(context.Background(),
@@ -3233,25 +3365,26 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 
 func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandboxExecution(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox")
-	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate_direct_sandbox", "thr_bridge_terminate_direct_sandbox")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate_direct_sandbox", "bind_bridge_terminate_direct_sandbox", 1, "pod_uid_terminate_direct_sandbox")
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
-	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate_sandbox")
+	scope := bridgeAPIScope("sesn_bridge_terminate_direct_sandbox", "thr_bridge_terminate_direct_sandbox", "bind_bridge_terminate_direct_sandbox", 1, "pod_uid_terminate_direct_sandbox")
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate_direct_sandbox")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_terminate_direct_sandbox_start", "mreq_terminate_direct_sandbox", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox_tool", ModelRequestId: "mreq_terminate_sandbox",
+		Scope: scope, RuntimeWriteId: "rwrite_terminate_direct_sandbox_tool", ModelRequestId: "mreq_terminate_direct_sandbox",
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"allow"}`,
 		SessionVisible: true,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t,
 			scope,
-			"rwrite_terminate_sandbox_tool",
+			"rwrite_terminate_direct_sandbox_tool",
 			"agent.tool_use",
 			"streaming",
 			bridgeRuntimePartDraftForTest{
 				kind: "tool",
-				json: `{"type":"tool","toolCallId":"call_terminate_sandbox","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
+				json: `{"type":"tool","toolCallId":"call_terminate_direct_sandbox","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
 			},
 		)},
 	})
@@ -3264,16 +3397,16 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
 			model_tool_call_id, execution_state, execution_attempt_generation,
 			created_at, updated_at
-		) VALUES ('default', 'sesn_bridge_terminate_sandbox', 'thr_bridge_terminate_sandbox',
+		) VALUES ('default', 'sesn_bridge_terminate_direct_sandbox', 'thr_bridge_terminate_direct_sandbox',
 			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', NULL,
-			'call_terminate_sandbox', 'running', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+			'call_terminate_direct_sandbox', 'running', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`,
 	); err != nil {
 		t.Fatalf("seed dispatched sandbox execution: %v", err)
 	}
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	response, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox", FailureJson: failureJSON,
+		Scope: scope, RuntimeWriteId: "rwrite_terminate_direct_sandbox", FailureJson: failureJSON,
 		SandboxExecutionToolUseEventIds: []string{toolUse.GetEventId()},
 	})
 	if err != nil {
@@ -3285,8 +3418,8 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT execution_state, result_json, consumed_by_terminal_event_id, consumption_reason
 		   FROM session_runtime_tool_results
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
-		    AND session_thread_id = 'thr_bridge_terminate_sandbox' AND tool_use_event_id = $1`,
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_direct_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_direct_sandbox' AND tool_use_event_id = $1`,
 		toolUse.GetEventId(),
 	).Scan(&executionState, &resultJSON, &terminalEventID, &consumptionReason); err != nil {
 		t.Fatalf("read terminated sandbox execution: %v", err)
@@ -3294,7 +3427,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	var toolResultCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_events
-		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_direct_sandbox'
 		    AND type = 'agent.tool_result'
 		    AND payload_json::jsonb ->> 'tool_use_event_id' = $1`,
 		toolUse.GetEventId(),
@@ -3306,6 +3439,146 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 		consumptionReason != "runtime_terminated" || toolResultCount != 1 {
 		t.Fatalf("termination ack=%s execution=%q result=%v terminal=%q reason=%q events=%d; want committed consumed thin receipt and one Tool Result",
 			response.GetAck().GetStatus(), executionState, resultJSON, terminalEventID, consumptionReason, toolResultCount)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndStagedSandboxResults(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox_sibling")
+	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "thr_bridge_terminate_mcp_sibling")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	siblingScope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox_sibling", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	mcpSiblingScope := bridgeAPIScope("sesn_bridge_terminate_sandbox", "thr_bridge_terminate_mcp_sibling", "bind_bridge_terminate_sandbox", 1, "pod_uid_terminate_sandbox")
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate_sandbox")
+	seedBridgeAPIRequestStart(t, store, siblingScope, "rwrite_terminate_sandbox_start", "mreq_terminate_sandbox", "agent_provider_request", 0)
+	seedBridgeAPIRequestStart(t, store, mcpSiblingScope, "rwrite_terminate_mcp_start", "mreq_terminate_mcp", "agent_provider_request", 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sandbox_tool", ModelRequestId: "mreq_terminate_sandbox",
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"allow"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			siblingScope,
+			"rwrite_terminate_sandbox_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_sandbox","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sandbox tool use: %v", err)
+	}
+	mcpToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: mcpSiblingScope, RuntimeWriteId: "rwrite_terminate_sandbox_mcp", ModelRequestId: "mreq_terminate_mcp",
+		EventType:      "agent.mcp_tool_use",
+		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"search_code","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			mcpSiblingScope,
+			"rwrite_terminate_sandbox_mcp",
+			"agent.mcp_tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_sandbox_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sibling MCP tool use: %v", err)
+	}
+	const stagedResultJSON = `{"status":"success","result":{"summary":"command completed"}}`
+	stagedResultDigest := sha256Hex(stagedResultJSON)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			result_digest, created_at, updated_at
+		) VALUES ('default', 'sesn_bridge_terminate_sandbox', 'thr_bridge_terminate_sandbox_sibling',
+			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', $4,
+			'call_terminate_sandbox', 'terminal_unconsumed', 1, $5,
+			CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`, stagedResultJSON, stagedResultDigest,
+	); err != nil {
+		t.Fatalf("seed staged sandbox execution: %v", err)
+	}
+	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
+	response, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox", FailureJson: failureJSON,
+	})
+	if err != nil {
+		t.Fatalf("CommitRuntimeTermination sibling tool executions: %v", err)
+	}
+	var executionState string
+	var resultJSON sql.NullString
+	var resultDigest, terminalEventID, consumptionReason string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT execution_state, result_json, result_digest, consumed_by_terminal_event_id, consumption_reason
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_sandbox_sibling' AND tool_use_event_id = $1`,
+		toolUse.GetEventId(),
+	).Scan(&executionState, &resultJSON, &resultDigest, &terminalEventID, &consumptionReason); err != nil {
+		t.Fatalf("read terminated sandbox execution: %v", err)
+	}
+	var toolResultEventID, toolResultPayload string
+	var toolResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT event_id, payload_json, count(*) OVER () FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_sandbox_sibling'
+		    AND type = 'agent.tool_result'
+		    AND payload_json::jsonb ->> 'tool_use_event_id' = $1`,
+		toolUse.GetEventId(),
+	).Scan(&toolResultEventID, &toolResultPayload, &toolResultCount); err != nil {
+		t.Fatalf("read terminated sibling sandbox Tool Result: %v", err)
+	}
+	var mcpResultPayload string
+	var mcpResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT payload_json, count(*) OVER () FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_mcp_sibling'
+		    AND type = 'agent.mcp_tool_result'
+		    AND payload_json::jsonb ->> 'mcp_tool_use_id' = $1`,
+		mcpToolUse.GetEventId(),
+	).Scan(&mcpResultPayload, &mcpResultCount); err != nil {
+		t.Fatalf("read terminated sibling MCP Tool Result: %v", err)
+	}
+	var siblingStatus, mcpSiblingStatus string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_threads
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND id = 'thr_bridge_terminate_sandbox_sibling'`,
+	).Scan(&siblingStatus); err != nil {
+		t.Fatalf("read terminated sibling status: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status FROM session_threads
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_sandbox'
+		    AND id = 'thr_bridge_terminate_mcp_sibling'`,
+	).Scan(&mcpSiblingStatus); err != nil {
+		t.Fatalf("read terminated MCP sibling status: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+		siblingStatus != "terminated" || mcpSiblingStatus != "terminated" || executionState != "consumed" || resultJSON.Valid ||
+		resultDigest != stagedResultDigest || terminalEventID != toolResultEventID ||
+		consumptionReason != "runtime_terminated" ||
+		toolResultCount != 1 || mcpResultCount != 1 ||
+		testJSONPathString(t, toolResultPayload, "reason") != "runtime_terminated" ||
+		testJSONPathString(t, mcpResultPayload, "reason") != "runtime_terminated" {
+		t.Fatalf("termination ack=%s siblings=%q/%q execution=%q result=%v digest=%q terminal=%q event=%q reason=%q counts=%d/%d sandbox=%s mcp=%s; want sibling terminal settlement and consumed thin receipt",
+			response.GetAck().GetStatus(), siblingStatus, mcpSiblingStatus, executionState, resultJSON, resultDigest,
+			terminalEventID, toolResultEventID, consumptionReason, toolResultCount, mcpResultCount, toolResultPayload, mcpResultPayload)
 	}
 }
 
@@ -3323,7 +3596,7 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_child_terminate")
 	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_child_terminate_start", ModelRequestId: "mreq_child_terminate",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_child_terminate"}`, SessionVisible: true,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_child_terminate"}`, SessionVisible: true,
 	}); err != nil {
 		t.Fatalf("WriteEvent child request start: %v", err)
 	}
@@ -3529,7 +3802,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndConsumesOnlyActiveTransientAttac
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_attachment_consumed_start",
 		ModelRequestId: "mreq_bridge_attachment_consumed",
-		EventType:      "span.model_request_start",
+		EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 		PayloadJson:    `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_consumed"}`,
 		SessionVisible: false,
 	})
@@ -3617,7 +3890,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndErrorKeepsBothAttachmentChannels
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_attachment_error"}}]}`)
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_error_start", ModelRequestId: "mreq_bridge_attachment_error",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_error"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_error"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent error start: %v", err)
@@ -3683,7 +3956,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRecordsServedFileAttachmentConsu
 	scope := bridgeAPIScope(sessionID, threadID, "bind_bridge_file_consumed", 1, "pod_bridge_file_consumed")
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_file_consumed_start", ModelRequestId: "mreq_bridge_file_consumed",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_file_consumed"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_file_consumed"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -3777,7 +4050,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndConsumesDeletedFileAttachmentRid
 	}
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_deleted_file_consumed_start", ModelRequestId: "mreq_bridge_deleted_file_consumed",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_deleted_file_consumed"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_deleted_file_consumed"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
@@ -3844,7 +4117,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndDoesNotConsumeAttachmentsOnResch
 		`{"content":[{"type":"image","source":{"type":"file","file_id":"file_bridge_attachment_reschedule"}}]}`)
 	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_attachment_reschedule_start", ModelRequestId: "mreq_bridge_attachment_reschedule",
-		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_reschedule"}`,
+		EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request", PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_bridge_attachment_reschedule"}`,
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent reschedule start: %v", err)
@@ -3913,7 +4186,7 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRescheduleStillValidatesAttachme
 			scope := bridgeAPIScope(sessionID, threadID, "bind_reschedule_scope", 1, "pod_reschedule_scope")
 			start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 				Scope: scope, RuntimeWriteId: "rwrite_reschedule_scope_start_" + suffix,
-				ModelRequestId: "mreq_reschedule_scope_" + suffix, EventType: "span.model_request_start",
+				ModelRequestId: "mreq_reschedule_scope_" + suffix, EventType: "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
 				PayloadJson: `{"type":"span.model_request_start","model_request_id":"mreq_reschedule_scope_` + suffix + `"}`,
 			})
 			if err != nil {
@@ -3996,8 +4269,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsUnknownAttachmentRefsAtom
 			Scope:          scope,
 			RuntimeWriteId: "rwrite_bridge_attachment_unknown_start_" + strconv.Itoa(index),
 			ModelRequestId: modelRequestID,
-			EventType:      "span.model_request_start",
-			PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+			EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+			PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 		})
 		if err != nil {
 			t.Fatalf("WriteEvent start %d: %v", index, err)
@@ -4068,8 +4341,8 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndBoundsConsumedAttachmentsAtomica
 				Scope:          scope,
 				RuntimeWriteId: "rwrite_bridge_attachment_bound_start_" + strconv.Itoa(count),
 				ModelRequestId: modelRequestID,
-				EventType:      "span.model_request_start",
-				PayloadJson:    `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+				EventType:      "span.model_request_start", ContextThroughMessageSequence: bridgeAPIInt64(0), RequestKind: "agent_provider_request",
+				PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
 			})
 			if err != nil {
 				t.Fatalf("WriteEvent start: %v", err)

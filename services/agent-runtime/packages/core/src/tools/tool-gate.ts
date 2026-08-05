@@ -3,7 +3,7 @@
  * Evaluates whether a normalized model tool call is unavailable, runnable, waiting on user
  * approval, waiting on the internal reviewer, or denied. It guards the separation between tool
  * availability and approval, maps reviewer failures back to user approval, and labels each decision
- * with its evaluated permission. AgentLoop calls this gate with catalog policy and optional reviewer
+ * with its evaluated permission. ThreadLoop calls this gate with catalog policy and optional reviewer
  * outcomes and keeps `review_required` internal by re-evaluating before public tool-use persistence;
  * the gate calls tool-catalog lookup and effective-policy helpers and performs no I/O itself.
  */

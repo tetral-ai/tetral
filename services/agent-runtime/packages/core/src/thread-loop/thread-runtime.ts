@@ -1,20 +1,20 @@
 /**
- * This module is the thread-local Runtime aggregate passed into AgentLoop. It
- * guards the current binding identity while keeping hot SessionState, reviewer
+ * This module is the thread-local Runtime aggregate passed into ThreadLoop. It
+ * guards the current binding identity while keeping hot ThreadState, reviewer
  * coordination, and session-wide tool coordination under explicit owners.
- * SessionManager creates and refreshes it, AgentLoop consumes it, and its
- * constructor creates SessionState and, when needed, a tool coordinator.
+ * SessionManager creates and refreshes it, ThreadLoop consumes it, and its
+ * constructor creates ThreadState and, when needed, a tool coordinator.
  *
  * @packageDocumentation
  */
 
-import { SessionState } from "./session-state.js";
-import type { AutoApprovalReviewerManager } from "./approval-reviewer-manager.js";
+import { ThreadState } from "./thread-state.js";
+import type { AutoApprovalReviewerManager } from "../session/approval-reviewer-manager.js";
 import { SessionToolCoordinator } from "../tools/tool-scheduler.js";
-import { SessionConfiguration } from "./session-configuration.js";
+import { SessionConfiguration } from "../session/session-configuration.js";
 
 /** Binding and thread identity required by Runtime-to-Bridge calls. */
-export interface RuntimeSessionIdentity {
+export interface RuntimeThreadIdentity {
   readonly workspaceId: string;
   readonly sessionId: string;
   readonly sessionThreadId: string;
@@ -29,38 +29,38 @@ export interface RuntimeSessionIdentity {
 }
 
 /** Thread-local aggregate joining identity, mutable hot state, and shared coordinators. */
-export class Session {
-  #identity: RuntimeSessionIdentity;
+export class ThreadRuntime {
+  #identity: RuntimeThreadIdentity;
   readonly sessionId: string;
-  readonly state: SessionState;
+  readonly state: ThreadState;
   readonly configuration: SessionConfiguration;
   readonly approvalReviewerManager: AutoApprovalReviewerManager | undefined;
   readonly toolCoordinator: SessionToolCoordinator;
 
   constructor(
-    identity: string | RuntimeSessionIdentity,
+    identity: string | RuntimeThreadIdentity,
     approvalReviewerManager?: AutoApprovalReviewerManager,
     toolCoordinator: SessionToolCoordinator = new SessionToolCoordinator(),
     configuration: SessionConfiguration = new SessionConfiguration(),
   ) {
-    this.#identity = typeof identity === "string" ? defaultRuntimeSessionIdentity(identity) : identity;
+    this.#identity = typeof identity === "string" ? defaultRuntimeThreadIdentity(identity) : identity;
     this.sessionId = this.#identity.sessionId;
-    this.state = new SessionState(this.sessionId);
+    this.state = new ThreadState(this.sessionId);
     this.configuration = configuration;
     this.approvalReviewerManager = approvalReviewerManager;
     this.toolCoordinator = toolCoordinator;
   }
 
-  get identity(): RuntimeSessionIdentity {
+  get identity(): RuntimeThreadIdentity {
     return this.#identity;
   }
 
-  updateIdentity(identity: RuntimeSessionIdentity): void {
+  updateIdentity(identity: RuntimeThreadIdentity): void {
     this.#identity = identity;
   }
 }
 
-function defaultRuntimeSessionIdentity(sessionId: string): RuntimeSessionIdentity {
+function defaultRuntimeThreadIdentity(sessionId: string): RuntimeThreadIdentity {
   return {
     workspaceId: "workspace-test",
     sessionId,

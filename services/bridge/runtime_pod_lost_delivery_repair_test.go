@@ -468,7 +468,7 @@ func seedRuntimePodLostDeliveryFixture(
 		sequence++
 	}
 	if withRequestEnd {
-		payload := fmt.Sprintf(`{"type":"span.model_request_end","model_request_id":%q,"request_kind":"agent_provider_request","is_error":false,"finish_reason":"stop","usage":{}}`, fixture.modelRequestID)
+		payload := fmt.Sprintf(`{"type":"span.model_request_end","model_request_id":%q,"model_request_start_id":%q,"request_kind":"agent_provider_request","is_error":false,"finish_reason":"stop","usage":{}}`, fixture.modelRequestID, "evt_start_"+fixture.toolUseEventID)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_end_"+fixture.toolUseEventID, sequence, "span.model_request_end", payload, "internal", false)
 	}
 	return fixture
@@ -476,13 +476,17 @@ func seedRuntimePodLostDeliveryFixture(
 
 func seedRuntimePodLostDeliveryEvent(t *testing.T, db *sql.DB, fixture runtimePodLostDeliveryFixture, threadID string, eventID string, sequence int64, eventType string, payloadJSON string, visibility string, sessionVisible bool) {
 	t.Helper()
+	projectionJSON := `{}`
+	if eventType == "span.model_request_start" {
+		projectionJSON = `{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}`
+	}
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
-		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, '{}',
+		) VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID); err != nil {
+		fixture.sessionID, threadID, eventID, sequence, eventType, payloadJSON, visibility, sessionVisible, fixture.modelRequestID, projectionJSON); err != nil {
 		t.Fatalf("seed %s event %s: %v", eventType, eventID, err)
 	}
 }

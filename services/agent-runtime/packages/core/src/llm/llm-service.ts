@@ -4,7 +4,7 @@
  * It guards request identity, fragment ordering, attachment-rejection placement, terminal
  * uniqueness, and protocol completeness before any event reaches request-turn orchestration.
  * The Runtime host constructs a concrete adapter backed by GatewayClient and injects it through
- * the Interface boundary into AgentLoop, which calls stream. The adapter validates
+ * the Interface boundary into ThreadLoop, which calls stream. The adapter validates
  * shared protocol bounds and ordering, maps ordinary frames directly, and calls
  * Runtime's bounded constructors when it normalizes failures.
  */

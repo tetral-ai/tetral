@@ -549,6 +549,11 @@ export interface IdleCloseoutStamp {
   committedIdleAt: string;
 }
 
+export interface RequestStartStamp {
+  requestKind: string;
+  contextThroughMessageSequence: number;
+}
+
 export interface DeclarationReceipt {
   sessionThreadId: string;
   operationKind: string;
@@ -562,6 +567,7 @@ export interface DeclarationReceipt {
   declarationDigest: string;
   requestReschedule: RequestRescheduleStamp | undefined;
   childLifecycle: ChildLifecycleStamp[];
+  requestStart: RequestStartStamp | undefined;
   idleCloseout: IdleCloseoutStamp | undefined;
   compactedThroughMessageSequence?: number | undefined;
 }
@@ -813,6 +819,8 @@ export interface WriteEventRequest {
   drafts: RuntimeMessageDraft[];
   mcpMaterializationHandle?: string | undefined;
   sandboxResultDigest?: string | undefined;
+  contextThroughMessageSequence?: number | undefined;
+  requestKind: string;
 }
 
 export interface ServerToolUseUsage {
@@ -2509,6 +2517,90 @@ export const IdleCloseoutStamp: MessageFns<IdleCloseoutStamp> = {
   },
 };
 
+function createBaseRequestStartStamp(): RequestStartStamp {
+  return { requestKind: "", contextThroughMessageSequence: 0 };
+}
+
+export const RequestStartStamp: MessageFns<RequestStartStamp> = {
+  encode(message: RequestStartStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.requestKind !== "") {
+      writer.uint32(10).string(message.requestKind);
+    }
+    if (message.contextThroughMessageSequence !== 0) {
+      writer.uint32(16).int64(message.contextThroughMessageSequence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RequestStartStamp {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRequestStartStamp();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.requestKind = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.contextThroughMessageSequence = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RequestStartStamp {
+    return {
+      requestKind: isSet(object.requestKind)
+        ? globalThis.String(object.requestKind)
+        : isSet(object.request_kind)
+        ? globalThis.String(object.request_kind)
+        : "",
+      contextThroughMessageSequence: isSet(object.contextThroughMessageSequence)
+        ? globalThis.Number(object.contextThroughMessageSequence)
+        : isSet(object.context_through_message_sequence)
+        ? globalThis.Number(object.context_through_message_sequence)
+        : 0,
+    };
+  },
+
+  toJSON(message: RequestStartStamp): unknown {
+    const obj: any = {};
+    if (message.requestKind !== "") {
+      obj.requestKind = message.requestKind;
+    }
+    if (message.contextThroughMessageSequence !== 0) {
+      obj.contextThroughMessageSequence = Math.round(message.contextThroughMessageSequence);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RequestStartStamp>, I>>(base?: I): RequestStartStamp {
+    return RequestStartStamp.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RequestStartStamp>, I>>(object: I): RequestStartStamp {
+    const message = createBaseRequestStartStamp();
+    message.requestKind = object.requestKind ?? "";
+    message.contextThroughMessageSequence = object.contextThroughMessageSequence ?? 0;
+    return message;
+  },
+};
+
 function createBaseDeclarationReceipt(): DeclarationReceipt {
   return {
     sessionThreadId: "",
@@ -2523,6 +2615,7 @@ function createBaseDeclarationReceipt(): DeclarationReceipt {
     declarationDigest: "",
     requestReschedule: undefined,
     childLifecycle: [],
+    requestStart: undefined,
     idleCloseout: undefined,
     compactedThroughMessageSequence: undefined,
   };
@@ -2565,6 +2658,9 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     }
     for (const v of message.childLifecycle) {
       ChildLifecycleStamp.encode(v!, writer.uint32(98).fork()).join();
+    }
+    if (message.requestStart !== undefined) {
+      RequestStartStamp.encode(message.requestStart, writer.uint32(106).fork()).join();
     }
     if (message.idleCloseout !== undefined) {
       IdleCloseoutStamp.encode(message.idleCloseout, writer.uint32(114).fork()).join();
@@ -2678,6 +2774,14 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
           message.childLifecycle.push(ChildLifecycleStamp.decode(reader, reader.uint32()));
           continue;
         }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.requestStart = RequestStartStamp.decode(reader, reader.uint32());
+          continue;
+        }
         case 14: {
           if (tag !== 114) {
             break;
@@ -2761,6 +2865,11 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
         : globalThis.Array.isArray(object?.child_lifecycle)
         ? object.child_lifecycle.map((e: any) => ChildLifecycleStamp.fromJSON(e))
         : [],
+      requestStart: isSet(object.requestStart)
+        ? RequestStartStamp.fromJSON(object.requestStart)
+        : isSet(object.request_start)
+        ? RequestStartStamp.fromJSON(object.request_start)
+        : undefined,
       idleCloseout: isSet(object.idleCloseout)
         ? IdleCloseoutStamp.fromJSON(object.idleCloseout)
         : isSet(object.idle_closeout)
@@ -2812,6 +2921,9 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     if (message.childLifecycle?.length) {
       obj.childLifecycle = message.childLifecycle.map((e) => ChildLifecycleStamp.toJSON(e));
     }
+    if (message.requestStart !== undefined) {
+      obj.requestStart = RequestStartStamp.toJSON(message.requestStart);
+    }
     if (message.idleCloseout !== undefined) {
       obj.idleCloseout = IdleCloseoutStamp.toJSON(message.idleCloseout);
     }
@@ -2840,6 +2952,9 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
       ? RequestRescheduleStamp.fromPartial(object.requestReschedule)
       : undefined;
     message.childLifecycle = object.childLifecycle?.map((e) => ChildLifecycleStamp.fromPartial(e)) || [];
+    message.requestStart = (object.requestStart !== undefined && object.requestStart !== null)
+      ? RequestStartStamp.fromPartial(object.requestStart)
+      : undefined;
     message.idleCloseout = (object.idleCloseout !== undefined && object.idleCloseout !== null)
       ? IdleCloseoutStamp.fromPartial(object.idleCloseout)
       : undefined;
@@ -6923,6 +7038,8 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     drafts: [],
     mcpMaterializationHandle: undefined,
     sandboxResultDigest: undefined,
+    contextThroughMessageSequence: undefined,
+    requestKind: "",
   };
 }
 
@@ -6960,6 +7077,12 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     }
     if (message.sandboxResultDigest !== undefined) {
       writer.uint32(98).string(message.sandboxResultDigest);
+    }
+    if (message.contextThroughMessageSequence !== undefined) {
+      writer.uint32(104).int64(message.contextThroughMessageSequence);
+    }
+    if (message.requestKind !== "") {
+      writer.uint32(114).string(message.requestKind);
     }
     return writer;
   },
@@ -7059,6 +7182,22 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.sandboxResultDigest = reader.string();
           continue;
         }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.contextThroughMessageSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.requestKind = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7119,6 +7258,16 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.sandbox_result_digest)
         ? globalThis.String(object.sandbox_result_digest)
         : undefined,
+      contextThroughMessageSequence: isSet(object.contextThroughMessageSequence)
+        ? globalThis.Number(object.contextThroughMessageSequence)
+        : isSet(object.context_through_message_sequence)
+        ? globalThis.Number(object.context_through_message_sequence)
+        : undefined,
+      requestKind: isSet(object.requestKind)
+        ? globalThis.String(object.requestKind)
+        : isSet(object.request_kind)
+        ? globalThis.String(object.request_kind)
+        : "",
     };
   },
 
@@ -7157,6 +7306,12 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.sandboxResultDigest !== undefined) {
       obj.sandboxResultDigest = message.sandboxResultDigest;
     }
+    if (message.contextThroughMessageSequence !== undefined) {
+      obj.contextThroughMessageSequence = Math.round(message.contextThroughMessageSequence);
+    }
+    if (message.requestKind !== "") {
+      obj.requestKind = message.requestKind;
+    }
     return obj;
   },
 
@@ -7180,6 +7335,8 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
     message.mcpMaterializationHandle = object.mcpMaterializationHandle ?? undefined;
     message.sandboxResultDigest = object.sandboxResultDigest ?? undefined;
+    message.contextThroughMessageSequence = object.contextThroughMessageSequence ?? undefined;
+    message.requestKind = object.requestKind ?? "";
     return message;
   },
 };

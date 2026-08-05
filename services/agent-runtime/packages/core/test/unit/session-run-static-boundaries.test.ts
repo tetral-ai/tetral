@@ -5,7 +5,7 @@ import { extname, relative, sep } from "node:path";
 const packageRoot = new URL("../../", import.meta.url);
 const sourceRoot = new URL("../../src/", import.meta.url);
 const lifecycleLayerRoots = [
-  new URL("../../src/agent-loop/", import.meta.url),
+  new URL("../../src/thread-loop/", import.meta.url),
   new URL("../../src/session/", import.meta.url),
   new URL("../../src/session-run-host/", import.meta.url),
 ] as const;
@@ -108,21 +108,27 @@ function collectLifecycleBoundaryViolations(relativePath: string, text: string):
     }
   }
   for (const importSpecifier of importSpecifiers(text)) {
-    const allowedAgentLoopRuntimeImport =
-      relativePath === "src/agent-loop/agent-loop.ts" &&
-      (importSpecifier === "../runtime/message-projection.js" ||
-        importSpecifier === "../runtime/accumulator.js" ||
-        importSpecifier === "../runtime/conversation-turns.js" ||
-        importSpecifier === "../runtime/runtime-declaration.js" ||
-        importSpecifier === "../runtime/metrics.js" ||
-        importSpecifier === "../runtime/turn-retry-budget.js");
+    const allowedThreadLoopRuntimeImport =
+      (relativePath === "src/thread-loop/thread-loop.ts" &&
+        (importSpecifier === "../runtime/message-projection.js" ||
+          importSpecifier === "../runtime/accumulator.js" ||
+          importSpecifier === "../runtime/conversation-turns.js" ||
+          importSpecifier === "../runtime/runtime-declaration.js" ||
+          importSpecifier === "../runtime/metrics.js" ||
+          importSpecifier === "../runtime/turn-retry-budget.js")) ||
+      (relativePath === "src/thread-loop/provider-request.ts" &&
+        importSpecifier === "../runtime/metrics.js") ||
+      (relativePath === "src/thread-loop/tool-execution.ts" &&
+        importSpecifier === "../runtime/accumulator.js") ||
+      (relativePath === "src/thread-loop/closeout.ts" &&
+        importSpecifier === "../runtime/runtime-declaration.js");
     const allowedSessionManagerRuntimeImport =
       relativePath === "src/session/session-manager.ts" &&
       importSpecifier === "../runtime/metrics.js";
     if (importSpecifier.startsWith(".") && extname(importSpecifier) !== ".js") {
       violations.push(`${relativePath}: relative import without .js suffix (${importSpecifier})`);
     }
-    if (!allowedAgentLoopRuntimeImport && !allowedSessionManagerRuntimeImport && /^(?:.*\/)?(?:providers|runtime)\//.test(importSpecifier)) {
+    if (!allowedThreadLoopRuntimeImport && !allowedSessionManagerRuntimeImport && /^(?:.*\/)?(?:providers|runtime)\//.test(importSpecifier)) {
       violations.push(`${relativePath}: guarded runtime/provider import (${importSpecifier})`);
     }
   }
@@ -133,15 +139,19 @@ describe("session run static boundaries", () => {
   test("lifecycle roots expose the new Agent Pod ownership files and no removed service/state files", async () => {
     const sources = await readLifecycleSources();
     const expectedLifecycleFiles = [
-      "src/agent-loop/agent-loop.ts",
-      "src/agent-loop/provider-call-assembly.ts",
-      "src/agent-loop/request-turn-state.ts",
+      "src/thread-loop/thread-loop.ts",
+      "src/thread-loop/thread-runtime.ts",
+      "src/thread-loop/thread-state.ts",
+      "src/thread-loop/thread-turn-checkpoint.ts",
+      "src/thread-loop/thread-turn-reducer.ts",
+      "src/thread-loop/provider-request.ts",
+      "src/thread-loop/tool-execution.ts",
+      "src/thread-loop/compaction.ts",
+      "src/thread-loop/closeout.ts",
       "src/session/approval-reviewer-manager.ts",
       "src/session/context-manager.ts",
       "src/session/session-configuration.ts",
       "src/session/session-manager.ts",
-      "src/session/session-state.ts",
-      "src/session/session.ts",
       "src/session/thread-command-channel.ts",
       "src/session-run-host/session-run-host.ts",
     ].sort((left, right) => left.localeCompare(right));
@@ -191,9 +201,9 @@ describe("session run static boundaries", () => {
     expect(violations).toContain("src/session/bad.ts: forbidden Bun.serve transport");
   });
 
-  test("only SessionManager residency and the reviewer decision memo own hot string-keyed maps", async () => {
+  test("string-keyed maps are limited to residency, reviewer memo, and pure checkpoint extraction", async () => {
     const managerSource = await readFile(sourceUrl("src/session/session-manager.ts"), "utf8");
-    const stateSource = await readFile(sourceUrl("src/session/session-state.ts"), "utf8");
+    const stateSource = await readFile(sourceUrl("src/thread-loop/thread-state.ts"), "utf8");
     const normalizedManager = normalizeSource(managerSource);
     const normalizedState = normalizeSource(stateSource);
     const normalizedSessionEntry = normalizeSource(namedInterfaceBody(managerSource, "SessionEntry"));
@@ -209,6 +219,7 @@ describe("session run static boundaries", () => {
     expect(mapOwners).toEqual([
       "src/session/approval-reviewer-manager.ts",
       "src/session/session-manager.ts",
+      "src/thread-loop/thread-turn-checkpoint.ts",
     ]);
     expect(normalizedManager).toContain("interfaceThreadRunSlot{");
     expect(normalizedManager).toContain("pendingWakeAfterStop:boolean;");
@@ -216,14 +227,14 @@ describe("session run static boundaries", () => {
     expect(normalizedManager).toContain("runSlot:ThreadRunSlot|undefined;");
     expect(normalizedSessionEntry).toBe("workspaceId:string;readonlysessionId:string;bindingId:string;bindingGeneration:number;readonlythreads:Map<string,ThreadEntry>;readonlytoolCoordinator:SessionToolCoordinator;readonlyruntimeShutdown:RuntimeShutdownObservation;readonlycontrolGate:Semaphore.Semaphore;readonlyconfiguration:SessionConfiguration;sharedStateStatus:\"initializing\"|\"ready\"|\"failed\";readonlysharedStateInitializerThreadId:string;readonlysharedStateReady:Promise<boolean>;readonlycompleteSharedStateReady:(ready:boolean)=>void;");
     expect(normalizedManager).toContain("toolCoordinator:newSessionToolCoordinator({maxConcurrentTools:options.maxConcurrentTools??8})");
-    expect(normalizedManager).toContain("newSession.Session(identity,approvalReviewer,toolCoordinator,sessionConfiguration)");
+    expect(normalizedManager).toContain("newThreadRuntime.ThreadRuntime(identity,approvalReviewer,toolCoordinator,sessionConfiguration,)");
     expect(normalizedManager).toContain("constsessions=newMap<string,SessionEntry>();");
     expect(normalizedManager).toContain("constsessionKey=(workspaceId:string,sessionId:string):string=>`${workspaceId}\\u0000${sessionId}`;");
     expect(normalizedManager).toContain("constcommandSessionKey=(command:{readonlyworkspaceId:string;readonlysessionId:string}):string=>sessionKey(command.workspaceId,command.sessionId);");
-    expect(normalizedManager).toContain("constawaitRunSlot=(runSlot:ThreadRunSlot,):Effect.Effect<Exit.Exit<AgentLoop.AgentLoopRunResult,unknown>>=>Deferred.await(runSlot.doneDeferred).pipe(Effect.exit)");
+    expect(normalizedManager).toContain("constawaitRunSlot=(runSlot:ThreadRunSlot,):Effect.Effect<Exit.Exit<ThreadLoop.ThreadLoopRunResult,unknown>>=>Deferred.await(runSlot.doneDeferred).pipe(Effect.exit)");
     expect(normalizedManager).toContain("construnScope=yield*Scope.make();");
     expect(normalizedManager).toContain("constfiber=yield*Effect.forkIn(run,runScope);");
-    expect(normalizedManager).toContain("constcontrolIdentity=(command:RuntimeThreadControlState):Session.RuntimeSessionIdentity=>({workspaceId:command.workspaceId,sessionId:command.sessionId,sessionThreadId:command.sessionThreadId,bindingId:command.bindingId,bindingGeneration:command.bindingGeneration");
+    expect(normalizedManager).toContain("constcontrolIdentity=(command:RuntimeThreadControlState):ThreadRuntime.RuntimeThreadIdentity=>({workspaceId:command.workspaceId,sessionId:command.sessionId,sessionThreadId:command.sessionThreadId,bindingId:command.bindingId,bindingGeneration:command.bindingGeneration");
     expect(normalizedManager).toContain("constsessionEntry=sessions.get(commandSessionKey(command));if(sessionEntry===undefined){return{ok:true,sessionId,created:false,applied:false,noResidency:true};}");
     expect(normalizedManager).toContain("sessionEntry.sharedStateStatus!==\"ready\"||[...sessionEntry.threads.values()].some((threadEntry)=>threadEntry.installationState!==\"ready\"||threadEntry.runSlot!==undefined,)");
     expect(normalizedManager).toContain("for(constthreadEntryofsessionEntry.threads.values()){");
@@ -253,7 +264,7 @@ describe("session run static boundaries", () => {
 
     expect(serviceTags.sort()).toEqual(
       [
-      "src/agent-loop/agent-loop.ts: tetral-agent/AgentLoop",
+      "src/thread-loop/thread-loop.ts: tetral-agent/ThreadLoop",
       "src/session/session-manager.ts: tetral-agent/SessionManager",
       "src/session-run-host/session-run-host.ts: tetral-agent/SessionRunHost",
       ].sort(),
@@ -312,12 +323,12 @@ describe("session run static boundaries", () => {
 
   test("cold preload publishes installing residency before the shared-state gate and pending-tool hydration", async () => {
     const managerSource = await readFile(sourceUrl("src/session/session-manager.ts"), "utf8");
-    const agentLoopSource = await readFile(sourceUrl("src/agent-loop/agent-loop.ts"), "utf8");
-    const normalizedAgentLoop = normalizeSource(agentLoopSource);
+    const threadLoopSource = await readFile(sourceUrl("src/thread-loop/thread-loop.ts"), "utf8");
+    const normalizedThreadLoop = normalizeSource(threadLoopSource);
     const preloadStart = managerSource.indexOf("const preloadThread");
     const preloadEnd = managerSource.indexOf("\n      const interruptThread", preloadStart);
     const preloadSection = managerSource.slice(preloadStart, preloadEnd);
-    const installIndex = preloadSection.indexOf("agentLoop.installLoadedPendingToolUses");
+    const installIndex = preloadSection.indexOf("threadLoop.installLoadedPendingToolUses");
     const pendingAssignmentIndex = preloadSection.indexOf("const pendingToolUseInstall");
     const residencyIndex = preloadSection.indexOf("getOrCreateThreadEntry(identity, metadata, \"installing\")");
     const sharedStateGateIndex = preloadSection.indexOf("threadResult.sessionEntry.sharedStateReady");
@@ -325,8 +336,8 @@ describe("session run static boundaries", () => {
     expect(preloadStart).toBeGreaterThanOrEqual(0);
     expect(preloadEnd).toBeGreaterThan(preloadStart);
     expect(installIndex).toBeGreaterThanOrEqual(0);
-    expect(normalizedAgentLoop).toContain(
-      "installLoadedPendingToolUses:(session,pendingToolUses,messages)=>Effect.sync(()=>installLoadedPendingToolUses(session,options,pendingToolUses,messages))",
+    expect(normalizedThreadLoop).toContain(
+      "installLoadedPendingToolUses:(session,pendingToolUses,messages)=>Effect.sync(()=>installLoadedPendingToolUses(session,()=>toolCatalogForSession(session,options),pendingToolUses,messages))",
     );
     expect(pendingAssignmentIndex).toBeGreaterThanOrEqual(0);
     expect(residencyIndex).toBeGreaterThanOrEqual(0);
@@ -336,7 +347,7 @@ describe("session run static boundaries", () => {
   });
 
   test("pending approval hot state stores settlement descriptors, never SessionProcessor", async () => {
-    const stateSource = await readFile(sourceUrl("src/session/session-state.ts"), "utf8");
+    const stateSource = await readFile(sourceUrl("src/thread-loop/thread-state.ts"), "utf8");
     const stateStart = stateSource.indexOf("export interface RuntimePendingApprovalToolJobState");
     const stateEnd = stateSource.indexOf("\n}\n", stateStart);
     const pendingState = stateSource.slice(stateStart, stateEnd);

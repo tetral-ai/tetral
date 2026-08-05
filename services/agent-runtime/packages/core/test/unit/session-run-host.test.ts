@@ -20,8 +20,8 @@ import { RuntimeInternalToolRepairStore } from "../../src/contracts/runtime.js";
 import type { AcceptedInputCommitResult, ContextLoader } from "../../src/context/context-loader.js";
 import type { LLMEvent } from "../../src/llm/llm-event.js";
 import type { Interface as LLMServiceInterface, LLMRequest } from "../../src/llm/llm-service.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "../../src/session/session-state.js";
-import * as AgentLoop from "../../src/agent-loop/agent-loop.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "../../src/thread-loop/thread-state.js";
+import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
 import * as SessionManager from "../../src/session/session-manager.js";
 import * as SessionRunHost from "../../src/session-run-host/session-run-host.js";
 import {
@@ -30,6 +30,7 @@ import {
   buildRuntimeControlCommitResult,
 } from "./runtime-message-builders.js";
 import { acceptedInputReceipt } from "./runtime-declaration-fixtures.js";
+import { writerFrom } from "./thread-loop/thread-loop-test-support.js";
 
 const createdAt = "2026-06-14T00:00:00.000Z";
 const emptyColdCoverage = {
@@ -252,86 +253,26 @@ class HostRuntimeStore extends RuntimeInternalToolRepairStore {
 
 class RecordingWriter implements SessionEventWriter {
   readonly events: SessionEvent[] = [];
-
-  async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
+  private readonly writer = writerFrom((envelope) => {
     this.events.push(envelope.event);
-    const eventId = `bridge-${envelope.writeId}`;
     return {
       ok: true,
       writeId: envelope.writeId,
-      eventId,
+      eventId: `bridge-${envelope.writeId}`,
       processedAt: createdAt,
-      declaration: {
-        applicationDisposition: "current_custody",
-        observedBindingId: envelope.bindingId,
-        observedBindingGeneration: envelope.bindingGeneration,
-        receipt: {
-          sessionThreadId: envelope.sessionThreadId,
-          operationKind: "write_event",
-          sourceKind: envelope.event.type,
-          sourceId: envelope.writeId,
-          declarationDigest: `digest_${envelope.writeId}`,
-          pendingAttachmentDelta: [],
-          pendingToolDelta: [],
-          prefixConsumptions: [],
-
-          childLifecycle: [],
-          events: [{
-            sessionThreadId: envelope.sessionThreadId,
-            sourceEventId: envelope.writeId,
-            eventId,
-            eventSequence: this.events.length,
-            disposition: "created",
-          }],
-          messages: envelope.drafts.map((draft) => ({
-            runtimeLocalId: draft.runtimeLocalId,
-            sessionThreadId: envelope.sessionThreadId,
-            owningEventId: eventId,
-            messageId: `msg_${draft.runtimeLocalId}`,
-            messageSequence: 2,
-            createdAt,
-            updatedAt: createdAt,
-            disposition: "created",
-            parts: draft.parts.map((part, index) => ({
-              runtimeLocalPartId: part.runtimeLocalPartId,
-              partId: `part_${part.runtimeLocalPartId}`,
-              messageId: `msg_${draft.runtimeLocalId}`,
-              partSequence: index,
-              createdAt,
-              updatedAt: createdAt,
-              disposition: "created",
-            })),
-          })),
-        },
-      },
     };
+  });
+
+  async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
+    return await this.writer.append(envelope);
   }
 
   async writeRequestEnd(envelope: SessionEventWriterRequestEndEnvelope): Promise<SessionEventWriterAppendResult> {
-    this.events.push({
-      type: "span.model_request_end",
-      model_request_start_id: envelope.modelRequestStartEventId,
-      is_error: envelope.isError,
-      ...(envelope.errorKind !== undefined ? { error_kind: envelope.errorKind } : {}),
-      model_usage: {
-        input_tokens: envelope.usage?.inputTokens ?? 0,
-        output_tokens: envelope.usage?.outputTokens ?? 0,
-        cache_creation_input_tokens: envelope.usage?.cacheWriteTokens ?? 0,
-        cache_read_input_tokens: envelope.usage?.cacheReadTokens ?? 0,
-        speed: null,
-      },
-    });
-    return { ok: true, writeId: envelope.writeId, eventId: `bridge-${envelope.writeId}`, processedAt: createdAt };
+    return await this.writer.writeRequestEnd!(envelope);
   }
 
   async finishIdle(envelope: SessionEventWriterFinishIdleEnvelope): Promise<SessionEventWriterAppendResult> {
-    this.events.push({ type: "session.status_idle", stop_reason: envelope.stopReason });
-    return {
-      ok: true,
-      writeId: envelope.durableTurnId,
-      eventId: `bridge-${envelope.durableTurnId}`,
-      processedAt: createdAt,
-    };
+    return await this.writer.finishIdle!(envelope);
   }
 }
 
@@ -399,7 +340,7 @@ function fullHostLayer(options: {
   readonly writer: RecordingWriter;
   readonly llmService: LLMServiceInterface;
 }): Layer.Layer<SessionRunHost.Service> {
-  const agentLoopLayer = AgentLoop.layer({
+  const threadLoopLayer = ThreadLoop.layer({
     internalToolRepairStore: options.store,
     sessionEventWriter: options.writer,
     runtime: runtime(),
@@ -410,7 +351,7 @@ function fullHostLayer(options: {
       systemInstructions: "SessionRunHost integration test.",
       timeoutMs: 1_800_000,
     },
-  }).pipe(Layer.provide(AgentLoop.contextLoaderLayer(options.loader)));
+  }).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(options.loader)));
   const managerLayer = SessionManager.layer({
     maxLocalSessions: 10,
     now: () => createdAt,
@@ -420,7 +361,7 @@ function fullHostLayer(options: {
       runtimeBindingToken: `rtbt_${command.sessionId}`,
       coldCoverage: emptyColdCoverage,
     }),
-  }).pipe(Layer.provide(agentLoopLayer));
+  }).pipe(Layer.provide(threadLoopLayer));
   return SessionRunHost.layer.pipe(Layer.provide(managerLayer));
 }
 
@@ -596,7 +537,7 @@ describe("SessionRunHost", () => {
     ]);
   });
 
-  test("handleAcceptInput drives the real manager and agent loop through the fake runtime path", async () => {
+  test("handleAcceptInput drives the real manager and ThreadLoop through the fake runtime path", async () => {
     const loader = new QueuedContextLoader([], []);
     const store = new HostRuntimeStore();
     const writer = new RecordingWriter();

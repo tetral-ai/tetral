@@ -596,6 +596,7 @@ func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *t
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_cancelled_once_start", "mreq_interrupt_cancelled_once", "agent_provider_request", 0)
 	written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_interrupt_cancelled_once", ModelRequestId: "mreq_interrupt_cancelled_once",
 		EventType:   "agent.tool_use",
@@ -621,7 +622,7 @@ func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *t
 	firstEventID := "evt_interrupt_cancelled_once_first"
 	firstInputID := "rin_interrupt_cancelled_once_first"
 	localID := stableRuntimeID("runtime_message_draft", "default", sessionID, threadID, "interrupt_control", firstInputID, "cancellation", "0")
-	if err := commitInterrupt(firstEventID, firstInputID, 2, []*bridgev1.RuntimeMessageDraft{{
+	if err := commitInterrupt(firstEventID, firstInputID, 3, []*bridgev1.RuntimeMessageDraft{{
 		RuntimeLocalId: localID, SourceKind: "interrupt_control", SourceId: firstInputID,
 		SourceEventId: firstEventID, DraftKind: bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
 		MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
@@ -632,7 +633,7 @@ func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *t
 	}}); err != nil {
 		t.Fatalf("commit first interrupt: %v", err)
 	}
-	if err := commitInterrupt("evt_interrupt_cancelled_once_second", "rin_interrupt_cancelled_once_second", 3, nil); err != nil {
+	if err := commitInterrupt("evt_interrupt_cancelled_once_second", "rin_interrupt_cancelled_once_second", 4, nil); err != nil {
 		t.Fatalf("commit later interrupt: %v", err)
 	}
 	var cancellations int
@@ -1357,6 +1358,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_generated_start", "mreq_bridge_generated_tool_use", "agent_provider_request", 0)
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope:          scope,
 		RuntimeWriteId: "rwrite_bridge_generated_tool_use",
@@ -1380,16 +1382,16 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		t.Fatalf("WriteEvent generated tool use: %v", err)
 	}
 	setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", toolUse.GetEventId(), "resolving")
-	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "evt_bridge_generated_confirm", 2, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"`+toolUse.GetEventId()+`","result":"allow"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "tool_confirmation", `["evt_bridge_generated_confirm"]`, "accepted", "bind_bridge_generated_confirm", "pod_uid_generated_confirm", 2, 2)
+	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "evt_bridge_generated_confirm", 3, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"`+toolUse.GetEventId()+`","result":"allow"}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "tool_confirmation", `["evt_bridge_generated_confirm"]`, "accepted", "bind_bridge_generated_confirm", "pod_uid_generated_confirm", 3, 3)
 
 	response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "bind_bridge_generated_confirm", 1, "pod_uid_generated_confirm"),
 		RuntimeInputId: "rin_bridge_generated_confirm",
 		InputKind:      "tool_confirmation",
 		EventIds:       []string{"evt_bridge_generated_confirm"},
-		SequenceFrom:   2,
-		SequenceTo:     2,
+		SequenceFrom:   3,
+		SequenceTo:     3,
 		Drafts: []*bridgev1.RuntimeMessageDraft{
 			bridgeApprovalInputDraftForTest("default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "evt_bridge_generated_confirm", "Approval allowed"),
 		},
@@ -2176,14 +2178,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-		seedBridgeAPIEvent(t, admin, "default", sessionID, reviewerID, eventID, 1, "approval_review.decision", `{"decision":"approve"}`)
 		request := &bridgev1.CommitInputsRequest{
 			Scope:          bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
 			RuntimeInputId: inputID,
 			InputKind:      "approval_review",
 			EventIds:       []string{eventID},
-			SequenceFrom:   1,
-			SequenceTo:     1,
 			Drafts: []*bridgev1.RuntimeMessageDraft{
 				bridgeInputDraftForTest(
 					"default",
@@ -2198,11 +2197,72 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 				),
 			},
 		}
-		response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
+		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		response, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
 			t.Fatalf("CommitInputs reviewer input: %v", err)
 		}
 		assertSingleCommitInputReceipt(t, response, "approval_review", inputID, eventID)
+		eventStamp := response.GetDeclaration().GetReceipts()[0].GetEvents()[0]
+		if eventStamp.GetDisposition() != bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED || eventStamp.GetEventSequence() <= 0 {
+			t.Fatalf("reviewer input event stamp = %+v; want newly created durable event", eventStamp)
+		}
+
+		var eventType string
+		var payloadJSON string
+		var visibility string
+		var sessionVisible bool
+		var processed bool
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT type, payload_json, visibility, session_visible, processed_at IS NOT NULL
+			   FROM session_events
+			  WHERE workspace_id = 'default'
+			    AND session_id = $1
+			    AND session_thread_id = $2
+			    AND event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&eventType, &payloadJSON, &visibility, &sessionVisible, &processed); err != nil {
+			t.Fatalf("read reviewer input event: %v", err)
+		}
+		if eventType != "approval_review.input" || visibility != "internal" || sessionVisible || !processed {
+			t.Fatalf("reviewer input event = type %q visibility %q session_visible %v processed %v; want internal processed approval_review.input", eventType, visibility, sessionVisible, processed)
+		}
+		if got := testJSONPathString(t, payloadJSON, "runtime_input_id"); got != inputID {
+			t.Fatalf("reviewer input runtime_input_id = %q; want %q", got, inputID)
+		}
+
+		replay, err := store.CommitInputs(context.Background(), request)
+		if err != nil {
+			t.Fatalf("replay CommitInputs reviewer input: %v", err)
+		}
+		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+			t.Fatalf("reviewer input ACKs = %s/%s; want committed/duplicate", response.GetAck().GetStatus(), replay.GetAck().GetStatus())
+		}
+		assertSingleCommitInputReceipt(t, replay, "approval_review", inputID, eventID)
+		var eventCount int
+		var messageCount int
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM session_events WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&eventCount); err != nil {
+			t.Fatalf("count reviewer input events: %v", err)
+		}
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM session_messages WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND source_event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&messageCount); err != nil {
+			t.Fatalf("count reviewer input messages: %v", err)
+		}
+		if eventCount != 1 || messageCount != 1 {
+			t.Fatalf("reviewer input durable rows = %d events/%d messages; want 1/1", eventCount, messageCount)
+		}
 	})
 
 	t.Run("rejection", func(t *testing.T) {

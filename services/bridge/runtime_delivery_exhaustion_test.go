@@ -13,6 +13,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -43,6 +44,81 @@ func TestRuntimeDeliveryExhaustionEventIDMatchesDatabaseDerivation(t *testing.T)
 	}
 	if got := runtimeDeliveryExhaustionEventID(job); got != databaseID {
 		t.Fatalf("runtime delivery exhaustion event id = %q; database derivation = %q", got, databaseID)
+	}
+}
+
+func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_exhaustion_boundary"
+		threadID  = "thr_exhaustion_boundary"
+		bindingID = "bind_exhaustion_boundary"
+		podUID    = "pod_exhaustion_boundary"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	seedBridgeAPIRuntimeInput(
+		t, admin, "default", sessionID, threadID,
+		"rin_exhaustion_message", bindingID, podUID, "evt_exhaustion_message",
+	)
+
+	apiStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	apiStore.RuntimeBindingTokenHMACKey = []byte("bridge-exhaustion-boundary-key!")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_exhaustion_message", InputKind: "messages",
+		EventIds: []string{"evt_exhaustion_message"}, SequenceFrom: 1, SequenceTo: 1,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInputDraftForTest(
+			"default", sessionID, threadID, "messages", "rin_exhaustion_message", "evt_exhaustion_message",
+			bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT, "user", "hello",
+		)},
+	})
+	if err != nil {
+		t.Fatalf("commit exhaustion boundary input: %v", err)
+	}
+	messageSequence := committed.GetDeclaration().GetReceipts()[0].GetMessages()[0].GetMessageSequence()
+
+	seedBridgeAPIEvent(
+		t, admin, "default", sessionID, threadID,
+		"evt_exhaustion_delivery", 2, "user.message", `{"content":[{"type":"text","text":"exhaust"}]}`,
+	)
+	seedBridgeAPIRuntimeInbox(
+		t, admin, "default", sessionID, threadID,
+		"rin_exhaustion_delivery", "messages", `["evt_exhaustion_delivery"]`,
+		"accepted", bindingID, podUID, 2, 2,
+	)
+	job := exhaustionRuntimeJob(sessionID, threadID, "rin_exhaustion_delivery", "messages", []string{"evt_exhaustion_delivery"})
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	if _, err := deliveryStore.FinalizeRuntimeDelivery(context.Background(), job, retryableExhaustionResult()); err != nil {
+		t.Fatalf("finalize exhausted delivery: %v", err)
+	}
+
+	var messageCount int
+	var maximumSequence int64
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*), COALESCE(MAX(sequence), 0)
+		   FROM session_messages
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2`,
+		sessionID, threadID,
+	).Scan(&messageCount, &maximumSequence); err != nil {
+		t.Fatalf("read exhaustion message boundary: %v", err)
+	}
+	if messageCount != 1 || maximumSequence != messageSequence {
+		t.Fatalf("exhaustion messages count/max sequence = %d/%d; want 1/%d", messageCount, maximumSequence, messageSequence)
+	}
+	if _, err := apiStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: scope, RuntimeInputId: "rin_exhaustion_cold_load",
+	}); err != nil {
+		t.Fatalf("LoadContext after exhaustion: %v", err)
+	}
+	boundary := messageSequence
+	if _, err := apiStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_exhaustion_boundary", ModelRequestId: "mreq_exhaustion_boundary",
+		EventType:                     "span.model_request_start",
+		PayloadJson:                   `{"type":"span.model_request_start","model_request_id":"mreq_exhaustion_boundary"}`,
+		ContextThroughMessageSequence: &boundary, RequestKind: "agent_provider_request",
+	}); err != nil {
+		t.Fatalf("write Request Start at unchanged boundary: %v", err)
 	}
 }
 
@@ -383,6 +459,16 @@ func assertRuntimeExhaustionRows(t *testing.T, db *sql.DB, job RuntimeJob, inbox
 	}
 	if runtimeStatusRows != 0 {
 		t.Fatalf("exhaustion runtime status rows = %d; want no status mutation", runtimeStatusRows)
+	}
+	var exhaustionMessageCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_messages WHERE workspace_id=$1 AND source_event_id=$2`,
+		job.WorkspaceID, runtimeDeliveryExhaustionEventID(job),
+	).Scan(&exhaustionMessageCount); err != nil {
+		t.Fatalf("count exhaustion message projections: %v", err)
+	}
+	if exhaustionMessageCount != 0 {
+		t.Fatalf("exhaustion message projections = %d; want 0", exhaustionMessageCount)
 	}
 }
 

@@ -700,8 +700,8 @@ func TestDraftDurableRuntimeTablesExist(t *testing.T) {
 		},
 		"session_pending_tool_uses": {
 			"workspace_id", "session_id", "session_thread_id", "tool_use_event_id",
-			"model_tool_call_id", "tool_name", "kind", "input_json", "decision", "deny_message", "status",
-			"result_event_id", "expires_at", "created_at", "updated_at", "resolved_at",
+			"model_tool_call_id", "tool_name", "input_json", "decision", "deny_message", "status",
+			"result_event_id", "created_at", "updated_at", "resolved_at",
 		},
 		"session_background_tasks": {
 			"workspace_id", "session_id", "session_thread_id", "task_id",

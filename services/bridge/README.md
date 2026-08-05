@@ -54,7 +54,7 @@ stored ACK; the same identity with a divergent payload is a fatal conflict.
 | Context | `LoadContext` | Cold-start one thread: messages from the newest compaction boundary forward, unresolved pending tool waits with any recorded decision, the per-server MCP manifests in-band (or an unready server's diagnostic with no tools), and the thread's pending media for both origins (active transient rows plus the file-backed derivation) |
 | Input | `CommitInputs`, `CommitTaskNotificationResult` | User / inter-agent / internal-reviewer inputs stamp and project in one transaction; interrupt and tool-confirmation variants process their already-admitted source event, project the loop-authored cancellation or approval message, and settle the named pending-tool state in that same transaction; background-task settlement rides the shared compare-and-set row, never a second public tool result, and its record family also fences pre-inbox notification-delivery exhaustion |
 | Events | `WriteEvent`, `CommitInternalToolRepair` | One semantic event plus its projection in one transaction; a public tool event may carry the anchored prefix of completed reasoning parts, and a web tool-result event may carry one fixed-shape `server_tool_use` usage attachment — both fold into the idempotency hash so replays are byte-identical or rejected; the event-less invalid-tool repair row is atomic and rehydratable |
-| Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, waits without a database transaction, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn, atomically stores current-thread cancellation or abnormal-child mail declared by the live loop, closes started spans, writes terminal status, and returns the complete declaration receipt. |
+| Settlement | `WriteRequestEnd`, `FinishIdle`, `CommitRuntimeTermination` | Request-end event + usage detail + cumulative usage projection in one transaction. An ordinary end also seals the existing model-request assistant projection and returns its complete message/part stamps; a successful end validates the loop-authored terminal draft against the request's full reasoning ledger, while a retryable failure seals only content already durable and carries the reschedule leg. An interrupt during an open request joins the loop-authored cancellation drafts and pending-tool deltas to this transaction, which returns independently keyed request-end and interrupt receipts. The reschedule leg increments the durable per-thread retry budget and writes rescheduled status only when the ceiling admits — at most one terminal end per model request, a losing close yields. `FinishIdle` ensures or joins Sandbox-owned output capture, waits without a database transaction, then atomically adopts its staged Blob references with idle status. `CommitRuntimeTermination` validates the open durable turn and stores the live loop's current-thread declarations. A child failure remains local and, when the child is a sub-agent, commits its completion mail; a Main failure atomically closes every non-terminal sibling request and tool obligation before terminating the Session, without mailing the terminal Main Thread. |
 | Children | `CreateChildThread`, `ResolveChildThread`, `ListChildThreads`, `MarkChildThreadClosed`, `MarkChildThreadActive`, `ResolveInterAgentDelivery` | Child row plus thread-context-prefix checkpoint; child lifecycle marks; idempotent resolution of one stored inter-agent envelope into its received event, bound Runtime inbox, and durable queue wake |
 | Tools | `AcceptSandboxExecution`, `AwaitSandboxExecution`, `ReadCommandResult`, `SendCommandInput`, `CancelCommand`, `RunMemory` | Atomic Sandbox execution handoff and independent terminal-result read; background-command follow-ups by task id; durable memory writes with content-match conflict checks |
 | Attachment resolution (Gateway, read-only, scope-validated) | `ResolveTransientAttachment`, `ResolveFileAttachmentMetadata`, `ReadFileAttachmentChunk` | Stored attachment bytes for provider-request lowering; batch file-backed metadata preflight with zero blob reads; bounded offset-addressed file-backed chunk reads (≤ 8 MiB, idempotent by construction) |
@@ -108,12 +108,14 @@ interrupting.
 ### Repair (Job Runner, on proven-gone)
 
 Under the session mutation lock and binding fence, from durable evidence
-alone: unfinished request spans close as errors (`runtime_pod_lost`, original
+alone: every Thread sharing the lost Session binding that has unfinished work
+is included regardless of its current Thread status; unfinished
+request spans close as errors (`runtime_pod_lost`, original
 `model_request_id` reused); each orphaned public tool use gets exactly one
 terminal result (`spawn_agent` / `send_message` settle delivery-aware by their
 `delivery_id`, keyed on the durable inter-agent delivery state); a delivered-
 but-uncommitted input replays from the inbox; pending waits owned by the lost
-turn are cancelled; every live scope the loss left unsettled
+binding are cancelled; every included scope the loss left unsettled
 resolves to idle with its `session.error` — **except** an interrupted-then-
 lost scope, which settles quietly as `end_turn` with no error because the
 user's own processed `user.interrupt` (the thread's highest-sequence committed
@@ -125,7 +127,7 @@ independent of Runtime Pod loss. Provider text is never reconstructed
 ### Cleanup order (hot Runtime state only)
 
 1. Runtime Pod accepts `CleanupSession` and clears its hot state (or is proven gone), proving no active run can still resolve a wait;
-2. `pending`-status external waits expire by terminal projection;
+2. durable `approval` waits and their recoverable Sandbox receipts remain for a later confirmation; other `pending` external waits and unowned Sandbox executions expire by terminal projection;
 3. the Runtime binding and `session_runtime_status` finalize after those settlements are durable;
 4. durable `session_threads`, `session_events`, `session_messages`, Sandbox bindings, and provider resources are never deleted by TTL cleanup.
 
@@ -183,7 +185,7 @@ replacement must preserve, and the conformance suites that prove it.
   transport metadata, raw provider payloads, request ids, and raw attachment
   bytes never project. Opening or resolving an external wait updates
   `session_pending_tool_uses` in the same transaction: the trigger is the tool
-  event's `evaluated_permission` — `ask` upserts the `kind='approval'`,
+  event's `evaluated_permission` — `ask` upserts the approval's
   `status='pending'` row (`applyWriteEventToolBookkeepingTx` in `bridge_api_events.go`),
   while `allow` and `deny` write no row. A public tool event may
   carry an anchored reasoning prefix; a web tool-result event may carry one
@@ -222,18 +224,25 @@ replacement must preserve, and the conformance suites that prove it.
   The reschedule leg increments `session_turn_retries` and writes rescheduled
   status only when the ceiling admits. `FinishIdle` adopts a Sandbox-staged
   output-capture generation into `session_output_captures` and the file tables,
-  then writes `session.status_idle` in the same transaction. `CommitRuntimeTermination` accepts only the
-  live loop's current-thread declarations under the open durable-turn identity,
-  persists those declarations with failure and terminal status, and returns
-  their database-assigned stamps atomically.
+  then writes `session.status_idle` in the same transaction.
+  `CommitRuntimeTermination` accepts only the live loop's current-thread
+  declarations under the open durable-turn identity. A sub-agent declaration
+  persists local failure and completion mail; other child roles persist local
+  failure without mail. A Main declaration additionally
+  closes every non-terminal sibling's open request and Tool Use from durable
+  evidence, marks those children terminated, and terminates the Session in the
+  same transaction. The response returns only the declaring Thread's
+  database-assigned stamps.
 - **Lifecycle.** At most one terminal end per `model_request_id` (pod close and
   repair close both check inside the transaction, serialized on the start-row
   lock; a divergent loser is rejected and cold-recovers the durable winner). `FinishIdle` and
   `CommitRuntimeTermination` are idempotent on the database-named durable turn:
   declaration-and-close or nothing. A live child loop supplies its errored
-  completion-return envelope in that transaction. Content belonging to another
-  thread is never inferred by this writer; once its custodian is mechanically
-  gone, the pod-loss and cleanup repair paths own the postmortem closeout.
+  completion-return envelope in that transaction. A Main terminal declaration
+  derives sibling closeout only from already durable requests and Tool Uses;
+  it never invents sibling model content or completion mail. Once a custodian
+  is mechanically gone, the pod-loss and cleanup repair paths own the
+  postmortem closeout.
 - **Invariants a replacement must preserve.** The request-end transaction is
   the sole provider/model-usage writer (web `server_tool_use` counters arrive
   on `WriteEvent`, not here); output capture scan failures are best-effort while

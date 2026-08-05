@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Effect, Fiber, Scope } from "effect";
 import type { RuntimeMessage, SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/agent-loop/agent-loop.js";
+import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/session/session-state.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadControlState, RuntimeThreadPreloadState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type * as SessionManager from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { ApprovalReviewerOutcome } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
 import { createRuntimeApprovalReviewer as createEffectRuntimeApprovalReviewer } from "../../src/approval-reviewer.js";
@@ -246,7 +246,7 @@ describe("Runtime approval reviewer", () => {
     ]);
     const reviewer = createRuntimeApprovalReviewer(() => host, { model: platformReviewerModel, threadCreator: new RecordingReviewerThreadCreator(), now: () => createdAt, waitTimeoutMs: 10 });
 
-    await reviewer(validReviewRequest({ currentRequestTurnMessages: [assistantDraftMessage("sesn_1")] }));
+    await reviewer(validReviewRequest({ currentProviderRequestMessages: [assistantDraftMessage("sesn_1")] }));
 
     const input = host.inputs[0] as Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>;
     const promptPart = input.promptItems[0]?.parts[0];
@@ -901,7 +901,7 @@ describe("Runtime approval reviewer", () => {
       .not.toBe((host.inputs[1] as Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>).reviewId);
   });
 
-  test("manager loss re-reviews the same target with a byte-stable idempotent input", async () => {
+  test("manager loss preserves review identity while scoping the source event to the new trunk", async () => {
     const host = new RecordingReviewerHost([
       assistantDecision("sesn_1", "allow", "replayed target"),
     ]);
@@ -929,6 +929,8 @@ describe("Runtime approval reviewer", () => {
     const second = host.inputs[1] as Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>;
     expect(second.reviewId).toBe(first.reviewId);
     expect(second.runtimeInputId).toBe(first.runtimeInputId);
+    expect(second.sessionThreadId).not.toBe(first.sessionThreadId);
+    expect(second.eventIds).not.toEqual(first.eventIds);
     expect(second.promptItems).toEqual(first.promptItems);
     expect(host.decisions).toHaveLength(2);
   });
@@ -1678,7 +1680,7 @@ function validReviewRequest(overrides: Partial<RuntimeApprovalReviewRequest> = {
     actionJson: { path: "src/a.ts", content: "ok" },
     approvalReviewerManager: new AutoApprovalReviewerManager(),
     parentTranscript: { generation: 1, messages: [userMessage("sesn_1")] },
-    currentRequestTurnMessages: [],
+    currentProviderRequestMessages: [],
     siblingToolCalls: [{ modelToolCallId: "tool_call_1", toolName: "Write", actionJson: { path: "src/a.ts", content: "ok" } }],
     policyContext: { approvalMode: "approve_for_me", permissionPolicy: "always_ask" },
     currentModel: { providerId: "anthropic", modelId: "claude-test" },

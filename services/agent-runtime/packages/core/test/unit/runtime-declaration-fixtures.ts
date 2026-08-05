@@ -1,7 +1,7 @@
 import type { AcceptedInputCommitResult } from "../../src/context/context-loader.js";
 import { acceptedInputDeclarationKind, acceptedInputDrafts } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeDeclarationReceipt } from "../../src/runtime/runtime-declaration.js";
-import type { RuntimeAcceptedInputState } from "../../src/session/session-state.js";
+import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
 
 const committedAt = "2026-07-28T00:00:00.000Z";
 
@@ -27,8 +27,10 @@ export function acceptedInputReceipt(
       sessionThreadId: input.sessionThreadId,
       sourceEventId: eventId,
       eventId,
-      eventSequence: input.sequenceFrom + index,
-      disposition: "existing",
+      eventSequence: input.kind === "approval_review"
+        ? messageSequenceStart + index
+        : input.sequenceFrom + index,
+      disposition: input.kind === "approval_review" ? "created" : "existing",
     })),
     messages: drafts.map((draft, messageIndex) => {
       if (draft.sourceEventId === undefined) {

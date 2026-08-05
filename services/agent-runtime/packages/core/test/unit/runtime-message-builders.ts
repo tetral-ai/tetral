@@ -2,6 +2,7 @@
 // schema construction in one auditable test module.
 
 import type {
+  DurableRuntimeMessage,
   RuntimeJsonValue,
   RuntimeMessage,
   RuntimeMessageDraft,
@@ -12,7 +13,7 @@ import type {
   RuntimeControlInputCommitResult,
   RuntimeControlInputDeclaration,
   RuntimeThreadControlState,
-} from "../../src/session/session-state.js";
+} from "../../src/thread-loop/thread-state.js";
 
 export function buildRuntimeControlCommitResult(
   scope: RuntimeThreadControlState,
@@ -79,7 +80,7 @@ function runtimeControlMessageStamp(
   };
 }
 
-export function buildAgentLoopUserMessage(id: string, sequence: number, text: string): RuntimeMessage {
+export function buildThreadLoopUserMessage(id: string, sequence: number, text: string): RuntimeMessage {
   const createdAt = "2026-06-14T00:00:00.000Z";
   return RuntimeMessageSchema.parse({
     id,
@@ -105,7 +106,7 @@ export function buildAgentLoopUserMessage(id: string, sequence: number, text: st
   });
 }
 
-export function buildAgentLoopRuntimeNotificationMessage(id: string, text: string): RuntimeMessage {
+export function buildThreadLoopRuntimeNotificationMessage(id: string, text: string): RuntimeMessage {
   const createdAt = "2026-06-14T00:00:00.000Z";
   return RuntimeMessageSchema.parse({
     id,
@@ -131,6 +132,15 @@ export function buildAgentLoopRuntimeNotificationMessage(id: string, text: strin
         completedAt: createdAt,
       },
     ],
+  });
+}
+
+export function buildThreadLoopDurableRuntimeNotificationMessage(id: string, text: string): DurableRuntimeMessage {
+  const message = buildThreadLoopRuntimeNotificationMessage(id, text);
+  return DurableRuntimeMessageSchema.parse({
+    ...message,
+    owningEventId: `${id}-event`,
+    eventSequence: 1,
   });
 }
 
@@ -389,14 +399,16 @@ export function buildRuntimeMessageProjectionMessage(
   });
 }
 
-export function buildSessionManagerBridgeRuntimeMessage(sessionId = "sesn_1", text = "bridge projected task notification"): RuntimeMessage {
+export function buildSessionManagerBridgeRuntimeMessage(sessionId = "sesn_1", text = "bridge projected task notification"): DurableRuntimeMessage {
   const timestamp = "2026-06-14T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id: "msg_bridge_task_notification",
     sessionId,
     role: "user",
     origin: "runtime",
     sequence: 0,
+    owningEventId: `sevt_${sessionId}_task_notification`,
+    eventSequence: 1,
     status: "completed",
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -498,14 +510,16 @@ export function buildSessionRunHostUserMessage(id: string, sequence: number, tex
   });
 }
 
-export function buildSessionRunHostRuntimeNotificationMessage(sessionId: string): RuntimeMessage {
+export function buildSessionRunHostRuntimeNotificationMessage(sessionId: string): DurableRuntimeMessage {
   const createdAt = "2026-06-14T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id: "msg_bridge_task_notification",
     sessionId,
     role: "user",
     origin: "runtime",
     sequence: 0,
+    owningEventId: `sevt_${sessionId}_task_notification`,
+    eventSequence: 1,
     status: "completed",
     createdAt,
     updatedAt: createdAt,
@@ -701,11 +715,13 @@ export function buildBridgeClientRuntimeRepairMessage(): RuntimeMessage {
   };
 }
 
-export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string): RuntimeMessage {
+export function buildCoreHostsUserMessage(sessionId: string, id: string, sequence: number, text: string): DurableRuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
-  return RuntimeMessageSchema.parse({
+  return DurableRuntimeMessageSchema.parse({
     id,
     sessionId,
+    owningEventId: `sevt_${id}`,
+    eventSequence: sequence,
     role: "user",
     origin: "user",
     sequence,
@@ -739,7 +755,7 @@ export function buildCoreHostsAssistantRunningToolMessage(
     readonly kind: "mcp";
     readonly mcpServerName: string;
   } = { kind: "tool" },
-): RuntimeMessage {
+): DurableRuntimeMessage {
   const createdAt = "2026-06-16T00:00:00.000Z";
   return DurableRuntimeMessageSchema.parse({
     id,
@@ -803,6 +819,15 @@ export function buildCoreHostsBridgeRuntimeMessage(sessionId: string, text: stri
   });
 }
 
+export function buildCoreHostsDurableBridgeRuntimeMessage(sessionId: string, text: string): DurableRuntimeMessage {
+  return DurableRuntimeMessageSchema.parse({
+    ...buildCoreHostsBridgeRuntimeMessage(sessionId, text),
+    sequence: 1,
+    owningEventId: `sevt_${sessionId}_task_notification`,
+    eventSequence: 1,
+  });
+}
+
 export function buildRuntimeServiceBridgeRuntimeMessage(options: { readonly text?: string; readonly sessionId?: string } = {}): RuntimeMessage {
   const sessionId = options.sessionId ?? "sesn_1";
   const now = "2026-01-01T00:00:00.000Z";
@@ -830,6 +855,17 @@ export function buildRuntimeServiceBridgeRuntimeMessage(options: { readonly text
         completedAt: now,
       },
     ],
+  });
+}
+
+export function buildRuntimeServiceDurableBridgeRuntimeMessage(
+  options: { readonly text?: string; readonly sessionId?: string } = {},
+): DurableRuntimeMessage {
+  const message = buildRuntimeServiceBridgeRuntimeMessage(options);
+  return DurableRuntimeMessageSchema.parse({
+    ...message,
+    owningEventId: `sevt_${message.sessionId}_task_notification`,
+    eventSequence: 1,
   });
 }
 

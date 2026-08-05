@@ -32,6 +32,7 @@ import type {
 import type { ServiceAccountIdentity } from "./auth.js";
 import type { RuntimePodLogger } from "./logger.js";
 import type {
+  DurableRuntimeMessage,
   RuntimeDeclarationReceipt,
   RuntimeMessage,
   RuntimeMessageDraft,
@@ -39,7 +40,7 @@ import type {
 import type {
   RuntimeControlInputCommitResult,
   RuntimeControlInputDeclaration,
-} from "@tetral/agent-runtime-core/src/session/session-state.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { taskNotificationDraft } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { GrpcStatusError } from "./errors.js";
 import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
@@ -119,7 +120,7 @@ export interface RuntimeSessionRunHost {
     },
     commit: () => Promise<
       | { readonly ok: true; readonly stale: true }
-      | { readonly ok: true; readonly committedMessage: RuntimeMessage }
+      | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
       | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
     >,
   ) => Promise<
@@ -202,7 +203,7 @@ export interface RuntimeTaskNotificationCommitter {
     };
   }) => Promise<
     | { readonly ok: true; readonly stale: true }
-    | { readonly ok: true; readonly committedMessage: RuntimeMessage }
+    | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
     | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string; readonly message: string }
   >;
 }
@@ -605,7 +606,7 @@ export class RuntimeControlService {
     //
     //  # | action                                      | durable boundary
     // ---+---------------------------------------------+------------------------------------------
-    //  1 | freeze RequestTurn and stop new ToolFibers  | none
+    //  1 | freeze the provider request and stop new ToolFibers | none
     //  2 | cancel provider and join ToolFibers         | none
     //  3 | close an open request and its interrupt     | joined WriteRequestEnd + CommitInputs receipt
     //  4 | otherwise settle the interrupt input        | CommitInputs callback

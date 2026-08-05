@@ -1,7 +1,7 @@
 /**
  * Builds deterministic Runtime declarations and applies database receipts to
  * produce durable hot messages. It guards the boundary between unstamped loop
- * authorship and database-owned identities; the agent loop calls it around
+ * authorship and database-owned identities; ThreadLoop calls it around
  * accepted-input commits and the Bridge adapter only transports its values.
  */
 
@@ -24,7 +24,7 @@ import type {
 import type {
   RuntimeAcceptedInputState,
   RuntimePendingApprovalToolJobState,
-} from "../session/session-state.js";
+} from "../thread-loop/thread-state.js";
 import { stableRuntimeID } from "./runtime-identity.js";
 
 export type { RuntimeDeclarationReceipt } from "../contracts/runtime.js";
@@ -238,6 +238,7 @@ export function applyAcceptedInputReceipt(
   }
   const expectedEventIDs = new Set(input.eventIds);
   const eventByID = uniqueMap(receipt.events, (event) => event.eventId, "event");
+  const expectedEventDisposition = input.kind === "approval_review" ? "created" : "existing";
   if (eventByID.size !== expectedEventIDs.size) {
     throw new Error("declaration receipt event stamp set is incomplete");
   }
@@ -245,7 +246,7 @@ export function applyAcceptedInputReceipt(
     if (
       event.sessionThreadId !== input.sessionThreadId ||
       event.sourceEventId !== event.eventId ||
-      event.disposition !== "existing" ||
+      event.disposition !== expectedEventDisposition ||
       !expectedEventIDs.has(event.eventId)
     ) {
       throw new Error("declaration receipt contains an invalid event stamp");
@@ -907,7 +908,10 @@ export function validateRuntimeTerminationReceipt(input: {
     readonly runtimeLocalId: string;
   }[];
   readonly sandboxExecutionToolUseEventIds: readonly string[];
-}, receipt: RuntimeDeclarationReceipt): void {
+}, receipt: RuntimeDeclarationReceipt): {
+  readonly failureEventId: string;
+  readonly closeoutEventId: string;
+} {
   if (
     receipt.sessionThreadId !== input.sessionThreadId ||
     receipt.operationKind !== "commit_runtime_termination" ||
@@ -968,6 +972,10 @@ export function validateRuntimeTerminationReceipt(input: {
     throw new Error("runtime termination declaration receipt has invalid terminal event stamps");
   }
   assertPendingToolCancellationDeltas(input.pendingToolCancellations, receipt.pendingToolDelta);
+  return {
+    failureEventId: terminalEvents[0]!.eventId,
+    closeoutEventId: terminalEvents[1]!.eventId,
+  };
 }
 
 /** Validates the durable closeout stamp and any child completion-mail stamps. */

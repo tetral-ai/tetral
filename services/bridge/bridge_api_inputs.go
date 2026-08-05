@@ -140,6 +140,7 @@ func commitInputDeclarationTx(
 	now time.Time,
 ) (*bridgev1.DeclarationReceipt, error) {
 	inboxStatus := ""
+	var approvalReviewEvent *bridgev1.DurableEventStamp
 	if commitInputsKindUsesRuntimeInbox(inputKind) {
 		var err error
 		inboxStatus, err = lockAndValidateRuntimeInboxCommitTx(ctx, tx, request, inputKind)
@@ -178,6 +179,18 @@ func commitInputDeclarationTx(
 		if err := requireApprovalReviewerInputTargetTx(ctx, tx, request.GetScope()); err != nil {
 			return nil, err
 		}
+		var err error
+		approvalReviewEvent, err = createApprovalReviewInputEventTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			key,
+			request.GetEventIds()[0],
+			now,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if inputKind == "agent_mail" {
 		if err := requireAgentMailInputTargetTx(ctx, tx, request.GetScope()); err != nil {
@@ -189,8 +202,10 @@ func commitInputDeclarationTx(
 			return nil, err
 		}
 	}
-	if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
-		return nil, err
+	if inputKind != "approval_review" {
+		if err := markSessionEventsProcessed(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
+			return nil, err
+		}
 	}
 	if inputKind == "tool_confirmation" {
 		if err := settleToolConfirmationEventsTx(ctx, tx, request.GetScope(), request.GetEventIds(), now); err != nil {
@@ -218,6 +233,9 @@ func commitInputDeclarationTx(
 			SourceId:        key,
 		}
 	}
+	if approvalReviewEvent != nil {
+		receipt.Events = []*bridgev1.DurableEventStamp{approvalReviewEvent}
+	}
 	if inputKind == "messages" {
 		receipt.PendingAttachmentDeltaJson, err = loadCommittedInputAttachmentDeltaTx(
 			ctx,
@@ -243,6 +261,56 @@ func commitInputDeclarationTx(
 		}
 	}
 	return receipt, nil
+}
+
+func createApprovalReviewInputEventTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	eventID string,
+	now time.Time,
+) (*bridgev1.DurableEventStamp, error) {
+	if eventID == "" {
+		return nil, status.Error(codes.InvalidArgument, "approval review event id is invalid")
+	}
+	sequence, err := nextSessionEventSequenceTx(ctx, tx, scope)
+	if err != nil {
+		return nil, err
+	}
+	payloadJSON, err := marshalBridgeJSON(map[string]any{
+		"type":             "approval_review.input",
+		"runtime_input_id": runtimeInputID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, runtime_write_id, created_at, updated_at, processed_at
+		) VALUES ($1, $2, $3, $4, $5, 'approval_review.input', $6, 'internal', false, $7, $8, $8, $8)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
+		scope.GetSessionThreadId(),
+		eventID,
+		sequence,
+		payloadJSON,
+		runtimeInputID,
+		now,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, "internal", false, now); err != nil {
+		return nil, err
+	}
+	return &bridgev1.DurableEventStamp{
+		SessionThreadId: scope.GetSessionThreadId(),
+		SourceEventId:   eventID,
+		EventId:         eventID,
+		EventSequence:   sequence,
+		Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
+	}, nil
 }
 
 func commitInputsKindUsesRuntimeInbox(inputKind string) bool {
@@ -1620,7 +1688,6 @@ func recordPendingToolConfirmationDecisionTx(ctx context.Context, tx *dbconnect.
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4
-		    AND kind = 'approval'
 		    AND status = 'resolving'
 		    AND (decision IS NULL OR (decision = $5 AND deny_message IS NOT DISTINCT FROM $6))`,
 		scope.GetWorkspaceId(),

@@ -54,8 +54,8 @@ describe("Runtime Pod command entrypoint", () => {
       },
     });
     try {
-      expect(capturedOptions?.agentLoop.providerCallRuntime?.timeoutMs).toBe(765_432);
-      expect(capturedOptions?.agentLoop.compaction?.timeoutMs).toBe(765_432);
+      expect(capturedOptions?.threadLoop.providerCallRuntime?.timeoutMs).toBe(765_432);
+      expect(capturedOptions?.threadLoop.compaction?.timeoutMs).toBe(765_432);
     } finally {
       await dependencies.coreHosts.close();
     }
@@ -634,6 +634,7 @@ describe("Runtime Pod command entrypoint", () => {
           contextLoader: {
             loadThreadContext: async () => ({
               messages: [],
+              turnFacts: { events: [], messageLineage: [] },
               runtimeBindingToken: "runtime-binding-token-command-test",
               coldCoverage: {
                 pendingToolIds: [],

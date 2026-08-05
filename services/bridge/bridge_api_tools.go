@@ -51,7 +51,7 @@ func (s *PostgreSQLBridgeAPIStore) AcceptSandboxExecution(ctx context.Context, r
 		if err := lockSandboxExecutionThreadTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if _, settled, err := toolResultForToolUseExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetToolUseEventId()); err != nil {
+		if _, settled, err := toolResultForToolUseExistsTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), "agent.tool_use", request.GetToolUseEventId()); err != nil {
 			return err
 		} else if settled {
 			return status.Error(codes.FailedPrecondition, "sandbox tool use is already settled")
@@ -281,7 +281,7 @@ func verifyApprovedSandboxExecutionHandoffTx(
 		`SELECT model_tool_call_id, tool_name, input_json, status, decision
 		   FROM session_pending_tool_uses
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND tool_use_event_id = $4 AND kind = 'approval'
+		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),
@@ -548,6 +548,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
+			return err
+		}
 		eventID, eventSequence, err := insertInternalToolRepairEventTx(ctx, tx, request, threadScope, repairKey, now)
 		if err != nil {
 			return err
@@ -565,6 +568,15 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			now,
 		)
 		if err != nil {
+			return err
+		}
+		if err := verifyModelToolCallIDUniqueTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			request.GetModelRequestId(),
+			request.GetModelToolCallId(),
+		); err != nil {
 			return err
 		}
 		receipt.DeclarationDigest = declarationDigest

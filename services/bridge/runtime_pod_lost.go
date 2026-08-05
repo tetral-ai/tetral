@@ -26,16 +26,26 @@ type runtimeOpenRequestStart struct {
 type runtimeOrphanToolUse struct {
 	SessionThreadID string
 	EventID         string
+	EventType       string
 	ModelRequestID  string
 	PayloadJSON     string
 }
 
+type runtimePodLostAffectedThreads struct {
+	MainThreadID string
+	ThreadIDs    []string
+}
+
 func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
-	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID)
+	affected, err := runtimePodLostAffectedThreadsTx(ctx, tx, workspaceID, sessionID, binding)
 	if err != nil {
 		return 0, err
 	}
-	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID)
+	starts, err := runtimePodLostOpenRequestStartsTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
+	if err != nil {
+		return 0, err
+	}
+	toolUses, err := runtimePodLostOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs)
 	if err != nil {
 		return 0, err
 	}
@@ -58,12 +68,12 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 			repaired++
 		}
 	}
-	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, binding, now)
+	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs, binding, now)
 	if err != nil {
 		return 0, err
 	}
 	repaired += deliveryRepaired
-	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, binding, now)
+	liveScopesSettled, err := settleRuntimePodLostLiveScopesTx(ctx, tx, workspaceID, sessionID, affected, binding, now)
 	if err != nil {
 		return 0, err
 	}
@@ -71,14 +81,13 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 	return repaired, nil
 }
 
-func settleRuntimePodLostLiveScopesTx(
+func runtimePodLostAffectedThreadsTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	workspaceID string,
 	sessionID string,
 	binding runtimeBindingForDelivery,
-	now time.Time,
-) (int, error) {
+) (runtimePodLostAffectedThreads, error) {
 	var mainThreadID, sessionStatus string
 	if err := tx.QueryRow(ctx,
 		`SELECT main_thread_id, status
@@ -89,9 +98,9 @@ func settleRuntimePodLostLiveScopesTx(
 		workspaceID,
 		sessionID,
 	).Scan(&mainThreadID, &sessionStatus); dbconnect.IsNoRows(err) {
-		return 0, runtimePodLostStaleFenceError("runtime pod-loss session is stale")
+		return runtimePodLostAffectedThreads{}, runtimePodLostStaleFenceError("runtime pod-loss session is stale")
 	} else if err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
 	var runtimeStatus string
 	if err := tx.QueryRow(ctx,
@@ -107,49 +116,110 @@ func settleRuntimePodLostLiveScopesTx(
 		binding.BindingID,
 		binding.BindingGeneration,
 	).Scan(&runtimeStatus); dbconnect.IsNoRows(err) {
-		return 0, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
+		return runtimePodLostAffectedThreads{}, runtimePodLostStaleFenceError("runtime pod-loss status binding is stale")
 	} else if err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
 
+	runtimeWasActive := runtimeStatus == "running" || sessionStatus == "rescheduling"
 	threadIDs := make([]string, 0)
-	if runtimeStatus == "running" || sessionStatus == "rescheduling" {
-		threadIDs = append(threadIDs, mainThreadID)
-	}
 	rows, err := tx.Query(ctx,
-		`SELECT id
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND id <> $3
-		    AND status IN ('running', 'rescheduling')
-		  ORDER BY id
-		  FOR UPDATE`,
+		`SELECT thread.id
+		   FROM session_threads thread
+		  WHERE thread.workspace_id = $1
+		    AND thread.session_id = $2
+		    AND (
+		      (thread.id = $3 AND $4)
+		      OR (thread.id <> $3 AND thread.status IN ('running', 'rescheduling'))
+		      OR EXISTS (
+		        SELECT 1
+		          FROM session_events started
+		         WHERE started.workspace_id = thread.workspace_id
+		           AND started.session_id = thread.session_id
+		           AND started.session_thread_id = thread.id
+		           AND started.type = 'span.model_request_start'
+		           AND NOT EXISTS (
+		             SELECT 1
+		               FROM session_events ended
+		              WHERE ended.workspace_id = started.workspace_id
+		                AND ended.session_id = started.session_id
+		                AND ended.session_thread_id = started.session_thread_id
+		                AND ended.model_request_id = started.model_request_id
+		                AND ended.type = 'span.model_request_end'
+		           )
+		      )
+		      OR EXISTS (
+		        SELECT 1
+		          FROM session_pending_tool_uses pending
+		         WHERE pending.workspace_id = thread.workspace_id
+		           AND pending.session_id = thread.session_id
+		           AND pending.session_thread_id = thread.id
+		           AND pending.status IN ('pending', 'resolving')
+		      )
+		      OR EXISTS (
+		        SELECT 1
+		          FROM session_events tool_use
+		         WHERE tool_use.workspace_id = thread.workspace_id
+		           AND tool_use.session_id = thread.session_id
+		           AND tool_use.session_thread_id = thread.id
+		           AND tool_use.type IN ('agent.tool_use', 'agent.mcp_tool_use')
+		           AND NOT EXISTS (
+		             SELECT 1
+		               FROM session_events result
+		              WHERE result.workspace_id = tool_use.workspace_id
+		                AND result.session_id = tool_use.session_id
+		                AND result.session_thread_id = tool_use.session_thread_id
+		                AND (
+		                     (tool_use.type = 'agent.tool_use'
+		                      AND result.type = 'agent.tool_result'
+		                      AND (result.payload_json::jsonb ->> 'tool_use_event_id' = tool_use.event_id
+		                           OR result.payload_json::jsonb ->> 'tool_use_id' = tool_use.event_id))
+		                  OR (tool_use.type = 'agent.mcp_tool_use'
+		                      AND result.type = 'agent.mcp_tool_result'
+		                      AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = tool_use.event_id)
+		                )
+		           )
+		      )
+		    )
+		  ORDER BY thread.id
+		  FOR UPDATE OF thread`,
 		workspaceID,
 		sessionID,
 		mainThreadID,
+		runtimeWasActive,
 	)
 	if err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var threadID string
 		if err := rows.Scan(&threadID); err != nil {
-			return 0, err
+			return runtimePodLostAffectedThreads{}, err
 		}
 		threadIDs = append(threadIDs, threadID)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return runtimePodLostAffectedThreads{}, err
 	}
+	return runtimePodLostAffectedThreads{MainThreadID: mainThreadID, ThreadIDs: threadIDs}, nil
+}
 
-	for _, threadID := range threadIDs {
-		if err := settleRuntimePodLostLiveScopeTx(ctx, tx, workspaceID, sessionID, mainThreadID, threadID, binding, now); err != nil {
+func settleRuntimePodLostLiveScopesTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	affected runtimePodLostAffectedThreads,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) (int, error) {
+	for _, threadID := range affected.ThreadIDs {
+		if err := settleRuntimePodLostLiveScopeTx(ctx, tx, workspaceID, sessionID, affected.MainThreadID, threadID, binding, now); err != nil {
 			return 0, err
 		}
 	}
-	return len(threadIDs), nil
+	return len(affected.ThreadIDs), nil
 }
 
 func settleRuntimePodLostLiveScopeTx(
@@ -378,6 +448,9 @@ func insertRuntimePodLostSettlementEventTx(
 
 func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Context, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) error {
 	return s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+			return err
+		}
 		current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, workspaceID, sessionID)
 		if err != nil {
 			return err
@@ -419,19 +492,25 @@ func runtimePodLostStaleFenceError(message string) runtimeDeliveryPrepareError {
 	return runtimeDeliveryPrepareError{kind: "runtime_pod_lost_claim_stale", message: message, retryable: true}
 }
 
-func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimeOpenRequestStart, error) {
+func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOpenRequestStart, error) {
+	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
-		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.payload_json
+		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.projection_json
 		   FROM session_events e
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
+		    AND e.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
 		    AND e.type = 'span.model_request_start'
 		    AND COALESCE(e.model_request_id, '') <> ''
-		    AND NOT EXISTS (
+			    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events ended
 		         WHERE ended.workspace_id = e.workspace_id
 		           AND ended.session_id = e.session_id
+		           AND ended.session_thread_id = e.session_thread_id
 		           AND ended.model_request_id = e.model_request_id
 		           AND ended.type = 'span.model_request_end'
 		    )
@@ -439,6 +518,7 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 		  FOR UPDATE OF e`,
 		workspaceID,
 		sessionID,
+		string(threadIDsJSON),
 	)
 	if err != nil {
 		return nil, err
@@ -447,11 +527,15 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 	starts := make([]runtimeOpenRequestStart, 0)
 	for rows.Next() {
 		var start runtimeOpenRequestStart
-		var payloadJSON string
-		if err := rows.Scan(&start.SessionThreadID, &start.EventID, &start.ModelRequestID, &payloadJSON); err != nil {
+		var projectionJSON string
+		if err := rows.Scan(&start.SessionThreadID, &start.EventID, &start.ModelRequestID, &projectionJSON); err != nil {
 			return nil, err
 		}
-		start.RequestKind = requestKindFromModelRequestStartPayload(payloadJSON)
+		requestKind, err := requestKindFromModelRequestStartProjection(projectionJSON)
+		if err != nil {
+			return nil, err
+		}
+		start.RequestKind = requestKind
 		starts = append(starts, start)
 	}
 	if err := rows.Err(); err != nil {
@@ -460,10 +544,22 @@ func runtimePodLostOpenRequestStartsTx(ctx context.Context, tx *dbconnect.Tx, wo
 	return starts, nil
 }
 
-func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimeOrphanToolUse, error) {
+func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimeOrphanToolUse, error) {
+	return runtimeTerminalOrphanToolUsesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs, false)
+}
+
+func runtimeTerminalOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, includeSubAgentDeliveries bool) ([]runtimeOrphanToolUse, error) {
+	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
-		`SELECT e.session_thread_id, e.event_id, e.model_request_id, e.payload_json
+		`SELECT e.session_thread_id, e.event_id, e.type, e.model_request_id, e.payload_json
 		   FROM session_events e
+		   JOIN session_threads thread_scope
+		     ON thread_scope.workspace_id = e.workspace_id
+		    AND thread_scope.session_id = e.session_id
+		    AND thread_scope.id = e.session_thread_id
 		   JOIN session_messages m
 		     ON m.workspace_id = e.workspace_id
 		    AND m.session_id = e.session_id
@@ -472,10 +568,17 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 		    AND m.kind = 'assistant'
 		  WHERE e.workspace_id = $1
 		    AND e.session_id = $2
-		    AND e.type = 'agent.tool_use'
-		    AND e.visibility = 'public'
-		    AND COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
-		    AND EXISTS (
+		    AND e.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
+		    AND e.type IN ('agent.tool_use', 'agent.mcp_tool_use')
+		    AND (
+		      e.visibility = 'public'
+		      OR (e.visibility = 'internal' AND thread_scope.role = 'approval_reviewer')
+		    )
+			    AND ($4 OR (
+			      e.type <> 'agent.tool_use'
+			      OR COALESCE(e.payload_json::jsonb ->> 'name', '') NOT IN ('spawn_agent', 'send_message')
+			    ))
+			    AND EXISTS (
 		        SELECT 1
 		          FROM jsonb_array_elements(
 		               CASE
@@ -491,18 +594,25 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 		    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events result
-		         WHERE result.workspace_id = e.workspace_id
-		           AND result.session_id = e.session_id
-		           AND result.type = 'agent.tool_result'
-		           AND (
-		                result.payload_json::jsonb ->> 'tool_use_event_id' = e.event_id
-		             OR result.payload_json::jsonb ->> 'tool_use_id' = e.event_id
-		           )
+			         WHERE result.workspace_id = e.workspace_id
+			           AND result.session_id = e.session_id
+			           AND result.session_thread_id = e.session_thread_id
+			           AND (
+			                (e.type = 'agent.tool_use'
+			                 AND result.type = 'agent.tool_result'
+			                 AND (result.payload_json::jsonb ->> 'tool_use_event_id' = e.event_id
+			                      OR result.payload_json::jsonb ->> 'tool_use_id' = e.event_id))
+			             OR (e.type = 'agent.mcp_tool_use'
+			                 AND result.type = 'agent.mcp_tool_result'
+			                 AND result.payload_json::jsonb ->> 'mcp_tool_use_id' = e.event_id)
+			           )
 		    )
 		  ORDER BY e.sequence ASC, e.event_id ASC
 		  FOR UPDATE OF e`,
 		workspaceID,
 		sessionID,
+		string(threadIDsJSON),
+		includeSubAgentDeliveries,
 	)
 	if err != nil {
 		return nil, err
@@ -511,7 +621,7 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 	toolUses := make([]runtimeOrphanToolUse, 0)
 	for rows.Next() {
 		var toolUse runtimeOrphanToolUse
-		if err := rows.Scan(&toolUse.SessionThreadID, &toolUse.EventID, &toolUse.ModelRequestID, &toolUse.PayloadJSON); err != nil {
+		if err := rows.Scan(&toolUse.SessionThreadID, &toolUse.EventID, &toolUse.EventType, &toolUse.ModelRequestID, &toolUse.PayloadJSON); err != nil {
 			return nil, err
 		}
 		toolUses = append(toolUses, toolUse)
@@ -523,12 +633,12 @@ func runtimePodLostOrphanToolUsesTx(ctx context.Context, tx *dbconnect.Tx, works
 }
 
 func insertRuntimePodLostRequestEndTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, start runtimeOpenRequestStart, now time.Time) (bool, error) {
-	return insertRuntimeTerminalRequestEndTx(ctx, tx, workspaceID, sessionID, binding, start, "runtime_pod_lost", "rwrite_runtime_pod_lost_", now)
+	scope := runtimePodLostRepairScope(workspaceID, sessionID, start.SessionThreadID, binding, start.ModelRequestID)
+	return insertRuntimeTerminalRequestEndTx(ctx, tx, scope, start, "runtime_pod_lost", "rwrite_runtime_pod_lost_", now)
 }
 
-func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, start runtimeOpenRequestStart, errorKind string, writeIDPrefix string, now time.Time) (bool, error) {
-	scope := runtimePodLostRepairScope(workspaceID, sessionID, start.SessionThreadID, binding, start.ModelRequestID)
-	if _, ok, err := modelRequestEndExistsTx(ctx, tx, workspaceID, sessionID, start.ModelRequestID); err != nil || ok {
+func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, start runtimeOpenRequestStart, errorKind string, writeIDPrefix string, now time.Time) (bool, error) {
+	if _, ok, err := modelRequestEndExistsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), start.SessionThreadID, start.ModelRequestID); err != nil || ok {
 		return false, err
 	}
 	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
@@ -561,8 +671,8 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, wo
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
 		) VALUES ($1, $2, $3, $4, $5, 'span.model_request_end', $6, $7, $8, $9, $10, $6, $11, $11, $11)`,
-		workspaceID,
-		sessionID,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
 		start.SessionThreadID,
 		eventID,
 		sequence,
@@ -585,8 +695,8 @@ func insertRuntimeTerminalRequestEndTx(ctx context.Context, tx *dbconnect.Tx, wo
 			total_tokens, provider_usage_json, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, '{}', $7)
 		ON CONFLICT (workspace_id, session_id, model_request_id, runtime_write_id) DO NOTHING`,
-		workspaceID,
-		sessionID,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
 		start.SessionThreadID,
 		start.ModelRequestID,
 		request.GetRuntimeWriteId(),
@@ -605,7 +715,7 @@ func insertRuntimePodLostToolResultTx(ctx context.Context, tx *dbconnect.Tx, wor
 		Reason:        "runtime_pod_lost",
 		ErrorType:     "runtime_pod_lost",
 		Message:       "Tool result unavailable because the runtime pod was lost.",
-		Retryable:     true,
+		Retryable:     false,
 	}, now)
 }
 
@@ -616,14 +726,14 @@ type runtimePodLostSubAgentDelivery struct {
 	Delivery  string
 }
 
-func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
-	deliveries, err := runtimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID)
+func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string, binding runtimeBindingForDelivery, now time.Time) (int, error) {
+	deliveries, err := runtimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affectedThreadIDs)
 	if err != nil {
 		return 0, err
 	}
 	repaired := 0
 	for _, delivery := range deliveries {
-		if _, exists, err := toolResultForToolUseExistsTx(ctx, tx, workspaceID, sessionID, delivery.ToolUse.EventID); err != nil {
+		if _, exists, err := toolResultForToolUseExistsTx(ctx, tx, workspaceID, sessionID, delivery.ToolUse.SessionThreadID, "agent.tool_use", delivery.ToolUse.EventID); err != nil {
 			return 0, err
 		} else if exists {
 			continue
@@ -720,7 +830,11 @@ func settleRuntimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect
 	return repaired, nil
 }
 
-func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string) ([]runtimePodLostSubAgentDelivery, error) {
+func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, affectedThreadIDs []string) ([]runtimePodLostSubAgentDelivery, error) {
+	threadIDsJSON, err := json.Marshal(affectedThreadIDs)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT tool_use.session_thread_id,
 		        tool_use.event_id,
@@ -743,14 +857,16 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		   ) sent ON TRUE
 		  WHERE tool_use.workspace_id = $1
 		    AND tool_use.session_id = $2
+		    AND tool_use.session_thread_id IN (SELECT jsonb_array_elements_text($3::jsonb))
 		    AND tool_use.type = 'agent.tool_use'
 		    AND tool_use.visibility = 'public'
 		    AND COALESCE(tool_use.payload_json::jsonb ->> 'name', '') IN ('spawn_agent', 'send_message')
 		    AND NOT EXISTS (
 		        SELECT 1
 		          FROM session_events result
-		         WHERE result.workspace_id = tool_use.workspace_id
-		           AND result.session_id = tool_use.session_id
+			         WHERE result.workspace_id = tool_use.workspace_id
+			           AND result.session_id = tool_use.session_id
+			           AND result.session_thread_id = tool_use.session_thread_id
 		           AND result.type = 'agent.tool_result'
 		           AND (
 		                result.payload_json::jsonb ->> 'tool_use_event_id' = tool_use.event_id
@@ -761,6 +877,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		  FOR UPDATE OF tool_use`,
 		workspaceID,
 		sessionID,
+		string(threadIDsJSON),
 	)
 	if err != nil {
 		return nil, err
@@ -780,6 +897,7 @@ func runtimePodLostSubAgentDeliveriesTx(ctx context.Context, tx *dbconnect.Tx, w
 		); err != nil {
 			return nil, err
 		}
+		delivery.ToolUse.EventType = "agent.tool_use"
 		result = append(result, delivery)
 	}
 	if err := rows.Err(); err != nil {
@@ -818,17 +936,27 @@ type runtimeTerminalToolResult struct {
 
 func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, binding runtimeBindingForDelivery, toolUse runtimeOrphanToolUse, terminal runtimeTerminalToolResult, now time.Time) (bool, error) {
 	scope := runtimePodLostRepairScope(workspaceID, sessionID, toolUse.SessionThreadID, binding, toolUse.ModelRequestID)
-	if _, ok, err := toolResultForToolUseExistsTx(ctx, tx, workspaceID, sessionID, toolUse.EventID); err != nil || ok {
+	return insertRuntimeTerminalToolResultForScopeTx(ctx, tx, scope, toolUse, terminal, now)
+}
+
+func insertRuntimeTerminalToolResultForScopeTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUse runtimeOrphanToolUse, terminal runtimeTerminalToolResult, now time.Time) (bool, error) {
+	if _, ok, err := toolResultForToolUseExistsTx(ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), toolUse.SessionThreadID, toolUse.EventType, toolUse.EventID); err != nil || ok {
 		return false, err
 	}
 	threadScope, err := lockThreadMutationTx(ctx, tx, scope)
 	if err != nil {
 		return false, err
 	}
-	visibility, sessionVisible := threadScope.publicProjection("agent.tool_result")
+	resultEventType := "agent.tool_result"
+	toolUseField := "tool_use_event_id"
+	if toolUse.EventType == "agent.mcp_tool_use" {
+		resultEventType = "agent.mcp_tool_result"
+		toolUseField = "mcp_tool_use_id"
+	}
+	visibility, sessionVisible := threadScope.publicProjection(resultEventType)
 	eventPayload := map[string]any{
-		"type":              "agent.tool_result",
-		"tool_use_event_id": toolUse.EventID,
+		"type":       resultEventType,
+		toolUseField: toolUse.EventID,
 		"content": []map[string]string{{
 			"type": "text",
 			"text": terminal.Message,
@@ -851,12 +979,13 @@ func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, wo
 		`INSERT INTO session_events (
 			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
 			visibility, session_visible, runtime_write_id, model_request_id, projection_json, created_at, updated_at, processed_at
-		) VALUES ($1, $2, $3, $4, $5, 'agent.tool_result', $6, $7, $8, $9, $10, '{}', $11, $11, $11)`,
-		workspaceID,
-		sessionID,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, '{}', $12, $12, $12)`,
+		scope.GetWorkspaceId(),
+		scope.GetSessionId(),
 		toolUse.SessionThreadID,
 		eventID,
 		sequence,
+		resultEventType,
 		payloadJSON,
 		visibility,
 		sessionVisible,
@@ -884,7 +1013,7 @@ func insertRuntimeTerminalToolResultTx(ctx context.Context, tx *dbconnect.Tx, wo
 			return false, err
 		}
 	} else {
-		if err := cancelPendingToolUseForRuntimePodLostTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
+		if err := cancelPendingToolUseForTerminalResultTx(ctx, tx, scope, toolUse.EventID, eventID, now); err != nil {
 			return false, err
 		}
 	}
@@ -994,19 +1123,21 @@ func settleRuntimeTerminalToolPartTx(
 	return nil
 }
 
-func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, modelRequestID string) (string, bool, error) {
+func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, sessionThreadID string, modelRequestID string) (string, bool, error) {
 	var eventID string
 	err := tx.QueryRow(ctx,
 		`SELECT event_id
 		   FROM session_events
 		  WHERE workspace_id = $1
 		    AND session_id = $2
-		    AND model_request_id = $3
+		    AND session_thread_id = $3
+		    AND model_request_id = $4
 		    AND type = 'span.model_request_end'
 		  ORDER BY sequence ASC
 		  LIMIT 1`,
 		workspaceID,
 		sessionID,
+		sessionThreadID,
 		modelRequestID,
 	).Scan(&eventID)
 	if dbconnect.IsNoRows(err) {
@@ -1018,22 +1149,37 @@ func modelRequestEndExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID 
 	return eventID, true, nil
 }
 
-func toolResultForToolUseExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, toolUseEventID string) (string, bool, error) {
+func toolResultForToolUseExistsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, sessionThreadID string, toolUseEventType string, toolUseEventID string) (string, bool, error) {
+	resultEventType := ""
+	switch toolUseEventType {
+	case "agent.tool_use":
+		resultEventType = "agent.tool_result"
+	case "agent.mcp_tool_use":
+		resultEventType = "agent.mcp_tool_result"
+	default:
+		return "", false, status.Error(codes.FailedPrecondition, "tool use family is invalid")
+	}
 	var eventID string
 	err := tx.QueryRow(ctx,
 		`SELECT event_id
 		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND type = 'agent.tool_result'
-		    AND (
-		         payload_json::jsonb ->> 'tool_use_event_id' = $3
-		      OR payload_json::jsonb ->> 'tool_use_id' = $3
-		    )
+			  WHERE workspace_id = $1
+			    AND session_id = $2
+			    AND session_thread_id = $3
+			    AND type = $4
+			    AND (
+			         ($4 = 'agent.tool_result' AND (
+			              payload_json::jsonb ->> 'tool_use_event_id' = $5
+			           OR payload_json::jsonb ->> 'tool_use_id' = $5
+			         ))
+			      OR ($4 = 'agent.mcp_tool_result' AND payload_json::jsonb ->> 'mcp_tool_use_id' = $5)
+			    )
 		  ORDER BY sequence ASC
 		  LIMIT 1`,
 		workspaceID,
 		sessionID,
+		sessionThreadID,
+		resultEventType,
 		toolUseEventID,
 	).Scan(&eventID)
 	if dbconnect.IsNoRows(err) {
@@ -1045,7 +1191,7 @@ func toolResultForToolUseExistsTx(ctx context.Context, tx *dbconnect.Tx, workspa
 	return eventID, true, nil
 }
 
-func cancelPendingToolUseForRuntimePodLostTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultEventID string, now time.Time) error {
+func cancelPendingToolUseForTerminalResultTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, toolUseEventID string, resultEventID string, now time.Time) error {
 	_, err := tx.Exec(ctx,
 		`UPDATE session_pending_tool_uses
 		    SET status = 'cancelled',
@@ -1067,16 +1213,21 @@ func cancelPendingToolUseForRuntimePodLostTx(ctx context.Context, tx *dbconnect.
 	return err
 }
 
-func requestKindFromModelRequestStartPayload(payloadJSON string) string {
-	var payload struct {
-		RequestKind string `json:"request_kind"`
+func requestKindFromModelRequestStartProjection(projectionJSON string) (string, error) {
+	var projection struct {
+		RequestKind                   string `json:"request_kind"`
+		ContextThroughMessageSequence *int64 `json:"context_through_message_sequence"`
 	}
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err == nil {
-		if requestKind, err := normalizeRequestKind(payload.RequestKind); err == nil {
-			return requestKind
-		}
+	if err := json.Unmarshal([]byte(projectionJSON), &projection); err != nil ||
+		projection.RequestKind == "" || projection.ContextThroughMessageSequence == nil ||
+		*projection.ContextThroughMessageSequence < 0 {
+		return "", status.Error(codes.FailedPrecondition, "request start projection is malformed")
 	}
-	return requestKindAgentProviderRequest
+	requestKind, err := normalizeRequestKind(projection.RequestKind)
+	if err != nil {
+		return "", status.Error(codes.FailedPrecondition, "request start projection is malformed")
+	}
+	return requestKind, nil
 }
 
 func runtimePodLostRepairScope(workspaceID string, sessionID string, sessionThreadID string, binding runtimeBindingForDelivery, requestIDPart string) *bridgev1.RuntimeScope {

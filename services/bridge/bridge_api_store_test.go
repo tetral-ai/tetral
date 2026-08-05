@@ -19,7 +19,7 @@ func TestStripInternalProviderFieldsRemovesNestedProviderMetadata(t *testing.T) 
 	}
 }
 
-func TestBridgeSessionMessageProjectionInsertsAreConflictSafe(t *testing.T) {
+func TestPendingToolTerminalMessageInsertIsConflictSafe(t *testing.T) {
 	assertConflictSafeInsert := func(t *testing.T, source string, signature string) {
 		t.Helper()
 		body := sourceFunctionBody(t, source, signature)
@@ -31,20 +31,6 @@ func TestBridgeSessionMessageProjectionInsertsAreConflictSafe(t *testing.T) {
 			if !strings.Contains(body, fragment) {
 				t.Fatalf("%s missing source_event_id conflict protection fragment %q in:\n%s", signature, fragment, body)
 			}
-		}
-	}
-
-	for filename, signatures := range map[string][]string{
-		"bridge_api_events.go": {
-			"func insertSessionMessageProjectionTx",
-		},
-	} {
-		bridgeSourceBytes, err := os.ReadFile(filename)
-		if err != nil {
-			t.Fatalf("read %s: %v", filename, err)
-		}
-		for _, signature := range signatures {
-			assertConflictSafeInsert(t, string(bridgeSourceBytes), signature)
 		}
 	}
 

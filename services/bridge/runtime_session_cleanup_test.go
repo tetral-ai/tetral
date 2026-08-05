@@ -3,6 +3,7 @@ package agentruntimebridge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
+	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
 // This file owns cleanup-session and delete-cleanup state-machine tests.
@@ -995,11 +997,12 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 		    AND tool_use_event_id = 'sevt_cleanup_gone_wait'`).Scan(&pendingStatus); err != nil {
 		t.Fatalf("read pending wait: %v", err)
 	}
-	if pendingStatus != "expired" {
-		t.Fatalf("gone cleanup pending wait status = %q; want expired", pendingStatus)
+	if pendingStatus != "pending" {
+		t.Fatalf("gone cleanup pending wait status = %q; want preserved pending approval", pendingStatus)
 	}
-	var executionState, consumptionReason string
+	var executionState string
 	var storedResult sql.NullString
+	var consumptionReason sql.NullString
 	if err := admin.QueryRowContext(context.Background(), `SELECT execution_state, result_json, consumption_reason
 		FROM session_runtime_tool_results
 		WHERE workspace_id='default' AND session_id='sesn_bridge_cleanup_gone' AND tool_use_event_id='sevt_cleanup_gone_wait'`).Scan(
@@ -1007,15 +1010,194 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionFinalizesWhenRuntimePodProv
 	); err != nil {
 		t.Fatalf("read cleanup-wait execution receipt: %v", err)
 	}
-	if executionState != "consumed" || storedResult.Valid || consumptionReason != "cleanup_wait_expired" {
-		t.Fatalf("cleanup-wait execution = %q/%v/%q; want consumed thin receipt", executionState, storedResult, consumptionReason)
+	if executionState != "terminal_unconsumed" || !storedResult.Valid || storedResult.String != resultJSON || consumptionReason.Valid {
+		t.Fatalf("cleanup-wait execution = %q/%v/%v; want recoverable terminal receipt", executionState, storedResult, consumptionReason)
 	}
 	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
-	if result, err := bridgeStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 1 {
-		t.Fatalf("reconcile cleanup-wait attachment = %+v, %v; want one deleted", result, err)
+	if result, err := bridgeStore.ReconcileTransientAttachments(context.Background(), 10); err != nil || result.Deleted != 0 {
+		t.Fatalf("reconcile cleanup-wait attachment = %+v, %v; want retained recoverable attachment", result, err)
 	}
-	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "deleted" {
-		t.Fatalf("cleanup-wait attachment status = %q; want deleted", got)
+	if got := bridgeTransientAttachmentStatus(t, admin, attachment.GetAttachmentRef()); got != "staged" {
+		t.Fatalf("cleanup-wait attachment status = %q; want staged", got)
+	}
+}
+
+func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSettlement(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_cleanup_cold_approval"
+		threadID       = "thr_cleanup_cold_approval"
+		bindingID      = "bind_cleanup_cold_approval"
+		podUID         = "pod_cleanup_cold_approval"
+		modelRequestID = "mreq_cleanup_cold_approval"
+		durableTurnID  = "evt_cleanup_cold_approval_running"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 7, podUID)
+	bridgeStore := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridgeStore.RuntimeBindingTokenHMACKey = []byte("cleanup-cold-approval-key-32bytes")
+	bridgeStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 45, 0, time.UTC) }
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 7, podUID)
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
+	start := seedBridgeAPIRequestStart(
+		t, bridgeStore, scope, "rwrite_cleanup_cold_approval_start", modelRequestID, "agent_provider_request", 0,
+	)
+	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
+		EventType:   "agent.tool_use",
+		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}`,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, scope, "rwrite_cleanup_cold_approval_tool", "agent.tool_use", "streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"tool-call-cleanup-cold-approval","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"src/a.ts"},"preview":"{\"file_path\":\"src/a.ts\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("write cleanup approval Tool Use: %v", err)
+	}
+	if _, err := bridgeStore.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_end", ModelRequestId: modelRequestID,
+		ModelRequestStartEventId: start.GetEventId(), FinishReason: "tool_calls", UsageJson: `{}`,
+		RequestKind: "agent_provider_request",
+	}); err != nil {
+		t.Fatalf("seal cleanup approval request: %v", err)
+	}
+	if _, err := finishIdleWithStagedCaptureForTest(t, admin, bridgeStore, &bridgev1.FinishIdleRequest{
+		Scope: scope, DurableTurnId: durableTurnID,
+		StopReasonJson: `{"type":"requires_action","event_ids":["` + toolUse.GetEventId() + `"]}`,
+	}); err != nil {
+		t.Fatalf("finish cleanup approval requires-action turn: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_runtime_status
+		    SET cleanup_job_id = 'cleanup_cold_approval_1',
+		        cleanup_enqueued_at = '2026-01-01T00:30:00Z'
+		  WHERE workspace_id = 'default' AND session_id = $1`, sessionID); err != nil {
+		t.Fatalf("mark cleanup approval enqueued: %v", err)
+	}
+
+	cleanupStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	cleanupStore.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 31, 0, 0, time.UTC) }
+	cleanupStore.TargetResolver = KubernetesRuntimeTargetResolver{
+		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot {
+			return enginekubernetes.NewBindingVisibilitySnapshotStateForTest(
+				true,
+				enginekubernetes.BoundRuntimePod{
+					Namespace: "tetral-agent-runtime", PodName: "runtime-pod-0", PodUID: podUID, PodIP: "10.0.0.10",
+				},
+				enginekubernetes.BindingVisibilityAbsent,
+			)
+		},
+	}
+	result, err := (RuntimePodDirectDeliverer{
+		Store: cleanupStore,
+		Sender: &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
+			Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+		}},
+	}).DeliverRuntimeJob(context.Background(), RuntimeJob{ //nolint:gosec // Test lease token fixture, not a secret.
+		JobID: "qjob_cleanup_cold_approval", LeaseToken: "lease_cleanup_cold_approval",
+		Kind: queue.KindCleanupSession, WorkspaceID: "default", SessionID: sessionID,
+		RuntimeInputID: "cleanup_session:cleanup_cold_approval_1", CleanupJobID: "cleanup_cold_approval_1",
+		CommandKind: agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_CLEANUP_SESSION,
+		PayloadJSON: `{"workspace_id":"default","session_id":"` + sessionID + `","cleanup_job_id":"cleanup_cold_approval_1"}`,
+	})
+	if err != nil {
+		t.Fatalf("deliver proven-gone cleanup approval: %v", err)
+	}
+	if result.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("cleanup approval result = %#v; want accepted", result)
+	}
+
+	const (
+		recoveryBindingID = "bind_cleanup_cold_approval_recovery"
+		recoveryPodUID    = "pod_cleanup_cold_approval_recovery"
+	)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, recoveryBindingID, 8, recoveryPodUID)
+	recoveryScope := bridgeAPIScope(sessionID, threadID, recoveryBindingID, 8, recoveryPodUID)
+	loaded, err := bridgeStore.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_load",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext after ordinary cleanup: %v", err)
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("decode cleanup approval context: %v", err)
+	}
+	if len(payload.PendingToolUses) != 1 ||
+		payload.PendingToolUses[0].ToolUseEventID != toolUse.GetEventId() ||
+		payload.PendingToolUses[0].ModelRequestID != modelRequestID ||
+		payload.PendingToolUses[0].Status != "pending" {
+		t.Fatalf("pending approval after ordinary cleanup = %#v; want same requires-action member", payload.PendingToolUses)
+	}
+	if len(payload.PendingSandboxExecutions) != 0 {
+		t.Fatalf("sandbox executions after ordinary approval cleanup = %#v; want none", payload.PendingSandboxExecutions)
+	}
+	if len(payload.ColdCoverage.PendingToolIDs) != 1 || payload.ColdCoverage.PendingToolIDs[0] != toolUse.GetEventId() {
+		t.Fatalf("cold pending approval coverage = %#v; want same Tool Use", payload.ColdCoverage)
+	}
+
+	setBridgeAPIPendingApprovalStatus(
+		t, admin, "default", sessionID, threadID, toolUse.GetEventId(), "resolving",
+	)
+	confirmationEventID := "evt_cleanup_cold_approval_deny"
+	confirmationSequence := nextBridgeAPIEventSequenceForTest(t, admin, sessionID, threadID)
+	seedBridgeAPIEvent(
+		t, admin, "default", sessionID, threadID, confirmationEventID, confirmationSequence,
+		"user.tool_confirmation",
+		`{"type":"user.tool_confirmation","tool_use_id":"`+toolUse.GetEventId()+`","result":"deny","deny_message":"not safe"}`,
+	)
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_inbox (
+			workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+			event_ids_json, sequence_from, sequence_to, status, binding_id, binding_generation,
+			target_pod_uid, created_at, updated_at
+		) VALUES ('default', $1, $2, 'rin_cleanup_cold_approval_deny', 'tool_confirmation', $3,
+			$4, $4, 'accepted', $5, 8, $6, '2026-01-01T00:31:00Z', '2026-01-01T00:31:00Z')`,
+		sessionID, threadID, `["`+confirmationEventID+`"]`, confirmationSequence, recoveryBindingID, recoveryPodUID,
+	); err != nil {
+		t.Fatalf("seed cleanup approval confirmation inbox: %v", err)
+	}
+	if _, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny", InputKind: "tool_confirmation",
+		EventIds: []string{confirmationEventID}, SequenceFrom: confirmationSequence, SequenceTo: confirmationSequence,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInputDraftForTest(
+			"default", sessionID, threadID, "tool_confirmation", "rin_cleanup_cold_approval_deny", confirmationEventID,
+			bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_APPROVAL_INPUT, "user", "Approval denied: not safe",
+		)},
+	}); err != nil {
+		t.Fatalf("commit cleanup approval denial: %v", err)
+	}
+	terminal, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: recoveryScope, RuntimeWriteId: "rwrite_cleanup_cold_approval_result", ModelRequestId: modelRequestID,
+		EventType:      "agent.tool_result",
+		PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"Approval denied: not safe"}],"is_error":true}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t, recoveryScope, "rwrite_cleanup_cold_approval_result", "agent.tool_result", "completed",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"tool-call-cleanup-cold-approval","toolName":"Write","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"error","input":{"value":{"file_path":"src/a.ts"},"preview":"{\"file_path\":\"src/a.ts\"}","truncated":false},"error":{"type":"tool_denied","message":"Approval denied: not safe","retryable":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("write cleanup approval denial result: %v", err)
+	}
+	var pendingStatus string
+	var resultEventID sql.NullString
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT status, result_event_id
+		   FROM session_pending_tool_uses
+		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2 AND tool_use_event_id = $3`,
+		sessionID, threadID, toolUse.GetEventId(),
+	).Scan(&pendingStatus, &resultEventID); err != nil {
+		t.Fatalf("read cleanup approval after denial: %v", err)
+	}
+	if pendingStatus != "resolved" || !resultEventID.Valid || resultEventID.String != terminal.GetEventId() {
+		t.Fatalf("cleanup approval settlement = %q/%v; want resolved by %s", pendingStatus, resultEventID, terminal.GetEventId())
 	}
 }
 

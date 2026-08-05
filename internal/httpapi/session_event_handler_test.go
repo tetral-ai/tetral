@@ -542,7 +542,6 @@ func TestSessionEventIngressErrorMapping(t *testing.T) {
 		{name: "validation", err: &sessionevent.ValidationError{Message: "events is required"}, wantStatus: http.StatusBadRequest, wantType: "invalid_request_error"},
 		{name: "not found", err: &sessionevent.NotFoundError{Message: "session not found"}, wantStatus: http.StatusNotFound, wantType: "not_found_error"},
 		{name: "conflict", err: &sessionevent.ConflictError{Message: "session is archived"}, wantStatus: http.StatusConflict, wantType: "invalid_request_error"},
-		{name: "expired tool confirmation", err: &sessionevent.ConflictError{Message: "pending approval expired"}, wantStatus: http.StatusConflict, wantType: "invalid_request_error", wantMessage: "pending approval expired"},
 		{name: "non pending tool confirmation", err: &sessionevent.ConflictError{Message: "pending approval is not pending"}, wantStatus: http.StatusConflict, wantType: "invalid_request_error", wantMessage: "pending approval is not pending"},
 		{name: "internal", err: errors.New("database raw prompt runtime token"), wantStatus: http.StatusInternalServerError, wantType: "api_error"},
 	} {

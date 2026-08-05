@@ -1292,13 +1292,12 @@ func seedThreadPendingWait(t *testing.T, db *sql.DB, ws workspace.ID, sessionID 
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'tool_call_wait', 'bash', 'approval', '{}', 'pending', $5, $6, $6)`,
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, 'tool_call_wait', 'bash', '{}', 'pending', $5, $5)`,
 		string(ws),
 		sessionID,
 		threadID,
 		toolUseEventID,
-		now.Add(time.Hour).Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano),
 	); err != nil {
 		t.Fatalf("seed pending wait: %v", err)

@@ -253,6 +253,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-shared-tool-projection-key")
 	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_shared_start", modelRequestID, "agent_provider_request", 0)
 
 	encoded, err := os.ReadFile(filepath.Join(repoRootFromBridgeTest(t), "testdata", "stable-reasoning-anchor-vector.json"))
 	if err != nil {
@@ -871,9 +872,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 				if _, err := admin.ExecContext(context.Background(),
 					`INSERT INTO session_pending_tool_uses (
 						workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-						tool_name, kind, input_json, decision, status, expires_at, created_at, updated_at
-					) VALUES ('default', $1, $2, $3, $4, 'exec_command', 'approval', $5, $6, $7,
-						'2026-01-01T01:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+						tool_name, input_json, decision, status, created_at, updated_at
+					) VALUES ('default', $1, $2, $3, $4, 'exec_command', $5, $6, $7,
+						'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 					sessionID, threadID, toolUseID, modelToolCallID, approvalInput, testCase.approvalDecision, testCase.approvalStatus,
 				); err != nil {
 					t.Fatalf("seed permission approval: %v", err)
@@ -1049,12 +1050,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_repair", "thr_bridge_repair")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair")
-	seedBridgeAPIInternalToolCallMessage(t, admin, "default", "sesn_bridge_repair", "thr_bridge_repair", "msg_invalid_call", "part_invalid_call", "call_repair", "unknown_tool", 1)
-
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_repair_start", "mreq_repair", "agent_provider_request", 0)
 	repairKey := internalToolRepairKey("mreq_repair", "call_repair", "unknown_tool")
 	request := &bridgev1.CommitInternalToolRepairRequest{
-		Scope:           bridgeAPIScope("sesn_bridge_repair", "thr_bridge_repair", "bind_bridge_repair", 1, "pod_uid_repair"),
+		Scope:           scope,
 		ModelRequestId:  "mreq_repair",
 		ModelToolCallId: "call_repair",
 		ToolName:        "unknown_tool",
@@ -1130,10 +1131,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	if err := json.Unmarshal([]byte(contextResponse.GetContextJson()), &payload); err != nil {
 		t.Fatalf("parse LoadContext after repair: %v", err)
 	}
-	if len(payload.Messages) != 2 ||
-		!strings.Contains(string(payload.Messages[0]), `"id":"msg_invalid_call"`) ||
-		!strings.Contains(string(payload.Messages[1]), `"id":"`+messageID+`"`) ||
-		!strings.Contains(string(payload.Messages[1]), `"toolCallId":"call_repair"`) {
+	if len(payload.Messages) != 1 ||
+		!strings.Contains(string(payload.Messages[0]), `"id":"`+messageID+`"`) ||
+		!strings.Contains(string(payload.Messages[0]), `"toolCallId":"call_repair"`) {
 		t.Fatalf("LoadContext repair messages = %s; want invalid call followed by durable repair row", contextResponse.GetContextJson())
 	}
 
@@ -1145,6 +1145,101 @@ func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairPersistsReplaysAndLoads
 	)
 	if _, err := store.CommitInternalToolRepair(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInternalToolRepair err = %v; want AlreadyExists", err)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreRejectsPublicAndRepairToolCallIdentityCollision(t *testing.T) {
+	for _, order := range []string{"public_then_repair", "repair_then_public"} {
+		t.Run(order, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID := "sesn_bridge_tool_collision_" + order
+			threadID := "thr_bridge_tool_collision_" + order
+			bindingID := "bind_bridge_tool_collision_" + order
+			podUID := "pod_bridge_tool_collision_" + order
+			modelRequestID := "mreq_bridge_tool_collision_" + order
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_tool_collision_start_"+order, modelRequestID, "agent_provider_request", 0)
+
+			writePublic := func(writeID string) error {
+				_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+					Scope: scope, RuntimeWriteId: writeID, ModelRequestId: modelRequestID,
+					EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"unknown_tool","input":{},"evaluated_permission":"allow"}`,
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+						t, scope, writeID, "agent.tool_use", "streaming",
+						bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_collision","toolName":"unknown_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+					)},
+				})
+				return err
+			}
+			writeRepair := func() error {
+				repairKey := internalToolRepairKey(modelRequestID, "call_collision", "unknown_tool")
+				_, err := store.CommitInternalToolRepair(context.Background(), &bridgev1.CommitInternalToolRepairRequest{
+					Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: "call_collision", ToolName: "unknown_tool",
+					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInternalToolRepairDraftForTest(
+						"default", sessionID, threadID, repairKey, "call_collision", "unknown_tool", "invalid tool",
+					)},
+				})
+				return err
+			}
+
+			if order == "public_then_repair" {
+				if err := writePublic("rwrite_tool_collision_public_first"); err != nil {
+					t.Fatalf("first public Tool Use: %v", err)
+				}
+				if err := writeRepair(); status.Code(err) != codes.AlreadyExists {
+					t.Fatalf("colliding internal repair err = %v; want AlreadyExists", err)
+				}
+				return
+			}
+			if err := writeRepair(); err != nil {
+				t.Fatalf("first internal repair: %v", err)
+			}
+			if err := writePublic("rwrite_tool_collision_public_second"); status.Code(err) != codes.AlreadyExists {
+				t.Fatalf("colliding public Tool Use err = %v; want AlreadyExists", err)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreCommitInternalToolRepairRejectsRequestEndSeal(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID      = "sesn_repair_after_end"
+		threadID       = "thr_repair_after_end"
+		modelRequestID = "mreq_repair_after_end"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_repair_after_end", 1, "pod_repair_after_end")
+	scope := bridgeAPIScope(sessionID, threadID, "bind_repair_after_end", 1, "pod_repair_after_end")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	boundary := int64(0)
+	start, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_repair_after_end_start", ModelRequestId: modelRequestID,
+		EventType: "span.model_request_start", PayloadJson: `{"type":"span.model_request_start","model_request_id":"` + modelRequestID + `"}`,
+		ContextThroughMessageSequence: &boundary, RequestKind: "agent_provider_request",
+	})
+	if err != nil {
+		t.Fatalf("write request start: %v", err)
+	}
+	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_repair_after_end_close", ModelRequestId: modelRequestID,
+		ModelRequestStartEventId: start.GetEventId(), FinishReason: "tool_calls", UsageJson: `{}`,
+		RequestKind: "agent_provider_request",
+	}); err != nil {
+		t.Fatalf("write request end: %v", err)
+	}
+	repairKey := internalToolRepairKey(modelRequestID, "call_repair_after_end", "unknown_tool")
+	request := &bridgev1.CommitInternalToolRepairRequest{
+		Scope: scope, ModelRequestId: modelRequestID, ModelToolCallId: "call_repair_after_end", ToolName: "unknown_tool",
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInternalToolRepairDraftForTest(
+			"default", sessionID, threadID, repairKey, "call_repair_after_end", "unknown_tool", "invalid tool",
+		)},
+	}
+	if _, err := store.CommitInternalToolRepair(context.Background(), request); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("post-seal internal repair err = %v; want FailedPrecondition", err)
 	}
 }
 

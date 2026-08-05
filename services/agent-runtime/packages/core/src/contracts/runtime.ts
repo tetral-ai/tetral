@@ -2,7 +2,7 @@
  * This module provides Runtime Core's shared domain and integration-port boundary definitions.
  * It guards validated message, part, event, failure, settlement, and store shapes
  * plus the byte bounds imposed at stable-write and transport edges. The session
- * processor, agent loop, tool runner, context loader, and Bridge adapters consume
+ * processor, ThreadLoop, tool runner, context loader, and Bridge adapters consume
  * it; it composes provider schemas and invokes injected store operations through
  * validating wrappers.
  *
@@ -523,6 +523,11 @@ export interface RuntimeIdleCloseoutStamp {
   readonly committedIdleAt: string;
 }
 
+export interface RuntimeRequestStartStamp {
+  readonly requestKind: "agent_provider_request" | "compaction_summary" | "approval_reviewer";
+  readonly contextThroughMessageSequence: number;
+}
+
 export interface RuntimeChildLifecycleStamp {
   readonly childThreadId: string;
   readonly disposition:
@@ -547,6 +552,7 @@ export interface RuntimeDeclarationReceipt {
   readonly pendingToolDelta: readonly string[];
   readonly prefixConsumptions: readonly RuntimePrefixConsumptionStamp[];
   readonly requestReschedule?: RuntimeRequestRescheduleStamp | undefined;
+  readonly requestStart?: RuntimeRequestStartStamp | undefined;
   readonly idleCloseout?: RuntimeIdleCloseoutStamp | undefined;
   readonly compactedThroughMessageSequence?: number | undefined;
   readonly childLifecycle: readonly RuntimeChildLifecycleStamp[];
@@ -971,6 +977,8 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   serverToolUse: SessionEventWriterServerToolUseSchema.optional(),
   mcpMaterializationHandle: SanitizedIdentifierSchema.optional(),
   sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  contextThroughMessageSequence: NonNegativeIntegerSchema.optional(),
+  requestKind: z.enum(["agent_provider_request", "compaction_summary", "approval_reviewer"]).optional(),
 }).superRefine((envelope, context) => {
   const parts = envelope.stableReasoningParts ?? [];
   if (parts.length > 0 && envelope.event.type !== "agent.tool_use" && envelope.event.type !== "agent.mcp_tool_use") {
@@ -996,6 +1004,13 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   }
   if (envelope.sandboxResultDigest !== undefined && envelope.event.type !== "agent.tool_result") {
     context.addIssue({ code: "custom", message: "sandbox result digest requires a tool-result event" });
+  }
+  if (envelope.event.type === "span.model_request_start") {
+    if (envelope.contextThroughMessageSequence === undefined || envelope.requestKind === undefined) {
+      context.addIssue({ code: "custom", message: "model request start requires its private request stamp" });
+    }
+  } else if (envelope.contextThroughMessageSequence !== undefined || envelope.requestKind !== undefined) {
+    context.addIssue({ code: "custom", message: "private request stamp requires a model request start" });
   }
   validateStableReasoningSet(parts, context);
 });

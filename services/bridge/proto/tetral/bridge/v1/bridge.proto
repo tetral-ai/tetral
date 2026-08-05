@@ -180,6 +180,11 @@ message IdleCloseoutStamp {
   string committed_idle_at = 4;
 }
 
+message RequestStartStamp {
+  string request_kind = 1;
+  int64 context_through_message_sequence = 2;
+}
+
 message DeclarationReceipt {
   string session_thread_id = 1;
   string operation_kind = 2;
@@ -193,6 +198,7 @@ message DeclarationReceipt {
   string declaration_digest = 10;
   RequestRescheduleStamp request_reschedule = 11;
   repeated ChildLifecycleStamp child_lifecycle = 12;
+  RequestStartStamp request_start = 13;
   IdleCloseoutStamp idle_closeout = 14;
   optional int64 compacted_through_message_sequence = 15;
 }
@@ -459,6 +465,8 @@ message WriteEventRequest {
   repeated RuntimeMessageDraft drafts = 10;
   optional string mcp_materialization_handle = 11;
   optional string sandbox_result_digest = 12;
+  optional int64 context_through_message_sequence = 13;
+  string request_kind = 14;
 }
 
 message ServerToolUseUsage {

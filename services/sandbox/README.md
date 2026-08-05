@@ -117,6 +117,12 @@ pending
   -> preparing -> running -> terminal_unconsumed -> consumed
 ```
 
+`terminal_unconsumed` is durable staging, not conversation history. The Bridge
+turns it into a conversation Tool Result only when Runtime commits that event.
+If another terminal writer wins first, the staged body is cleared and only its
+digest and settlement receipt remain, so a late provider result cannot rewrite
+the terminal conversation.
+
 `preparing` stages a provider command under a persisted deadline but does not
 run the user-authored command. The transition to `running` rechecks the current
 binding revision, exact provider handle, release and cancellation fences,

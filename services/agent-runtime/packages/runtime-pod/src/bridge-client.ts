@@ -58,9 +58,11 @@ import type {
   RuntimePreloadedSandboxExecutionState,
   RuntimeThreadControlState,
   RuntimeColdCoverage,
-} from "@tetral/agent-runtime-core/src/session/session-state.js";
-import type { RuntimeSessionIdentity } from "@tetral/agent-runtime-core/src/session/session.js";
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeThreadIdentity } from "@tetral/agent-runtime-core/src/thread-loop/thread-runtime.js";
 import type { ThreadContextPrefix } from "@tetral/agent-runtime-core/src/session/context-manager.js";
+import { ThreadTurnLoadFactsSchema } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import {
   DurableRuntimeMessageSchema,
   RuntimeMessageSchema,
@@ -72,6 +74,7 @@ import {
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
+  DurableRuntimeMessage,
   RuntimeMessageDraft as CoreRuntimeMessageDraft,
   RuntimeInternalToolRepairCommit,
   RuntimeInternalToolRepairCommitResult,
@@ -683,7 +686,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
    * Concurrent refreshes for the same thread and binding share one in-flight request.
    */
   async refreshRuntimeBindingToken(
-    identity: RuntimeSessionIdentity,
+    identity: RuntimeThreadIdentity,
     options: { readonly force?: boolean | undefined } = {},
   ): Promise<string> {
     if (options.force !== true && !bindingTokenNeedsRefresh(identity.runtimeBindingToken, this.nowEpochMs(), this.refreshMarginMs)) {
@@ -705,7 +708,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     }
   }
 
-  private async refreshRuntimeBindingTokenOnce(identity: RuntimeSessionIdentity): Promise<string> {
+  private async refreshRuntimeBindingTokenOnce(identity: RuntimeThreadIdentity): Promise<string> {
     for (let attempt = 1; attempt <= RuntimeBindingTokenRefreshPolicy.attempts; attempt += 1) {
       try {
         const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
@@ -745,7 +748,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
   async loadThreadContext(
     command: RuntimeThreadControlState,
   ): Promise<{
-    readonly messages: readonly RuntimeMessage[];
+    readonly messages: readonly DurableRuntimeMessage[];
+    readonly turnFacts: ThreadTurnLoadFacts;
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
     readonly durableTurnId?: string | undefined;
     readonly runtimeBindingToken: string;
@@ -1000,7 +1004,8 @@ export class BridgeAPIContextLoader implements ContextLoader {
   private async loadContext(
     input: RuntimeThreadControlState,
   ): Promise<{
-    readonly messages: readonly RuntimeMessage[];
+    readonly messages: readonly DurableRuntimeMessage[];
+    readonly turnFacts: ThreadTurnLoadFacts;
     readonly threadContextPrefix?: ThreadContextPrefix | undefined;
     readonly durableTurnId?: string | undefined;
     readonly runtimeBindingToken: string;
@@ -1084,6 +1089,8 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         serverToolUse: envelope.serverToolUse,
         mcpMaterializationHandle: envelope.mcpMaterializationHandle,
         sandboxResultDigest: envelope.sandboxResultDigest,
+        contextThroughMessageSequence: envelope.contextThroughMessageSequence,
+        requestKind: envelope.requestKind ?? "",
         drafts: envelope.drafts.map(runtimeMessageDraftForBridge),
       };
       const declarationDigest = writeEventDeclarationDigest(request);
@@ -1114,7 +1121,16 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         receipt.events.length !== 1 ||
         receipt.events[0]?.eventId !== response.eventId ||
         receipt.events[0]?.eventSequence !== response.sequence ||
-        receipt.compactedThroughMessageSequence !== undefined
+        receipt.compactedThroughMessageSequence !== undefined ||
+        (
+          event.type === "span.model_request_start" &&
+          (
+            receipt.requestStart === undefined ||
+            receipt.requestStart.requestKind !== envelope.requestKind ||
+            receipt.requestStart.contextThroughMessageSequence !== envelope.contextThroughMessageSequence
+          )
+        ) ||
+        (event.type !== "span.model_request_start" && receipt.requestStart !== undefined)
       ) {
         recordBridgeReceiptEvidence(this.options, {
           workspaceId: envelope.workspaceId,
@@ -2049,6 +2065,12 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
         idleEventSequence: receipt.idleCloseout.idleEventSequence,
         committedIdleAt: receipt.idleCloseout.committedIdleAt,
       };
+  const requestStart = receipt.requestStart === undefined
+    ? undefined
+    : {
+        requestKind: parseRuntimeRequestKind(receipt.requestStart.requestKind),
+        contextThroughMessageSequence: receipt.requestStart.contextThroughMessageSequence,
+      };
   return {
     sessionThreadId: receipt.sessionThreadId,
     operationKind: receipt.operationKind,
@@ -2074,6 +2096,7 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
       };
     }),
     ...(requestReschedule !== undefined ? { requestReschedule } : {}),
+    ...(requestStart !== undefined ? { requestStart } : {}),
     ...(idleCloseout !== undefined ? { idleCloseout } : {}),
     ...(receipt.compactedThroughMessageSequence !== undefined
       ? { compactedThroughMessageSequence: receipt.compactedThroughMessageSequence }
@@ -2128,6 +2151,15 @@ function runtimeDeclarationReceipt(receipt: BridgeDeclarationReceipt): RuntimeDe
       })),
     })),
   };
+}
+
+function parseRuntimeRequestKind(
+  value: string,
+): "agent_provider_request" | "compaction_summary" | "approval_reviewer" {
+  if (value === "agent_provider_request" || value === "compaction_summary" || value === "approval_reviewer") {
+    return value;
+  }
+  throw new Error("declaration receipt has an invalid request-start stamp");
 }
 
 export function validateChildLifecycleDeclarationResponse(
@@ -2392,7 +2424,7 @@ function bridgeScope(input: {
   };
 }
 
-function bindingTokenRefreshScope(identity: RuntimeSessionIdentity): RuntimeScope {
+function bindingTokenRefreshScope(identity: RuntimeThreadIdentity): RuntimeScope {
   return {
     requestId: `binding-token-refresh:${identity.sessionThreadId}`,
     workspaceId: identity.workspaceId,
@@ -2406,7 +2438,7 @@ function bindingTokenRefreshScope(identity: RuntimeSessionIdentity): RuntimeScop
   };
 }
 
-function bindingTokenRefreshKey(identity: RuntimeSessionIdentity): string {
+function bindingTokenRefreshKey(identity: RuntimeThreadIdentity): string {
   return [
     identity.workspaceId,
     identity.sessionId,
@@ -2515,7 +2547,8 @@ function internalToolRepairStoreFailure(
 }
 
 function parseContextPayload(contextJson: string, input: RuntimeThreadControlState): {
-  readonly messages: readonly RuntimeMessage[];
+  readonly messages: readonly DurableRuntimeMessage[];
+  readonly turnFacts: ThreadTurnLoadFacts;
   readonly threadContextPrefix?: ThreadContextPrefix | undefined;
   readonly durableTurnId?: string | undefined;
   readonly thread: RuntimeAcceptedThreadMetadataState;
@@ -2534,6 +2567,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
       throw new Error("load context messages are malformed");
     }
     const messages = parsed.messages.map((message) => DurableRuntimeMessageSchema.parse(message));
+    const turnFacts = ThreadTurnLoadFactsSchema.parse(parsed.turnFacts);
     const threadContextPrefix = parseThreadContextPrefix(parsed.threadContextPrefix);
     const durableTurnId = stringField(parsed, "durableTurnId");
     const thread = parseThreadMetadata(parsed.thread);
@@ -2547,6 +2581,7 @@ function parseContextPayload(contextJson: string, input: RuntimeThreadControlSta
     const coldCoverage = parseColdCoverage(parsed.coldCoverage);
     return {
       messages,
+      turnFacts,
       ...(threadContextPrefix !== undefined ? { threadContextPrefix } : {}),
       ...(durableTurnId !== undefined ? { durableTurnId } : {}),
       thread,
@@ -2897,9 +2932,8 @@ function parsePendingToolUses(value: unknown): readonly RuntimeLoadedPendingTool
     if (!isRecord(item)) {
       throw new Error("load context pendingToolUses is malformed");
     }
-    const kind = stringField(item, "kind");
     const status = stringField(item, "status");
-    if ((kind !== "approval" && kind !== "custom") || (status !== "pending" && status !== "resolving")) {
+    if (status !== "pending" && status !== "resolving") {
       throw new Error("load context pendingToolUses is malformed");
     }
     const decision = pendingToolDecision(item);
@@ -2909,12 +2943,10 @@ function parsePendingToolUses(value: unknown): readonly RuntimeLoadedPendingTool
       modelRequestId: requiredStringField(item, "modelRequestId"),
       modelToolCallId: requiredStringField(item, "modelToolCallId"),
       toolName: requiredStringField(item, "toolName"),
-      kind,
       input: RuntimeJsonValueSchema.parse(item.input ?? {}),
       ...(decision !== undefined ? { decision } : {}),
       ...(denyMessage !== undefined ? { denyMessage } : {}),
       status,
-      expiresAt: requiredStringField(item, "expiresAt"),
     };
   });
 }

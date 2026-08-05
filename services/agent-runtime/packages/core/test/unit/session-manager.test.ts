@@ -11,9 +11,9 @@ import type {
   RuntimeConfigPatchState,
   RuntimeControlInputDeclaration,
   RuntimeThreadControlState,
-} from "../../src/session/session-state.js";
-import * as AgentLoop from "../../src/agent-loop/agent-loop.js";
-import * as Session from "../../src/session/session.js";
+} from "../../src/thread-loop/thread-state.js";
+import * as ThreadLoop from "../../src/thread-loop/thread-loop.js";
+import * as ThreadRuntime from "../../src/thread-loop/thread-runtime.js";
 import * as SessionManager from "../../src/session/session-manager.js";
 import type { RuntimeHotStateMetrics, RuntimeMetricsSink } from "../../src/runtime/metrics.js";
 import {
@@ -165,67 +165,67 @@ function threadControl(
 
 interface RunRecord {
   readonly sessionId: string;
-  readonly session: Session.Session;
+  readonly session: ThreadRuntime.ThreadRuntime;
   readonly args: readonly unknown[];
-  readonly release: (result?: AgentLoop.AgentLoopRunResult) => void;
+  readonly release: (result?: ThreadLoop.ThreadLoopRunResult) => void;
 }
 
 interface CrashRunRecord {
   readonly sessionId: string;
-  readonly session: Session.Session;
+  readonly session: ThreadRuntime.ThreadRuntime;
   readonly releaseCrash: () => void;
 }
 
-interface ControlledAgentLoop {
+interface ControlledThreadLoop {
   readonly runs: RunRecord[];
-  readonly layer: Layer.Layer<AgentLoop.Service>;
+  readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
-interface ControlledCrashAgentLoop {
+interface ControlledCrashThreadLoop {
   readonly runs: CrashRunRecord[];
-  readonly layer: Layer.Layer<AgentLoop.Service>;
+  readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
-interface InterruptRecordingAgentLoop {
-  readonly runs: Array<{ readonly sessionId: string; readonly session: Session.Session }>;
+interface InterruptRecordingThreadLoop {
+  readonly runs: Array<{ readonly sessionId: string; readonly session: ThreadRuntime.ThreadRuntime }>;
   readonly interruptions: Array<{
     readonly sessionId: string;
     readonly runtimeShutdownRequested: boolean;
   }>;
-  readonly layer: Layer.Layer<AgentLoop.Service>;
+  readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
-interface InterruptCleanupAgentLoop {
+interface InterruptCleanupThreadLoop {
   readonly runs: RunRecord[];
   readonly cleanupStarted: Promise<void>;
   readonly releaseCleanup: () => void;
-  readonly layer: Layer.Layer<AgentLoop.Service>;
+  readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
-interface ReviewerInterruptCleanupAgentLoop extends ControlledAgentLoop {
+interface ReviewerInterruptCleanupThreadLoop extends ControlledThreadLoop {
   readonly reviewerCleanupStarted: Promise<void>;
   readonly releaseReviewerCleanup: () => void;
 }
 
-interface ReviewerGenerationAgentLoop {
+interface ReviewerGenerationThreadLoop {
   readonly observedReviewerInputIds: string[];
   readonly targetAStarted: Promise<void>;
   readonly cleanupStarted: Promise<void>;
   readonly releaseCleanup: () => void;
   readonly targetBStarted: Promise<void>;
   readonly releaseTargetB: () => void;
-  readonly layer: Layer.Layer<AgentLoop.Service>;
+  readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
-interface FollowUpCleanupAgentLoop {
+interface FollowUpCleanupThreadLoop {
   readonly runs: RunRecord[];
   readonly followUpCleanupStarted: Promise<void>;
   readonly releaseFollowUpCleanup: () => void;
-  readonly layer: Layer.Layer<AgentLoop.Service>;
+  readonly layer: Layer.Layer<ThreadLoop.Service>;
 }
 
-function agentLoopService(overrides: Pick<AgentLoop.Interface, "run"> & Partial<AgentLoop.Interface>): AgentLoop.Interface {
-  return AgentLoop.Service.of({
+function threadLoopService(overrides: Pick<ThreadLoop.Interface, "run"> & Partial<ThreadLoop.Interface>): ThreadLoop.Interface {
+  return ThreadLoop.Service.of({
     closeFailedRun: () => Effect.succeed({ type: "landed" }),
     seedRuntimeModel: () => {},
     installLoadedPendingToolUses: () => Effect.succeed({ ok: true }),
@@ -234,15 +234,15 @@ function agentLoopService(overrides: Pick<AgentLoop.Interface, "run"> & Partial<
   });
 }
 
-function makeControlledAgentLoop(overrides: Partial<AgentLoop.Interface> = {}): ControlledAgentLoop {
+function makeControlledThreadLoop(overrides: Partial<ThreadLoop.Interface> = {}): ControlledThreadLoop {
   const runs: RunRecord[] = [];
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
-      run: (...args: readonly [Session.Session, ...unknown[]]) =>
+    ThreadLoop.Service,
+    threadLoopService({
+      run: (...args: readonly [ThreadRuntime.ThreadRuntime, ...unknown[]]) =>
         Effect.promise(
           () =>
-            new Promise<AgentLoop.AgentLoopRunResult>((resolve) => {
+            new Promise<ThreadLoop.ThreadLoopRunResult>((resolve) => {
               const session = args[0];
               runs.push({
                 sessionId: session.sessionId,
@@ -264,15 +264,15 @@ function makeControlledAgentLoop(overrides: Partial<AgentLoop.Interface> = {}): 
   return { runs, layer };
 }
 
-function makeInputConsumingControlledAgentLoop(): ControlledAgentLoop {
+function makeInputConsumingControlledThreadLoop(): ControlledThreadLoop {
   const runs: RunRecord[] = [];
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) =>
         Effect.promise(
           () =>
-            new Promise<AgentLoop.AgentLoopRunResult>((resolve) => {
+            new Promise<ThreadLoop.ThreadLoopRunResult>((resolve) => {
               let acceptedInput = session.state.peekAcceptedInput();
               while (acceptedInput !== undefined) {
                 session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
@@ -291,12 +291,12 @@ function makeInputConsumingControlledAgentLoop(): ControlledAgentLoop {
   return { runs, layer };
 }
 
-function makeInterruptRecordingAgentLoop(): InterruptRecordingAgentLoop {
-  const runs: Array<{ readonly sessionId: string; readonly session: Session.Session }> = [];
-  const interruptions: InterruptRecordingAgentLoop["interruptions"] = [];
+function makeInterruptRecordingThreadLoop(): InterruptRecordingThreadLoop {
+  const runs: Array<{ readonly sessionId: string; readonly session: ThreadRuntime.ThreadRuntime }> = [];
+  const interruptions: InterruptRecordingThreadLoop["interruptions"] = [];
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) =>
         Effect.sync(() => {
           runs.push({ sessionId: session.sessionId, session });
@@ -325,7 +325,7 @@ function makeInterruptRecordingAgentLoop(): InterruptRecordingAgentLoop {
   return { runs, interruptions, layer };
 }
 
-function makeInterruptCleanupAgentLoop(): InterruptCleanupAgentLoop {
+function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
   const runs: RunRecord[] = [];
   let cleanupStartedResolve: () => void = () => {};
   let releaseCleanupResolve: () => void = () => {};
@@ -336,8 +336,8 @@ function makeInterruptCleanupAgentLoop(): InterruptCleanupAgentLoop {
     releaseCleanupResolve = resolve;
   });
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) => {
         const runIndex = runs.length;
         if (runIndex === 0) {
@@ -369,7 +369,7 @@ function makeInterruptCleanupAgentLoop(): InterruptCleanupAgentLoop {
         }
         return Effect.promise(
           () =>
-            new Promise<AgentLoop.AgentLoopRunResult>((resolve) => {
+            new Promise<ThreadLoop.ThreadLoopRunResult>((resolve) => {
               runs.push({
                 sessionId: session.sessionId,
                 session,
@@ -384,7 +384,7 @@ function makeInterruptCleanupAgentLoop(): InterruptCleanupAgentLoop {
   return { runs, cleanupStarted, releaseCleanup: releaseCleanupResolve, layer };
 }
 
-function makeReviewerInterruptCleanupAgentLoop(reviewerThreadId: string): ReviewerInterruptCleanupAgentLoop {
+function makeReviewerInterruptCleanupThreadLoop(reviewerThreadId: string): ReviewerInterruptCleanupThreadLoop {
   const runs: RunRecord[] = [];
   let reviewerCleanupStartedResolve: () => void = () => {};
   let releaseReviewerCleanupResolve: () => void = () => {};
@@ -395,8 +395,8 @@ function makeReviewerInterruptCleanupAgentLoop(reviewerThreadId: string): Review
     releaseReviewerCleanupResolve = resolve;
   });
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) => {
         if (session.identity.sessionThreadId === reviewerThreadId) {
           return Effect.sync(() => {
@@ -415,7 +415,7 @@ function makeReviewerInterruptCleanupAgentLoop(reviewerThreadId: string): Review
           );
         }
         return Effect.promise(
-          () => new Promise<AgentLoop.AgentLoopRunResult>((resolve) => {
+          () => new Promise<ThreadLoop.ThreadLoopRunResult>((resolve) => {
             runs.push({
               sessionId: session.sessionId,
               session,
@@ -435,7 +435,7 @@ function makeReviewerInterruptCleanupAgentLoop(reviewerThreadId: string): Review
   };
 }
 
-function makeReviewerGenerationAgentLoop(): ReviewerGenerationAgentLoop {
+function makeReviewerGenerationThreadLoop(): ReviewerGenerationThreadLoop {
   let runIndex = 0;
   const observedReviewerInputIds: string[] = [];
   let cleanupStartedResolve: () => void = () => {};
@@ -459,8 +459,8 @@ function makeReviewerGenerationAgentLoop(): ReviewerGenerationAgentLoop {
     releaseTargetBResolve = resolve;
   });
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) => {
         const currentRun = runIndex;
         runIndex += 1;
@@ -504,7 +504,7 @@ function makeReviewerGenerationAgentLoop(): ReviewerGenerationAgentLoop {
   };
 }
 
-function makeFollowUpCleanupAgentLoop(): FollowUpCleanupAgentLoop {
+function makeFollowUpCleanupThreadLoop(): FollowUpCleanupThreadLoop {
   const runs: RunRecord[] = [];
   let cleanupStartedResolve: () => void = () => {};
   let releaseCleanupResolve: () => void = () => {};
@@ -515,13 +515,13 @@ function makeFollowUpCleanupAgentLoop(): FollowUpCleanupAgentLoop {
     releaseCleanupResolve = resolve;
   });
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) => {
         const runIndex = runs.length;
         const run = Effect.promise(
           () =>
-            new Promise<AgentLoop.AgentLoopRunResult>((resolve) => {
+            new Promise<ThreadLoop.ThreadLoopRunResult>((resolve) => {
               runs.push({
                 sessionId: session.sessionId,
                 session,
@@ -552,19 +552,19 @@ function makeFollowUpCleanupAgentLoop(): FollowUpCleanupAgentLoop {
   return { runs, followUpCleanupStarted, releaseFollowUpCleanup: releaseCleanupResolve, layer };
 }
 
-function makeControlledCrashAgentLoop(
+function makeControlledCrashThreadLoop(
   mode: "fail" | "die" | "reject",
-  overrides: Partial<AgentLoop.Interface> = {},
-): ControlledCrashAgentLoop {
+  overrides: Partial<ThreadLoop.Interface> = {},
+): ControlledCrashThreadLoop {
   const runs: CrashRunRecord[] = [];
   const layer = Layer.succeed(
-    AgentLoop.Service,
-    agentLoopService({
+    ThreadLoop.Service,
+    threadLoopService({
       run: (session) => {
         if (mode === "reject") {
           return Effect.promise(
             () =>
-              new Promise<AgentLoop.AgentLoopRunResult>((_resolve, reject) => {
+              new Promise<ThreadLoop.ThreadLoopRunResult>((_resolve, reject) => {
                 runs.push({
                   sessionId: session.sessionId,
                   session,
@@ -598,7 +598,7 @@ function makeControlledCrashAgentLoop(
             ),
           );
         }
-        return release.pipe(Effect.flatMap(() => Effect.die(new Error("agent loop defect"))));
+        return release.pipe(Effect.flatMap(() => Effect.die(new Error("thread loop defect"))));
       },
       ...overrides,
     }),
@@ -627,7 +627,7 @@ const forbiddenHostileFragments = [
 ] as const;
 
 function sessionManagerLayer(
-  agentLoop: { readonly layer: Layer.Layer<AgentLoop.Service> },
+  threadLoop: { readonly layer: Layer.Layer<ThreadLoop.Service> },
   options: {
     readonly maxLocalSessions?: number;
     readonly metrics?: RuntimeMetricsSink;
@@ -645,7 +645,7 @@ function sessionManagerLayer(
     ...(options.closeoutMonotonicMs !== undefined ? { closeoutMonotonicMs: options.closeoutMonotonicMs } : {}),
     ...(options.closeoutSleep !== undefined ? { closeoutSleep: options.closeoutSleep } : {}),
     ...(options.recordCloseoutEvent !== undefined ? { recordCloseoutEvent: options.recordCloseoutEvent } : {}),
-  }).pipe(Layer.provide(agentLoop.layer));
+  }).pipe(Layer.provide(threadLoop.layer));
 }
 
 async function withSessionManager<T>(
@@ -702,14 +702,14 @@ function testSessionManager(manager: SessionManager.Interface): TestSessionManag
   return manager as TestSessionManager;
 }
 
-async function waitForRuns(agentLoop: ControlledAgentLoop, count: number): Promise<void> {
+async function waitForRuns(threadLoop: ControlledThreadLoop, count: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (agentLoop.runs.length >= count) {
+    if (threadLoop.runs.length >= count) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
-  throw new Error(`expected ${count} AgentLoop runs, observed ${agentLoop.runs.length}`);
+  throw new Error(`expected ${count} ThreadLoop runs, observed ${threadLoop.runs.length}`);
 }
 
 async function waitForCondition(predicate: () => boolean | Promise<boolean>, label: string): Promise<void> {
@@ -733,24 +733,24 @@ async function waitForThreadIdle(manager: SessionManager.Interface, sessionId: s
   throw new Error(`expected ${sessionThreadId} to become idle`);
 }
 
-async function waitForCrashRuns(agentLoop: ControlledCrashAgentLoop, count: number): Promise<void> {
+async function waitForCrashRuns(threadLoop: ControlledCrashThreadLoop, count: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (agentLoop.runs.length >= count) {
+    if (threadLoop.runs.length >= count) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
-  throw new Error(`expected ${count} AgentLoop crash runs, observed ${agentLoop.runs.length}`);
+  throw new Error(`expected ${count} ThreadLoop crash runs, observed ${threadLoop.runs.length}`);
 }
 
-async function waitForInterruptRecordingRuns(agentLoop: InterruptRecordingAgentLoop, count: number): Promise<void> {
+async function waitForInterruptRecordingRuns(threadLoop: InterruptRecordingThreadLoop, count: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (agentLoop.runs.length >= count) {
+    if (threadLoop.runs.length >= count) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
-  throw new Error(`expected ${count} AgentLoop runs, observed ${agentLoop.runs.length}`);
+  throw new Error(`expected ${count} ThreadLoop runs, observed ${threadLoop.runs.length}`);
 }
 
 async function waitForIdleCleanup(manager: SessionManager.Interface, sessionId: string): Promise<SessionManager.CleanupSessionResult> {
@@ -771,15 +771,16 @@ function expectNoHostileFragments(value: unknown): void {
   }
 }
 
-function fatalRunResult(reason: "persistence_failed" | "event_write_failed" | "crashed"): AgentLoop.AgentLoopRunResult {
+function fatalRunResult(reason: "terminated" | "persistence_failed" | "event_write_failed" | "crashed"): ThreadLoop.ThreadLoopRunResult {
+  const runtimeFailure = reason === "terminated" || reason === "crashed";
   return {
     type: "failed",
     error: normalizeRuntimeFailure({
       type: reason === "persistence_failed" ? "message-store" : reason === "event_write_failed" ? "session-event-writer" : "runtime",
-      code: reason === "crashed" ? "runtime_invalid_sequence" : "unavailable",
-      retryable: true,
-      fatal: false,
-      ...(reason === "crashed" ? { reason: "runtime_contract_validation" } : {}),
+      code: runtimeFailure ? "runtime_invalid_sequence" : "unavailable",
+      retryable: reason !== "terminated",
+      fatal: reason === "terminated",
+      ...(runtimeFailure ? { reason: "runtime_contract_validation" } : {}),
     }),
     releaseSession: { reason },
   };
@@ -817,7 +818,7 @@ describe("SessionManager", () => {
     const sessionId = "sesn_reviewer_cancel_reentry";
     const reviewerThreadId = "thrd_reviewer_cancel_reentry";
     const parentThreadId = "thrd_parent_cancel_reentry";
-    const agentLoop = makeReviewerGenerationAgentLoop();
+    const threadLoop = makeReviewerGenerationThreadLoop();
     const targetBInput = approvalReviewInput(sessionId, "rin_target_b_reentry", reviewerThreadId, parentThreadId);
     let managerRef: TestSessionManager | undefined;
     let reentryArmed = false;
@@ -830,7 +831,7 @@ describe("SessionManager", () => {
       reentryResult = Effect.runPromise(managerRef.acceptInput(targetBInput));
     });
 
-    await withSessionManager(sessionManagerLayer(agentLoop, { metrics }), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop, { metrics }), async (manager) => {
       managerRef = manager;
       const targetA = await Effect.runPromise(manager.acceptInput(
         approvalReviewInput(sessionId, "rin_target_a_reentry", reviewerThreadId, parentThreadId),
@@ -838,21 +839,21 @@ describe("SessionManager", () => {
       if (!targetA.ok || targetA.reviewerExecutionToken === undefined) {
         throw new Error("target A did not receive a reviewer execution token");
       }
-      await agentLoop.targetAStarted;
+      await threadLoop.targetAStarted;
       const cancellation = Effect.runPromise(manager.interruptReviewerExecution(
         threadControl(sessionId, "rin_target_a_reentry_control", reviewerThreadId),
         targetA.reviewerExecutionToken,
       ));
-      await agentLoop.cleanupStarted;
+      await threadLoop.cleanupStarted;
 
       reentryArmed = true;
-      agentLoop.releaseCleanup();
+      threadLoop.releaseCleanup();
       await cancellation;
       await waitForCondition(() => reentryResult !== undefined, "reviewer reentrant admission");
       expect(await reentryResult).toMatchObject({ ok: true, started: true });
-      await agentLoop.targetBStarted;
-      expect(agentLoop.observedReviewerInputIds).toEqual(["rin_target_a_reentry", "rin_target_b_reentry"]);
-      agentLoop.releaseTargetB();
+      await threadLoop.targetBStarted;
+      expect(threadLoop.observedReviewerInputIds).toEqual(["rin_target_a_reentry", "rin_target_b_reentry"]);
+      threadLoop.releaseTargetB();
     });
   });
 
@@ -860,22 +861,22 @@ describe("SessionManager", () => {
     const sessionId = "sesn_reviewer_generation";
     const reviewerThreadId = "thrd_reviewer_generation";
     const parentThreadId = "thrd_parent_generation";
-    const agentLoop = makeReviewerGenerationAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeReviewerGenerationThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const targetAInput = approvalReviewInput(sessionId, "rin_target_a", reviewerThreadId, parentThreadId);
       const targetA = await Effect.runPromise(manager.acceptInput(targetAInput));
       expect(targetA).toMatchObject({ ok: true, started: true });
       if (!targetA.ok || targetA.reviewerExecutionToken === undefined) {
         throw new Error("target A did not receive a reviewer execution token");
       }
-      await agentLoop.targetAStarted;
+      await threadLoop.targetAStarted;
 
       const targetAControl = threadControl(sessionId, "rin_target_a_control", reviewerThreadId);
       const cancellation = Effect.runPromise(manager.interruptReviewerExecution(
         targetAControl,
         targetA.reviewerExecutionToken,
       ));
-      await agentLoop.cleanupStarted;
+      await threadLoop.cleanupStarted;
 
       const targetBWhileAIsLive = await Effect.runPromise(manager.acceptInput(
         approvalReviewInput(sessionId, "rin_target_b_early", reviewerThreadId, parentThreadId),
@@ -890,7 +891,7 @@ describe("SessionManager", () => {
         targetA.reviewerExecutionToken,
       ))).toMatchObject({ ok: false, reason: "thread_busy" });
 
-      agentLoop.releaseCleanup();
+      threadLoop.releaseCleanup();
       expect(await cancellation).toMatchObject({ ok: true, terminal: true, applied: true });
 
       const targetBInput = approvalReviewInput(sessionId, "rin_target_b", reviewerThreadId, parentThreadId);
@@ -902,8 +903,8 @@ describe("SessionManager", () => {
       expect(targetB.reviewerExecutionToken.runId).not.toBe(targetA.reviewerExecutionToken.runId);
 
       const targetBControl = threadControl(sessionId, "rin_target_b_control", reviewerThreadId);
-      await agentLoop.targetBStarted;
-      expect(agentLoop.observedReviewerInputIds).toEqual(["rin_target_a", "rin_target_b"]);
+      await threadLoop.targetBStarted;
+      expect(threadLoop.observedReviewerInputIds).toEqual(["rin_target_a", "rin_target_b"]);
       expect(await Effect.runPromise(manager.waitReviewerExecution(
         targetBControl,
         targetA.reviewerExecutionToken,
@@ -917,7 +918,7 @@ describe("SessionManager", () => {
         targetBControl,
         targetB.reviewerExecutionToken,
       ))).toMatchObject({ ok: false, reason: "thread_busy" });
-      agentLoop.releaseTargetB();
+      threadLoop.releaseTargetB();
       expect(await Effect.runPromise(manager.waitReviewerExecution(
         targetBControl,
         targetB.reviewerExecutionToken,
@@ -946,8 +947,8 @@ describe("SessionManager", () => {
     const sessionId = "sesn_reviewer_mail_rejected";
     const reviewerThreadId = "thrd_reviewer_mail_rejected";
     const parentThreadId = "thrd_reviewer_mail_parent";
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionId, "rin_preload_reviewer_mail", reviewerThreadId),
         runtimeBindingToken: "runtime-binding-token",
@@ -979,15 +980,15 @@ describe("SessionManager", () => {
         sessionId,
         reason: "thread_not_receivable",
       });
-      expect(agentLoop.runs).toEqual([]);
+      expect(threadLoop.runs).toEqual([]);
     });
   });
   test("reports hot-state session, thread, and run fiber gauges through injected metrics", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const metrics = new RecordingRuntimeMetrics();
-    await withSessionManager(sessionManagerLayer(agentLoop, { metrics }), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop, { metrics }), async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"));
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(metrics.latestHotState()).toEqual({
         activeSessions: 1,
         activeThreads: 1,
@@ -995,7 +996,7 @@ describe("SessionManager", () => {
         pendingApprovals: 0,
       });
 
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
       await waitForCondition(() => metrics.latestHotState()?.activeFibers === 0, "metrics active fiber release");
       expect(metrics.latestHotState()).toEqual({
         activeSessions: 1,
@@ -1006,24 +1007,24 @@ describe("SessionManager", () => {
     });
   });
 
-  test("accepted input creates one session and does not duplicate an in-flight AgentLoop", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+  test("accepted input creates one session and does not duplicate an in-flight ThreadLoop", async () => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const first = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"));
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       const second = Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"));
       await new Promise((resolve) => setTimeout(resolve, 5));
       expect(first).toEqual({ ok: true, sessionId: "sesn_1", created: true, started: true });
-      expect(agentLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1"]);
-      expect(agentLoop.runs[0]?.args).toHaveLength(2);
-      agentLoop.runs[0]?.release();
+      expect(threadLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1"]);
+      expect(threadLoop.runs[0]?.args).toHaveLength(2);
+      threadLoop.runs[0]?.release();
       expect(await second).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: false });
     });
   });
 
   test("acceptInput marks one pending wake while running and starts exactly one follow-up run", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(
         Effect.gen(function* () {
         const first = yield* manager.acceptInput(acceptedInput("sesn_1", "rin_1"));
@@ -1035,19 +1036,19 @@ describe("SessionManager", () => {
         }),
       );
 
-      await waitForRuns(agentLoop, 1);
-      agentLoop.runs[0]?.release();
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_1"]);
-      expect(agentLoop.runs[1]?.session).toBe(agentLoop.runs[0]?.session);
-      expect(agentLoop.runs[1]?.session.state.contextManager).toBe(agentLoop.runs[0]?.session.state.contextManager);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 1);
+      threadLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_1"]);
+      expect(threadLoop.runs[1]?.session).toBe(threadLoop.runs[0]?.session);
+      expect(threadLoop.runs[1]?.session.state.contextManager).toBe(threadLoop.runs[0]?.session.state.contextManager);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("duplicate accepted input is idempotent and does not schedule an empty follow-up", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_duplicate")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -1055,7 +1056,7 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_duplicate")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -1064,25 +1065,27 @@ describe("SessionManager", () => {
         pendingWake: false,
         duplicate: true,
       });
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
       await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(agentLoop.runs).toHaveLength(1);
+      expect(threadLoop.runs).toHaveLength(1);
     });
   });
 
-  test("cold recovery treats an input whose source event is already projected as a duplicate", async () => {
-    const agentLoop = makeControlledAgentLoop();
+  test("cold recovery starts the reconstructed request after the input ACK response was lost", async () => {
+    const threadLoop = makeControlledThreadLoop();
     const input = acceptedInput("sesn_cold_input_replay", "rin_cold_input_replay");
     const durableMessage = {
       ...coldUserMessage(input.sessionId),
       owningEventId: input.eventIds[0]!,
       eventSequence: input.sequenceFrom,
     };
-    await withSessionManager(sessionManagerLayer(agentLoop, {
+    await withSessionManager(sessionManagerLayer(threadLoop, {
       loadThreadContext: async () => ({
         ...threadControl(input.sessionId, input.runtimeInputId, input.sessionThreadId),
         runtimeBindingToken: "runtime-binding-token",
         messages: [durableMessage],
+        turnCheckpoint: { pendingInputMessageIds: [durableMessage.id] },
+        durableTurnId: "sevt_cold_input_running",
         coldCoverage: coldCoverage(),
       }),
     }), async (manager) => {
@@ -1090,11 +1093,15 @@ describe("SessionManager", () => {
         ok: true,
         sessionId: input.sessionId,
         created: true,
-        started: false,
+        started: true,
         pendingWake: false,
         duplicate: true,
       });
-      expect(agentLoop.runs).toEqual([]);
+      await waitForRuns(threadLoop, 1);
+      expect(threadLoop.runs[0]?.session.state.threadTurnReduction().action).toEqual({
+        action: "prepare_next_request",
+      });
+      threadLoop.runs[0]?.release();
     });
   });
 
@@ -1110,10 +1117,10 @@ describe("SessionManager", () => {
       { role: "main", visibility: "public", agentType: "general", status: "idle" },
     );
     const observedAcceptedInputCounts: number[] = [];
-    const agentLoop = {
+    const threadLoop = {
       layer: Layer.succeed(
-        AgentLoop.Service,
-        agentLoopService({
+        ThreadLoop.Service,
+        threadLoopService({
           run: (session) => Effect.sync(() => {
             observedAcceptedInputCounts.push(session.state.acceptedInputCount());
             return { type: "completed" as const, modelMessageCount: 0 };
@@ -1121,7 +1128,7 @@ describe("SessionManager", () => {
         }),
       ),
     };
-    await withSessionManager(sessionManagerLayer(agentLoop, {
+    await withSessionManager(sessionManagerLayer(threadLoop, {
       loadThreadContext: async () => ({
         ...threadControl(sessionId, trigger.runtimeInputId, threadId),
         runtimeBindingToken: "runtime-binding-token",
@@ -1143,15 +1150,15 @@ describe("SessionManager", () => {
   });
 
   test("interruptControl cancels an active run and deduplicates a later idle interrupt", async () => {
-    const agentLoop = makeInterruptRecordingAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeInterruptRecordingThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1")))).toMatchObject({
         ok: true,
         sessionId: "sesn_1",
         started: true,
       });
-      await waitForInterruptRecordingRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
+      await waitForInterruptRecordingRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
       if (session === undefined) {
         throw new Error("expected active session");
       }
@@ -1168,7 +1175,7 @@ describe("SessionManager", () => {
         interrupted: true,
         idleInterrupt: false,
       });
-      expect(agentLoop.interruptions).toEqual([
+      expect(threadLoop.interruptions).toEqual([
         {
           sessionId: "sesn_1",
           runtimeShutdownRequested: false,
@@ -1196,9 +1203,66 @@ describe("SessionManager", () => {
         },
         committedMessages: [],
       });
-      session.state.contextManager.appendMessage(
-        pendingApprovalAssistantMessage("sesn_1", "sevt_idle_interrupt_tool"),
-      );
+      const approvalMessage = pendingApprovalAssistantMessage("sesn_1", "sevt_idle_interrupt_tool");
+      const sandboxMessage = pendingApprovalAssistantMessage("sesn_1", "sevt_idle_interrupt_sandbox");
+      session.state.contextManager.appendMessage(approvalMessage);
+      session.state.contextManager.appendMessage(sandboxMessage);
+      session.state.recordPendingSandboxExecutionJob({
+        recoveryKind: "sandbox_execution",
+        toolUseEventId: "sevt_idle_interrupt_sandbox",
+        modelRequestId: "mreq_idle_interrupt",
+        source: { providerId: "fake", modelId: "fake-chat" },
+        assistantMessage: sandboxMessage,
+        toolPart: pendingApprovalToolPart("sesn_1", "sevt_idle_interrupt_sandbox"),
+        entry: {} as never,
+        job: {
+          id: "mreq_idle_interrupt:tool-2",
+          modelOrder: 1,
+          toolUseEventId: "sevt_idle_interrupt_sandbox",
+          modelToolCallId: "tool-2",
+          kind: "builtin",
+          name: "Write",
+          route: { kind: "sandbox", operation: "RunTool", helperSubcommand: "write" },
+          input: { file_path: "src/b.ts" },
+          runPolicy: { mode: "parallel_safe", conflictKeys: null },
+          gateState: "runnable",
+        },
+        committedMessages: [approvalMessage, sandboxMessage],
+      });
+      session.state.installThreadTurn({
+        pendingInputMessageIds: [],
+        request: {
+          modelRequestId: "mreq_idle_interrupt",
+          requestStartEventId: "sevt_idle_interrupt_start",
+          requestKind: "agent_provider_request",
+          contextThroughMessageSequence: 0,
+          requestEnd: {
+            eventId: "sevt_idle_interrupt_end",
+            isError: false,
+            rescheduled: false,
+          },
+          toolMembers: [{
+            memberKind: "public_tool_use",
+            modelToolCallId: "tool-1",
+            toolUseEventId: "sevt_idle_interrupt_tool",
+            toolName: "Write",
+          }, {
+            memberKind: "public_tool_use",
+            modelToolCallId: "tool-2",
+            toolUseEventId: "sevt_idle_interrupt_sandbox",
+            toolName: "Write",
+          }],
+        },
+        idleCloseout: { eventId: "sevt_idle_interrupt_requires_action", stopReason: "requires_action" },
+      }, {
+        routes: [{
+          toolUseEventId: "sevt_idle_interrupt_tool",
+          disposition: "requires_user_action",
+        }, {
+          toolUseEventId: "sevt_idle_interrupt_sandbox",
+          disposition: "resume_sandbox_execution",
+        }],
+      });
       let idleInterruptCommits = 0;
       const idleInterrupt = { ...threadControl("sesn_1"), runtimeInputId: "rin_idle_interrupt", sequenceTo: 10 };
       expect(await Effect.runPromise(manager.interruptControl("sesn_1", idleInterrupt, async (declaration) => {
@@ -1212,15 +1276,18 @@ describe("SessionManager", () => {
         idleInterrupt: true,
       });
       expect(idleInterruptCommits).toBe(1);
-      expect(session.state.contextManager.messages()).toHaveLength(2);
-      expect(session.state.contextManager.messages().at(-1)?.parts).toEqual([
-        expect.objectContaining({
-          type: "tool",
-          toolUseEventId: "sevt_idle_interrupt_tool",
-          state: expect.objectContaining({ status: "cancelled" }),
-        }),
-      ]);
+      expect(session.state.contextManager.messages().flatMap((message) => message.parts)
+        .flatMap((part) => part.type === "tool" && part.state.status === "cancelled"
+          ? [part.toolUseEventId]
+          : [])).toEqual([
+          "sevt_idle_interrupt_tool",
+        ]);
       expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
+      expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
+      expect(session.state.threadTurnReduction()).toMatchObject({
+        state: { state: "idle" },
+        action: { action: "await_input" },
+      });
       expect(await Effect.runPromise(manager.interruptControl(
         "sesn_1",
         idleInterrupt,
@@ -1237,15 +1304,15 @@ describe("SessionManager", () => {
         duplicate: true,
       });
       expect(idleInterruptCommits).toBe(1);
-      expect(session.state.contextManager.messages()).toHaveLength(2);
-      expect(agentLoop.runs).toHaveLength(1);
-      expect(agentLoop.interruptions).toHaveLength(1);
+      expect(session.state.contextManager.messages()).toHaveLength(3);
+      expect(threadLoop.runs).toHaveLength(1);
+      expect(threadLoop.interruptions).toHaveLength(1);
     });
   });
 
   test("concurrent idle interrupt replay commits one frozen declaration", async () => {
-    const agentLoop = makeInterruptRecordingAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeInterruptRecordingThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const sessionId = "sesn_concurrent_idle_interrupt";
       const threadId = "thrd_concurrent_idle_interrupt";
       const preload = threadControl(sessionId, "rin_preload_concurrent_idle_interrupt", threadId);
@@ -1303,13 +1370,13 @@ describe("SessionManager", () => {
   });
 
   test("distinct active interrupts settle in order across the first run closeout", async () => {
-    const agentLoop = makeInterruptRecordingAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeInterruptRecordingThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const sessionId = "sesn_ordered_active_interrupts";
       const threadId = "thrd_ordered_active_interrupts";
       await Effect.runPromise(manager.acceptInput(acceptedInput(sessionId, "rin_active_owner", threadId)));
-      await waitForInterruptRecordingRuns(agentLoop, 1);
-      agentLoop.runs[0]?.session.state.acknowledgeAcceptedInput("rin_active_owner");
+      await waitForInterruptRecordingRuns(threadLoop, 1);
+      threadLoop.runs[0]?.session.state.acknowledgeAcceptedInput("rin_active_owner");
 
       let firstCommitStarted: (() => void) | undefined;
       const firstCommitStart = new Promise<void>((resolve) => {
@@ -1350,7 +1417,7 @@ describe("SessionManager", () => {
 
       releaseFirstCommit?.();
       expect(await firstResult).toMatchObject({ ok: true, interrupted: true });
-      expect(agentLoop.runs).toHaveLength(1);
+      expect(threadLoop.runs).toHaveLength(1);
       const settledSecond = await secondResult;
       expect(settledSecond).toMatchObject({ ok: true, idleInterrupt: true });
       expect(committed).toEqual([first.runtimeInputId, second.runtimeInputId]);
@@ -1358,8 +1425,8 @@ describe("SessionManager", () => {
   });
 
   test("retryable idle interrupt replay retries the frozen declaration", async () => {
-    const agentLoop = makeInterruptRecordingAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeInterruptRecordingThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const sessionId = "sesn_retryable_idle_interrupt";
       const threadId = "thrd_retryable_idle_interrupt";
       const preload = threadControl(sessionId, "rin_preload_retryable_idle_interrupt", threadId);
@@ -1404,10 +1471,10 @@ describe("SessionManager", () => {
     });
   });
 
-  test("idle config commands update shared hot state without starting AgentLoop work", async () => {
-    const agentLoop = makeControlledAgentLoop();
+  test("idle config commands update shared hot state without starting ThreadLoop work", async () => {
+    const threadLoop = makeControlledThreadLoop();
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl("sesn_1", "rin_preload_config"),
         runtimeBindingToken: "runtime-binding-token",
@@ -1423,7 +1490,7 @@ describe("SessionManager", () => {
           }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_1", created: false, applied: true });
-      expect(agentLoop.runs).toEqual([]);
+      expect(threadLoop.runs).toEqual([]);
 
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"))).toEqual({
         ok: true,
@@ -1431,26 +1498,26 @@ describe("SessionManager", () => {
         created: false,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
       expect(session?.configuration.runtimeConfigPatch()).toEqual({
         generation: 5,
         payloadJson: "{\"config_generation\":5}",
       });
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
     });
   });
 
   test("task notification received during a run remains pending for the follow-up turn", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionId = "sesn_task_notification_wake";
     let commitCalls = 0;
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput(sessionId)))).toMatchObject({
         ok: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
         ...threadControl(sessionId, "rin_task_notification_wake"),
         taskId: "task_notification_wake",
@@ -1465,24 +1532,24 @@ describe("SessionManager", () => {
         };
       }))).toMatchObject({ ok: true, applied: true });
       expect(commitCalls).toBe(0);
-      expect(agentLoop.runs[0]!.session.state.contextManager.messages()).not.toContainEqual(
+      expect(threadLoop.runs[0]!.session.state.contextManager.messages()).not.toContainEqual(
         bridgeRuntimeMessage(sessionId, "task completed"),
       );
 
-      agentLoop.runs[0]!.release();
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]!.session.state.peekAcceptedInput()).toMatchObject({
+      threadLoop.runs[0]!.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]!.session.state.peekAcceptedInput()).toMatchObject({
         kind: "task_notification",
         runtimeInputId: "rin_task_notification_wake",
         taskId: "task_notification_wake",
       });
       expect(commitCalls).toBe(0);
-      agentLoop.runs[1]!.release();
+      threadLoop.runs[1]!.release();
     });
   });
 
-  test("one failed shared-state initializer prevents sibling cold loads from creating a second session state", async () => {
-    const agentLoop = makeControlledAgentLoop();
+  test("one failed shared-state initializer prevents sibling cold loads from creating a second shared state", async () => {
+    const threadLoop = makeControlledThreadLoop();
     let loadCount = 0;
     let releaseFailedLoad: (() => void) | undefined;
     let observeFailedLoad: (() => void) | undefined;
@@ -1527,7 +1594,7 @@ describe("SessionManager", () => {
       };
     };
 
-    await withSessionManager(sessionManagerLayer(agentLoop, { loadThreadContext }), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop, { loadThreadContext }), async (manager) => {
       const initializer = Effect.runPromise(manager.ensureThreadInstalled(
         threadControl("sesn_shared_install_failure", "rin_initializer", "thrd_shared_initializer"),
       ));
@@ -1584,9 +1651,9 @@ describe("SessionManager", () => {
   });
 
   test("existing child thread keeps parent and role metadata across accepted input", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(
         await Effect.runPromise(
           manager.preloadThread({
@@ -1611,23 +1678,23 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
 
-      expect(agentLoop.runs[0]?.session.identity).toMatchObject({
+      expect(threadLoop.runs[0]?.session.identity).toMatchObject({
         parentThreadId: "thrd_parent",
         threadRole: "subagent",
         runtimeBindingToken: "runtime-binding-token-child",
       });
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
     });
   });
 
   test("preloadThread restores running background task handles before task notification settlement", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const committedMessage = bridgeRuntimeMessage("sesn_cold_background", "background task completed after cold load");
     let commitCalls = 0;
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(
         await Effect.runPromise(
           manager.preloadThread({
@@ -1658,23 +1725,23 @@ describe("SessionManager", () => {
         ),
       ).toEqual({ ok: true, sessionId: "sesn_cold_background", created: false, applied: true });
 
-      await waitForRuns(agentLoop, 1);
-      expect(agentLoop.runs[0]?.session.state.backgroundTool("task_cold_background")).toMatchObject({
+      await waitForRuns(threadLoop, 1);
+      expect(threadLoop.runs[0]?.session.state.backgroundTool("task_cold_background")).toMatchObject({
         taskId: "task_cold_background",
         sourceToolUseEventId: "sevt_tool_background",
         status: "running",
       });
-      expect(agentLoop.runs[0]?.session.state.peekAcceptedInput()).toMatchObject({
+      expect(threadLoop.runs[0]?.session.state.peekAcceptedInput()).toMatchObject({
         kind: "task_notification",
         runtimeInputId: "rin_task_background",
       });
       expect(commitCalls).toBe(0);
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
     });
   });
 
   test("preload admits stored completion mail through the waking path and leaves an empty preload idle", async () => {
-    const base = makeControlledAgentLoop();
+    const base = makeControlledThreadLoop();
     const layer = sessionManagerLayer(base);
     const sessionID = "sesn_preload_agent_mail";
     const threadID = "thrd_preload_agent_mail_main";
@@ -1726,7 +1793,7 @@ describe("SessionManager", () => {
   });
 
   test("cold preload drains four completion mails as four turns without a stranded wake", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionID = "sesn_preload_agent_mail_page";
     const threadID = "thrd_preload_agent_mail_page_main";
     const thread: RuntimeAcceptedThreadMetadataState = {
@@ -1742,7 +1809,7 @@ describe("SessionManager", () => {
       `thrd_preload_agent_mail_page_child_${index}`,
       thread,
     ));
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionID, "rin_preload_agent_mail_page", threadID),
         runtimeBindingToken: "runtime-binding-token",
@@ -1755,14 +1822,14 @@ describe("SessionManager", () => {
       }))).toMatchObject({ ok: true, applied: true });
 
       for (let index = 0; index < mails.length; index += 1) {
-        await waitForRuns(agentLoop, index + 1);
-        expect(agentLoop.runs[index]!.session.state.peekAcceptedInput()?.runtimeInputId).toBe(
+        await waitForRuns(threadLoop, index + 1);
+        expect(threadLoop.runs[index]!.session.state.peekAcceptedInput()?.runtimeInputId).toBe(
           mails[index]!.runtimeInputId,
         );
-        agentLoop.runs[index]!.release({ type: "completed", modelMessageCount: 1 });
+        threadLoop.runs[index]!.release({ type: "completed", modelMessageCount: 1 });
       }
       await waitForThreadIdle(manager, sessionID, threadID);
-      expect(agentLoop.runs).toHaveLength(mails.length);
+      expect(threadLoop.runs).toHaveLength(mails.length);
       expect(await Effect.runPromise(manager.acceptInput(mails[3]!))).toMatchObject({
         ok: true,
         started: false,
@@ -1772,8 +1839,8 @@ describe("SessionManager", () => {
   });
 
   test("completion mail admitted to a busy resident thread is a pending-wake success", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop);
+    const threadLoop = makeControlledThreadLoop();
+    const layer = sessionManagerLayer(threadLoop);
     const sessionID = "sesn_busy_agent_mail";
     const threadID = "thrd_busy_agent_mail_main";
     const thread: RuntimeAcceptedThreadMetadataState = {
@@ -1793,7 +1860,7 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(
         acceptedInput(sessionID, "rin_busy_agent_mail_first", threadID),
       ))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       const mail = agentMailInput(
         sessionID,
         "agent_mail:delivery_busy_agent_mail",
@@ -1808,14 +1875,14 @@ describe("SessionManager", () => {
         started: false,
         pendingWake: true,
       });
-      agentLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
-      await waitForRuns(agentLoop, 2);
-      agentLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
+      threadLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
+      await waitForRuns(threadLoop, 2);
+      threadLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
     });
   });
 
   test("cold preload installs both pending attachment origins before the next run", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const pendingAttachments = [{
       transient: {
         attachmentRef: "att_cold",
@@ -1837,7 +1904,7 @@ describe("SessionManager", () => {
       filename: "brief.pdf",
     }];
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl("sesn_cold_attachments", "rin_preload_attachments"),
         runtimeBindingToken: "runtime-binding-token-attachments",
@@ -1862,21 +1929,21 @@ describe("SessionManager", () => {
         created: false,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      expect(agentLoop.runs[0]?.session.state.pendingAttachments()).toEqual(pendingAttachments);
-      agentLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 1);
+      expect(threadLoop.runs[0]?.session.state.pendingAttachments()).toEqual(pendingAttachments);
+      threadLoop.runs[0]?.release();
     });
   });
 
   test("cold preload installs generation-fenced MCP manifests before pending MCP approval recovery", async () => {
-    const manifestsObservedDuringRecovery: Array<ReturnType<Session.Session["configuration"]["patches"]>> = [];
-    const agentLoop = makeControlledAgentLoop({
+    const manifestsObservedDuringRecovery: Array<ReturnType<ThreadRuntime.ThreadRuntime["configuration"]["patches"]>> = [];
+    const threadLoop = makeControlledThreadLoop({
       installLoadedPendingToolUses: (session) => Effect.sync(() => {
         manifestsObservedDuringRecovery.push([...session.configuration.patches()]);
         return { ok: true as const };
       }),
     });
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const control = threadControl("sesn_mcp_cold_pending", "rin_mcp_cold_pending");
       const result = await Effect.runPromise(manager.preloadThread({
         ...control,
@@ -1916,10 +1983,8 @@ describe("SessionManager", () => {
           modelRequestId: "mrq_mcp_pending",
           modelToolCallId: "toolu_mcp_pending",
           toolName: "github_search",
-          kind: "approval",
           input: { query: "tetral" },
           status: "pending",
-          expiresAt: "2026-06-14T00:30:00.000Z",
         }],
         coldCoverage: coldCoverage({
           pendingToolIds: ["sevt_mcp_pending"],
@@ -1943,7 +2008,7 @@ describe("SessionManager", () => {
 
   test("cold preload seeds the runtime model before pending tool use recovery", async () => {
     const modelsObservedDuringRecovery: unknown[] = [];
-    const agentLoop = makeControlledAgentLoop({
+    const threadLoop = makeControlledThreadLoop({
       seedRuntimeModel: (session) => {
         session.state.updateCurrentModel({ providerId: "seeded", modelId: "before-install" });
       },
@@ -1952,7 +2017,7 @@ describe("SessionManager", () => {
         return { ok: true as const };
       }),
     });
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const control = threadControl("sesn_seed_before_install", "rin_seed_before_install");
       const result = await Effect.runPromise(manager.preloadThread({
         ...control,
@@ -1973,10 +2038,8 @@ describe("SessionManager", () => {
           modelRequestId: "mrq_seed_pending",
           modelToolCallId: "toolu_seed_pending",
           toolName: "Read",
-          kind: "approval",
           input: { path: "README.md" },
           status: "pending",
-          expiresAt: "2026-06-14T00:30:00.000Z",
         }],
         coldCoverage: coldCoverage({
           pendingToolIds: ["sevt_seed_pending"],
@@ -1995,7 +2058,7 @@ describe("SessionManager", () => {
   test("cold preload rejects overlap between approval and sandbox execution recovery", async () => {
     let approvalInstalls = 0;
     let executionInstalls = 0;
-    const agentLoop = makeControlledAgentLoop({
+    const threadLoop = makeControlledThreadLoop({
       installLoadedPendingToolUses: () => Effect.sync(() => {
         approvalInstalls += 1;
         return { ok: true as const };
@@ -2005,7 +2068,7 @@ describe("SessionManager", () => {
         return { ok: true as const };
       }),
     });
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const sessionID = "sesn_cold_recovery_overlap";
       const toolUseEventID = "sevt_cold_recovery_overlap";
       const message = pendingApprovalAssistantMessage(sessionID, toolUseEventID);
@@ -2023,10 +2086,8 @@ describe("SessionManager", () => {
         messages: [message],
         pendingToolUses: [{
           ...shared,
-          kind: "approval",
           status: "resolving",
           decision: "allow",
-          expiresAt: "2026-06-14T00:30:00.000Z",
         }],
         pendingSandboxExecutions: [{ ...shared, executionState: "running" }],
         coldCoverage: coldCoverage({
@@ -2045,17 +2106,17 @@ describe("SessionManager", () => {
   });
 
   test("tool confirmation wakes a thread when a ToolJob is pending approval", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"))).toEqual({
         ok: true,
         sessionId: "sesn_1",
         created: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
       expect(session).toBeDefined();
       session?.state.recordPendingApprovalToolJob({
         toolUseEventId: "sevt_tool_1",
@@ -2105,7 +2166,7 @@ describe("SessionManager", () => {
       expect(session?.state.contextManager.messages().at(-1)?.parts).toEqual([
         expect.objectContaining({ type: "text", text: "Approval allowed" }),
       ]);
-      expect(agentLoop.runs).toHaveLength(1);
+      expect(threadLoop.runs).toHaveLength(1);
       const messagesAfterConfirmation = session?.state.contextManager.messages().length;
       expect(
         await Effect.runPromise(
@@ -2119,25 +2180,25 @@ describe("SessionManager", () => {
       expect(confirmationCommits).toBe(1);
       expect(session?.state.contextManager.messages()).toHaveLength(messagesAfterConfirmation ?? 0);
 
-      agentLoop.runs[0]?.release();
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session).toBe(session);
-      agentLoop.runs[1]?.release();
+      threadLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session).toBe(session);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("stale control receipts discard the addressed hot thread without applying their payload", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionId = "sesn_stale_control_receipt";
     const scope = threadControl(sessionId, "rin_stale_control_receipt");
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput(sessionId))).toMatchObject({
         ok: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]!.session;
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]!.session;
       session.state.recordPendingApprovalToolJob({
         toolUseEventId: "sevt_stale_control_tool",
         modelRequestId: "mreq_stale_control",
@@ -2182,8 +2243,8 @@ describe("SessionManager", () => {
   });
 
   test("runtime config patch is installed only while the target thread is idle", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(
         await Effect.runPromise(
           manager.applyRuntimeConfigPatch("sesn_cold", {
@@ -2193,7 +2254,7 @@ describe("SessionManager", () => {
           }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_cold", created: false, applied: false, noResidency: true });
-      expect(agentLoop.runs).toEqual([]);
+      expect(threadLoop.runs).toEqual([]);
 
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_second_session_1")))).toEqual({
         ok: true,
@@ -2202,7 +2263,7 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
 
       expect(
         await Effect.runPromise(
@@ -2214,7 +2275,7 @@ describe("SessionManager", () => {
         ),
       ).toEqual({ ok: false, sessionId: "sesn_1", reason: "control_busy" });
 
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
       let idlePatch: SessionManager.RuntimeControlResult | undefined;
       for (let attempt = 0; attempt < 100 && idlePatch === undefined; attempt += 1) {
         const result = await Effect.runPromise(
@@ -2235,8 +2296,8 @@ describe("SessionManager", () => {
   });
 
   test("runtime config patch updates every idle resident thread before ACK", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       for (const sessionThreadId of ["thrd_main", "thrd_child"]) {
         expect(await Effect.runPromise(manager.preloadThread({
           ...threadControl("sesn_config_all", `rin_preload_${sessionThreadId}`, sessionThreadId),
@@ -2267,17 +2328,17 @@ describe("SessionManager", () => {
           ok: true,
           started: true,
         });
-        await waitForRuns(agentLoop, agentLoop.runs.length + 1);
-        expect(agentLoop.runs.at(-1)?.session.configuration.runtimeConfigPatch()).toEqual(expectedPatch);
-        agentLoop.runs.at(-1)?.release();
+        await waitForRuns(threadLoop, threadLoop.runs.length + 1);
+        expect(threadLoop.runs.at(-1)?.session.configuration.runtimeConfigPatch()).toEqual(expectedPatch);
+        threadLoop.runs.at(-1)?.release();
         await waitForThreadIdle(manager, "sesn_config_all", sessionThreadId);
       }
     });
   });
 
   test("busy sibling rejects a session config patch without partially updating idle threads", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       for (const sessionThreadId of ["thrd_main", "thrd_child"]) {
         expect(await Effect.runPromise(manager.preloadThread({
           ...threadControl("sesn_config_busy", `rin_preload_${sessionThreadId}`, sessionThreadId),
@@ -2290,7 +2351,7 @@ describe("SessionManager", () => {
         ok: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
 
       expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_config_busy", {
         ...threadControl("sesn_config_busy", "rin_config_rejected", "thrd_main"),
@@ -2298,21 +2359,21 @@ describe("SessionManager", () => {
         payloadJson: "{\"config_generation\":8}",
       }))).toEqual({ ok: false, sessionId: "sesn_config_busy", reason: "control_busy" });
 
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
       await waitForThreadIdle(manager, "sesn_config_busy", "thrd_child");
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_config_busy", "rin_main_after_reject", "thrd_main")))).toMatchObject({
         ok: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session.configuration.runtimeConfigPatch()).toBeUndefined();
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session.configuration.runtimeConfigPatch()).toBeUndefined();
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("runtime config and MCP manifest generations use independent monotonic stale gates", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_create")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -2320,9 +2381,9 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
-      agentLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
+      threadLoop.runs[0]?.release();
 
       const applyWhenIdle = async (command: Parameters<typeof manager.applyRuntimeConfigPatch>[1]): Promise<SessionManager.RuntimeControlResult> => {
         for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -2391,8 +2452,8 @@ describe("SessionManager", () => {
   });
 
   test("input accepted during interrupt cleanup starts one follow-up after the run scope closes", async () => {
-    const agentLoop = makeInterruptCleanupAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeInterruptCleanupThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_first")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -2400,8 +2461,8 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
-      const firstSession = agentLoop.runs[0]?.session;
+      await waitForRuns(threadLoop, 1);
+      const firstSession = threadLoop.runs[0]?.session;
 
       const interruptCommand = { ...threadControl("sesn_1", "rin_interrupt"), sequenceTo: 9 };
       const interrupt = Effect.runPromise(manager.interruptControl(
@@ -2409,7 +2470,7 @@ describe("SessionManager", () => {
         interruptCommand,
         testControlCommit(interruptCommand),
       ));
-      await agentLoop.cleanupStarted;
+      await threadLoop.cleanupStarted;
 
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_after_interrupt")))).toEqual({
         ok: true,
@@ -2419,23 +2480,23 @@ describe("SessionManager", () => {
         pendingWake: true,
       });
 
-      agentLoop.releaseCleanup();
+      threadLoop.releaseCleanup();
       expect(await interrupt).toEqual({ ok: true, sessionId: "sesn_1", created: false, interrupted: true, idleInterrupt: false });
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session).toBe(firstSession);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session).toBe(firstSession);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("interrupt discards pre-fence queued input and preserves input accepted during closeout", async () => {
-    const agentLoop = makeInterruptCleanupAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeInterruptCleanupThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_active"), sequenceTo: 1 }))).toMatchObject({
         ok: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
       session?.state.acknowledgeAcceptedInput("rin_active");
 
       expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_before_fence"), sequenceTo: 5 }))).toMatchObject({
@@ -2451,24 +2512,24 @@ describe("SessionManager", () => {
         interruptCommand,
         testControlCommit(interruptCommand),
       ));
-      await agentLoop.cleanupStarted;
+      await threadLoop.cleanupStarted;
 
       expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_after_fence"), sequenceFrom: 10, sequenceTo: 10 }))).toMatchObject({
         ok: true,
         pendingWake: true,
       });
-      agentLoop.releaseCleanup();
+      threadLoop.releaseCleanup();
       await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
-      await waitForRuns(agentLoop, 2);
+      await waitForRuns(threadLoop, 2);
 
       expect(session?.state.acceptedInputCount()).toBe(1);
       expect(session?.state.peekAcceptedInput()?.runtimeInputId).toBe("rin_after_fence");
-      agentLoop.runs[1]?.release();
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("positive interrupt fence preserves queued completion mail for one follow-up presentation", async () => {
-    const agentLoop = makeInterruptCleanupAgentLoop();
+    const threadLoop = makeInterruptCleanupThreadLoop();
     const sessionID = "sesn_interrupt_agent_mail";
     const threadID = "thrd_interrupt_agent_mail_main";
     const thread: RuntimeAcceptedThreadMetadataState = {
@@ -2484,13 +2545,13 @@ describe("SessionManager", () => {
       "thrd_interrupt_agent_mail_child",
       thread,
     );
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput({
         ...acceptedInput(sessionID, "rin_interrupt_agent_mail_active", threadID),
         sequenceTo: 1,
       }))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(agentLoop, 1);
-      agentLoop.runs[0]!.session.state.acknowledgeAcceptedInput("rin_interrupt_agent_mail_active");
+      await waitForRuns(threadLoop, 1);
+      threadLoop.runs[0]!.session.state.acknowledgeAcceptedInput("rin_interrupt_agent_mail_active");
       expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
         ok: true,
         started: false,
@@ -2506,41 +2567,41 @@ describe("SessionManager", () => {
         interruptCommand,
         testControlCommit(interruptCommand),
       ));
-      await agentLoop.cleanupStarted;
-      agentLoop.releaseCleanup();
+      await threadLoop.cleanupStarted;
+      threadLoop.releaseCleanup();
       await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]!.session.state.peekAcceptedInput()?.runtimeInputId).toBe(mail.runtimeInputId);
-      agentLoop.runs[1]!.session.state.acknowledgeAcceptedInput(mail.runtimeInputId);
-      agentLoop.runs[1]!.release({ type: "completed", modelMessageCount: 1 });
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]!.session.state.peekAcceptedInput()?.runtimeInputId).toBe(mail.runtimeInputId);
+      threadLoop.runs[1]!.session.state.acknowledgeAcceptedInput(mail.runtimeInputId);
+      threadLoop.runs[1]!.release({ type: "completed", modelMessageCount: 1 });
       await waitForThreadIdle(manager, sessionID, threadID);
       expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
         ok: true,
         started: false,
         pendingWake: false,
       });
-      expect(agentLoop.runs).toHaveLength(2);
+      expect(threadLoop.runs).toHaveLength(2);
     });
   });
 
-  test("shutdownActiveRuns interrupts active AgentLoop owner fibers", async () => {
-    const agentLoop = makeInterruptRecordingAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+  test("shutdownActiveRuns interrupts active ThreadLoop owner fibers", async () => {
+    const threadLoop = makeInterruptRecordingThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_shutdown")))).toMatchObject({
         ok: true,
         sessionId: "sesn_shutdown",
         started: true,
       });
-      await waitForInterruptRecordingRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
+      await waitForInterruptRecordingRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
       if (session === undefined) {
         throw new Error("expected active session");
       }
 
       await Effect.runPromise(manager.shutdownActiveRuns());
 
-      expect(agentLoop.interruptions).toEqual([
+      expect(threadLoop.interruptions).toEqual([
         {
           sessionId: "sesn_shutdown",
           runtimeShutdownRequested: true,
@@ -2556,8 +2617,8 @@ describe("SessionManager", () => {
   });
 
   test("shutdownActiveRuns reaches active runs without pending interrupt, cleanup, or unbind", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_shutdown")))).toEqual({
         ok: true,
         sessionId: "sesn_shutdown",
@@ -2565,18 +2626,18 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]?.session;
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
       if (session === undefined) {
         throw new Error("expected active session");
       }
       const shutdown = Effect.runPromise(manager.shutdownActiveRuns());
       await new Promise((resolve) => setTimeout(resolve, 1));
-      agentLoop.runs[0]?.release({ type: "interrupted" });
+      threadLoop.runs[0]?.release({ type: "interrupted" });
       await shutdown;
 
       expect(session.state.runtimeShutdownRequested()).toBe(false);
-      expect(agentLoop.runs[0]?.args).toHaveLength(2);
+      expect(threadLoop.runs[0]?.args).toHaveLength(2);
       expect(await Effect.runPromise(manager.cleanupSession("sesn_shutdown", threadControl("sesn_shutdown")))).toEqual({
         ok: true,
         sessionId: "sesn_shutdown",
@@ -2586,7 +2647,7 @@ describe("SessionManager", () => {
   });
 
   test("shutdown joins cold installation and rejects a late preload result", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     let reportLoadStarted = (): void => undefined;
     let releaseLoad = (): void => undefined;
     const loadStarted = new Promise<void>((resolve) => {
@@ -2596,7 +2657,7 @@ describe("SessionManager", () => {
       releaseLoad = resolve;
     });
     const command = threadControl("sesn_shutdown_install", "rin_shutdown_install");
-    await withSessionManager(sessionManagerLayer(agentLoop, {
+    await withSessionManager(sessionManagerLayer(threadLoop, {
       loadThreadContext: async () => {
         reportLoadStarted();
         await loadGate;
@@ -2630,16 +2691,16 @@ describe("SessionManager", () => {
   });
 
   test("accepted input restarts an existing idle session with the same hot ContextManager", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"))).toEqual({
         ok: true,
         sessionId: "sesn_1",
         created: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      const firstSession = agentLoop.runs[0]?.session;
+      await waitForRuns(threadLoop, 1);
+      const firstSession = threadLoop.runs[0]?.session;
       expect(firstSession).toBeDefined();
       firstSession?.state.contextManager.appendMessage({
         id: "msg_1",
@@ -2651,9 +2712,9 @@ describe("SessionManager", () => {
         createdAt: timestamp,
         parts: [],
       });
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 1; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
         const result = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"));
         if (result.ok && result.started) {
           expect(result).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: true });
@@ -2661,12 +2722,12 @@ describe("SessionManager", () => {
         }
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session).toBe(firstSession);
-      expect(agentLoop.runs[1]?.session.state.contextManager.messages()).toHaveLength(1);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session).toBe(firstSession);
+      expect(threadLoop.runs[1]?.session.state.contextManager.messages()).toHaveLength(1);
+      threadLoop.runs[1]?.release();
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 2; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 2; attempt += 1) {
         const result = await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_restart_after_idle")));
         if (result.ok && result.started) {
           expect(result).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: true, pendingWake: false });
@@ -2674,83 +2735,83 @@ describe("SessionManager", () => {
         }
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
-      await waitForRuns(agentLoop, 3);
-      expect(agentLoop.runs[2]?.session).toBe(firstSession);
-      expect(agentLoop.runs[2]?.session.state.contextManager.messages()).toHaveLength(1);
-      agentLoop.runs[2]?.release();
+      await waitForRuns(threadLoop, 3);
+      expect(threadLoop.runs[2]?.session).toBe(firstSession);
+      expect(threadLoop.runs[2]?.session.state.contextManager.messages()).toHaveLength(1);
+      threadLoop.runs[2]?.release();
     });
   });
 
   test("concurrent same-thread accept calls coalesce behind one active run", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const [first, second, third] = await Promise.all([
         Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_concurrent_1"))),
         Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_concurrent_2"))),
         Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_concurrent_3"))),
       ]);
 
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect([first, second, third].filter((result) => result.ok && result.started)).toHaveLength(1);
       expect([first, second, third].filter((result) => result.ok && result.pendingWake)).toHaveLength(2);
-      agentLoop.runs[0]?.release();
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_1"]);
-      agentLoop.runs[1]?.release();
+      threadLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_1"]);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("concurrent thread waiters join one owner run", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_join", "rin_join")));
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
 
       const first = Effect.runPromise(manager.waitThread(threadControl("sesn_join"), undefined));
       const second = Effect.runPromise(manager.waitThread(threadControl("sesn_join"), undefined));
       await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(agentLoop.runs).toHaveLength(1);
+      expect(threadLoop.runs).toHaveLength(1);
 
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
       expect(await Promise.all([first, second])).toEqual([
         expect.objectContaining({ ok: true, observed: true, status: "idle", timedOut: false }),
         expect.objectContaining({ ok: true, observed: true, status: "idle", timedOut: false }),
       ]);
-      expect(agentLoop.runs).toHaveLength(1);
+      expect(threadLoop.runs).toHaveLength(1);
     });
   });
 
   test("cancelling a joined thread waiter does not cancel the owner run", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_join_cancel", "rin_join_cancel")));
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
 
       const waiter = Effect.runFork(manager.waitThread(threadControl("sesn_join_cancel"), undefined));
       await new Promise((resolve) => setTimeout(resolve, 5));
       await Effect.runPromise(Fiber.interrupt(waiter));
 
-      expect(agentLoop.runs).toHaveLength(1);
+      expect(threadLoop.runs).toHaveLength(1);
       expect(await Effect.runPromise(manager.inspectThread(threadControl("sesn_join_cancel")))).toMatchObject({
         ok: true,
         observed: true,
         status: "running",
       });
-      agentLoop.runs[0]?.release();
+      threadLoop.runs[0]?.release();
       await waitForThreadIdle(manager, "sesn_join_cancel", "thrd_sesn_join_cancel");
     });
   });
 
   test("closing a waiter scope detaches it without consuming pending input", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_waiter_scope", "rin_active")));
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_waiter_scope", "rin_pending")))).toMatchObject({
         ok: true,
         pendingWake: true,
       });
-      const session = agentLoop.runs[0]?.session;
+      const session = threadLoop.runs[0]?.session;
       expect(session?.state.acceptedInputCount()).toBe(2);
 
       const waiterScope = await Effect.runPromise(Scope.make());
@@ -2763,41 +2824,41 @@ describe("SessionManager", () => {
       expect(Exit.isFailure(waiterExit)).toBe(true);
       expect(session?.state.acceptedInputCount()).toBe(2);
       expect(await Effect.runPromise(manager.inspectThread(threadControl("sesn_waiter_scope")))).toMatchObject({ status: "running" });
-      agentLoop.runs[0]?.release();
-      await waitForRuns(agentLoop, 2);
-      agentLoop.runs[1]?.release();
+      threadLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 2);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("wake during follow-up scope cleanup starts exactly one later follow-up", async () => {
-    const agentLoop = makeFollowUpCleanupAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeFollowUpCleanupThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_follow_cleanup", "rin_first")));
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_follow_cleanup", "rin_second")));
-      agentLoop.runs[0]?.release();
-      await waitForRuns(agentLoop, 2);
+      threadLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 2);
 
-      agentLoop.runs[1]?.release();
-      await agentLoop.followUpCleanupStarted;
+      threadLoop.runs[1]?.release();
+      await threadLoop.followUpCleanupStarted;
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_follow_cleanup", "rin_during_cleanup")))).toMatchObject({
         ok: true,
         started: false,
         pendingWake: true,
       });
-      agentLoop.releaseFollowUpCleanup();
+      threadLoop.releaseFollowUpCleanup();
 
-      await waitForRuns(agentLoop, 3);
-      expect(agentLoop.runs).toHaveLength(3);
-      agentLoop.runs[2]?.release();
+      await waitForRuns(threadLoop, 3);
+      expect(threadLoop.runs).toHaveLength(3);
+      threadLoop.runs[2]?.release();
       await waitForThreadIdle(manager, "sesn_follow_cleanup", "thrd_sesn_follow_cleanup");
-      expect(agentLoop.runs).toHaveLength(3);
+      expect(threadLoop.runs).toHaveLength(3);
     });
   });
 
-  test("payload-like extra input cannot reach AgentLoop through SessionManager", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+  test("payload-like extra input cannot reach ThreadLoop through SessionManager", async () => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const unsafeManager = manager as unknown as {
         readonly acceptInput: (command: ReturnType<typeof acceptedInput>, payload: unknown) => ReturnType<typeof manager.acceptInput>;
       };
@@ -2808,28 +2869,28 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
-      expect(agentLoop.runs[0]?.args).toHaveLength(2);
-      expect(agentLoop.runs[0]?.args[0]).toBe(agentLoop.runs[0]?.session);
-      agentLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 1);
+      expect(threadLoop.runs[0]?.args).toHaveLength(2);
+      expect(threadLoop.runs[0]?.args[0]).toBe(threadLoop.runs[0]?.session);
+      threadLoop.runs[0]?.release();
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 1; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
         const result = await Effect.runPromise(unsafeManager.acceptInput(acceptedInput("sesn_1"), { providerRequest: hostileText }));
         if (result.ok && result.started) {
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.args).toHaveLength(2);
-      expect(agentLoop.runs[1]?.args[0]).toBe(agentLoop.runs[1]?.session);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.args).toHaveLength(2);
+      expect(threadLoop.runs[1]?.args[0]).toBe(threadLoop.runs[1]?.session);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("different sessions have isolated manager-owned run markers and ContextManagers", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_event_write_initial")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -2844,9 +2905,9 @@ describe("SessionManager", () => {
         started: true,
       });
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs.map((run) => run.sessionId).sort()).toEqual(["sesn_1", "sesn_2"]);
-      expect(agentLoop.runs[0]?.session.state.contextManager).not.toBe(agentLoop.runs[1]?.session.state.contextManager);
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.sessionId).sort()).toEqual(["sesn_1", "sesn_2"]);
+      expect(threadLoop.runs[0]?.session.state.contextManager).not.toBe(threadLoop.runs[1]?.session.state.contextManager);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_crashed_initial")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -2854,23 +2915,23 @@ describe("SessionManager", () => {
         started: false,
         pendingWake: true,
       });
-      agentLoop.runs[0]?.release();
-      agentLoop.runs[1]?.release();
-      await waitForRuns(agentLoop, 3);
-      expect(agentLoop.runs.map((run) => run.sessionId).sort()).toEqual(["sesn_1", "sesn_1", "sesn_2"]);
-      agentLoop.runs[2]?.release();
+      threadLoop.runs[0]?.release();
+      threadLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 3);
+      expect(threadLoop.runs.map((run) => run.sessionId).sort()).toEqual(["sesn_1", "sesn_1", "sesn_2"]);
+      threadLoop.runs[2]?.release();
     });
   });
 
   test("fatal thread release disposes its approval reviewer manager", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_reviewer_release")));
-      await waitForRuns(agentLoop, 1);
-      const reviewerManager = agentLoop.runs[0]?.session.approvalReviewerManager;
+      await waitForRuns(threadLoop, 1);
+      const reviewerManager = threadLoop.runs[0]?.session.approvalReviewerManager;
       expect(reviewerManager?.isDisposed()).toBe(false);
 
-      agentLoop.runs[0]?.release(fatalRunResult("crashed"));
+      threadLoop.runs[0]?.release(fatalRunResult("crashed"));
       for (let attempt = 0; attempt < 100 && reviewerManager?.isDisposed() !== true; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
@@ -2878,12 +2939,12 @@ describe("SessionManager", () => {
     });
   });
 
-  test("fatal public parent release closes its active reviewer resident through run settlement", async () => {
+  test("terminal public parent release closes its active reviewer resident through run settlement", async () => {
     const sessionId = "sesn_parent_reviewer_release";
     const parentThreadId = "thrd_parent_release";
     const reviewerThreadId = "thrd_reviewer_trunk_release";
-    const agentLoop = makeReviewerInterruptCleanupAgentLoop(reviewerThreadId);
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeReviewerInterruptCleanupThreadLoop(reviewerThreadId);
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const unrelatedThreadId = "thrd_unrelated_release";
       await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionId, "rin_parent_preload", parentThreadId),
@@ -2906,11 +2967,11 @@ describe("SessionManager", () => {
         coldCoverage: coldCoverage(),
         messages: [],
       }));
-      await waitForRuns(agentLoop, 2);
+      await waitForRuns(threadLoop, 2);
 
-      agentLoop.runs[0]?.release(fatalRunResult("crashed"));
+      threadLoop.runs[0]?.release(fatalRunResult("terminated"));
       expect(await Promise.race([
-        agentLoop.reviewerCleanupStarted.then(() => true),
+        threadLoop.reviewerCleanupStarted.then(() => true),
         new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
       ])).toBe(true);
       expect(await Effect.runPromise(manager.inspectThread(threadControl(
@@ -2929,7 +2990,7 @@ describe("SessionManager", () => {
         unrelatedThreadId,
       )))).toMatchObject({ observed: true });
 
-      agentLoop.releaseReviewerCleanup();
+      threadLoop.releaseReviewerCleanup();
       await waitForCondition(async () => {
         const snapshot = await Effect.runPromise(manager.inspectThread(threadControl(
           sessionId,
@@ -2952,14 +3013,14 @@ describe("SessionManager", () => {
   });
 
   test("session cleanup disposes every thread approval reviewer manager", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_reviewer_cleanup", "rin_a", "thrd_a")));
       await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_reviewer_cleanup", "rin_b", "thrd_b")));
-      await waitForRuns(agentLoop, 2);
-      const reviewerManagers = agentLoop.runs.map((run) => run.session.approvalReviewerManager);
-      agentLoop.runs[0]?.release();
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      const reviewerManagers = threadLoop.runs.map((run) => run.session.approvalReviewerManager);
+      threadLoop.runs[0]?.release();
+      threadLoop.runs[1]?.release();
 
       const cleanup = await waitForIdleCleanup(manager, "sesn_reviewer_cleanup");
       expect(cleanup).toEqual({ ok: true, sessionId: "sesn_reviewer_cleanup", cleaned: true });
@@ -2968,8 +3029,8 @@ describe("SessionManager", () => {
   });
 
   test("same session id in different workspaces owns separate hot sessions and cleanup", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       const workspaceA = acceptedInput("sesn_shared", "rin_workspace_a", "thrd_workspace_a");
       const workspaceB = {
         ...acceptedInput("sesn_shared", "rin_workspace_b", "thrd_workspace_b"),
@@ -2992,12 +3053,12 @@ describe("SessionManager", () => {
         pendingWake: false,
       });
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs.map((run) => run.session.identity.workspaceId).sort()).toEqual(["wksp_other", "wksp_test"]);
-      expect(agentLoop.runs[0]?.session.state.contextManager).not.toBe(agentLoop.runs[1]?.session.state.contextManager);
-      expect(agentLoop.runs[0]?.session.toolCoordinator).not.toBe(agentLoop.runs[1]?.session.toolCoordinator);
-      agentLoop.runs[0]?.release();
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.session.identity.workspaceId).sort()).toEqual(["wksp_other", "wksp_test"]);
+      expect(threadLoop.runs[0]?.session.state.contextManager).not.toBe(threadLoop.runs[1]?.session.state.contextManager);
+      expect(threadLoop.runs[0]?.session.toolCoordinator).not.toBe(threadLoop.runs[1]?.session.toolCoordinator);
+      threadLoop.runs[0]?.release();
+      threadLoop.runs[1]?.release();
 
       const cleanupA = await waitForIdleCleanup(manager, "sesn_shared");
       expect(cleanupA).toEqual({ ok: true, sessionId: "sesn_shared", cleaned: true });
@@ -3020,8 +3081,8 @@ describe("SessionManager", () => {
   });
 
   test("same session different threads own independent run slots and ContextManagers", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_thread_a", "thrd_a")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -3037,10 +3098,10 @@ describe("SessionManager", () => {
         pendingWake: false,
       });
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs.map((run) => run.session.identity.sessionThreadId).sort()).toEqual(["thrd_a", "thrd_b"]);
-      expect(agentLoop.runs[0]?.session.state.contextManager).not.toBe(agentLoop.runs[1]?.session.state.contextManager);
-      expect(agentLoop.runs[0]?.session.toolCoordinator).toBe(agentLoop.runs[1]?.session.toolCoordinator);
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.session.identity.sessionThreadId).sort()).toEqual(["thrd_a", "thrd_b"]);
+      expect(threadLoop.runs[0]?.session.state.contextManager).not.toBe(threadLoop.runs[1]?.session.state.contextManager);
+      expect(threadLoop.runs[0]?.session.toolCoordinator).toBe(threadLoop.runs[1]?.session.toolCoordinator);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_thread_a_follow", "thrd_a")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -3049,18 +3110,18 @@ describe("SessionManager", () => {
         pendingWake: true,
       });
 
-      agentLoop.runs[0]?.release();
-      agentLoop.runs[1]?.release();
-      await waitForRuns(agentLoop, 3);
-      expect(agentLoop.runs[2]?.session.identity.sessionThreadId).toBe("thrd_a");
-      expect(agentLoop.runs[2]?.session).toBe(agentLoop.runs.find((run) => run.session.identity.sessionThreadId === "thrd_a")?.session);
-      agentLoop.runs[2]?.release();
+      threadLoop.runs[0]?.release();
+      threadLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 3);
+      expect(threadLoop.runs[2]?.session.identity.sessionThreadId).toBe("thrd_a");
+      expect(threadLoop.runs[2]?.session).toBe(threadLoop.runs.find((run) => run.session.identity.sessionThreadId === "thrd_a")?.session);
+      threadLoop.runs[2]?.release();
     });
   });
 
   test("cleanup rejects running sessions, removes idle sessions without durable unbind, and releases capacity", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+    const threadLoop = makeControlledThreadLoop();
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       await Effect.runPromise(
@@ -3076,8 +3137,8 @@ describe("SessionManager", () => {
         }),
       );
 
-      await waitForRuns(agentLoop, 1);
-      agentLoop.runs[0]?.release();
+      await waitForRuns(threadLoop, 1);
+      threadLoop.runs[0]?.release();
 
       expect(await waitForIdleCleanup(manager, "sesn_1")).toEqual({ ok: true, sessionId: "sesn_1", cleaned: true });
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_2"))).toEqual({
@@ -3086,22 +3147,22 @@ describe("SessionManager", () => {
         created: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 2);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("cleanup rejects an inter-turn accepted queue even when no run slot is active", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionID = "sesn_cleanup_inter_turn_queue";
     const threadID = "thrd_cleanup_inter_turn_queue";
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(
         acceptedInput(sessionID, "rin_cleanup_inter_turn_initial", threadID),
       ))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(agentLoop, 1);
-      const session = agentLoop.runs[0]!.session;
-      agentLoop.runs[0]!.release({ type: "completed", modelMessageCount: 1 });
+      await waitForRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]!.session;
+      threadLoop.runs[0]!.release({ type: "completed", modelMessageCount: 1 });
       await waitForThreadIdle(manager, sessionID, threadID);
 
       const queued = acceptedInput(sessionID, "rin_cleanup_inter_turn_queued", threadID);
@@ -3120,10 +3181,10 @@ describe("SessionManager", () => {
   });
 
   test("cleanup rejects an admitted task while its owning run has not settled it", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionId = "sesn_cleanup_receipt_awaiting";
     const threadId = "thrd_cleanup_receipt_awaiting";
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionId, "rin_cleanup_receipt_preload", threadId),
         runtimeBindingToken: "runtime-binding-token",
@@ -3144,20 +3205,20 @@ describe("SessionManager", () => {
       }, async () => {
         throw new Error("transport admission must not settle the task");
       }))).toMatchObject({ ok: true, applied: true });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
 
       expect(await Effect.runPromise(manager.cleanupSession(
         sessionId,
         threadControl(sessionId, "rin_cleanup_receipt_attempt", threadId),
       ))).toEqual({ ok: false, sessionId, reason: "session_busy" });
 
-      agentLoop.runs[0]!.release();
+      threadLoop.runs[0]!.release();
     });
   });
 
   test("fatal persistence run discards hot state and releases local capacity", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+    const threadLoop = makeControlledThreadLoop();
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_1"))).toEqual({
@@ -3171,10 +3232,10 @@ describe("SessionManager", () => {
         sessionId: "sesn_2",
         reason: "local_session_capacity_exceeded",
       });
-      await waitForRuns(agentLoop, 1);
-      agentLoop.runs[0]?.release(fatalRunResult("persistence_failed"));
+      await waitForRuns(threadLoop, 1);
+      threadLoop.runs[0]?.release(fatalRunResult("persistence_failed"));
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 1; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
         const result = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_2"));
         if (result.ok && result.started) {
           expect(result).toEqual({ ok: true, sessionId: "sesn_2", created: true, started: true });
@@ -3183,15 +3244,15 @@ describe("SessionManager", () => {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.sessionId).toBe("sesn_2");
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.sessionId).toBe("sesn_2");
       expect(await Effect.runPromise(manager.cleanupSession("sesn_1", threadControl("sesn_1")))).toEqual({ ok: true, sessionId: "sesn_1", cleaned: false });
-      agentLoop.runs[1]?.release();
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("value-level failed exit releases queued completion mail for cold redelivery", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionID = "sesn_failed_agent_mail_redelivery";
     const threadID = "thrd_failed_agent_mail_redelivery_main";
     const thread: RuntimeAcceptedThreadMetadataState = {
@@ -3207,7 +3268,7 @@ describe("SessionManager", () => {
       "thrd_failed_agent_mail_redelivery_child",
       thread,
     );
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionID, "rin_preload_failed_agent_mail_redelivery", threadID),
         runtimeBindingToken: "runtime-binding-token",
@@ -3218,7 +3279,7 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(
         acceptedInput(sessionID, "rin_failed_agent_mail_active", threadID),
       ))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
         ok: true,
         started: false,
@@ -3229,7 +3290,7 @@ describe("SessionManager", () => {
       if (failure.type !== "failed") {
         throw new Error("expected failed run fixture");
       }
-      agentLoop.runs[0]?.release({ type: "failed", error: failure.error });
+      threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
       await waitForCondition(async () => {
         const snapshot = await Effect.runPromise(manager.inspectThread(
           threadControl(sessionID, "rin_inspect_failed_agent_mail_release", threadID),
@@ -3247,17 +3308,17 @@ describe("SessionManager", () => {
           undeliveredMailDeliveryIds: [mail.deliveryId],
         }),
       }))).toMatchObject({ ok: true, applied: true });
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId).toBe(mail.runtimeInputId);
-      agentLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId).toBe(mail.runtimeInputId);
+      threadLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
     });
   });
 
   test("value-level failed exit releases a queued task notification for inbox repair", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const sessionId = "sesn_failed_task_notification_redelivery";
     const threadId = "thrd_failed_task_notification_redelivery";
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.preloadThread({
         ...threadControl(sessionId, "rin_preload_failed_task_notification", threadId),
         runtimeBindingToken: "runtime-binding-token",
@@ -3271,7 +3332,7 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(
         acceptedInput(sessionId, "rin_failed_task_notification_active", threadId),
       ))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
         ...threadControl(sessionId, "task_notification:task_failed_task_notification", threadId),
         taskId: "task_failed_task_notification",
@@ -3286,7 +3347,7 @@ describe("SessionManager", () => {
       if (failure.type !== "failed") {
         throw new Error("expected failed run fixture");
       }
-      agentLoop.runs[0]?.release({ type: "failed", error: failure.error });
+      threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
 
       await waitForCondition(async () => {
         const snapshot = await Effect.runPromise(manager.inspectThread(
@@ -3298,8 +3359,8 @@ describe("SessionManager", () => {
   });
 
   test("discard-requested interruption removes hot state before the next command", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+    const threadLoop = makeControlledThreadLoop();
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_discard_hot_state"))).toEqual({
@@ -3308,9 +3369,9 @@ describe("SessionManager", () => {
         created: true,
         started: true,
       });
-      await waitForRuns(agentLoop, 1);
-      const staleSession = agentLoop.runs[0]?.session;
-      agentLoop.runs[0]?.release({ type: "interrupted", discardHotState: true });
+      await waitForRuns(threadLoop, 1);
+      const staleSession = threadLoop.runs[0]?.session;
+      threadLoop.runs[0]?.release({ type: "interrupted", discardHotState: true });
 
       let accepted: SessionManager.AcceptInputResult | undefined;
       for (let attempt = 0; attempt < 100 && accepted === undefined; attempt += 1) {
@@ -3329,15 +3390,15 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session).not.toBe(staleSession);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session).not.toBe(staleSession);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("fatal event-write run drops pending restart and discards hot state", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+    const threadLoop = makeControlledThreadLoop();
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_event_write_initial")))).toEqual({
@@ -3347,7 +3408,7 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
+      await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_event_write_follow")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -3355,9 +3416,9 @@ describe("SessionManager", () => {
         started: false,
         pendingWake: true,
       });
-      agentLoop.runs[0]?.release(fatalRunResult("event_write_failed"));
+      threadLoop.runs[0]?.release(fatalRunResult("event_write_failed"));
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 1; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
         const result = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_2"));
         if (result.ok && result.started) {
           expect(result).toEqual({ ok: true, sessionId: "sesn_2", created: true, started: true });
@@ -3366,15 +3427,15 @@ describe("SessionManager", () => {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_2"]);
-      agentLoop.runs[1]?.release();
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_2"]);
+      threadLoop.runs[1]?.release();
     });
   });
 
   test("fatal crashed run clears state, drops pending restart, and discards hot state", async () => {
-    const agentLoop = makeControlledAgentLoop();
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+    const threadLoop = makeControlledThreadLoop();
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_crashed_initial")))).toEqual({
@@ -3384,8 +3445,8 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForRuns(agentLoop, 1);
-      agentLoop.runs[0]?.session.state.contextManager.appendMessage({
+      await waitForRuns(threadLoop, 1);
+      threadLoop.runs[0]?.session.state.contextManager.appendMessage({
         id: "msg_1",
         sessionId: "sesn_1",
         role: "user",
@@ -3402,9 +3463,9 @@ describe("SessionManager", () => {
         started: false,
         pendingWake: true,
       });
-      agentLoop.runs[0]?.release(fatalRunResult("crashed"));
+      threadLoop.runs[0]?.release(fatalRunResult("crashed"));
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 1; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
         const result = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_2"));
         if (result.ok && result.started) {
           expect(result).toEqual({ ok: true, sessionId: "sesn_2", created: true, started: true });
@@ -3413,16 +3474,16 @@ describe("SessionManager", () => {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
 
-      await waitForRuns(agentLoop, 2);
-      expect(agentLoop.runs[0]?.session.state.contextManager.messages()).toEqual([]);
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs[0]?.session.state.contextManager.messages()).toEqual([]);
       expect(await Effect.runPromise(manager.cleanupSession("sesn_1", threadControl("sesn_1")))).toEqual({ ok: true, sessionId: "sesn_1", cleaned: false });
-      agentLoop.runs[1]?.release();
+      threadLoop.runs[1]?.release();
     });
   });
 
-  test("AgentLoop Effect failure clears hot state, drops pending wake, and releases capacity", async () => {
-    const agentLoop = makeControlledCrashAgentLoop("fail");
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+  test("ThreadLoop Effect failure clears hot state, drops pending wake, and releases capacity", async () => {
+    const threadLoop = makeControlledCrashThreadLoop("fail");
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_fail", "rin_fail_initial")))).toEqual({
@@ -3432,8 +3493,8 @@ describe("SessionManager", () => {
         started: true,
         pendingWake: false,
       });
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.session.state.contextManager.appendMessage({
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.session.state.contextManager.appendMessage({
         id: "msg_1",
         sessionId: "sesn_fail",
         role: "user",
@@ -3451,7 +3512,7 @@ describe("SessionManager", () => {
         pendingWake: true,
       });
 
-      agentLoop.runs[0]?.releaseCrash();
+      threadLoop.runs[0]?.releaseCrash();
       let replacement: TestRunStartResult | undefined;
       for (let attempt = 0; attempt < 100 && replacement === undefined; attempt += 1) {
         const result = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("replacement_fail"));
@@ -3467,16 +3528,16 @@ describe("SessionManager", () => {
         sessionId: "sesn_fail",
         reason: "local_session_capacity_exceeded",
       });
-      await waitForCrashRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.sessionId).toBe("replacement_fail");
-      expect(agentLoop.runs[0]?.session.state.contextManager.messages()).toEqual([]);
+      await waitForCrashRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.sessionId).toBe("replacement_fail");
+      expect(threadLoop.runs[0]?.session.state.contextManager.messages()).toEqual([]);
       expect(await Effect.runPromise(manager.cleanupSession("sesn_fail", threadControl("sesn_fail")))).toEqual({ ok: true, sessionId: "sesn_fail", cleaned: false });
     });
   });
 
-  test("AgentLoop Effect defect removes crashed entry and permits a later accepted-input run", async () => {
-    const agentLoop = makeControlledCrashAgentLoop("die");
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+  test("ThreadLoop Effect defect removes crashed entry and permits a later accepted-input run", async () => {
+    const threadLoop = makeControlledCrashThreadLoop("die");
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_die"))).toEqual({
@@ -3485,8 +3546,8 @@ describe("SessionManager", () => {
         created: true,
         started: true,
       });
-      await waitForCrashRuns(agentLoop, 1);
-      const firstSession = agentLoop.runs[0]?.session;
+      await waitForCrashRuns(threadLoop, 1);
+      const firstSession = threadLoop.runs[0]?.session;
       firstSession?.state.contextManager.appendMessage({
         id: "msg_1",
         sessionId: "sesn_die",
@@ -3497,9 +3558,9 @@ describe("SessionManager", () => {
         createdAt: timestamp,
         parts: [],
       });
-      agentLoop.runs[0]?.releaseCrash();
+      threadLoop.runs[0]?.releaseCrash();
 
-      for (let attempt = 0; attempt < 100 && agentLoop.runs.length === 1; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 1; attempt += 1) {
         const result = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_die"));
         if (result.ok && result.started) {
           expect(result).toEqual({
@@ -3513,13 +3574,13 @@ describe("SessionManager", () => {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
 
-      await waitForCrashRuns(agentLoop, 2);
-      expect(agentLoop.runs[1]?.session).not.toBe(firstSession);
-      expect(agentLoop.runs[1]?.session.state.contextManager.messages()).toEqual([]);
+      await waitForCrashRuns(threadLoop, 2);
+      expect(threadLoop.runs[1]?.session).not.toBe(firstSession);
+      expect(threadLoop.runs[1]?.session.state.contextManager.messages()).toEqual([]);
     });
   });
 
-  test("AgentLoop defect retains the live thread until durable closeout finishes", async () => {
+  test("ThreadLoop defect retains the live thread until durable closeout finishes", async () => {
     let closeoutStartedResolve: () => void = () => {};
     let closeoutReleaseResolve: () => void = () => {};
     const closeoutStarted = new Promise<void>((resolve) => {
@@ -3528,22 +3589,22 @@ describe("SessionManager", () => {
     const closeoutRelease = new Promise<void>((resolve) => {
       closeoutReleaseResolve = resolve;
     });
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.promise(async () => {
         closeoutStartedResolve();
         await closeoutRelease;
         return { type: "landed" as const };
       }),
     });
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_fence"))).toMatchObject({
         ok: true,
         started: true,
       });
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.releaseCrash();
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.releaseCrash();
       await closeoutStarted;
 
       expect(await Effect.runPromise(manager.inspectThread(threadControl("sesn_closeout_fence")))).toMatchObject({
@@ -3571,7 +3632,7 @@ describe("SessionManager", () => {
         ok: true,
         started: true,
       });
-      await waitForCrashRuns(agentLoop, 2);
+      await waitForCrashRuns(threadLoop, 2);
     });
   });
 
@@ -3579,7 +3640,7 @@ describe("SessionManager", () => {
     let attempts = 0;
     const sleeps: number[] = [];
     const events: SessionManager.RuntimeCloseoutEvent[] = [];
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.sync(() => {
         attempts += 1;
         return attempts < 3
@@ -3590,7 +3651,7 @@ describe("SessionManager", () => {
           : { type: "landed" as const };
       }),
     });
-    const layer = sessionManagerLayer(agentLoop, {
+    const layer = sessionManagerLayer(threadLoop, {
       maxLocalSessions: 1,
       closeoutMonotonicMs: () => 1_000,
       closeoutSleep: async (durationMs) => {
@@ -3602,8 +3663,8 @@ describe("SessionManager", () => {
 
     await withSessionManager(layer, async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_retry"));
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.releaseCrash();
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.releaseCrash();
       await waitForCondition(async () => {
         const snapshot = await Effect.runPromise(manager.inspectThread(threadControl("sesn_closeout_retry")));
         return snapshot.ok && !snapshot.observed;
@@ -3624,7 +3685,7 @@ describe("SessionManager", () => {
     let attempts = 0;
     const sleepers: Array<() => void> = [];
     const events: SessionManager.RuntimeCloseoutEvent[] = [];
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.sync(() => {
         attempts += 1;
         return ledgerAvailable
@@ -3635,7 +3696,7 @@ describe("SessionManager", () => {
             };
       }),
     });
-    const layer = sessionManagerLayer(agentLoop, {
+    const layer = sessionManagerLayer(threadLoop, {
       maxLocalSessions: 2,
       closeoutMonotonicMs: () => now,
       closeoutSleep: async (_durationMs, signal) =>
@@ -3658,22 +3719,22 @@ describe("SessionManager", () => {
 
     await withSessionManager(layer, async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_stall_a"));
-      await waitForCrashRuns(agentLoop, 1);
+      await waitForCrashRuns(threadLoop, 1);
       const joinedA = Effect.runPromise(manager.waitThread(
         threadControl("sesn_closeout_stall_a"),
         undefined,
       ));
-      agentLoop.runs[0]?.releaseCrash();
+      threadLoop.runs[0]?.releaseCrash();
       await waitForCondition(() => Promise.resolve(sleepers.length === 1), "old closeout backoff");
 
       now = SessionManager.CloseoutStalledAlarmThresholdMs - 1;
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_stall_b"));
-      await waitForCrashRuns(agentLoop, 2);
+      await waitForCrashRuns(threadLoop, 2);
       const joinedB = Effect.runPromise(manager.waitThread(
         threadControl("sesn_closeout_stall_b"),
         undefined,
       ));
-      agentLoop.runs[1]?.releaseCrash();
+      threadLoop.runs[1]?.releaseCrash();
       await waitForCondition(() => Promise.resolve(sleepers.length === 2), "fresh closeout backoff");
 
       now = SessionManager.CloseoutStalledAlarmThresholdMs;
@@ -3714,7 +3775,7 @@ describe("SessionManager", () => {
   test("superseded and unrepairable closeouts release immediately with only the unrepairable record", async () => {
     for (const disposition of ["superseded", "unrepairable"] as const) {
       const events: SessionManager.RuntimeCloseoutEvent[] = [];
-      const agentLoop = makeControlledCrashAgentLoop("die", {
+      const threadLoop = makeControlledCrashThreadLoop("die", {
         closeFailedRun: () => Effect.succeed({
           type: disposition,
           error: normalizeSessionEventWriterError({
@@ -3722,7 +3783,7 @@ describe("SessionManager", () => {
           }),
         }),
       });
-      const layer = sessionManagerLayer(agentLoop, {
+      const layer = sessionManagerLayer(threadLoop, {
         maxLocalSessions: 1,
         recordCloseoutEvent: (event) => events.push(event),
       });
@@ -3730,8 +3791,8 @@ describe("SessionManager", () => {
       await withSessionManager(layer, async (manager) => {
         const sessionId = `sesn_closeout_${disposition}`;
         await Effect.runPromise(manager.startTestRunThroughAcceptedInput(sessionId));
-        await waitForCrashRuns(agentLoop, 1);
-        agentLoop.runs[0]?.releaseCrash();
+        await waitForCrashRuns(threadLoop, 1);
+        threadLoop.runs[0]?.releaseCrash();
         await waitForCondition(async () => {
           const snapshot = await Effect.runPromise(manager.inspectThread(threadControl(sessionId)));
           return snapshot.ok && !snapshot.observed;
@@ -3749,13 +3810,13 @@ describe("SessionManager", () => {
   });
 
   test("a throwing unrepairable observer cannot retain the failed run slot", async () => {
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.succeed({
         type: "unrepairable",
         error: normalizeSessionEventWriterError({ code: "ack_mismatch" }),
       }),
     });
-    const layer = sessionManagerLayer(agentLoop, {
+    const layer = sessionManagerLayer(threadLoop, {
       maxLocalSessions: 1,
       recordCloseoutEvent: () => {
         throw new Error("closeout observer failed");
@@ -3764,12 +3825,12 @@ describe("SessionManager", () => {
 
     await withSessionManager(layer, async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_observer_defect"));
-      await waitForCrashRuns(agentLoop, 1);
+      await waitForCrashRuns(threadLoop, 1);
       const joined = Effect.runPromise(manager.waitThread(
         threadControl("sesn_closeout_observer_defect"),
         undefined,
       ));
-      agentLoop.runs[0]?.releaseCrash();
+      threadLoop.runs[0]?.releaseCrash();
       await waitForCondition(async () => {
         const snapshot = await Effect.runPromise(manager.inspectThread(threadControl("sesn_closeout_observer_defect")));
         return snapshot.ok && !snapshot.observed;
@@ -3779,7 +3840,7 @@ describe("SessionManager", () => {
         ok: true,
         started: true,
       });
-      await waitForCrashRuns(agentLoop, 2);
+      await waitForCrashRuns(threadLoop, 2);
     });
   });
 
@@ -3788,13 +3849,13 @@ describe("SessionManager", () => {
     const backoffStarted = new Promise<void>((resolve) => {
       backoffStartedResolve = resolve;
     });
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.succeed({
         type: "retry",
         error: normalizeSessionEventWriterError({ code: "unavailable" }),
       }),
     });
-    const layer = sessionManagerLayer(agentLoop, {
+    const layer = sessionManagerLayer(threadLoop, {
       maxLocalSessions: 1,
       closeoutSleep: async (_durationMs, signal) =>
         await new Promise<boolean>((resolve) => {
@@ -3805,8 +3866,8 @@ describe("SessionManager", () => {
 
     await withSessionManager(layer, async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_shutdown"));
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.releaseCrash();
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.releaseCrash();
       await backoffStarted;
       await Effect.runPromise(manager.shutdownActiveRuns());
       expect(await Effect.runPromise(manager.inspectThread(threadControl("sesn_closeout_shutdown")))).toMatchObject({
@@ -3824,7 +3885,7 @@ describe("SessionManager", () => {
     const observationWindow = new Promise<void>((resolve) => {
       observationWindowResolve = resolve;
     });
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.promise(async () => {
         observationStartedResolve();
         await observationWindow;
@@ -3835,10 +3896,10 @@ describe("SessionManager", () => {
       }),
     });
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_shutdown_window"));
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.releaseCrash();
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.releaseCrash();
       await observationStarted;
 
       let shutdownSettled = false;
@@ -3865,7 +3926,7 @@ describe("SessionManager", () => {
     const closeoutRelease = new Promise<void>((resolve) => {
       closeoutReleaseResolve = resolve;
     });
-    const agentLoop = makeControlledCrashAgentLoop("die", {
+    const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.promise(async () => {
         closeoutStartedResolve();
         await closeoutRelease;
@@ -3873,10 +3934,10 @@ describe("SessionManager", () => {
       }),
     });
 
-    await withSessionManager(sessionManagerLayer(agentLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_closeout_interrupt"));
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.releaseCrash();
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.releaseCrash();
       await closeoutStarted;
 
       let interruptSettled = false;
@@ -3910,12 +3971,12 @@ describe("SessionManager", () => {
   });
 
   test("closing a child cancels and releases its entire hot descendant subtree", async () => {
-    const runs: Session.Session[] = [];
+    const runs: ThreadRuntime.ThreadRuntime[] = [];
     const interruptedThreadIds: string[] = [];
     const layer = sessionManagerLayer({
       layer: Layer.succeed(
-        AgentLoop.Service,
-        agentLoopService({
+        ThreadLoop.Service,
+        threadLoopService({
           run: (session) => Effect.sync(() => {
             runs.push(session);
           }).pipe(
@@ -3990,9 +4051,9 @@ describe("SessionManager", () => {
     });
   });
 
-  test("AgentLoop rejected promise removes crashed entry without exposing hostile rejection text", async () => {
-    const agentLoop = makeControlledCrashAgentLoop("reject");
-    const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+  test("ThreadLoop rejected promise removes crashed entry without exposing hostile rejection text", async () => {
+    const threadLoop = makeControlledCrashThreadLoop("reject");
+    const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
     await withSessionManager(layer, async (manager) => {
       const first = await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_reject"));
@@ -4002,8 +4063,8 @@ describe("SessionManager", () => {
         created: true,
         started: true,
       });
-      await waitForCrashRuns(agentLoop, 1);
-      agentLoop.runs[0]?.releaseCrash();
+      await waitForCrashRuns(threadLoop, 1);
+      threadLoop.runs[0]?.releaseCrash();
 
       let replacement: TestRunStartResult | undefined;
       for (let attempt = 0; attempt < 100 && replacement === undefined; attempt += 1) {
@@ -4024,14 +4085,14 @@ describe("SessionManager", () => {
       expectNoHostileFragments(first);
       expectNoHostileFragments(replacement);
       expectNoHostileFragments(await Effect.runPromise(manager.cleanupSession("sesn_reject", threadControl("sesn_reject"))));
-      await waitForCrashRuns(agentLoop, 2);
+      await waitForCrashRuns(threadLoop, 2);
     });
   });
 
   test("same-session accept after fatal discard starts a fresh run instead of queuing on the old entry", async () => {
     for (const reason of ["persistence_failed", "event_write_failed", "crashed"] as const) {
-      const agentLoop = makeControlledAgentLoop();
-      const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+      const threadLoop = makeControlledThreadLoop();
+      const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
       await withSessionManager(layer, async (manager) => {
         expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput(`accept_${reason}`))).toEqual({
@@ -4040,9 +4101,9 @@ describe("SessionManager", () => {
           created: true,
           started: true,
         });
-        await waitForRuns(agentLoop, 1);
-        const fatalSession = agentLoop.runs[0]?.session;
-        agentLoop.runs[0]?.release(fatalRunResult(reason));
+        await waitForRuns(threadLoop, 1);
+        const fatalSession = threadLoop.runs[0]?.session;
+        threadLoop.runs[0]?.release(fatalRunResult(reason));
 
         let accepted: SessionManager.AcceptInputResult | undefined;
         for (let attempt = 0; attempt < 100 && accepted === undefined; attempt += 1) {
@@ -4054,17 +4115,17 @@ describe("SessionManager", () => {
           await new Promise((resolve) => setTimeout(resolve, 1));
         }
         expect(accepted).toEqual({ ok: true, sessionId: `accept_${reason}`, created: true, started: true, pendingWake: false });
-        await waitForRuns(agentLoop, 2);
-        expect(agentLoop.runs[1]?.session).not.toBe(fatalSession);
-        agentLoop.runs[1]?.release();
+        await waitForRuns(threadLoop, 2);
+        expect(threadLoop.runs[1]?.session).not.toBe(fatalSession);
+        threadLoop.runs[1]?.release();
       });
     }
   });
 
   test("replacement session capacity is available after fatal discard", async () => {
     for (const reason of ["persistence_failed", "event_write_failed", "crashed"] as const) {
-      const agentLoop = makeControlledAgentLoop();
-      const layer = sessionManagerLayer(agentLoop, { maxLocalSessions: 1 });
+      const threadLoop = makeControlledThreadLoop();
+      const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
       await withSessionManager(layer, async (manager) => {
         expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput(`old_${reason}`))).toEqual({
@@ -4073,8 +4134,8 @@ describe("SessionManager", () => {
           created: true,
           started: true,
         });
-        await waitForRuns(agentLoop, 1);
-        agentLoop.runs[0]?.release(fatalRunResult(reason));
+        await waitForRuns(threadLoop, 1);
+        threadLoop.runs[0]?.release(fatalRunResult(reason));
 
         let replacement: TestRunStartResult | undefined;
         for (let attempt = 0; attempt < 100 && replacement === undefined; attempt += 1) {
@@ -4086,17 +4147,17 @@ describe("SessionManager", () => {
           await new Promise((resolve) => setTimeout(resolve, 1));
         }
         expect(replacement).toEqual({ ok: true, sessionId: `replacement_${reason}`, created: true, started: true });
-        await waitForRuns(agentLoop, 2);
+        await waitForRuns(threadLoop, 2);
 
         const joined = Effect.runPromise(manager.startTestRunThroughAcceptedInput(`replacement_${reason}`));
         await new Promise((resolve) => setTimeout(resolve, 5));
-        expect(agentLoop.runs).toHaveLength(2);
+        expect(threadLoop.runs).toHaveLength(2);
         expect(await Effect.runPromise(manager.cleanupSession(`old_${reason}`, threadControl(`old_${reason}`)))).toEqual({
           ok: true,
           sessionId: `old_${reason}`,
           cleaned: false,
         });
-        agentLoop.runs[1]?.release();
+        threadLoop.runs[1]?.release();
         expect(await joined).toEqual({
           ok: true,
           sessionId: `replacement_${reason}`,
@@ -4108,9 +4169,9 @@ describe("SessionManager", () => {
   });
 
   test("manager layer exposes only the contract command surface", async () => {
-    const agentLoop = makeControlledAgentLoop();
+    const threadLoop = makeControlledThreadLoop();
     const keys = await withSessionManager(
-      sessionManagerLayer(agentLoop),
+      sessionManagerLayer(threadLoop),
       async (manager) => Object.keys(manager).sort(),
     );
 

@@ -106,7 +106,7 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			if err != nil {
 				return err
 			}
-			if err := rejectMessageWhileApprovalPending(ctx, tx, workspaceID, sessionID, runtimeStatus, events, settings.now); err != nil {
+			if err := rejectMessageWhileApprovalPending(ctx, tx, workspaceID, sessionID, runtimeStatus, events); err != nil {
 				return err
 			}
 			appended := make([]*Event, 0, len(events))
@@ -457,7 +457,6 @@ func resolvePendingToolConfirmationTarget(ctx context.Context, tx *dbconnect.Tx,
 		  WHERE p.workspace_id = $1
 		    AND p.session_id = $2
 		    AND p.tool_use_event_id = $3
-		    AND p.kind = 'approval'
 		    AND t.visibility = 'public'
 		    AND t.archived_at IS NULL
 		  FOR UPDATE OF p`,
@@ -594,7 +593,7 @@ func publicEventSessionVisible(eventType string, sessionThreadID string, mainThr
 	}
 }
 
-func rejectMessageWhileApprovalPending(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, runtimeStatus sessionRuntimeStatusAdmissionState, events []preparedEvent, now time.Time) error {
+func rejectMessageWhileApprovalPending(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, runtimeStatus sessionRuntimeStatusAdmissionState, events []preparedEvent) error {
 	hasMessage := false
 	for _, event := range events {
 		if event.eventType == EventTypeUserMessage {
@@ -612,13 +611,10 @@ func rejectMessageWhileApprovalPending(ctx context.Context, tx *dbconnect.Tx, wo
 			  FROM session_pending_tool_uses p
 			 WHERE p.workspace_id = $1
 			   AND p.session_id = $2
-			   AND p.kind = 'approval'
 			   AND p.status = 'pending'
-			   AND p.expires_at > $3
 		)`,
 		string(workspaceID),
 		sessionID,
-		now,
 	).Scan(&exists); err != nil {
 		return err
 	}
@@ -630,7 +626,7 @@ func rejectMessageWhileApprovalPending(ctx context.Context, tx *dbconnect.Tx, wo
 
 func resolvePendingToolConfirmation(ctx context.Context, tx *dbconnect.Tx, workspaceID workspace.ID, sessionID string, toolUseEventID string, decision string, denyMessage string, now time.Time) (string, error) {
 	row := tx.QueryRow(ctx,
-		`SELECT p.session_thread_id, p.status, p.expires_at
+		`SELECT p.session_thread_id, p.status
 		   FROM session_pending_tool_uses p
 		   JOIN session_threads t
 		     ON t.workspace_id = p.workspace_id
@@ -639,7 +635,6 @@ func resolvePendingToolConfirmation(ctx context.Context, tx *dbconnect.Tx, works
 		  WHERE p.workspace_id = $1
 		    AND p.session_id = $2
 		    AND p.tool_use_event_id = $3
-		    AND p.kind = 'approval'
 		    AND t.visibility = 'public'
 		    AND t.archived_at IS NULL
 		  FOR UPDATE OF p`,
@@ -649,21 +644,13 @@ func resolvePendingToolConfirmation(ctx context.Context, tx *dbconnect.Tx, works
 	)
 	var sessionThreadID string
 	var status string
-	var expiresAtRaw string
-	if err := row.Scan(&sessionThreadID, &status, &expiresAtRaw); dbconnect.IsNoRows(err) {
+	if err := row.Scan(&sessionThreadID, &status); dbconnect.IsNoRows(err) {
 		return "", &ConflictError{Message: "pending approval not found"}
 	} else if err != nil {
 		return "", err
 	}
 	if status != "pending" {
 		return "", &ConflictError{Message: "pending approval is not pending"}
-	}
-	expiresAt, err := time.Parse(time.RFC3339Nano, expiresAtRaw)
-	if err != nil {
-		return "", err
-	}
-	if !expiresAt.After(now) {
-		return "", &ConflictError{Message: "pending approval expired"}
 	}
 	var storedDenyMessage any
 	if decision == string(ToolConfirmationResultDeny) && denyMessage != "" {

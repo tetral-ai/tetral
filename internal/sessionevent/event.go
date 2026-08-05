@@ -36,7 +36,7 @@ const ContentSourceTypeFile = "file"
 // shared bound together. 32 is narrower than the upstream per-request image
 // allowance of 600 images for this context class (100 for 200k-context models).
 // UPDATE-WITH: services/gateway/packages/protocol/src/bounds.ts,
-// services/agent-runtime/packages/core/src/session/session-state.ts.
+// services/agent-runtime/packages/core/src/thread-loop/thread-state.ts.
 const MaxProviderRequestAttachments = 32
 
 const ToolConfirmationResultAllow = "allow"

@@ -82,6 +82,7 @@ func (s *PostgreSQLBridgeAPIStore) RefreshRuntimeBindingToken(ctx context.Contex
 
 type bridgeLoadContextPayload struct {
 	Messages                 []json.RawMessage                    `json:"messages"`
+	TurnFacts                bridgeLoadContextTurnFacts           `json:"turnFacts"`
 	ThreadContextPrefix      *bridgeLoadContextThreadPrefix       `json:"threadContextPrefix"`
 	DurableTurnID            *string                              `json:"durableTurnId"`
 	Thread                   bridgeLoadContextThread              `json:"thread"`
@@ -93,6 +94,15 @@ type bridgeLoadContextPayload struct {
 	PendingAttachments       []bridgeLoadContextPendingAttachment `json:"pendingAttachments"`
 	PendingAgentMail         []bridgeLoadContextAgentMail         `json:"pendingAgentMail"`
 	ColdCoverage             bridgeLoadContextColdCoverage        `json:"coldCoverage"`
+}
+
+type bridgeLoadContextMessageDescriptor struct {
+	Kind            string
+	MessageID       string
+	MessageSequence int64
+	OwningEventID   string
+	ModelRequestID  *string
+	DataJSON        json.RawMessage
 }
 
 type bridgeLoadContextColdCoverage struct {
@@ -199,12 +209,10 @@ type bridgeLoadContextPendingTool struct {
 	ModelRequestID  string          `json:"modelRequestId"`
 	ModelToolCallID string          `json:"modelToolCallId"`
 	ToolName        string          `json:"toolName"`
-	Kind            string          `json:"kind"`
 	Input           json.RawMessage `json:"input"`
 	Decision        *string         `json:"decision,omitempty"`
 	DenyMessage     *string         `json:"denyMessage,omitempty"`
 	Status          string          `json:"status"`
-	ExpiresAt       string          `json:"expiresAt"`
 }
 
 type bridgeLoadContextSandboxExecution struct {
@@ -284,6 +292,7 @@ func loadThreadContextJSONTx(
 			       m.sequence,
 			       m.data_json,
 			       COALESCE(m.last_event_id, m.source_event_id),
+		       COALESCE(m.model_request_id, e.model_request_id),
 		       m.created_at,
 		       m.updated_at,
 		       e.sequence
@@ -308,12 +317,14 @@ func loadThreadContextJSONTx(
 	}
 	defer func() { _ = rows.Close() }()
 	messages := make([]json.RawMessage, 0)
+	messageDescriptors := make([]bridgeLoadContextMessageDescriptor, 0)
 	for rows.Next() {
 		var kind string
 		var messageID string
 		var sequence int64
 		var raw string
 		var owningEventID sql.NullString
+		var modelRequestID sql.NullString
 		var createdAt time.Time
 		var updatedAt time.Time
 		var eventSequence sql.NullInt64
@@ -323,6 +334,7 @@ func loadThreadContextJSONTx(
 			&sequence,
 			&raw,
 			&owningEventID,
+			&modelRequestID,
 			&createdAt,
 			&updatedAt,
 			&eventSequence,
@@ -356,12 +368,31 @@ func loadThreadContextJSONTx(
 			return "", err
 		}
 		messages = append(messages, stamped)
+		descriptor := bridgeLoadContextMessageDescriptor{
+			Kind:            kind,
+			MessageID:       messageID,
+			MessageSequence: sequence,
+			OwningEventID:   owningEventID.String,
+			DataJSON:        stamped,
+		}
+		if modelRequestID.Valid {
+			descriptor.ModelRequestID = &modelRequestID.String
+		}
+		messageDescriptors = append(messageDescriptors, descriptor)
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+	turnFacts, err := loadThreadTurnFactsTx(ctx, tx, scope, messageDescriptors, durableTurnID)
+	if err != nil {
+		return "", err
+	}
 	return marshalBridgeJSON(bridgeLoadContextPayload{
 		Messages:                 messages,
+		TurnFacts:                turnFacts,
 		ThreadContextPrefix:      threadContextPrefix,
 		DurableTurnID:            durableTurnID,
 		Thread:                   thread,
@@ -1038,12 +1069,10 @@ func loadThreadPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		        COALESCE(e.model_request_id, ''),
 		        p.model_tool_call_id,
 		        p.tool_name,
-		        p.kind,
 		        p.input_json,
 		        p.decision,
 		        p.deny_message,
-		        p.status,
-		        p.expires_at
+		        p.status
 		   FROM session_pending_tool_uses p
 		   LEFT JOIN session_events e
 		     ON e.workspace_id = p.workspace_id
@@ -1083,12 +1112,10 @@ func loadThreadPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 			&item.ModelRequestID,
 			&item.ModelToolCallID,
 			&item.ToolName,
-			&item.Kind,
 			&inputJSON,
 			&decision,
 			&denyMessage,
 			&item.Status,
-			&item.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
