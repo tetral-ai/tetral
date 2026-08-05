@@ -1351,6 +1351,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	scope := bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_tool_result_start", "mrq_pending_approval", "agent_provider_request", 0)
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result", "evt_public_tool_use", 2)
+	toolOutput := "RESULT_HEAD" + strings.Repeat("r", 200_000-len("RESULT_HEAD")-len("RESULT_TAIL")) + "RESULT_TAIL"
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_pending_tool_uses
 		    SET status = 'resolving',
@@ -1366,7 +1367,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		RuntimeWriteId: "rwrite_bridge_tool_result",
 		ModelRequestId: "mrq_pending_approval",
 		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"done"}]}`,
+		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"` + toolOutput + `"}]}`,
 		SessionVisible: true,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t,
@@ -1376,7 +1377,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 			"completed",
 			bridgeRuntimePartDraftForTest{
 				kind: "tool",
-				json: `{"type":"tool","toolCallId":"tool-call-result","toolName":"search","toolUseEventId":"evt_public_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
+				json: `{"type":"tool","toolCallId":"tool-call-result","toolName":"search","toolUseEventId":"evt_public_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"` + toolOutput + `","truncated":false}}}`,
 			},
 		)},
 	})
@@ -1389,7 +1390,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		`SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND source_event_id = $1 AND kind = 'assistant'`, response.GetEventId()).Scan(&messageDataJSON); err != nil {
 		t.Fatalf("read projected tool result message: %v", err)
 	}
-	assertToolResultRuntimeMessage(t, messageDataJSON, "tool-call-result", "search", "evt_public_tool_use", "completed", "done")
+	assertToolResultRuntimeMessage(t, messageDataJSON, "tool-call-result", "search", "evt_public_tool_use", "completed", toolOutput)
 	var pendingStatus string
 	var pendingResultEventID sql.NullString
 	var pendingResolvedAt sql.NullString
@@ -1420,7 +1421,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	if len(contextPayload.Messages) != 1 {
 		t.Fatalf("LoadContext messages = %d; want 1 in %s", len(contextPayload.Messages), contextResponse.GetContextJson())
 	}
-	assertToolResultRuntimeMessage(t, string(contextPayload.Messages[0]), "tool-call-result", "search", "evt_public_tool_use", "completed", "done")
+	assertToolResultRuntimeMessage(t, string(contextPayload.Messages[0]), "tool-call-result", "search", "evt_public_tool_use", "completed", toolOutput)
 	var resultFact *bridgeLoadContextToolResult
 	for _, event := range contextPayload.TurnFacts.Events {
 		if event.Type == "agent.tool_result" {

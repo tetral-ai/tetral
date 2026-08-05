@@ -242,7 +242,7 @@ func TestFindUsesRE2CaseFlagsCapsMatchesAndCompletesWithZeroMatches(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if zero != "[r_example] 0 matches for pattern missing in 1 lines" {
+	if zero != "[r_example] 0 matches in 1 lines" {
 		t.Fatalf("zero=%q", zero)
 	}
 	many := make([]string, maxFindMatches+1)

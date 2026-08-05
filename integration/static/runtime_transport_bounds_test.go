@@ -25,6 +25,10 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 	if err != nil {
 		t.Fatalf("read Go completion-mail bounds: %v", err)
 	}
+	bridgeMainBody, err := os.ReadFile(filepath.Join(root, "services", "bridge", "cmd", "bridge-api", "main.go")) //nolint:gosec // repository-local source path.
+	if err != nil {
+		t.Fatalf("read Bridge API composition: %v", err)
+	}
 	gatewayBody, err := os.ReadFile(filepath.Join(root, "services", "gateway", "packages", "provider-gateway", "src", "bounds.ts")) //nolint:gosec // repository-local source path.
 	if err != nil {
 		t.Fatalf("read Gateway transport bounds: %v", err)
@@ -47,16 +51,26 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 		`MaxOutboundGRPCMessageBytes\s*=\s*64\s*\*\s*1024`,
 		`MaxRuntimeCommandGRPCMessageBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024`,
 		`MaxAttachmentGRPCMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024`,
+		`MaxBridgeAPIGRPCMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024`,
 	} {
 		if !regexp.MustCompile(required).Match(goBody) {
 			t.Fatalf("Go transport bounds missing %q", required)
 		}
 	}
 	for _, required := range []string{
+		`grpc\.MaxRecvMsgSize\(sessionrpc\.MaxBridgeAPIGRPCMessageBytes\)`,
+		`grpc\.MaxSendMsgSize\(sessionrpc\.MaxBridgeAPIGRPCMessageBytes\)`,
+	} {
+		if !regexp.MustCompile(required).Match(bridgeMainBody) {
+			t.Fatalf("Bridge API transport composition missing %q", required)
+		}
+	}
+	for _, required := range []string{
 		`export const MaxGrpcInboundMessageBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024;`,
 		`export const MaxGrpcOutboundMessageBytes\s*=\s*4\s*\*\s*1024\s*\*\s*1024;`,
 		`export const MaxAttachmentGrpcMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024;`,
-		`export const MaxGatewayRequestGrpcMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024;`,
+		`export const MaxBridgeDurableContextGrpcMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024;`,
+		`export const MaxGatewayRequestGrpcMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024;`,
 		`export const MaxGatewayStreamEventGrpcMessageBytes\s*=\s*8\s*\*\s*1024\s*\*\s*1024;`,
 	} {
 		if !regexp.MustCompile(required).Match(tsBody) {
@@ -80,10 +94,13 @@ func TestRuntimeCommandAndBridgeFusesStayAlignedAcrossGoAndTypeScript(t *testing
 			t.Fatalf("Go completion-mail bounds missing %q", required)
 		}
 	}
-	if required := `MaxGrpcInboundMessageBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024`; !regexp.MustCompile(required).Match(gatewayBody) {
+	if required := `MaxGrpcInboundMessageBytes\s*=\s*64\s*\*\s*1024\s*\*\s*1024`; !regexp.MustCompile(required).Match(gatewayBody) {
 		t.Fatalf("Gateway transport bounds missing %q", required)
 	}
-	if required := `export const MaxProviderRequestMessagePartBytes\s*=\s*32\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
+	if required := `export const MaxProviderRequestMessagePartJsonBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
+		t.Fatalf("Gateway protocol bounds missing %q", required)
+	}
+	if required := `export const MaxProviderRequestToolOutputJsonBytes\s*=\s*512\s*\*\s*1024;`; !regexp.MustCompile(required).Match(gatewayProtocolBody) {
 		t.Fatalf("Gateway protocol bounds missing %q", required)
 	}
 	for _, pair := range []struct {

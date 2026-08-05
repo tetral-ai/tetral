@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { MaxProviderRequestMessagePartJsonBytes, MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import {
+  MaxStableReasoningBytesPerRequest,
+  MaxStableReasoningPartsPerRequest,
+} from "../../src/contracts/runtime.js";
 import type {
   RuntimeMessageDraft,
   RuntimeInternalToolRepairCommit,
@@ -307,7 +312,7 @@ describe("SessionProcessor", () => {
       id: "tool-1",
       toolName: "search",
       input: { q: "x" },
-      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
     }))).events);
     events.push(...(await processor.commitPublicToolUse(source, "tool-1", { q: "x" }, "allow")).events);
     events.push(...(await processor.commitToolSettlement(source, "tool-1", {
@@ -339,12 +344,12 @@ describe("SessionProcessor", () => {
     await processor.process(envelope({ type: "reasoning-end", id: "reasoning-1" }));
     await processor.process(envelope({
       type: "tool-call", id: "tool-1", toolName: "search", input: {},
-      inputPreview: { value: {}, preview: "{}", truncated: false },
+      inputPreview: { preview: "{}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "tool-1", {}, "allow");
     await processor.process(envelope({
       type: "tool-call", id: "tool-2", toolName: "create_issue", input: {},
-      inputPreview: { value: {}, preview: "{}", truncated: false },
+      inputPreview: { preview: "{}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "tool-2", {}, "allow", { kind: "mcp", mcpServerName: "github" });
 
@@ -380,7 +385,7 @@ describe("SessionProcessor", () => {
       id: "tool-1",
       toolName: "search",
       input: { q: "x" },
-      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "tool-1", { q: "x" }, "allow");
     await processor.commitToolSettlement(source, "tool-1", {
@@ -447,7 +452,7 @@ describe("SessionProcessor", () => {
         id,
         toolName: "Read",
         input: { file_path: path },
-        inputPreview: { value: { file_path: path }, preview: JSON.stringify({ file_path: path }), truncated: false },
+        inputPreview: { preview: JSON.stringify({ file_path: path }), truncated: false },
       }));
     }
     await processor.commitPublicToolUse(source, "tool-1", { file_path: "src/a.ts" }, "allow");
@@ -496,7 +501,7 @@ describe("SessionProcessor", () => {
       id: "tool-1",
       toolName: "create_issue",
       input: { title: "Bug" },
-      inputPreview: { value: { title: "Bug" }, preview: "{\"title\":\"Bug\"}", truncated: false },
+      inputPreview: { preview: "{\"title\":\"Bug\"}", truncated: false },
     }))).events);
     events.push(...(await processor.commitPublicToolUse(source, "tool-1", { title: "Bug" }, "allow", { kind: "mcp", mcpServerName: "github" })).events);
     events.push(...(await processor.commitToolSettlement(source, "tool-1", {
@@ -577,7 +582,7 @@ describe("SessionProcessor", () => {
         id: "tool-1",
         toolName: "create_issue",
         input: { title: "Bug" },
-        inputPreview: { value: { title: "Bug" }, preview: "{\"title\":\"Bug\"}", truncated: false },
+        inputPreview: { preview: "{\"title\":\"Bug\"}", truncated: false },
       }))).events);
       events.push(...(await processor.commitPublicToolUse(source, "tool-1", { title: "Bug" }, "allow", { kind: "mcp", mcpServerName: "github" })).events);
       events.push(...(await processor.commitToolSettlement(source, "tool-1", {
@@ -658,7 +663,7 @@ describe("SessionProcessor", () => {
       id: "internal-tool-call",
       toolName: "search",
       input: { q: "x" },
-      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
     }));
     const toolUse = await processor.commitPublicToolUse(source, "internal-tool-call", { q: "x" }, "allow");
     expect(toolUse).toMatchObject({ ok: true, toolUseEventId: "bridge-event-tool-use" });
@@ -703,7 +708,7 @@ describe("SessionProcessor", () => {
       id: "web-tool-call",
       toolName: "web",
       input: { search_query: [{ q: "tetral" }] },
-      inputPreview: { value: { search_query: [{ q: "tetral" }] }, preview: "{}", truncated: false },
+      inputPreview: { preview: "{}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "web-tool-call", { search_query: [{ q: "tetral" }] }, "allow");
     await processor.commitToolSettlement(source, "web-tool-call", {
@@ -740,7 +745,7 @@ describe("SessionProcessor", () => {
       id: "unknown-tool-call",
       toolName: "unknown_tool",
       input: { q: "x" },
-      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
     }));
     const repaired = await processor.commitInternalToolRepair(
       source,
@@ -784,7 +789,7 @@ describe("SessionProcessor", () => {
       id: "unknown-tool-call",
       toolName: "unknown_tool",
       input: { q: "x" },
-      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
     }));
     const pendingRepair = processor.commitInternalToolRepair(
       source,
@@ -893,7 +898,7 @@ describe("SessionProcessor", () => {
         id: "tool-1",
         toolName: "search",
         input: { q: "x" },
-        inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+        inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
       }));
 
       const result = await processor.process(envelope({ type: "finish", finishReason }));
@@ -954,7 +959,7 @@ describe("SessionProcessor", () => {
       id: "tool-ok",
       toolName: "search",
       input: { query: hostileText },
-      inputPreview: { value: { query: hostileText }, preview: hostileText, truncated: false },
+      inputPreview: { preview: hostileText, truncated: false },
     }))).events);
     successEvents.push(...(await successProcessor.commitPublicToolUse(source, "tool-ok", { query: hostileText }, "allow")).events);
     successEvents.push(...(await successProcessor.commitToolSettlement(source, "tool-ok", {
@@ -975,7 +980,7 @@ describe("SessionProcessor", () => {
       id: "tool-1",
       toolName: "search",
       input: { query: hostileText },
-      inputPreview: { value: { query: hostileText }, preview: hostileText, truncated: false },
+      inputPreview: { preview: hostileText, truncated: false },
     }))).events);
     events.push(...(await processor.commitPublicToolUse(source, "tool-1", { query: hostileText }, "allow")).events);
     events.push(...(await processor.commitToolSettlement(source, "tool-1", {
@@ -1028,7 +1033,7 @@ describe("SessionProcessor", () => {
       id: "tool-large",
       toolName: "Read",
       input: { file_path: "notes/a.txt" },
-      inputPreview: { value: { file_path: "notes/a.txt" }, preview: "{}", truncated: false },
+      inputPreview: { preview: "{}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "tool-large", { file_path: "notes/a.txt" }, "allow");
     const output = `content: ${"x".repeat(60 * 1024)}\nnext_offset: 61440`;
@@ -1044,7 +1049,40 @@ describe("SessionProcessor", () => {
     expect(completed?.type === "tool" && completed.state.status === "completed" ? completed.state.output.text : "").toBe(output);
   });
 
-  test("text delta updates only processor-local state before stable text write", async () => {
+  test("keeps complete tool input when only its display preview is truncated", async () => {
+    const drafts: RuntimeMessageDraft[] = [];
+    const processor = createProcessor({
+      appendEvent: async (event, output) => {
+        if (output !== undefined) {
+          drafts.push(output.message);
+        }
+        return {
+          ok: true,
+          writeId: `write-${drafts.length}`,
+          eventId: event.type === "agent.tool_use" ? "bridge-tool-use-large" : "bridge-event-large",
+          processedAt: createdAt,
+        };
+      },
+    });
+    const input = { content: "x".repeat(100 * 1024), file_path: "notes/large.txt" };
+
+    await processor.process(envelope({
+      type: "tool-call",
+      id: "tool-large-input",
+      toolName: "Write",
+      input,
+      inputPreview: { preview: JSON.stringify(input).slice(0, 8_192), truncated: true },
+    }));
+    await processor.commitPublicToolUse(source, "tool-large-input", input, "allow");
+
+    const tool = drafts.at(-1)?.parts.find(
+      (part) => part.type === "tool" && part.toolCallId === "tool-large-input",
+    );
+    expect(tool?.type === "tool" && "input" in tool.state ? tool.state.input?.value : undefined).toEqual(input);
+    expect(tool?.type === "tool" && "input" in tool.state ? tool.state.input?.truncated : undefined).toBe(true);
+  });
+
+  test("text deltas ignore the preview budget and persist the complete semantic text", async () => {
     const processor = createProcessor({ maxBytes: 5 });
     await processor.process(envelope({ type: "text-start", id: "text-1" }));
     const first = await processor.process(envelope({ type: "text-delta", id: "text-1", text_delta: "hello" }));
@@ -1053,8 +1091,114 @@ describe("SessionProcessor", () => {
 
     expect(first.events).toEqual([]);
     expect(second.events).toEqual([]);
-    expect(ended.events).toEqual([expect.objectContaining({ type: "agent.message", content: [{ type: "text", text: "hello" }] })]);
-    expect(JSON.stringify(ended.events)).not.toContain("SECRET");
+    expect(ended.events).toEqual([expect.objectContaining({ type: "agent.message", content: [{ type: "text", text: "helloSECRET" }] })]);
+  });
+
+  test("accepts the exact assistant-part JSON bound and fails one byte over without truncation", async () => {
+    const processor = createProcessor();
+    const escapedCharacters = Math.floor((MaxProviderRequestMessagePartJsonBytes - 2) / 6);
+    const exactText = `${"\u0000".repeat(escapedCharacters)}${"x".repeat(MaxProviderRequestMessagePartJsonBytes - 2 - escapedCharacters * 6)}`;
+    await processor.process(envelope({ type: "text-start", id: "text-boundary" }));
+    for (let offset = 0; offset < exactText.length; offset += MaxTextBytes) {
+      const accepted = await processor.process(envelope({
+        type: "text-delta",
+        id: "text-boundary",
+        text_delta: exactText.slice(offset, offset + MaxTextBytes),
+      }));
+      expect(accepted.events).toEqual([]);
+    }
+
+    const rejected = await processor.process(envelope({
+      type: "text-delta",
+      id: "text-boundary",
+      text_delta: "x",
+    }));
+
+    expect(new TextEncoder().encode(JSON.stringify(exactText)).byteLength).toBe(MaxProviderRequestMessagePartJsonBytes);
+    expect(rejected.events).toContainEqual(expect.objectContaining({
+      type: "session.error",
+      error: expect.objectContaining({ reason: "bounded", retryable: false, fatal: true }),
+    }));
+    expect(JSON.stringify(rejected.events)).not.toContain('"truncated":true');
+  });
+
+  test("reasoning deltas ignore the preview budget and retain the complete stable prefix", async () => {
+    const stableReasoning: SessionEventWriterStableReasoningPart[][] = [];
+    const processor = createProcessor({
+      maxBytes: 5,
+      appendEvent: async (event, _output, parts) => {
+        if (event.type === "agent.tool_use") {
+          stableReasoning.push([...(parts ?? [])]);
+        }
+        return {
+          ok: true,
+          writeId: `write-${event.type}`,
+          eventId: event.type === "agent.tool_use" ? "bridge-tool-use-reasoning" : `bridge-${event.type}`,
+          processedAt: createdAt,
+        };
+      },
+    });
+    const reasoning = `think:${"r".repeat(9_000)}`;
+
+    await processor.process(envelope({ type: "reasoning-start", id: "reasoning-large" }));
+    await processor.process(envelope({ type: "reasoning-delta", id: "reasoning-large", text_delta: reasoning }));
+    await processor.process(envelope({ type: "reasoning-end", id: "reasoning-large" }));
+    await processor.process(envelope({
+      type: "tool-call",
+      id: "tool-after-reasoning",
+      toolName: "Read",
+      input: { file_path: "notes/a.txt" },
+      inputPreview: { preview: "{}", truncated: false },
+    }));
+    await processor.commitPublicToolUse(source, "tool-after-reasoning", { file_path: "notes/a.txt" }, "allow");
+
+    expect(stableReasoning[0]?.map((part) => part.text)).toEqual([reasoning]);
+    expect(stableReasoning[0]?.[0]?.truncated).toBe(false);
+  });
+
+  test("accepts the exact stable-reasoning aggregate and fails one byte over", async () => {
+    const processor = createProcessor();
+    const exactReasoning = "r".repeat(MaxStableReasoningBytesPerRequest - 2);
+    await processor.process(envelope({ type: "reasoning-start", id: "reasoning-boundary" }));
+    for (let offset = 0; offset < exactReasoning.length; offset += MaxTextBytes) {
+      const accepted = await processor.process(envelope({
+        type: "reasoning-delta",
+        id: "reasoning-boundary",
+        text_delta: exactReasoning.slice(offset, offset + MaxTextBytes),
+      }));
+      expect(accepted.events).toEqual([]);
+    }
+
+    const rejected = await processor.process(envelope({
+      type: "reasoning-delta",
+      id: "reasoning-boundary",
+      text_delta: "x",
+    }));
+
+    expect(rejected.events).toContainEqual(expect.objectContaining({
+      type: "session.error",
+      error: expect.objectContaining({ reason: "bounded", retryable: false, fatal: true }),
+    }));
+    expect(JSON.stringify(rejected.events)).not.toContain('"truncated":true');
+  });
+
+  test("rejects a seventeenth empty reasoning part before it becomes durable", async () => {
+    const processor = createProcessor();
+    for (let index = 0; index < MaxStableReasoningPartsPerRequest; index++) {
+      expect((await processor.process(envelope({ type: "reasoning-start", id: `reasoning-${index}` }))).ok).toBe(true);
+      expect((await processor.process(envelope({ type: "reasoning-end", id: `reasoning-${index}` }))).ok).toBe(true);
+    }
+
+    const rejected = await processor.process(envelope({
+      type: "reasoning-start",
+      id: `reasoning-${MaxStableReasoningPartsPerRequest}`,
+    }));
+
+    expect(rejected.events).toContainEqual(expect.objectContaining({
+      type: "session.error",
+      error: expect.objectContaining({ reason: "bounded", retryable: false, fatal: true }),
+    }));
+    expect(rejected.events).not.toContainEqual(expect.objectContaining({ type: "agent.thinking" }));
   });
 
   test("stable text writes exclude completed reasoning until a tool anchors it", async () => {
@@ -1118,7 +1262,7 @@ describe("SessionProcessor", () => {
       id: "tool-1",
       toolName: "search",
       input: {},
-      inputPreview: { value: {}, preview: "{}", truncated: false },
+      inputPreview: { preview: "{}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "tool-1", {}, "allow");
 
@@ -1241,7 +1385,7 @@ describe("SessionProcessor", () => {
       id: "running-tool",
       toolName: "search",
       input: { q: "x" },
-      inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+      inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "running-tool", { q: "x" }, "allow");
     const providerResult = await processor.process(envelope({
@@ -1291,7 +1435,7 @@ describe("SessionProcessor", () => {
       id: "accepted-tool",
       toolName: "write",
       input: { path: "a.txt" },
-      inputPreview: { value: { path: "a.txt" }, preview: "{\"path\":\"a.txt\"}", truncated: false },
+      inputPreview: { preview: "{\"path\":\"a.txt\"}", truncated: false },
     }));
     await processor.commitPublicToolUse(source, "accepted-tool", { path: "a.txt" }, "allow");
 

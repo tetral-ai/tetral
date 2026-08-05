@@ -43,7 +43,7 @@ const (
 //
 // It caps the model-visible conflict wire (conflicts[], conflict_total,
 // conflicts_truncated). Derivation: worst case ~32 entries x ~1024 B each is
-// ~32 KiB, which stays under the 64 KiB JSON-field precedent. The value is
+// ~32 KiB, so the explicit 64 KiB cap leaves room for the enclosing wire. The value is
 // coincidentally equal to MaxProviderRequestAttachments but is NOT coupled with
 // it; the two move independently. The conflict query's ORDER BY (conflict-kind
 // priority, then length(path) DESC, then memory_id ASC) makes truncation

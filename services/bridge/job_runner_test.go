@@ -12,9 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
 
@@ -1105,6 +1108,109 @@ func TestRunJobRunnerLoopLogsPollFailureWithSafeSharedFields(t *testing.T) {
 			t.Fatalf("job runner log missing %s: %s", want, logOutput)
 		}
 	}
+}
+
+func TestRunJobRunnerLoopWakesFromCommittedPostgreSQLRuntimeInput(t *testing.T) {
+	runtimeDB, _ := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	store := queue.NewPostgreSQLStore(client)
+	wake := queue.NewWakeSignal()
+
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	defer cancelListener()
+	listenerDone := make(chan error, 1)
+	readySnapshot := wake.Snapshot()
+	go func() {
+		listenerDone <- queue.RunNotificationListener(listenerCtx, queue.PostgreSQLNotificationListener{Client: client}, queue.ConsumerClassBridge, wake, nil)
+	}()
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), time.Second)
+	defer cancelReady()
+	if err := wake.Wait(readyCtx, time.Hour, readySnapshot); err != nil {
+		t.Fatalf("wait for PostgreSQL listener: %v", err)
+	}
+
+	initialLease := make(chan struct{})
+	queueClient := &notifyingBridgeQueueClient{
+		QueueClient:  tetralqueue.NewServer(store, nil),
+		initialLease: initialLease,
+	}
+	deliverer := &wakeProofDeliverer{delivered: make(chan RuntimeJob, 1)}
+	runner := &JobRunner{
+		Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge_wake"}, Deliverer: deliverer,
+		Config: JobRunnerConfig{PollInterval: time.Hour, LeaseOwner: "bridge-wake-proof", MaxJobs: 1, LeaseDuration: time.Minute},
+	}
+	runnerCtx, cancelRunner := context.WithCancel(context.Background())
+	defer cancelRunner()
+	runnerDone := make(chan error, 1)
+	go func() { runnerDone <- RunJobRunnerLoop(runnerCtx, runner, nil, wake) }()
+	select {
+	case <-initialLease:
+	case <-time.After(time.Second):
+		t.Fatal("Bridge runner did not complete its initial empty lease")
+	}
+
+	now := time.Now().UTC()
+	payload := []byte(`{"workspace_id":"ws_bridge_wake","session_id":"sesn_bridge_wake","session_thread_id":"thrd_bridge_wake","runtime_input_id":"rin_bridge_wake","event_ids":["sevt_bridge_wake"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`)
+	if _, err := store.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: "qjob_bridge_wake", WorkspaceID: "ws_bridge_wake", Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey("ws_bridge_wake", "sesn_bridge_wake"),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey("ws_bridge_wake", "sesn_bridge_wake", "rin_bridge_wake"),
+		PayloadVersion: 1, PayloadJSON: payload, Now: now,
+	}); err != nil {
+		t.Fatalf("enqueue runtime input: %v", err)
+	}
+	select {
+	case job := <-deliverer.delivered:
+		if job.Kind != queue.KindRuntimeInput || job.RuntimeInputID != "rin_bridge_wake" {
+			t.Fatalf("delivered job = %+v; want committed runtime input", job)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PostgreSQL notification did not wake Bridge before its one-hour poll")
+	}
+
+	cancelRunner()
+	cancelListener()
+	select {
+	case err := <-runnerDone:
+		if err != nil {
+			t.Fatalf("Bridge runner shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Bridge runner did not stop")
+	}
+	select {
+	case err := <-listenerDone:
+		if err != nil {
+			t.Fatalf("listener shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not stop")
+	}
+}
+
+type notifyingBridgeQueueClient struct {
+	QueueClient
+	once         sync.Once
+	initialLease chan struct{}
+}
+
+func (c *notifyingBridgeQueueClient) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
+	response, err := c.QueueClient.Lease(ctx, request)
+	c.once.Do(func() { close(c.initialLease) })
+	return response, err
+}
+
+type wakeProofDeliverer struct {
+	delivered chan RuntimeJob
+}
+
+func (d *wakeProofDeliverer) DeliverRuntimeJob(_ context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	d.delivered <- job
+	return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+}
+
+func (*wakeProofDeliverer) ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	return RuntimeDeliveryResult{}, false, nil
 }
 
 func TestRunJobRunnerLoopBacksOffAcrossConsecutiveEmptyPolls(t *testing.T) {

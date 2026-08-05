@@ -13,10 +13,11 @@ import {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
+  MaxIdBytes,
   MaxMetadataBytes,
   MaxProviderRequestToolOutputJsonBytes,
   MaxProviderRequestAttachments,
-  MaxProviderRequestMessagePartBytes,
+  MaxProviderRequestMessagePartJsonBytes,
   MaxProviderToolCallInputJsonBytes,
   MaxProviderUsageJsonBytes,
   MaxTextBytes,
@@ -60,7 +61,7 @@ describe("Gateway protocol bounds", () => {
   });
 
   test("admits multi-megabyte message parts while keeping system segments at 64 KiB", () => {
-    expect(MaxProviderRequestMessagePartBytes).toBe(32 * 1024 * 1024);
+    expect(MaxProviderRequestMessagePartJsonBytes).toBe(16 * 1024 * 1024);
     const multiMegabyteText = "x".repeat(2 * 1024 * 1024);
     const base = validProviderRequest();
     for (const part of [
@@ -94,7 +95,26 @@ describe("Gateway protocol bounds", () => {
     });
 
     expect(validateProviderRequest(withReasoning(""))).toEqual({ ok: true });
-    expectInvalid(validateProviderRequest(withReasoning("x".repeat(MaxProviderRequestMessagePartBytes + 1))));
+    expect(validateProviderRequest(withReasoning("x".repeat(MaxProviderRequestMessagePartJsonBytes - 2)))).toEqual({ ok: true });
+    expectInvalid(validateProviderRequest(withReasoning("x".repeat(MaxProviderRequestMessagePartJsonBytes - 1))));
+  });
+
+  test("uses the protocol identifier limit for provider stream ids", () => {
+    const base = validProviderRequest();
+    const eventBase = {
+      requestId: base.requestId,
+      modelRequestId: base.modelRequestId,
+      sequence: 1,
+      type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+    };
+    expect(validateProviderStreamEvent({
+      ...eventBase,
+      text: { id: "i".repeat(MaxIdBytes), text: "", metadataJson: "{}" },
+    }, base)).toEqual({ ok: true });
+    expect(validateProviderStreamEvent({
+      ...eventBase,
+      text: { id: "i".repeat(MaxIdBytes + 1), text: "", metadataJson: "{}" },
+    }, base)).not.toEqual({ ok: true });
   });
 
   test("accepts all contract-owned ProviderRequest request kinds", () => {

@@ -23,7 +23,7 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { RuntimeFailure } from "./llm-event.js";
 import type { LLMEvent, RuntimeJsonValue } from "./llm-event.js";
-import { RuntimeBoundedJsonSchema, RuntimeFailureSchema, RuntimePreviewTextMaxBytes, runtimeFailureFromProviderError } from "./llm-event.js";
+import { RuntimeJsonPreviewSchema, RuntimeFailureSchema, RuntimePreviewTextMaxBytes, runtimeFailureFromProviderError } from "./llm-event.js";
 import { normalizeProviderError } from "../contracts/provider.js";
 import { boundRuntimeJson } from "../contracts/runtime.js";
 
@@ -500,13 +500,17 @@ function gatewayProtocolFailure(request: ProviderRequest): RuntimeFailure {
 
 function runtimeJsonFromString(inputJson: string): {
   readonly input: RuntimeJsonValue;
-  readonly inputPreview: ReturnType<typeof RuntimeBoundedJsonSchema.parse>;
+  readonly inputPreview: ReturnType<typeof RuntimeJsonPreviewSchema.parse>;
 } | undefined {
   try {
     const value = JSON.parse(inputJson) as RuntimeJsonValue;
+    const bounded = boundRuntimeJson(value, RuntimePreviewTextMaxBytes);
     return {
       input: value,
-      inputPreview: RuntimeBoundedJsonSchema.parse(boundRuntimeJson(value, RuntimePreviewTextMaxBytes)),
+      inputPreview: RuntimeJsonPreviewSchema.parse({
+        preview: bounded.preview,
+        truncated: bounded.truncated,
+      }),
     };
   } catch {
     return undefined;

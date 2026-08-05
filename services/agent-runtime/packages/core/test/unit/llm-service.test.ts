@@ -753,7 +753,9 @@ describe("LLMService Gateway boundary", () => {
       { type: "tool-input-end", id: "call-1", toolName: "lookup" },
       {
         type: "tool-call", id: "call-1", toolName: "lookup", input: { q: "hi" },
-        inputPreview: { value: { q: "hi" }, preview: "{\"q\":\"hi\"}", truncated: false },
+        inputPreview: {
+          preview: "{\"q\":\"hi\"}", truncated: false,
+        },
       },
       { type: "finish", finishReason: "tool-calls", usage: emptyFinishUsage, modelLimits: defaultFinishLimits },
     ]);

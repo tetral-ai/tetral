@@ -322,7 +322,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 		}
 		inputValue := map[string]any{"value": exactInput, "preview": canonicalInput, "truncated": false}
 		if index == 2 {
-			inputValue = map[string]any{"preview": canonicalInput[:8192], "truncated": true}
+			inputValue = map[string]any{"value": exactInput, "preview": canonicalInput[:8192], "truncated": true}
 		}
 		partJSON, err := json.Marshal(map[string]any{
 			"type":       "tool",
@@ -409,6 +409,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 		t.Fatalf("LoadContext shared tools: %v", err)
 	}
 	var contextPayload struct {
+		Messages        []json.RawMessage `json:"messages"`
 		PendingToolUses []struct {
 			ToolUseEventID string          `json:"toolUseEventId"`
 			Input          json.RawMessage `json:"input"`
@@ -428,6 +429,37 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 		if loadedInput[tool.eventID] != tool.input {
 			t.Fatalf("cold approval input for %s differs from exact durable input", tool.eventID)
 		}
+	}
+	var coldToolInput json.RawMessage
+	var coldToolPreview string
+	var coldToolTruncated bool
+	for _, rawMessage := range contextPayload.Messages {
+		var message struct {
+			Parts []struct {
+				ToolCallID string `json:"toolCallId"`
+				State      struct {
+					Input struct {
+						Value     json.RawMessage `json:"value"`
+						Preview   string          `json:"preview"`
+						Truncated bool            `json:"truncated"`
+					} `json:"input"`
+				} `json:"state"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal(rawMessage, &message); err != nil {
+			t.Fatalf("decode cold shared tool message: %v", err)
+		}
+		for _, part := range message.Parts {
+			if part.ToolCallID == tools[2].callID {
+				coldToolInput = part.State.Input.Value
+				coldToolPreview = part.State.Input.Preview
+				coldToolTruncated = part.State.Input.Truncated
+			}
+		}
+	}
+	if string(coldToolInput) != tools[2].input || len(coldToolPreview) != 8192 || !coldToolTruncated {
+		t.Fatalf("cold shared tool input value/preview/truncated = %d/%d/%v; want exact/%d/true",
+			len(coldToolInput), len(coldToolPreview), coldToolTruncated, len(tools[2].input))
 	}
 
 	baseRequest := func(tool acceptedTool) *bridgev1.AcceptSandboxExecutionRequest {
@@ -571,7 +603,7 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 		}
 		inputValue := map[string]any{"value": exactInput, "preview": tool.input, "truncated": false}
 		if len(tool.input) > 8192 {
-			inputValue = map[string]any{"preview": tool.input[:8192], "truncated": true}
+			inputValue = map[string]any{"value": exactInput, "preview": tool.input[:8192], "truncated": true}
 		}
 		partJSON, err := json.Marshal(map[string]any{
 			"type": "tool", "toolCallId": tool.callID, "toolName": tool.toolName,

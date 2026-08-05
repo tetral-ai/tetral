@@ -231,7 +231,8 @@ activation/materialization/release, cancellation, background commands,
 memory projection, and output capture/cleanup, receive the shared wake hint.
 
 `queue.job.leased` records `queue.job.id`, `queue.job.kind`, the partition, and
-`duration.ms` from durable creation to lease. Sandbox provider completion lines
+`duration.ms` for the database Lease call and `queue.ready_wait.ms` from a
+job becoming available to being leased. Sandbox provider completion lines
 use `sandbox.provider.operation_completed` with `operation`, `outcome`,
 `duration.ms`, available workspace/session/thread/lifecycle/provider IDs, and a
 normalized error kind. Materialization arm operations identify helper health,

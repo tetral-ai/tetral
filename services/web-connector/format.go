@@ -7,9 +7,9 @@ import (
 	"unicode/utf8"
 )
 
-func formatSearch(query string, domains []string, hits []SearchHit, refs []Ref) string {
+func formatSearch(domains []string, hits []SearchHit, refs []Ref) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Search results for %q", query)
+	b.WriteString("Search results")
 	if len(domains) > 0 {
 		b.WriteString(", sites: ")
 		for i, domain := range domains {
@@ -116,7 +116,7 @@ func formatFind(id, pattern string, page Page) (string, error) {
 	if total == 1 {
 		word = "match"
 	}
-	fmt.Fprintf(&b, "[%s] %d %s for pattern %s in %d lines", id, total, word, pattern, len(lines))
+	fmt.Fprintf(&b, "[%s] %d %s in %d lines", id, total, word, len(lines))
 	for _, item := range matches {
 		fmt.Fprintf(&b, "\nL%d: %s", item.number, item.text)
 	}

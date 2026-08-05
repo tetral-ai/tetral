@@ -63,6 +63,7 @@ import {
 } from "../../../core/test/unit/runtime-message-builders.js";
 import { createJsonLogger } from "../../src/logger.js";
 import { RuntimePodMetricsRegistry } from "../../src/metrics.js";
+import { MaxBridgeDurableContextGrpcMessageBytes } from "../../src/bounds.js";
 
 describe("BridgeAPIContextLoader", () => {
   test("rejects missing message arrays and accepts an explicit empty context", async () => {
@@ -110,6 +111,49 @@ describe("BridgeAPIContextLoader", () => {
     });
 
     await expect(loader.loadThreadContext(control("thr_main", "rin_empty_context", 1))).resolves.toMatchObject({ messages: [] });
+  });
+
+  test("loads a complete cold context above the former 32 MiB carrier without changing message bytes", async () => {
+    const bridge = new RecordingBridgeClient();
+    const texts = [
+      `CONTEXT_HEAD${"a".repeat(11 * 1024 * 1024 - 12)}`,
+      "b".repeat(11 * 1024 * 1024),
+      `${"c".repeat(11 * 1024 * 1024 - 12)}CONTEXT_TAIL`,
+    ];
+    bridge.loadContextJSON = JSON.stringify({
+      messages: texts.map((text, index) => ({
+        ...durableRuntimeMessage(`msg_large_context_${index}`, text),
+        sequence: index + 1,
+        eventSequence: index + 1,
+      })),
+      turnFacts: { events: [], messageLineage: [] },
+      coldCoverage: {
+        pendingToolIds: [],
+        pendingSandboxExecutionIds: [],
+        pendingAttachmentIdentities: [],
+        undeliveredMailDeliveryIds: [],
+      },
+      thread: {
+        parentThreadId: null,
+        role: "main",
+        visibility: "public",
+        taskName: null,
+        agentType: "general",
+        status: "idle",
+      },
+    });
+    const loader = new BridgeAPIContextLoader({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    const loaded = await loader.loadThreadContext(control("thr_main", "rin_large_context", 1));
+
+    expect(Buffer.byteLength(bridge.loadContextJSON, "utf8")).toBeGreaterThan(32 * 1024 * 1024);
+    expect(Buffer.byteLength(bridge.loadContextJSON, "utf8")).toBeLessThan(MaxBridgeDurableContextGrpcMessageBytes);
+    expect(loaded.messages.map((message) => message.parts[0]?.type === "text" ? message.parts[0].text : "")).toEqual(texts);
   });
 
   test("refreshes binding tokens on expiry margin with per-thread single-flight", async () => {
@@ -726,6 +770,46 @@ describe("BridgeAPIControlInputCommitter", () => {
 });
 
 describe("BridgeAPIEventWriter", () => {
+  test("rejects an aggregate declaration above the durable carrier before metadata or transport", async () => {
+    const bridge = new RecordingBridgeClient();
+    let metadataCalls = 0;
+    const writer = new BridgeAPIEventWriter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => {
+        metadataCalls++;
+        return new Metadata();
+      },
+    });
+    const largeDraft = outputDraft(
+      "rwrite_aggregate_overflow",
+      "agent.message",
+      "assistant_text",
+      assistantTextMessage("x".repeat(16 * 1024 * 1024 - 2)),
+    );
+    const drafts = Array.from({ length: 5 }, (_, index) => ({
+      ...largeDraft,
+      runtimeLocalId: `runtime_message_${index}`,
+    }));
+
+    const result = await writer.append({
+      ...writerScope(),
+      writeId: "rwrite_aggregate_overflow",
+      event: { type: "agent.message", content: [{ type: "text", text: "complete" }] },
+      drafts,
+      modelRequestId: "mreq_aggregate_overflow",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "schema_mismatch", retryable: false, fatal: true },
+    });
+    expect(metadataCalls).toBe(0);
+    expect(bridge.writeEventRequests).toEqual([]);
+    expect(MaxBridgeDurableContextGrpcMessageBytes).toBe(64 * 1024 * 1024);
+  });
+
   test("returns the original Tool Use receipt when Bridge reports a duplicate write", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.eventWriterAckStatus = BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE;

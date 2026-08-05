@@ -9,7 +9,7 @@
  */
 
 import { z } from "zod/v4";
-import { MaxProviderErrorMessageBytes, truncateUtf8Bytes } from "@tetral/gateway-protocol/src/bounds.js";
+import { MaxIdBytes, MaxProviderErrorMessageBytes, truncateUtf8Bytes } from "@tetral/gateway-protocol/src/bounds.js";
 
 /** Provider identifier carried through Runtime without selecting a provider implementation. */
 export type ProviderId = string;
@@ -216,7 +216,7 @@ function safeOptionalIdentifier(value: string | undefined): string | undefined {
   if (value === undefined || value.length === 0) {
     return undefined;
   }
-  return value.length > 128 ? value.slice(0, 128) : value;
+  return truncateUtf8Bytes(value, MaxIdBytes);
 }
 
 function safeOptionalNonNegativeInteger(value: number | undefined): number | undefined {

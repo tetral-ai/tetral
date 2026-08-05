@@ -3,6 +3,7 @@ import {
   capacityProofHasRequiredHeadroom,
   runGatewayCapacityProof,
   runGatewayCapacityFuseMutation,
+  runGatewayReceiveCapacityFuseMutation,
   runGatewayReceiveFuseProof,
   runLargeToolInputMappingProof,
   runMaximumReadTransportProof,
@@ -13,9 +14,10 @@ describe("Runtime-to-Gateway catalog capacity", () => {
   test("carries the maximum-context production vectors with transport headroom", async () => {
     const measurements = await runGatewayCapacityProof();
 
-    expect(measurements).toHaveLength(4);
+    expect(measurements).toHaveLength(5);
     for (const measurement of measurements) {
       expect(capacityProofHasRequiredHeadroom(measurement)).toBe(true);
+      expect(measurement.estimatedTokens).toBeLessThanOrEqual(measurement.modelLimitTokens);
       expect(Object.keys(measurement.loweredBytesByFamily).sort()).toEqual([
         "anthropic",
         "openai",
@@ -28,6 +30,18 @@ describe("Runtime-to-Gateway catalog capacity", () => {
   test("fails when the Runtime request carrier is lowered below a maximum vector", async () => {
     await expect(runGatewayCapacityFuseMutation()).rejects.toMatchObject({
       type: "gateway-client",
+      code: "gateway_unavailable",
+      retryable: true,
+      fatal: false,
+    });
+  }, 30_000);
+
+  test("fails when the Gateway receive carrier is lowered below a maximum vector", async () => {
+    await expect(runGatewayReceiveCapacityFuseMutation()).rejects.toMatchObject({
+      type: "gateway-client",
+      code: "gateway_unavailable",
+      retryable: true,
+      fatal: false,
     });
   }, 30_000);
 
@@ -45,9 +59,11 @@ describe("Runtime-to-Gateway catalog capacity", () => {
   test("carries an exact maximum Read result through formatting and provider transport", async () => {
     const measurement = await runMaximumReadTransportProof();
     expect(measurement.envelopeBytes).toBe(200_000);
-    expect(measurement.projectedOutputBytes).toBeLessThanOrEqual(256 * 1024);
-    expect(measurement.providerRequestBytes).toBeLessThan(32 * 1024 * 1024);
-    expect(measurement.providerBodyContainsMarker).toBe(true);
+    expect(measurement.projectedOutputBytes).toBeLessThanOrEqual(512 * 1024);
+    expect(measurement.providerRequestBytes).toBeLessThan(64 * 1024 * 1024);
+    expect(measurement.providerBodyContainsMarkers).toBe(true);
+    expect(measurement.outputPreserved).toBe(true);
+    expect(measurement.truncated).toBe(false);
   }, 30_000);
 
   test("classifies a real oversized Gateway event as a local receive-fuse failure", async () => {

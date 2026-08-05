@@ -96,8 +96,8 @@ func run(ctx context.Context, env envReader) error {
 		Register:          func(server *grpc.Server) { agentruntimebridge.RegisterBridgeAPI(server, store) },
 		MethodAuthorizer:  agentruntimebridge.BridgeAPIMethodAuthorizer,
 		ServerOptions: []grpc.ServerOption{
-			grpc.MaxRecvMsgSize(sessionrpc.MaxAttachmentGRPCMessageBytes),
-			grpc.MaxSendMsgSize(sessionrpc.MaxAttachmentGRPCMessageBytes),
+			grpc.MaxRecvMsgSize(sessionrpc.MaxBridgeAPIGRPCMessageBytes),
+			grpc.MaxSendMsgSize(sessionrpc.MaxBridgeAPIGRPCMessageBytes),
 		},
 		DBStatsProvider:      database.Client,
 		RunWorkload:          runWorkload,

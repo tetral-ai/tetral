@@ -1171,7 +1171,9 @@ test("failed interrupt receipt application leaves FinishIdle unwritten and surfa
                         id: "tool-repair-failure",
                         toolName: "Write",
                         input: { file_path: "src/failure.ts", content: "one" },
-                        inputPreview: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
+                        inputPreview: {
+                            preview: "{}", truncated: false,
+                        },
                     };
                     if (streamOptions?.abortSignal === undefined) {
                         throw new Error("provider stream requires an abort signal");

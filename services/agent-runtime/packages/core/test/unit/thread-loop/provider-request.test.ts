@@ -11,6 +11,7 @@ import {
   ApplyPatchInstructionsText,
   PlatformBaseSystemPrompt,
   assembleProviderCallRequest,
+  requestErrorKindFromFailure,
   renderSkillGuidanceSegment,
 } from "../../../src/thread-loop/provider-request.js";
 import type {
@@ -29,7 +30,18 @@ import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, T
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
-test("reports declaration, event-write, and provider stream metrics through injected sink", async () => {
+  test("classifies bounded Runtime output as a semantic request error", () => {
+    expect(requestErrorKindFromFailure({
+      type: "runtime",
+      code: "runtime_invalid_sequence",
+      message: "Runtime provider output exceeds its semantic size bound.",
+      retryable: false,
+      fatal: true,
+      reason: "bounded",
+    })).toBe("runtime_semantic_error");
+  });
+
+  test("reports declaration, event-write, and provider stream metrics through injected sink", async () => {
     const metrics = new RecordingRuntimeMetrics();
     const loader = new RecordingContextLoader([], {
         type: "messages",

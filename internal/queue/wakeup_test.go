@@ -1,11 +1,17 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 )
 
 func TestConsumerClassForKindCoversEveryKnownKind(t *testing.T) {
@@ -24,6 +30,49 @@ func TestConsumerClassForKindCoversEveryKnownKind(t *testing.T) {
 	}
 	if consumerClass, ok := ConsumerClassForKind("unknown"); ok || consumerClass != "" {
 		t.Fatalf("ConsumerClassForKind(unknown) = %q,%t; want empty,false", consumerClass, ok)
+	}
+}
+
+func TestNotificationListenerFailureLogsSafePermanentAndTransientCategories(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		code      string
+		retryable bool
+	}{
+		{
+			name: "authentication",
+			err: &dbconnect.DiagnosticError{
+				Kind:  dbconnect.KindAuthenticationFailed,
+				Cause: errors.New("password=listener-secret"),
+			},
+			code: "notification_listener_authentication", retryable: false,
+		},
+		{
+			name: "endpoint transport",
+			err: &pgconn.PgError{
+				Code: "08006", Message: "connection to postgresql://user:listener-secret@example.invalid failed",
+			},
+			code: "notification_listener_endpoint_transport", retryable: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logNotificationListenerFailure(slog.New(slog.NewJSONHandler(&logs, nil)), ConsumerClassBridge, test.err)
+			for _, want := range []string{
+				`"error.code":"` + test.code + `"`,
+				`"retryable":` + map[bool]string{true: "true", false: "false"}[test.retryable],
+				`"error.message_safe":"queue notification listener disconnected"`,
+			} {
+				if !strings.Contains(logs.String(), want) {
+					t.Fatalf("listener log missing %s: %s", want, logs.String())
+				}
+			}
+			if strings.Contains(logs.String(), "listener-secret") || strings.Contains(logs.String(), "postgresql://") {
+				t.Fatalf("listener log exposed raw cause: %s", logs.String())
+			}
+		})
 	}
 }
 

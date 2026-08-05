@@ -8,6 +8,7 @@
  * repair writers and returns the hot projection and durable-ACK outcomes to ThreadLoop.
  */
 import { createHash } from "node:crypto";
+import { MaxProviderRequestMessagePartJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   RuntimeMessageStoreError,
   RuntimeBoundedJson,
@@ -38,7 +39,10 @@ import {
   RuntimeMessageDraftSchema,
   RuntimeFailureSchema,
   RuntimePartDraftSchema,
+  RuntimeBoundedJsonSchema,
   RuntimeBoundedTextSchema,
+  MaxStableReasoningBytesPerRequest,
+  MaxStableReasoningPartsPerRequest,
   normalizeSessionEventWriterError,
   normalizeRuntimeMessageStoreError,
   boundRuntimeText,
@@ -136,12 +140,6 @@ export interface SessionProcessorOptions {
     readonly toolUseEventId: string;
     readonly outcome: "success" | "error" | "cancelled";
   }) => void;
-}
-
-interface TextAppendResult {
-  readonly text: string;
-  readonly truncated: boolean;
-  readonly acceptedDelta: string;
 }
 
 type TextRuntimePartDraft = Extract<RuntimePartDraft, { readonly type: "text" }>;
@@ -370,13 +368,13 @@ export class SessionProcessor {
       case "text-start":
         return await this.startText({ ...envelope, event });
       case "text-delta":
-        return this.appendText({ ...envelope, event });
+        return await this.appendText({ ...envelope, event });
       case "text-end":
         return await this.endText({ ...envelope, event });
       case "reasoning-start":
         return await this.startReasoning({ ...envelope, event });
       case "reasoning-delta":
-        return this.appendReasoning({ ...envelope, event });
+        return await this.appendReasoning({ ...envelope, event });
       case "reasoning-end":
         return await this.endReasoning({ ...envelope, event });
       case "tool-input-start":
@@ -828,17 +826,19 @@ export class SessionProcessor {
     return { ok: true, events: [] };
   }
 
-  private appendText(
+  private async appendText(
     envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { readonly type: "text-delta" }> },
-  ): SessionProcessorResult {
+  ): Promise<SessionProcessorResult> {
     if (this.activeTextPart === undefined) {
       return { ok: true, events: [] };
     }
-    const appended = appendBoundedText(this.activeTextPart, envelope.event.text_delta, this.maxBytes());
+    const text = `${this.activeTextPart.text}${envelope.event.text_delta}`;
+    if (!withinJsonStringBudget(text, MaxProviderRequestMessagePartJsonBytes)) {
+      return await this.terminalFailure(envelope, "failed", boundedSemanticFailure());
+    }
     const updatedText = parseTextPart({
       ...this.activeTextPart,
-      text: appended.text,
-      truncated: appended.truncated,
+      text,
     });
     this.activeTextPart = updatedText;
     this.upsertPart(this.activeTextPart);
@@ -877,6 +877,9 @@ export class SessionProcessor {
       status: "streaming",
       startedAt: now,
     });
+    if (!this.reasoningSetFits(part)) {
+      return await this.terminalFailure(envelope, "failed", boundedSemanticFailure());
+    }
     const event = this.sessionEvent({ type: "agent.thinking" });
     const appendResult = await this.options.writer.appendEvent(event, envelope);
     if (!appendResult.ok) {
@@ -890,21 +893,22 @@ export class SessionProcessor {
     return { ok: true, events: [event] };
   }
 
-  private appendReasoning(
+  private async appendReasoning(
     envelope: LLMEventEnvelope & { readonly event: Extract<LLMEvent, { readonly type: "reasoning-delta" }> },
-  ): SessionProcessorResult {
+  ): Promise<SessionProcessorResult> {
     const part = this.reasoningParts.get(envelope.event.id);
     if (part === undefined) {
       return { ok: true, events: [] };
     }
-    const appended = appendBoundedText(part, envelope.event.text_delta, this.maxBytes());
     const providerMetadata = mergeProviderMetadata(part.providerMetadata, envelope.event.providerMetadata);
     const updated = parseReasoningPart({
       ...part,
       ...(providerMetadata !== undefined ? { providerMetadata } : {}),
-      text: appended.text,
-      truncated: appended.truncated,
+      text: `${part.text}${envelope.event.text_delta}`,
     });
+    if (!withinJsonStringBudget(updated.text, MaxProviderRequestMessagePartJsonBytes) || !this.reasoningSetFits(updated)) {
+      return await this.terminalFailure(envelope, "failed", boundedSemanticFailure());
+    }
     this.reasoningParts.set(envelope.event.id, updated);
     this.upsertPart(updated);
     return { ok: true, events: [] };
@@ -959,7 +963,7 @@ export class SessionProcessor {
       toolName: envelope.event.toolName,
       state: {
         status: "running",
-        input: runtimeJsonFromProvider(envelope.event.inputPreview, this.maxBytes()),
+        input: runtimeJsonFromProvider(envelope.event.input, envelope.event.inputPreview, this.maxBytes()),
       },
     });
     this.toolParts.set(envelope.event.id, updated);
@@ -1322,6 +1326,27 @@ export class SessionProcessor {
     return this.workingMessage.parts;
   }
 
+  private reasoningSetFits(candidate: ReasoningRuntimePartDraft): boolean {
+    const parts = new Map<string, ReasoningRuntimePartDraft>();
+    for (const part of this.currentParts()) {
+      if (part.type === "reasoning") {
+        parts.set(part.runtimeLocalPartId, part);
+      }
+    }
+    for (const part of this.reasoningParts.values()) {
+      parts.set(part.runtimeLocalPartId, part);
+    }
+    parts.set(candidate.runtimeLocalPartId, candidate);
+    if (parts.size > MaxStableReasoningPartsPerRequest) {
+      return false;
+    }
+    let aggregateBytes = 0;
+    for (const part of parts.values()) {
+      aggregateBytes += byteLength(part.text) + byteLength(JSON.stringify(part.providerMetadata ?? {}));
+    }
+    return aggregateBytes <= MaxStableReasoningBytesPerRequest;
+  }
+
   private outputDraftFromMessage(
     runtimeWriteId: string,
     eventType: string,
@@ -1507,34 +1532,25 @@ function parseToolPart(input: unknown): ToolRuntimePartDraft {
   return part;
 }
 
-function appendBoundedText(
-  part: TextRuntimePartDraft | ReasoningRuntimePartDraft,
-  text_delta: string,
+function runtimeJsonFromProvider(
+  value: RuntimeJsonValue,
+  preview: Extract<LLMEvent, { readonly type: "tool-call" }>["inputPreview"],
   maxBytes: number,
-): TextAppendResult {
-  const bounded = boundRuntimeText(`${part.text}${text_delta}`, maxBytes);
-  const acceptedDelta = bounded.text.startsWith(part.text) ? bounded.text.slice(part.text.length) : "";
-  return {
-    text: bounded.text,
-    truncated: part.truncated || bounded.truncated,
-    acceptedDelta,
-  };
-}
-
-function runtimeJsonFromProvider(payload: RuntimeBoundedJson, maxBytes: number): RuntimeBoundedJson {
-  const boundedPreview = boundRuntimeText(payload.preview, maxBytes);
-  const serializedValue = payload.value === undefined ? undefined : JSON.stringify(payload.value);
-  const valueFits =
-    serializedValue !== undefined && byteLength(serializedValue) <= maxBytes && !boundedPreview.truncated;
-  return {
-    ...(valueFits ? { value: payload.value } : {}),
+): RuntimeBoundedJson {
+  const boundedPreview = boundRuntimeText(preview.preview, maxBytes);
+  return RuntimeBoundedJsonSchema.parse({
+    value,
     preview: boundedPreview.text,
-    truncated: payload.truncated || boundedPreview.truncated || (payload.value !== undefined && !valueFits),
-  };
+    truncated: preview.truncated || boundedPreview.truncated,
+  });
 }
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+function withinJsonStringBudget(value: string, maxBytes: number): boolean {
+  return byteLength(JSON.stringify(value)) <= maxBytes;
 }
 
 function toolUseSessionEvent(
@@ -1744,6 +1760,17 @@ function semanticSequenceFailure(): RuntimeFailure {
     retryable: false,
     fatal: true,
     reason: "runtime_contract_validation",
+  };
+}
+
+function boundedSemanticFailure(): RuntimeFailure {
+  return {
+    type: "runtime",
+    code: "runtime_invalid_sequence",
+    message: "Runtime provider output exceeds its semantic size bound.",
+    retryable: false,
+    fatal: true,
+    reason: "bounded",
   };
 }
 

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
 )
@@ -145,16 +147,7 @@ func RunNotificationListener(ctx context.Context, listener NotificationListener,
 			return nil
 		}
 		if logger != nil {
-			logger.Warn("queue.notification_listener.disconnected",
-				slog.String("operation", "queue.notification_listener"),
-				slog.String("event.kind", "listener_disconnected"),
-				slog.String("consumer.class", consumerClass),
-				slog.String("error.class", "queue_notification_listener_error"),
-				slog.String("error.code", "listener_disconnected"),
-				slog.String("error.message_safe", "queue notification listener disconnected"),
-				slog.Bool("retryable", true),
-				slog.Bool("terminal", false),
-			)
+			logNotificationListenerFailure(logger, consumerClass, err)
 		}
 		delay := backoff.Next(false)
 		if err == nil {
@@ -167,4 +160,57 @@ func RunNotificationListener(ctx context.Context, listener NotificationListener,
 			return waitErr
 		}
 	}
+}
+
+type notificationListenerFailure struct {
+	category  string
+	retryable bool
+}
+
+func logNotificationListenerFailure(logger *slog.Logger, consumerClass string, err error) {
+	failure := classifyNotificationListenerFailure(err)
+	logger.Warn("queue.notification_listener.disconnected",
+		slog.String("operation", "queue.notification_listener"),
+		slog.String("event.kind", "listener_disconnected"),
+		slog.String("consumer.class", consumerClass),
+		slog.String("error.class", "queue_notification_listener_error"),
+		slog.String("error.code", "notification_listener_"+failure.category),
+		slog.String("error.message_safe", "queue notification listener disconnected"),
+		slog.Bool("retryable", failure.retryable),
+		slog.Bool("terminal", false),
+	)
+}
+
+func classifyNotificationListenerFailure(err error) notificationListenerFailure {
+	var diagnostic *dbconnect.DiagnosticError
+	if errors.As(err, &diagnostic) {
+		switch diagnostic.Kind {
+		case dbconnect.KindAuthenticationFailed:
+			return notificationListenerFailure{category: "authentication", retryable: false}
+		case dbconnect.KindPermissionDenied, dbconnect.KindRuntimeRoleInvalid:
+			return notificationListenerFailure{category: "permission", retryable: false}
+		case dbconnect.KindEndpointUnreachable, dbconnect.KindTLSFailed:
+			return notificationListenerFailure{category: "endpoint_transport", retryable: true}
+		case dbconnect.KindTimeout:
+			return notificationListenerFailure{category: "timeout", retryable: true}
+		}
+	}
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) {
+		switch {
+		case len(pgError.Code) >= 2 && pgError.Code[:2] == "28":
+			return notificationListenerFailure{category: "authentication", retryable: false}
+		case pgError.Code == "42501":
+			return notificationListenerFailure{category: "permission", retryable: false}
+		case len(pgError.Code) >= 2 && pgError.Code[:2] == "08", pgError.Code == "57P01":
+			return notificationListenerFailure{category: "endpoint_transport", retryable: true}
+		case pgError.Code == "57014":
+			return notificationListenerFailure{category: "timeout", retryable: true}
+		}
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return notificationListenerFailure{category: "timeout", retryable: true}
+	}
+	return notificationListenerFailure{category: "unknown", retryable: true}
 }

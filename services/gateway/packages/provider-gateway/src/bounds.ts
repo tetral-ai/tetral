@@ -36,15 +36,14 @@ import type { ValidationResult } from "@tetral/gateway-protocol/src/bounds.js";
 const MaxWebOperations = 8;
 const MaxSearchDomains = 4;
 const MaxDomainBytes = 253;
-// The Runtime->Gateway request-channel fuse. 32 MiB is sized to the catalog's
-// largest full-context request (largest context window serialized plus envelope
-// overhead), the same order as the upstream provider's own public request cap.
+// The Runtime->Gateway request-channel fuse carries the catalog's largest
+// full-context request, including escape-dense output history and envelope overhead.
 // It is pinned at BOTH ends: this server-receive length AND the runtime-pod
 // client's send length (grpc.max_send_message_length, plus its pre-send encoded-
 // size check) must carry the same value — setting one without the other leaves
 // the smaller wall in force on the model path.
 // UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
-const MaxGrpcInboundMessageBytes = 32 * 1024 * 1024;
+const MaxGrpcInboundMessageBytes = 64 * 1024 * 1024;
 const MaxGrpcOutboundMessageBytes = 8 * 1024 * 1024;
 // Connection-lifecycle bounds that drive per-call load balancing across replicas.
 // max_connection_age (5 min) forces clients to periodically drop and re-resolve

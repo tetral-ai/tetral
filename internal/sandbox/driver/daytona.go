@@ -262,15 +262,6 @@ func (e *DaytonaHelperExecutor) ObserveForegroundTool(ctx context.Context, obser
 	return ToolExecution{ResultJSON: resultJSON, ForegroundObservation: &next}, nil
 }
 
-func (e *DaytonaHelperExecutor) cancelUntrackedForegroundTask(reference CommandReference) bool {
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	result, err := e.executeCommandHelper(cancelCtx, reference, helperSubcommandCancel, map[string]any{
-		"task_id": reference.Task.TaskID,
-	})
-	return err == nil && result.TerminalStatus != ""
-}
-
 type foregroundCommandAccumulator struct {
 	stdout *foregroundStreamAccumulator
 	stderr *foregroundStreamAccumulator

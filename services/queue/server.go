@@ -53,7 +53,8 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	if err != nil {
 		return nil, err
 	}
-	leaseNow := s.nowUTC()
+	leaseStarted := s.nowUTC()
+	leaseNow := leaseStarted
 	jobs, err := s.store.Lease(ctx, queue.LeaseRequest{
 		WorkspaceID:   workspace.ID(request.GetWorkspaceId()),
 		Kinds:         request.GetKinds(),
@@ -65,21 +66,26 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	if err != nil {
 		return nil, mapQueueError(err)
 	}
+	leaseCompleted := s.nowUTC()
 	response := &queuev1.LeaseResponse{Jobs: make([]*queuev1.QueueJob, 0, len(jobs))}
 	for _, job := range jobs {
-		s.logLease(job, leaseNow)
+		s.logLease(job, leaseNow, leaseStarted, leaseCompleted)
 		response.Jobs = append(response.Jobs, queueJobToProto(job))
 	}
 	return response, nil
 }
 
-func (s *Server) logLease(job *queue.Job, now time.Time) {
+func (s *Server) logLease(job *queue.Job, leaseNow, leaseStarted, leaseCompleted time.Time) {
 	if s == nil || s.logger == nil || job == nil {
 		return
 	}
-	wait := now.Sub(job.CreatedAt)
-	if wait < 0 {
-		wait = 0
+	duration := leaseCompleted.Sub(leaseStarted)
+	if duration < 0 {
+		duration = 0
+	}
+	readyWait := leaseNow.Sub(job.AvailableAt)
+	if readyWait < 0 {
+		readyWait = 0
 	}
 	s.logger.Info("queue.job.leased",
 		slog.String("operation", "queue.lease"),
@@ -88,7 +94,8 @@ func (s *Server) logLease(job *queue.Job, now time.Time) {
 		slog.String("queue.job.id", job.ID),
 		slog.String("queue.job.kind", job.Kind),
 		slog.String("queue.partition.key", job.PartitionKey),
-		slog.Int64("duration.ms", wait.Milliseconds()),
+		slog.Int64("duration.ms", duration.Milliseconds()),
+		slog.Int64("queue.ready_wait.ms", readyWait.Milliseconds()),
 	)
 }
 

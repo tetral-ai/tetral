@@ -103,7 +103,6 @@ test(`lost Tool Use acknowledgement retries one write identity and continues aft
                     toolName: "lookup_ack_loss",
                     input: { query: "durable" },
                     inputPreview: {
-                        value: { query: "durable" },
                         preview: "{\"query\":\"durable\"}",
                         truncated: false,
                     },
@@ -272,7 +271,7 @@ test("approval reviewer tools settle before the reviewer produces its final deci
                 id: "call_reviewer_read",
                 toolName: "Read",
                 input: { file_path: "README.md" },
-                inputPreview: { value: { file_path: "README.md" }, preview: "{}", truncated: false },
+                inputPreview: { preview: "{}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -384,7 +383,6 @@ test("provider reschedule does not repeat committed RunTool effect", async () =>
                         toolName: "mutate_record",
                         input: { record_id: "reschedule", value: "committed" },
                         inputPreview: {
-                            value: { record_id: "reschedule", value: "committed" },
                             preview: "{\"record_id\":\"reschedule\",\"value\":\"committed\"}",
                             truncated: false,
                         },
@@ -526,7 +524,7 @@ test("same-request committed tool is repaired and rebased before provider resche
                         id: "tool-same-request",
                         toolName: "mutate_record",
                         input: { id: "one" },
-                        inputPreview: { value: { id: "one" }, preview: "{\"id\":\"one\"}", truncated: false },
+                        inputPreview: { preview: "{\"id\":\"one\"}", truncated: false },
                     };
                     await toolResultCommitted.promise;
                     yield { type: "provider-error" as const, error: failure };
@@ -626,7 +624,7 @@ test("runtime layer discards hot state when a tool route observes stale custody"
                 id: "tool-1",
                 toolName: "search",
                 input: { q: "x" },
-                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -661,7 +659,7 @@ test("runtime layer tracks background tool state until task notification settlem
                 id: "tool-1",
                 toolName: "search",
                 input: { q: "x" },
-                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -964,7 +962,7 @@ test("request-end failure cancels and durably settles an acknowledged live tool"
                         id: "tool-live",
                         toolName: "Write",
                         input: { file_path: "src/a.ts", content: "ok" },
-                        inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                        inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
                     };
                     await toolStarted.promise;
                     yield { type: "finish" as const, finishReason: "tool-calls" as const };
@@ -1048,7 +1046,7 @@ test("request end waits for an in-flight Tool Result declaration ACK", async () 
                         id: "tool-live",
                         toolName: "Read",
                         input: { file_path: "src/a.ts" },
-                        inputPreview: { value: { file_path: "src/a.ts" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                        inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
                     };
                     await toolStarted.promise;
                     releaseTool.resolve(undefined);
@@ -1227,7 +1225,7 @@ test("runtime layer commits valid tool errors to hot context after error result 
                 id: "tool-1",
                 toolName: "search",
                 input: { q: "x" },
-                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -1309,7 +1307,6 @@ test("a lost continuation Request Start acknowledgement retries one identity wit
                     toolName: "Read",
                     input: { file_path: "src/a.ts" },
                     inputPreview: {
-                        value: { file_path: "src/a.ts" },
                         preview: "{\"file_path\":\"src/a.ts\"}",
                         truncated: false,
                     },
@@ -1323,7 +1320,6 @@ test("a lost continuation Request Start acknowledgement retries one identity wit
                     toolName: "Read",
                     input: { file_path: "src/b.ts" },
                     inputPreview: {
-                        value: { file_path: "src/b.ts" },
                         preview: "{\"file_path\":\"src/b.ts\"}",
                         truncated: false,
                     },
@@ -1403,7 +1399,6 @@ test("the continuation request combines terminal Tool Results with user input an
                     toolName: "Read",
                     input: { file_path: "src/mixed.ts" },
                     inputPreview: {
-                        value: { file_path: "src/mixed.ts" },
                         preview: "{\"file_path\":\"src/mixed.ts\"}",
                         truncated: false,
                     },
@@ -1479,7 +1474,7 @@ test("absent cross-family builtins take the durable internal invalid-tool repair
                         id: "tool-other-family",
                         toolName: tc.absentTool,
                         input: {},
-                        inputPreview: { value: {}, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     },
                     { type: "finish", finishReason: "tool-calls" },
                 ],
@@ -1525,14 +1520,14 @@ test("mixed internal repair and public Tool Use waits for the public terminal re
                         id: "call-invalid-cross-family",
                         toolName: "exec_command",
                         input: {},
-                        inputPreview: { value: {}, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     },
                     {
                         type: "tool-call",
                         id: "call-public-read",
                         toolName: "Read",
                         input: { file_path: "README.md" },
-                        inputPreview: { value: { file_path: "README.md" }, preview: "{\"file_path\":\"README.md\"}", truncated: false },
+                        inputPreview: { preview: "{\"file_path\":\"README.md\"}", truncated: false },
                     },
                     { type: "finish", finishReason: "tool-calls" },
                 ],
@@ -1584,14 +1579,14 @@ test("runtime layer schedules same-target tool calls through ToolScheduler", asy
                 id: "tool-1",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "one" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             {
                 type: "tool-call",
                 id: "tool-2",
                 toolName: "Write",
                 input: { file_path: "/workspace/src/a.ts", content: "two" },
-                inputPreview: { value: { file_path: "/workspace/src/a.ts", content: "two" }, preview: "{\"file_path\":\"/workspace/src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"/workspace/src/a.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -1647,10 +1642,10 @@ test("four mixed-policy tools continue once only after every terminal receipt", 
                     ]);
                 }
                 return Stream.fromIterable([
-                    { type: "tool-call" as const, id: "write-1", toolName: "Write", input: { file_path: "same.txt", content: "one" }, inputPreview: { value: {}, preview: "{}", truncated: false } },
-                    { type: "tool-call" as const, id: "read-1", toolName: "Read", input: { file_path: "one.txt" }, inputPreview: { value: {}, preview: "{}", truncated: false } },
-                    { type: "tool-call" as const, id: "write-2", toolName: "Write", input: { file_path: "same.txt", content: "two" }, inputPreview: { value: {}, preview: "{}", truncated: false } },
-                    { type: "tool-call" as const, id: "read-2", toolName: "Read", input: { file_path: "two.txt" }, inputPreview: { value: {}, preview: "{}", truncated: false } },
+                    { type: "tool-call" as const, id: "write-1", toolName: "Write", input: { file_path: "same.txt", content: "one" }, inputPreview: { preview: "{}", truncated: false } },
+                    { type: "tool-call" as const, id: "read-1", toolName: "Read", input: { file_path: "one.txt" }, inputPreview: { preview: "{}", truncated: false } },
+                    { type: "tool-call" as const, id: "write-2", toolName: "Write", input: { file_path: "same.txt", content: "two" }, inputPreview: { preview: "{}", truncated: false } },
+                    { type: "tool-call" as const, id: "read-2", toolName: "Read", input: { file_path: "two.txt" }, inputPreview: { preview: "{}", truncated: false } },
                     { type: "finish" as const, finishReason: "tool-calls" as const },
                 ]);
             },
@@ -1728,14 +1723,14 @@ test("serializes one shared-message declaration stream while four safe tools exe
                 id: "tool-1",
                 toolName: "Read",
                 input: { file_path: "src/a.ts" },
-                inputPreview: { value: { file_path: "src/a.ts" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             {
                 type: "tool-call",
                 id: "tool-2",
                 toolName: "Read",
                 input: { file_path: "src/b.ts" },
-                inputPreview: { value: { file_path: "src/b.ts" }, preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
             },
             {
                 type: "tool-call",
@@ -1749,7 +1744,7 @@ test("serializes one shared-message declaration stream while four safe tools exe
                 id: "tool-4",
                 toolName: "Read",
                 input: { file_path: "src/d.ts" },
-                inputPreview: { value: { file_path: "src/d.ts" }, preview: "{\"file_path\":\"src/d.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/d.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -1828,14 +1823,14 @@ test("holds an earlier Tool Result behind a sibling Tool Use declaration ACK", a
                 id: "tool-1",
                 toolName: "Read",
                 input: { file_path: "src/a.ts" },
-                inputPreview: { value: { file_path: "src/a.ts" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             {
                 type: "tool-call",
                 id: "tool-2",
                 toolName: "Read",
                 input: { file_path: "src/b.ts" },
-                inputPreview: { value: { file_path: "src/b.ts" }, preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -1880,7 +1875,7 @@ test("separate thread provider requests share session-wide tool admission", asyn
             id: "tool-memory",
             toolName: "memory",
             input: { action: "view", path: "notes" },
-            inputPreview: { value: { action: "view", path: "notes" }, preview: "{\"action\":\"view\",\"path\":\"notes\"}", truncated: false },
+            inputPreview: { preview: "{\"action\":\"view\",\"path\":\"notes\"}", truncated: false },
         },
         { type: "finish", finishReason: "tool-calls" },
     ];
@@ -1948,7 +1943,7 @@ test("Memory projection replay stays in one ToolFiber until one final settlement
                 id: "tool-memory",
                 toolName: "memory",
                 input: { action: "create", path: "notes/todo.md", content: "one" },
-                inputPreview: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
+                inputPreview: { preview: "{\"action\":\"create\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -2046,7 +2041,7 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
                         id: "tool-gated",
                         toolName: "Write",
                         input: { file_path: "src/gated.ts", content: "one" },
-                        inputPreview: { value: { file_path: "src/gated.ts", content: "one" }, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     };
                     if (options?.abortSignal === undefined) {
                         throw new Error("provider stream requires an abort signal");
@@ -2197,7 +2192,7 @@ test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and per
                         id: "tool-invalid",
                         toolName: "MissingTool",
                         input: {},
-                        inputPreview: { value: {}, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     };
                     if (options?.abortSignal === undefined) {
                         throw new Error("provider stream requires an abort signal");
@@ -2333,7 +2328,7 @@ test("post-success cooperative repair failure settles the attachment ride alread
                 id: "tool-post-success-cooperative-failure",
                 toolName: "Write",
                 input: { file_path: "src/failure.ts", content: "one" },
-                inputPreview: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
+                inputPreview: { preview: "{}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -2425,7 +2420,7 @@ test("post-success interrupt-fence failure settles the attachment ride already c
                 id: "tool-post-success-interrupt-failure",
                 toolName: "Write",
                 input: { file_path: "src/failure.ts", content: "one" },
-                inputPreview: { value: { file_path: "src/failure.ts", content: "one" }, preview: "{}", truncated: false },
+                inputPreview: { preview: "{}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -2468,7 +2463,7 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
                     id: "tool-memory",
                     toolName: "memory",
                     input: { action: "create", path: "notes/todo.md", content: "one" },
-                    inputPreview: { value: { action: "create", path: "notes/todo.md", content: "one" }, preview: "{\"action\":\"create\"}", truncated: false },
+                    inputPreview: { preview: "{\"action\":\"create\"}", truncated: false },
                 };
                 if (options?.abortSignal === undefined) {
                     throw new Error("provider stream requires an abort signal");
@@ -2720,7 +2715,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
                         id: "tool-terminal",
                         toolName: "Read",
                         input: { file_path: "src/shared.ts", content: "terminal" },
-                        inputPreview: { value: { file_path: "src/shared.ts", content: "terminal" }, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     };
                     await releaseNextProviderTool.promise;
                     yield {
@@ -2728,7 +2723,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
                         id: "tool-running",
                         toolName: "Write",
                         input: { file_path: "src/shared.ts", content: "running" },
-                        inputPreview: { value: { file_path: "src/shared.ts", content: "running" }, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     };
                     await pendingToolUseAppendStarted.promise;
                     yield {
@@ -2736,7 +2731,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
                         id: "tool-uncommitted",
                         toolName: "UncommittedWrite",
                         input: { file_path: "src/shared.ts", content: "must-not-commit" },
-                        inputPreview: { value: { file_path: "src/shared.ts", content: "must-not-commit" }, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     };
                     yield { type: "finish" as const, finishReason: "tool-calls" as const };
                 })(), (error): LLMServiceError => ({
@@ -2962,7 +2957,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
                         id: "tool-non-cooperative-route",
                         toolName: "Write",
                         input: { file_path: "src/non-cooperative.ts", content: "late" },
-                        inputPreview: { value: { file_path: "src/non-cooperative.ts", content: "late" }, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     },
                     { type: "finish" as const, finishReason: "tool-calls" as const },
                 ]);
@@ -3389,7 +3384,7 @@ test("runtime shutdown joins durable Sandbox acceptance before freezing executio
                 id: "tool-accept-fence",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "one" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+                inputPreview: { preview: "{}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -3453,7 +3448,7 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
                 id: "tool-interrupt-acceptance",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "one" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+                inputPreview: { preview: "{}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -3558,7 +3553,7 @@ test("provider closeout joins durable Sandbox acceptance before freezing executi
                         id: "tool-provider-closeout",
                         toolName: "Write",
                         input: { file_path: "src/a.ts", content: "one" },
-                        inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{}", truncated: false },
+                        inputPreview: { preview: "{}", truncated: false },
                     };
                     await acceptanceStarted.promise;
                     yield {
@@ -3629,7 +3624,7 @@ test("runtime shutdown aborts active ToolFiber route execution", async () => {
                     id: "tool-1",
                     toolName: "Write",
                     input: { file_path: "src/a.ts", content: "one" },
-                    inputPreview: { value: { file_path: "src/a.ts", content: "one" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                    inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
                 };
                 if (options?.abortSignal === undefined) {
                     throw new Error("provider stream requires an abort signal");
@@ -3718,7 +3713,7 @@ test("approve_for_me runs reviewer before public tool_use is written", async () 
                 id: "tool-1",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "ok" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -3771,7 +3766,7 @@ test("approve_for_me reviewer failure falls back to public ask approval", async 
                 id: "tool-1",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "ok" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -3816,7 +3811,7 @@ test("approval reviewer stale custody stops the turn and discards HotState", asy
                 id: "tool-1",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "ok" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -3863,7 +3858,7 @@ test("approve_for_me reviewer receives current request-turn draft state", async 
                 id: "tool-1",
                 toolName: "Write",
                 input: { file_path: "src/a.ts", content: "ok" },
-                inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],
@@ -3919,7 +3914,7 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
                     id: "tool-1",
                     toolName: "Write",
                     input: { file_path: "src/a.ts", content: "ok" },
-                    inputPreview: { value: { file_path: "src/a.ts", content: "ok" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                    inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
                 },
                 { type: "finish", finishReason: "tool-calls" },
             ],
@@ -4047,14 +4042,14 @@ test("one approval decision settles its named member while sibling approvals rem
                     id: "tool-partial-1",
                     toolName: "Write",
                     input: { file_path: "src/a.ts", content: "a" },
-                    inputPreview: { value: { file_path: "src/a.ts", content: "a" }, preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+                    inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
                 },
                 {
                     type: "tool-call",
                     id: "tool-partial-2",
                     toolName: "Write",
                     input: { file_path: "src/b.ts", content: "b" },
-                    inputPreview: { value: { file_path: "src/b.ts", content: "b" }, preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+                    inputPreview: { preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
                 },
                 { type: "finish", finishReason: "tool-calls" },
             ]], requests),
@@ -4703,14 +4698,14 @@ test("partial approval settles confirmed members and keeps the provider request 
                     id: "tool-1",
                     toolName: "Write",
                     input: { file_path: "src/shared.ts", content: "one" },
-                    inputPreview: { value: { file_path: "src/shared.ts", content: "one" }, preview: "{\"file_path\":\"src/shared.ts\"}", truncated: false },
+                    inputPreview: { preview: "{\"file_path\":\"src/shared.ts\"}", truncated: false },
                 },
                 {
                     type: "tool-call",
                     id: "tool-2",
                     toolName: "Write",
                     input: { file_path: "/workspace/src/shared.ts", content: "two" },
-                    inputPreview: { value: { file_path: "/workspace/src/shared.ts", content: "two" }, preview: "{\"file_path\":\"/workspace/src/shared.ts\"}", truncated: false },
+                    inputPreview: { preview: "{\"file_path\":\"/workspace/src/shared.ts\"}", truncated: false },
                 },
                 { type: "finish", finishReason: "tool-calls" },
             ],
@@ -4821,7 +4816,7 @@ test("terminal provider failure discards a tool call without a durable public to
                 id: "tool-uncommitted",
                 toolName: "search",
                 input: { q: "x" },
-                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
             },
             { type: "provider-error", error: providerError },
         ],
@@ -4875,7 +4870,7 @@ test("terminal provider failure retains an atomically committed internal tool re
                 id: "tool-internal-repair",
                 toolName: "Bash",
                 input: {},
-                inputPreview: { value: {}, preview: "{}", truncated: false },
+                inputPreview: { preview: "{}", truncated: false },
             },
             { type: "provider-error", error: providerError },
         ],

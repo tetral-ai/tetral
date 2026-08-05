@@ -421,6 +421,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		"reasoning",
 		"1",
 	)
+	firstReasoningText := "REASONING_HEAD" + strings.Repeat("r", 9_000) + "REASONING_TAIL"
 	request := &bridgev1.WriteRequestEndRequest{
 		Scope:                    scope,
 		RuntimeWriteId:           "rwrite_bridge_reasoning_settle_end",
@@ -429,7 +430,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		FinishReason:             "stop",
 		UsageJson:                `{"input_tokens":4,"output_tokens":3}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{
-			{ReasoningPartId: firstReasoningLocalID, ProviderPartId: "provider_reason_1", PartSequence: 0, Text: "first private thought", MetadataJson: `{"anthropic":{"signature":"sig_signed"}}`},
+			{ReasoningPartId: firstReasoningLocalID, ProviderPartId: "provider_reason_1", PartSequence: 0, Text: firstReasoningText, MetadataJson: `{"anthropic":{"signature":"sig_signed"}}`},
 			{ReasoningPartId: secondReasoningLocalID, ProviderPartId: "provider_reason_2", PartSequence: 1, Text: "second private thought", MetadataJson: `{"openai":{"encrypted_content":"ciphertext"}}`, Truncated: true},
 		},
 		Drafts: []*bridgev1.RuntimeMessageDraft{{
@@ -442,7 +443,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 				{
 					RuntimeLocalPartId: firstReasoningLocalID,
 					PartKind:           "reasoning",
-					PartJson:           `{"type":"reasoning","providerPartId":"provider_reason_1","text":"first private thought","providerMetadata":{"anthropic":{"signature":"sig_signed"}},"truncated":false,"status":"completed"}`,
+					PartJson:           `{"type":"reasoning","providerPartId":"provider_reason_1","text":"` + firstReasoningText + `","providerMetadata":{"anthropic":{"signature":"sig_signed"}},"truncated":false,"status":"completed"}`,
 				},
 				{
 					RuntimeLocalPartId: secondReasoningLocalID,
@@ -550,7 +551,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		strings.Count(contextJSON, `"id":"`+message.Parts[0].ID+`"`) != 1 ||
 		strings.Count(contextJSON, `"id":"`+message.Parts[1].ID+`"`) != 1 ||
 		strings.Count(contextJSON, `"signature":"sig_signed"`) != 1 ||
-		strings.Count(contextJSON, `"encrypted_content":"ciphertext"`) != 1 {
+		strings.Count(contextJSON, `"encrypted_content":"ciphertext"`) != 1 ||
+		strings.Count(contextJSON, "REASONING_HEAD") != 1 || strings.Count(contextJSON, "REASONING_TAIL") != 1 {
 		t.Fatalf("cold context = %s; want ordered signed/encrypted stable reasoning", contextJSON)
 	}
 

@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { RunWebRequest as RunWebRequestMessage } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import {
   MaxAttachmentGrpcMessageBytes,
+  MaxBridgeDurableContextGrpcMessageBytes,
   MaxGatewayRequestGrpcMessageBytes,
   MaxGatewayStreamEventGrpcMessageBytes,
   MaxGrpcInboundMessageBytes,
@@ -14,6 +15,7 @@ import {
   GrpcKeepaliveTimeMs,
   GrpcKeepaliveTimeoutMs,
   bridgeAttachmentGrpcChannelOptions,
+  bridgeDurableContextGrpcChannelOptions,
   gatewayGrpcChannelOptions,
   grpcClientChannelOptions,
   grpcServerOptions,
@@ -25,6 +27,7 @@ describe("Runtime Pod transport bounds", () => {
     expect(MaxGrpcInboundMessageBytes).toBe(4 * 1024 * 1024);
     expect(MaxGrpcOutboundMessageBytes).toBe(4 * 1024 * 1024);
     expect(MaxAttachmentGrpcMessageBytes).toBe(32 * 1024 * 1024);
+    expect(MaxBridgeDurableContextGrpcMessageBytes).toBe(64 * 1024 * 1024);
     expect(GrpcKeepaliveTimeMs).toBe(30 * 1000);
     expect(GrpcKeepaliveTimeoutMs).toBe(10 * 1000);
     expect(grpcServerOptions()).toEqual({
@@ -47,6 +50,13 @@ describe("Runtime Pod transport bounds", () => {
       "grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
       "grpc.keepalive_permit_without_calls": 0,
     });
+    expect(bridgeDurableContextGrpcChannelOptions()).toEqual({
+      "grpc.max_receive_message_length": MaxBridgeDurableContextGrpcMessageBytes,
+      "grpc.max_send_message_length": MaxBridgeDurableContextGrpcMessageBytes,
+      "grpc.keepalive_time_ms": GrpcKeepaliveTimeMs,
+      "grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
+      "grpc.keepalive_permit_without_calls": 0,
+    });
     expect(gatewayGrpcChannelOptions()).toEqual({
       "grpc.max_receive_message_length": MaxGatewayStreamEventGrpcMessageBytes,
       "grpc.max_send_message_length": MaxGatewayRequestGrpcMessageBytes,
@@ -61,7 +71,7 @@ describe("Runtime Pod transport bounds", () => {
       "grpc.keepalive_timeout_ms": GrpcKeepaliveTimeoutMs,
       "grpc.keepalive_permit_without_calls": 0,
     });
-    expect(MaxGatewayRequestGrpcMessageBytes).toBe(32 * 1024 * 1024);
+    expect(MaxGatewayRequestGrpcMessageBytes).toBe(64 * 1024 * 1024);
     expect(MaxGatewayStreamEventGrpcMessageBytes).toBe(8 * 1024 * 1024);
     expect(MaxWebRequestGrpcMessageBytes).toBe(1024 * 1024);
     expect(MaxWebResponseGrpcMessageBytes).toBe(512 * 1024);
@@ -81,8 +91,8 @@ describe("Runtime Pod transport bounds", () => {
     expect(channelFactoryFor("BridgeAPIControlInputCommitter")).toBe("grpcClientChannelOptions");
     expect(channelFactoryFor("BridgeAPITaskNotificationCommitter")).toBe("grpcClientChannelOptions");
     expect(channelFactoryFor("BridgeAPIApprovalReviewerThreadCreator")).toBe("grpcClientChannelOptions");
-    expect(channelFactoryFor("BridgeAPIContextLoader")).toBe("bridgeAttachmentGrpcChannelOptions");
-    expect(channelFactoryFor("BridgeAPIEventWriter")).toBe("grpcClientChannelOptions");
+    expect(channelFactoryFor("BridgeAPIContextLoader")).toBe("bridgeDurableContextGrpcChannelOptions");
+    expect(channelFactoryFor("BridgeAPIEventWriter")).toBe("bridgeDurableContextGrpcChannelOptions");
     expect(channelFactoryFor("BridgeAPIInternalToolRepairCommitter")).toBe("grpcClientChannelOptions");
   });
 

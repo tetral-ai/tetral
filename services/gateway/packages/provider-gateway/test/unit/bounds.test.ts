@@ -35,7 +35,7 @@ describe("Gateway process bounds", () => {
 
   test("keeps grpc-js server options in the Gateway process package", () => {
     expect(grpcServerOptions()).toEqual({
-      "grpc.max_receive_message_length": 32 * 1024 * 1024,
+      "grpc.max_receive_message_length": 64 * 1024 * 1024,
       "grpc.max_send_message_length": 8 * 1024 * 1024,
       "grpc.max_connection_age_ms": 5 * 60 * 1000,
       "grpc.max_connection_age_grace_ms": 30 * 60 * 1000,

@@ -12,7 +12,7 @@ import type {
   ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
-import { MaxGatewayRequestGrpcMessageBytes } from "../../src/bounds.js";
+import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
 import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
 
 describe("Runtime Pod Gateway client", () => {
@@ -68,6 +68,33 @@ describe("Runtime Pod Gateway client", () => {
         statusCode: scenario.code,
       });
     }
+  });
+
+  test("preserves an already classified abort before the first event", async () => {
+    const records: unknown[] = [];
+    const abortController = new AbortController();
+    abortController.abort();
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: recordingGatewayClient(() => undefined),
+      metadataFactory: async () => new Metadata(),
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+    });
+
+    const error = await Effect.runPromise(
+      Stream.runCollect(client.streamProviderRequest(providerRequest(), {
+        abortSignal: abortController.signal,
+      })).pipe(Effect.flip),
+    );
+
+    expect(error).toMatchObject({
+      type: "gateway-client",
+      code: "gateway_cancelled",
+      retryable: false,
+      fatal: false,
+    });
+    expect(records).toEqual([]);
   });
 
   test("rejects an oversized ProviderRequest before metadata or transport work", async () => {
@@ -128,6 +155,25 @@ describe("Runtime Pod Gateway client", () => {
         statusCode: status.RESOURCE_EXHAUSTED,
       });
     }
+  });
+
+  test("classifies the local decompressed receive fuse as a fatal protocol error", async () => {
+    const error = await collectGatewayError(new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: failingGatewayClient(
+        status.RESOURCE_EXHAUSTED,
+        `Received message that decompresses to a size larger than ${MaxGatewayStreamEventGrpcMessageBytes}`,
+      ),
+      metadataFactory: async () => new Metadata(),
+    }), providerRequest());
+
+    expect(error).toMatchObject({
+      code: "gateway_protocol_error",
+      retryable: false,
+      fatal: true,
+      statusCode: status.RESOURCE_EXHAUSTED,
+    });
   });
 });
 

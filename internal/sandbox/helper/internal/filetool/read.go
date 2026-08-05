@@ -52,7 +52,7 @@ const (
 	readByteBudget   = 200_000
 	// maxReadEnvelopeBytes bounds the complete json.Marshal output after string
 	// escaping. Runtime decodes this envelope before adding line numbers, then
-	// re-encodes the visible provider part under its paired 256 KiB fuse.
+	// re-encodes the visible provider part under its paired 512 KiB fuse.
 	// UPDATE-WITH: services/gateway/packages/protocol/src/bounds.ts
 	//   (MaxProviderRequestToolOutputJsonBytes).
 	maxReadEnvelopeBytes  = 200_000

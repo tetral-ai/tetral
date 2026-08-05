@@ -1045,21 +1045,35 @@ describe("RuntimePodToolRunner", () => {
     const gateway = new RecordingGatewayClient();
     const runner = makeRunner({ gateway });
     const cases = [
-      { search_query: Array.from({ length: 9 }, () => ({ q: "tetral" })) },
-      { search_query: [{ q: "x".repeat(64 * 1024 + 1) }] },
-      { search_query: [{ q: "tetral", domains: Array.from({ length: 5 }, () => "example.com") }] },
-      { open: [{ url: "https://example.com", ref_id: "ref_1" }] },
-      { find: [{ ref_id: "ref_1", pattern: "x".repeat(64 * 1024 + 1) }] },
+      { input: { search_query: Array.from({ length: 9 }, () => ({ q: "tetral" })) }, message: "web accepts at most 8 operations." },
+      { input: { search_query: [{ q: "x".repeat(64 * 1024 + 1) }] }, message: "web search_query contains an invalid operation." },
+      { input: { search_query: [{ q: "tetral", domains: Array.from({ length: 5 }, () => "example.com") }] }, message: "web search_query contains an invalid operation." },
+      { input: { search_query: [{ q: "tetral", domains: "example.com" }] }, message: "web search_query contains an invalid operation." },
+      { input: { open: [{ url: "https://example.com", ref_id: "ref_1" }] }, message: "web open contains an invalid operation." },
+      { input: { find: [{ ref_id: "ref_1", pattern: "x".repeat(64 * 1024 + 1) }] }, message: "web find contains an invalid operation." },
     ];
 
-    for (const input of cases) {
-      const result = await runner.runTool(toolRequest("web", input));
+    for (const testCase of cases) {
+      const result = await runner.runTool(toolRequest("web", testCase.input));
       expect(result).toMatchObject({
         type: "error",
-        error: { retryable: false, message: "web requires at least one valid search, open, or find operation." },
+        error: { retryable: false, message: testCase.message },
       });
     }
     expect(gateway.runWebRequests).toHaveLength(0);
+  });
+
+  test("accepts exactly eight Web operations before transport", async () => {
+    const gateway = new RecordingGatewayClient();
+    const result = await makeRunner({ gateway }).runTool(toolRequest("web", {
+      search_query: Array.from({ length: 8 }, (_, index) => ({
+        q: `query-${index}-${"q".repeat(64 * 1024 - `query-${index}-`.length)}`,
+      })),
+    }));
+
+    expect(result.type).toBe("completed");
+    expect(gateway.runWebRequests[0]?.input?.searchQuery).toHaveLength(8);
+    expect(gateway.runWebRequests[0]?.input?.searchQuery.every((query) => query.q.length === 64 * 1024)).toBe(true);
   });
 
   test("web ignores the undeclared refId alias", async () => {
@@ -1070,7 +1084,7 @@ describe("RuntimePodToolRunner", () => {
 
     expect(result).toMatchObject({
       type: "error",
-      error: { retryable: false, message: "web requires at least one valid search, open, or find operation." },
+      error: { retryable: false, message: "web open contains an invalid operation." },
     });
     expect(gateway.runWebRequests).toHaveLength(0);
   });

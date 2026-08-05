@@ -206,7 +206,7 @@ func (s *Service) execute(ctx context.Context, scope Scope, input *providergatew
 			itemRefs = append(itemRefs, ref)
 			appendProtoRef(&refs, seen, ref)
 		}
-		blocks = append(blocks, formatSearch(query.GetQ(), query.GetDomains(), hits, itemRefs))
+		blocks = append(blocks, formatSearch(query.GetDomains(), hits, itemRefs))
 	}
 	for _, open := range input.GetOpen() {
 		var page Page

@@ -218,6 +218,9 @@ function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncI
 //   @tetral/agent-runtime-core/src/llm/llm-service.ts (GatewayClientError shape
 //   and gatewayClientFailure, which read retryable/fatal).
 function gatewayClientError(error: unknown): GatewayClientError {
+  if (isGatewayClientError(error)) {
+    return error;
+  }
   const serviceError = error as Partial<ServiceError>;
   const code = serviceError.code;
   if (code === status.CANCELLED) {
@@ -269,6 +272,23 @@ function gatewayClientError(error: unknown): GatewayClientError {
     fatal,
     ...(code !== undefined ? { statusCode: code } : {}),
   };
+}
+
+function isGatewayClientError(error: unknown): error is GatewayClientError {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const candidate = error as Partial<GatewayClientError>;
+  return candidate.type === "gateway-client" &&
+    (
+      candidate.code === "gateway_unavailable" ||
+      candidate.code === "gateway_stream_error" ||
+      candidate.code === "gateway_protocol_error" ||
+      candidate.code === "gateway_cancelled"
+    ) &&
+    typeof candidate.message === "string" &&
+    typeof candidate.retryable === "boolean" &&
+    typeof candidate.fatal === "boolean";
 }
 
 function isLocalReceiveFuseError(error: Partial<ServiceError>): boolean {

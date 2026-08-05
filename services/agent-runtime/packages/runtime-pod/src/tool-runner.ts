@@ -463,9 +463,9 @@ export class RuntimePodToolRunner {
   }
 
   private async runWebTool(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
-    const input = webInputFromRuntime(request.input);
-    if (input === undefined) {
-      return toolFailure(request, "web requires at least one valid search, open, or find operation.", false);
+    const validatedInput = webInputFromRuntime(request.input);
+    if (!validatedInput.ok) {
+      return toolFailure(request, validatedInput.reason, false);
     }
     try {
       const response = await runWeb(this.webClient, {
@@ -476,7 +476,7 @@ export class RuntimePodToolRunner {
         bindingId: request.bindingId,
         bindingGeneration: request.bindingGeneration,
         runtimeBindingToken: request.runtimeBindingToken,
-        input,
+        input: validatedInput.input,
       }, await this.metadata(), request.abortSignal);
       const serverToolUse = webServerToolUse(response);
       if (serverToolUse === undefined) {
@@ -1824,7 +1824,10 @@ function resultJsonToExecutionResult(
     const backgroundTask = status === "running" ? backgroundTaskFromResult(visible) : undefined;
     return {
       type: "completed",
-      output: { text: formatToolResult(request, visible), truncated: resultIsTruncated(parsed) },
+      output: RuntimeBoundedTextSchema.parse({
+        ...capturedToolText(formatToolResult(request, visible)),
+        truncated: resultIsTruncated(parsed),
+      }),
       ...(backgroundTask !== undefined ? { backgroundTask } : {}),
       ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
@@ -2325,32 +2328,49 @@ function recordField(input: RuntimeJsonValue, field: string): RuntimeJsonValue |
   return isRecord(input) ? input[field] : undefined;
 }
 
-function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined {
+type WebInputValidation =
+  | { readonly ok: true; readonly input: WebToolInput }
+  | { readonly ok: false; readonly reason: string };
+
+function webInputFromRuntime(input: RuntimeJsonValue): WebInputValidation {
   if (!isRecord(input)) {
-    return undefined;
+    return { ok: false, reason: "web input must be an object." };
   }
-  const rawSearchQuery = arrayField(input, "search_query");
-  const rawOpen = arrayField(input, "open");
-  const rawFind = arrayField(input, "find");
+  const rawSearchQuery = optionalArrayField(input, "search_query");
+  if (rawSearchQuery === undefined) {
+    return { ok: false, reason: "web search_query must be an array." };
+  }
+  const rawOpen = optionalArrayField(input, "open");
+  if (rawOpen === undefined) {
+    return { ok: false, reason: "web open must be an array." };
+  }
+  const rawFind = optionalArrayField(input, "find");
+  if (rawFind === undefined) {
+    return { ok: false, reason: "web find must be an array." };
+  }
   const operationCount = rawSearchQuery.length + rawOpen.length + rawFind.length;
-  if (operationCount === 0 || operationCount > WEB_OPERATIONS_MAX) {
-    return undefined;
+  if (operationCount === 0) {
+    return { ok: false, reason: "web requires at least one search, open, or find operation." };
+  }
+  if (operationCount > WEB_OPERATIONS_MAX) {
+    return { ok: false, reason: `web accepts at most ${WEB_OPERATIONS_MAX} operations.` };
   }
 
   const searchQuery: Array<{ readonly q: string; readonly domains: string[] }> = [];
   for (const item of rawSearchQuery) {
     if (!isRecord(item)) {
-      return undefined;
+      return { ok: false, reason: "web search_query contains an invalid operation." };
     }
     const q = stringField(item, "q");
-    const rawDomains = arrayField(item, "domains");
+    const rawDomains = optionalArrayField(item, "domains");
     if (
+      rawDomains === undefined ||
       q === undefined ||
       invalidUtf8Bytes(q, MaxTextBytes) ||
       rawDomains.length > WEB_SEARCH_DOMAINS_MAX ||
       rawDomains.some((domain) => typeof domain !== "string" || invalidUtf8Bytes(domain, WEB_DOMAIN_MAX_BYTES))
     ) {
-      return undefined;
+      return { ok: false, reason: "web search_query contains an invalid operation." };
     }
     const domains = rawDomains.filter((domain): domain is string => typeof domain === "string");
     searchQuery.push({ q, domains });
@@ -2359,7 +2379,7 @@ function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined 
   const open: Array<{ readonly url?: string; readonly refId?: string; readonly lineno?: number }> = [];
   for (const item of rawOpen) {
     if (!isRecord(item)) {
-      return undefined;
+      return { ok: false, reason: "web open contains an invalid operation." };
     }
     const url = stringField(item, "url");
     const refId = stringField(item, "ref_id");
@@ -2372,7 +2392,7 @@ function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined 
       (refId !== undefined && invalidUtf8Bytes(refId, MaxIdBytes)) ||
       (lineno !== undefined && lineno < 1)
     ) {
-      return undefined;
+      return { ok: false, reason: "web open contains an invalid operation." };
     }
     open.push({
       ...(url !== undefined ? { url } : {}),
@@ -2384,7 +2404,7 @@ function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined 
   const find: Array<{ readonly refId: string; readonly pattern: string }> = [];
   for (const item of rawFind) {
     if (!isRecord(item)) {
-      return undefined;
+      return { ok: false, reason: "web find contains an invalid operation." };
     }
     const refId = stringField(item, "ref_id");
     const pattern = stringField(item, "pattern");
@@ -2394,11 +2414,11 @@ function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined 
       invalidUtf8Bytes(refId, MaxIdBytes) ||
       encodedBytes(pattern) > MaxTextBytes
     ) {
-      return undefined;
+      return { ok: false, reason: "web find contains an invalid operation." };
     }
     find.push({ refId, pattern });
   }
-  return { searchQuery, open, find };
+  return { ok: true, input: { searchQuery, open, find } };
 }
 
 function invalidUtf8Bytes(value: string, maxBytes: number): boolean {
@@ -2409,9 +2429,9 @@ function encodedBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function arrayField(input: Record<string, RuntimeJsonValue>, field: string): readonly RuntimeJsonValue[] {
+function optionalArrayField(input: Record<string, RuntimeJsonValue>, field: string): readonly RuntimeJsonValue[] | undefined {
   const value = input[field];
-  return Array.isArray(value) ? value : [];
+  return value === undefined || Array.isArray(value) ? (value ?? []) : undefined;
 }
 
 function numberField(input: Record<string, RuntimeJsonValue>, field: string): number | undefined {

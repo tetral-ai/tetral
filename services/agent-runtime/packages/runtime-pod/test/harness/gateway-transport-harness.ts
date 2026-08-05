@@ -177,6 +177,8 @@ export async function runGatewayCapacityFuseMutation(): Promise<void> {
     runtimeBindingTokenVerifier: { verify: () => true },
     ready: () => true,
     logger: { info: () => undefined, error: () => undefined },
+    providerStreamer: { stream: (input) => successfulCapacityStream(input.request) },
+    credentialResolver: capacityCredentialResolver(),
   }));
   const port = await server.bind("127.0.0.1:0");
   const client = new RuntimePodGatewayClient({
@@ -189,6 +191,70 @@ export async function runGatewayCapacityFuseMutation(): Promise<void> {
     await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(requestForRoute(vector.request, CapacityRoutes[0]))));
   } finally {
     await server.shutdown();
+  }
+}
+
+/** Proves a smaller Gateway receive carrier rejects the same otherwise-valid maximum vector. */
+export async function runGatewayReceiveCapacityFuseMutation(): Promise<void> {
+  const vector = capacityVectors()[0];
+  if (vector === undefined) {
+    throw new Error("capacity proof vector is absent");
+  }
+  const request = requestForRoute(vector.request, CapacityRoutes[0]);
+  const service = new ProviderGatewayServiceShell({
+    authenticator: {
+      authenticate: async () => ({
+        ok: true,
+        serviceAccount: { namespace: "tetral", name: "agent-runtime", podUid: "pod_capacity" },
+      }),
+    },
+    runtimeBindingTokenVerifier: { verify: () => true },
+    ready: () => true,
+    logger: { info: () => undefined, error: () => undefined },
+    providerStreamer: { stream: (input) => successfulCapacityStream(input.request) },
+    credentialResolver: capacityCredentialResolver(),
+  });
+  const server = new Server({
+    "grpc.max_receive_message_length": 4 * 1024 * 1024,
+    "grpc.max_send_message_length": 8 * 1024 * 1024,
+  });
+  const implementation: ProviderGatewayServiceServer = {
+    streamProviderRequest(call) {
+      void (async () => {
+        try {
+          for await (const event of service.streamProviderRequest(call.request, call.metadata)) {
+            call.write(event);
+          }
+          call.end();
+        } catch (error) {
+          call.emit("error", error instanceof Error ? error : new Error("capacity mutation failed"));
+        }
+      })();
+    },
+    runWeb(_call, callback) {
+      callback(new Error("not implemented"));
+    },
+  };
+  server.addService(ProviderGatewayServiceService, implementation);
+  const port = await new Promise<number>((resolve, reject) => {
+    server.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      resolve(boundPort);
+    });
+  });
+  const client = new RuntimePodGatewayClient({
+    address: `127.0.0.1:${port}`,
+    tokenPath: "/unused",
+    channelOptions: gatewayGrpcChannelOptions(),
+    metadataFactory: async () => new Metadata(),
+  });
+  try {
+    await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(request)));
+  } finally {
+    await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
   }
 }
 
@@ -329,7 +395,7 @@ export async function runMaximumReadTransportProof() {
     "maximum_read",
     [message("message_maximum_read", 1, "assistant", [runtimePart])],
     undefined,
-    ["TETRAL_MAXIMUM_READ"],
+    ["TETRAL_MAXIMUM_READ_HEAD", "TETRAL_MAXIMUM_READ_TAIL"],
   );
   const request = requestForRoute(assembled.request, CapacityRoutes[1]);
   let providerBody = "";
@@ -375,8 +441,12 @@ export async function runMaximumReadTransportProof() {
   return {
     envelopeBytes: Buffer.byteLength(resultJson, "utf8"),
     providerRequestBytes: ProviderRequestMessage.encode(request).finish().byteLength,
-    providerBodyContainsMarker: providerBody.includes("TETRAL_MAXIMUM_READ"),
+    providerBodyContainsMarkers:
+      providerBody.includes("TETRAL_MAXIMUM_READ_HEAD") && providerBody.includes("TETRAL_MAXIMUM_READ_TAIL"),
     projectedOutputBytes: Buffer.byteLength(projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson ?? "", "utf8"),
+    outputPreserved:
+      projected.messages[0]?.parts[0]?.tool?.outputOrErrorJson === JSON.stringify({ text: result.output.text }),
+    truncated: result.output.truncated,
   };
 }
 
@@ -502,6 +572,27 @@ function capacityCredentialResolver(): ProviderCredentialResolver {
   } as unknown as ProviderCredentialResolver;
 }
 
+async function* successfulCapacityStream(request: ProviderRequest) {
+  yield {
+    requestId: request.requestId,
+    modelRequestId: request.modelRequestId,
+    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    finish: {
+      reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP,
+      usage: {
+        inputTotalTokens: 1,
+        inputUncachedTokens: 1,
+        outputTotalTokens: 1,
+        totalTokens: 2,
+        providerUsageJson: "{}",
+      },
+      metadataJson: "{}",
+      contextWindowTokens: CapacityTargetTokens,
+      outputTokenLimit: 128_000,
+    },
+  };
+}
+
 function capacityVectors(): readonly {
   readonly name: string;
   readonly estimatedTokens: number;
@@ -535,12 +626,20 @@ function capacityVectors(): readonly {
       ));
     });
   });
+  const escapeDenseMarkers = ["TETRAL_ESCAPE_OUTPUT_FIRST", "TETRAL_ESCAPE_OUTPUT_LAST"] as const;
+  const escapeDenseToolMessages = Array.from({ length: 48 }, (_, index) =>
+    message(`escape_tool_${index}`, index + 1, "assistant", [escapeDenseToolPart(index, 48, escapeDenseMarkers)]));
+  const escapeDenseOutputs = fitMessagesToTokenTarget((budget) => [
+    ...escapeDenseToolMessages,
+    textMessage("escape_dense_filler", escapeDenseToolMessages.length + 1, "x".repeat(budget)),
+  ]);
 
   return [
     assembledVector("ordinary_ascii_and_utf8", ordinary, undefined, ordinaryMarkers),
     assembledVector("escaped_tool_input_and_max_output", withTools, undefined, toolMarkers),
     assembledVector("maximum_mcp_catalog", withCatalog, maximumMcpCatalog(), mcpMarkers),
     assembledVector("fragmented_history", fragmented, undefined, fragmentMarkers),
+    assembledVector("escape_dense_output_history", escapeDenseOutputs, undefined, escapeDenseMarkers),
   ];
 }
 
@@ -609,7 +708,7 @@ function fitMessagesToTokenTarget(build: (characterBudget: number) => readonly R
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const estimated = estimatedRuntimeMessagesTokens(messages);
     const delta = CapacityTargetTokens - estimated;
-    if (Math.abs(delta) <= 2) {
+    if (delta >= 0 && delta <= 2) {
       return messages;
     }
     budget = Math.max(1, budget + delta * 4);
@@ -645,7 +744,7 @@ function completedToolPart(): RuntimePart {
     old_text: markedText(inputLength, "TETRAL_TOOL_INPUT_FIRST", "", "\u0001"),
     new_text: markedText(inputLength, "", "TETRAL_TOOL_INPUT_LAST", "\u0001"),
   };
-  const outputLength = 256 * 1024 - Buffer.byteLength(JSON.stringify({ text: "" }), "utf8");
+  const outputLength = 512 * 1024 - Buffer.byteLength(JSON.stringify({ text: "" }), "utf8");
   const output = markedText(outputLength, "TETRAL_TOOL_OUTPUT_FIRST", "TETRAL_TOOL_OUTPUT_LAST", "x");
   return {
     id: "part_tool",
@@ -666,6 +765,36 @@ function completedToolPart(): RuntimePart {
   };
 }
 
+function escapeDenseToolPart(
+  index: number,
+  count: number,
+  markers: readonly [string, string],
+): RuntimePart {
+  const output = markedText(
+    80 * 1024,
+    index === 0 ? markers[0] : "",
+    index === count - 1 ? markers[1] : "",
+    "\u0001",
+  );
+  return {
+    id: `part_escape_tool_${index}`,
+    sessionId: "sesn_capacity",
+    messageId: `escape_tool_${index}`,
+    sequence: 0,
+    type: "tool",
+    toolCallId: `call_escape_${index}`,
+    toolName: "Read",
+    toolUseEventId: `event_escape_${index}`,
+    state: {
+      status: "completed",
+      input: { value: { index }, preview: `{\"index\":${index}}`, truncated: false },
+      output: { text: output, truncated: false },
+    },
+    createdAt,
+    completedAt: createdAt,
+  };
+}
+
 function markedText(length: number, prefix: string, suffix: string, fill: string): string {
   const remaining = length - prefix.length - suffix.length;
   if (remaining < 0) {
@@ -675,7 +804,8 @@ function markedText(length: number, prefix: string, suffix: string, fill: string
 }
 
 function maximumReadEnvelope(): string {
-  const marker = "TETRAL_MAXIMUM_READ";
+  const headMarker = "TETRAL_MAXIMUM_READ_HEAD";
+  const tailMarker = "TETRAL_MAXIMUM_READ_TAIL";
   const lineBreaks = "\n".repeat(1999);
   const envelope = (content: string): string => JSON.stringify({
     status: "success",
@@ -683,11 +813,11 @@ function maximumReadEnvelope(): string {
       content,
       start_line: Number.MAX_SAFE_INTEGER,
       returned_lines: 2000,
-      truncated: true,
+      truncated: false,
       line_truncations: 0,
     },
   });
-  const empty = envelope(marker + lineBreaks);
+  const empty = envelope(headMarker + tailMarker + lineBreaks);
   let remaining = 200_000 - Buffer.byteLength(empty, "utf8");
   if (remaining < 0) {
     throw new Error("maximum Read envelope metadata exceeds its byte budget");
@@ -701,7 +831,7 @@ function maximumReadEnvelope(): string {
   if (remaining === 1) {
     escapeDense += "x";
   }
-  const result = envelope(marker + escapeDense + lineBreaks);
+  const result = envelope(headMarker + escapeDense + tailMarker + lineBreaks);
   if (Buffer.byteLength(result, "utf8") !== 200_000) {
     throw new Error("maximum Read envelope does not match the 200000-byte contract");
   }
@@ -742,7 +872,7 @@ function message(id: string, sequence: number, role: "user" | "assistant", parts
 
 export function capacityProofHasRequiredHeadroom(measurement: GatewayCapacityMeasurement): boolean {
   return measurement.estimatedTokens >= CapacityTargetTokens - 2 &&
-    measurement.estimatedTokens <= CapacityTargetTokens + 2 &&
+    measurement.estimatedTokens <= CapacityTargetTokens &&
     measurement.encodedRequestBytes === measurement.receivedRequestBytes &&
     measurement.headroomRatio >= RequiredHeadroomRatio;
 }

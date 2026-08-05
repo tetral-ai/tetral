@@ -46,29 +46,26 @@ export const MaxTokenBytes = 1024;
 // tool descriptions, transient-attachment source paths, provider-error messages, and
 // streamed text/reasoning/tool-input fragment deltas (validFragment). It does NOT bound
 // message text or reasoning parts; those ride the request fuse under
-// MaxProviderRequestMessagePartBytes. The 64 KiB value is a fixed sanity ceiling, not
+// MaxProviderRequestMessagePartJsonBytes. The 64 KiB value is a fixed sanity ceiling, not
 // sized to any payload.
 // UPDATE-WITH: validateProviderRequest, validateProviderStreamEvent,
 //   validAttachmentRejections, validFragment (all in this file).
 /** Maximum UTF-8 size of short free-text fields and individual streamed fragment deltas. */
 export const MaxTextBytes = 64 * 1024;
-// MaxProviderRequestMessagePartBytes: per-part bound for message text parts and reasoning
-// parts in a ProviderRequest (validRuntimePart). These parts are bounded by the request
-// fuse they ride in rather than by the MaxTextBytes field cap. The 32 MiB value is the
-// size the Runtime->Gateway request channel is pinned to at both ends: the catalog's
-// largest context window serialized plus envelope overhead, the same order as the
-// upstream provider's 32 MB request cap.
+// MaxProviderRequestMessagePartJsonBytes: per-part semantic bound for message text and
+// reasoning in a ProviderRequest (validRuntimePart). Runtime accumulation and Gateway
+// validation both measure JSON.stringify(text), so escape-dense content has one contract.
 // UPDATE-WITH: validRuntimePart (part.text.text, part.reasoning.text) in this file.
-/** Maximum UTF-8 size of one Runtime message text or reasoning part in a provider request. */
-export const MaxProviderRequestMessagePartBytes = 32 * 1024 * 1024;
+/** Maximum canonical JSON-string size of one Runtime message text or reasoning part. */
+export const MaxProviderRequestMessagePartJsonBytes = 16 * 1024 * 1024;
 // A fitted Read result is already a complete JSON-escaped helper envelope of at
 // most 200,000 bytes. Runtime decodes it, adds at most 2,000 line prefixes, and
-// serializes the visible text once; 256 KiB leaves room for those prefixes and
-// the provider-request tool envelope without truncation.
+// serializes the visible text once. 512 KiB also carries the MCP formatter's
+// 50 KiB raw result under worst-case JSON escaping without truncation.
 // UPDATE-WITH: internal/sandbox/helper/internal/filetool/read.go
 //   (maxReadEnvelopeBytes); validRuntimePart below.
 /** Maximum UTF-8 size of provider-request tool output/error JSON. */
-export const MaxProviderRequestToolOutputJsonBytes = 256 * 1024;
+export const MaxProviderRequestToolOutputJsonBytes = 512 * 1024;
 /** Maximum UTF-8 size of one provider-produced tool-call input JSON value. */
 export const MaxProviderToolCallInputJsonBytes = 4 * 1024 * 1024;
 /** Maximum UTF-8 size of provider-native usage JSON. */
@@ -429,10 +426,10 @@ function validRuntimePart(part: RuntimePart): boolean {
     return false;
   }
   if (part.text !== undefined) {
-    return !invalidBytes(part.text.text, MaxProviderRequestMessagePartBytes);
+    return validJsonString(part.text.text, MaxProviderRequestMessagePartJsonBytes);
   }
   if (part.reasoning !== undefined) {
-    return !exceedsBytes(part.reasoning.text, MaxProviderRequestMessagePartBytes) && validMetadata(part.reasoning.metadataJson);
+    return validJsonString(part.reasoning.text, MaxProviderRequestMessagePartJsonBytes) && validMetadata(part.reasoning.metadataJson);
   }
   return part.tool !== undefined &&
     !invalidBytes(part.tool.callId, MaxIdBytes) &&
@@ -537,6 +534,10 @@ function invalidBytes(value: string, limit: number): boolean {
 
 function exceedsBytes(value: string, limit: number): boolean {
   return new TextEncoder().encode(value).byteLength > limit;
+}
+
+function validJsonString(value: string, limit: number): boolean {
+  return !exceedsBytes(JSON.stringify(value), limit);
 }
 
 function invalidBindingGeneration(value: number): boolean {

@@ -103,15 +103,14 @@ func TestRunWorkspaceConsumerLoopWakesFromCommittedPostgreSQLNotificationAndLeas
 
 	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
 	defer cancelConsumer()
-	maximumBackoffPoll := make(chan struct{})
+	initialEmptyPoll := make(chan struct{})
 	leasedAfter := make(chan time.Duration, 1)
 	consumerDone := make(chan error, 1)
-	var maximumBackoffPollOnce sync.Once
-	var emptyPolls atomic.Int64
+	var initialEmptyPollOnce sync.Once
 	var enqueueStarted atomic.Int64
 	workspaceID := workspace.ID("ws_queue_wake_e2e")
 	go func() {
-		consumerDone <- RunWorkspaceConsumerLoop(consumerCtx, sandboxStaticWorkspaceLister{workspaceID}, 5*time.Millisecond, func(ctx context.Context, currentWorkspaceID workspace.ID) (bool, error) {
+		consumerDone <- RunWorkspaceConsumerLoop(consumerCtx, sandboxStaticWorkspaceLister{workspaceID}, time.Hour, func(ctx context.Context, currentWorkspaceID workspace.ID) (bool, error) {
 			jobs, err := store.Lease(ctx, queue.LeaseRequest{
 				WorkspaceID:   currentWorkspaceID,
 				Kinds:         []string{queue.KindEnvironmentBuild},
@@ -123,9 +122,7 @@ func TestRunWorkspaceConsumerLoopWakesFromCommittedPostgreSQLNotificationAndLeas
 				return false, err
 			}
 			if len(jobs) == 0 {
-				if emptyPolls.Add(1) >= 6 {
-					maximumBackoffPollOnce.Do(func() { close(maximumBackoffPoll) })
-				}
+				initialEmptyPollOnce.Do(func() { close(initialEmptyPoll) })
 				return false, nil
 			}
 			leasedAfter <- time.Since(time.Unix(0, enqueueStarted.Load()))
@@ -133,9 +130,9 @@ func TestRunWorkspaceConsumerLoopWakesFromCommittedPostgreSQLNotificationAndLeas
 		}, wake, nil)
 	}()
 	select {
-	case <-maximumBackoffPoll:
+	case <-initialEmptyPoll:
 	case <-time.After(time.Second):
-		t.Fatal("consumer did not reach its maximum idle backoff")
+		t.Fatal("consumer did not complete its initial empty poll")
 	}
 
 	payload, err := json.Marshal(map[string]any{
@@ -162,7 +159,7 @@ func TestRunWorkspaceConsumerLoopWakesFromCommittedPostgreSQLNotificationAndLeas
 			t.Fatalf("committed enqueue to Lease elapsed = %s; want less than one second", elapsed)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("committed enqueue did not wake the maximum-backoff consumer")
+		t.Fatal("committed enqueue did not wake the consumer before its one-hour poll")
 	}
 
 	cancelConsumer()

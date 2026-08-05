@@ -10,10 +10,12 @@ import type { ChannelOptions, ServerOptions } from "@grpc/grpc-js";
 export const MaxGrpcInboundMessageBytes = 4 * 1024 * 1024;
 /** Maximum outbound Runtime Pod command response size, including its protobuf envelope. */
 export const MaxGrpcOutboundMessageBytes = 4 * 1024 * 1024;
-/** Symmetric message ceiling for Bridge API calls that can carry context or attachment data. */
+/** Symmetric message ceiling for Bridge attachment transfers. */
 export const MaxAttachmentGrpcMessageBytes = 32 * 1024 * 1024;
+/** Symmetric message ceiling for durable declarations and complete cold context. */
+export const MaxBridgeDurableContextGrpcMessageBytes = 64 * 1024 * 1024;
 /** Maximum serialized provider request the Runtime Pod sends to Gateway. */
-export const MaxGatewayRequestGrpcMessageBytes = 32 * 1024 * 1024;
+export const MaxGatewayRequestGrpcMessageBytes = 64 * 1024 * 1024;
 /** Maximum provider stream event the Runtime Pod accepts from Gateway. */
 export const MaxGatewayStreamEventGrpcMessageBytes = 8 * 1024 * 1024;
 /** Maximum encoded Web request sent from Runtime to web-connector. */
@@ -63,6 +65,15 @@ export function bridgeAttachmentGrpcChannelOptions(): ChannelOptions {
   return {
     "grpc.max_receive_message_length": MaxAttachmentGrpcMessageBytes,
     "grpc.max_send_message_length": MaxAttachmentGrpcMessageBytes,
+    ...grpcClientKeepaliveOptions(),
+  };
+}
+
+/** Returns the Bridge channel ceilings for durable declarations and complete cold context. */
+export function bridgeDurableContextGrpcChannelOptions(): ChannelOptions {
+  return {
+    "grpc.max_receive_message_length": MaxBridgeDurableContextGrpcMessageBytes,
+    "grpc.max_send_message_length": MaxBridgeDurableContextGrpcMessageBytes,
     ...grpcClientKeepaliveOptions(),
   };
 }

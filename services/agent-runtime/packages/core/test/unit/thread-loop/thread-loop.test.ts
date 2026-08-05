@@ -1027,7 +1027,7 @@ test("runtime layer updates non-text hot context only after the matching ACK bou
                 id: "tool-1",
                 toolName: "search",
                 input: { q: "x" },
-                inputPreview: { value: { q: "x" }, preview: "{\"q\":\"x\"}", truncated: false },
+                inputPreview: { preview: "{\"q\":\"x\"}", truncated: false },
             },
             { type: "finish", finishReason: "tool-calls" },
         ],

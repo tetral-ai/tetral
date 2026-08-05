@@ -139,8 +139,9 @@ it preserves the stated invariants and passes the named suites.
 - **Lifecycle.** `ProviderRequest` is a complete snapshot for one turn; there is
   no cross-turn protocol state.
 - **Invariants.** `ProviderRequest` has no credential field, by design. The
-  request channel is pinned at 32 MiB at both ends and is exercised with the
-  1,050,000-token catalog-capacity vectors. Provider stream events have an
+  request channel is pinned at 64 MiB at both ends and is exercised with the
+  1,050,000-token catalog-capacity vectors, including escape-dense tool-result
+  history. Provider stream events have an
   independent 8 MiB carrier for bounded tool-call input. Provider deltas and raw
   provider chunks are hot-only and never forwarded; the gateway never writes
   events, messages, or usage; credentials never reach Runtime or Bridge; a

@@ -48,6 +48,9 @@ accidental exposure, not network identity.
 Grouped by what each call settles. Every durable-write RPC carries a stable
 idempotency identity: replaying it with the identical payload returns the
 stored ACK; the same identity with a divergent payload is a fatal conflict.
+The Bridge API process admits 64 MiB messages for complete `WriteEvent`
+declarations and `LoadContext` responses. Attachment clients retain their
+separate 32 MiB transport fuse and existing per-attachment semantic limits.
 
 | Group | RPCs | Settles |
 | --- | --- | --- |
