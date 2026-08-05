@@ -6,17 +6,19 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
+	"github.com/tetral-ai/tetral/internal/queue"
 )
 
-func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logger) error {
-	return runJobRunnerLoop(ctx, runner, logger, waitForJobRunnerPoll)
+func RunJobRunnerLoop(ctx context.Context, runner *JobRunner, logger *slog.Logger, wake *queue.WakeSignal) error {
+	return runJobRunnerLoop(ctx, runner, logger, wake, wake.Wait)
 }
 
 func runJobRunnerLoop(
 	ctx context.Context,
 	runner *JobRunner,
 	logger *slog.Logger,
-	wait func(context.Context, time.Duration) error,
+	wake *queue.WakeSignal,
+	wait func(context.Context, time.Duration, queue.WakeSnapshot) error,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -28,11 +30,9 @@ func runJobRunnerLoop(
 	if interval <= 0 {
 		interval = defaultJobRunnerPollInterval
 	}
-	if wait == nil {
-		wait = waitForJobRunnerPoll
-	}
 	backoff := pollbackoff.New(interval, 30*interval)
 	for {
+		wakeSnapshot := wake.Snapshot()
 		hadWork, err := runner.RunOnceWithActivity(ctx)
 		if err != nil && ctx.Err() == nil && logger != nil {
 			logger.Warn("bridge.job_runner.poll_failed",
@@ -46,22 +46,13 @@ func runJobRunnerLoop(
 				slog.String("error.message_safe", "job runner poll failed"),
 			)
 		}
-		if err := wait(ctx, backoff.Next(hadWork)); err != nil {
+		delay := backoff.Next(hadWork)
+		waitErr := wait(ctx, delay, wakeSnapshot)
+		if waitErr != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			return waitErr
 		}
-	}
-}
-
-func waitForJobRunnerPoll(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }

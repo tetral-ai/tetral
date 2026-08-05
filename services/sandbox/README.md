@@ -215,6 +215,37 @@ provider command timeout, late-command margin, credential lifetime, and
 artifact construction are also service-owned settings. The process listens
 only on `TETRAL_SANDBOX_HTTP_ADDR` for health and metrics.
 
+## Queue and provider diagnostics
+
+A committed Queue insert emits a PostgreSQL notification containing only the
+consumer class. Each Bridge or Sandbox process broadcasts that hint to its
+local polling loops; they still call Queue `Lease`, which remains the sole
+assignment authority. A disconnected listener reconnects and triggers a
+catch-up poll, while the existing timer polling remains the fallback.
+
+Three retention/maintenance loops are deliberately poll-only because their
+latency is not user-facing: over-limit Queue reconciliation, the expired
+output-capture sweep, and resource-prefix garbage collection. All business
+Queue runners, including environment build/fanout, tool execution,
+activation/materialization/release, cancellation, background commands,
+memory projection, and output capture/cleanup, receive the shared wake hint.
+
+`queue.job.leased` records `queue.job.id`, `queue.job.kind`, the partition, and
+`duration.ms` from durable creation to lease. Sandbox provider completion lines
+use `sandbox.provider.operation_completed` with `operation`, `outcome`,
+`duration.ms`, available workspace/session/thread/lifecycle/provider IDs, and a
+normalized error kind. Materialization arm operations identify helper health,
+base directories, credential mint, file staging, mount/bind verification,
+skills, memory projection, and repository checkout separately.
+
+Provider failures retain only a safe status code and a bounded message that
+passes the provider-message validator. Credentials, headers, request bodies,
+tool JSON, commands, mount URLs, tokens, and raw stacks are omitted. Startup
+failure categories distinguish configuration, schema, listener, dependency
+readiness, and unknown failures. `TETRAL_SANDBOX_DEBUG_LOGGING=true` enables
+Sandbox-only debug diagnostics; info-level defaults and completion logs are
+unchanged.
+
 ## Testing
 
 Focused tests live in `services/sandbox`, `internal/sandbox`, and

@@ -3,10 +3,12 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/pollbackoff"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
@@ -68,8 +70,8 @@ func RunWorkspaceConsumerCycle(ctx context.Context, lister WorkspaceLister, cons
 	return hadWork, nil
 }
 
-func RunWorkspaceConsumerLoop(ctx context.Context, lister WorkspaceLister, pollInterval time.Duration, consume WorkspaceConsumer) error {
-	return runWorkspaceConsumerLoop(ctx, lister, pollInterval, consume, waitForWorkspacePoll)
+func RunWorkspaceConsumerLoop(ctx context.Context, lister WorkspaceLister, pollInterval time.Duration, consume WorkspaceConsumer, wake *queue.WakeSignal, logger *slog.Logger) error {
+	return runWorkspaceConsumerLoop(ctx, lister, pollInterval, consume, wake, logger, wake.Wait)
 }
 
 // RunWorkspaceConsumerGroup starts enough long-lived contenders to expose the
@@ -81,6 +83,8 @@ func RunWorkspaceConsumerGroup(
 	lister WorkspaceLister,
 	pollInterval time.Duration,
 	consume WorkspaceConsumer,
+	wake *queue.WakeSignal,
+	logger *slog.Logger,
 ) error {
 	if contenders <= 0 {
 		return errors.New("sandbox workspace contender count must be positive")
@@ -101,7 +105,7 @@ func RunWorkspaceConsumerGroup(
 			defer contendersDone.Done()
 			errorsByContender <- RunWorkspaceConsumerLoop(groupCtx, lister, pollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 				return pool.run(cycleCtx, consume, workspaceID)
-			})
+			}, wake, logger)
 		}()
 	}
 	firstErr := <-errorsByContender
@@ -115,18 +119,29 @@ func runWorkspaceConsumerLoop(
 	lister WorkspaceLister,
 	pollInterval time.Duration,
 	consume WorkspaceConsumer,
-	wait func(context.Context, time.Duration) error,
+	wake *queue.WakeSignal,
+	logger *slog.Logger,
+	wait func(context.Context, time.Duration, queue.WakeSnapshot) error,
 ) error {
 	if pollInterval <= 0 {
 		pollInterval = time.Second
 	}
-	if wait == nil {
-		wait = waitForWorkspacePoll
-	}
 	backoff := pollbackoff.New(pollInterval, 30*pollInterval)
 	for {
+		wakeSnapshot := wake.Snapshot()
 		hadWork, err := RunWorkspaceConsumerCycle(ctx, lister, consume)
-		if waitErr := wait(ctx, backoff.Next(hadWork)); waitErr != nil {
+		delay := backoff.Next(hadWork)
+		if logger != nil {
+			logger.Debug("sandbox.queue.wait",
+				slog.String("operation", "sandbox.queue.wait"),
+				slog.String("event.kind", "queue_wait"),
+				slog.Int64("duration.ms", delay.Milliseconds()),
+				slog.Bool("poll.had_work", hadWork),
+				slog.Bool("notification.enabled", wake != nil),
+			)
+		}
+		waitErr := wait(ctx, delay, wakeSnapshot)
+		if waitErr != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -135,16 +150,5 @@ func runWorkspaceConsumerLoop(
 		if err != nil {
 			continue
 		}
-	}
-}
-
-func waitForWorkspacePoll(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }

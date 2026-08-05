@@ -72,6 +72,8 @@ func TestSandboxProductionConsumerGroupSettlesIndependentSessionsWithinGlobalBou
 				LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
 				PreparationTimeout: 45 * time.Second,
 			},
+			nil,
+			nil,
 		)
 	}()
 	select {
@@ -101,7 +103,7 @@ func sandboxProductionQueueClient(t *testing.T, store *queue.PostgreSQLQueueStor
 	t.Helper()
 	listener := bufconn.Listen(2 * 1024 * 1024)
 	server := grpc.NewServer()
-	queuev1.RegisterQueueServiceServer(server, tetralqueue.NewServer(store))
+	queuev1.RegisterQueueServiceServer(server, tetralqueue.NewServer(store, nil))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		server.Stop()

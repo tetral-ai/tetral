@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"regexp"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/tetral-ai/tetral/internal/storage"
 )
@@ -20,6 +22,8 @@ type Client struct {
 	closeOnce sync.Once
 	closeErr  error
 }
+
+var notificationChannelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`)
 
 func newClient(db *sql.DB, provider Provider, descriptor Descriptor) *Client {
 	return &Client{db: db, provider: provider, descriptor: descriptor}
@@ -192,6 +196,48 @@ func (c *Client) QueryRow(ctx context.Context, operation string, query string, a
 		return &Row{err: err}
 	}
 	return &Row{row: c.db.QueryRowContext(ctx, query, args...), client: c, op: operation}
+}
+
+// Listen holds one dedicated PostgreSQL connection until ctx is cancelled or
+// the connection fails. Notifications are hints only; callers must re-read
+// their durable source after onReady and onNotification.
+func (c *Client) Listen(ctx context.Context, operation string, channel string, onReady func(), onNotification func(string)) error {
+	if err := c.validateOperation(operation); err != nil {
+		return err
+	}
+	if !notificationChannelPattern.MatchString(channel) {
+		return errors.New("dbconnect: invalid notification channel")
+	}
+	conn, err := c.db.Conn(ctx)
+	if err != nil {
+		return c.classifyRuntimeError(operation, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "LISTEN "+channel); err != nil {
+		return c.classifyRuntimeError(operation, err)
+	}
+	if onReady != nil {
+		onReady()
+	}
+	err = conn.Raw(func(raw any) error {
+		stdlibConn, ok := raw.(*stdlib.Conn)
+		if !ok {
+			return errors.New("dbconnect: notification listener requires the pgx stdlib driver")
+		}
+		for {
+			notification, waitErr := stdlibConn.Conn().WaitForNotification(ctx)
+			if waitErr != nil {
+				return waitErr
+			}
+			if onNotification != nil {
+				onNotification(notification.Payload)
+			}
+		}
+	})
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return c.classifyRuntimeError(operation, err)
 }
 
 func (c *Client) WithTx(ctx context.Context, operation string, opts *sql.TxOptions, fn func(*Tx) error) error {

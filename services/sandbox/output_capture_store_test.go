@@ -427,7 +427,7 @@ func TestSandboxOutputCleanupRunnerExhaustionQueuesOneSuccessor(t *testing.T) {
 		t.Fatalf("advance cleanup attempt count: %v", err)
 	}
 	runner := &SandboxOutputCaptureCleanupRunner{
-		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client)), Store: store,
+		Queue: tetralqueue.NewServer(queue.NewPostgreSQLStore(client), nil), Store: store,
 		BlobStore: &failingDeleteBlobStore{FakeBlobStore: blob.NewFakeBlobStore()},
 		Config:    SandboxOutputCaptureRunnerConfig{WorkspaceID: "ws_execution_store", LeaseOwner: "sandbox-cleanup-test", MaxJobs: 1, LeaseDuration: 2 * time.Minute, HeartbeatInterval: 15 * time.Second},
 	}

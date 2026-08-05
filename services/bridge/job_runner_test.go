@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
@@ -1066,7 +1067,7 @@ func TestRunJobRunnerLoopLogsPollFailureWithSafeSharedFields(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- RunJobRunnerLoop(ctx, runner, slog.New(slog.NewJSONHandler(buffer, nil)))
+		done <- RunJobRunnerLoop(ctx, runner, slog.New(slog.NewJSONHandler(buffer, nil)), nil)
 	}()
 	deadline := time.After(time.Second)
 	for !strings.Contains(buffer.String(), `"msg":"bridge.job_runner.poll_failed"`) {
@@ -1118,7 +1119,7 @@ func TestRunJobRunnerLoopBacksOffAcrossConsecutiveEmptyPolls(t *testing.T) {
 		},
 	}
 	var delays []time.Duration
-	err := runJobRunnerLoop(ctx, runner, nil, func(_ context.Context, delay time.Duration) error {
+	err := runJobRunnerLoop(ctx, runner, nil, nil, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
 		delays = append(delays, delay)
 		if len(delays) == 4 {
 			cancel()
@@ -1146,7 +1147,7 @@ func TestRunJobRunnerLoopResetsBackoffWhenRepairWasActiveBeforePollFailure(t *te
 		},
 	}
 	var delays []time.Duration
-	err := runJobRunnerLoop(ctx, runner, nil, func(_ context.Context, delay time.Duration) error {
+	err := runJobRunnerLoop(ctx, runner, nil, nil, func(_ context.Context, delay time.Duration, _ queue.WakeSnapshot) error {
 		delays = append(delays, delay)
 		if len(delays) == 3 {
 			cancel()

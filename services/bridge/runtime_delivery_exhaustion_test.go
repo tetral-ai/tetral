@@ -337,7 +337,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 					t.Fatalf("commit Bridge exhaustion fence: %v", err)
 				}
 				deliverer := &postgresFinalizingDeliverer{store: bridgeStore, result: retryableExhaustionResult()}
-				queueServer := tetralqueue.NewServer(queueStore)
+				queueServer := tetralqueue.NewServer(queueStore, nil)
 				queueClient := &fixedLeaseQueueClient{QueueClient: queueServer, job: queueJobProto(leased)}
 				runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
 
@@ -361,7 +361,7 @@ func TestPostgreSQLJobRunnerExhaustionCrashWindowsConvergeAcrossDatabases(t *tes
 		queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(queueRuntime))
 		enqueueExhaustionJob(t, queueStore, job, time.Date(2026, 1, 1, 2, 1, 0, 0, time.UTC))
 		deliverer := &postgresFinalizingDeliverer{store: bridgeStore, result: retryableExhaustionResult()}
-		queueClient := &deadLetterResponseLossQueueClient{QueueClient: tetralqueue.NewServer(queueStore)}
+		queueClient := &deadLetterResponseLossQueueClient{QueueClient: tetralqueue.NewServer(queueStore, nil)}
 		runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{workspace.DefaultID}, Deliverer: deliverer}
 
 		if err := runner.RunOnce(context.Background()); err == nil || !errors.Is(err, errSyntheticQueueResponseLoss) {

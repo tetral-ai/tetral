@@ -250,7 +250,7 @@ func startBackgroundNotificationQueueServer(t *testing.T, store *queue.PostgreSQ
 	t.Helper()
 	listener := bufconn.Listen(2 * 1024 * 1024)
 	server := grpc.NewServer()
-	queuev1.RegisterQueueServiceServer(server, tetralqueue.NewServer(store))
+	queuev1.RegisterQueueServiceServer(server, tetralqueue.NewServer(store, nil))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
 		server.Stop()

@@ -94,6 +94,124 @@ func TestPostgreSQLStoreLeasePriorityPartitionBarrierAndAckFence(t *testing.T) {
 	assertLeasedIDs(t, next, []string{"qjob_low"})
 }
 
+func TestPostgreSQLQueueNotificationPublishesOnlyCommittedNewWork(t *testing.T) {
+	store, admin := newPostgreSQLQueueStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{})
+	payloads := make(chan string, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- (PostgreSQLNotificationListener{Client: store.client}).Listen(ctx, NotificationChannel, func() {
+			close(ready)
+		}, func(payload string) {
+			payloads <- payload
+		})
+	}()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("notification listener did not become ready")
+	}
+
+	ws := workspace.ID("ws_queue_notify")
+	now := time.Now().UTC()
+	committed := EnqueueRequest{
+		ID: "qjob_notify_committed", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(ws, "sesn_notify"),
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, "sesn_notify", "input_committed"),
+		PayloadJSON:  runtimeInputPayload(t, ws, "sesn_notify", "thrd_notify", "input_committed", "messages", 1, 1),
+		Now:          now,
+	}
+	mustEnqueue(t, store, committed)
+	select {
+	case payload := <-payloads:
+		if payload != ConsumerClassBridge {
+			t.Fatalf("notification payload = %q; want %q", payload, ConsumerClassBridge)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("committed enqueue did not publish a notification")
+	}
+
+	rollbackErr := errors.New("force rollback")
+	rolledBack := committed
+	rolledBack.ID = "qjob_notify_rollback"
+	rolledBack.DedupeKey = FormatRuntimeInputDedupeKey(ws, "sesn_notify", "input_rolled_back")
+	rolledBack.PayloadJSON = runtimeInputPayload(t, ws, "sesn_notify", "thrd_notify", "input_rolled_back", "messages", 2, 2)
+	err := store.client.WithWorkspaceTx(context.Background(), string(ws), "queue.test_notify_rollback", func(tx *dbconnect.Tx) error {
+		if _, err := EnqueueTx(context.Background(), tx, rolledBack); err != nil {
+			return err
+		}
+		return rollbackErr
+	})
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("rolled-back enqueue error = %v", err)
+	}
+	if queueJobExists(t, admin, ws, rolledBack.ID) {
+		t.Fatal("rolled-back queue job exists")
+	}
+	select {
+	case payload := <-payloads:
+		t.Fatalf("rolled-back enqueue published %q", payload)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("listener shutdown = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not stop")
+	}
+}
+
+func TestPostgreSQLQueueMultipleWakeHintsStillLeaseOneJob(t *testing.T) {
+	store, _ := newPostgreSQLQueueStore(t)
+	ws := workspace.ID("ws_queue_wake_race")
+	now := time.Now().UTC()
+	mustEnqueue(t, store, EnqueueRequest{
+		ID: "qjob_wake_race", WorkspaceID: ws, Kind: KindRuntimeInput,
+		PartitionKey: FormatSessionPartitionKey(ws, "sesn_wake_race"),
+		DedupeKey:    FormatRuntimeInputDedupeKey(ws, "sesn_wake_race", "input_wake_race"),
+		PayloadJSON:  runtimeInputPayload(t, ws, "sesn_wake_race", "thrd_wake_race", "input_wake_race", "messages", 1, 1),
+		Now:          now,
+	})
+	wake := NewWakeSignal()
+	for range 8 {
+		wake.Broadcast()
+	}
+	start := make(chan struct{})
+	leasedCounts := make(chan int, 2)
+	for index := range 2 {
+		go func(owner int) {
+			<-start
+			jobs, err := store.Lease(context.Background(), LeaseRequest{
+				WorkspaceID: ws, Kinds: []string{KindRuntimeInput}, LeaseOwner: "wake-race-" + strconv.Itoa(owner),
+				MaxJobs: 1, LeaseDuration: time.Minute,
+			})
+			if err != nil {
+				leasedCounts <- -1
+				return
+			}
+			leasedCounts <- len(jobs)
+		}(index)
+	}
+	close(start)
+	total := 0
+	for range 2 {
+		count := <-leasedCounts
+		if count < 0 {
+			t.Fatal("concurrent Lease failed")
+		}
+		total += count
+	}
+	if total != 1 {
+		t.Fatalf("jobs leased after repeated wake hints = %d; want exactly one", total)
+	}
+}
+
 func TestPostgreSQLStoreLeaseAndHeartbeatUseDatabaseClock(t *testing.T) {
 	store, admin := newPostgreSQLQueueStore(t)
 	ctx := context.Background()

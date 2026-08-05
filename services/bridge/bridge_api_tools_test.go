@@ -523,6 +523,8 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionFromSharedAssistantProjec
 					},
 				}).RunOnceWithActivity(cycleCtx)
 			},
+			nil,
+			nil,
 		)
 	}()
 	for range 4 {
@@ -1446,7 +1448,7 @@ func TestPostgreSQLBridgeAPIStoreRunMemoryWaitsForDurableSandboxProjection(t *te
 	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	runner := &tetralsandbox.SandboxMemoryProjectionJobRunner{
-		Queue: tetralqueue.NewServer(queueStore), Store: projectionStore, Providers: providers,
+		Queue: tetralqueue.NewServer(queueStore, nil), Store: projectionStore, Providers: providers,
 		Config: tetralsandbox.SandboxMemoryProjectionRunnerConfig{
 			WorkspaceID: workspaceID, LeaseOwner: "bridge-memory-projection-test",
 			MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,

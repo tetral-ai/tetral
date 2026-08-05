@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -112,6 +113,10 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 	deliveryStore.AttachmentBlobStore = blobStore
 	loopCtx, cancelLoop := context.WithCancel(ctx)
 	defer cancelLoop()
+	queueWake := queue.NewWakeSignal()
+	go func() {
+		_ = queue.RunNotificationListener(loopCtx, queue.PostgreSQLNotificationListener{Client: database.Client}, queue.ConsumerClassBridge, queueWake, logger)
+	}()
 	go func() {
 		_ = agentruntimebridge.RunJobRunnerLoop(loopCtx, &agentruntimebridge.JobRunner{
 			Queue:      agentruntimebridge.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
@@ -123,7 +128,7 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 				}),
 			},
 			Config: cfg,
-		}, logger)
+		}, logger, queueWake)
 	}()
 	httpMetrics := workload.NewHTTPMetrics()
 	return runWorkload(ctx, workload.Config{

@@ -75,6 +75,26 @@ func TestConfigFromEnvCarriesGitProxyHost(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvSandboxDebugLoggingIsExplicitAndDefaultOff(t *testing.T) {
+	cfg, err := ConfigFromEnv(validSandboxConfigEnv())
+	if err != nil {
+		t.Fatalf("ConfigFromEnv(default): %v", err)
+	}
+	if cfg.DebugLogging {
+		t.Fatal("DebugLogging defaulted on")
+	}
+	env := validSandboxConfigEnv()
+	env[EnvSandboxDebugLogging] = "true"
+	cfg, err = ConfigFromEnv(env)
+	if err != nil || !cfg.DebugLogging {
+		t.Fatalf("ConfigFromEnv(debug) = %+v, %v; want enabled", cfg, err)
+	}
+	env[EnvSandboxDebugLogging] = "verbose"
+	if _, err := ConfigFromEnv(env); err == nil || !strings.Contains(err.Error(), EnvSandboxDebugLogging) {
+		t.Fatalf("ConfigFromEnv(invalid debug) = %v; want knob-owned error", err)
+	}
+}
+
 func TestConfigFromEnvRejectsEveryLeaseConcurrencyAboveTransportCapacity(t *testing.T) {
 	for _, envName := range []string{
 		EnvSandboxEnvironmentBuildConcurrency,

@@ -69,7 +69,7 @@ func Run(ctx context.Context, cfg Config, store Store, runtime RuntimeConfig) er
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_NOT_SERVING)
 	healthv1.RegisterHealthServer(grpcServer, healthServer)
-	Register(grpcServer, store)
+	Register(grpcServer, store, logger)
 
 	grpcErr := make(chan error, 1)
 	go func() {

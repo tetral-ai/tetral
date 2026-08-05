@@ -48,6 +48,7 @@ const (
 	EnvRcloneVFSCacheMaxSize                    = "TETRAL_RCLONE_VFS_CACHE_MAX_SIZE"
 	EnvRcloneVFSMinFree                         = "TETRAL_RCLONE_VFS_MIN_FREE"
 	EnvGitProxyHost                             = "TETRAL_GIT_PROXY_HOST"
+	EnvSandboxDebugLogging                      = "TETRAL_SANDBOX_DEBUG_LOGGING"
 	defaultHTTPAddress                          = ":8080"
 	defaultSandboxLeaseHeartbeatInterval        = 15 * time.Second
 	defaultSandboxJobLeaseDuration              = 120 * time.Second
@@ -99,6 +100,7 @@ type Config struct {
 	RcloneVFSCacheMaxSize             string
 	RcloneVFSMinFree                  string
 	GitProxyHost                      string
+	DebugLogging                      bool
 }
 
 func ConfigFromEnv(env Env) (Config, error) {
@@ -184,6 +186,12 @@ func ConfigFromEnv(env Env) (Config, error) {
 		return Config{}, workload.NewConfigError(EnvGitProxyHost + " is required")
 	}
 	var err error
+	if raw := strings.TrimSpace(env.Getenv(EnvSandboxDebugLogging)); raw != "" {
+		cfg.DebugLogging, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, workload.NewConfigError(EnvSandboxDebugLogging + " must be true or false")
+		}
+	}
 	durationFields := []struct {
 		envName string
 		target  *time.Duration

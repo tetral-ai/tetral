@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"os"
 
@@ -44,6 +45,9 @@ func run(ctx context.Context, env envReader) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
+	if cfg.DebugLogging {
+		logger = workload.NewLoggerWithLevel(os.Stderr, tetralsandbox.ServiceName, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"), slog.LevelDebug)
+	}
 	openResult, err := openDatabase(ctx, tetralsandbox.EnvPostgresDSN, cfg.PostgresDSN)
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
@@ -62,7 +66,7 @@ func run(ctx context.Context, env envReader) error {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = queueConn.Close() }()
-	providerAdapter, err := tetralsandbox.NewDaytonaAdapter(ctx, cfg, openResult.Client)
+	providerAdapter, err := tetralsandbox.NewDaytonaAdapter(ctx, cfg, openResult.Client, logger)
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
@@ -88,6 +92,12 @@ func run(ctx context.Context, env envReader) error {
 	if err != nil {
 		return workload.LogStartupFailure(logger, tetralsandbox.ServiceName, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
+	queueWakeCtx, cancelQueueWake := context.WithCancel(ctx)
+	defer cancelQueueWake()
+	queueWake := queue.NewWakeSignal()
+	go func() {
+		_ = queue.RunNotificationListener(queueWakeCtx, queue.PostgreSQLNotificationListener{Client: openResult.Client}, queue.ConsumerClassSandbox, queueWake, logger)
+	}()
 	overLimitLoopCtx, cancelOverLimitLoop := context.WithCancel(ctx)
 	defer cancelOverLimitLoop()
 	go tetralsandbox.RunSandboxQueueOverLimitLoop(overLimitLoopCtx, &tetralsandbox.SandboxQueueOverLimitReconciler{
@@ -109,7 +119,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	outputCaptureLoopCtx, cancelOutputCaptureLoop := context.WithCancel(ctx)
 	defer cancelOutputCaptureLoop()
@@ -123,7 +133,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	outputCaptureCleanupLoopCtx, cancelOutputCaptureCleanupLoop := context.WithCancel(ctx)
 	defer cancelOutputCaptureCleanupLoop()
@@ -137,7 +147,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	outputCaptureSweepLoopCtx, cancelOutputCaptureSweepLoop := context.WithCancel(ctx)
 	defer cancelOutputCaptureSweepLoop()
@@ -145,7 +155,7 @@ func run(ctx context.Context, env envReader) error {
 		_ = tetralsandbox.RunWorkspaceConsumerLoop(outputCaptureSweepLoopCtx, workspaceStore, cfg.JobPollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 			count, err := outputCaptureStore.SweepExpiredCaptures(cycleCtx, workspaceID.String(), storage.Now(), tetralsandbox.SandboxOutputCaptureCleanupBatchSize)
 			return count > 0, err
-		})
+		}, nil, logger)
 	}()
 	executionLoopCtx, cancelExecutionLoop := context.WithCancel(ctx)
 	defer cancelExecutionLoop()
@@ -158,6 +168,8 @@ func run(ctx context.Context, env envReader) error {
 				HeartbeatInterval: cfg.LeaseHeartbeatInterval, PreparationTimeout: cfg.ProviderCommandTimeout,
 				LateCommandMargin: cfg.LateCommandMargin,
 			},
+			queueWake,
+			logger,
 		)
 	}()
 	cancellationLoopCtx, cancelCancellationLoop := context.WithCancel(ctx)
@@ -172,7 +184,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	backgroundReconcileLoopCtx, cancelBackgroundReconcileLoop := context.WithCancel(ctx)
 	defer cancelBackgroundReconcileLoop()
@@ -186,7 +198,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	backgroundCommandLoopCtx, cancelBackgroundCommandLoop := context.WithCancel(ctx)
 	defer cancelBackgroundCommandLoop()
@@ -200,7 +212,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	memoryProjectionLoopCtx, cancelMemoryProjectionLoop := context.WithCancel(ctx)
 	defer cancelMemoryProjectionLoop()
@@ -214,7 +226,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	activationLoopCtx, cancelActivationLoop := context.WithCancel(ctx)
 	defer cancelActivationLoop()
@@ -228,7 +240,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	materializationLoopCtx, cancelMaterializationLoop := context.WithCancel(ctx)
 	defer cancelMaterializationLoop()
@@ -242,7 +254,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	releaseLoopCtx, cancelReleaseLoop := context.WithCancel(ctx)
 	defer cancelReleaseLoop()
@@ -256,7 +268,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	environmentReadyFanoutLoopCtx, cancelEnvironmentReadyFanoutLoop := context.WithCancel(ctx)
 	defer cancelEnvironmentReadyFanoutLoop()
@@ -273,7 +285,7 @@ func run(ctx context.Context, env envReader) error {
 					HeartbeatInterval: cfg.LeaseHeartbeatInterval,
 				},
 			}).RunOnceWithActivity(cycleCtx)
-		})
+		}, queueWake, logger)
 	}()
 	resourcePrefixGCLoopCtx, cancelResourcePrefixGCLoop := context.WithCancel(ctx)
 	defer cancelResourcePrefixGCLoop()
@@ -288,7 +300,7 @@ func run(ctx context.Context, env envReader) error {
 				},
 			}).RunOnce(cycleCtx)
 			return len(jobs) > 0, err
-		})
+		}, nil, logger)
 	}()
 	readiness := workload.NewReadiness()
 	readiness.MarkReady()

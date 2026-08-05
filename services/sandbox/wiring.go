@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
@@ -19,7 +20,7 @@ func EnvironmentQueueLeaseDuration(cfg Config) time.Duration {
 	return cfg.LeaseHeartbeatInterval * 4
 }
 
-func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client) (*DaytonaAdapter, error) {
+func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client, logger *slog.Logger) (*DaytonaAdapter, error) {
 	if client == nil {
 		return nil, &ConfigError{Message: "sandbox database client is required"}
 	}
@@ -38,7 +39,7 @@ func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client
 		return nil, err
 	}
 	artifacts := driver.NewDaytonaArtifactBuilderForClient(daytonaClient.Snapshot, cfg.Daytona.ArtifactBaseImage)
-	projection, err := NewDaytonaFileResourceMaterializerFromConfig(ctx, cfg, helper)
+	projection, err := NewDaytonaFileResourceMaterializerFromConfig(ctx, cfg, helper, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +53,7 @@ func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client
 			Rotator: gitticket.NewPostgreSQLStore(client), Materializer: helper,
 			GitProxyHost: cfg.GitProxyHost,
 		},
+		Logger: logger,
 	}
 	return &DaytonaAdapter{
 		Lifecycle: lifecycle,
@@ -60,10 +62,11 @@ func NewDaytonaAdapter(ctx context.Context, cfg Config, client *dbconnect.Client
 		Resources: resources,
 		Artifacts: artifacts,
 		BlobStore: projection.blob,
+		Logger:    logger,
 	}, nil
 }
 
-func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Config, runner driver.DaytonaCommandRunner) (*DaytonaFileResourceMaterializer, error) {
+func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Config, runner driver.DaytonaCommandRunner, logger *slog.Logger) (*DaytonaFileResourceMaterializer, error) {
 	blobStore, err := blob.NewS3BlobStore(ctx, &blob.Config{
 		Endpoint:  cfg.BlobEndpoint,
 		Region:    cfg.BlobRegion,
@@ -94,6 +97,7 @@ func NewDaytonaFileResourceMaterializerFromConfig(ctx context.Context, cfg Confi
 		CommandTimeout:          cfg.ProviderCommandTimeout,
 		RcloneVFSCacheMaxSize:   cfg.RcloneVFSCacheMaxSize,
 		RcloneVFSMinFree:        cfg.RcloneVFSMinFree,
+		Logger:                  logger,
 	})
 }
 

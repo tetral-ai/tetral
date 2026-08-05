@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -185,6 +186,8 @@ func RunSandboxToolExecutionConsumerGroup(
 	providers *ProviderRegistry,
 	media SandboxMediaMaterializer,
 	config SandboxToolExecutionRunnerConfig,
+	wake *queue.WakeSignal,
+	logger *slog.Logger,
 ) error {
 	return RunWorkspaceConsumerGroup(ctx, contenders, pool, lister, pollInterval, func(cycleCtx context.Context, workspaceID workspace.ID) (bool, error) {
 		workspaceConfig := config
@@ -192,7 +195,7 @@ func RunSandboxToolExecutionConsumerGroup(
 		return (&SandboxToolExecutionJobRunner{
 			Queue: queueClient, Coordinator: coordinator, Providers: providers, Media: media, Config: workspaceConfig,
 		}).RunOnceWithActivity(cycleCtx)
-	})
+	}, wake, logger)
 }
 
 func (r *SandboxToolExecutionJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxToolExecutionRunnerConfig, localExpiry time.Time) (resultErr error) {

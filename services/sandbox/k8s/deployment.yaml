@@ -95,6 +95,11 @@ spec:
                 configMapKeyRef:
                   name: sandbox-config
                   key: TETRAL_SANDBOX_JOB_POLL_INTERVAL
+            - name: TETRAL_SANDBOX_DEBUG_LOGGING
+              valueFrom:
+                configMapKeyRef:
+                  name: sandbox-config
+                  key: TETRAL_SANDBOX_DEBUG_LOGGING
             - name: TETRAL_SANDBOX_ENVIRONMENT_BUILD_CONCURRENCY
               valueFrom:
                 configMapKeyRef:

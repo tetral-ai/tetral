@@ -1,8 +1,11 @@
 package tetralsandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,44 @@ import (
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/services/sandbox/internal/resourceprojection"
 )
+
+func TestProviderCompletionLogsDurableIdentityAndRedactsUnsafeFailureDetail(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	adapter := &DaytonaAdapter{Lifecycle: &adapterLifecycleFake{}, Logger: logger}
+	adapter.Activate(context.Background(), ActivationRequest{
+		Kind: ActivationCreate,
+		Setup: sandbox.SandboxSetup{
+			WorkspaceID: "ws_log", SessionID: "sesn_log", EnvironmentID: "env_log",
+			LifecycleOperationID: "slop_log",
+		},
+	})
+	unsafeDetail := "prompt=do-not-log tool_json={secret:true} command=rm credential=token-secret https://user:password@example.test/path stack=raw-stack"
+	logProviderCompletion(context.Background(), logger, "sandbox.provider.inspect_execution", providerOperationIdentity{
+		workspaceID: "ws_log", providerResourceID: "provider_sandbox_log",
+	}, 1500*time.Millisecond, &sandbox.ProviderError{
+		Provider: "daytona", Stage: sandbox.StageStatus, Kind: sandbox.ProviderErrorAuthFailed,
+		StatusCode: 401, SafeMessage: unsafeDetail, Cause: errors.New("raw-stack"),
+	})
+	got := logs.String()
+	for _, want := range []string{
+		`"operation":"sandbox.provider.create"`, `"workspace.id":"ws_log"`,
+		`"session.id":"sesn_log"`, `"environment.id":"env_log"`,
+		`"sandbox.lifecycle_operation.id":"slop_log"`, `"outcome":"success"`,
+		`"operation":"sandbox.provider.inspect_execution"`, `"duration.ms":1500`,
+		`"provider.status_code":401`, `"error.kind":"auth_failed"`,
+		`"error.message_safe":"sandbox provider failure detail redacted"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("provider log missing %s: %s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"do-not-log", "secret:true", "rm", "token-secret", "password", "raw-stack"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("provider log contains %q: %s", forbidden, got)
+		}
+	}
+}
 
 func TestDaytonaAdapterNormalizesExecutionReadiness(t *testing.T) {
 	tests := []struct {
@@ -274,13 +315,22 @@ func TestDaytonaAdapterRejectsMalformedToolResultAfterSubmission(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			adapter := &DaytonaAdapter{Tools: &adapterToolExecutorFake{result: sandboxdriver.ToolExecution{ResultJSON: test.resultJSON}}}
+			var logs bytes.Buffer
+			adapter := &DaytonaAdapter{
+				Tools:  &adapterToolExecutorFake{result: sandboxdriver.ToolExecution{ResultJSON: test.resultJSON}},
+				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+			}
 			outcome := adapter.ExecuteTool(context.Background(), ToolExecutionRequest{
 				Handle:   sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider-sandbox"},
 				Prepared: daytonaPreparedTool{},
 			})
 			if outcome.EffectBoundary != ProviderSubmitted || outcome.Disposition != ProviderTerminal || outcome.ErrorKind != "provider_response_malformed" {
 				t.Fatalf("malformed tool result outcome = %+v; want submitted terminal malformed response", outcome)
+			}
+			if !strings.Contains(logs.String(), `"outcome":"error"`) ||
+				!strings.Contains(logs.String(), `"error.kind":"provider_response_malformed"`) ||
+				strings.Contains(logs.String(), `"outcome":"success"`) {
+				t.Fatalf("malformed tool result log = %s; want only normalized failure", logs.String())
 			}
 		})
 	}

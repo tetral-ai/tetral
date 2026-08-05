@@ -47,9 +47,9 @@ const (
 	// the media/envelope cap on purpose, so a large document with a small
 	// requested slice still works; the trimmed sub-PDF is then held to
 	// maxReadMediaBytes. Beyond this, too_large names the source.
-	defaultReadLines      = 2000
-	maxReadLines          = 2000
-	readByteBudget = 200_000
+	defaultReadLines = 2000
+	maxReadLines     = 2000
+	readByteBudget   = 200_000
 	// maxReadEnvelopeBytes bounds the complete json.Marshal output after string
 	// escaping. Runtime decodes this envelope before adding line numbers, then
 	// re-encodes the visible provider part under its paired 256 KiB fuse.
