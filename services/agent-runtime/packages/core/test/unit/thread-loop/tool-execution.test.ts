@@ -3156,22 +3156,18 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
             modelRequestId: "mrq_rehydrated_approved",
             modelToolCallId: "tool-approved-settled",
             toolName: "Write",
-            kind: "approval" as const,
             input: { file_path: "src/settled.ts", content: "settled" },
             status: "resolving" as const,
             decision: "allow" as const,
-            expiresAt: "2026-06-14T00:30:00.000Z",
         },
         {
             toolUseEventId: "sevt_approved_late",
             modelRequestId: "mrq_rehydrated_approved",
             modelToolCallId: "tool-approved-late",
             toolName: "Write",
-            kind: "approval" as const,
             input: { file_path: "src/late.ts", content: "late" },
             status: "resolving" as const,
             decision: "allow" as const,
-            expiresAt: "2026-06-14T00:30:00.000Z",
         },
     ];
     const loader = new QueuedContextLoader([], []);
@@ -4148,10 +4144,8 @@ test("LoadContext pendingToolUses hydrates cold approval waits and settles the o
             modelRequestId: "mrq_cold_restore",
             modelToolCallId: "tool-1",
             toolName: "Write",
-            kind: "approval" as const,
             input: pendingInput,
             status: "pending" as const,
-            expiresAt: "2026-06-14T00:30:00.000Z",
         }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];
@@ -4515,10 +4509,8 @@ test("cold unresolved approval does not strand an accepted Sandbox execution", a
             modelRequestId: "mrq_cold_mixed",
             modelToolCallId: "tool-approval",
             toolName: "Write",
-            kind: "approval" as const,
             input: approvalInput,
             status: "pending" as const,
-            expiresAt: "2026-06-14T00:30:00.000Z",
         }];
     const pendingSandboxExecutions = [{
             toolUseEventId: "sevt_sandbox",
@@ -4628,12 +4620,10 @@ test("LoadContext pendingToolUses applies recorded deny decisions without re-wai
             modelRequestId: "mrq_cold_deny_restore",
             modelToolCallId: "tool-1",
             toolName: "Write",
-            kind: "approval" as const,
             input: pendingInput,
             status: "resolving" as const,
             decision: "deny" as const,
             denyMessage: "not now",
-            expiresAt: "2026-06-14T00:30:00.000Z",
         }];
     const loader = new QueuedContextLoader([], []);
     const appended: SessionEvent[] = [];

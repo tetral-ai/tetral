@@ -872,9 +872,9 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionEnforcesDurablePermission
 				if _, err := admin.ExecContext(context.Background(),
 					`INSERT INTO session_pending_tool_uses (
 						workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-						tool_name, kind, input_json, decision, status, expires_at, created_at, updated_at
-					) VALUES ('default', $1, $2, $3, $4, 'exec_command', 'approval', $5, $6, $7,
-						'2026-01-01T01:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+						tool_name, input_json, decision, status, created_at, updated_at
+					) VALUES ('default', $1, $2, $3, $4, 'exec_command', $5, $6, $7,
+						'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 					sessionID, threadID, toolUseID, modelToolCallID, approvalInput, testCase.approvalDecision, testCase.approvalStatus,
 				); err != nil {
 					t.Fatalf("seed permission approval: %v", err)

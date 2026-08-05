@@ -1903,9 +1903,9 @@ func seedBridgeAPIPendingApproval(t *testing.T, db *sql.DB, workspaceID string, 
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, 'toolu_cleanup_wait', 'dangerous_tool', 'approval', '{}', 'pending',
-			'2026-01-01T00:30:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, 'toolu_cleanup_wait', 'dangerous_tool', '{}', 'pending',
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		workspaceID,
 		sessionID,
 		threadID,

@@ -281,7 +281,7 @@ func verifyApprovedSandboxExecutionHandoffTx(
 		`SELECT model_tool_call_id, tool_name, input_json, status, decision
 		   FROM session_pending_tool_uses
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND tool_use_event_id = $4 AND kind = 'approval'
+		    AND tool_use_event_id = $4
 		  FOR UPDATE`,
 		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
 		request.GetScope().GetSessionThreadId(), request.GetToolUseEventId(),

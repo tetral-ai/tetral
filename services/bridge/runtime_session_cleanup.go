@@ -446,7 +446,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) FinalizeRuntimeCleanup(ctx context.Cont
 			}
 			return err
 		}
-		if err := expireCleanupPendingWaitsTx(ctx, tx, loaded, now); err != nil {
+		if err := expireCleanupSandboxExecutionsTx(ctx, tx, loaded, now); err != nil {
 			return err
 		}
 		claim = loaded
@@ -496,7 +496,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeSessionDeleteCleanup(ctx contex
 				PodUID: state.Binding.PodUID, PodIP: state.Binding.PodIP, PodName: state.Binding.PodName,
 				Namespace: state.Binding.Namespace,
 			}
-			if err := expireCleanupPendingWaitsTx(ctx, tx, claim, now); err != nil {
+			if err := expireCleanupSandboxExecutionsTx(ctx, tx, claim, now); err != nil {
 				return err
 			}
 			if err := finalizeCleanupSessionTx(ctx, tx, claim, now); err != nil {
@@ -732,94 +732,6 @@ func loadClaimedCleanupSessionTx(ctx context.Context, tx *dbconnect.Tx, job Runt
 	})
 }
 
-func expireCleanupPendingWaitsTx(ctx context.Context, tx *dbconnect.Tx, claim cleanupSessionClaim, now time.Time) error {
-	rows, err := tx.Query(ctx,
-		`SELECT p.session_thread_id, p.tool_use_event_id, p.model_tool_call_id, p.tool_name, p.input_json,
-		        e.type, COALESCE(e.payload_json::jsonb ->> 'mcp_server_name', '')
-		   FROM session_pending_tool_uses p
-		   JOIN session_events e
-		     ON e.workspace_id = p.workspace_id
-		    AND e.session_id = p.session_id
-		    AND e.session_thread_id = p.session_thread_id
-		    AND e.event_id = p.tool_use_event_id
-		  WHERE p.workspace_id = $1
-		    AND p.session_id = $2
-		    AND p.status = 'pending'
-		    AND p.kind <> 'approval'
-		    AND e.latest_stream_position <= $3
-		  ORDER BY e.latest_stream_position ASC, p.tool_use_event_id ASC
-		  FOR UPDATE OF p`,
-		claim.WorkspaceID,
-		claim.SessionID,
-		claim.IdleStreamPosition,
-	)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	var waits []cleanupPendingWait
-	for rows.Next() {
-		var wait cleanupPendingWait
-		if err := rows.Scan(&wait.ThreadID, &wait.ToolUseEventID, &wait.ModelToolCallID, &wait.ToolName, &wait.InputJSON, &wait.EventType, &wait.MCPServerName); err != nil {
-			return err
-		}
-		waits = append(waits, wait)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, wait := range waits {
-		scope := &bridgev1.RuntimeScope{
-			WorkspaceId:     claim.WorkspaceID,
-			SessionId:       claim.SessionID,
-			SessionThreadId: wait.ThreadID,
-			Binding: &bridgev1.RuntimeBindingRef{
-				BindingId:         claim.BindingID,
-				BindingGeneration: claim.BindingGeneration,
-				TargetPodUid:      claim.PodUID,
-			},
-		}
-		eventID, err := insertPendingToolTerminalResultTx(ctx, tx, scope, wait, pendingToolTerminal{
-			PartStatus: "error",
-			ErrorType:  "cleanup_expired",
-			Message:    "Tool approval expired during session cleanup.",
-		}, now)
-		if err != nil {
-			return err
-		}
-		if wait.EventType == "agent.tool_use" {
-			if err := consumeSandboxExecutionForTerminalWriterTx(ctx, tx, scope, wait.ToolUseEventID, eventID, "cleanup_wait_expired", now); err != nil {
-				return err
-			}
-		}
-		result, err := tx.Exec(ctx,
-			`UPDATE session_pending_tool_uses
-			    SET status = 'expired',
-			        result_event_id = COALESCE(result_event_id, $5),
-			        resolved_at = COALESCE(resolved_at, $6),
-			        updated_at = $6
-			  WHERE workspace_id = $1
-			    AND session_id = $2
-			    AND session_thread_id = $3
-			    AND tool_use_event_id = $4
-			    AND status = 'pending'`,
-			claim.WorkspaceID,
-			claim.SessionID,
-			wait.ThreadID,
-			wait.ToolUseEventID,
-			eventID,
-			now,
-		)
-		if err != nil {
-			return err
-		}
-		if !rowsAffected(result) {
-			return runtimeDeliveryPrepareError{kind: "cleanup_pending_wait_expire_stale", message: "cleanup pending wait expiry fence is stale", retryable: false}
-		}
-	}
-	return expireCleanupSandboxExecutionsTx(ctx, tx, claim, now)
-}
-
 func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, claim cleanupSessionClaim, now time.Time) error {
 	rows, err := tx.Query(ctx,
 		`SELECT r.session_thread_id, r.tool_use_event_id, r.model_tool_call_id, r.tool_name, r.input_json
@@ -840,7 +752,6 @@ func expireCleanupSandboxExecutionsTx(ctx context.Context, tx *dbconnect.Tx, cla
 		           AND pending_approval.session_id = r.session_id
 		           AND pending_approval.session_thread_id = r.session_thread_id
 		           AND pending_approval.tool_use_event_id = r.tool_use_event_id
-		           AND pending_approval.kind = 'approval'
 		           AND pending_approval.status IN ('pending', 'resolving')
 		    )
 		    AND e.latest_stream_position <= $3

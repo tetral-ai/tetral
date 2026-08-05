@@ -459,15 +459,15 @@ const (
 		)
 	)`
 
-	// session_pending_tool_uses tracks public tool calls whose result waits on an
-	// external reply (the active class is approval via user.tool_confirmation).
+	// session_pending_tool_uses tracks public tool calls whose result waits on
+	// approval via user.tool_confirmation.
 	// The row is a cold-resume and stale-reply routing record, NOT a context
 	// message: LoadContext installs unresolved rows as thread-local ToolJob
 	// state, and a rehydrated decision is applied, never re-evaluated under
 	// current policy.
 	//
 	//   status      meaning                             entered on                                 legal next
-	//   pending     approval opened, undecided          agent.tool_use(ask) projection             resolving, cancelled, expired
+	//   pending     approval opened, undecided          agent.tool_use(ask) projection             resolving, cancelled
 	//                                                   (upsertPendingToolApproval)
 	//   resolving   user decision recorded, awaiting    user.tool_confirmation processing          resolved, cancelled
 	//               the terminal tool result            (Bridge CommitInputs /
@@ -475,11 +475,9 @@ const (
 	//   resolved    terminal agent.tool_result          markPendingToolResultResolved              (terminal)
 	//               committed (sets result_event_id)
 	//   cancelled   owner turn failed/interrupted       interrupt / pod-loss cancel                (terminal)
-	//   expired     cleanup expiry of a still-pending   cleanup (a resolving row is never           (terminal)
-	//               row                                 expired by cleanup)
 	//
-	// UPDATE-WITH: services/bridge pending-tool projection,
-	// input-commit, cleanup, and LoadContext paths.
+	// UPDATE-WITH: services/bridge pending-tool projection, input-commit,
+	// terminal settlement, and LoadContext paths.
 	createPostgreSQLSessionPendingToolUsesTable = `CREATE TABLE IF NOT EXISTS session_pending_tool_uses (
 		workspace_id TEXT NOT NULL,
 		session_id TEXT NOT NULL,
@@ -487,21 +485,18 @@ const (
 		tool_use_event_id TEXT NOT NULL,
 		model_tool_call_id TEXT NOT NULL,
 		tool_name TEXT NOT NULL,
-		kind TEXT NOT NULL,
 		input_json TEXT NOT NULL,
 		decision TEXT,
 		deny_message TEXT,
 		status TEXT NOT NULL,
 		result_event_id TEXT,
-		expires_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		resolved_at TIMESTAMPTZ,
 		PRIMARY KEY (workspace_id, session_id, session_thread_id, tool_use_event_id),
 		FOREIGN KEY (workspace_id, session_id, session_thread_id) REFERENCES session_threads(workspace_id, session_id, id) ON DELETE CASCADE,
-		CONSTRAINT session_pending_tool_uses_kind_shape CHECK (kind IN ('approval', 'custom')),
 		CONSTRAINT session_pending_tool_uses_decision_shape CHECK (decision IS NULL OR decision IN ('allow', 'deny')),
-		CONSTRAINT session_pending_tool_uses_status_shape CHECK (status IN ('pending', 'resolving', 'resolved', 'cancelled', 'expired'))
+		CONSTRAINT session_pending_tool_uses_status_shape CHECK (status IN ('pending', 'resolving', 'resolved', 'cancelled'))
 	)`
 
 	// session_background_tasks is the durable recovery record for background
@@ -1673,7 +1668,7 @@ END $$`
 	createPostgreSQLSessionEventsPendingMediaIndex          = `CREATE INDEX IF NOT EXISTS session_events_pending_media_lookup ON session_events(workspace_id, session_id, session_thread_id, sequence, event_id) WHERE type = 'user.message' AND payload_json::jsonb @? '$.content[*] ? (@.type == "image" || @.type == "document")'`
 	createPostgreSQLSessionFileAttachmentPendingIndex       = `CREATE INDEX IF NOT EXISTS session_file_attachment_consumptions_pending_lookup ON session_file_attachment_consumptions(workspace_id, session_id, session_thread_id, source_event_id, file_id)`
 	createPostgreSQLSessionEventsCompletionMailIndex        = `CREATE INDEX IF NOT EXISTS idx_session_events_completion_mail_reconciliation ON session_events(workspace_id, session_id, ((payload_json::jsonb ->> 'delivery_id'))) WHERE type IN ('agent.thread_message_sent', 'agent.thread_message_received')`
-	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status, expires_at)`
+	createPostgreSQLPendingToolUsesStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_pending_tool_uses_status ON session_pending_tool_uses(workspace_id, session_id, session_thread_id, status)`
 	createPostgreSQLBackgroundTasksStatusIndex              = `CREATE INDEX IF NOT EXISTS idx_session_background_tasks_status ON session_background_tasks(workspace_id, session_id, status, updated_at)`
 	createPostgreSQLRuntimeInboxRepairIndex                 = `CREATE INDEX IF NOT EXISTS idx_session_runtime_inbox_repair ON session_runtime_inbox(workspace_id, session_id, status, updated_at) WHERE status IN ('queued', 'delivering', 'accepted', 'parked', 'dead_lettered')`
 	createPostgreSQLSessionMCPManifestsGenerationIndex      = `CREATE INDEX IF NOT EXISTS idx_session_mcp_manifests_session_generation ON session_mcp_manifests(workspace_id, session_id, manifest_generation)`

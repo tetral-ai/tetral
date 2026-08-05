@@ -1688,7 +1688,6 @@ func recordPendingToolConfirmationDecisionTx(ctx context.Context, tx *dbconnect.
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4
-		    AND kind = 'approval'
 		    AND status = 'resolving'
 		    AND (decision IS NULL OR (decision = $5 AND deny_message IS NOT DISTINCT FROM $6))`,
 		scope.GetWorkspaceId(),

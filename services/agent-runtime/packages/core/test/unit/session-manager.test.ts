@@ -1983,10 +1983,8 @@ describe("SessionManager", () => {
           modelRequestId: "mrq_mcp_pending",
           modelToolCallId: "toolu_mcp_pending",
           toolName: "github_search",
-          kind: "approval",
           input: { query: "tetral" },
           status: "pending",
-          expiresAt: "2026-06-14T00:30:00.000Z",
         }],
         coldCoverage: coldCoverage({
           pendingToolIds: ["sevt_mcp_pending"],
@@ -2040,10 +2038,8 @@ describe("SessionManager", () => {
           modelRequestId: "mrq_seed_pending",
           modelToolCallId: "toolu_seed_pending",
           toolName: "Read",
-          kind: "approval",
           input: { path: "README.md" },
           status: "pending",
-          expiresAt: "2026-06-14T00:30:00.000Z",
         }],
         coldCoverage: coldCoverage({
           pendingToolIds: ["sevt_seed_pending"],
@@ -2090,10 +2086,8 @@ describe("SessionManager", () => {
         messages: [message],
         pendingToolUses: [{
           ...shared,
-          kind: "approval",
           status: "resolving",
           decision: "allow",
-          expiresAt: "2026-06-14T00:30:00.000Z",
         }],
         pendingSandboxExecutions: [{ ...shared, executionState: "running" }],
         coldCoverage: coldCoverage({

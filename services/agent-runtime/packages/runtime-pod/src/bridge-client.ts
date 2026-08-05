@@ -2932,9 +2932,8 @@ function parsePendingToolUses(value: unknown): readonly RuntimeLoadedPendingTool
     if (!isRecord(item)) {
       throw new Error("load context pendingToolUses is malformed");
     }
-    const kind = stringField(item, "kind");
     const status = stringField(item, "status");
-    if ((kind !== "approval" && kind !== "custom") || (status !== "pending" && status !== "resolving")) {
+    if (status !== "pending" && status !== "resolving") {
       throw new Error("load context pendingToolUses is malformed");
     }
     const decision = pendingToolDecision(item);
@@ -2944,12 +2943,10 @@ function parsePendingToolUses(value: unknown): readonly RuntimeLoadedPendingTool
       modelRequestId: requiredStringField(item, "modelRequestId"),
       modelToolCallId: requiredStringField(item, "modelToolCallId"),
       toolName: requiredStringField(item, "toolName"),
-      kind,
       input: RuntimeJsonValueSchema.parse(item.input ?? {}),
       ...(decision !== undefined ? { decision } : {}),
       ...(denyMessage !== undefined ? { denyMessage } : {}),
       status,
-      expiresAt: requiredStringField(item, "expiresAt"),
     };
   });
 }

@@ -140,11 +140,11 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
+			tool_name, input_json, status, created_at, updated_at
 		) VALUES (
 			'default', 'sesn_bridge_pod_loss', 'thr_bridge_pod_loss', 'evt_pod_loss_tool', 'tool-call-pod-loss',
-			'Write', 'approval', '{"file_path":"src/a.ts"}', 'resolving',
-			'2026-01-01T00:30:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+			'Write', '{"file_path":"src/a.ts"}', 'resolving',
+			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err != nil {
 		t.Fatalf("seed lost pending approval: %v", err)
 	}
@@ -653,9 +653,9 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 			if _, err := admin.ExecContext(context.Background(),
 				`INSERT INTO session_pending_tool_uses (
 					workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-					tool_name, kind, input_json, status, expires_at, created_at, updated_at
-				) VALUES ('default', $1, $2, $3, $4, 'Write', 'approval',
-					'{"file_path":"src/a.ts"}', $5, now() + interval '30 minutes', now(), now())`,
+					tool_name, input_json, status, created_at, updated_at
+				) VALUES ('default', $1, $2, $3, $4, 'Write',
+					'{"file_path":"src/a.ts"}', $5, now(), now())`,
 				sessionID, threadID, toolUseEventID, "tool-call-pod-loss-approval-"+suffix, testCase.approvalStatus,
 			); err != nil {
 				t.Fatalf("seed pending approval: %v", err)
@@ -876,9 +876,8 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		if _, err := admin.ExecContext(context.Background(),
 			`INSERT INTO session_pending_tool_uses (
 				workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-				tool_name, kind, input_json, status, expires_at, created_at, updated_at
-			) VALUES ('default', $1, $2, $3, $4, 'Write', 'approval', $5, $6,
-				now() + interval '30 minutes', now(), now())`,
+				tool_name, input_json, status, created_at, updated_at
+			) VALUES ('default', $1, $2, $3, $4, 'Write', $5, $6, now(), now())`,
 			sessionID, threadID, tool.eventID, tool.toolCallID,
 			`{"file_path":"`+tool.path+`"}`, tool.status,
 		); err != nil {
@@ -913,14 +912,36 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
+			tool_name, input_json, status, created_at, updated_at
 		) VALUES ('default', $1, $2, 'evt_pod_loss_sibling_tool', 'tool-call-pod-loss-sibling',
-			'Write', 'approval', '{"file_path":"src/sibling.ts"}', 'pending',
-			now() + interval '30 minutes', now(), now())`,
+			'Write', '{"file_path":"src/sibling.ts"}', 'pending', now(), now())`,
 		sessionID,
 		siblingThreadID,
 	); err != nil {
 		t.Fatalf("seed sibling approval: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_events (
+			workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json,
+			visibility, session_visible, model_request_id, projection_json, created_at, updated_at
+		) VALUES
+		('default', $1, $2, 'evt_pod_loss_idle_start', 1, 'span.model_request_start',
+		 '{"type":"span.model_request_start","model_request_id":"mreq_pod_loss_idle"}',
+		 'internal', false, 'mreq_pod_loss_idle',
+		 '{"context_through_message_sequence":0,"request_kind":"agent_provider_request"}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_idle_tool', 2, 'agent.tool_use',
+		 '{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}',
+		 'public', true, 'mreq_pod_loss_idle', '{}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_idle_result', 3, 'agent.tool_result',
+		 '{"type":"agent.tool_result","tool_use_event_id":"evt_pod_loss_idle_tool","content":[{"type":"text","text":"done"}]}',
+		 'public', true, 'mreq_pod_loss_idle', '{}', now(), now()),
+		('default', $1, $2, 'evt_pod_loss_idle_end', 4, 'span.model_request_end',
+		 '{"type":"span.model_request_end","model_request_id":"mreq_pod_loss_idle","model_request_start_id":"evt_pod_loss_idle_start","finish_reason":"stop","is_error":false}',
+		 'internal', false, 'mreq_pod_loss_idle', '{}', now(), now())`,
+		sessionID,
+		idleSiblingThreadID,
+	); err != nil {
+		t.Fatalf("seed idle sibling terminal history: %v", err)
 	}
 
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -951,7 +972,7 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		`SELECT count(*)
 		   FROM session_pending_tool_uses
 		  WHERE workspace_id = 'default' AND session_id = $1 AND session_thread_id = $2
-		    AND kind = 'approval' AND status = 'cancelled' AND result_event_id IS NOT NULL`,
+		    AND status = 'cancelled' AND result_event_id IS NOT NULL`,
 		sessionID, threadID,
 	).Scan(&cancelledAndLinked); err != nil {
 		t.Fatalf("count cancelled multiple approvals: %v", err)
@@ -981,23 +1002,28 @@ func TestRuntimePodLossSettlesEveryPendingApprovalExactlyOnce(t *testing.T) {
 		t.Fatalf("sibling approval = %q/results %d; want cancelled/1", siblingApprovalStatus, siblingResultCount)
 	}
 	var idleSiblingStatus string
-	var idleSiblingEventCount int
+	var idleSiblingRepairEventCount int
+	var idleSiblingHistoryCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT status,
 		        (SELECT count(*) FROM session_events event
 		          WHERE event.workspace_id = thread.workspace_id
 		            AND event.session_id = thread.session_id
 		            AND event.session_thread_id = thread.id
-		            AND event.type IN ('session.error', 'session.thread_status_idle'))
+		            AND event.type IN ('session.error', 'session.thread_status_idle')),
+		        (SELECT count(*) FROM session_events event
+		          WHERE event.workspace_id = thread.workspace_id
+		            AND event.session_id = thread.session_id
+		            AND event.session_thread_id = thread.id)
 		   FROM session_threads thread
 		  WHERE thread.workspace_id = 'default' AND thread.session_id = $1 AND thread.id = $2`,
 		sessionID,
 		idleSiblingThreadID,
-	).Scan(&idleSiblingStatus, &idleSiblingEventCount); err != nil {
+	).Scan(&idleSiblingStatus, &idleSiblingRepairEventCount, &idleSiblingHistoryCount); err != nil {
 		t.Fatalf("read idle sibling after pod loss: %v", err)
 	}
-	if idleSiblingStatus != "idle" || idleSiblingEventCount != 0 {
-		t.Fatalf("idle sibling = %q/events %d; want idle/0", idleSiblingStatus, idleSiblingEventCount)
+	if idleSiblingStatus != "idle" || idleSiblingRepairEventCount != 0 || idleSiblingHistoryCount != 4 {
+		t.Fatalf("idle sibling = %q/repair events %d/history %d; want idle/0/4", idleSiblingStatus, idleSiblingRepairEventCount, idleSiblingHistoryCount)
 	}
 }
 

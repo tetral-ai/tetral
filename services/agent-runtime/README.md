@@ -364,12 +364,11 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 
 | Suite | Proves |
 | --- | --- |
-| `core/test/unit/session-manager.test.ts` | `run_slot` single-owner, `wake` coalescing, idle-only resume, interrupt/stop fences, concurrent distinct threads, sub-agent delivery and lifecycle |
+| `core/test/unit/session-manager.test.ts` | `run_slot` single-owner, `wake` coalescing, idle-only resume, interrupt/stop fences, concurrent distinct threads, sub-agent delivery and lifecycle, cold load of durable context, pending waits, and background handles |
 | `core/test/unit/thread-loop/thread-loop.test.ts` | ThreadLoop coordination and recoverable ThreadState behavior |
 | `core/test/unit/thread-loop/thread-turn-checkpoint.test.ts`, `thread-turn-reducer.test.ts` | durable turn reconstruction and the closed transition table |
 | `core/test/unit/thread-loop/tool-execution.test.ts`, `closeout.test.ts` | post-ACK tool execution, continuation, interruption, and settlement |
 | `core/test/unit/thread-loop/compaction.test.ts` | proactive and reactive compaction lifecycle |
-| `core/test/unit/session-manager.test.ts` | cold load of durable context, pending waits, and background handles |
 | `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
 | `core/test/unit/llm-service.test.ts` | provider-stream ordering/identity validation and normalization |
 | `core/test/unit/runtime-accumulator.test.ts` | per-turn `SessionProcessor` accumulation that never leaks across turns |

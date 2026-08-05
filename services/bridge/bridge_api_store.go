@@ -139,7 +139,6 @@ const (
 	defaultRuntimeBindingTokenTTL = 5 * time.Minute
 	defaultIdleCleanupDelay       = 30 * time.Minute
 	defaultTransientAttachmentTTL = 15 * time.Minute
-	defaultPendingToolApprovalTTL = 30 * time.Minute
 	maxRescheduleBackoff          = 120 * time.Second
 )
 

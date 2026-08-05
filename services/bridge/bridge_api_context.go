@@ -209,12 +209,10 @@ type bridgeLoadContextPendingTool struct {
 	ModelRequestID  string          `json:"modelRequestId"`
 	ModelToolCallID string          `json:"modelToolCallId"`
 	ToolName        string          `json:"toolName"`
-	Kind            string          `json:"kind"`
 	Input           json.RawMessage `json:"input"`
 	Decision        *string         `json:"decision,omitempty"`
 	DenyMessage     *string         `json:"denyMessage,omitempty"`
 	Status          string          `json:"status"`
-	ExpiresAt       string          `json:"expiresAt"`
 }
 
 type bridgeLoadContextSandboxExecution struct {
@@ -1071,12 +1069,10 @@ func loadThreadPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		        COALESCE(e.model_request_id, ''),
 		        p.model_tool_call_id,
 		        p.tool_name,
-		        p.kind,
 		        p.input_json,
 		        p.decision,
 		        p.deny_message,
-		        p.status,
-		        p.expires_at
+		        p.status
 		   FROM session_pending_tool_uses p
 		   LEFT JOIN session_events e
 		     ON e.workspace_id = p.workspace_id
@@ -1116,12 +1112,10 @@ func loadThreadPendingToolUsesTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 			&item.ModelRequestID,
 			&item.ModelToolCallID,
 			&item.ToolName,
-			&item.Kind,
 			&inputJSON,
 			&decision,
 			&denyMessage,
 			&item.Status,
-			&item.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}

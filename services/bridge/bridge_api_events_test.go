@@ -821,17 +821,16 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 	var toolName string
 	var inputJSON string
 	var pendingStatus string
-	var expiresAt string
 	var pendingCount int
 	var messageCount int
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT model_tool_call_id, tool_name, input_json, status, expires_at
+		`SELECT model_tool_call_id, tool_name, input_json, status
 		   FROM session_pending_tool_uses
 		  WHERE workspace_id = 'default'
 		    AND session_id = 'sesn_bridge_tool_ask'
 		    AND session_thread_id = 'thr_bridge_tool_ask'
 		    AND tool_use_event_id = $1`,
-		response.GetEventId()).Scan(&modelToolCallID, &toolName, &inputJSON, &pendingStatus, &expiresAt); err != nil {
+		response.GetEventId()).Scan(&modelToolCallID, &toolName, &inputJSON, &pendingStatus); err != nil {
 		t.Fatalf("read generated pending approval: %v", err)
 	}
 	if err := admin.QueryRowContext(context.Background(),
@@ -847,10 +846,10 @@ func TestPostgreSQLBridgeAPIStoreWriteEventOpensPendingApprovalFromToolUseAsk(t 
 		replay.GetEventId() != response.GetEventId() ||
 		modelToolCallID != "tool-call-ask" || toolName != "dangerous_tool" ||
 		inputJSON != `{"path":"README.md"}` || pendingStatus != "pending" ||
-		expiresAt != "2026-01-01T00:30:00Z" || pendingCount != 1 || messageCount != 1 {
-		t.Fatalf("pending declaration ack=%s replay=%s event=%s/%s model=%q tool=%q input=%s status=%q expires=%q pending=%d messages=%d; want ask pending idempotent with one loop-authored context row",
+		pendingCount != 1 || messageCount != 1 {
+		t.Fatalf("pending declaration ack=%s replay=%s event=%s/%s model=%q tool=%q input=%s status=%q pending=%d messages=%d; want ask pending idempotent with one loop-authored context row",
 			response.GetAck().GetStatus(), replay.GetAck().GetStatus(), response.GetEventId(), replay.GetEventId(),
-			modelToolCallID, toolName, inputJSON, pendingStatus, expiresAt, pendingCount, messageCount)
+			modelToolCallID, toolName, inputJSON, pendingStatus, pendingCount, messageCount)
 	}
 }
 

@@ -994,14 +994,14 @@ func TestAppendClientEventsRejectsInvalidExplicitInterruptTargetWithoutRows(t *t
 	}
 }
 
-func TestAppendClientEventsToolConfirmationResolvesPendingApprovalAndQueuesRuntimeInput(t *testing.T) {
+func TestAppendClientEventsToolConfirmationResolvesPendingApproval(t *testing.T) {
 	runtime, admin := newSessionEventStoreTestDB(t)
 	ctx := context.Background()
 	sessionID := "sesn_event_tool_confirmation"
 	toolUseEventID := "sevt_tool_use_confirmation"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, toolUseEventID, time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
+	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, toolUseEventID)
 	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time {
 		return time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	}))
@@ -1034,28 +1034,18 @@ func TestAppendClientEventsToolConfirmationResolvesPendingApprovalAndQueuesRunti
 	})
 }
 
-func TestAppendClientEventsRejectsExpiredOrNonPendingToolConfirmationWithoutRows(t *testing.T) {
+func TestAppendClientEventsRejectsNonPendingToolConfirmationWithoutRows(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string
 		sessionID  string
 		toolUseID  string
-		expiresAt  time.Time
 		status     string
 		wantErrMsg string
 	}{
 		{
-			name:       "expired",
-			sessionID:  "sesn_event_tool_confirmation_expired",
-			toolUseID:  "sevt_tool_use_expired",
-			expiresAt:  time.Date(2026, 6, 9, 9, 59, 0, 0, time.UTC),
-			status:     "pending",
-			wantErrMsg: "pending approval expired",
-		},
-		{
 			name:       "resolving",
 			sessionID:  "sesn_event_tool_confirmation_resolving",
 			toolUseID:  "sevt_tool_use_resolving",
-			expiresAt:  time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC),
 			status:     "resolving",
 			wantErrMsg: "pending approval is not pending",
 		},
@@ -1065,7 +1055,7 @@ func TestAppendClientEventsRejectsExpiredOrNonPendingToolConfirmationWithoutRows
 			ctx := context.Background()
 			seedSessionEventSession(t, admin, workspace.DefaultID, testCase.sessionID)
 			seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, testCase.sessionID)
-			seedSessionEventPendingApproval(t, admin, workspace.DefaultID, testCase.sessionID, testCase.toolUseID, testCase.expiresAt)
+			seedSessionEventPendingApproval(t, admin, workspace.DefaultID, testCase.sessionID, testCase.toolUseID)
 			if testCase.status != "pending" {
 				if _, err := admin.ExecContext(ctx,
 					`UPDATE session_pending_tool_uses
@@ -1115,7 +1105,7 @@ func TestAppendClientEventsRejectsMessageWhileApprovalPendingWithoutRows(t *test
 	toolUseEventID := "sevt_tool_use_blocks_message"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, toolUseEventID, time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
+	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, toolUseEventID)
 	service := newSessionEventServiceForTest(runtime, WithClock(func() time.Time {
 		return time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC)
 	}))
@@ -1143,7 +1133,7 @@ func TestAppendClientEventsAdmitsMessageWhileRunningWithApprovalPending(t *testi
 	sessionID := "sesn_event_running_with_pending_approval"
 	seedSessionEventSession(t, admin, workspace.DefaultID, sessionID)
 	seedSessionEventRunnableRuntime(t, admin, workspace.DefaultID, sessionID)
-	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, "sevt_running_pending_approval", time.Date(2026, 6, 9, 11, 0, 0, 0, time.UTC))
+	seedSessionEventPendingApproval(t, admin, workspace.DefaultID, sessionID, "sevt_running_pending_approval")
 	if _, err := admin.ExecContext(ctx,
 		`UPDATE session_runtime_status SET status = 'running', idle_since = NULL
 		  WHERE workspace_id = $1 AND session_id = $2`, string(workspace.DefaultID), sessionID); err != nil {
@@ -1967,19 +1957,18 @@ func seedSessionEventRunnableRuntime(t *testing.T, db *sql.DB, workspaceID works
 	seedSessionEventRuntimeStatus(t, db, workspaceID, sessionID)
 }
 
-func seedSessionEventPendingApproval(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, toolUseEventID string, expiresAt time.Time) {
+func seedSessionEventPendingApproval(t *testing.T, db *sql.DB, workspaceID workspace.ID, sessionID string, toolUseEventID string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, 'dangerous_tool', 'approval', '{}', 'pending', $6, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, 'dangerous_tool', '{}', 'pending', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		string(workspaceID),
 		sessionID,
 		sessionEventMainThreadID(sessionID),
 		toolUseEventID,
 		"call_"+toolUseEventID,
-		expiresAt.UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		t.Fatalf("seed pending approval: %v", err)
 	}

@@ -886,11 +886,3 @@ func insertRuntimeTerminationEventTx(
 		Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
 	}, nil
 }
-
-func runtimeTerminationBinding(scope *bridgev1.RuntimeScope) runtimeBindingForDelivery {
-	return runtimeBindingForDelivery{
-		BindingID:         scope.GetBinding().GetBindingId(),
-		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
-		PodUID:            scope.GetBinding().GetTargetPodUid(),
-	}
-}

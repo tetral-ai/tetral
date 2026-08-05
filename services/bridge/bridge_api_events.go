@@ -1771,17 +1771,15 @@ func upsertPendingToolApprovalTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 	_, err := tx.Exec(ctx,
 		`INSERT INTO session_pending_tool_uses (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, model_tool_call_id,
-			tool_name, kind, input_json, status, expires_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, 'approval', $7, 'pending', $8, $9, $9)
+			tool_name, input_json, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $8)
 		ON CONFLICT (workspace_id, session_id, session_thread_id, tool_use_event_id)
 		DO UPDATE SET
 			model_tool_call_id = EXCLUDED.model_tool_call_id,
 			tool_name = EXCLUDED.tool_name,
 			input_json = EXCLUDED.input_json,
-			expires_at = EXCLUDED.expires_at,
 			updated_at = EXCLUDED.updated_at
-		WHERE session_pending_tool_uses.kind = 'approval'
-		  AND session_pending_tool_uses.status IN ('pending', 'resolving')`,
+		WHERE session_pending_tool_uses.status IN ('pending', 'resolving')`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),
 		scope.GetSessionThreadId(),
@@ -1789,7 +1787,6 @@ func upsertPendingToolApprovalTx(ctx context.Context, tx *dbconnect.Tx, scope *b
 		projection.ModelToolCallID,
 		projection.ToolName,
 		inputJSON,
-		now.Add(defaultPendingToolApprovalTTL),
 		now,
 	)
 	return err
@@ -1806,7 +1803,6 @@ func markPendingToolResultResolvedTx(ctx context.Context, tx *dbconnect.Tx, scop
 		    AND session_id = $2
 		    AND session_thread_id = $3
 		    AND tool_use_event_id = $4
-		    AND kind = 'approval'
 		    AND status = 'resolving'`,
 		scope.GetWorkspaceId(),
 		scope.GetSessionId(),

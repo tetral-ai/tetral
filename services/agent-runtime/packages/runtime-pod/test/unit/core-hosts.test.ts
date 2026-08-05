@@ -679,11 +679,9 @@ describe("Runtime core host production assembly", () => {
                   modelRequestId: "mrq_cold_confirm",
                   modelToolCallId: "tool-1",
                   toolName: "github_search",
-                  kind: "approval",
                   input: pendingInput,
                   decision: "allow",
                   status: "resolving",
-                  expiresAt: "2026-06-16T00:30:00.000Z",
                 },
               ],
               coldCoverage: {
@@ -831,11 +829,9 @@ describe("Runtime core host production assembly", () => {
                   modelRequestId: "mrq_interrupt_confirm",
                   modelToolCallId: "tool-1",
                   toolName: "Write",
-                  kind: "approval",
                   input: pendingInput,
                   decision: "allow",
                   status: "resolving",
-                  expiresAt: "2026-06-16T00:30:00.000Z",
                 },
               ],
               coldCoverage: {

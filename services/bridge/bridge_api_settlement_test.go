@@ -3363,6 +3363,85 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSessionAtomicall
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandboxExecution(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate_direct_sandbox", "thr_bridge_terminate_direct_sandbox")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_terminate_direct_sandbox", "bind_bridge_terminate_direct_sandbox", 1, "pod_uid_terminate_direct_sandbox")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope("sesn_bridge_terminate_direct_sandbox", "thr_bridge_terminate_direct_sandbox", "bind_bridge_terminate_direct_sandbox", 1, "pod_uid_terminate_direct_sandbox")
+	seedBridgeAPIOpenDurableTurn(t, admin, scope, "rwrite_terminate_direct_sandbox")
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_terminate_direct_sandbox_start", "mreq_terminate_direct_sandbox", "agent_provider_request", 0)
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_terminate_direct_sandbox_tool", ModelRequestId: "mreq_terminate_direct_sandbox",
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 10"},"evaluated_permission":"allow"}`,
+		SessionVisible: true,
+		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+			t,
+			scope,
+			"rwrite_terminate_direct_sandbox_tool",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartDraftForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_direct_sandbox","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 10"},"preview":"{\"command\":\"sleep 10\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sandbox tool use: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			created_at, updated_at
+		) VALUES ('default', 'sesn_bridge_terminate_direct_sandbox', 'thr_bridge_terminate_direct_sandbox',
+			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', NULL,
+			'call_terminate_direct_sandbox', 'running', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`,
+	); err != nil {
+		t.Fatalf("seed dispatched sandbox execution: %v", err)
+	}
+	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
+	response, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_terminate_direct_sandbox", FailureJson: failureJSON,
+		SandboxExecutionToolUseEventIds: []string{toolUse.GetEventId()},
+	})
+	if err != nil {
+		t.Fatalf("CommitRuntimeTermination dispatched sandbox execution: %v", err)
+	}
+	var executionState string
+	var resultJSON sql.NullString
+	var terminalEventID, consumptionReason string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT execution_state, result_json, consumed_by_terminal_event_id, consumption_reason
+		   FROM session_runtime_tool_results
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_direct_sandbox'
+		    AND session_thread_id = 'thr_bridge_terminate_direct_sandbox' AND tool_use_event_id = $1`,
+		toolUse.GetEventId(),
+	).Scan(&executionState, &resultJSON, &terminalEventID, &consumptionReason); err != nil {
+		t.Fatalf("read terminated sandbox execution: %v", err)
+	}
+	var toolResultCount int
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM session_events
+		  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_terminate_direct_sandbox'
+		    AND type = 'agent.tool_result'
+		    AND payload_json::jsonb ->> 'tool_use_event_id' = $1`,
+		toolUse.GetEventId(),
+	).Scan(&toolResultCount); err != nil {
+		t.Fatalf("count terminated sandbox Tool Results: %v", err)
+	}
+	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
+		executionState != "consumed" || resultJSON.Valid || terminalEventID == "" ||
+		consumptionReason != "runtime_terminated" || toolResultCount != 1 {
+		t.Fatalf("termination ack=%s execution=%q result=%v terminal=%q reason=%q events=%d; want committed consumed thin receipt and one Tool Result",
+			response.GetAck().GetStatus(), executionState, resultJSON, terminalEventID, consumptionReason, toolResultCount)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndStagedSandboxResults(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_terminate_sandbox", "thr_bridge_terminate_sandbox")

@@ -2192,6 +2192,11 @@ describe("Thread turn cold extraction", () => {
         })).toThrow("cold non-terminal Tool Use requires exactly one durable route");
         expect(() => extractColdThreadToolRouteView({
             checkpoint,
+            pendingToolUses: [pendingToolUses[0]!, pendingToolUses[0]!],
+            pendingSandboxExecutions,
+        })).toThrow("cold non-terminal Tool Use requires exactly one durable route");
+        expect(() => extractColdThreadToolRouteView({
+            checkpoint,
             pendingToolUses,
             pendingSandboxExecutions: [
                 pendingSandboxExecutions[0]!,

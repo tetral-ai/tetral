@@ -203,9 +203,6 @@ export function installLoadedPendingToolUses(
     const seenToolUseEventIds = new Set<string>();
     const source: RuntimeProcessorSource = currentModel;
     for (const [pendingOrder, pending] of pendingToolUses.entries()) {
-      if (pending.kind !== "approval") {
-        throw new Error("pending tool use context contains unsupported custom tool wait");
-      }
       if (seenToolUseEventIds.has(pending.toolUseEventId)) {
         throw new Error("pending tool use context contains duplicate tool use id");
       }

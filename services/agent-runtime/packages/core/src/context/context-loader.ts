@@ -89,12 +89,10 @@ export interface RuntimeLoadedPendingToolUse {
   readonly modelRequestId: string;
   readonly modelToolCallId: string;
   readonly toolName: string;
-  readonly kind: "approval" | "custom";
   readonly input: RuntimeJsonValue;
   readonly decision?: "allow" | "deny" | undefined;
   readonly denyMessage?: string | undefined;
   readonly status: "pending" | "resolving";
-  readonly expiresAt: string;
 }
 
 /** Unreceipted child completion reconstructed from the durable sent-event ledger. */

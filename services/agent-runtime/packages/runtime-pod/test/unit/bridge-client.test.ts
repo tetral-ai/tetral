@@ -406,12 +406,10 @@ describe("BridgeAPIContextLoader", () => {
       modelRequestId: "mrq_pending_tool",
       modelToolCallId: "toolu_pending",
       toolName: "Write",
-      kind: "approval",
       input: { path: "/workspace/file.txt" },
       decision: "deny",
       denyMessage: "not safe",
       status: "resolving",
-      expiresAt: "2026-01-01T00:30:00Z",
     }]);
     expect(loadedContext.pendingSandboxExecutions).toEqual([{
       toolUseEventId: "evt_pending_sandbox",
@@ -2528,12 +2526,10 @@ class RecordingBridgeClient {
           modelRequestId: "mrq_pending_tool",
           modelToolCallId: "toolu_pending",
           toolName: "Write",
-          kind: "approval",
           input: { path: "/workspace/file.txt" },
           decision: "deny",
           denyMessage: "not safe",
           status: "resolving",
-          expiresAt: "2026-01-01T00:30:00Z",
         }],
         pendingSandboxExecutions: [{
           toolUseEventId: "evt_pending_sandbox",
