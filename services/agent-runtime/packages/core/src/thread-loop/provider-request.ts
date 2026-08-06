@@ -97,7 +97,7 @@ export interface ProviderCallAssemblySuccess {
   readonly ok: true;
   readonly system: readonly SystemSegment[];
   readonly tools: readonly GatewayRuntimeToolDefinition[];
-  readonly maxOutputTokens: number;
+  readonly maxOutputTokens?: number;
   readonly timeoutMs: number;
   readonly request: ProviderRequest;
 }
@@ -547,11 +547,6 @@ export const DefaultProviderCallRuntimeConfig: ProviderCallRuntimeConfig = {
   skillGuidanceDescriptionBudgetBytes: 32 * 1_024,
 };
 
-/** Resolves the configured output-token value or its default; the assembler validates positivity. */
-export function effectiveProviderMaxOutputTokens(runtime: Pick<ProviderCallRuntimeConfig, "maxOutputTokens">): number {
-  return runtime.maxOutputTokens ?? 1_024;
-}
-
 const SkillDescriptionPerEntryMaxBytes = 4 * 1_024;
 
 function assemblyFailure(
@@ -600,9 +595,11 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
   ) {
     return assemblyFailure(input, "runtime_contract_validation");
   }
-  const maxOutputTokens = effectiveProviderMaxOutputTokens(input.runtime);
+  // No output budget is invented here: an absent value means the provider's
+  // documented model output limit governs (Gateway lowering owns that value).
+  const maxOutputTokens = input.runtime.maxOutputTokens;
   const timeoutMs = input.runtime.timeoutMs;
-  if (!positiveInteger(maxOutputTokens) || timeoutMs === undefined || !positiveInteger(timeoutMs)) {
+  if ((maxOutputTokens !== undefined && !positiveInteger(maxOutputTokens)) || timeoutMs === undefined || !positiveInteger(timeoutMs)) {
     return assemblyFailure(input, "bounded");
   }
   const approvalReviewerRequest = requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER;
@@ -701,7 +698,9 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
     tools,
     attachments: [...(input.runtime.attachments ?? [])],
     limits: {
-      maxOutputTokens,
+      // Zero is the wire encoding of "unset": the provider's documented model
+      // output limit governs at Gateway lowering.
+      maxOutputTokens: maxOutputTokens ?? 0,
       timeoutMs,
     },
     ...(input.runtime.outputSchemaJson !== undefined ? { outputSchemaJson: input.runtime.outputSchemaJson } : {}),
@@ -711,7 +710,7 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
     ok: true,
     system,
     tools,
-    maxOutputTokens,
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     timeoutMs,
     request,
   };

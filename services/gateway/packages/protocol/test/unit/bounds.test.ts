@@ -451,7 +451,7 @@ describe("Gateway protocol bounds", () => {
       { ...base, tools: [{ ...base.tools[0]!, inputSchemaJson: "not-json" }] },
       { ...base, attachments: [{ ...base.attachments[0]!, mime: "text/plain" }] },
       { ...base, limits: undefined },
-      { ...base, limits: { maxOutputTokens: 0, timeoutMs: 30_000 } },
+      { ...base, limits: { maxOutputTokens: -1, timeoutMs: 30_000 } },
       { ...base, messages: [{ ...base.messages[0]!, role: 99 as RuntimeMessageRole }] },
       { ...base, messages: [{ ...base.messages[0]!, status: "streaming" }] },
       { ...base, messages: [{ ...base.messages[0]!, status: "pending" }] },
@@ -459,6 +459,14 @@ describe("Gateway protocol bounds", () => {
     ]) {
       expectInvalid(validateProviderRequest(request));
     }
+  });
+
+  test("accepts a zero output limit as unset so the model's documented limit governs", () => {
+    const base = validProviderRequest();
+    expect(validateProviderRequest({
+      ...base,
+      limits: { maxOutputTokens: 0, timeoutMs: 30_000 },
+    })).toEqual({ ok: true });
   });
 
   test("validates ProviderStreamEvent request identity and payload shape", () => {

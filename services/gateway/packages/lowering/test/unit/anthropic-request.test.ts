@@ -449,6 +449,12 @@ describe("anthropic request lowering", () => {
     expect(capped.options.maxOutputTokens).toBe(4096);
     expect(belowCap.options.maxOutputTokens).toBe(1024);
   });
+
+  test("L8 sends the catalog's documented model output limit when the request sets none", () => {
+    const unset = lowerAnthropicRequest(anthropicRequest({ limits: { maxOutputTokens: 0, timeoutMs: 30_000 } }), 384_000);
+
+    expect(unset.options.maxOutputTokens).toBe(384_000);
+  });
 });
 
 function lowerAnthropicRequest(

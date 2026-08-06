@@ -173,6 +173,11 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
             limits: { maxOutputTokens: 321, timeoutMs: 456 },
         },
     });
+    const { maxOutputTokens: _configured, ...runtimeWithoutOutputLimit } = input.runtime;
+    const unset = assembleProviderCallRequest({ ...input, runtime: runtimeWithoutOutputLimit });
+    if (!unset.ok) throw new Error("expected assembly without a configured output limit to succeed");
+    expect(unset.maxOutputTokens).toBeUndefined();
+    expect(unset.request.limits).toEqual({ maxOutputTokens: 0, timeoutMs: 456 });
     const outputSchemaJson = JSON.stringify({
         type: "object",
         additionalProperties: false,
