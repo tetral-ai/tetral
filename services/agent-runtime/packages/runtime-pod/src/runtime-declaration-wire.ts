@@ -16,7 +16,25 @@ import type {
   WriteEventRequest,
   WriteRequestEndRequest,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
-import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import {
+  canonicalRunToolJSON,
+  canonicalRunToolJSONWithoutObjectFields,
+} from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+
+// UPDATE-WITH: services/bridge/bridge_api_attachments.go
+// (internalProviderPayloadFields). Declarations strip these fields before
+// digesting so Runtime and Bridge hash the durable payload bytes.
+const internalProviderPayloadFields = new Set([
+  "background_task",
+  "engine_sandbox_id",
+  "provider_sandbox_id",
+  "provider_session_id",
+  "provider_command_id",
+  "provider_command_metadata",
+  "provider_command_metadata_json",
+  "provider_metadata",
+  "provider_metadata_json",
+]);
 
 /** Returns the SHA-256 digest Bridge must echo for this declaration. */
 export function commitInputsDeclarationDigest(
@@ -94,16 +112,19 @@ export function taskNotificationDeclarationDigest(
     "scope" | "runtimeInputId" | "taskId" | "resultJson" | "draft"
   >,
 ): string {
+  const resultJSON = canonicalRunToolJSONWithoutObjectFields(
+    request.resultJson,
+    internalProviderPayloadFields,
+  );
   const declaration = {
     draft: request.draft === undefined ? null : canonicalDrafts([request.draft])[0],
     operation_kind: "commit_task_notification_result",
-    result: JSON.parse(canonicalRunToolJSON(request.resultJson)) as unknown,
     runtime_input_id: request.runtimeInputId,
     session_thread_id: request.scope?.sessionThreadId ?? "",
     source_id: request.draft?.sourceId ?? "",
     task_id: request.taskId,
   };
-  const canonical = canonicalRunToolJSON(JSON.stringify(declaration));
+  const canonical = canonicalRunToolJSON(jsonObjectWithRawField(declaration, "result", resultJSON));
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
@@ -125,6 +146,10 @@ export function writeEventDeclarationDigest(
     | "drafts"
   >,
 ): string {
+  const payloadJSON = canonicalRunToolJSONWithoutObjectFields(
+    request.payloadJson,
+    internalProviderPayloadFields,
+  );
   const declaration = {
     drafts: canonicalDrafts(request.drafts),
     event_type: request.eventType,
@@ -133,7 +158,6 @@ export function writeEventDeclarationDigest(
       ? null
       : request.mcpMaterializationHandle,
     operation_kind: "write_event",
-    payload: JSON.parse(canonicalRunToolJSON(request.payloadJson)) as unknown,
     runtime_write_id: request.runtimeWriteId,
     sandbox_result_digest: request.sandboxResultDigest === undefined || request.sandboxResultDigest.length === 0
       ? null
@@ -160,7 +184,7 @@ export function writeEventDeclarationDigest(
         }
       : {}),
   };
-  const canonical = canonicalRunToolJSON(JSON.stringify(declaration));
+  const canonical = canonicalRunToolJSON(jsonObjectWithRawField(declaration, "payload", payloadJSON));
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
@@ -331,6 +355,15 @@ function canonicalDrafts(
     source_id: draft.sourceId,
     source_kind: draft.sourceKind,
   }));
+}
+
+function jsonObjectWithRawField(
+  value: Readonly<Record<string, unknown>>,
+  fieldName: string,
+  rawJSON: string,
+): string {
+  const encoded = JSON.stringify(value);
+  return `${encoded.slice(0, -1)},${JSON.stringify(fieldName)}:${rawJSON}}`;
 }
 
 function runtimeDraftKindName(kind: RuntimeDraftKind): string {

@@ -24,10 +24,14 @@ func canonicalRunToolInput(raw string) (string, string, error) {
 }
 
 func canonicalRunToolJSON(raw string) (string, error) {
+	return canonicalRunToolJSONWithoutObjectFields(raw, nil)
+}
+
+func canonicalRunToolJSONWithoutObjectFields(raw string, excludedObjectFields map[string]struct{}) (string, error) {
 	if !json.Valid([]byte(raw)) {
 		return "", errors.New("invalid JSON")
 	}
-	parser := runToolCanonicalJSONParser{raw: raw}
+	parser := runToolCanonicalJSONParser{raw: raw, excludedObjectFields: excludedObjectFields}
 	canonical, err := parser.parseValue(0)
 	if err != nil {
 		return "", err
@@ -40,8 +44,9 @@ func canonicalRunToolJSON(raw string) (string, error) {
 }
 
 type runToolCanonicalJSONParser struct {
-	raw    string
-	offset int
+	raw                  string
+	offset               int
+	excludedObjectFields map[string]struct{}
 }
 
 type runToolCanonicalJSONMember struct {
@@ -97,7 +102,13 @@ func (p *runToolCanonicalJSONParser) parseObject(depth int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		members = append(members, runToolCanonicalJSONMember{key: key, value: value})
+		excluded, err := p.objectFieldExcluded(key)
+		if err != nil {
+			return "", err
+		}
+		if !excluded {
+			members = append(members, runToolCanonicalJSONMember{key: key, value: value})
+		}
 		p.skipWhitespace()
 		if p.consume('}') {
 			break
@@ -121,6 +132,18 @@ func (p *runToolCanonicalJSONParser) parseObject(depth int) (string, error) {
 	}
 	canonical.WriteByte('}')
 	return canonical.String(), nil
+}
+
+func (p *runToolCanonicalJSONParser) objectFieldExcluded(rawKey string) (bool, error) {
+	if len(p.excludedObjectFields) == 0 {
+		return false, nil
+	}
+	var key string
+	if err := json.Unmarshal([]byte(rawKey), &key); err != nil {
+		return false, err
+	}
+	_, excluded := p.excludedObjectFields[key]
+	return excluded, nil
 }
 
 func (p *runToolCanonicalJSONParser) parseArray(depth int) (string, error) {

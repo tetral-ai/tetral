@@ -508,46 +508,27 @@ func logTransientAttachmentGC(logger *slog.Logger, result TransientAttachmentGCR
 	}
 }
 
+// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/runtime-declaration-wire.ts
+// (internalProviderPayloadFields). These fields are removed before declaration
+// digesting on both sides of the receipt contract.
+var internalProviderPayloadFields = map[string]struct{}{
+	"background_task":                {},
+	"engine_sandbox_id":              {},
+	"provider_sandbox_id":            {},
+	"provider_session_id":            {},
+	"provider_command_id":            {},
+	"provider_command_metadata":      {},
+	"provider_command_metadata_json": {},
+	"provider_metadata":              {},
+	"provider_metadata_json":         {},
+}
+
 func stripInternalProviderFields(raw string) string {
-	var value any
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
-		return raw
-	}
-	encoded, err := json.Marshal(stripInternalProviderValue(value))
+	stripped, err := canonicalRunToolJSONWithoutObjectFields(raw, internalProviderPayloadFields)
 	if err != nil {
 		return raw
 	}
-	return string(encoded)
-}
-
-func stripInternalProviderValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		for _, key := range []string{
-			"background_task",
-			"engine_sandbox_id",
-			"provider_sandbox_id",
-			"provider_session_id",
-			"provider_command_id",
-			"provider_command_metadata",
-			"provider_command_metadata_json",
-			"provider_metadata",
-			"provider_metadata_json",
-		} {
-			delete(typed, key)
-		}
-		for key, child := range typed {
-			typed[key] = stripInternalProviderValue(child)
-		}
-		return typed
-	case []any:
-		for index, child := range typed {
-			typed[index] = stripInternalProviderValue(child)
-		}
-		return typed
-	default:
-		return value
-	}
+	return stripped
 }
 
 type transientAttachmentCreate struct {
