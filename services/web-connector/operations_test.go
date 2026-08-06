@@ -14,11 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestValidationFailuresPerformNoBackendOrBlobOperations(t *testing.T) {
