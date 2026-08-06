@@ -47,6 +47,30 @@ func marshalRuntimeDeclarationObject(value map[string]any) ([]byte, error) {
 	return bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}), nil
 }
 
+func marshalRuntimeDeclarationObjectWithRawField(value map[string]any, fieldName string, rawJSON string) ([]byte, error) {
+	if !json.Valid([]byte(rawJSON)) {
+		return nil, fmt.Errorf("invalid raw declaration JSON")
+	}
+	encoded, err := marshalRuntimeDeclarationObject(value)
+	if err != nil {
+		return nil, err
+	}
+	encodedFieldName, err := json.Marshal(fieldName)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]byte, 0, len(encoded)+len(encodedFieldName)+len(rawJSON)+2)
+	result = append(result, encoded[:len(encoded)-1]...)
+	if len(encoded) > 2 {
+		result = append(result, ',')
+	}
+	result = append(result, encodedFieldName...)
+	result = append(result, ':')
+	result = append(result, rawJSON...)
+	result = append(result, '}')
+	return result, nil
+}
+
 func commitInputsDeclarationDigest(request *bridgev1.CommitInputsRequest, inputKind string) (string, error) {
 	drafts, err := canonicalRuntimeDrafts(request.GetDrafts())
 	if err != nil {
@@ -90,6 +114,7 @@ func writeEventDeclarationDigest(
 	stableReasoningJSON string,
 	serverToolUseJSON string,
 ) (string, error) {
+	payloadJSON = stripInternalProviderFields(payloadJSON)
 	drafts, err := canonicalRuntimeDrafts(request.GetDrafts())
 	if err != nil {
 		return "", err
@@ -102,7 +127,6 @@ func writeEventDeclarationDigest(
 		),
 		"model_request_id": nullableDeclarationString(request.GetModelRequestId()),
 		"operation_kind":   bridgeOpWriteEvent,
-		"payload":          json.RawMessage(payloadJSON),
 		"runtime_write_id": request.GetRuntimeWriteId(),
 		"sandbox_result_digest": nullableDeclarationString(
 			request.GetSandboxResultDigest(),
@@ -115,7 +139,7 @@ func writeEventDeclarationDigest(
 		declaration["context_through_message_sequence"] = nullableDeclarationInt64(request.ContextThroughMessageSequence)
 		declaration["request_kind"] = nullableDeclarationString(request.GetRequestKind())
 	}
-	raw, err := marshalRuntimeDeclarationObject(declaration)
+	raw, err := marshalRuntimeDeclarationObjectWithRawField(declaration, "payload", payloadJSON)
 	if err != nil {
 		return "", err
 	}
@@ -336,6 +360,7 @@ func taskNotificationDeclarationDigest(
 	request *bridgev1.CommitTaskNotificationResultRequest,
 	resultJSON string,
 ) (string, error) {
+	resultJSON = stripInternalProviderFields(resultJSON)
 	var draft any
 	if request.GetDraft() != nil {
 		drafts, err := canonicalRuntimeDrafts([]*bridgev1.RuntimeMessageDraft{request.GetDraft()})
@@ -344,15 +369,14 @@ func taskNotificationDeclarationDigest(
 		}
 		draft = drafts[0]
 	}
-	raw, err := marshalRuntimeDeclarationObject(map[string]any{
+	raw, err := marshalRuntimeDeclarationObjectWithRawField(map[string]any{
 		"draft":             draft,
 		"operation_kind":    bridgeOpCommitTaskNotificationResult,
-		"result":            json.RawMessage(resultJSON),
 		"runtime_input_id":  request.GetRuntimeInputId(),
 		"session_thread_id": request.GetScope().GetSessionThreadId(),
 		"source_id":         request.GetDraft().GetSourceId(),
 		"task_id":           request.GetTaskId(),
-	})
+	}, "result", resultJSON)
 	if err != nil {
 		return "", err
 	}

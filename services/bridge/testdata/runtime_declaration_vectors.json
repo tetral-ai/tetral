@@ -106,7 +106,7 @@
     "session_thread_id": "thr_vector",
     "runtime_input_id": "rin_task",
     "task_id": "task_vector",
-    "result_json": "{\"status\":\"completed\",\"task_id\":\"task_vector\"}",
+    "result_json": "{\"status\":\"completed\",\"task_id\":\"task_vector\",\"provider_metadata\":{\"secret\":\"hidden\"},\"message\":\"done &<>   \\u0026\"}",
     "draft": {
       "runtime_local_id": "msg_task",
       "source_kind": "task_notification",
@@ -121,8 +121,8 @@
         "part_json": "{\"type\":\"text\",\"text\":\"task complete\",\"truncated\":false,\"status\":\"completed\"}"
       }
     },
-    "canonical_json": "{\"draft\":{\"draft_kind\":\"RUNTIME_DRAFT_KIND_TASK_NOTIFICATION\",\"message_info\":{\"origin\":\"system\",\"role\":\"user\",\"status\":\"completed\"},\"ordinal\":0,\"parts\":[{\"ordinal\":0,\"part_json\":{\"status\":\"completed\",\"text\":\"task complete\",\"truncated\":false,\"type\":\"text\"},\"part_kind\":\"text\",\"runtime_local_part_id\":\"part_task\"}],\"runtime_local_id\":\"msg_task\",\"source_event_id\":null,\"source_id\":\"task_notice_vector\",\"source_kind\":\"task_notification\"},\"operation_kind\":\"commit_task_notification_result\",\"result\":{\"status\":\"completed\",\"task_id\":\"task_vector\"},\"runtime_input_id\":\"rin_task\",\"session_thread_id\":\"thr_vector\",\"source_id\":\"task_notice_vector\",\"task_id\":\"task_vector\"}",
-    "digest": "4d9bc6b90e089797591d88a173c137aeaa2033d78fc32e9fd6381a467399a722"
+    "canonical_json": "{\"draft\":{\"draft_kind\":\"RUNTIME_DRAFT_KIND_TASK_NOTIFICATION\",\"message_info\":{\"origin\":\"system\",\"role\":\"user\",\"status\":\"completed\"},\"ordinal\":0,\"parts\":[{\"ordinal\":0,\"part_json\":{\"status\":\"completed\",\"text\":\"task complete\",\"truncated\":false,\"type\":\"text\"},\"part_kind\":\"text\",\"runtime_local_part_id\":\"part_task\"}],\"runtime_local_id\":\"msg_task\",\"source_event_id\":null,\"source_id\":\"task_notice_vector\",\"source_kind\":\"task_notification\"},\"operation_kind\":\"commit_task_notification_result\",\"result\":{\"message\":\"done &<>   \\u0026\",\"status\":\"completed\",\"task_id\":\"task_vector\"},\"runtime_input_id\":\"rin_task\",\"session_thread_id\":\"thr_vector\",\"source_id\":\"task_notice_vector\",\"task_id\":\"task_vector\"}",
+    "digest": "7ce70cc85b80309d3b606207992d6d87c3c156a82fcea6982caf0d99a3626ab0"
   },
   "mcp_materialization": {
     "session_thread_id": "thr_vector",

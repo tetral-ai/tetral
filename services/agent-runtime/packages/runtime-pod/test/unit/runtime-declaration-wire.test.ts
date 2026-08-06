@@ -81,10 +81,22 @@ interface SharedDeclarationVector {
   readonly digest: string;
 }
 
+interface WriteEventDeclarationByteVector {
+  readonly payload_json: string;
+  readonly stripped_payload_json: string;
+  readonly draft?: SharedDeclarationDraft;
+  readonly digest: string;
+}
+
 const corpus = JSON.parse(readFileSync(
   resolve(import.meta.dir, "../../../../../bridge/testdata/runtime_declaration_vectors.json"),
   "utf8",
 )) as Record<PodDeclarationFamily | "mcp_materialization", SharedDeclarationVector>;
+
+const writeEventByteCorpus = JSON.parse(readFileSync(
+  resolve(import.meta.dir, "../../../../../bridge/testdata/write_event_declaration_byte_vectors.json"),
+  "utf8",
+)) as Record<string, WriteEventDeclarationByteVector>;
 
 describe("Runtime Pod shared declaration vectors", () => {
   test("contains exactly the active Pod families plus MCP materialization", () => {
@@ -95,6 +107,33 @@ describe("Runtime Pod shared declaration vectors", () => {
     const vector = corpus[family];
     expect(createHash("sha256").update(vector.canonical_json, "utf8").digest("hex")).toBe(vector.digest);
     expect(productionDigest(family, vector)).toBe(vector.digest);
+  });
+});
+
+describe("WriteEvent cross-language byte identity", () => {
+  test.each(Object.entries(writeEventByteCorpus))("%s", (_name, vector) => {
+    expect(writeEventDeclarationDigest({
+      scope: {
+        requestId: "",
+        workspaceId: "",
+        sessionId: "",
+        sessionThreadId: "thr_digest_bytes",
+        binding: undefined,
+      },
+      runtimeWriteId: "rwrite_digest_bytes",
+      modelRequestId: "mreq_digest_bytes",
+      eventType: "agent.message",
+      payloadJson: vector.payload_json,
+      stableReasoningParts: [],
+      serverToolUse: undefined,
+      drafts: vector.draft === undefined
+        ? []
+        : [runtimeDraft(vector.draft, RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_USE)],
+      mcpMaterializationHandle: undefined,
+      sandboxResultDigest: undefined,
+      contextThroughMessageSequence: undefined,
+      requestKind: "",
+    })).toBe(vector.digest);
   });
 });
 

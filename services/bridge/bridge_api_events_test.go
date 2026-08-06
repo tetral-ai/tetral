@@ -85,7 +85,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 		RuntimeWriteId: "rwrite_bridge_event",
 		ModelRequestId: "mreq_bridge_event",
 		EventType:      "agent.message",
-		PayloadJson:    `{"type":"agent.message","provider_session_id":"sess_provider","content":[{"type":"text","text":"hello","provider_metadata":{"raw":"secret"}}]}`,
+		PayloadJson:    `{"type":"agent.message","provider_session_id":"sess_provider","content":[{"type":"text","text":"hello","provider_metadata":{"raw":"secret"}}],"byte_identity":{"raw":"&<>   \u0026"}}`,
 		SessionVisible: true,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t,
@@ -99,6 +99,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 			},
 		)},
 	}
+	expectedPayloadJSON := `{"byte_identity":{"raw":"&<>   \u0026"},"content":[{"text":"hello","type":"text"}],"type":"agent.message"}`
 	response, err := store.WriteEvent(context.Background(), request)
 	if err != nil {
 		t.Fatalf("WriteEvent: %v", err)
@@ -134,6 +135,26 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT latest_stream_position, payload_json, projection_json FROM session_events WHERE workspace_id = 'default' AND event_id = $1`, response.GetEventId()).Scan(&latestPosition, &eventPayloadJSON, &eventProjectionJSON); err != nil {
 		t.Fatalf("read latest stream position: %v", err)
+	}
+	if eventPayloadJSON != expectedPayloadJSON {
+		t.Fatalf("stored event payload = %q; want byte-identical %q", eventPayloadJSON, expectedPayloadJSON)
+	}
+	stableReasoning := mustNormalizeStableReasoning(t, request)
+	serverToolUse, err := normalizeServerToolUseUsage(request)
+	if err != nil {
+		t.Fatalf("normalize server tool use: %v", err)
+	}
+	storedPayloadDigest, err := writeEventDeclarationDigest(
+		request,
+		eventPayloadJSON,
+		stableReasoning.CanonicalJSON,
+		serverToolUse.CanonicalJSON,
+	)
+	if err != nil {
+		t.Fatalf("digest stored event payload: %v", err)
+	}
+	if len(response.GetDeclaration().GetReceipts()) != 1 || response.GetDeclaration().GetReceipts()[0].GetDeclarationDigest() != storedPayloadDigest {
+		t.Fatalf("receipt digest does not cover the stored payload bytes")
 	}
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND model_request_id = 'mreq_bridge_event' AND kind = 'assistant'`).Scan(&assistantProjectionCount); err != nil {

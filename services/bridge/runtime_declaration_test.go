@@ -92,6 +92,13 @@ type runtimeDeclarationInlineMedia struct {
 	SuggestedFilename string `json:"suggested_filename"`
 }
 
+type writeEventDeclarationByteVector struct {
+	PayloadJSON         string                   `json:"payload_json"`
+	StrippedPayloadJSON string                   `json:"stripped_payload_json"`
+	Draft               *runtimeDeclarationDraft `json:"draft"`
+	Digest              string                   `json:"digest"`
+}
+
 func TestRuntimeDeclarationDigestsMatchSharedVectors(t *testing.T) {
 	raw, err := os.ReadFile("testdata/runtime_declaration_vectors.json") //nolint:gosec // Repository-owned fixture.
 	if err != nil {
@@ -129,6 +136,55 @@ func TestRuntimeDeclarationDigestsMatchSharedVectors(t *testing.T) {
 			got := runtimeDeclarationDigestForVector(t, family, vector)
 			if got != vector.Digest {
 				t.Fatalf("production declaration digest = %q; want %q", got, vector.Digest)
+			}
+		})
+	}
+}
+
+func TestWriteEventDeclarationDigestsMatchByteIdentityVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/write_event_declaration_byte_vectors.json") //nolint:gosec // Repository-owned fixture.
+	if err != nil {
+		t.Fatalf("read WriteEvent byte vectors: %v", err)
+	}
+	var corpus map[string]writeEventDeclarationByteVector
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatalf("decode WriteEvent byte vectors: %v", err)
+	}
+	for name, vector := range corpus {
+		t.Run(name, func(t *testing.T) {
+			if got := stripInternalProviderFields(vector.PayloadJSON); got != vector.StrippedPayloadJSON {
+				t.Fatalf("stripped payload = %q; want %q", got, vector.StrippedPayloadJSON)
+			}
+			request := &bridgev1.WriteEventRequest{
+				Scope:          &bridgev1.RuntimeScope{SessionThreadId: "thr_digest_bytes"},
+				RuntimeWriteId: "rwrite_digest_bytes",
+				ModelRequestId: "mreq_digest_bytes",
+				EventType:      "agent.message",
+				PayloadJson:    vector.PayloadJSON,
+			}
+			if vector.Draft != nil {
+				request.Drafts = []*bridgev1.RuntimeMessageDraft{runtimeDeclarationDraftForVector(
+					t,
+					vector.Draft,
+					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TOOL_USE,
+				)}
+			}
+			stableReasoning := mustNormalizeStableReasoning(t, request)
+			serverToolUse, err := normalizeServerToolUseUsage(request)
+			if err != nil {
+				t.Fatalf("normalize server tool use: %v", err)
+			}
+			digest, err := writeEventDeclarationDigest(
+				request,
+				vector.PayloadJSON,
+				stableReasoning.CanonicalJSON,
+				serverToolUse.CanonicalJSON,
+			)
+			if err != nil {
+				t.Fatalf("WriteEvent declaration digest: %v", err)
+			}
+			if digest != vector.Digest {
+				t.Fatalf("WriteEvent declaration digest = %q; want %q", digest, vector.Digest)
 			}
 		})
 	}

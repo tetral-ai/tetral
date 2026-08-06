@@ -948,6 +948,49 @@ describe("BridgeAPIEventWriter", () => {
     expect(bridge.writeEventRequests).toHaveLength(1);
   });
 
+  test("applies the WriteEvent receipt for a Bash tool input containing &&", async () => {
+    const bridge = new RecordingBridgeClient();
+    const lifecycleLogs: string[] = [];
+    const metrics = new RuntimePodMetricsRegistry();
+    const writer = new BridgeAPIEventWriter({
+      address: "bridge.test:9090",
+      tokenPath: "/var/run/token",
+      client: bridge.client(),
+      metadataFactory: async () => new Metadata(),
+      logger: createJsonLogger({ write: (line) => lifecycleLogs.push(line) }),
+      metrics,
+    });
+    const command = "git add . && git commit";
+
+    const result = await writer.append({
+      ...writerScope(),
+      writeId: "rwrite_bash_and",
+      event: {
+        type: "agent.tool_use",
+        name: "Bash",
+        input: { command },
+        evaluated_permission: "allow",
+      },
+      drafts: [outputDraft(
+        "rwrite_bash_and",
+        "agent.tool_use",
+        "tool_use",
+        assistantToolMessage("running", { kind: "tool" }, "Bash", "call_bash_and"),
+      )],
+      modelRequestId: "mreq_bash_and",
+    });
+
+    expect(result).toMatchObject({ ok: true, writeId: "rwrite_bash_and" });
+    expect(bridge.writeEventRequests).toHaveLength(1);
+    expect(bridge.writeEventRequests[0]?.payloadJson).toContain(command);
+    expect(lifecycleLogs.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({
+      event: "runtime_receipt_applied",
+      "declaration.source.id": "rwrite_bash_and",
+    }));
+    expect(metrics.snapshot().receiptEvidence.get("applied")).toBe(1);
+    expect(metrics.snapshot().receiptEvidence.get("declaration_digest_mismatch")).toBeUndefined();
+  });
+
   test("rejects a compaction boundary on an ordinary WriteEvent receipt", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.eventWriterCompactedThroughMessageSequence = 0;
@@ -2183,11 +2226,14 @@ function assistantToolMessage(
   toolName = "Read",
   toolCallId = "call_1",
 ): RuntimeMessage {
+  const inputValue = toolName === "web"
+    ? { search_query: [{ q: "tetral" }] }
+    : toolName === "Bash"
+      ? { command: "git add . && git commit" }
+      : { path: "a.txt" };
   const input = {
-    value: toolName === "web" ? { search_query: [{ q: "tetral" }] } : { path: "a.txt" },
-    preview: toolName === "web"
-      ? "{\"search_query\":[{\"q\":\"tetral\"}]}"
-      : "{\"path\":\"a.txt\"}",
+    value: inputValue,
+    preview: JSON.stringify(inputValue),
     truncated: false,
   };
   return RuntimeMessageSchema.parse({
