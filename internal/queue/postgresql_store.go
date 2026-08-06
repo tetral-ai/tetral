@@ -365,6 +365,7 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 		return leftRequest.DedupeKey < rightRequest.DedupeKey
 	})
 	jobs := make([]*Job, len(normalized))
+	notifyClasses := make(map[string]struct{}, 2)
 	for _, item := range ordered {
 		request := item.request
 		if request.DedupeKey != "" {
@@ -389,16 +390,37 @@ func EnqueueBatchTx(ctx context.Context, tx enqueueTransaction, requests []Enque
 		).Scan(&partitionSequence); err != nil {
 			return nil, err
 		}
-		job, err := insertQueueJobTx(ctx, tx, request, partitionSequence)
+		job, inserted, err := insertQueueJobTx(ctx, tx, request, partitionSequence)
 		if err != nil {
 			return nil, err
 		}
 		jobs[item.index] = job
+		if inserted {
+			consumerClass, ok := ConsumerClassForKind(request.Kind)
+			if !ok {
+				return nil, &IntegrityError{Message: "queue kind has no notification consumer class"}
+			}
+			notifyClasses[consumerClass] = struct{}{}
+		}
+	}
+	for _, consumerClass := range []string{ConsumerClassBridge, ConsumerClassSandbox} {
+		if _, ok := notifyClasses[consumerClass]; !ok {
+			continue
+		}
+		var notificationResult any
+		if err := tx.QueryRowScanner(
+			ctx,
+			`SELECT pg_notify($1, $2)`,
+			NotificationChannel,
+			consumerClass,
+		).Scan(&notificationResult); err != nil {
+			return nil, err
+		}
 	}
 	return jobs, nil
 }
 
-func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request EnqueueRequest, partitionSequence int64) (*Job, error) {
+func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request EnqueueRequest, partitionSequence int64) (*Job, bool, error) {
 	payload := append(json.RawMessage(nil), request.PayloadJSON...)
 	row := tx.QueryRowScanner(ctx,
 		`INSERT INTO queue_jobs (
@@ -425,12 +447,13 @@ func insertQueueJobTx(ctx context.Context, tx enqueueTransaction, request Enqueu
 	)
 	job, err := scanJob(row)
 	if err == nil {
-		return job, nil
+		return job, true, nil
 	}
 	if !dbconnect.IsNoRows(err) || request.DedupeKey == "" {
-		return nil, err
+		return nil, false, err
 	}
-	return existingActiveDedupeJob(ctx, tx, request.WorkspaceID, request.DedupeKey)
+	job, err = existingActiveDedupeJob(ctx, tx, request.WorkspaceID, request.DedupeKey)
+	return job, false, err
 }
 
 func existingActiveDedupeJob(ctx context.Context, tx enqueueTransaction, workspaceID workspace.ID, dedupeKey string) (*Job, error) {

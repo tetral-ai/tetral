@@ -140,6 +140,8 @@ func (s *Service) RunWeb(ctx context.Context, request *providergatewayv1.RunWebR
 
 func (s *Service) execute(ctx context.Context, scope Scope, input *providergatewayv1.WebToolInput, operation string, started time.Time) executionResult {
 	usage := &providergatewayv1.WebUsage{Operation: operation}
+	operationCount := len(input.GetSearchQuery()) + len(input.GetOpen()) + len(input.GetFind())
+	blockBudget := (maxVisibleResultBytes - 2*(operationCount-1)) / operationCount
 	blocks := make([]string, 0)
 	refs := make([]*providergatewayv1.WebRef, 0)
 	seen := map[string]bool{}
@@ -206,7 +208,11 @@ func (s *Service) execute(ctx context.Context, scope Scope, input *providergatew
 			itemRefs = append(itemRefs, ref)
 			appendProtoRef(&refs, seen, ref)
 		}
-		blocks = append(blocks, formatSearch(query.GetQ(), query.GetDomains(), hits, itemRefs))
+		block := formatSearch(query.GetDomains(), hits, itemRefs)
+		if len([]byte(block)) > blockBudget {
+			return finishError(BackendToolError, "web search result exceeds visible output budget")
+		}
+		blocks = append(blocks, block)
 	}
 	for _, open := range input.GetOpen() {
 		var page Page
@@ -255,15 +261,15 @@ func (s *Service) execute(ctx context.Context, scope Scope, input *providergatew
 		if open.Lineno != nil {
 			lineno = open.GetLineno()
 		}
-		window, windowErr := formatWindow(ref.ID, page, lineno)
+		window, windowErr := formatWindowWithin(ref.ID, page, lineno, blockBudget)
 		if windowErr != nil {
 			return finishError(BackendToolError, windowErr.Error())
 		}
 		blocks = append(blocks, window.text)
 		appendProtoRef(&refs, seen, window.ref)
+		windowTruncated = windowTruncated || window.truncated
 		if len(input.GetOpen()) == 1 {
 			nextLine = window.next
-			windowTruncated = window.truncated
 		}
 		sourceIncomplete = sourceIncomplete || page.SourceIncomplete
 	}
@@ -275,7 +281,10 @@ func (s *Service) execute(ctx context.Context, scope Scope, input *providergatew
 		}
 		text, findErr := formatFind(ref.ID, find.GetPattern(), page)
 		if findErr != nil {
-			return finishError(BackendToolError, "invalid pattern: "+findErr.Error())
+			return finishError(BackendToolError, "invalid pattern")
+		}
+		if len([]byte(text)) > blockBudget {
+			return finishError(BackendToolError, "web find result exceeds visible output budget")
 		}
 		blocks = append(blocks, text)
 		appendProtoRef(&refs, seen, Ref{ID: ref.ID, URL: page.URL, Title: page.Title, TotalLines: int32(len(page.Lines))})
@@ -456,7 +465,7 @@ func validateSemanticEnvelope(r *providergatewayv1.RunWebRequest) string {
 }
 func validStructuralRequest(r *providergatewayv1.RunWebRequest) bool {
 	for _, v := range []string{r.GetWorkspaceId(), r.GetSessionId(), r.GetSessionThreadId(), r.GetToolUseEventId(), r.GetBindingId()} {
-		if len([]byte(v)) > 128 || !utf8.ValidString(v) {
+		if len([]byte(v)) > maxIdentityBytes || !utf8.ValidString(v) {
 			return false
 		}
 	}
@@ -464,11 +473,11 @@ func validStructuralRequest(r *providergatewayv1.RunWebRequest) bool {
 		return false
 	}
 	for _, q := range r.GetInput().GetSearchQuery() {
-		if q.GetQ() == "" || len([]byte(q.GetQ())) > 64*1024 {
+		if q.GetQ() == "" || len([]byte(q.GetQ())) > maxRequestTextBytes {
 			return false
 		}
 		for _, d := range q.GetDomains() {
-			if d == "" || len([]byte(d)) > 253 {
+			if d == "" || len([]byte(d)) > maxDomainBytes {
 				return false
 			}
 		}
@@ -479,15 +488,15 @@ func validStructuralRequest(r *providergatewayv1.RunWebRequest) bool {
 		if hasURL == hasRef {
 			return false
 		}
-		if o.Url != nil && len([]byte(o.GetUrl())) > 64*1024 {
+		if o.Url != nil && len([]byte(o.GetUrl())) > maxRequestTextBytes {
 			return false
 		}
-		if o.RefId != nil && len([]byte(o.GetRefId())) > 128 {
+		if o.RefId != nil && len([]byte(o.GetRefId())) > maxIdentityBytes {
 			return false
 		}
 	}
 	for _, f := range r.GetInput().GetFind() {
-		if f.GetRefId() == "" || len([]byte(f.GetRefId())) > 128 {
+		if f.GetRefId() == "" || len([]byte(f.GetRefId())) > maxIdentityBytes || len([]byte(f.GetPattern())) > maxPatternBytes {
 			return false
 		}
 	}

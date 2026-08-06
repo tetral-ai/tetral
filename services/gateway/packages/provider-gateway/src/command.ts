@@ -25,7 +25,7 @@ import {
 } from "./providers/credentials.js";
 import { createProviderClientRegistry } from "./providers/clients.js";
 import { SQLOpenAIOAuthCredentialRefreshWriter } from "./providers/openai-oauth-refresh.js";
-import { verifyPostgreSQLSchema } from "../../schema/src/verify.js";
+import { SchemaVerificationError, verifyPostgreSQLSchema } from "../../schema/src/verify.js";
 import type { GatewayTokenReviewClient } from "./auth.js";
 import type { ProviderGatewayApp } from "./app.js";
 import type { ProviderGatewayConfig } from "./config.js";
@@ -87,8 +87,12 @@ export async function runProviderGatewayCommand(options: ProviderGatewayCommandO
       config: config.config,
       logger,
     });
-  } catch {
-    logger.error(startupFailureLogRecord({ kind: "startup_error", message: "gateway service startup failed" }));
+  } catch (error) {
+    logger.error(startupFailureLogRecord({
+      kind: "startup_error",
+      message: "gateway service startup failed",
+      causeCategory: error instanceof SchemaVerificationError ? "schema" : "dependency_readiness",
+    }));
     throw new Error("gateway service startup error");
   }
   const shutdown = async (): Promise<void> => {

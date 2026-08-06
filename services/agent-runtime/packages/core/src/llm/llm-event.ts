@@ -7,18 +7,21 @@
  * into these shapes, while SessionProcessor and ThreadLoop consume them.
  */
 import { z } from "zod/v4";
-import { MaxJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
+import {
+  MaxIdBytes,
+  MaxMetadataBytes,
+  MaxProviderErrorMessageBytes,
+  MaxProviderToolCallInputJsonBytes,
+  MaxProviderUsageJsonBytes,
+  MaxTextBytes,
+} from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   ProviderError,
 } from "../contracts/provider.js";
 import { ProviderErrorCodes, ProviderMetadataSchema as RawProviderMetadataSchema } from "../contracts/provider.js";
 
-/** Maximum UTF-8 bytes accepted for one provider-stream identifier. */
-export const LLMEventIdentifierMaxBytes = 256;
-/** Maximum UTF-8 bytes accepted for one provider-stream text field. */
-export const LLMEventTextMaxBytes = 8_192;
-/** Maximum serialized bytes accepted for provider metadata on one event. */
-export const LLMEventProviderMetadataMaxBytes = 4_096;
+/** Maximum UTF-8 bytes retained in a local diagnostic or tool-input preview. */
+export const RuntimePreviewTextMaxBytes = 8_192;
 
 const IdentifierSchema = z.string().min(1);
 const NonNegativeIntegerSchema = z.number().int().nonnegative();
@@ -146,18 +149,20 @@ function isRuntimeJsonValue(value: unknown): value is RuntimeJsonValue {
 }
 
 const SanitizedTextSchema = z.string()
-  .refine((value) => isWithinUtf8ByteBudget(value, LLMEventTextMaxBytes), `text must be at most ${LLMEventTextMaxBytes} UTF-8 bytes`)
+  .refine((value) => isWithinUtf8ByteBudget(value, MaxProviderErrorMessageBytes), `text must be at most ${MaxProviderErrorMessageBytes} UTF-8 bytes`)
   .transform(sanitizeRuntimeText);
 const SanitizedIdentifierSchema = IdentifierSchema
-  .refine((value) => isWithinUtf8ByteBudget(value, LLMEventIdentifierMaxBytes), `identifier must be at most ${LLMEventIdentifierMaxBytes} UTF-8 bytes`)
+  .refine((value) => isWithinUtf8ByteBudget(value, MaxIdBytes), `identifier must be at most ${MaxIdBytes} UTF-8 bytes`)
   .transform(sanitizeRuntimeText);
 const RuntimeTextSchema = z.string()
-  .refine((value) => isWithinUtf8ByteBudget(value, LLMEventTextMaxBytes), `text must be at most ${LLMEventTextMaxBytes} UTF-8 bytes`);
+  .refine((value) => isWithinUtf8ByteBudget(value, MaxTextBytes), `text must be at most ${MaxTextBytes} UTF-8 bytes`);
+const RuntimePreviewTextSchema = z.string()
+  .refine((value) => isWithinUtf8ByteBudget(value, RuntimePreviewTextMaxBytes), `preview must be at most ${RuntimePreviewTextMaxBytes} UTF-8 bytes`);
 const RuntimeIdentifierSchema = IdentifierSchema
-  .refine((value) => isWithinUtf8ByteBudget(value, LLMEventIdentifierMaxBytes), `identifier must be at most ${LLMEventIdentifierMaxBytes} UTF-8 bytes`);
+  .refine((value) => isWithinUtf8ByteBudget(value, MaxIdBytes), `identifier must be at most ${MaxIdBytes} UTF-8 bytes`);
 const ProviderMetadataSchema = RawProviderMetadataSchema.refine(
-  (metadata) => serializedRuntimeJsonByteLength(metadata as RuntimeJsonValue) <= LLMEventProviderMetadataMaxBytes,
-  `provider metadata must be at most ${LLMEventProviderMetadataMaxBytes} UTF-8 bytes`,
+  (metadata) => serializedRuntimeJsonByteLength(metadata as RuntimeJsonValue) <= MaxMetadataBytes,
+  `provider metadata must be at most ${MaxMetadataBytes} UTF-8 bytes`,
 );
 
 /** Normalized finish reasons accepted from provider streams. */
@@ -183,7 +188,9 @@ export const RuntimeUsageSchema = z.strictObject({
   cacheWriteTokens: NonNegativeIntegerSchema,
   totalTokens: NonNegativeIntegerSchema.optional(),
   unknownTokens: NonNegativeIntegerSchema.optional(),
-  providerUsageJson: z.string().optional(),
+  providerUsageJson: z.string()
+    .refine((value) => isWithinUtf8ByteBudget(value, MaxProviderUsageJsonBytes), `provider usage must be at most ${MaxProviderUsageJsonBytes} UTF-8 bytes`)
+    .optional(),
 });
 /** Normalized token accounting carried by a step-finish or finish event. */
 export type RuntimeUsage = z.infer<typeof RuntimeUsageSchema>;
@@ -197,32 +204,20 @@ export const RuntimeModelLimitsSchema = z.strictObject({
 /** Route-effective context and output limits reported independently of usage. */
 export type RuntimeModelLimits = z.infer<typeof RuntimeModelLimitsSchema>;
 
-/** Bounded text plus the marker that records whether normalization truncated it. */
-export const RuntimeBoundedTextSchema = z.strictObject({
-  text: RuntimeTextSchema,
-  truncated: z.boolean(),
-});
-/** Standalone bounded-text value; provider event variants do not embed this shape. */
-export type RuntimeBoundedText = z.infer<typeof RuntimeBoundedTextSchema>;
-
 /** Recursive JSON value validator used by bounded provider-stream payloads. */
 export const RuntimeJsonValueSchema = z.custom<RuntimeJsonValue>(isRuntimeJsonValue, "RuntimeJsonValue");
 const RuntimeToolInputSchema = RuntimeJsonValueSchema.refine(
-  (value) => serializedRuntimeJsonByteLength(value) <= MaxJsonBytes,
-  `tool input must be at most ${MaxJsonBytes} UTF-8 bytes`,
+  (value) => serializedRuntimeJsonByteLength(value) <= MaxProviderToolCallInputJsonBytes,
+  `tool input must be at most ${MaxProviderToolCallInputJsonBytes} UTF-8 bytes`,
 );
 
-/** Bounded JSON payload retaining either its value or a safe preview. */
-export const RuntimeBoundedJsonSchema = z.strictObject({
-  value: RuntimeJsonValueSchema.optional(),
-  preview: RuntimeTextSchema,
+/** Bounded display preview paired with the separately retained tool input. */
+export const RuntimeJsonPreviewSchema = z.strictObject({
+  preview: RuntimePreviewTextSchema,
   truncated: z.boolean(),
-}).refine(
-  (value) => value.value === undefined || serializedRuntimeJsonByteLength(value.value) <= LLMEventTextMaxBytes,
-  `runtime JSON value must be at most ${LLMEventTextMaxBytes} UTF-8 bytes`,
-);
-/** Validated JSON value and preview consumed by tool-call projection. */
-export type RuntimeBoundedJson = z.infer<typeof RuntimeBoundedJsonSchema>;
+});
+/** Display-only preview consumed alongside a complete tool input. */
+export type RuntimeJsonPreview = z.infer<typeof RuntimeJsonPreviewSchema>;
 
 /** Per-origin attachment rejection that does not terminate the provider request. */
 export const RuntimeAttachmentRejectionSchema = z.strictObject({
@@ -292,7 +287,7 @@ export const LLMEventSchema = z.discriminatedUnion("type", [
     id: RuntimeIdentifierSchema,
     toolName: RuntimeIdentifierSchema,
     input: RuntimeToolInputSchema,
-    inputPreview: RuntimeBoundedJsonSchema,
+    inputPreview: RuntimeJsonPreviewSchema,
   }),
   z.strictObject({ type: z.literal("step-finish"), finishReason: RuntimeFinishReasonSchema.optional(), usage: RuntimeUsageSchema.optional() }),
   z.strictObject({

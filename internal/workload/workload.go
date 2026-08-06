@@ -28,6 +28,10 @@ import (
 // A nil writer falls back to os.Stderr; empty identity fields take the same
 // defaults the command config layer applies.
 func NewLogger(writer io.Writer, serviceName string, deploymentEnvironment string, serviceVersion string) *slog.Logger {
+	return NewLoggerWithLevel(writer, serviceName, deploymentEnvironment, serviceVersion, slog.LevelInfo)
+}
+
+func NewLoggerWithLevel(writer io.Writer, serviceName string, deploymentEnvironment string, serviceVersion string, level slog.Level) *slog.Logger {
 	if writer == nil {
 		writer = os.Stderr
 	}
@@ -40,7 +44,7 @@ func NewLogger(writer io.Writer, serviceName string, deploymentEnvironment strin
 	if serviceVersion == "" {
 		serviceVersion = "unknown"
 	}
-	return slog.New(slog.NewJSONHandler(writer, nil)).With(
+	return slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: level})).With(
 		slog.String("service.name", serviceName),
 		slog.String("deployment.environment", deploymentEnvironment),
 		slog.String("service.version", serviceVersion),

@@ -196,30 +196,6 @@ func (e *DaytonaHelperExecutor) PrepareTool(ctx context.Context, invocation Tool
 	}, nil
 }
 
-// ExecutePreparedTool invokes the user-facing helper command exactly once for
-// a previously staged payload. Any returned error is post-authorization and
-// cannot justify replaying the command.
-func (e *DaytonaHelperExecutor) ExecutePreparedTool(ctx context.Context, prepared PreparedToolExecution) (ToolExecution, error) {
-	if prepared.immediateResult != nil {
-		return *prepared.immediateResult, nil
-	}
-	result, err := e.executePreparedHelper(ctx, prepared.process, prepared.helperCommand, prepared.payloadPath)
-	if err != nil {
-		return ToolExecution{}, err
-	}
-	if prepared.pollUntilTerminal {
-		return e.pollForegroundTaskUntilTerminal(ctx, prepared.target, prepared.toolUseEventID, protocol.Limits{
-			VisibleBytes: prepared.visibleBytes,
-			VisibleLines: prepared.visibleLines,
-		}, result)
-	}
-	var backgroundTask *BackgroundTask
-	if prepared.helperCommand == helperSubcommandExec {
-		backgroundTask = synthesizeHelperBackgroundTask(prepared.target, result)
-	}
-	return ToolExecution{ResultJSON: result.ResultJSON, BackgroundTask: backgroundTask}, nil
-}
-
 // SubmitPreparedTool invokes the user-facing helper command once and returns
 // immediately with durable observation state when a foreground task remains
 // running. Callers must persist that state before polling it.
@@ -229,7 +205,7 @@ func (e *DaytonaHelperExecutor) SubmitPreparedTool(ctx context.Context, prepared
 	}
 	result, err := e.executePreparedHelper(ctx, prepared.process, prepared.helperCommand, prepared.payloadPath)
 	if err != nil {
-		return ToolExecution{}, err
+		return ToolExecution{}, mapDaytonaError(sandbox.StageExecuteTool, err)
 	}
 	if prepared.pollUntilTerminal {
 		return newForegroundCommandSubmission(prepared.target, prepared.toolUseEventID, protocol.Limits{
@@ -284,68 +260,6 @@ func (e *DaytonaHelperExecutor) ObserveForegroundTool(ctx context.Context, obser
 		VisibleLines: observation.Limits.VisibleLines,
 	})
 	return ToolExecution{ResultJSON: resultJSON, ForegroundObservation: &next}, nil
-}
-
-func (e *DaytonaHelperExecutor) pollForegroundTaskUntilTerminal(ctx context.Context, target ToolTarget, sourceToolUseEventID string, limits protocol.Limits, first helperResult) (ToolExecution, error) {
-	taskID := runningTaskIDFromResult(first.ResultJSON)
-	if taskID == "" {
-		return ToolExecution{ResultJSON: first.ResultJSON}, nil
-	}
-	reference := CommandReference{
-		Target: target,
-		Task: BackgroundTask{
-			TaskID:                      taskID,
-			SourceToolUseEventID:        sourceToolUseEventID,
-			ProviderSessionID:           target.ProviderSandboxID,
-			ProviderCommandID:           taskID,
-			ProviderCommandMetadataJSON: `{}`,
-		},
-	}
-	accumulator := newForegroundCommandAccumulator(limits.VisibleBytes, limits.VisibleLines)
-	latestResultJSON, err := accumulator.add(first.ResultJSON)
-	if err != nil {
-		return e.resolveForegroundPollFailure(reference, first.ResultJSON, err)
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return e.resolveForegroundPollFailure(reference, latestResultJSON, err)
-		}
-		pollInput := map[string]any{
-			"task_id": taskID,
-			"wait_ms": helperMaxBlockingWaitMS,
-		}
-		if limits.VisibleBytes > 0 && limits.VisibleBytes < helperVisibleBytes {
-			pollInput["max_output_tokens"] = limits.VisibleBytes / 4
-		}
-		result, err := e.executeCommandHelper(ctx, reference, helperSubcommandPoll, pollInput)
-		if err != nil {
-			return e.resolveForegroundPollFailure(reference, latestResultJSON, err)
-		}
-		latestResultJSON, err = accumulator.add(result.ResultJSON)
-		if err != nil {
-			return e.resolveForegroundPollFailure(reference, latestResultJSON, err)
-		}
-		if result.TerminalStatus != "" {
-			return ToolExecution{ResultJSON: latestResultJSON}, nil
-		}
-	}
-}
-
-func (e *DaytonaHelperExecutor) resolveForegroundPollFailure(reference CommandReference, latestResultJSON string, pollErr error) (ToolExecution, error) {
-	if e.cancelUntrackedForegroundTask(reference) {
-		return ToolExecution{}, pollErr
-	}
-	task := reference.Task
-	return ToolExecution{ResultJSON: latestResultJSON, BackgroundTask: &task}, nil
-}
-
-func (e *DaytonaHelperExecutor) cancelUntrackedForegroundTask(reference CommandReference) bool {
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	result, err := e.executeCommandHelper(cancelCtx, reference, helperSubcommandCancel, map[string]any{
-		"task_id": reference.Task.TaskID,
-	})
-	return err == nil && result.TerminalStatus != ""
 }
 
 type foregroundCommandAccumulator struct {

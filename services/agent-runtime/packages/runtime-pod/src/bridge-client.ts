@@ -19,6 +19,7 @@ import {
   ReceiptApplicationDisposition,
   RequestRescheduleDisposition,
   RuntimeDraftKind,
+  WriteEventRequest as WriteEventRequestMessage,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   CommitInputsRequest,
@@ -71,6 +72,7 @@ import {
   normalizeContextLoaderError,
   normalizeRuntimeMessageStoreError,
   normalizeSessionEventWriterError,
+  stableReasoningMetadataJSON,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { MailFetchMaxEnvelopes } from "@tetral/agent-runtime-protocol/src/bounds.js";
 import type {
@@ -104,7 +106,11 @@ import type {
   RuntimeReceiptEvidence,
   RuntimeReceiptEvidenceMetrics,
 } from "./logger.js";
-import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions } from "./bounds.js";
+import {
+  MaxBridgeDurableContextGrpcMessageBytes,
+  bridgeDurableContextGrpcChannelOptions,
+  grpcClientChannelOptions,
+} from "./bounds.js";
 import { sessionEventForDurableWrite } from "@tetral/agent-runtime-core/src/runtime/session-event-writer.js";
 import {
   childLifecycleDeclarationDigest,
@@ -674,7 +680,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
   private readonly sleep: (durationMs: number) => Promise<void>;
 
   constructor(private readonly options: BridgeAPIContextLoaderOptions) {
-    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeAttachmentGrpcChannelOptions());
+    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeDurableContextGrpcChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
     this.nowEpochMs = options.nowEpochMs ?? (() => Date.now());
     this.refreshMarginMs = options.refreshMarginMs ?? RuntimeBindingTokenRefreshPolicy.marginMs;
@@ -1062,14 +1068,13 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
 
   constructor(private readonly options: BridgeAPIEventWriterOptions) {
-    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), grpcClientChannelOptions());
+    this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeDurableContextGrpcChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
   }
 
   /** Writes one semantic event and its optional projection, reasoning, or internal result evidence. */
   async append(envelope: SessionEventEnvelope): Promise<SessionEventWriterAppendResult> {
     try {
-      const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
       const event = sessionEventForDurableWrite(envelope.event);
       const request = {
         scope: bridgeScope(envelope),
@@ -1083,7 +1088,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           providerPartId: part.providerPartId ?? "",
           partSequence: part.partSequence,
           text: part.text,
-          metadataJson: JSON.stringify(part.providerMetadata ?? {}),
+          metadataJson: stableReasoningMetadataJSON(part.providerMetadata),
           truncated: part.truncated,
         })),
         serverToolUse: envelope.serverToolUse,
@@ -1093,6 +1098,10 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
         requestKind: envelope.requestKind ?? "",
         drafts: envelope.drafts.map(runtimeMessageDraftForBridge),
       };
+      if (WriteEventRequestMessage.encode(request).finish().byteLength > MaxBridgeDurableContextGrpcMessageBytes) {
+        return eventWriterSchemaFailure(envelope.sessionId, envelope.writeId);
+      }
+      const metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
       const declarationDigest = writeEventDeclarationDigest(request);
       const response = await writeEvent(this.client, request, metadata);
       if (!bridgeAckAccepted(response.ack?.status)) {
@@ -1247,7 +1256,7 @@ export class BridgeAPIEventWriter implements SessionEventWriter {
           providerPartId: part.providerPartId ?? "",
           partSequence: part.partSequence,
           text: part.text,
-          metadataJson: JSON.stringify(part.providerMetadata ?? {}),
+          metadataJson: stableReasoningMetadataJSON(part.providerMetadata),
           truncated: part.truncated,
         })),
         usageJson: JSON.stringify({

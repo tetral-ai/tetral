@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MaxProviderErrorMessageBytes, MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import {
   ContextLoaderErrorSchema,
   LLMEventSchema,
@@ -32,6 +33,7 @@ import {
   runtimeSleep,
 } from "../../src/contracts/runtime.js";
 import { sessionEventForDurableWrite } from "../../src/runtime/session-event-writer.js";
+import { RuntimePreviewTextMaxBytes } from "../../src/llm/llm-event.js";
 import { normalizeProviderError } from "../../src/contracts/provider.js";
 import type {
   RuntimeMessageInfo,
@@ -67,6 +69,17 @@ test("attachment_unavailable defaults to a non-fatal provider failure", () => {
     retryable: false,
     fatal: false,
   });
+});
+
+test("runtime provider errors preserve valid UTF-8 at the exact message byte boundary", () => {
+  const exact = `${"a".repeat(MaxProviderErrorMessageBytes - 3)}€`;
+  const atLimit = normalizeProviderError({ code: "provider_stream_error", message: exact });
+  const overLimit = normalizeProviderError({ code: "provider_stream_error", message: `${exact}b` });
+
+  expect(Buffer.byteLength(atLimit.message, "utf8")).toBe(MaxProviderErrorMessageBytes);
+  expect(atLimit.message).toBe(exact);
+  expect(overLimit.message).toBe(exact);
+  expect(() => new TextDecoder("utf-8", { fatal: true }).decode(new TextEncoder().encode(overLimit.message))).not.toThrow();
 });
 
 type ForkSDKRetryStatus =
@@ -550,24 +563,24 @@ describe("runtime boundary contracts", () => {
     }).success).toBe(false);
   });
 
-  test("keeps reasoning stream admission at the narrower 8 KiB text and 4 KiB metadata bounds", () => {
-    const metadataAtLimit = { x: "m".repeat(4_096 - 8) };
+  test("matches reasoning stream admission to the shared 64 KiB text and 16 KiB metadata bounds", () => {
+    const metadataAtLimit = { x: "m".repeat(16 * 1024 - 8) };
     expect(LLMEventSchema.safeParse({
       type: "reasoning-delta",
       id: "reasoning_1",
-      text_delta: "x".repeat(8_192),
+      text_delta: "x".repeat(64 * 1024),
       providerMetadata: metadataAtLimit,
     }).success).toBe(true);
     expect(LLMEventSchema.safeParse({
       type: "reasoning-delta",
       id: "reasoning_1",
-      text_delta: "x".repeat(8_193),
+      text_delta: "x".repeat(64 * 1024 + 1),
     }).success).toBe(false);
     expect(LLMEventSchema.safeParse({
       type: "reasoning-delta",
       id: "reasoning_1",
       text_delta: "x",
-      providerMetadata: { x: "m".repeat(4_096 - 7) },
+      providerMetadata: { x: "m".repeat(16 * 1024 - 7) },
     }).success).toBe(false);
   });
   test("maps internal RuntimeFailure session errors to fork-SDK durable payloads", () => {
@@ -837,7 +850,7 @@ describe("runtime boundary contracts", () => {
       id: canary,
       toolName: "search",
       input: boundedJson.value,
-      inputPreview: boundedJson,
+      inputPreview: { preview: boundedJson.preview, truncated: boundedJson.truncated },
     });
     const failure = RuntimeFailureSchema.parse({
       type: "provider",
@@ -851,9 +864,31 @@ describe("runtime boundary contracts", () => {
     expect(runtimeMessage.parts[0]).toMatchObject({ text: executableText });
     expect(toolCall).toMatchObject({
       input: { [rawHeaders]: executableText },
-      inputPreview: { value: { [rawHeaders]: executableText }, preview: executableText },
+      inputPreview: { preview: executableText, truncated: false },
     });
     expectSanitized(failure);
+  });
+
+  test("accepts exact canonical tool-output JSON and rejects one byte over", () => {
+    const envelopeBytes = new TextEncoder().encode(JSON.stringify({ text: "" })).byteLength;
+    const exactText = "x".repeat(MaxProviderRequestToolOutputJsonBytes - envelopeBytes);
+
+    expect(RuntimeBoundedTextSchema.safeParse({ text: exactText, truncated: false }).success).toBe(true);
+    expect(RuntimeBoundedTextSchema.safeParse({ text: `${exactText}x`, truncated: false }).success).toBe(false);
+  });
+
+  test("bounds durable tool-input previews independently from the complete value", () => {
+    const value = { content: "v".repeat(16 * 1024) };
+    expect(RuntimeBoundedJsonSchema.safeParse({
+      value,
+      preview: "p".repeat(RuntimePreviewTextMaxBytes),
+      truncated: true,
+    }).success).toBe(true);
+    expect(RuntimeBoundedJsonSchema.safeParse({
+      value,
+      preview: "p".repeat(RuntimePreviewTextMaxBytes + 1),
+      truncated: true,
+    }).success).toBe(false);
   });
 
   test("sanitizes failure and log-safe boundary outputs", async () => {

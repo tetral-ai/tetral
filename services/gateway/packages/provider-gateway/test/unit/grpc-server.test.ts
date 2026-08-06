@@ -57,10 +57,81 @@ describe("Gateway gRPC streaming transport", () => {
       expect(finalStatus.metadata).toBeInstanceOf(Metadata);
       expect(finalStatus.metadata.getMap()).toEqual({});
     } finally {
-      await server.shutdown();
       client.close();
+      await server.shutdown();
     }
   });
+
+  test("delivers pre-event INVALID_ARGUMENT as terminal grpc status", async () => {
+    const service = createService({ stream: async function* () {} });
+    const server = createGatewayGrpcServer(service);
+    const port = await server.bind("127.0.0.1:0");
+    const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure());
+    try {
+      const request = { ...validAnthropicProviderRequest(), requestId: "" };
+      const error = await Promise.race([
+        readStream(client.streamProviderRequest(request, metadata())).then(
+          () => undefined,
+          (failure: unknown) => failure,
+        ),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("timed out waiting for terminal grpc status")), 1_000)),
+      ]);
+      expect(error).toMatchObject({ code: grpcStatus.INVALID_ARGUMENT });
+    } finally {
+      client.close();
+      await server.shutdown();
+    }
+  });
+
+  test("carries the largest advertised tool-input shapes across the real stream", async () => {
+    const cases = [
+      {
+        name: "memory-create",
+        inputJson: JSON.stringify({ path: "notes.txt", content: "\u0001".repeat(102_400) }),
+      },
+      {
+        name: "memory-replace",
+        inputJson: JSON.stringify({
+          path: "notes.txt",
+          old_text: "\u0001".repeat(102_400),
+          new_text: "\u0001".repeat(102_400),
+        }),
+      },
+      {
+        name: "web-eight-operations",
+        inputJson: JSON.stringify({
+          search_query: Array.from({ length: 8 }, () => ({ q: "\u0001".repeat(64 * 1024), domains: ["example.test"] })),
+        }),
+      },
+    ];
+    for (const scenario of cases) {
+      const request = validAnthropicProviderRequest();
+      const service = createService({
+        stream: async function* () {
+          yield {
+            requestId: request.requestId,
+            modelRequestId: request.modelRequestId,
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+            toolCall: { id: `call_${scenario.name}`, name: "bounded_tool", inputJson: scenario.inputJson, metadataJson: "{}" },
+          };
+        },
+      });
+      const server = createGatewayGrpcServer(service);
+      const port = await server.bind("127.0.0.1:0");
+      const client = new ProviderGatewayServiceClient(`127.0.0.1:${port}`, credentials.createInsecure(), {
+        "grpc.max_receive_message_length": 8 * 1024 * 1024,
+      });
+      try {
+        const events = await readStream(client.streamProviderRequest(request, metadata()));
+        expect(events, scenario.name).toHaveLength(1);
+        expect(events[0]?.toolCall?.inputJson, scenario.name).toBe(scenario.inputJson);
+      } finally {
+        await server.shutdown();
+        client.close();
+      }
+    }
+  }, 15_000);
 
   test("honors writable backpressure before consuming the next provider event", async () => {
     const first = textEvent(validProviderRequest(), ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA, "one");
@@ -97,6 +168,7 @@ describe("Gateway gRPC streaming transport", () => {
   test("client cancellation aborts the upstream provider stream", async () => {
     let aborted = false;
     let release: (() => void) | undefined;
+    const statuses: StatusObject[] = [];
     const request = validAnthropicProviderRequest();
     const service = createService({
       stream: async function* (input) {
@@ -116,10 +188,13 @@ describe("Gateway gRPC streaming transport", () => {
     try {
       const call = client.streamProviderRequest(request, metadata());
       call.on("error", () => undefined);
+      call.on("status", (value) => statuses.push(value));
       await onceData(call);
       call.cancel();
-      await waitUntil(() => aborted);
+      await waitUntil(() => aborted && statuses.length > 0);
       expect(aborted).toBe(true);
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]?.code).toBe(grpcStatus.CANCELLED);
     } finally {
       await server.shutdown();
       client.close();

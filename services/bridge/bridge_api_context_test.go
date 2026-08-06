@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -441,13 +443,40 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 	const durableTurnID = "evt_context_idle_cleanup_running"
 	seedBridgeAPIOpenDurableTurn(t, admin, scope, durableTurnID)
 	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_context_cleanup_start", modelRequestID, "agent_provider_request", 0)
+	toolInput := map[string]any{
+		"path":    "a.txt",
+		"content": "头" + strings.Repeat("界", 3000) + "尾",
+	}
+	toolInputJSON, err := json.Marshal(toolInput)
+	if err != nil {
+		t.Fatalf("marshal cleanup tool input: %v", err)
+	}
+	if len(toolInputJSON) <= cleanupRuntimeInputPreviewMaxBytes {
+		t.Fatalf("cleanup tool input bytes = %d; want above %d", len(toolInputJSON), cleanupRuntimeInputPreviewMaxBytes)
+	}
+	toolPartJSON, err := json.Marshal(map[string]any{
+		"type":       "tool",
+		"toolCallId": "call_context_cleanup",
+		"toolName":   "Write",
+		"state": map[string]any{
+			"status": "running",
+			"input": map[string]any{
+				"value":     toolInput,
+				"preview":   "large write input",
+				"truncated": true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal cleanup tool part: %v", err)
+	}
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_context_cleanup_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"path":"a.txt"},"evaluated_permission":"ask"}`,
+		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(toolInputJSON) + `,"evaluated_permission":"ask"}`,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t, scope, "rwrite_context_cleanup_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_cleanup","toolName":"Write","state":{"status":"running","input":{"value":{"path":"a.txt"},"preview":"{\"path\":\"a.txt\"}","truncated":false}}}`},
+			bridgeRuntimePartDraftForTest{kind: "tool", json: string(toolPartJSON)},
 		)},
 	})
 	if err != nil {
@@ -474,7 +503,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 			context.Background(), tx, scope,
 			cleanupPendingWait{
 				ThreadID: threadID, ToolUseEventID: toolUse.GetEventId(), ModelToolCallID: "call_context_cleanup",
-				ToolName: "Write", InputJSON: `{"path":"a.txt"}`, EventType: "agent.tool_use",
+				ToolName: "Write", InputJSON: string(toolInputJSON), EventType: "agent.tool_use",
 			},
 			pendingToolTerminal{PartStatus: "error", ErrorType: "cleanup_expired", Message: "expired"},
 			time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC),
@@ -493,6 +522,43 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 	var payload bridgeLoadContextPayload
 	if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
 		t.Fatalf("decode idle-cleanup context: %v", err)
+	}
+	foundTerminalPart := false
+	for _, rawMessage := range payload.Messages {
+		var message struct {
+			Parts []struct {
+				ToolCallID string `json:"toolCallId"`
+				State      struct {
+					Status string `json:"status"`
+					Input  struct {
+						Value     map[string]any `json:"value"`
+						Preview   string         `json:"preview"`
+						Truncated bool           `json:"truncated"`
+					} `json:"input"`
+				} `json:"state"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal(rawMessage, &message); err != nil {
+			t.Fatalf("decode idle-cleanup message: %v", err)
+		}
+		for _, part := range message.Parts {
+			if part.ToolCallID != "call_context_cleanup" || part.State.Status != "error" {
+				continue
+			}
+			foundTerminalPart = true
+			if !reflect.DeepEqual(part.State.Input.Value, toolInput) {
+				t.Fatalf("idle-cleanup terminal input changed: got %#v want %#v", part.State.Input.Value, toolInput)
+			}
+			previewBytes := len([]byte(part.State.Input.Preview))
+			if previewBytes > cleanupRuntimeInputPreviewMaxBytes || !utf8.ValidString(part.State.Input.Preview) || !part.State.Input.Truncated {
+				t.Fatalf("idle-cleanup terminal preview bytes/UTF-8/truncated = %d/%v/%v; want <=%d/true/true",
+					previewBytes, utf8.ValidString(part.State.Input.Preview), part.State.Input.Truncated,
+					cleanupRuntimeInputPreviewMaxBytes)
+			}
+		}
+	}
+	if !foundTerminalPart {
+		t.Fatal("LoadContext omitted cleanup terminal tool part")
 	}
 	var repair *bridgeLoadContextMessageLineageEntry
 	for _, lineage := range payload.TurnFacts.MessageLineage {
@@ -1351,6 +1417,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	scope := bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_tool_result_start", "mrq_pending_approval", "agent_provider_request", 0)
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result", "evt_public_tool_use", 2)
+	toolOutput := "RESULT_HEAD" + strings.Repeat("r", 200_000-len("RESULT_HEAD")-len("RESULT_TAIL")) + "RESULT_TAIL"
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_pending_tool_uses
 		    SET status = 'resolving',
@@ -1366,7 +1433,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		RuntimeWriteId: "rwrite_bridge_tool_result",
 		ModelRequestId: "mrq_pending_approval",
 		EventType:      "agent.tool_result",
-		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"done"}]}`,
+		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"` + toolOutput + `"}]}`,
 		SessionVisible: true,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t,
@@ -1376,7 +1443,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 			"completed",
 			bridgeRuntimePartDraftForTest{
 				kind: "tool",
-				json: `{"type":"tool","toolCallId":"tool-call-result","toolName":"search","toolUseEventId":"evt_public_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
+				json: `{"type":"tool","toolCallId":"tool-call-result","toolName":"search","toolUseEventId":"evt_public_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"` + toolOutput + `","truncated":false}}}`,
 			},
 		)},
 	})
@@ -1389,7 +1456,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		`SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND source_event_id = $1 AND kind = 'assistant'`, response.GetEventId()).Scan(&messageDataJSON); err != nil {
 		t.Fatalf("read projected tool result message: %v", err)
 	}
-	assertToolResultRuntimeMessage(t, messageDataJSON, "tool-call-result", "search", "evt_public_tool_use", "completed", "done")
+	assertToolResultRuntimeMessage(t, messageDataJSON, "tool-call-result", "search", "evt_public_tool_use", "completed", toolOutput)
 	var pendingStatus string
 	var pendingResultEventID sql.NullString
 	var pendingResolvedAt sql.NullString
@@ -1420,7 +1487,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	if len(contextPayload.Messages) != 1 {
 		t.Fatalf("LoadContext messages = %d; want 1 in %s", len(contextPayload.Messages), contextResponse.GetContextJson())
 	}
-	assertToolResultRuntimeMessage(t, string(contextPayload.Messages[0]), "tool-call-result", "search", "evt_public_tool_use", "completed", "done")
+	assertToolResultRuntimeMessage(t, string(contextPayload.Messages[0]), "tool-call-result", "search", "evt_public_tool_use", "completed", toolOutput)
 	var resultFact *bridgeLoadContextToolResult
 	for _, event := range contextPayload.TurnFacts.Events {
 		if event.Type == "agent.tool_result" {
@@ -1430,6 +1497,114 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	if resultFact == nil || resultFact.ToolUseEventID != "evt_public_tool_use" || resultFact.Outcome != "success" {
 		t.Fatalf("LoadContext Tool Result fact = %+v; want successful projected outcome", resultFact)
 	}
+}
+
+func TestPostgreSQLBridgeAPIStoreLoadContextCarriesEscapeDenseToolHistoryWithHeadroom(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		workspaceID = "default"
+		sessionID   = "sesn_bridge_escape_dense_history"
+		threadID    = "thr_bridge_escape_dense_history"
+		bindingID   = "bind_bridge_escape_dense_history"
+		podUID      = "pod_bridge_escape_dense_history"
+		historySize = 48
+		outputBytes = 80 * 1024
+		contextFuse = 64 * 1024 * 1024
+	)
+	seedBridgeAPISession(t, admin, workspaceID, sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, workspaceID, sessionID, bindingID, 1, podUID)
+
+	for index := range historySize {
+		toolUseEventID := fmt.Sprintf("evt_escape_dense_use_%02d", index)
+		resultEventID := fmt.Sprintf("evt_escape_dense_result_%02d", index)
+		modelRequestID := fmt.Sprintf("mreq_escape_dense_%02d", index)
+		messageID := fmt.Sprintf("msg_escape_dense_%02d", index)
+		toolCallID := fmt.Sprintf("call_escape_dense_%02d", index)
+		head := ""
+		tail := ""
+		if index == 0 {
+			head = "TETRAL_ESCAPE_OUTPUT_FIRST"
+		}
+		if index == historySize-1 {
+			tail = "TETRAL_ESCAPE_OUTPUT_LAST"
+		}
+		output := head + strings.Repeat("\x01", outputBytes-len(head)-len(tail)) + tail
+		seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, toolUseEventID, int64(index*2+1), "agent.tool_use",
+			fmt.Sprintf(`{"type":"agent.tool_use","name":"Read","input":{"index":%d},"evaluated_permission":"allow"}`, index))
+		seedBridgeAPIEvent(t, admin, workspaceID, sessionID, threadID, resultEventID, int64(index*2+2), "agent.tool_result",
+			fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":"settled"}],"is_error":false}`, toolUseEventID))
+		if _, err := admin.ExecContext(context.Background(),
+			`UPDATE session_events
+			    SET model_request_id = $6
+			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+			    AND event_id IN ($4, $5)`,
+			workspaceID, sessionID, threadID, toolUseEventID, resultEventID, modelRequestID,
+		); err != nil {
+			t.Fatalf("stamp escape-dense event identity %d: %v", index, err)
+		}
+
+		dataJSON, err := json.Marshal(map[string]any{
+			"id": messageID, "sessionId": sessionID, "role": "assistant", "origin": "agent",
+			"sequence": index + 1, "status": "completed", "createdAt": "2026-01-01T00:00:00Z",
+			"updatedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:00:00Z",
+			"parts": []map[string]any{{
+				"id": "part_" + resultEventID, "sessionId": sessionID, "messageId": messageID,
+				"sequence": 0, "type": "tool", "toolCallId": toolCallID, "toolName": "Read",
+				"toolUseEventId": toolUseEventID, "toolEvent": map[string]any{"kind": "tool"},
+				"createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+				"completedAt": "2026-01-01T00:00:00Z",
+				"state": map[string]any{
+					"status": "completed",
+					"input":  map[string]any{"value": map[string]any{"index": index}, "preview": fmt.Sprintf(`{"index":%d}`, index), "truncated": false},
+					"output": map[string]any{"text": output, "truncated": false},
+				},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("marshal escape-dense message %d: %v", index, err)
+		}
+		if _, err := admin.ExecContext(context.Background(),
+			`INSERT INTO session_messages (
+				workspace_id, session_id, session_thread_id, message_id, sequence, kind,
+				data_json, source_event_id, last_event_id, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7, $7,
+				'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+			workspaceID, sessionID, threadID, messageID, index+1, string(dataJSON), resultEventID,
+		); err != nil {
+			t.Fatalf("insert escape-dense message %d: %v", index, err)
+		}
+		seedBridgeAPIMessageLineage(
+			t, admin, workspaceID, sessionID, threadID,
+			bridgeOpWriteEvent, "agent.tool_result", "rwrite_"+resultEventID,
+			resultEventID, messageID, int64(index+1),
+		)
+	}
+
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-escape-dense-context-key")
+	loaded, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope:          bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID),
+		RuntimeInputId: "rin_bridge_escape_dense_history",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext escape-dense history: %v", err)
+	}
+	contextBytes := len([]byte(loaded.GetContextJson()))
+	if contextBytes > contextFuse*80/100 {
+		t.Fatalf("LoadContext context_json bytes = %d; want at least 20 percent headroom below %d", contextBytes, contextFuse)
+	}
+	if !strings.Contains(loaded.GetContextJson(), "TETRAL_ESCAPE_OUTPUT_FIRST") ||
+		!strings.Contains(loaded.GetContextJson(), "TETRAL_ESCAPE_OUTPUT_LAST") {
+		t.Fatal("LoadContext escape-dense history lost a boundary sentinel")
+	}
+	var payload bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loaded.GetContextJson()), &payload); err != nil {
+		t.Fatalf("parse escape-dense LoadContext: %v", err)
+	}
+	if len(payload.Messages) != historySize {
+		t.Fatalf("LoadContext escape-dense messages = %d; want %d", len(payload.Messages), historySize)
+	}
+	t.Logf("escape-dense LoadContext context_json bytes=%d fuse=%d headroom=%.2f%%", contextBytes, contextFuse, 100*float64(contextFuse-contextBytes)/float64(contextFuse))
 }
 
 func TestBridgeTurnToolResultFactUsesToolUseProjectionIdentity(t *testing.T) {

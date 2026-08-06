@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import { MaxProviderErrorMessageBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { ProviderStreamTimeoutError, classifyOpenAIProviderError, classifyProviderStreamError, providerErrorEvent } from "../../src/errors.js";
 
 describe("Gateway provider error raising", () => {
@@ -27,6 +28,17 @@ describe("Gateway provider error raising", () => {
       },
     });
     expect(JSON.stringify(event)).not.toContain("sk-");
+  });
+
+  test("emits valid UTF-8 at the exact provider-error message byte boundary", () => {
+    const exact = `${"a".repeat(MaxProviderErrorMessageBytes - 3)}€`;
+    const atLimit = providerErrorEvent({ requestId: "req_exact", modelRequestId: "mreq_exact" }, { message: exact });
+    const overLimit = providerErrorEvent({ requestId: "req_over", modelRequestId: "mreq_over" }, { message: `${exact}b` });
+
+    expect(Buffer.byteLength(atLimit.providerError?.error?.message ?? "", "utf8")).toBe(MaxProviderErrorMessageBytes);
+    expect(atLimit.providerError?.error?.message).toBe(exact);
+    expect(overLimit.providerError?.error?.message).toBe(exact);
+    expect(() => new TextDecoder("utf-8", { fatal: true }).decode(new TextEncoder().encode(overLimit.providerError?.error?.message))).not.toThrow();
   });
 
   test("classifies abort and generic stream failures for Runtime-owned retry decisions", () => {

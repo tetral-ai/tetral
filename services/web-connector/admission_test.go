@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -103,8 +104,19 @@ func TestBindingAdmissionAcceptsMatchingClaimsBeforeHarmlessExecution(t *testing
 
 func TestWebPortLeavesSiblingProviderStreamUnimplemented(t *testing.T) {
 	listener := bufconn.Listen(1024 * 1024)
-	service, key, now := testService(blob.NewFakeBlobStore(), &fakeBackend{})
-	server, err := internalgrpc.NewServer(internalgrpc.Config{ServiceName: ServiceName, Listener: listener, Authenticator: fixedAuthenticator{identity: grpcauth.Identity{ServiceAccount: grpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: "runtime-pod"}}, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }})
+	backend := &fakeBackend{}
+	service, key, now := testService(blob.NewFakeBlobStore(), backend)
+	server, err := internalgrpc.NewServer(internalgrpc.Config{
+		ServiceName:      ServiceName,
+		Listener:         listener,
+		Authenticator:    fixedAuthenticator{identity: grpcauth.Identity{ServiceAccount: grpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"}, KubernetesPodUID: "runtime-pod"}},
+		MethodAuthorizer: MethodAuthorizer,
+		Register:         func(server *grpc.Server) { Register(server, service) },
+		ServerOptions: []grpc.ServerOption{
+			grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes),
+			grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes),
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,15 +128,31 @@ func TestWebPortLeavesSiblingProviderStreamUnimplemented(t *testing.T) {
 	}
 	defer func() { _ = connection.Close() }()
 	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer workload-token")
-	stream, err := providergatewayv1.NewProviderGatewayServiceClient(connection).StreamProviderRequest(ctx, &providergatewayv1.ProviderRequest{})
+	client := providergatewayv1.NewProviderGatewayServiceClient(connection)
+	queries := make([]*providergatewayv1.WebSearchQuery, maxOperations)
+	for index := range queries {
+		marker := fmt.Sprintf("QUERY_%d_", index)
+		queries[index] = &providergatewayv1.WebSearchQuery{Q: marker + strings.Repeat("q", maxRequestTextBytes-len(marker))}
+	}
+	response, err := client.RunWeb(ctx, testRequest(&providergatewayv1.WebToolInput{SearchQuery: queries}, "event-grpc-eight", key, now))
+	if err != nil {
+		t.Fatalf("RunWeb: %v", err)
+	}
+	if response.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED || backend.calls != maxOperations {
+		t.Fatalf("RunWeb response/backend calls = %+v/%d; want completed/%d", response, backend.calls, maxOperations)
+	}
+	for index := range queries {
+		if strings.Contains(response.GetResultText(), fmt.Sprintf("QUERY_%d_", index)) {
+			t.Fatalf("RunWeb response echoed maximum search query %d", index)
+		}
+	}
+	stream, err := client.StreamProviderRequest(ctx, &providergatewayv1.ProviderRequest{})
 	if err == nil {
 		_, err = stream.Recv()
 	}
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("code=%s err=%v", status.Code(err), err)
 	}
-	_ = key
-	_ = now
 }
 
 type fixedAuthenticator struct{ identity grpcauth.Identity }

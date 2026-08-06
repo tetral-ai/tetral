@@ -70,6 +70,11 @@ cilium:
   # there makes git-proxy unable to resolve any name.
   gitProxyFQDNPolicy: false
 
+sandbox:
+  # Enables Sandbox-only debug lines for queue wait decisions and bounded
+  # command summaries. Provider completion timings remain at info level.
+  debugLogging: false
+
 edge:
   enabled: false
   tlsSecretName: git-proxy-tls

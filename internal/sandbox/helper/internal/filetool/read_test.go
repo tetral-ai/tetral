@@ -479,6 +479,23 @@ func TestReadWindowAndEnvelopeReserveRuntimeNumberingHeadroom(t *testing.T) {
 	}
 }
 
+func TestReadEnvelopeFitsEscapeDenseContentAfterJSONEncoding(t *testing.T) {
+	startedAt := time.Unix(1_700_000_000, 0).UTC()
+	content := strings.Repeat(`"\`, 100_000)
+	result := ReadResult{Content: content, StartLine: 1, ReturnedLines: 1, Truncated: false}
+	fitted := FitReadResultForEnvelope(result, "read", startedAt)
+	encodedBytes := readEnvelopeLen(fitted, "read", startedAt)
+	if encodedBytes > maxReadEnvelopeBytes {
+		t.Fatalf("escape-dense envelope bytes = %d; want <= %d", encodedBytes, maxReadEnvelopeBytes)
+	}
+	if encodedBytes < maxReadEnvelopeBytes-1024 {
+		t.Fatalf("escape-dense envelope bytes = %d; want a fixture near the %d-byte producer bound", encodedBytes, maxReadEnvelopeBytes)
+	}
+	if !fitted.Truncated || !strings.Contains(fitted.Content, `"`) || !strings.Contains(fitted.Content, `\`) {
+		t.Fatalf("fitted escape-dense result lost contract shape: truncated=%v content-bytes=%d", fitted.Truncated, len(fitted.Content))
+	}
+}
+
 func TestReadWindowPropagatesUnexpectedIOError(t *testing.T) {
 	_, err := readWindow(eioReader{}, 1, 10, 1024, 1024)
 	if !errors.Is(err, syscall.EIO) {

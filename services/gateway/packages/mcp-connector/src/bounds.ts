@@ -11,7 +11,7 @@ import { McpErrorKind, McpRetryStatus, RunMcpToolStatus } from "@tetral/gateway-
 import {
   MaxBindingGeneration,
   MaxIdBytes,
-  MaxJsonBytes,
+  MaxMcpToolInputJsonBytes,
   MaxSchemaBytes,
   MaxTextBytes,
   MaxTokenBytes,
@@ -36,7 +36,7 @@ export function validateRunMcpToolRequest(request: RunMcpToolRequest): Validatio
     invalidBytes(request.bindingId, MaxIdBytes) ||
     invalidBindingGeneration(request.bindingGeneration) ||
     invalidBytes(request.runtimeBindingToken, MaxTokenBytes) ||
-    !validJsonObject(request.inputJson, MaxJsonBytes)
+    !validJsonObject(request.inputJson, MaxMcpToolInputJsonBytes)
   ) {
     return invalidRequest();
   }

@@ -27,7 +27,7 @@ import type {
   RunWebResponse,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderStreamEventType } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import { validateProviderRequest, validateProviderStreamEvent } from "@tetral/gateway-protocol/src/bounds.js";
+import { MaxIdBytes, validateProviderRequest, validateProviderStreamEvent } from "@tetral/gateway-protocol/src/bounds.js";
 import { classifyProviderStreamError, ProviderStreamTimeoutError, providerErrorEvent } from "@tetral/gateway-lowering/src/errors.js";
 import { GrpcStatusError } from "./errors.js";
 import type { RuntimeBindingTokenVerifier } from "@tetral/gateway-protocol/src/binding-token.js";
@@ -117,37 +117,32 @@ export class ProviderGatewayServiceShell {
     let requestOutcome: "ok" | "failed" = "failed";
     let errorClass = "runtime_error";
     let errorCode = "stream_incomplete";
+    let validationMember: string | undefined;
     let callerServiceAccount: string | undefined;
-    let requestIdentity: {
+    let requestIdentity: Partial<{
       readonly "workspace.id": string;
       readonly "session.id": string;
       readonly "thread.id": string;
       readonly "request.id": string;
       readonly "provider.request.id": string;
       readonly "model_request.id": string;
-    } | undefined;
+    }> | undefined;
     try {
       const caller = await this.authorize(metadata, "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest");
       callerServiceAccount = `${caller.serviceAccount.namespace}/${caller.serviceAccount.name}`;
       this.ensureReady();
+      requestIdentity = safeRequestIdentity(request);
       const validation = validateProviderRequest(request);
       if (!validation.ok) {
+        errorClass = "request_validation";
+        errorCode = validation.code ?? "invalid_request_shape";
+        validationMember = validation.member;
         throw new GrpcStatusError(status.INVALID_ARGUMENT, validation.message);
       }
-      requestIdentity = {
-        "workspace.id": request.workspaceId,
-        "session.id": request.sessionId,
-        "thread.id": request.sessionThreadId,
-        "request.id": request.requestId,
-        "provider.request.id": request.modelRequestId,
-        "model_request.id": request.modelRequestId,
-      };
-      if ((request.model?.variant ?? "") !== "") {
-        throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
-      }
       const limits = request.limits;
+      // Request validation above proves this required member is present.
       if (limits === undefined) {
-        throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid internal request");
+        throw new Error("validated provider limits are absent");
       }
       if (!this.options.runtimeBindingTokenVerifier.verify({
         request,
@@ -213,7 +208,7 @@ export class ProviderGatewayServiceShell {
       requestOutcome = failed ? "failed" : "ok";
     } catch (error) {
       requestOutcome = "failed";
-      if (error instanceof GrpcStatusError) {
+      if (error instanceof GrpcStatusError && errorCode === "stream_incomplete") {
         errorClass = "grpc_status";
         errorCode = String(error.code);
       } else if (errorCode === "stream_incomplete") {
@@ -229,6 +224,7 @@ export class ProviderGatewayServiceShell {
         "grpc.method": "/tetral.provider_gateway.v1.ProviderGatewayService/StreamProviderRequest",
         "caller.service_account": callerServiceAccount,
         ...requestIdentity,
+        ...(validationMember === undefined ? {} : { "validation.member": validationMember }),
         "request.outcome": requestOutcome,
         "duration.ms": Math.round(performance.now() - started),
       } as const;
@@ -491,6 +487,32 @@ export class ProviderGatewayServiceShell {
     }
     return undefined;
   }
+}
+
+function safeRequestIdentity(request: ProviderRequest): Partial<{
+  readonly "workspace.id": string;
+  readonly "session.id": string;
+  readonly "thread.id": string;
+  readonly "request.id": string;
+  readonly "provider.request.id": string;
+  readonly "model_request.id": string;
+}> {
+  const bounded = (value: string): string | undefined =>
+    value.length > 0 && new TextEncoder().encode(value).byteLength <= MaxIdBytes ? value : undefined;
+  const workspaceId = bounded(request.workspaceId);
+  const sessionId = bounded(request.sessionId);
+  const threadId = bounded(request.sessionThreadId);
+  const requestId = bounded(request.requestId);
+  const modelRequestId = bounded(request.modelRequestId);
+  return {
+    ...(workspaceId !== undefined ? { "workspace.id": workspaceId } : {}),
+    ...(sessionId !== undefined ? { "session.id": sessionId } : {}),
+    ...(threadId !== undefined ? { "thread.id": threadId } : {}),
+    ...(requestId !== undefined ? { "request.id": requestId } : {}),
+    ...(modelRequestId !== undefined
+      ? { "provider.request.id": modelRequestId, "model_request.id": modelRequestId }
+      : {}),
+  };
 }
 
 function providerLogErrorCode(value: string | undefined): string {

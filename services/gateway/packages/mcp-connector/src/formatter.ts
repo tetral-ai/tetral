@@ -21,7 +21,9 @@ export const MCP_BLOB_MAX_BYTES = 10 * 1024 * 1024;
 /**
  * Sets the UTF-8 byte threshold at which model-visible MCP result text is
  * truncated. Repairing a sliced partial code point can leave marked output up
- * to two bytes above this threshold.
+ * to two bytes above this threshold. UPDATE-WITH:
+ * MaxProviderRequestToolOutputJsonBytes in gateway-protocol bounds; even sixfold
+ * JSON escaping of this producer cap must fit that canonical consumer bound.
  */
 export const MCP_RESULT_TEXT_MAX_BYTES = 50 * 1024;
 /** Sets the maximum number of source lines retained before a truncation-marker line is appended. */

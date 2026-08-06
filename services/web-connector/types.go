@@ -15,16 +15,34 @@ const (
 	// stored line, so every window advances, next_lineno strictly increases, and
 	// every continuation chain terminates. Windows never split a stored line.
 	// UPDATE-WITH: storage.go normalizeContent, format.go formatWindow.
-	MaxStoredLineBytes = 4 * 1024
-	maxSnapshotBytes   = 1024 * 1024
-	maxWindowLines     = 2000
-	maxWindowBytes     = 50 * 1024
-	maxOperations      = 8
-	maxSearchHits      = 10
-	maxSearchDomains   = 4
-	maxFindMatches     = 250
-	maxFindMatchChars  = 250
-	maxPatternBytes    = 1024
+	MaxStoredLineBytes  = 4 * 1024
+	maxSnapshotBytes    = 1024 * 1024
+	maxWindowLines      = 2000
+	maxWindowBytes      = 50 * 1024
+	maxOperations       = 8
+	maxSearchHits       = 10
+	maxSearchDomains    = 4
+	maxRequestTextBytes = 64 * 1024
+	maxDomainBytes      = 253
+	maxIdentityBytes    = 128
+	maxFindMatches      = 250
+	maxFindMatchChars   = 250
+	maxPatternBytes     = maxRequestTextBytes
+	// Stored page content may retain ASCII control bytes. JSON can encode each
+	// such byte as a six-byte \u00XX escape, so this is the largest aggregate
+	// raw result that always fits the canonical {"text":...} tool-output JSON.
+	// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
+	// (RuntimeBoundedTextSchema); services/gateway/packages/protocol/src/bounds.ts
+	// (MaxProviderRequestToolOutputJsonBytes).
+	maxModelVisibleToolOutputJSONBytes = 512 * 1024
+	maxStoredJSONEscapeBytesPerByte    = 6
+	modelVisibleTextEnvelopeBytes      = len(`{"text":""}`)
+	maxVisibleResultBytes              = (maxModelVisibleToolOutputJSONBytes - modelVisibleTextEnvelopeBytes) / maxStoredJSONEscapeBytesPerByte
+
+	// UPDATE-WITH: services/agent-runtime/packages/runtime-pod/src/bounds.ts
+	// (MaxWebRequestGrpcMessageBytes, MaxWebResponseGrpcMessageBytes).
+	maxRunWebRequestGRPCMessageBytes  = 1024 * 1024
+	maxRunWebResponseGRPCMessageBytes = 512 * 1024
 )
 
 type Scope struct {

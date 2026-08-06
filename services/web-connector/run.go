@@ -67,7 +67,7 @@ func Run(ctx context.Context, cfg Config, service *Service, metrics *Metrics, ru
 	var ready atomic.Bool
 	grpcErr := make(chan error, 1)
 	go func() {
-		grpcErr <- internalgrpc.Run(serverCtx, internalgrpc.Config{ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, OnServing: func() { ready.Store(true) }, ShutdownTimeout: 10 * time.Second, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{grpc.MaxRecvMsgSize(512 * 1024), grpc.MaxSendMsgSize(512 * 1024), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute})}})
+		grpcErr <- internalgrpc.Run(serverCtx, internalgrpc.Config{ServiceName: ServiceName, Listener: grpcListener, Authenticator: runtime.Authenticator, MethodAuthorizer: MethodAuthorizer, Register: func(server *grpc.Server) { Register(server, service) }, OnServing: func() { ready.Store(true) }, ShutdownTimeout: 10 * time.Second, Logger: runtime.Logger, ServerOptions: []grpc.ServerOption{grpc.MaxRecvMsgSize(maxRunWebRequestGRPCMessageBytes), grpc.MaxSendMsgSize(maxRunWebResponseGRPCMessageBytes), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: 5 * time.Minute, MaxConnectionAgeGrace: 30 * time.Minute})}})
 	}()
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())

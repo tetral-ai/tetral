@@ -30,18 +30,18 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 	logger := workload.NewLogger(os.Stderr, "queue", env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
 	cfg, err := tetralqueue.ConfigFromEnv(env)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "queue", err)
+		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	openResult, err := openDatabase(ctx)
 	if err != nil {
-		return workload.LogStartupFailure(logger, "queue", err)
+		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = openResult.Client.Close() }()
 	if err := verifySchema(ctx, openResult.Client); err != nil {
-		return workload.LogStartupFailure(logger, "queue", err)
+		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	if err := openResult.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, "queue", err)
+		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	store := queue.NewPostgreSQLStoreWithRetryPolicy(openResult.Client, queue.RetryPolicy{
 		BaseDelay:   cfg.RetryBaseDelay,
@@ -49,7 +49,7 @@ func run(ctx context.Context, env tetralqueue.Env) error {
 		MaxAttempts: cfg.RetryMaxAttempts,
 	})
 	if err := store.VerifyReady(ctx); err != nil {
-		return workload.LogStartupFailure(logger, "queue", err)
+		return workload.LogStartupFailure(logger, "queue", workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	maintenanceCtx, cancelMaintenance := context.WithCancel(ctx)
 	defer cancelMaintenance()

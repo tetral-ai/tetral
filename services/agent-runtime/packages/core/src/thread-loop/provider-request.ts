@@ -328,7 +328,7 @@ export function requestErrorKindFromFailure(failure: RuntimeFailure): RuntimeReq
   if (
     failure.type === "runtime"
     && failure.code === "runtime_invalid_sequence"
-    && failure.reason === "runtime_contract_validation"
+    && (failure.reason === "runtime_contract_validation" || failure.reason === "bounded")
   ) {
     return "runtime_semantic_error";
   }

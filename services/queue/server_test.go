@@ -1,8 +1,10 @@
 package tetralqueue
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"strings"
@@ -22,6 +24,43 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestQueueServerLogsSuccessfulLeaseWaitAndDurableIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	store := &recordingStore{leaseJobs: []*queue.Job{{
+		ID: "qjob_observed", WorkspaceID: "ws_observed", Kind: queue.KindSandboxToolExecute,
+		PartitionKey: "sandbox:ws_observed:sesn_observed", CreatedAt: now.Add(-time.Hour),
+		AvailableAt: now.Add(-500 * time.Millisecond), AttemptCount: 2,
+	}}}
+	var logs bytes.Buffer
+	server := NewServer(store, slog.New(slog.NewJSONHandler(&logs, nil)))
+	nowCalls := 0
+	server.now = func() time.Time {
+		nowCalls++
+		if nowCalls == 1 {
+			return now
+		}
+		return now.Add(25 * time.Millisecond)
+	}
+	if _, err := server.Lease(context.Background(), &queuev1.LeaseRequest{
+		WorkspaceId: "ws_observed", Kinds: []string{queue.KindSandboxToolExecute},
+		LeaseOwner: "sandbox", MaxJobs: 1, LeaseDurationMs: 1000,
+	}); err != nil {
+		t.Fatalf("Lease: %v", err)
+	}
+	for _, want := range []string{
+		`"msg":"queue.job.leased"`, `"workspace.id":"ws_observed"`,
+		`"queue.job.id":"qjob_observed"`, `"queue.job.kind":"sandbox_tool_execute"`,
+		`"duration.ms":25`, `"queue.ready_wait.ms":500`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("lease log missing %s: %s", want, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "queue.age.ms") {
+		t.Fatalf("lease log must not contain queue.age.ms: %s", logs.String())
+	}
+}
 
 func TestQueueServiceGeneratedClientLeasesAndFencesTransitions(t *testing.T) {
 	now := time.Date(2026, 7, 1, 16, 0, 0, 0, time.UTC)
@@ -232,7 +271,7 @@ func newQueueClientConn(t *testing.T, store *recordingStore, now time.Time) (*gr
 	t.Helper()
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer(internalgrpc.QueueRPCServerOptions()...)
-	queueServer := NewServer(store)
+	queueServer := NewServer(store, nil)
 	queueServer.now = func() time.Time { return now }
 	queuev1.RegisterQueueServiceServer(server, queueServer)
 	done := make(chan error, 1)

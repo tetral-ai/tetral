@@ -398,13 +398,10 @@ function serializeCompactionMessage(message: RuntimeMessage, toolOutputMaxChars?
 }
 
 function compactionToolInput(
-  input: { readonly value?: RuntimeJsonValue | undefined; readonly preview: string } | undefined,
+  input: { readonly value: RuntimeJsonValue } | undefined,
 ): string {
   if (input === undefined) {
     return "";
-  }
-  if (input.value === undefined) {
-    return input.preview;
   }
   return typeof input.value === "string" ? input.value : JSON.stringify(input.value);
 }

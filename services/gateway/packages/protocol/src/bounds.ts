@@ -46,23 +46,37 @@ export const MaxTokenBytes = 1024;
 // tool descriptions, transient-attachment source paths, provider-error messages, and
 // streamed text/reasoning/tool-input fragment deltas (validFragment). It does NOT bound
 // message text or reasoning parts; those ride the request fuse under
-// MaxProviderRequestMessagePartBytes. The 64 KiB value is a fixed sanity ceiling, not
+// MaxProviderRequestMessagePartJsonBytes. The 64 KiB value is a fixed sanity ceiling, not
 // sized to any payload.
 // UPDATE-WITH: validateProviderRequest, validateProviderStreamEvent,
 //   validAttachmentRejections, validFragment (all in this file).
 /** Maximum UTF-8 size of short free-text fields and individual streamed fragment deltas. */
 export const MaxTextBytes = 64 * 1024;
-// MaxProviderRequestMessagePartBytes: per-part bound for message text parts and reasoning
-// parts in a ProviderRequest (validRuntimePart). These parts are bounded by the request
-// fuse they ride in rather than by the MaxTextBytes field cap. The 32 MiB value is the
-// size the Runtime->Gateway request channel is pinned to at both ends: the catalog's
-// largest context window serialized plus envelope overhead, the same order as the
-// upstream provider's 32 MB request cap.
+// MaxProviderRequestMessagePartJsonBytes: per-part semantic bound for message text and
+// reasoning in a ProviderRequest (validRuntimePart). Runtime accumulation and Gateway
+// validation both measure JSON.stringify(text), so escape-dense content has one contract.
 // UPDATE-WITH: validRuntimePart (part.text.text, part.reasoning.text) in this file.
-/** Maximum UTF-8 size of one Runtime message text or reasoning part in a provider request. */
-export const MaxProviderRequestMessagePartBytes = 32 * 1024 * 1024;
-/** Maximum UTF-8 size of serialized tool payloads and provider usage JSON. */
-export const MaxJsonBytes = 64 * 1024;
+/** Maximum canonical JSON-string size of one Runtime message text or reasoning part. */
+export const MaxProviderRequestMessagePartJsonBytes = 16 * 1024 * 1024;
+// A fitted Read result is already a complete JSON-escaped helper envelope of at
+// most 200,000 bytes. Runtime decodes it, adds at most 2,000 line prefixes, and
+// serializes the visible text once. 512 KiB also carries the MCP formatter's
+// 50 KiB raw result under worst-case JSON escaping without truncation.
+// UPDATE-WITH: internal/sandbox/helper/internal/filetool/read.go
+//   (maxReadEnvelopeBytes); validRuntimePart below;
+//   services/agent-runtime/packages/core/src/contracts/runtime.ts
+//   (RuntimeBoundedTextSchema); services/web-connector/types.go
+//   (maxModelVisibleToolOutputJSONBytes, maxVisibleResultBytes).
+/** Maximum UTF-8 size of provider-request tool output/error JSON. */
+export const MaxProviderRequestToolOutputJsonBytes = 512 * 1024;
+/** Maximum UTF-8 size of one provider-produced tool-call input JSON value. */
+export const MaxProviderToolCallInputJsonBytes = 4 * 1024 * 1024;
+/** Maximum UTF-8 size of provider-native usage JSON. */
+export const MaxProviderUsageJsonBytes = 16 * 1024;
+/** Maximum UTF-8 size of MCP tool input JSON. */
+export const MaxMcpToolInputJsonBytes = 64 * 1024;
+/** Maximum UTF-8 size of a safe provider error message. */
+export const MaxProviderErrorMessageBytes = 8 * 1024;
 /**
  * Maximum UTF-8 size of a serialized JSON schema accepted on provider requests
  * and MCP tool-list responses.
@@ -106,7 +120,14 @@ const AllowedRuntimeMessageOrigins = new Set(["user", "agent", "runtime"]);
  * The `ok` discriminant lets callers continue with the typed message or reject it with the fixed,
  * non-diagnostic failure text without exposing malformed internal data.
  */
-export type ValidationResult = { readonly ok: true } | { readonly ok: false; readonly message: "invalid internal request" };
+export type ValidationResult = { readonly ok: true } | {
+  readonly ok: false;
+  readonly message: "invalid internal request";
+  /** Fixed, non-payload diagnostic category safe for structured logs. */
+  readonly code?: string;
+  /** Fixed protocol member path safe for structured logs. */
+  readonly member?: string;
+};
 
 /**
  * Validates the bounded shape of one complete provider request before Gateway performs provider work.
@@ -117,22 +138,23 @@ export type ValidationResult = { readonly ok: true } | { readonly ok: false; rea
  * It does not authenticate the caller or verify that the binding token belongs to the request.
  */
 export function validateProviderRequest(request: ProviderRequest): ValidationResult {
-  const ids = validateIdFields(
-    request.requestId,
-    request.modelRequestId,
-    request.workspaceId,
-    request.sessionId,
-    request.sessionThreadId,
-    request.bindingId,
-  );
-  if (!ids.ok) {
-    return ids;
+  for (const [member, value] of [
+    ["request_id", request.requestId],
+    ["model_request_id", request.modelRequestId],
+    ["workspace_id", request.workspaceId],
+    ["session_id", request.sessionId],
+    ["session_thread_id", request.sessionThreadId],
+    ["binding_id", request.bindingId],
+  ] as const) {
+    if (invalidBytes(value, MaxIdBytes)) {
+      return invalidRequest("invalid_identifier", member);
+    }
   }
   if (request.parentThreadId !== undefined && invalidBytes(request.parentThreadId, MaxIdBytes)) {
-    return invalidRequest();
+    return invalidRequest("invalid_identifier", "parent_thread_id");
   }
   if (invalidBytes(request.runtimeBindingToken, MaxTokenBytes) || invalidBindingGeneration(request.bindingGeneration)) {
-    return invalidRequest();
+    return invalidRequest("invalid_binding", "runtime_binding");
   }
   if (!validEnumValue(
     request.requestKind,
@@ -141,20 +163,20 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
     ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER,
     ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER_COMPACTION,
   )) {
-    return invalidRequest();
+    return invalidRequest("invalid_request_kind", "request_kind");
   }
   const approvalReviewerRequest = request.requestKind === ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER;
   if (
     (approvalReviewerRequest && (request.outputSchemaJson === undefined || !validJsonObject(request.outputSchemaJson, MaxSchemaBytes))) ||
     (!approvalReviewerRequest && request.outputSchemaJson !== undefined)
   ) {
-    return invalidRequest();
+    return invalidRequest("invalid_output_schema", "output_schema_json");
   }
   if (request.model === undefined || invalidBytes(request.model.providerId, MaxIdBytes) || invalidBytes(request.model.modelId, MaxIdBytes)) {
-    return invalidRequest();
+    return invalidRequest("invalid_model", "model");
   }
-  if (request.model.variant !== "" && invalidBytes(request.model.variant, MaxIdBytes)) {
-    return invalidRequest();
+  if (request.model.variant !== "") {
+    return invalidRequest("unsupported_model_variant", "model.variant");
   }
   for (const segment of request.system) {
     if (
@@ -170,7 +192,7 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
       !validEnumValue(segment.cacheHint, SystemCacheHint.SYSTEM_CACHE_HINT_STABLE, SystemCacheHint.SYSTEM_CACHE_HINT_SESSION, SystemCacheHint.SYSTEM_CACHE_HINT_NONE) ||
       invalidBytes(segment.text, MaxTextBytes)
     ) {
-      return invalidRequest();
+      return invalidRequest("invalid_system_segment", "system");
     }
   }
   for (const message of request.messages) {
@@ -181,11 +203,11 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
       !AllowedRuntimeMessageStatuses.has(message.status) ||
       !AllowedRuntimeMessageOrigins.has(message.origin)
     ) {
-      return invalidRequest();
+      return invalidRequest("invalid_message", "messages");
     }
     for (const part of message.parts) {
       if (!validRuntimePart(part)) {
-        return invalidRequest();
+        return invalidRequest("invalid_message_part", "messages.parts");
       }
     }
   }
@@ -196,16 +218,16 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
       !validJsonObject(tool.inputSchemaJson, MaxSchemaBytes) ||
       (tool.outputSchemaJson !== undefined && !validJsonObject(tool.outputSchemaJson, MaxSchemaBytes))
     ) {
-      return invalidRequest();
+      return invalidRequest("invalid_tool_definition", "tools");
     }
   }
   if (request.attachments.length > MaxProviderRequestAttachments) {
-    return invalidRequest();
+    return invalidRequest("too_many_attachments", "attachments");
   }
   const fileAttachmentOrigins = new Set<string>();
   for (const attachment of request.attachments) {
     if (invalidBytes(attachment.filename, MaxIdBytes)) {
-      return invalidRequest();
+      return invalidRequest("invalid_attachment", "attachments.filename");
     }
     if (attachment.transient !== undefined) {
       if (
@@ -217,7 +239,7 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
         !validAttachmentPageRange(attachment.transient.pageRange) ||
         invalidBytes(attachment.transient.detail, MaxAttachmentHintBytes)
       ) {
-        return invalidRequest();
+        return invalidRequest("invalid_attachment", "attachments.transient");
       }
       continue;
     }
@@ -227,19 +249,19 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
       invalidBytes(attachment.fileBacked.sourceEventId, MaxIdBytes) ||
       invalidBytes(attachment.fileBacked.fileId, MaxIdBytes)
     ) {
-      return invalidRequest();
+      return invalidRequest("invalid_attachment", "attachments.file_backed");
     }
     const originKey = JSON.stringify([
       attachment.fileBacked.sourceEventId,
       attachment.fileBacked.fileId,
     ]);
     if (fileAttachmentOrigins.has(originKey)) {
-      return invalidRequest();
+      return invalidRequest("duplicate_attachment", "attachments.file_backed");
     }
     fileAttachmentOrigins.add(originKey);
   }
   if (request.limits === undefined || request.limits.maxOutputTokens <= 0 || request.limits.timeoutMs <= 0) {
-    return invalidRequest();
+    return invalidRequest("invalid_limits", "limits");
   }
   return { ok: true };
 }
@@ -306,7 +328,7 @@ export function validateProviderStreamEvent(event: ProviderStreamEvent, request:
       return event.toolCall !== undefined &&
         !invalidBytes(event.toolCall.id, MaxIdBytes) &&
         !invalidBytes(event.toolCall.name, MaxIdBytes) &&
-        validJson(event.toolCall.inputJson, MaxJsonBytes) &&
+        validJson(event.toolCall.inputJson, MaxProviderToolCallInputJsonBytes) &&
         validMetadata(event.toolCall.metadataJson)
         ? { ok: true }
         : invalidRequest();
@@ -332,7 +354,7 @@ export function validateProviderStreamEvent(event: ProviderStreamEvent, request:
     case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
       return event.providerError?.error !== undefined &&
         !invalidBytes(event.providerError.error.code, MaxIdBytes) &&
-        !invalidBytes(event.providerError.error.message, MaxTextBytes) &&
+        !invalidBytes(event.providerError.error.message, MaxProviderErrorMessageBytes) &&
         nonNegativeInteger(event.providerError.error.statusCode) &&
         nonNegativeInteger(event.providerError.error.retryAfterMs) &&
         validMetadata(event.providerError.metadataJson)
@@ -407,10 +429,10 @@ function validRuntimePart(part: RuntimePart): boolean {
     return false;
   }
   if (part.text !== undefined) {
-    return !invalidBytes(part.text.text, MaxProviderRequestMessagePartBytes);
+    return part.text.text.length > 0 && validJsonString(part.text.text, MaxProviderRequestMessagePartJsonBytes);
   }
   if (part.reasoning !== undefined) {
-    return !exceedsBytes(part.reasoning.text, MaxProviderRequestMessagePartBytes) && validMetadata(part.reasoning.metadataJson);
+    return validJsonString(part.reasoning.text, MaxProviderRequestMessagePartJsonBytes) && validMetadata(part.reasoning.metadataJson);
   }
   return part.tool !== undefined &&
     !invalidBytes(part.tool.callId, MaxIdBytes) &&
@@ -425,8 +447,8 @@ function validRuntimePart(part: RuntimePart): boolean {
       RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_ERROR,
       RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_CANCELLED,
     ) &&
-    validJson(part.tool.inputJson, MaxJsonBytes) &&
-    validJson(part.tool.outputOrErrorJson, MaxJsonBytes);
+    validJson(part.tool.inputJson, MaxProviderToolCallInputJsonBytes) &&
+    validJson(part.tool.outputOrErrorJson, MaxProviderRequestToolOutputJsonBytes);
 }
 
 function validFragment(id: string, text: string, metadataJson: string, options: { readonly textAllowed: boolean }): boolean {
@@ -444,7 +466,26 @@ function validRequestUsage(usage: RequestUsage): boolean {
     nonNegativeInteger(usage.outputTotalTokens) &&
     optionalNonNegativeInteger(usage.outputReasoningTokens) &&
     optionalNonNegativeInteger(usage.totalTokens) &&
-    (usage.providerUsageJson === "" || validJson(usage.providerUsageJson, MaxJsonBytes));
+    (usage.providerUsageJson === "" || validJson(usage.providerUsageJson, MaxProviderUsageJsonBytes));
+}
+
+/** Returns the longest valid-Unicode prefix whose UTF-8 encoding fits the byte budget. */
+export function truncateUtf8Bytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= maxBytes) {
+    return value;
+  }
+  const characters: string[] = [];
+  let usedBytes = 0;
+  for (const character of value) {
+    const characterBytes = encoder.encode(character).byteLength;
+    if (usedBytes + characterBytes > maxBytes) {
+      break;
+    }
+    characters.push(character);
+    usedBytes += characterBytes;
+  }
+  return characters.join("");
 }
 
 function validAttachmentPageRange(value: string): boolean {
@@ -498,6 +539,10 @@ function exceedsBytes(value: string, limit: number): boolean {
   return new TextEncoder().encode(value).byteLength > limit;
 }
 
+function validJsonString(value: string, limit: number): boolean {
+  return !exceedsBytes(JSON.stringify(value), limit);
+}
+
 function invalidBindingGeneration(value: number): boolean {
   return !Number.isInteger(value) || value <= 0 || value > MaxBindingGeneration;
 }
@@ -534,6 +579,11 @@ function parseJson(value: string, limit: number): unknown {
   }
 }
 
-function invalidRequest(): ValidationResult {
-  return { ok: false, message: "invalid internal request" };
+function invalidRequest(code?: string, member?: string): ValidationResult {
+  return {
+    ok: false,
+    message: "invalid internal request",
+    ...(code === undefined ? {} : { code }),
+    ...(member === undefined ? {} : { member }),
+  };
 }

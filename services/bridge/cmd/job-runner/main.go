@@ -10,6 +10,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/internalgrpc"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
+	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workload"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimebridge "github.com/tetral-ai/tetral/services/bridge"
@@ -38,48 +39,48 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 	logger := workload.NewLogger(os.Stderr, agentruntimebridge.ServiceNameJobRunner, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
 	cfg, err := agentruntimebridge.JobRunnerConfigFromEnv(env)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	database, err := openDatabase(ctx, agentruntimebridge.EnvDatabaseURL, cfg.DatabaseURL)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = database.Client.Close() }()
 	if err := verifySchema(ctx, database.Client); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	// Workspace isolation is enforced by row-level policies that a superuser or
 	// BYPASSRLS role silently defeats. The Job Runner sweeps every workspace, so
 	// it refuses to serve on a role that would bypass them.
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	workspaceStore := workspace.NewStore(database.RawDatabaseForExcludedStores)
 	if err := agentruntimebridge.ValidateRuntimeInboxEventRefBounds(ctx, database.Client, workspaceStore); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	listener, err := listenTCP("tcp", cfg.HTTPAddress)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseListener, err))
 	}
 	defer func() { _ = listener.Close() }()
 	dialOptions := append([]grpc.DialOption{}, internalgrpc.QueueRPCDialOptions()...)
 	dialOptions = append(dialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	queueConn, err := grpc.NewClient(cfg.QueueGRPCAddress, dialOptions...)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = queueConn.Close() }()
 	visibilityConfig, err := enginekubernetes.LoadConfig(env)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	kubernetesCache := enginekubernetes.NewWatcherCache(cfg.KubernetesNamespace, enginekubernetes.WithLogger(
 		logger,
 	))
 	kubernetesClient, err := enginekubernetes.NewInClusterVisibilityClient()
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	watchHandles, err := enginekubernetes.SyncAndWatch(ctx, kubernetesClient, enginekubernetes.Config{
 		Namespace:                 visibilityConfig.Namespace,
@@ -87,21 +88,21 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 		AgentRuntimeServiceName:   visibilityConfig.AgentRuntimeServiceName,
 	}, kubernetesCache)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer watchHandles.Stop()
 	readiness := workload.NewReadiness().WithReadinessDependency(kubernetesCache.Ready)
 	readiness.MarkReady()
 	blobConfig, err := blob.LoadConfig()
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	if err := blobConfig.AssertProductionReady(); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	blobStore, err := blob.NewS3BlobStore(ctx, blobConfig)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameJobRunner, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	deliveryStore := agentruntimebridge.NewJobRunnerRuntimeDeliveryStore(
 		database.Client,
@@ -112,6 +113,10 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 	deliveryStore.AttachmentBlobStore = blobStore
 	loopCtx, cancelLoop := context.WithCancel(ctx)
 	defer cancelLoop()
+	queueWake := queue.NewWakeSignal()
+	go func() {
+		_ = queue.RunNotificationListener(loopCtx, queue.PostgreSQLNotificationListener{Client: database.Client}, queue.ConsumerClassBridge, queueWake, logger)
+	}()
 	go func() {
 		_ = agentruntimebridge.RunJobRunnerLoop(loopCtx, &agentruntimebridge.JobRunner{
 			Queue:      agentruntimebridge.QueueClientFromGRPC(queuev1.NewQueueServiceClient(queueConn)),
@@ -123,7 +128,7 @@ func run(ctx context.Context, env agentruntimebridge.Env) error {
 				}),
 			},
 			Config: cfg,
-		}, logger)
+		}, logger, queueWake)
 	}()
 	httpMetrics := workload.NewHTTPMetrics()
 	return runWorkload(ctx, workload.Config{

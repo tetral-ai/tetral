@@ -43,11 +43,23 @@ Both containers run in one pod, so ServiceAccount and NetworkPolicy treat
 Bridge as a single trust boundary; the per-container credential split limits
 accidental exposure, not network identity.
 
+Queue insertion and wakeup share the enqueue transaction: each newly inserted
+job emits a PostgreSQL `NOTIFY` containing only its consumer class. The
+`job-runner` owns one reconnecting `LISTEN` connection for the Bridge class and
+turns matching notifications into local wake hints; it then leases durable jobs
+from PostgreSQL normally. Notifications carry no work and are not correctness
+state. A listener connection or reconnect also triggers a catch-up poll, and
+the bounded polling loop remains the fallback if a notification is coalesced or
+lost.
+
 ### The Bridge API RPC surface
 
 Grouped by what each call settles. Every durable-write RPC carries a stable
 idempotency identity: replaying it with the identical payload returns the
 stored ACK; the same identity with a divergent payload is a fatal conflict.
+The Bridge API process admits 64 MiB messages for complete `WriteEvent`
+declarations and `LoadContext` responses. Attachment clients retain their
+separate 32 MiB transport fuse and existing per-attachment semantic limits.
 
 | Group | RPCs | Settles |
 | --- | --- | --- |

@@ -11,20 +11,23 @@
 
 import { z } from "zod/v4";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
+import {
+  MaxProviderRequestToolOutputJsonBytes,
+  MaxProviderToolCallInputJsonBytes,
+} from "@tetral/gateway-protocol/src/bounds.js";
 import { ProviderErrorCodes, ProviderMetadataSchema as RawProviderMetadataSchema } from "./provider.js";
 import type { ProviderId } from "./provider.js";
+import { RuntimePreviewTextMaxBytes } from "../llm/llm-event.js";
 export {
   LLMEventSchema,
   LLMEventTypes,
-  RuntimeBoundedJsonSchema as LLMRuntimeBoundedJsonSchema,
-  RuntimeBoundedTextSchema as LLMRuntimeBoundedTextSchema,
+  RuntimeJsonPreviewSchema as LLMRuntimeJsonPreviewSchema,
   RuntimeFailureSchema as LLMRuntimeFailureSchema,
   RuntimeUsageSchema as LLMRuntimeUsageSchema,
 } from "../llm/llm-event.js";
 export type {
   LLMEvent,
-  RuntimeBoundedJson as LLMRuntimeBoundedJson,
-  RuntimeBoundedText as LLMRuntimeBoundedText,
+  RuntimeJsonPreview as LLMRuntimeJsonPreview,
   RuntimeFailure as LLMRuntimeFailure,
   RuntimeUsage as LLMRuntimeUsage,
 } from "../llm/llm-event.js";
@@ -78,6 +81,13 @@ const RuntimeProviderMetadataMaxBytes = 16 * 1024;
 //              services/bridge/bridge_api_settlement.go
 export const MaxStableReasoningPartsPerRequest = 16;
 export const MaxStableReasoningBytesPerRequest = 2 * 1024 * 1024;
+
+/** Encodes the exact reasoning metadata bytes sent to and counted by Bridge. */
+// UPDATE-WITH: services/bridge/bridge_api_settlement.go
+// (normalizeStableReasoningParts metadataJSON aggregate accounting).
+export function stableReasoningMetadataJSON(metadata: RuntimeJsonValue | undefined): string {
+  return JSON.stringify(metadata ?? {});
+}
 const SafeOperationNameSchema = z.enum(["commitInternalToolRepair"]);
 const SafeReasonCodeSchema = z.enum([
   "aborted",
@@ -89,7 +99,6 @@ const SafeReasonCodeSchema = z.enum([
 ]);
 const SafeTerminalStatusSchema = z.enum(["completed", "failed", "cancelled"]);
 const Utf8Encoder = new TextEncoder();
-const DefaultMaxNormalizedTextPreviewBytes = 8_192;
 
 const RedactedText = "[redacted]";
 const SensitiveTextPatterns = [
@@ -196,10 +205,17 @@ export const RuntimeMessageStatusSchema = z.enum(["streaming", "completed", "fai
 
 export const RuntimePartStatusSchema = z.enum(["streaming", "completed", "failed", "cancelled"]);
 
+// Measures the exact one-time {text} JSON shape projected to Gateway.
+// UPDATE-WITH: services/gateway/packages/protocol/src/bounds.ts
+// (MaxProviderRequestToolOutputJsonBytes); services/web-connector/types.go
+// (maxModelVisibleToolOutputJSONBytes, maxVisibleResultBytes).
 export const RuntimeBoundedTextSchema = z.strictObject({
   text: RuntimeTextSchema,
   truncated: z.boolean(),
-});
+}).refine(
+  (value) => byteLength(JSON.stringify({ text: value.text })) <= MaxProviderRequestToolOutputJsonBytes,
+  `tool output JSON must be at most ${MaxProviderRequestToolOutputJsonBytes} UTF-8 bytes`,
+);
 export type RuntimeBoundedText = z.infer<typeof RuntimeBoundedTextSchema>;
 
 export type RuntimeJsonValue =
@@ -242,8 +258,14 @@ export const RuntimeJsonValueSchema = z.custom<RuntimeJsonValue>(isRuntimeJsonVa
 export const RuntimeJsonObjectSchema = z.custom<RuntimeJsonObject>(isRuntimeJsonObject, "RuntimeJsonObject");
 
 export const RuntimeBoundedJsonSchema = z.strictObject({
-  value: RuntimeJsonValueSchema.optional(),
-  preview: RuntimeTextSchema,
+  value: RuntimeJsonValueSchema.refine(
+    (value) => byteLength(JSON.stringify(value)) <= MaxProviderToolCallInputJsonBytes,
+    `tool input must be at most ${MaxProviderToolCallInputJsonBytes} UTF-8 bytes`,
+  ),
+  preview: RuntimeTextSchema.refine(
+    (value) => byteLength(value) <= RuntimePreviewTextMaxBytes,
+    `preview must be at most ${RuntimePreviewTextMaxBytes} UTF-8 bytes`,
+  ),
   truncated: z.boolean(),
 });
 export type RuntimeBoundedJson = z.infer<typeof RuntimeBoundedJsonSchema>;
@@ -953,7 +975,7 @@ function validateStableReasoningSet(
     ids.add(part.reasoningPartId);
     sequences.add(part.partSequence);
     previousSequence = part.partSequence;
-    aggregateBytes += byteLength(part.text) + byteLength(JSON.stringify(part.providerMetadata ?? {}));
+    aggregateBytes += byteLength(part.text) + byteLength(stableReasoningMetadataJSON(part.providerMetadata));
   }
   if (aggregateBytes > MaxStableReasoningBytesPerRequest) {
     context.addIssue({ code: "custom", message: "stable reasoning exceeds aggregate byte bound" });
@@ -1776,15 +1798,15 @@ function jsonPreview(input: unknown): string {
   return "[non-json-runtime-value]";
 }
 
-/** Produces a bounded JSON preview while retaining the value only when it fits intact. */
-export function boundRuntimeJson(input: unknown, maxBytes: number): RuntimeBoundedJson {
+/** Retains a complete admitted JSON value and derives an independently bounded preview. */
+export function boundRuntimeJson(input: RuntimeJsonValue, maxBytes: number): RuntimeBoundedJson {
   const preview = jsonPreview(input);
   const boundedPreview = boundRuntimeText(preview, maxBytes);
-  return {
-    ...(isRuntimeJsonValue(input) && !boundedPreview.truncated ? { value: input } : {}),
+  return RuntimeBoundedJsonSchema.parse({
+    value: input,
     preview: boundedPreview.text,
     truncated: boundedPreview.truncated,
-  };
+  });
 }
 
 export function boundRuntimeToolError(input: RuntimeToolError, maxBytes: number): RuntimeToolError {
@@ -1794,92 +1816,6 @@ export function boundRuntimeToolError(input: RuntimeToolError, maxBytes: number)
     message: boundedMessage.text,
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
   });
-}
-
-function boundExistingRuntimeBoundedText(input: RuntimeBoundedText, maxBytes: number): RuntimeBoundedText {
-  const bounded = boundRuntimeText(input.text, maxBytes);
-  return {
-    text: bounded.text,
-    truncated: input.truncated || bounded.truncated,
-  };
-}
-
-function boundExistingRuntimeBoundedJson(input: RuntimeBoundedJson, maxBytes: number): RuntimeBoundedJson {
-  const runtimeValue = input.value;
-  const boundedPreview = boundRuntimeText(input.preview, maxBytes);
-  const serializedValue = runtimeValue === undefined ? undefined : JSON.stringify(runtimeValue);
-  const valueFits =
-    serializedValue !== undefined && byteLength(serializedValue) <= maxBytes && !boundedPreview.truncated;
-  return {
-    ...(valueFits ? { value: runtimeValue } : {}),
-    preview: boundedPreview.text,
-    truncated: input.truncated || boundedPreview.truncated || !valueFits,
-  };
-}
-
-function boundToolState(state: ToolState, maxBytes: number): ToolState {
-  switch (state.status) {
-    case "pending":
-      return {
-        status: "pending",
-      };
-    case "running":
-      return {
-        status: "running",
-        input: boundExistingRuntimeBoundedJson(state.input, maxBytes),
-      };
-    case "completed":
-      return {
-        status: "completed",
-        input: boundExistingRuntimeBoundedJson(state.input, maxBytes),
-        // Tool routes apply their source-specific capture bound before the
-        // result reaches Runtime Core. Re-bounding here would destroy
-        // continuation metadata and narrower route-specific windows.
-        output: RuntimeBoundedTextSchema.parse(state.output),
-      };
-    case "error":
-      return {
-        status: "error",
-        ...(state.input !== undefined ? { input: boundExistingRuntimeBoundedJson(state.input, maxBytes) } : {}),
-        error: boundRuntimeToolError(state.error, maxBytes),
-      };
-    case "cancelled":
-      return {
-        status: "cancelled",
-        ...(state.input !== undefined ? { input: boundExistingRuntimeBoundedJson(state.input, maxBytes) } : {}),
-        ...(state.error !== undefined ? { error: boundRuntimeToolError(state.error, maxBytes) } : {}),
-      };
-  }
-}
-
-/** Re-bounds one stable part without weakening route-specific tool output bounds. */
-export function boundRuntimePartForStableWrite(part: RuntimePart, maxBytes: number = DefaultMaxNormalizedTextPreviewBytes): RuntimePart {
-  switch (part.type) {
-    case "text": {
-      const bounded = boundRuntimeText(part.text, maxBytes);
-      return RuntimePartSchema.parse({
-        ...part,
-        text: bounded.text,
-        truncated: part.truncated || bounded.truncated,
-      });
-    }
-    case "reasoning": {
-      const bounded = boundRuntimeText(part.text, maxBytes);
-      return RuntimePartSchema.parse({
-        ...part,
-        text: bounded.text,
-        truncated: part.truncated || bounded.truncated,
-      });
-    }
-    case "tool":
-      return RuntimePartSchema.parse({
-        ...part,
-        state: boundToolState(part.state, maxBytes),
-      });
-    case "step-start":
-    case "step-finish":
-      return part;
-  }
 }
 
 export function createRuntimeId(deps: RuntimeDependencies, prefix: string): string {

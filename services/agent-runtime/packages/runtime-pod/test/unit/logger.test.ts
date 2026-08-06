@@ -56,6 +56,7 @@ describe("Runtime Pod JSON logger", () => {
       component: "agent-runtime",
       kind: "config_error",
       message: "invalid runtime pod identity",
+      "startup.cause_category": "configuration",
       "error.class": "config_error",
       "error.code": "config_error",
       "error.message_safe": "invalid runtime pod identity",
@@ -76,6 +77,7 @@ describe("Runtime Pod JSON logger", () => {
       "error.code": "startup_error",
       "error.message_safe": "runtime pod startup failed",
       "startup.cause_class": "ReferenceError",
+      "startup.cause_category": "unknown",
     });
 
     expect(shutdownFailureLogRecord({

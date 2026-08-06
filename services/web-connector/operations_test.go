@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/blob"
 	grpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
@@ -228,7 +231,7 @@ func TestFindOnSearchStubPreservesLazyFetchFailureTaxonomyAndUsage(t *testing.T)
 	}
 }
 
-func TestOversizedFindPatternReturnsToolErrorWithoutBackendCall(t *testing.T) {
+func TestOversizedFindPatternIsRejectedAtTheServiceBoundary(t *testing.T) {
 	t.Parallel()
 	objects := blob.NewFakeBlobStore()
 	backend := &fakeBackend{}
@@ -240,14 +243,8 @@ func TestOversizedFindPatternReturnsToolErrorWithoutBackendCall(t *testing.T) {
 	}
 	input := &providergatewayv1.WebToolInput{Find: []*providergatewayv1.WebFindRequest{{RefId: ref.ID, Pattern: strings.Repeat("a", maxPatternBytes+1)}}}
 	response, err := service.RunWeb(testContext(), testRequest(input, "event-oversized-find", key, now))
-	if err != nil {
-		t.Fatalf("RunWeb returned protocol error: %v", err)
-	}
-	if response.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_TOOL_ERROR {
-		t.Fatalf("status=%s; want tool error", response.GetStatus())
-	}
-	if response.GetResultText() != "invalid pattern: pattern exceeds 1024 bytes" {
-		t.Fatalf("result=%q", response.GetResultText())
+	if status.Code(err) != codes.InvalidArgument || response != nil {
+		t.Fatalf("RunWeb response/error = %+v/%v; want InvalidArgument", response, err)
 	}
 	if backend.calls != 0 {
 		t.Fatalf("backend calls=%d", backend.calls)
@@ -270,7 +267,6 @@ func TestOperationLevelBoundsReturnToolErrorsInsteadOfProtocolErrors(t *testing.
 		text  string
 	}{
 		{name: "zero-line", input: &providergatewayv1.WebToolInput{Open: []*providergatewayv1.WebOpenRequest{{RefId: stringptr(ref.ID), Lineno: int32ptr(0)}}}, text: "lineno out of range: document has 1 lines"},
-		{name: "very-large-pattern", input: &providergatewayv1.WebToolInput{Find: []*providergatewayv1.WebFindRequest{{RefId: ref.ID, Pattern: strings.Repeat("a", 64*1024+1)}}}, text: "invalid pattern: pattern exceeds 1024 bytes"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -669,8 +665,8 @@ func TestMultiItemResponseReducesSingularFieldsWithoutLastItemWins(t *testing.T)
 	if !response.GetSourceIncomplete() {
 		t.Fatal("source_incomplete=false; want logical OR across items")
 	}
-	if response.NextLineno != nil || response.GetWindowTruncated() {
-		t.Fatalf("next_lineno=%v window_truncated=%v; want unset/false for two applicable windows", response.NextLineno, response.GetWindowTruncated())
+	if response.NextLineno != nil || !response.GetWindowTruncated() {
+		t.Fatalf("next_lineno=%v window_truncated=%v; want unset/true for two windows with any truncated member", response.NextLineno, response.GetWindowTruncated())
 	}
 	if response.GetUsage().TargetHttpStatus != nil {
 		t.Fatalf("target_http_status=%v; want unset for two applicable fetches", response.GetUsage().TargetHttpStatus)

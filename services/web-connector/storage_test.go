@@ -144,6 +144,25 @@ func TestSnapshotNormalizationOrdersTruncationCRLFSplittingWrappingAndEmptyBody(
 	}
 }
 
+func TestSnapshotNormalizationPreservesControlBytesUsedByVisibleResultBudget(t *testing.T) {
+	t.Parallel()
+	content := string([]byte{0x00, 0x01, 0x1f, '"', '\\', 'x'})
+	lines, incomplete := normalizeContent(content)
+	if incomplete || len(lines) != 1 || lines[0] != content {
+		t.Fatalf("normalized content = %#v, incomplete=%t; want exact control-byte preservation", lines, incomplete)
+	}
+	encoded, err := json.Marshal(map[string]string{"text": content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`\u0000\u0001\u001f`)) {
+		t.Fatalf("canonical JSON did not use six-byte control escapes: %q", encoded)
+	}
+	if maxVisibleResultBytes != 87379 {
+		t.Fatalf("max visible result bytes = %d; want 87379", maxVisibleResultBytes)
+	}
+}
+
 func TestEveryStoredLineIsAddressableAndEmptyDocumentHasAValidFirstWindow(t *testing.T) {
 	t.Parallel()
 	objects := blob.NewFakeBlobStore()
@@ -242,7 +261,7 @@ func TestFindUsesRE2CaseFlagsCapsMatchesAndCompletesWithZeroMatches(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if zero != "[r_example] 0 matches for pattern missing in 1 lines" {
+	if zero != "[r_example] 0 matches in 1 lines" {
 		t.Fatalf("zero=%q", zero)
 	}
 	many := make([]string, maxFindMatches+1)

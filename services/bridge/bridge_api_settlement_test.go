@@ -421,6 +421,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		"reasoning",
 		"1",
 	)
+	firstReasoningText := "REASONING_HEAD" + strings.Repeat("r", 9_000) + "REASONING_TAIL"
 	request := &bridgev1.WriteRequestEndRequest{
 		Scope:                    scope,
 		RuntimeWriteId:           "rwrite_bridge_reasoning_settle_end",
@@ -429,7 +430,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		FinishReason:             "stop",
 		UsageJson:                `{"input_tokens":4,"output_tokens":3}`,
 		StableReasoningParts: []*bridgev1.StableReasoningPart{
-			{ReasoningPartId: firstReasoningLocalID, ProviderPartId: "provider_reason_1", PartSequence: 0, Text: "first private thought", MetadataJson: `{"anthropic":{"signature":"sig_signed"}}`},
+			{ReasoningPartId: firstReasoningLocalID, ProviderPartId: "provider_reason_1", PartSequence: 0, Text: firstReasoningText, MetadataJson: `{"anthropic":{"signature":"sig_signed"}}`},
 			{ReasoningPartId: secondReasoningLocalID, ProviderPartId: "provider_reason_2", PartSequence: 1, Text: "second private thought", MetadataJson: `{"openai":{"encrypted_content":"ciphertext"}}`, Truncated: true},
 		},
 		Drafts: []*bridgev1.RuntimeMessageDraft{{
@@ -442,7 +443,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 				{
 					RuntimeLocalPartId: firstReasoningLocalID,
 					PartKind:           "reasoning",
-					PartJson:           `{"type":"reasoning","providerPartId":"provider_reason_1","text":"first private thought","providerMetadata":{"anthropic":{"signature":"sig_signed"}},"truncated":false,"status":"completed"}`,
+					PartJson:           `{"type":"reasoning","providerPartId":"provider_reason_1","text":"` + firstReasoningText + `","providerMetadata":{"anthropic":{"signature":"sig_signed"}},"truncated":false,"status":"completed"}`,
 				},
 				{
 					RuntimeLocalPartId: secondReasoningLocalID,
@@ -550,7 +551,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningSettlementIsAtomic(t *testing.T)
 		strings.Count(contextJSON, `"id":"`+message.Parts[0].ID+`"`) != 1 ||
 		strings.Count(contextJSON, `"id":"`+message.Parts[1].ID+`"`) != 1 ||
 		strings.Count(contextJSON, `"signature":"sig_signed"`) != 1 ||
-		strings.Count(contextJSON, `"encrypted_content":"ciphertext"`) != 1 {
+		strings.Count(contextJSON, `"encrypted_content":"ciphertext"`) != 1 ||
+		strings.Count(contextJSON, "REASONING_HEAD") != 1 || strings.Count(contextJSON, "REASONING_TAIL") != 1 {
 		t.Fatalf("cold context = %s; want ordered signed/encrypted stable reasoning", contextJSON)
 	}
 
@@ -616,11 +618,10 @@ func TestNormalizeStableReasoningPartsEnforcesExactBoundsAndCanonicalMetadata(t 
 		}
 	}
 	exactAggregate := &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{
-		part("exact_1", 0, strings.Repeat("a", 1024*1024-2), `{}`),
-		part("exact_2", 1, strings.Repeat("b", 1024*1024-2), `{}`),
+		part("exact_1", 0, strings.Repeat("a", 2*1024*1024-2), `{}`),
 	}}
-	if normalized, err := normalizeStableReasoningParts(exactAggregate); err != nil || len(normalized.Parts) != 2 || !normalized.StrictlyOrdered {
-		t.Fatalf("exact 2 MiB aggregate = %+v err=%v; want accepted ordered pair", normalized, err)
+	if normalized, err := normalizeStableReasoningParts(exactAggregate); err != nil || len(normalized.Parts) != 1 || !normalized.StrictlyOrdered {
+		t.Fatalf("exact 2 MiB aggregate = %+v err=%v; want accepted part", normalized, err)
 	}
 
 	exactCount := &bridgev1.WriteRequestEndRequest{}
@@ -637,6 +638,22 @@ func TestNormalizeStableReasoningPartsEnforcesExactBoundsAndCanonicalMetadata(t 
 		t.Fatalf("exact 64 KiB metadata: %v", err)
 	}
 
+	transportMetadata := `{"x":"` + strings.Repeat("<", 11_000) + `"}`
+	transportExact := &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{
+		part("transport_exact", 0, strings.Repeat("t", 2*1024*1024-len(transportMetadata)), transportMetadata),
+	}}
+	normalizedTransport, err := normalizeStableReasoningParts(transportExact)
+	if err != nil {
+		t.Fatalf("exact transported metadata aggregate: %v", err)
+	}
+	if err := validateStableReasoningBudget([]any{map[string]any{
+		"type":             "reasoning",
+		"text":             transportExact.GetStableReasoningParts()[0].GetText(),
+		"providerMetadata": normalizedTransport.Parts[0].Metadata,
+	}}); err != nil {
+		t.Fatalf("exact durable draft metadata aggregate: %v", err)
+	}
+
 	tests := []struct {
 		name    string
 		request *bridgev1.WriteRequestEndRequest
@@ -650,7 +667,7 @@ func TestNormalizeStableReasoningPartsEnforcesExactBoundsAndCanonicalMetadata(t 
 			part("over_1", 0, strings.Repeat("a", 1024*1024-2), `{}`),
 			part("over_2", 1, strings.Repeat("b", 1024*1024-1), `{}`),
 		}}},
-		{name: "text over", request: &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{part("text_over", 0, strings.Repeat("x", 1024*1024+1), `{}`)}}},
+		{name: "text over", request: &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{part("text_over", 0, strings.Repeat("x", 2*1024*1024-1), `{}`)}}},
 		{name: "metadata over", request: &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{part("metadata_over", 0, "", `{"x":"`+strings.Repeat("m", 64*1024-7)+`"}`)}}},
 		{name: "metadata array", request: &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{part("metadata_array", 0, "", `[]`)}}},
 		{name: "invalid utf8", request: &bridgev1.WriteRequestEndRequest{StableReasoningParts: []*bridgev1.StableReasoningPart{part("utf8", 0, string([]byte{0xff}), `{}`)}}},

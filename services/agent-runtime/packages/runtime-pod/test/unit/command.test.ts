@@ -760,6 +760,7 @@ describe("Runtime Pod command entrypoint", () => {
       "error.code": "startup_error",
       "error.message_safe": "runtime pod startup failed",
       "startup.cause_class": "Error",
+      "startup.cause_category": "dependency_readiness",
     });
     expect(records[1]).toBe("startup_error:runtime pod startup failed:startup_error:startup_error:runtime pod startup failed");
     for (const forbidden of ["secret-token", "kubernetes.default.svc", "TokenReview", "raw request body", "sk-provider-key", "kube object dump"]) {

@@ -3,6 +3,7 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/tetral-ai/tetral/internal/sandbox"
 )
@@ -27,6 +28,7 @@ type DaytonaResourceMaterializer struct {
 	Projection daytonaFileResourceMaterialization
 	Memory     memoryResourceMaterialization
 	GitHub     gitHubResourceMaterialization
+	Logger     *slog.Logger
 }
 
 func (m *DaytonaResourceMaterializer) MaterializeResources(ctx context.Context, setup sandbox.SandboxSetup, handle sandbox.ProviderHandle) (sandbox.ResourceSetup, error) {
@@ -36,7 +38,10 @@ func (m *DaytonaResourceMaterializer) MaterializeResources(ctx context.Context, 
 	if handle.SandboxID == "" {
 		return sandbox.ResourceSetup{}, errors.New("daytona resource materialization requires a provider resource")
 	}
-	if err := m.GitHub.RemoveDeletedGitHubRepositories(ctx, setup, handle); err != nil {
+	identity := providerIdentityForSetup(setup, handle.SandboxID)
+	if err := observeProviderAction(ctx, m.Logger, "sandbox.materialization.repository_cleanup", identity, func() error {
+		return m.GitHub.RemoveDeletedGitHubRepositories(ctx, setup, handle)
+	}); err != nil {
 		return sandbox.ResourceSetup{}, err
 	}
 	resources, err := m.Projection.MaterializeFileResources(ctx, setup, handle)
@@ -45,10 +50,14 @@ func (m *DaytonaResourceMaterializer) MaterializeResources(ctx context.Context, 
 	}
 	materializedSetup := setup
 	materializedSetup.Resources = resources
-	if err := m.Memory.MaterializeMemoryResources(ctx, materializedSetup, handle); err != nil {
+	if err := observeProviderAction(ctx, m.Logger, "sandbox.materialization.memory_projection", identity, func() error {
+		return m.Memory.MaterializeMemoryResources(ctx, materializedSetup, handle)
+	}); err != nil {
 		return sandbox.ResourceSetup{}, err
 	}
-	if err := m.GitHub.MaterializeGitHubRepositories(ctx, materializedSetup, handle); err != nil {
+	if err := observeProviderAction(ctx, m.Logger, "sandbox.materialization.repository_clone", identity, func() error {
+		return m.GitHub.MaterializeGitHubRepositories(ctx, materializedSetup, handle)
+	}); err != nil {
 		return sandbox.ResourceSetup{}, err
 	}
 	return resources, nil

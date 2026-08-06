@@ -45,41 +45,41 @@ func run(ctx context.Context, env envReader) error {
 	logger := workload.NewLogger(os.Stderr, agentruntimebridge.ServiceNameBridgeAPI, env.Getenv("TETRAL_DEPLOYMENT_ENVIRONMENT"), env.Getenv("TETRAL_SERVICE_VERSION"))
 	database, err := openDatabase(ctx, agentruntimebridge.EnvDatabaseURL, env.Getenv(agentruntimebridge.EnvDatabaseURL))
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	defer func() { _ = database.Client.Close() }()
 	if err := verifySchema(ctx, database.Client); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseSchema, err))
 	}
 	// Workspace isolation is enforced by row-level policies that a superuser or
 	// BYPASSRLS role silently defeats. Bridge is the widest writer in the
 	// system, so it refuses to serve on a role that would bypass them.
 	if err := database.Client.VerifyRuntimeRole(ctx); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, err))
 	}
 	store := agentruntimebridge.NewPostgreSQLBridgeAPIStore(database.Client)
 	store.Logger = logger
 	bridgeConfig, err := agentruntimebridge.BridgeAPIConfigFromEnv(env)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	tokenKey, err := agentruntimebridge.RuntimeBindingTokenHMACKeyFromEnv(env)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	store.RuntimeBindingTokenHMACKey = tokenKey
 	store.ProviderRescheduleBudget = bridgeConfig.ProviderRescheduleBudget
 	store.CompactionRescheduleBudget = bridgeConfig.CompactionRescheduleBudget
 	blobConfig, err := blob.LoadConfig()
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	if err := blobConfig.AssertProductionReady(); err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, err)
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseConfiguration, err))
 	}
 	blobStore, err := blob.NewS3BlobStore(ctx, blobConfig)
 	if err != nil {
-		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, fmt.Errorf("blob store: %w", err))
+		return workload.LogStartupFailure(logger, agentruntimebridge.ServiceNameBridgeAPI, workload.WithStartupFailureCause(workload.StartupFailureCauseDependencyReadiness, fmt.Errorf("blob store: %w", err)))
 	}
 	store.AttachmentBlobStore = blobStore
 	store.FileBlobStore = blobStore
@@ -95,9 +95,12 @@ func run(ctx context.Context, env envReader) error {
 		GRPCListenDefault: ":9090",
 		Register:          func(server *grpc.Server) { agentruntimebridge.RegisterBridgeAPI(server, store) },
 		MethodAuthorizer:  agentruntimebridge.BridgeAPIMethodAuthorizer,
+		// UPDATE-WITH: internal/sessionrpc/bounds.go
+		// (MaxBridgeAPIGRPCMessageBytes); services/agent-runtime/packages/
+		// runtime-pod/src/bounds.ts (MaxBridgeDurableContextGrpcMessageBytes).
 		ServerOptions: []grpc.ServerOption{
-			grpc.MaxRecvMsgSize(sessionrpc.MaxAttachmentGRPCMessageBytes),
-			grpc.MaxSendMsgSize(sessionrpc.MaxAttachmentGRPCMessageBytes),
+			grpc.MaxRecvMsgSize(sessionrpc.MaxBridgeAPIGRPCMessageBytes),
+			grpc.MaxSendMsgSize(sessionrpc.MaxBridgeAPIGRPCMessageBytes),
 		},
 		DBStatsProvider:      database.Client,
 		RunWorkload:          runWorkload,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import {
   formatMcpToolResult,
   MCP_BLOB_MAX_BYTES,
@@ -109,6 +110,16 @@ describe("MCP formatter", () => {
 
     expect(Buffer.byteLength(formatted.resultText, "utf8")).toBeLessThanOrEqual(MCP_RESULT_TEXT_MAX_BYTES);
     expect(formatted.resultText).toContain(MCP_RESULT_TEXT_TRUNCATED_MARKER);
+  });
+
+  test("keeps escape-dense maximum text inside the canonical tool-result bound", () => {
+    const escapeDense = `${"\u0000".repeat(MCP_RESULT_TEXT_MAX_BYTES - 2)}\"\\`;
+    const formatted = formatMcpToolResult({ content: [{ type: "text", text: escapeDense }] });
+    const canonicalBytes = Buffer.byteLength(JSON.stringify({ text: formatted.resultText }), "utf8");
+
+    expect(formatted.resultText).toBe(escapeDense);
+    expect(Buffer.byteLength(formatted.resultText, "utf8")).toBe(MCP_RESULT_TEXT_MAX_BYTES);
+    expect(canonicalBytes).toBeLessThanOrEqual(MaxProviderRequestToolOutputJsonBytes);
   });
 
   test("truncates text content at the runtime result line cap with a visible marker", () => {

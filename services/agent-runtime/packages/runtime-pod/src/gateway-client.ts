@@ -28,6 +28,8 @@ import type { GatewayClient, GatewayClientError } from "@tetral/agent-runtime-co
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "./bounds.js";
+import { semanticErrorFields } from "@tetral/ts-observability";
+import type { RuntimePodLogger } from "./logger.js";
 
 /** Configures Gateway addressing, workload authentication, transport, and injectable test boundaries. */
 export interface RuntimePodGatewayClientOptions {
@@ -41,6 +43,8 @@ export interface RuntimePodGatewayClientOptions {
   readonly client?: ProviderGatewayServiceClient;
   /** Extends or overrides the default round-robin channel configuration. */
   readonly channelOptions?: ChannelOptions;
+  /** Receives bounded identity-only transport diagnostics. */
+  readonly logger?: RuntimePodLogger;
 }
 
 const GatewayRoundRobinChannelOptions: ChannelOptions = {
@@ -79,16 +83,25 @@ export class RuntimePodGatewayClient implements GatewayClient {
     options: { readonly abortSignal?: AbortSignal } = {},
   ): Stream.Stream<ProviderStreamEvent, GatewayClientError> {
     if (ProviderRequestMessage.encode(request).finish().byteLength > MaxGatewayRequestGrpcMessageBytes) {
-      return Stream.fail({
+      const error: GatewayClientError = {
         type: "gateway-client",
         code: "gateway_protocol_error",
         message: "Gateway provider request exceeds the transport fuse.",
         retryable: false,
         fatal: true,
-      });
+      };
+      logProviderStreamFailureBeforeFirstEvent(this.options.logger, request, error);
+      return Stream.fail(error);
     }
     return Stream.fromAsyncIterable(
-      streamProviderRequest(this.client, this.metadataFactory, this.options.tokenPath, request, options.abortSignal),
+      streamProviderRequest(
+        this.client,
+        this.metadataFactory,
+        this.options.tokenPath,
+        request,
+        options.abortSignal,
+        this.options.logger,
+      ),
       (error): GatewayClientError => gatewayClientError(error),
     );
   }
@@ -100,25 +113,65 @@ async function* streamProviderRequest(
   tokenPath: string,
   request: ProviderRequest,
   abortSignal: AbortSignal | undefined,
+  logger?: RuntimePodLogger,
 ): AsyncGenerator<ProviderStreamEvent> {
-  const metadata = await metadataFactory({ tokenPath });
-  const call = client.streamProviderRequest(request, metadata);
-  const cancel = (): void => {
-    call.cancel();
-  };
-  if (abortSignal !== undefined) {
-    if (abortSignal.aborted) {
-      cancel();
-      throw gatewayClientError({ code: status.CANCELLED });
-    }
-    abortSignal.addEventListener("abort", cancel, { once: true });
-  }
+  let receivedEvent = false;
   try {
-    for await (const event of readableEvents(call)) {
-      yield event;
+    const metadata = await metadataFactory({ tokenPath });
+    const call = client.streamProviderRequest(request, metadata);
+    const cancel = (): void => {
+      call.cancel();
+    };
+    if (abortSignal !== undefined) {
+      if (abortSignal.aborted) {
+        cancel();
+        throw gatewayClientError({ code: status.CANCELLED });
+      }
+      abortSignal.addEventListener("abort", cancel, { once: true });
     }
-  } finally {
-    abortSignal?.removeEventListener("abort", cancel);
+    try {
+      for await (const event of readableEvents(call)) {
+        receivedEvent = true;
+        yield event;
+      }
+    } finally {
+      abortSignal?.removeEventListener("abort", cancel);
+    }
+  } catch (error) {
+    const classified = gatewayClientError(error);
+    if (!receivedEvent && classified.code !== "gateway_cancelled") {
+      logProviderStreamFailureBeforeFirstEvent(logger, request, classified);
+    }
+    throw error;
+  }
+}
+
+function logProviderStreamFailureBeforeFirstEvent(
+  logger: RuntimePodLogger | undefined,
+  request: ProviderRequest,
+  error: GatewayClientError,
+): void {
+  try {
+    logger?.error({
+      event: "provider_stream_failed_before_first_event",
+      "event.kind": "provider_stream_failed_before_first_event",
+      operation: "StreamProviderRequest",
+      component: "agent-runtime",
+      message: "provider stream failed before first event",
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "thread.id": request.sessionThreadId,
+      "request.id": request.requestId,
+      "provider.request.id": request.modelRequestId,
+      "model_request.id": request.modelRequestId,
+      ...semanticErrorFields({
+        errorClass: "gateway_client",
+        errorCode: error.code,
+        messageSafe: "provider stream failed before first event",
+      }),
+    });
+  } catch {
+    // Observability cannot replace provider-stream settlement.
   }
 }
 
@@ -137,7 +190,9 @@ function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncI
 //  CANCELLED           | local abort / stream cancel     | gateway_cancelled      | no        | no
 //  UNAVAILABLE         | transient infra outage          | gateway_unavailable    | yes       | no
 //  DEADLINE_EXCEEDED   | transient infra outage          | gateway_unavailable    | yes       | no
-//  RESOURCE_EXHAUSTED  | local receive fuse              | gateway_protocol_error | no        | yes
+//  RESOURCE_EXHAUSTED  | local request send fuse         | gateway_protocol_error | no        | yes
+//  RESOURCE_EXHAUSTED  | Gateway request receive fuse    | gateway_protocol_error | no        | yes
+//  RESOURCE_EXHAUSTED  | local response receive fuse     | gateway_protocol_error | no        | yes
 //  RESOURCE_EXHAUSTED  | remote resource exhaustion      | gateway_unavailable    | yes       | no
 //  INVALID_ARGUMENT    | deterministic request-shape rej | gateway_protocol_error | no        | yes
 //  INTERNAL            | deterministic fatal             | gateway_stream_error   | no        | yes
@@ -148,9 +203,9 @@ function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncI
 //  (any other status)  | unenumerated -> fail fast       | gateway_stream_error   | no        | no
 //
 // INVARIANTS:
-// - Retryable is a closed set: only UNAVAILABLE, DEADLINE_EXCEEDED, and remote
-//   RESOURCE_EXHAUSTED classify retryable. grpc-js's two local receive-fuse
-//   detail prefixes classify as deterministic protocol failures. Every other status, INCLUDING any
+// - Retryable is a closed set: only UNAVAILABLE, DEADLINE_EXCEEDED, and generic
+//   RESOURCE_EXHAUSTED classify retryable. grpc-js's send/receive size details
+//   classify as deterministic protocol failures. Every other status, INCLUDING any
 //   unenumerated one, falls through the final arm as non-retryable and fails
 //   fast. There is deliberately no default-retryable catch-all arm: retrying a
 //   doomed request would burn the whole reschedule budget plus minutes of
@@ -165,6 +220,9 @@ function readableEvents(call: ClientReadableStream<ProviderStreamEvent>): AsyncI
 //   @tetral/agent-runtime-core/src/llm/llm-service.ts (GatewayClientError shape
 //   and gatewayClientFailure, which read retryable/fatal).
 function gatewayClientError(error: unknown): GatewayClientError {
+  if (isGatewayClientError(error)) {
+    return error;
+  }
   const serviceError = error as Partial<ServiceError>;
   const code = serviceError.code;
   if (code === status.CANCELLED) {
@@ -177,15 +235,18 @@ function gatewayClientError(error: unknown): GatewayClientError {
       statusCode: code,
     };
   }
-  if (code === status.RESOURCE_EXHAUSTED && isLocalReceiveFuseError(serviceError)) {
-    return {
-      type: "gateway-client",
-      code: "gateway_protocol_error",
-      message: "Gateway response exceeded the transport fuse.",
-      retryable: false,
-      fatal: true,
-      statusCode: code,
-    };
+  if (code === status.RESOURCE_EXHAUSTED) {
+    const sizeFailure = gatewayTransportSizeFailure(serviceError);
+    if (sizeFailure !== undefined) {
+      return {
+        type: "gateway-client",
+        code: "gateway_protocol_error",
+        message: sizeFailure,
+        retryable: false,
+        fatal: true,
+        statusCode: code,
+      };
+    }
   }
   if (code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED || code === status.RESOURCE_EXHAUSTED) {
     return {
@@ -218,13 +279,39 @@ function gatewayClientError(error: unknown): GatewayClientError {
   };
 }
 
-function isLocalReceiveFuseError(error: Partial<ServiceError>): boolean {
+function isGatewayClientError(error: unknown): error is GatewayClientError {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const candidate = error as Partial<GatewayClientError>;
+  return candidate.type === "gateway-client" &&
+    (
+      candidate.code === "gateway_unavailable" ||
+      candidate.code === "gateway_stream_error" ||
+      candidate.code === "gateway_protocol_error" ||
+      candidate.code === "gateway_cancelled"
+    ) &&
+    typeof candidate.message === "string" &&
+    typeof candidate.retryable === "boolean" &&
+    typeof candidate.fatal === "boolean";
+}
+
+function gatewayTransportSizeFailure(error: Partial<ServiceError>): string | undefined {
   const details = typeof error.details === "string"
     ? error.details
     : error instanceof Error
       ? error.message
       : "";
+  if (/Attempted to send message with a size larger than \d+/.test(details)) {
+    return "Gateway request exceeded the local transport fuse.";
+  }
   const framedLimit = /Received message larger than max \(\d+ vs (\d+)\)/.exec(details)?.[1];
   const decompressedLimit = /Received message that decompresses to a size larger than (\d+)/.exec(details)?.[1];
-  return Number(framedLimit ?? decompressedLimit) === MaxGatewayStreamEventGrpcMessageBytes;
+  const limit = Number(framedLimit ?? decompressedLimit);
+  if (!Number.isFinite(limit)) {
+    return undefined;
+  }
+  return limit === MaxGatewayStreamEventGrpcMessageBytes
+    ? "Gateway response exceeded the transport fuse."
+    : "Gateway rejected the request above its transport fuse.";
 }

@@ -155,6 +155,13 @@ mounts no Kubernetes API token; the network policy restricts egress to PostgreSQ
 and DNS, and ingress on both ports to `api`, `bridge`, and
 `sandbox`.
 
+Each successful lease logs `duration.ms` for the database Lease call and
+`queue.ready_wait.ms` for time elapsed since that job's `available_at`; retry
+backoff before `available_at` is deliberately excluded. PostgreSQL LISTEN
+disconnects log only fixed authentication, permission, endpoint/transport,
+timeout, or unknown categories. Raw database errors, DSNs, queries, and
+credentials are never included, and polling remains the reconnect fallback.
+
 ## Seams
 
 ### Seam 1 — Job kind registry

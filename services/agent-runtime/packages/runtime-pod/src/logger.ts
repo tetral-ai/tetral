@@ -25,12 +25,16 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "closeout.active_count"?: number;
   readonly "closeout.error_code"?: RuntimeCloseoutEvent["errorCode"];
   readonly "startup.cause_class"?: string;
+  readonly "startup.cause_category"?: RuntimeStartupCauseCategory;
   readonly "declaration.source.kind"?: string;
   readonly "declaration.source.id"?: string;
   readonly "declaration.digest"?: string;
   readonly "receipt.application_disposition"?: "current_custody" | "stale_custody";
   readonly "receipt.discard_reason"?: Exclude<RuntimeReceiptEvidenceOutcome, "applied">;
 };
+
+/** Closed, non-sensitive Runtime Pod startup stages. */
+export type RuntimeStartupCauseCategory = "configuration" | "listener" | "dependency_readiness" | "unknown";
 
 /** Safe identity-only evidence emitted after one Bridge declaration response is validated. */
 export interface RuntimeReceiptEvidence {
@@ -111,8 +115,10 @@ export function startupFailureLogRecord(input: {
   readonly kind: "config_error" | "startup_error";
   readonly message: string;
   readonly cause?: unknown;
+  readonly causeCategory?: RuntimeStartupCauseCategory;
 }): RuntimePodLogRecord {
   const safeMessage = input.kind === "config_error" ? input.message : "runtime pod startup failed";
+  const causeCategory = input.kind === "config_error" ? "configuration" : input.causeCategory ?? "unknown";
   return {
     event: "startup_failed",
     "event.kind": "startup_failed",
@@ -120,6 +126,7 @@ export function startupFailureLogRecord(input: {
     component: "agent-runtime",
     kind: input.kind,
     message: safeMessage,
+    "startup.cause_category": causeCategory,
     ...(input.kind === "startup_error" ? { "startup.cause_class": startupCauseClass(input.cause) } : {}),
     ...semanticErrorFields({ errorClass: input.kind, errorCode: input.kind, messageSafe: safeMessage }),
   };

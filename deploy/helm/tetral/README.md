@@ -228,6 +228,17 @@ endpoints are Secret-sourced, so their egress-intent annotations remain
 operator-advisory canonical literals; the chart cannot verify a value it
 cannot read.
 
+Sandbox provider completions and Queue lease wait times are logged at the
+default info level. Set `sandbox.debugLogging: true` only while diagnosing
+Sandbox queue waits or provider commands; logged summaries remain bounded and
+exclude command bodies, credentials, tokens, headers, and mount URLs. Queue
+notifications are wake hints: Bridge and Sandbox reconnect their PostgreSQL
+listeners and retain timer polling as fallback, while Queue `Lease` remains the
+execution authority.
+The Sandbox over-limit reconciler, expired output-capture sweep, and
+resource-prefix garbage collector are deliberate poll-only maintenance loops;
+latency-relevant business Queue runners receive the PostgreSQL wake hint.
+
 The following remain deliberately fixed for `0.1.0-alpha`:
 
 - `tetral-system` and `tetral-agent-runtime`, including every service FQDN,

@@ -2,6 +2,7 @@ package tetralqueue
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"time"
 
@@ -28,16 +29,20 @@ type Store interface {
 
 type Server struct {
 	queuev1.UnimplementedQueueServiceServer
-	store Store
-	now   func() time.Time
+	store  Store
+	now    func() time.Time
+	logger *slog.Logger
 }
 
-func NewServer(store Store) *Server {
-	return &Server{store: store, now: time.Now}
+func NewServer(store Store, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Server{store: store, now: time.Now, logger: logger}
 }
 
-func Register(server *grpc.Server, store Store) {
-	queuev1.RegisterQueueServiceServer(server, NewServer(store))
+func Register(server *grpc.Server, store Store, logger *slog.Logger) {
+	queuev1.RegisterQueueServiceServer(server, NewServer(store, logger))
 }
 
 func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*queuev1.LeaseResponse, error) {
@@ -48,22 +53,50 @@ func (s *Server) Lease(ctx context.Context, request *queuev1.LeaseRequest) (*que
 	if err != nil {
 		return nil, err
 	}
+	leaseStarted := s.nowUTC()
+	leaseNow := leaseStarted
 	jobs, err := s.store.Lease(ctx, queue.LeaseRequest{
 		WorkspaceID:   workspace.ID(request.GetWorkspaceId()),
 		Kinds:         request.GetKinds(),
 		LeaseOwner:    request.GetLeaseOwner(),
 		MaxJobs:       int(request.GetMaxJobs()),
 		LeaseDuration: leaseDuration,
-		Now:           s.nowUTC(),
+		Now:           leaseNow,
 	})
 	if err != nil {
 		return nil, mapQueueError(err)
 	}
+	leaseCompleted := s.nowUTC()
 	response := &queuev1.LeaseResponse{Jobs: make([]*queuev1.QueueJob, 0, len(jobs))}
 	for _, job := range jobs {
+		s.logLease(job, leaseNow, leaseStarted, leaseCompleted)
 		response.Jobs = append(response.Jobs, queueJobToProto(job))
 	}
 	return response, nil
+}
+
+func (s *Server) logLease(job *queue.Job, leaseNow, leaseStarted, leaseCompleted time.Time) {
+	if s == nil || s.logger == nil || job == nil {
+		return
+	}
+	duration := leaseCompleted.Sub(leaseStarted)
+	if duration < 0 {
+		duration = 0
+	}
+	readyWait := leaseNow.Sub(job.AvailableAt)
+	if readyWait < 0 {
+		readyWait = 0
+	}
+	s.logger.Info("queue.job.leased",
+		slog.String("operation", "queue.lease"),
+		slog.String("event.kind", "queue_job_leased"),
+		slog.String("workspace.id", job.WorkspaceID.String()),
+		slog.String("queue.job.id", job.ID),
+		slog.String("queue.job.kind", job.Kind),
+		slog.String("queue.partition.key", job.PartitionKey),
+		slog.Int64("duration.ms", duration.Milliseconds()),
+		slog.Int64("queue.ready_wait.ms", readyWait.Milliseconds()),
+	)
 }
 
 func (s *Server) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {

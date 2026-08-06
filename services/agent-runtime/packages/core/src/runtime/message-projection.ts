@@ -239,7 +239,7 @@ function gatewayToolState(status: Exclude<Extract<RuntimePart, { readonly type: 
 
 function toolInputJson(part: Extract<RuntimePart, { readonly type: "tool" }>): string {
   if ("input" in part.state && part.state.input !== undefined) {
-    return JSON.stringify(part.state.input.value ?? part.state.input.preview);
+    return JSON.stringify(part.state.input.value);
   }
   return "{}";
 }

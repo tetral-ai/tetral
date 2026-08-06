@@ -459,7 +459,7 @@ func TestEnvironmentReadyFanoutInvalidPayloadSettlesWaitingSandboxActivation(t *
 		t.Fatalf("poison environment fanout payload: %v", err)
 	}
 	runner := &EnvironmentReadyFanoutJobRunner{
-		Queue: tetralqueue.NewServer(queueStore),
+		Queue: tetralqueue.NewServer(queueStore, nil),
 		Store: NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime)),
 		Config: EnvironmentRunnerConfig{
 			WorkspaceID: "ws_execution_store", LeaseOwner: "environment-fanout-test", MaxJobs: 1,

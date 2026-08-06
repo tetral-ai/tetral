@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -420,6 +421,8 @@ func TestDaytonaFileResourceMaterializerCommandFailureCleansMaterializedSkills(t
 		ExpiresAt:  time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
 	}}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
+	var logs bytes.Buffer
+	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	setup := testResourceProjectionSetup()
 	setup.Resources.Skills = []sandbox.SkillMount{{
 		SkillID:        "skill_finance",
@@ -443,6 +446,47 @@ func TestDaytonaFileResourceMaterializerCommandFailureCleansMaterializedSkills(t
 		if !strings.Contains(cleanup, want) {
 			t.Fatalf("skill cleanup command missing %q:\n%s", want, cleanup)
 		}
+	}
+	if got := strings.Count(logs.String(), `"operation":"sandbox.materialization.skills_cleanup"`); got != 1 {
+		t.Fatalf("skill cleanup completion logs = %d; want exactly one: %s", got, logs.String())
+	}
+}
+
+func TestDaytonaFileResourceMaterializerSkillUploadFailureLogsCleanup(t *testing.T) {
+	ctx := context.Background()
+	blobStore := blob.NewFakeBlobStore()
+	skillZip := buildSkillPackageZip(t, "finance")
+	const skillBlobKey = "skills/ws_test/skill_finance/versions/1/package.zip"
+	if err := blobStore.Put(ctx, skillBlobKey, bytes.NewReader(skillZip), int64(len(skillZip))); err != nil {
+		t.Fatalf("put skill package: %v", err)
+	}
+	runner := &recordingDaytonaCommandRunner{stageErr: errors.New("skill upload failed")}
+	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, &recordingResourceCredentialMinter{}, runner)
+	var logs bytes.Buffer
+	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	setup := testResourceProjectionSetup()
+	setup.Resources.Files = nil
+	setup.Resources.MemoryStores = nil
+	setup.Resources.GitHubRepositories = nil
+	setup.Resources.Skills = []sandbox.SkillMount{{
+		SkillID:        "skill_finance",
+		SkillVersionID: "skill_version_finance",
+		Version:        "1",
+		Directory:      "finance",
+		BlobKey:        skillBlobKey,
+		SizeBytes:      int64(len(skillZip)),
+		SHA256:         sha256Hex(skillZip),
+	}}
+
+	_, err := preparer.MaterializeFileResources(ctx, setup, sandbox.ProviderHandle{SandboxID: "provider_sandbox"})
+	if err == nil || !strings.Contains(err.Error(), "skill upload failed") {
+		t.Fatalf("MaterializeFileResources err = %v; want skill upload failure", err)
+	}
+	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0].command, "rm -rf -- '/skills/finance'") {
+		t.Fatalf("cleanup calls = %+v; want one skill cleanup", runner.calls)
+	}
+	if got := strings.Count(logs.String(), `"operation":"sandbox.materialization.skills_cleanup"`); got != 1 {
+		t.Fatalf("skill cleanup completion logs = %d; want exactly one: %s", got, logs.String())
 	}
 }
 
@@ -899,6 +943,8 @@ func TestDaytonaFileResourceMaterializerCleansDeletedFileBeforeActiveProjection(
 	events := []string{}
 	runner := &recordingDaytonaCommandRunner{eventsRef: &events}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
+	var logs bytes.Buffer
+	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	setup := testResourceProjectionSetup()
 	setup.Resources.DeletedFiles = []sandbox.FileMount{{
 		ResourceID:    "sesrsc_deleted",
@@ -1052,6 +1098,8 @@ func TestDaytonaFileResourceMaterializerCleansDeletedLastFileAndUnmountsStaging(
 	minter := &recordingResourceCredentialMinter{result: resourceprojection.CredentialMintResult{ExpiresAt: expiresAt}}
 	runner := &recordingDaytonaCommandRunner{eventsRef: &events}
 	preparer := newTestDaytonaFileResourceMaterializer(t, blobStore, minter, runner)
+	var logs bytes.Buffer
+	preparer.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	oldExpiresAt := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
 	setup := sandbox.SandboxSetup{
 		WorkspaceID: workspace.ID("ws_test"),
@@ -1093,6 +1141,17 @@ func TestDaytonaFileResourceMaterializerCleansDeletedLastFileAndUnmountsStaging(
 	}
 	if want := []string{"file-remove", "blob-delete", "staging-unmount"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("last-file cleanup events = %v; want %v", events, want)
+	}
+	logOutput := logs.String()
+	for _, operation := range []string{"sandbox.materialization.deleted_file_cleanup", "sandbox.materialization.mount_cleanup"} {
+		if got := strings.Count(logOutput, `"operation":"`+operation+`"`); got != 1 {
+			t.Fatalf("%s completion logs = %d; want exactly one: %s", operation, got, logOutput)
+		}
+	}
+	for _, identity := range []string{`"workspace.id":"ws_test"`, `"session.id":"sesn_test"`, `"provider.resource.id":"provider_sandbox"`} {
+		if !strings.Contains(logOutput, identity) {
+			t.Fatalf("cleanup completion logs missing %s: %s", identity, logOutput)
+		}
 	}
 }
 

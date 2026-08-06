@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { Metadata, status } from "@grpc/grpc-js";
 import {
   ProviderRequestKind,
@@ -13,10 +12,34 @@ import type {
   ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
-import { MaxGatewayRequestGrpcMessageBytes } from "../../src/bounds.js";
+import { MaxGatewayRequestGrpcMessageBytes, MaxGatewayStreamEventGrpcMessageBytes } from "../../src/bounds.js";
 import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
 
 describe("Runtime Pod Gateway client", () => {
+  test("logs one bounded identity record for a failure before the first event", async () => {
+    const records: unknown[] = [];
+    const request = providerRequest();
+    const error = await collectGatewayError(new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: failingGatewayClient(status.INVALID_ARGUMENT, "secret raw rejection"),
+      metadataFactory: async () => new Metadata(),
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+    }), request);
+
+    expect(error).toMatchObject({ code: "gateway_protocol_error", fatal: true });
+    expect(records).toEqual([expect.objectContaining({
+      event: "provider_stream_failed_before_first_event",
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "thread.id": request.sessionThreadId,
+      "request.id": request.requestId,
+      "provider.request.id": request.modelRequestId,
+      "error.code": "gateway_protocol_error",
+    })]);
+    expect(JSON.stringify(records)).not.toContain("secret raw rejection");
+  });
+
   test("classifies the closed set of remote gRPC statuses", async () => {
     for (const scenario of [
       { code: status.INVALID_ARGUMENT, wantCode: "gateway_protocol_error", retryable: false, fatal: true },
@@ -47,9 +70,37 @@ describe("Runtime Pod Gateway client", () => {
     }
   });
 
+  test("preserves an already classified abort before the first event", async () => {
+    const records: unknown[] = [];
+    const abortController = new AbortController();
+    abortController.abort();
+    const client = new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: recordingGatewayClient(() => undefined),
+      metadataFactory: async () => new Metadata(),
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+    });
+
+    const error = await Effect.runPromise(
+      Stream.runCollect(client.streamProviderRequest(providerRequest(), {
+        abortSignal: abortController.signal,
+      })).pipe(Effect.flip),
+    );
+
+    expect(error).toMatchObject({
+      type: "gateway-client",
+      code: "gateway_cancelled",
+      retryable: false,
+      fatal: false,
+    });
+    expect(records).toEqual([]);
+  });
+
   test("rejects an oversized ProviderRequest before metadata or transport work", async () => {
     let metadataCalls = 0;
     let transportCalls = 0;
+    const records: unknown[] = [];
     const request = providerRequest();
     request.messages[0]!.parts = [{
       id: "part_oversized",
@@ -65,6 +116,7 @@ describe("Runtime Pod Gateway client", () => {
         metadataCalls++;
         return new Metadata();
       },
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
     });
 
     const error = await collectGatewayError(client, request);
@@ -76,67 +128,64 @@ describe("Runtime Pod Gateway client", () => {
     });
     expect(metadataCalls).toBe(0);
     expect(transportCalls).toBe(0);
+    expect(records).toEqual([expect.objectContaining({
+      event: "provider_stream_failed_before_first_event",
+      "request.id": request.requestId,
+      "provider.request.id": request.modelRequestId,
+      "error.code": "gateway_protocol_error",
+    })]);
   });
 
-  test("treats grpc-js framed receive-limit exhaustion as a local protocol failure", async () => {
-    expectGrpcJSVersion("1.14.4");
-    const error = await collectGatewayError(new RuntimePodGatewayClient({
-      address: "gateway.test:9090",
-      tokenPath: "/var/run/token",
-      client: failingGatewayClient(
-        status.RESOURCE_EXHAUSTED,
-        "Received message larger than max (524289 vs 524288)",
-      ),
-      metadataFactory: async () => new Metadata(),
-    }), providerRequest());
-
-    expect(error).toMatchObject({
-      code: "gateway_protocol_error",
-      retryable: false,
-      fatal: true,
-      statusCode: status.RESOURCE_EXHAUSTED,
-    });
-  });
-
-  test("treats grpc-js decompressed receive-limit exhaustion as a local protocol failure", async () => {
-    expectGrpcJSVersion("1.14.4");
-    const error = await collectGatewayError(new RuntimePodGatewayClient({
-      address: "gateway.test:9090",
-      tokenPath: "/var/run/token",
-      client: failingGatewayClient(
-        status.RESOURCE_EXHAUSTED,
-        "Received message that decompresses to a size larger than 524288",
-      ),
-      metadataFactory: async () => new Metadata(),
-    }), providerRequest());
-
-    expect(error).toMatchObject({
-      code: "gateway_protocol_error",
-      retryable: false,
-      fatal: true,
-      statusCode: status.RESOURCE_EXHAUSTED,
-    });
-  });
-
-  test("keeps peer receive-limit details in the remote retryable arm", async () => {
-    for (const details of [
-      "Received message larger than max (33554433 vs 33554432)",
-      "Received message that decompresses to a size larger than 33554432",
-    ]) {
+  test("classifies local-send and Gateway-receive size failures precisely", async () => {
+    const cases = [
+      {
+        details: "Attempted to send message with a size larger than 4194304",
+        message: "Gateway request exceeded the local transport fuse.",
+      },
+      {
+        details: "Received message larger than max (33554433 vs 33554432)",
+        message: "Gateway rejected the request above its transport fuse.",
+      },
+      {
+        details: "Received message that decompresses to a size larger than 33554432",
+        message: "Gateway rejected the request above its transport fuse.",
+      },
+    ];
+    for (const testCase of cases) {
       const error = await collectGatewayError(new RuntimePodGatewayClient({
         address: "gateway.test:9090",
         tokenPath: "/var/run/token",
-        client: failingGatewayClient(status.RESOURCE_EXHAUSTED, details),
+        client: failingGatewayClient(status.RESOURCE_EXHAUSTED, testCase.details),
         metadataFactory: async () => new Metadata(),
       }), providerRequest());
 
       expect(error).toMatchObject({
-        code: "gateway_unavailable",
-        retryable: true,
-        fatal: false,
+        code: "gateway_protocol_error",
+        message: testCase.message,
+        retryable: false,
+        fatal: true,
         statusCode: status.RESOURCE_EXHAUSTED,
       });
     }
+  });
+
+  test("classifies the local decompressed receive fuse as a fatal protocol error", async () => {
+    const error = await collectGatewayError(new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: failingGatewayClient(
+        status.RESOURCE_EXHAUSTED,
+        `Received message that decompresses to a size larger than ${MaxGatewayStreamEventGrpcMessageBytes}`,
+      ),
+      metadataFactory: async () => new Metadata(),
+    }), providerRequest());
+
+    expect(error).toMatchObject({
+      code: "gateway_protocol_error",
+      retryable: false,
+      fatal: true,
+      statusCode: status.RESOURCE_EXHAUSTED,
+    });
   });
 });
 
@@ -150,13 +199,6 @@ function failingGatewayClient(code: number, details = "gateway request failed"):
   return recordingGatewayClient(() => {
     throw Object.assign(new Error(details), { code, details });
   });
-}
-
-function expectGrpcJSVersion(want: string): void {
-  const manifest = JSON.parse(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")) as {
-    readonly dependencies?: Readonly<Record<string, string>>;
-  };
-  expect(manifest.dependencies?.["@grpc/grpc-js"]).toBe(want);
 }
 
 function recordingGatewayClient(onIterate: () => void): ProviderGatewayServiceClient {

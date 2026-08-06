@@ -88,18 +88,18 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 
 	authConfig, err := grpcauth.LoadConfig(env)
 	if err != nil {
-		return logGRPCStartupFailure(params.ServiceName, logger, err)
+		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseConfiguration, err)
 	}
 	var authenticator Authenticator
 	if params.NewAuthenticator != nil {
 		authenticator, err = params.NewAuthenticator(authConfig)
 		if err != nil {
-			return logGRPCStartupFailure(params.ServiceName, logger, err)
+			return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseDependencyReadiness, err)
 		}
 	} else {
 		client, err := newTokenReviewClient()
 		if err != nil {
-			return logGRPCStartupFailure(params.ServiceName, logger, err)
+			return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseDependencyReadiness, err)
 		}
 		authenticator = grpcauth.NewTokenReviewAuthenticator(client, authConfig)
 	}
@@ -107,12 +107,12 @@ func RunGRPCWorkload(ctx context.Context, env EnvReader, params GRPCWorkloadPara
 	grpcAddress := valueOrDefault(env.Getenv(params.GRPCListenEnvKey), params.GRPCListenDefault)
 	grpcListener, err := listen("tcp", grpcAddress)
 	if err != nil {
-		return logGRPCStartupFailure(params.ServiceName, logger, err)
+		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseListener, err)
 	}
 	defer func() { _ = grpcListener.Close() }()
 	httpListener, err := listen("tcp", httpAddress)
 	if err != nil {
-		return logGRPCStartupFailure(params.ServiceName, logger, err)
+		return logGRPCStartupFailure(params.ServiceName, logger, workload.StartupFailureCauseListener, err)
 	}
 	defer func() { _ = httpListener.Close() }()
 
@@ -218,9 +218,9 @@ func valueOrDefault(value string, fallback string) string {
 // error.class/error.code=startup_error with no message field, because their text
 // may carry DSNs, tokens, or payloads. The shared workload helper guarantees this
 // is the same rule every workload applies.
-func logGRPCStartupFailure(serviceName string, logger *slog.Logger, err error) error {
+func logGRPCStartupFailure(serviceName string, logger *slog.Logger, cause workload.StartupFailureCause, err error) error {
 	if logger == nil {
 		logger = workload.NewLogger(os.Stderr, serviceName, "", "")
 	}
-	return workload.LogStartupFailure(logger, serviceName, err)
+	return workload.LogStartupFailure(logger, serviceName, workload.WithStartupFailureCause(cause, err))
 }

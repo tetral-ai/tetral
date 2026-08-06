@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import { credentials, status } from "@grpc/grpc-js";
 import type { CallOptions, ClientUnaryCall, Metadata, ServiceError } from "@grpc/grpc-js";
-import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions } from "./bounds.js";
+import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions, webGrpcChannelOptions } from "./bounds.js";
 import {
   AgentRuntimeBridgeServiceClient,
   BridgeWriteStatus,
@@ -75,7 +75,7 @@ import {
   SessionEventWriterRetryPolicy,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeBoundedText, RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeSandboxExecutionAcceptanceResult,
   RuntimeSandboxExecutionRequest,
@@ -89,6 +89,7 @@ import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
+import { MaxIdBytes, MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import { validateChildLifecycleDeclarationResponse } from "./bridge-client.js";
 
 // Durable tool-route transport retries rejoin one accepted identity. This
@@ -109,6 +110,19 @@ const DURABLE_TOOL_REJOIN_DELAY_MS = 300;
 //   types.go (maxOperations=8, maxSearchDomains=4 — the caps these mirror).
 const WEB_SEARCH_REQUESTS_MAX = 32;
 const WEB_FETCH_REQUESTS_MAX = 8;
+// UPDATE-WITH: services/web-connector/types.go; services/gateway/packages/
+// provider-gateway/src/bounds.ts.
+const WEB_OPERATIONS_MAX = 8;
+const WEB_SEARCH_DOMAINS_MAX = 4;
+const WEB_DOMAIN_MAX_BYTES = 253;
+const TOOL_RESULT_BOUND_FAILURE = "Tool result exceeds the 512 KiB model-visible output limit.";
+
+class ToolResultContractError extends Error {
+  constructor() {
+    super(TOOL_RESULT_BOUND_FAILURE);
+    this.name = "ToolResultContractError";
+  }
+}
 
 /**
  * Supplies the service endpoints, current accepted-input scope, and injectable
@@ -202,7 +216,7 @@ export class RuntimePodToolRunner {
     this.bridgeClient =
       options.bridgeClient ?? new AgentRuntimeBridgeServiceClient(options.bridgeAddress, credentials.createInsecure(), bridgeAttachmentGrpcChannelOptions());
     this.webClient =
-      options.webClient ?? new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), grpcClientChannelOptions());
+      options.webClient ?? new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), webGrpcChannelOptions());
     this.mcpConnectorClient =
       options.mcpConnectorClient ?? new McpConnectorServiceClient(options.mcpConnectorAddress, credentials.createInsecure(), grpcClientChannelOptions());
     this.metadataFactory = options.metadataFactory ?? buildOutboundBearerMetadata;
@@ -297,6 +311,9 @@ export class RuntimePodToolRunner {
       } catch (error) {
         if (isToolRouteAborted(error) || request.abortSignal.aborted) {
           return toolCancelled(request, "Sandbox tool execution was cancelled.");
+        }
+        if (error instanceof ToolResultContractError) {
+          return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
         }
         if (isDurableBridgeRejection(error)) {
           return { type: "stale_custody" };
@@ -457,9 +474,9 @@ export class RuntimePodToolRunner {
   }
 
   private async runWebTool(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
-    const input = webInputFromRuntime(request.input);
-    if (input === undefined) {
-      return toolFailure(request, "web requires at least one valid search, open, or find operation.", false);
+    const validatedInput = webInputFromRuntime(request.input);
+    if (!validatedInput.ok) {
+      return toolFailure(request, validatedInput.reason, false);
     }
     try {
       const response = await runWeb(this.webClient, {
@@ -470,14 +487,14 @@ export class RuntimePodToolRunner {
         bindingId: request.bindingId,
         bindingGeneration: request.bindingGeneration,
         runtimeBindingToken: request.runtimeBindingToken,
-        input,
+        input: validatedInput.input,
       }, await this.metadata(), request.abortSignal);
       const serverToolUse = webServerToolUse(response);
       if (serverToolUse === undefined) {
         return toolFailure(request, "Gateway web execution returned malformed usage.", true);
       }
       if (response.status === RunWebStatus.RUN_WEB_STATUS_COMPLETED) {
-        return { type: "completed", output: capturedToolText(webResponseText(response)), serverToolUse };
+        return { type: "completed", output: capturedToolText(response.resultText), serverToolUse };
       }
       return toolFailure(
         request,
@@ -491,6 +508,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Gateway web execution was cancelled.");
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, "Gateway web execution is unavailable.", true);
     }
@@ -551,6 +571,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "MCP tool execution was cancelled.");
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, "MCP connector route is unavailable.", true);
     }
@@ -670,6 +693,9 @@ export class RuntimePodToolRunner {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent spawn was cancelled.");
       }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+      }
       if (isGrpcStatus(error, status.ALREADY_EXISTS)) {
         return toolFailure(request, `Sub-agent task_name ${taskName} already exists under this parent thread.`, false);
       }
@@ -750,6 +776,9 @@ export class RuntimePodToolRunner {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent send was cancelled.");
       }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+      }
       return toolFailure(request, "Sub-agent send route is unavailable.", true);
     }
   }
@@ -796,6 +825,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, "Sub-agent wait was cancelled.");
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, "Sub-agent wait route is unavailable.", true);
     }
@@ -993,7 +1025,10 @@ export class RuntimePodToolRunner {
           agent_type: child.agentType,
         })),
       }, null, 2));
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
+      }
       return toolFailure(request, "Sub-agent list route is unavailable.", true);
     }
   }
@@ -1020,6 +1055,9 @@ export class RuntimePodToolRunner {
     } catch (error) {
       if (isToolRouteAborted(error) || request.abortSignal.aborted) {
         return toolCancelled(request, `${toolName} was cancelled.`);
+      }
+      if (error instanceof ToolResultContractError) {
+        return toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false);
       }
       return toolFailure(request, `${toolName} route is unavailable.`, true);
     }
@@ -1240,7 +1278,11 @@ function completedText(text: string): RuntimeToolExecutionResult {
 }
 
 function capturedToolText(text: string) {
-  return RuntimeBoundedTextSchema.parse({ text, truncated: false });
+  const parsed = RuntimeBoundedTextSchema.safeParse({ text, truncated: false });
+  if (!parsed.success) {
+    throw new ToolResultContractError();
+  }
+  return parsed.data;
 }
 
 function stableId(prefix: string, seed: string): string {
@@ -1816,9 +1858,24 @@ function resultJsonToExecutionResult(
   }
   if (status === "success" || status === "completed" || status === "running" || status === "accepted") {
     const backgroundTask = status === "running" ? backgroundTaskFromResult(visible) : undefined;
+    let output: RuntimeBoundedText;
+    try {
+      output = RuntimeBoundedTextSchema.parse({
+        ...capturedToolText(formatToolResult(request, visible)),
+        truncated: resultIsTruncated(parsed),
+      });
+    } catch (error) {
+      if (error instanceof ToolResultContractError) {
+        return {
+          ...toolFailure(request, TOOL_RESULT_BOUND_FAILURE, false),
+          ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
+        };
+      }
+      throw error;
+    }
     return {
       type: "completed",
-      output: { text: formatToolResult(request, visible), truncated: resultIsTruncated(parsed) },
+      output,
       ...(backgroundTask !== undefined ? { backgroundTask } : {}),
       ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
     };
@@ -2100,27 +2157,6 @@ function forbiddenResultField(key: string): boolean {
     normalized === "runtimebindingtoken";
 }
 
-function webResponseText(response: RunWebResponse): string {
-  const refs = response.refs.map((ref) => ({
-    ref_id: ref.refId,
-    url: ref.url,
-    ...(ref.title !== undefined ? { title: ref.title } : {}),
-    ...(ref.lineStart !== undefined ? { line_start: ref.lineStart } : {}),
-    ...(ref.lineEnd !== undefined ? { line_end: ref.lineEnd } : {}),
-    ...(ref.totalLines !== undefined ? { total_lines: ref.totalLines } : {}),
-  }));
-  if (refs.length === 0 && response.nextLineno === undefined && !response.windowTruncated && !response.sourceIncomplete) {
-    return response.resultText;
-  }
-  return JSON.stringify({
-    text: response.resultText,
-    refs,
-    ...(response.nextLineno !== undefined ? { next_lineno: response.nextLineno } : {}),
-    window_truncated: response.windowTruncated,
-    source_incomplete: response.sourceIncomplete,
-  }, null, 2);
-}
-
 function webServerToolUse(response: RunWebResponse): { readonly webSearchRequests: number; readonly webFetchRequests: number } | undefined {
   const usage = response.usage;
   if (usage === undefined ||
@@ -2319,56 +2355,110 @@ function recordField(input: RuntimeJsonValue, field: string): RuntimeJsonValue |
   return isRecord(input) ? input[field] : undefined;
 }
 
-function webInputFromRuntime(input: RuntimeJsonValue): WebToolInput | undefined {
+type WebInputValidation =
+  | { readonly ok: true; readonly input: WebToolInput }
+  | { readonly ok: false; readonly reason: string };
+
+function webInputFromRuntime(input: RuntimeJsonValue): WebInputValidation {
   if (!isRecord(input)) {
-    return undefined;
+    return { ok: false, reason: "web input must be an object." };
   }
-  const searchQuery = arrayField(input, "search_query")
-    .map((item) => isRecord(item) && typeof item.q === "string"
-      ? { q: item.q, domains: stringArrayField(item, "domains") }
-      : undefined)
-    .filter((item): item is { readonly q: string; readonly domains: string[] } => item !== undefined);
-  const open = arrayField(input, "open")
-    .map((item) => {
-      if (!isRecord(item)) {
-        return undefined;
-      }
-      const url = stringField(item, "url");
-      const refId = stringField(item, "ref_id");
-      const lineno = numberField(item, "lineno");
-      if ((url === undefined || url.length === 0) && (refId === undefined || refId.length === 0)) {
-        return undefined;
-      }
-      return {
-        ...(url !== undefined ? { url } : {}),
-        ...(refId !== undefined ? { refId } : {}),
-        ...(lineno !== undefined ? { lineno } : {}),
-      };
-    })
-    .filter((item): item is { readonly url?: string; readonly refId?: string; readonly lineno?: number } => item !== undefined);
-  const find = arrayField(input, "find")
-    .map((item) => {
-      if (!isRecord(item)) {
-        return undefined;
-      }
-      const refId = stringField(item, "ref_id");
-      const pattern = stringField(item, "pattern");
-      return refId !== undefined && pattern !== undefined ? { refId, pattern } : undefined;
-    })
-    .filter((item): item is { readonly refId: string; readonly pattern: string } => item !== undefined);
-  if (searchQuery.length + open.length + find.length === 0) {
-    return undefined;
+  const rawSearchQuery = optionalArrayField(input, "search_query");
+  if (rawSearchQuery === undefined) {
+    return { ok: false, reason: "web search_query must be an array." };
   }
-  return { searchQuery, open, find };
+  const rawOpen = optionalArrayField(input, "open");
+  if (rawOpen === undefined) {
+    return { ok: false, reason: "web open must be an array." };
+  }
+  const rawFind = optionalArrayField(input, "find");
+  if (rawFind === undefined) {
+    return { ok: false, reason: "web find must be an array." };
+  }
+  const operationCount = rawSearchQuery.length + rawOpen.length + rawFind.length;
+  if (operationCount === 0) {
+    return { ok: false, reason: "web requires at least one search, open, or find operation." };
+  }
+  if (operationCount > WEB_OPERATIONS_MAX) {
+    return { ok: false, reason: `web accepts at most ${WEB_OPERATIONS_MAX} operations.` };
+  }
+
+  const searchQuery: Array<{ readonly q: string; readonly domains: string[] }> = [];
+  for (const item of rawSearchQuery) {
+    if (!isRecord(item)) {
+      return { ok: false, reason: "web search_query contains an invalid operation." };
+    }
+    const q = stringField(item, "q");
+    const rawDomains = optionalArrayField(item, "domains");
+    if (
+      rawDomains === undefined ||
+      q === undefined ||
+      invalidUtf8Bytes(q, MaxTextBytes) ||
+      rawDomains.length > WEB_SEARCH_DOMAINS_MAX ||
+      rawDomains.some((domain) => typeof domain !== "string" || invalidUtf8Bytes(domain, WEB_DOMAIN_MAX_BYTES))
+    ) {
+      return { ok: false, reason: "web search_query contains an invalid operation." };
+    }
+    const domains = rawDomains.filter((domain): domain is string => typeof domain === "string");
+    searchQuery.push({ q, domains });
+  }
+
+  const open: Array<{ readonly url?: string; readonly refId?: string; readonly lineno?: number }> = [];
+  for (const item of rawOpen) {
+    if (!isRecord(item)) {
+      return { ok: false, reason: "web open contains an invalid operation." };
+    }
+    const url = stringField(item, "url");
+    const refId = stringField(item, "ref_id");
+    const lineno = numberField(item, "lineno");
+    const hasUrl = url !== undefined && url !== "";
+    const hasRef = refId !== undefined && refId !== "";
+    if (
+      hasUrl === hasRef ||
+      (url !== undefined && invalidUtf8Bytes(url, MaxTextBytes)) ||
+      (refId !== undefined && invalidUtf8Bytes(refId, MaxIdBytes)) ||
+      (lineno !== undefined && lineno < 1)
+    ) {
+      return { ok: false, reason: "web open contains an invalid operation." };
+    }
+    open.push({
+      ...(url !== undefined ? { url } : {}),
+      ...(refId !== undefined ? { refId } : {}),
+      ...(lineno !== undefined ? { lineno } : {}),
+    });
+  }
+
+  const find: Array<{ readonly refId: string; readonly pattern: string }> = [];
+  for (const item of rawFind) {
+    if (!isRecord(item)) {
+      return { ok: false, reason: "web find contains an invalid operation." };
+    }
+    const refId = stringField(item, "ref_id");
+    const pattern = stringField(item, "pattern");
+    if (
+      refId === undefined ||
+      pattern === undefined ||
+      invalidUtf8Bytes(refId, MaxIdBytes) ||
+      encodedBytes(pattern) > MaxTextBytes
+    ) {
+      return { ok: false, reason: "web find contains an invalid operation." };
+    }
+    find.push({ refId, pattern });
+  }
+  return { ok: true, input: { searchQuery, open, find } };
 }
 
-function arrayField(input: Record<string, RuntimeJsonValue>, field: string): readonly RuntimeJsonValue[] {
+function invalidUtf8Bytes(value: string, maxBytes: number): boolean {
+  return value.length === 0 || encodedBytes(value) > maxBytes;
+}
+
+function encodedBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function optionalArrayField(input: Record<string, RuntimeJsonValue>, field: string): readonly RuntimeJsonValue[] | undefined {
   const value = input[field];
-  return Array.isArray(value) ? value : [];
-}
-
-function stringArrayField(input: Record<string, RuntimeJsonValue>, field: string): string[] {
-  return arrayField(input, field).filter((item): item is string => typeof item === "string");
+  return value === undefined || Array.isArray(value) ? (value ?? []) : undefined;
 }
 
 function numberField(input: Record<string, RuntimeJsonValue>, field: string): number | undefined {

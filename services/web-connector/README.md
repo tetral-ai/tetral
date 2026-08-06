@@ -35,8 +35,12 @@ Constants that govern behavior are fixed source values, not free knobs, and are
 Web-stage contract values. The window / snapshot / wrap / item / hit / domain /
 find bounds live in `types.go`: window bound 2000 lines / 50 KiB (whichever
 binds first), snapshot cap 1 MiB, stored-line wrap 4 KiB, find match cap 250,
-find match-line render cap 250 chars, find pattern cap 1024 bytes, max 8 input
-items per call, 10 rendered hits per query, 4 domains max per query. The fetch
+find match-line render cap 250 chars, find pattern cap 64 KiB, max 8 input
+items per call, 10 rendered hits per query, 4 domains max per query. The gRPC
+request carrier is 1 MiB and the independently bounded response carrier is
+512 KiB. Search results do not repeat the request query, and find results
+report the ref, match count, line count, and matched lines without repeating
+the request pattern. The fetch
 timeout 30 s, fetch token budget 262144, and key cooldowns 60 s (rate-limited)
 and 3600 s (quota-exhausted) live in `backend.go`. The 7-day cache TTL is the
 bucket lifecycle rule, provisioned outside this repository.

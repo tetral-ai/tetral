@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +94,44 @@ func TestRunWebSearchAndOpenSumBackendUsage(t *testing.T) {
 	}
 	if len(response.GetRefs()) != 2 {
 		t.Fatalf("refs = %d", len(response.GetRefs()))
+	}
+}
+
+func TestRunWebBoundsEightEscapeDenseOpenWindowsBeforeRuntimeEncoding(t *testing.T) {
+	t.Parallel()
+	controlDense := strings.Repeat(string([]byte{0x01}), maxSnapshotBytes)
+	pages := make([]Page, maxOperations)
+	outcomes := make([]BackendOutcome, maxOperations)
+	opens := make([]*providergatewayv1.WebOpenRequest, maxOperations)
+	for index := range maxOperations {
+		url := fmt.Sprintf("https://example.com/page-%d", index)
+		pages[index] = Page{URL: url, Content: controlDense, TargetHTTPStatus: 200}
+		outcomes[index] = BackendOutcome{Kind: BackendSuccess, Requests: 1, TargetHTTPStatus: int32ptr(200)}
+		opens[index] = &providergatewayv1.WebOpenRequest{Url: strptr(url)}
+	}
+	service, key, now := testService(blob.NewFakeBlobStore(), &sequenceFetchBackend{pages: pages, outcomes: outcomes})
+	request := testRequest(&providergatewayv1.WebToolInput{Open: opens}, "event-eight-escape-dense-windows", key, now)
+
+	response, err := service.RunWeb(testContext(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetStatus() != providergatewayv1.RunWebStatus_RUN_WEB_STATUS_COMPLETED {
+		t.Fatalf("status = %s, text = %q", response.GetStatus(), response.GetResultText())
+	}
+	if len([]byte(response.GetResultText())) > maxVisibleResultBytes {
+		t.Fatalf("visible result bytes = %d; want <= %d", len([]byte(response.GetResultText())), maxVisibleResultBytes)
+	}
+	canonical, err := json.Marshal(map[string]string{"text": response.GetResultText()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canonical) > maxModelVisibleToolOutputJSONBytes {
+		t.Fatalf("canonical tool output bytes = %d; want <= %d", len(canonical), maxModelVisibleToolOutputJSONBytes)
+	}
+	if !response.GetWindowTruncated() || response.NextLineno != nil || strings.Count(response.GetResultText(), "[truncated — continue with open(") != maxOperations {
+		t.Fatalf("truncation markers/window flags = %d/%t/%v; want %d/true/nil",
+			strings.Count(response.GetResultText(), "[truncated — continue with open("), response.GetWindowTruncated(), response.NextLineno, maxOperations)
 	}
 }
 

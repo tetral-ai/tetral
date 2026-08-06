@@ -21,6 +21,9 @@ func TestTransportFusesPinScopedMessageCapacity(t *testing.T) {
 	if MaxAttachmentGRPCMessageBytes != 32*1024*1024 {
 		t.Fatalf("Bridge gRPC fuse = %d; want 32 MiB", MaxAttachmentGRPCMessageBytes)
 	}
+	if MaxBridgeAPIGRPCMessageBytes != 64*1024*1024 {
+		t.Fatalf("Bridge API gRPC fuse = %d; want 64 MiB", MaxBridgeAPIGRPCMessageBytes)
+	}
 	if MaxRuntimeCommandGRPCMessageBytes <= 2*1024*1024 {
 		t.Fatalf("runtime command gRPC fuse = %d; must leave protobuf headroom above the 2 MiB payload fuse", MaxRuntimeCommandGRPCMessageBytes)
 	}

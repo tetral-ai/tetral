@@ -11,6 +11,7 @@ import {
   ApplyPatchInstructionsText,
   PlatformBaseSystemPrompt,
   assembleProviderCallRequest,
+  requestErrorKindFromFailure,
   renderSkillGuidanceSegment,
 } from "../../../src/thread-loop/provider-request.js";
 import type {
@@ -29,7 +30,18 @@ import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, T
 import type { TestContextLoader } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
-test("reports declaration, event-write, and provider stream metrics through injected sink", async () => {
+  test("classifies bounded Runtime output as a semantic request error", () => {
+    expect(requestErrorKindFromFailure({
+      type: "runtime",
+      code: "runtime_invalid_sequence",
+      message: "Runtime provider output exceeds its semantic size bound.",
+      retryable: false,
+      fatal: true,
+      reason: "bounded",
+    })).toBe("runtime_semantic_error");
+  });
+
+  test("reports declaration, event-write, and provider stream metrics through injected sink", async () => {
     const metrics = new RecordingRuntimeMetrics();
     const loader = new RecordingContextLoader([], {
         type: "messages",
@@ -852,18 +864,21 @@ test("deterministic Gateway rejection closes on the first attempt without resche
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
         writer,
-        llmService: queuedLLMService([[
-                {
-                    type: "provider-error",
+        llmService: {
+            stream(request) {
+                requests.push(request);
+                return Stream.fail({
+                    type: "llm-service" as const,
                     error: {
-                        type: "runtime",
-                        code: "gateway_protocol_error",
+                        type: "runtime" as const,
+                        code: "gateway_protocol_error" as const,
                         message: "Gateway rejected the provider request.",
                         retryable: false,
                         fatal: true,
                     },
-                },
-            ]], requests),
+                });
+            },
+        },
         runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
     }))));
     expect(result).toMatchObject({
@@ -877,6 +892,71 @@ test("deterministic Gateway rejection closes on the first attempt without resche
         errorKind: "gateway_protocol_error",
     });
     expect(requestEnds[0]?.reschedule).toBeUndefined();
+});
+test("pre-event Gateway unavailability uses the existing reschedule budget", async () => {
+    const session = new ThreadRuntime("sesn_gateway_pre_event_unavailable");
+    const loader = new RecordingContextLoader([], {
+        type: "messages",
+        messages: [userMessage("user-gateway-unavailable", 0, "send this request")],
+    });
+    const requests: LLMRequest[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => {
+            requestEnds.push(envelope);
+            return await baseWriter.writeRequestEnd(envelope);
+        },
+    };
+    const success = llmService([
+        { type: "text-start", id: "text_after_retry" },
+        { type: "text-delta", id: "text_after_retry", text_delta: "done" },
+        { type: "text-end", id: "text_after_retry" },
+        { type: "finish", finishReason: "stop" },
+    ]);
+    let attempt = 0;
+    const retryingLLM: LLMServiceInterface = {
+        stream(request, options) {
+            requests.push(request);
+            attempt += 1;
+            if (attempt === 1) {
+                return Stream.fail({
+                    type: "llm-service" as const,
+                    error: {
+                        type: "runtime" as const,
+                        code: "gateway_unavailable" as const,
+                        message: "Gateway provider stream is unavailable.",
+                        retryable: true,
+                        fatal: false,
+                    },
+                });
+            }
+            return success.stream(request, options);
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        llmService: retryingLLM,
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+    }))));
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
+    expect(requests).toHaveLength(2);
+    expect(requestEnds).toHaveLength(2);
+    expect(requestEnds[0]).toMatchObject({
+        isError: true,
+        errorKind: "gateway_stream_error",
+        reschedule: { attempt: 1 },
+    });
+    expect(requestEnds[1]).toMatchObject({ isError: false });
 });
 test("a stale no-content request-end receipt discards hot state before another provider request", async () => {
     const session = new ThreadRuntime("sesn_stale_empty_request_end");

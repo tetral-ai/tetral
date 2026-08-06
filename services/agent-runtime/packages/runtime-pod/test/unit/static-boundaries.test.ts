@@ -206,7 +206,7 @@ describe("Runtime Pod static boundaries", () => {
     expect(command).toContain("BridgeAPIEventWriter");
     expect(command).toContain("RuntimePodGatewayClient");
     expect(command).toContain("channelOptions: gatewayGrpcChannelOptions()");
-    expect(toolRunner).toContain("new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), grpcClientChannelOptions())");
+    expect(toolRunner).toContain("new ProviderGatewayServiceClient(options.webAddress, credentials.createInsecure(), webGrpcChannelOptions())");
     expect(toolRunner).toContain("new McpConnectorServiceClient(options.mcpConnectorAddress, credentials.createInsecure(), grpcClientChannelOptions())");
     expect(command).toContain("RuntimePodToolRunner");
     expect(command).toContain("createToolCatalog");

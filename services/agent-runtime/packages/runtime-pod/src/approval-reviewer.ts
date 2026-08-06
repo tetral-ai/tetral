@@ -597,8 +597,8 @@ function renderTranscriptEvidence(messages: readonly RuntimeMessage[]): readonly
           ...(part.toolUseEventId !== undefined ? { tool_use_event_id: part.toolUseEventId } : {}),
           ...("input" in part.state && part.state.input !== undefined
             ? {
-                input: part.state.input.value ?? part.state.input.preview,
-                input_truncated: part.state.input.truncated,
+                input: part.state.input.value,
+                input_preview_truncated: part.state.input.truncated,
               }
             : {}),
         })),

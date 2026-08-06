@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -1042,15 +1044,43 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	start := seedBridgeAPIRequestStart(
 		t, bridgeStore, scope, "rwrite_cleanup_cold_approval_start", modelRequestID, "agent_provider_request", 0,
 	)
+	approvalInputValue := map[string]any{
+		"file_path": "src/a.ts",
+		"content":   strings.Repeat("界", 3000),
+	}
+	approvalInputJSON, err := json.Marshal(approvalInputValue)
+	if err != nil {
+		t.Fatalf("marshal cleanup approval input: %v", err)
+	}
+	initialPreviewBytes := approvalInputJSON[:cleanupRuntimeInputPreviewMaxBytes]
+	for len(initialPreviewBytes) > 0 && !utf8.Valid(initialPreviewBytes) {
+		initialPreviewBytes = initialPreviewBytes[:len(initialPreviewBytes)-1]
+	}
+	approvalPartJSON, err := json.Marshal(map[string]any{
+		"type":       "tool",
+		"toolCallId": "tool-call-cleanup-cold-approval",
+		"toolName":   "Write",
+		"state": map[string]any{
+			"status": "running",
+			"input": map[string]any{
+				"value":     approvalInputValue,
+				"preview":   string(initialPreviewBytes),
+				"truncated": true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal cleanup approval part: %v", err)
+	}
 	toolUse, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"file_path":"src/a.ts"},"evaluated_permission":"ask"}`,
+		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
 		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
 			t, scope, "rwrite_cleanup_cold_approval_tool", "agent.tool_use", "streaming",
 			bridgeRuntimePartDraftForTest{
 				kind: "tool",
-				json: `{"type":"tool","toolCallId":"tool-call-cleanup-cold-approval","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"src/a.ts"},"preview":"{\"file_path\":\"src/a.ts\"}","truncated":false}}}`,
+				json: string(approvalPartJSON),
 			},
 		)},
 	})
@@ -1138,6 +1168,42 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	if len(payload.ColdCoverage.PendingToolIDs) != 1 || payload.ColdCoverage.PendingToolIDs[0] != toolUse.GetEventId() {
 		t.Fatalf("cold pending approval coverage = %#v; want same Tool Use", payload.ColdCoverage)
 	}
+	foundCleanupPart := false
+	for _, rawMessage := range payload.Messages {
+		var message struct {
+			Parts []struct {
+				ToolCallID string `json:"toolCallId"`
+				State      struct {
+					Input struct {
+						Value     map[string]any `json:"value"`
+						Preview   string         `json:"preview"`
+						Truncated bool           `json:"truncated"`
+					} `json:"input"`
+				} `json:"state"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal(rawMessage, &message); err != nil {
+			t.Fatalf("decode cleanup approval message: %v", err)
+		}
+		for _, part := range message.Parts {
+			if part.ToolCallID != "tool-call-cleanup-cold-approval" {
+				continue
+			}
+			foundCleanupPart = true
+			if !reflect.DeepEqual(part.State.Input.Value, approvalInputValue) {
+				t.Fatalf("cleanup approval input value changed across LoadContext")
+			}
+			if len([]byte(part.State.Input.Preview)) > cleanupRuntimeInputPreviewMaxBytes ||
+				!utf8.ValidString(part.State.Input.Preview) || !part.State.Input.Truncated {
+				t.Fatalf("cleanup approval preview bytes/UTF-8/truncated = %d/%v/%v; want <=%d/true/true",
+					len([]byte(part.State.Input.Preview)), utf8.ValidString(part.State.Input.Preview), part.State.Input.Truncated,
+					cleanupRuntimeInputPreviewMaxBytes)
+			}
+		}
+	}
+	if !foundCleanupPart {
+		t.Fatal("LoadContext omitted cleanup approval tool part")
+	}
 
 	setBridgeAPIPendingApprovalStatus(
 		t, admin, "default", sessionID, threadID, toolUse.GetEventId(), "resolving",
@@ -1170,6 +1236,29 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
 	}
+	terminalApprovalPartJSON, err := json.Marshal(map[string]any{
+		"type":           "tool",
+		"toolCallId":     "tool-call-cleanup-cold-approval",
+		"toolName":       "Write",
+		"toolUseEventId": toolUse.GetEventId(),
+		"toolEvent":      map[string]any{"kind": "tool"},
+		"state": map[string]any{
+			"status": "error",
+			"input": map[string]any{
+				"value":     approvalInputValue,
+				"preview":   string(initialPreviewBytes),
+				"truncated": true,
+			},
+			"error": map[string]any{
+				"type":      "tool_denied",
+				"message":   "Approval denied: not safe",
+				"retryable": false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal cleanup approval terminal part: %v", err)
+	}
 	terminal, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: recoveryScope, RuntimeWriteId: "rwrite_cleanup_cold_approval_result", ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_result",
@@ -1179,7 +1268,7 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 			t, recoveryScope, "rwrite_cleanup_cold_approval_result", "agent.tool_result", "completed",
 			bridgeRuntimePartDraftForTest{
 				kind: "tool",
-				json: `{"type":"tool","toolCallId":"tool-call-cleanup-cold-approval","toolName":"Write","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"error","input":{"value":{"file_path":"src/a.ts"},"preview":"{\"file_path\":\"src/a.ts\"}","truncated":false},"error":{"type":"tool_denied","message":"Approval denied: not safe","retryable":false}}}`,
+				json: string(terminalApprovalPartJSON),
 			},
 		)},
 	})
