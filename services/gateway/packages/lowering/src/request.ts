@@ -691,7 +691,10 @@ function dynamicThinkingBudgetTokens(
 }
 
 function effectiveOutputTokenLimit(request: ProviderRequest, options: LowerProviderRequestOptions): number {
-  return Math.min(request.limits?.maxOutputTokens ?? 0, options.modelOutputTokenLimit);
+  // An unset request limit (proto3 zero) means the provider's own documented
+  // model output limit governs; an explicit request value only ever narrows it.
+  const requested = request.limits?.maxOutputTokens ?? 0;
+  return requested > 0 ? Math.min(requested, options.modelOutputTokenLimit) : options.modelOutputTokenLimit;
 }
 
 function applyRequestProviderOptions(

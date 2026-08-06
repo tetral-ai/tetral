@@ -195,6 +195,12 @@ describe("deepseek request lowering", () => {
   test("deepseek-error-mapping leaves provider-specific error overrides empty beyond generic classification", () => {
     expect(DeepSeekV4ProRules.providerSpecificErrorRules).toEqual([]);
   });
+
+  test("deepseek-output-limit sends the catalog's documented model output limit when the request sets none", () => {
+    const unset = lowerDeepSeekRequest(deepSeekRequest({ limits: { maxOutputTokens: 0, timeoutMs: 30_000 } }), 384_000);
+
+    expect(unset.options.maxOutputTokens).toBe(384_000);
+  });
 });
 
 interface DeepSeekFixture {

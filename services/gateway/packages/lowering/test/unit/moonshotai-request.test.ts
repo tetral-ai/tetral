@@ -201,6 +201,12 @@ describe("moonshotai Kimi request lowering", () => {
   test("kimi-error-mapping leaves provider-specific error overrides empty beyond generic classification", () => {
     expect(MoonshotKimiK3Rules.providerSpecificErrorRules).toEqual([]);
   });
+
+  test("kimi-output-limit sends the catalog's documented model output limit when the request sets none", () => {
+    const unset = lowerKimiRequest(kimiRequest({ limits: { maxOutputTokens: 0, timeoutMs: 30_000 } }), 131_072);
+
+    expect(unset.options.maxOutputTokens).toBe(131_072);
+  });
 });
 
 function lowerKimiRequest(

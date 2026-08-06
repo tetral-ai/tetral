@@ -260,7 +260,9 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
     }
     fileAttachmentOrigins.add(originKey);
   }
-  if (request.limits === undefined || request.limits.maxOutputTokens <= 0 || request.limits.timeoutMs <= 0) {
+  // maxOutputTokens zero is "unset": the provider's documented model output
+  // limit governs at lowering. Only negative values are malformed.
+  if (request.limits === undefined || request.limits.maxOutputTokens < 0 || request.limits.timeoutMs <= 0) {
     return invalidRequest("invalid_limits", "limits");
   }
   return { ok: true };
