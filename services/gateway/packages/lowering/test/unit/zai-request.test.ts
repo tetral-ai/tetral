@@ -225,6 +225,12 @@ describe("zai GLM request lowering", () => {
   test("zai-error-mapping leaves provider-specific error overrides empty beyond generic classification", () => {
     expect(ZaiGLM52Rules.providerSpecificErrorRules).toEqual([]);
   });
+
+  test("zai-output-limit sends the catalog's documented model output limit when the request sets none", () => {
+    const unset = lowerZaiRequest(zaiRequest({ limits: { maxOutputTokens: 0, timeoutMs: 30_000 } }), 131_072);
+
+    expect(unset.options.maxOutputTokens).toBe(131_072);
+  });
 });
 
 function lowerZaiRequest(
