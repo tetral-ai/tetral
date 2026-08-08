@@ -43,7 +43,8 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimActivation(ctx context.Context, j
 	}
 	var work SandboxActivationWork
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.activation.claim", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.activation.claim", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var preliminaryKind string
 		var preliminaryGeneration sql.NullInt64
 		if err := tx.QueryRow(ctx,
@@ -207,6 +208,9 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimActivation(ctx context.Context, j
 		disposition = SandboxLifecycleApplied
 		return nil
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxActivationWork{}, SandboxLifecycleLostAuthority, err
+	}
 	return work, disposition, err
 }
 
@@ -216,6 +220,7 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 	}
 	disposition := SandboxLifecycleNotApplicable
 	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.complete", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var environmentID string
 		var resourceRevision int64
 		var databaseNow time.Time
@@ -409,6 +414,9 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteActivation(ctx context.Context
 		}
 		return attachExecutionWaitersToMaterializationTx(ctx, tx, work.Job.WorkspaceID, waiters, materializationID, now)
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxLifecycleLostAuthority, err
+	}
 	return disposition, err
 }
 
@@ -485,7 +493,8 @@ func requeueActivationMaterializationsTx(ctx context.Context, tx *dbconnect.Tx, 
 func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.Context, work SandboxActivationWork, now time.Time) (SandboxActivationWork, SandboxLifecycleDisposition, error) {
 	var replacement SandboxActivationWork
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.replace_missing", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.replace_missing", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var environmentID string
 		if err := tx.QueryRow(ctx,
 			`SELECT environment_id FROM sessions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
@@ -549,7 +558,7 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 		if artifactProvider != sandboxdriver.DaytonaProviderName {
 			return errors.New("sandbox replacement environment artifact provider is invalid")
 		}
-		labels := sandboxActivationLabels(work.Job.WorkspaceID, work.Job.SessionID, environmentID, binding.LogicalSandboxID, work.Job.OperationID)
+		labels := stableSandboxOwnershipLabels(work.Job.WorkspaceID, work.Job.SessionID, environmentID, binding.LogicalSandboxID)
 		labelsJSON, err := json.Marshal(labels)
 		if err != nil {
 			return err
@@ -638,12 +647,16 @@ func (s *PostgreSQLSandboxLifecycleStore) ReplaceMissingActivation(ctx context.C
 		}
 		return nil
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxActivationWork{}, SandboxLifecycleLostAuthority, err
+	}
 	return replacement, disposition, err
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) ObserveUnknownActivation(ctx context.Context, work SandboxActivationWork, kind string, now time.Time) (SandboxLifecycleDisposition, error) {
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.observe_unknown", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.observe_unknown", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		result, err := tx.Exec(ctx,
 			`UPDATE sandbox_lifecycle_operations
 			    SET state = 'running', outcome_effect_boundary = 'outcome_unknown',
@@ -660,6 +673,9 @@ func (s *PostgreSQLSandboxLifecycleStore) ObserveUnknownActivation(ctx context.C
 		disposition, err = lifecycleMutationDispositionTx(ctx, tx, work.Job, result)
 		return err
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxLifecycleLostAuthority, err
+	}
 	return disposition, err
 }
 
@@ -668,7 +684,8 @@ func (s *PostgreSQLSandboxLifecycleStore) FailActivation(ctx context.Context, wo
 		return SandboxLifecycleNotApplicable, errors.New("sandbox activation failure classification is required")
 	}
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.fail", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.activation.fail", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
@@ -700,6 +717,9 @@ func (s *PostgreSQLSandboxLifecycleStore) FailActivation(ctx context.Context, wo
 		}
 		return enqueueReadySandboxReleasesTx(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID, now)
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxLifecycleLostAuthority, err
+	}
 	return disposition, err
 }
 
@@ -752,7 +772,8 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimMaterialization(ctx context.Conte
 	}
 	var work SandboxMaterializationWork
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.materialization.claim", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.materialization.claim", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var preliminaryTargetEnvironmentGeneration int64
 		if err := tx.QueryRow(ctx,
 			`SELECT target_environment_generation
@@ -884,6 +905,9 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimMaterialization(ctx context.Conte
 		disposition = SandboxLifecycleApplied
 		return nil
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxMaterializationWork{}, SandboxLifecycleLostAuthority, err
+	}
 	return work, disposition, err
 }
 
@@ -982,6 +1006,9 @@ func (s *PostgreSQLSandboxLifecycleStore) WaitMaterializationForActivation(ctx c
 		if _, err := queue.EnqueueBatchTx(ctx, tx, enqueueRequests); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
 		updated, err := queue.AckTx(ctx, tx, queue.AckRequest{
 			WorkspaceID: workspace.ID(work.Job.WorkspaceID), JobID: work.Job.JobID,
 			LeaseToken: work.Job.LeaseToken, Now: now.UTC(),
@@ -996,13 +1023,17 @@ func (s *PostgreSQLSandboxLifecycleStore) WaitMaterializationForActivation(ctx c
 		return nil
 	})
 	if errors.Is(err, errQueueLeaseLost) {
-		return SandboxLifecycleLostAuthority, nil
+		return SandboxLifecycleLostAuthority, err
+	}
+	if err == nil && disposition == SandboxLifecycleApplied {
+		markQueueLeaseConsumed(ctx)
 	}
 	return disposition, err
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) CompleteMaterialization(ctx context.Context, work SandboxMaterializationWork, result MaterializationResult, now time.Time) error {
 	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.materialization.complete", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var desiredRevision int64
 		if err := tx.QueryRow(ctx,
 			`SELECT sandbox_resource_revision FROM sessions
@@ -1191,7 +1222,8 @@ func materializedDeletedResourceIDs(resources sandbox.ResourceSetup) []string {
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) FailMaterialization(ctx context.Context, work SandboxMaterializationWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.materialization.fail", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.materialization.fail", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
@@ -1235,7 +1267,8 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimRelease(ctx context.Context, job 
 	}
 	var work SandboxReleaseWork
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.release.claim", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.release.claim", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: job.WorkspaceID, SessionID: job.SessionID}); err != nil {
 			return err
 		}
@@ -1291,6 +1324,9 @@ func (s *PostgreSQLSandboxLifecycleStore) ClaimRelease(ctx context.Context, job 
 		disposition = SandboxLifecycleApplied
 		return nil
 	})
+	if errors.Is(err, errQueueLeaseLost) {
+		return SandboxReleaseWork{}, SandboxLifecycleLostAuthority, err
+	}
 	return work, disposition, err
 }
 
@@ -1333,16 +1369,6 @@ func (s *PostgreSQLSandboxLifecycleStore) ParkBlockedRelease(ctx context.Context
 		if err != nil || disposition != SandboxLifecycleApplied {
 			return err
 		}
-		updated, err := queue.AckTx(ctx, tx, queue.AckRequest{
-			WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID,
-			LeaseToken: job.LeaseToken, Now: now.UTC(),
-		})
-		if err != nil {
-			return err
-		}
-		if !updated {
-			return errQueueLeaseLost
-		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE sandbox_lifecycle_operations
 			    SET state='pending', queue_job_id=NULL, queue_kind=NULL,
@@ -1354,17 +1380,34 @@ func (s *PostgreSQLSandboxLifecycleStore) ParkBlockedRelease(ctx context.Context
 		); err != nil {
 			return err
 		}
+		if err := stopQueueLeaseGuard(ctx); err != nil {
+			return err
+		}
+		updated, err := queue.AckTx(ctx, tx, queue.AckRequest{
+			WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID,
+			LeaseToken: job.LeaseToken, Now: now.UTC(),
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errQueueLeaseLost
+		}
 		return nil
 	})
 	if errors.Is(err, errQueueLeaseLost) {
-		return SandboxLifecycleLostAuthority, nil
+		return SandboxLifecycleLostAuthority, err
+	}
+	if err == nil && disposition == SandboxLifecycleApplied {
+		markQueueLeaseConsumed(ctx)
 	}
 	return disposition, err
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) AuthorizeRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) (bool, error) {
 	var authorized bool
-	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.authorize", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.authorize", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
@@ -1388,7 +1431,8 @@ func (s *PostgreSQLSandboxLifecycleStore) AuthorizeRelease(ctx context.Context, 
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) RearmRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.rearm", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.rearm", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
@@ -1426,7 +1470,8 @@ func (s *PostgreSQLSandboxLifecycleStore) RearmRelease(ctx context.Context, work
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) CompleteRelease(ctx context.Context, work SandboxReleaseWork, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.complete", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.complete", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockSession(ctx, tx, SandboxExecutionRef{WorkspaceID: work.Job.WorkspaceID, SessionID: work.Job.SessionID}); err != nil {
 			return err
 		}
@@ -1467,7 +1512,8 @@ func (s *PostgreSQLSandboxLifecycleStore) CompleteRelease(ctx context.Context, w
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) ObserveUnknownRelease(ctx context.Context, work SandboxReleaseWork, kind string, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.observe_unknown", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.observe_unknown", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
@@ -1484,7 +1530,8 @@ func (s *PostgreSQLSandboxLifecycleStore) ObserveUnknownRelease(ctx context.Cont
 }
 
 func (s *PostgreSQLSandboxLifecycleStore) FailRelease(ctx context.Context, work SandboxReleaseWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string, now time.Time) error {
-	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.fail", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, work.Job.WorkspaceID, "sandbox.release.fail", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		if err := lockLifecycleSessionBindingOperation(ctx, tx, work.Job); err != nil {
 			return err
 		}
@@ -1522,7 +1569,8 @@ func (s *PostgreSQLSandboxLifecycleStore) finalizeClosedLifecycle(ctx context.Co
 		return SandboxLifecycleNotApplicable, errors.New("sandbox lifecycle exhaustion Queue identity is invalid")
 	}
 	disposition := SandboxLifecycleNotApplicable
-	err := s.client.WithWorkspaceTx(ctx, queueJob.GetWorkspaceId(), "sandbox.lifecycle.finalize_exhausted", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, queueJob.GetWorkspaceId(), "sandbox.lifecycle.finalize_exhausted", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		job, found, err := lookupSandboxLifecycleJobByQueueIdentity(
 			ctx, tx, queueJob.GetWorkspaceId(), queueJob.GetId(), queueKind,
 			queueJob.GetPartitionKey(), queueJob.GetDedupeKey(),
@@ -1911,7 +1959,7 @@ func ensureActivationOperationTx(ctx context.Context, tx *dbconnect.Tx, job Sand
 	queueJobID := queue.NewJobID()
 	partitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID(job.WorkspaceID), binding.LogicalSandboxID)
 	dedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxActivate, workspace.ID(job.WorkspaceID), binding.LogicalSandboxID, operationID)
-	labelsJSON, err := json.Marshal(sandboxActivationLabels(job.WorkspaceID, job.SessionID, binding.EnvironmentID, binding.LogicalSandboxID, operationID))
+	labelsJSON, err := json.Marshal(stableSandboxOwnershipLabels(job.WorkspaceID, job.SessionID, binding.EnvironmentID, binding.LogicalSandboxID))
 	if err != nil {
 		return "", nil, err
 	}
@@ -2042,14 +2090,16 @@ func sandboxLifecycleQueueIdentityMatches(job SandboxLifecycleJob, kind string, 
 		dedupe.Valid && dedupe.String == queue.FormatSandboxLifecycleDedupeKey(kind, ws, job.LogicalSandboxID, job.OperationID)
 }
 
-func sandboxActivationLabels(workspaceID string, sessionID string, environmentID string, logicalSandboxID string, operationID string) map[string]string {
+// stableSandboxOwnershipLabels is the provider-resource ownership boundary.
+// Lifecycle operation identity remains on durable operation, Queue, waiter,
+// receipt, and log records; it never becomes part of provider ownership.
+func stableSandboxOwnershipLabels(workspaceID string, sessionID string, environmentID string, logicalSandboxID string) map[string]string {
 	return map[string]string{
-		"tetral.workspace_id":           workspaceID,
-		"tetral.session_id":             sessionID,
-		"tetral.environment_id":         environmentID,
-		"tetral.sandbox_id":             logicalSandboxID,
-		"tetral.lifecycle_operation_id": operationID,
-		"tetral.lifecycle_owner":        "sandbox",
+		"tetral.workspace_id":    workspaceID,
+		"tetral.session_id":      sessionID,
+		"tetral.environment_id":  environmentID,
+		"tetral.sandbox_id":      logicalSandboxID,
+		"tetral.lifecycle_owner": "sandbox",
 	}
 }
 

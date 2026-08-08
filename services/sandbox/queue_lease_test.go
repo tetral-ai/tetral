@@ -110,6 +110,11 @@ func TestQueueLeaseGuardCarriesHeartbeatExpiryIntoLifecycleClaim(t *testing.T) {
 		t.Fatalf("WaitForActivation: %v", err)
 	}
 	job := readLifecycleJob(t, adminDB, execution.Ref.ToolUseEventID, "waiting_activation_operation_id")
+	if _, err := adminDB.Exec(`UPDATE queue_jobs
+		SET status=$1, lease_token=NULL, leased_by=NULL, leased_at=NULL, leased_until=NULL
+		WHERE workspace_id=$2 AND id=$3`, queue.StatusPending, job.WorkspaceID, job.JobID); err != nil {
+		t.Fatalf("return activation Queue job to pending: %v", err)
+	}
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))
 	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 		WorkspaceID: "ws_execution_store", Kinds: []string{queue.KindSandboxActivate},

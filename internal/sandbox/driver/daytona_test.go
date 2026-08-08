@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"reflect"
@@ -1135,19 +1136,44 @@ func TestDaytonaCreateSandboxLowersBoundedLifecycleIntervals(t *testing.T) {
 	}
 }
 
+func TestDaytonaCreateSandboxLowersOnlyStableOwnershipLabels(t *testing.T) {
+	client := &recordingDaytonaLifecycleClient{}
+	provider := NewDaytonaLifecycleProviderForClient(client, 45*time.Second)
+	_, err := provider.CreateSandbox(context.Background(), sandbox.CreateSandboxRequest{Setup: sandbox.SandboxSetup{
+		WorkspaceID: "ws_labels", SessionID: "sesn_labels", EnvironmentID: "env_labels",
+		SandboxID: "sbox_labels", LifecycleOperationID: "sop_attempt", EnvironmentGeneration: 9,
+		ProviderArtifactRef: "snapshot_labels",
+	}})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	params := client.createParams.(types.SnapshotParams)
+	want := map[string]string{
+		"tetral.workspace_id":    "ws_labels",
+		"tetral.session_id":      "sesn_labels",
+		"tetral.environment_id":  "env_labels",
+		"tetral.sandbox_id":      "sbox_labels",
+		"tetral.lifecycle_owner": "sandbox",
+	}
+	if !reflect.DeepEqual(params.Labels, want) {
+		t.Fatalf("Create labels = %v; want stable ownership %v", params.Labels, want)
+	}
+}
+
 func TestDaytonaResolveSandboxRequiresExactStableIdentity(t *testing.T) {
 	labels := map[string]string{
-		"tetral.workspace_id":           "ws_resolve",
-		"tetral.session_id":             "sesn_resolve",
-		"tetral.sandbox_id":             "sbox_resolve",
-		"tetral.lifecycle_operation_id": "sop_resolve",
-		"tetral.lifecycle_owner":        "sandbox",
+		"tetral.workspace_id":    "ws_resolve",
+		"tetral.session_id":      "sesn_resolve",
+		"tetral.environment_id":  "env_resolve",
+		"tetral.sandbox_id":      "sbox_resolve",
+		"tetral.lifecycle_owner": "sandbox",
 	}
 	tests := []struct {
-		name      string
-		got       *daytona.Sandbox
-		wantFound bool
-		wantError bool
+		name                  string
+		got                   *daytona.Sandbox
+		wantFound             bool
+		wantError             bool
+		wantOwnershipMismatch bool
 	}{
 		{
 			name: "exact ownership",
@@ -1161,38 +1187,92 @@ func TestDaytonaResolveSandboxRequiresExactStableIdentity(t *testing.T) {
 			got: &daytona.Sandbox{
 				ID: "provider_resolve", Name: "sbox_resolve",
 				Labels: map[string]string{
-					"tetral.workspace_id":           "ws_resolve",
-					"tetral.session_id":             "sesn_resolve",
-					"tetral.sandbox_id":             "sbox_resolve",
-					"tetral.lifecycle_operation_id": "sop_resolve",
-					"tetral.lifecycle_owner":        "sandbox",
-					types.CodeToolboxLanguageLabel:  string(types.CodeLanguagePython),
+					"tetral.workspace_id":          "ws_resolve",
+					"tetral.session_id":            "sesn_resolve",
+					"tetral.environment_id":        "env_resolve",
+					"tetral.sandbox_id":            "sbox_resolve",
+					"tetral.lifecycle_owner":       "sandbox",
+					types.CodeToolboxLanguageLabel: string(types.CodeLanguagePython),
 				},
 			},
 			wantFound: true,
+		},
+		{
+			name: "malformed sdk language label",
+			got: &daytona.Sandbox{
+				ID: "provider_resolve", Name: "sbox_resolve",
+				Labels: map[string]string{
+					"tetral.workspace_id":          "ws_resolve",
+					"tetral.session_id":            "sesn_resolve",
+					"tetral.environment_id":        "env_resolve",
+					"tetral.sandbox_id":            "sbox_resolve",
+					"tetral.lifecycle_owner":       "sandbox",
+					types.CodeToolboxLanguageLabel: "javascript",
+				},
+			},
+			wantError:             true,
+			wantOwnershipMismatch: true,
 		},
 		{
 			name: "wrong stable name",
 			got: &daytona.Sandbox{
 				ID: "provider_resolve", Name: "different", Labels: labels,
 			},
-			wantError: true,
+			wantError:             true,
+			wantOwnershipMismatch: true,
 		},
 		{
 			name: "extra ownership label",
 			got: &daytona.Sandbox{
 				ID: "provider_resolve", Name: "sbox_resolve",
 				Labels: map[string]string{
-					"tetral.workspace_id":           "ws_resolve",
-					"tetral.session_id":             "sesn_resolve",
-					"tetral.sandbox_id":             "sbox_resolve",
-					"tetral.lifecycle_operation_id": "sop_resolve",
-					"tetral.lifecycle_owner":        "sandbox",
-					"unexpected":                    "label",
+					"tetral.workspace_id":    "ws_resolve",
+					"tetral.session_id":      "sesn_resolve",
+					"tetral.environment_id":  "env_resolve",
+					"tetral.sandbox_id":      "sbox_resolve",
+					"tetral.lifecycle_owner": "sandbox",
+					"unexpected":             "label",
 				},
 			},
-			wantError: true,
+			wantError:             true,
+			wantOwnershipMismatch: true,
 		},
+	}
+	for _, key := range []string{
+		"tetral.workspace_id",
+		"tetral.session_id",
+		"tetral.environment_id",
+		"tetral.sandbox_id",
+		"tetral.lifecycle_owner",
+	} {
+		missing := maps.Clone(labels)
+		delete(missing, key)
+		tests = append(tests, struct {
+			name                  string
+			got                   *daytona.Sandbox
+			wantFound             bool
+			wantError             bool
+			wantOwnershipMismatch bool
+		}{
+			name:                  "missing " + key,
+			got:                   &daytona.Sandbox{ID: "provider_resolve", Name: "sbox_resolve", Labels: missing},
+			wantError:             true,
+			wantOwnershipMismatch: true,
+		})
+		wrong := maps.Clone(labels)
+		wrong[key] += "_wrong"
+		tests = append(tests, struct {
+			name                  string
+			got                   *daytona.Sandbox
+			wantFound             bool
+			wantError             bool
+			wantOwnershipMismatch bool
+		}{
+			name:                  "wrong " + key,
+			got:                   &daytona.Sandbox{ID: "provider_resolve", Name: "sbox_resolve", Labels: wrong},
+			wantError:             true,
+			wantOwnershipMismatch: true,
+		})
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1200,6 +1280,9 @@ func TestDaytonaResolveSandboxRequiresExactStableIdentity(t *testing.T) {
 			handle, found, err := provider.ResolveSandbox(context.Background(), "sbox_resolve", labels)
 			if (err != nil) != test.wantError || found != test.wantFound {
 				t.Fatalf("ResolveSandbox = (%+v, %t, %v); want found=%t error=%t", handle, found, err, test.wantFound, test.wantError)
+			}
+			if errors.Is(err, ErrSandboxOwnershipMismatch) != test.wantOwnershipMismatch {
+				t.Fatalf("ResolveSandbox ownership mismatch = %t; want %t (err %v)", errors.Is(err, ErrSandboxOwnershipMismatch), test.wantOwnershipMismatch, err)
 			}
 			if found && handle.SandboxID != "provider_resolve" {
 				t.Fatalf("resolved handle = %+v", handle)

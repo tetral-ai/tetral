@@ -67,6 +67,7 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 	}
 	attrs := []slog.Attr{
 		slog.String("operation", operation),
+		slog.String("event", "sandbox_provider_operation_completed"),
 		slog.String("event.kind", "sandbox_provider_operation_completed"),
 		slog.String("provider.name", "daytona"),
 		slog.String("outcome", result),
@@ -82,7 +83,8 @@ func logProviderOutcomeCompletion[T any](ctx context.Context, logger *slog.Logge
 			message = "sandbox provider failure detail redacted"
 		}
 		attrs = append(attrs,
-			slog.String("error.kind", outcome.ErrorKind),
+			slog.String("error.class", "sandbox_provider_error"),
+			slog.String("error.code", outcome.ErrorKind),
 			slog.Int("provider.status_code", outcome.ProviderStatusCode),
 			slog.String("error.message_safe", boundedProviderLogMessage(message)),
 		)
@@ -117,6 +119,7 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 	}
 	attrs := []slog.Attr{
 		slog.String("operation", operation),
+		slog.String("event", "sandbox_provider_operation_completed"),
 		slog.String("event.kind", "sandbox_provider_operation_completed"),
 		slog.String("provider.name", "daytona"),
 		slog.String("outcome", outcome),
@@ -125,7 +128,8 @@ func logProviderCompletion(ctx context.Context, logger *slog.Logger, operation s
 	attrs = appendProviderIdentityAttrs(attrs, identity)
 	if err != nil {
 		attrs = append(attrs,
-			slog.String("error.kind", errorKind),
+			slog.String("error.class", "sandbox_provider_error"),
+			slog.String("error.code", errorKind),
 			slog.Int("provider.status_code", statusCode),
 			slog.String("error.message_safe", boundedProviderLogMessage(safeMessage)),
 		)
@@ -140,9 +144,9 @@ func appendProviderIdentityAttrs(attrs []slog.Attr, identity providerOperationId
 	}{
 		{key: "workspace.id", value: identity.workspaceID},
 		{key: "session.id", value: identity.sessionID},
-		{key: "session.thread.id", value: identity.threadID},
+		{key: "thread.id", value: identity.threadID},
 		{key: "environment.id", value: identity.environmentID},
-		{key: "sandbox.lifecycle_operation.id", value: identity.lifecycleOperationID},
+		{key: "operation.id", value: identity.lifecycleOperationID},
 		{key: "provider.resource.id", value: identity.providerResourceID},
 		{key: "tool_use.event.id", value: identity.toolUseEventID},
 	} {

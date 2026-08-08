@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -51,6 +52,7 @@ type SandboxToolCancelJobRunner struct {
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
 	Clock     func() time.Time
+	Logger    *slog.Logger
 }
 
 func (r *SandboxToolCancelJobRunner) RunOnce(ctx context.Context) error {
@@ -93,9 +95,18 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 		}
 	}()
 	ctx = workCtx
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindSandboxToolCancel, writer)
+		}
+	}()
 	transportJob, transportErr := decodeSandboxToolCancelQueueTransportIdentity(queueJob)
 	if transportErr == nil && queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -108,6 +119,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	}
 	if transportErr == nil && queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -122,6 +136,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	if err != nil {
 		if transportErr == nil {
 			if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+				}
 				return err
 			}
 		}
@@ -136,7 +153,7 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	work, current, err := r.Store.ClaimToolCancellation(ctx, job, r.now())
 	if err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
-			return err
+			return queueAuthorityLostBy("sandbox_tool_cancel_claim", err)
 		}
 		return r.retry(ctx, queueJob, "sandbox_tool_cancel_store_error")
 	}
@@ -157,7 +174,7 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	submitted, err := r.Store.MarkToolCancellationSubmitted(ctx, work, r.now())
 	if err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
-			return err
+			return queueAuthorityLostBy("sandbox_tool_cancel_mark_submitted", err)
 		}
 		return r.retry(ctx, queueJob, "sandbox_tool_cancel_store_error")
 	}
@@ -177,6 +194,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 		resultJSON = `{"status":"cancelled"}`
 	}
 	if err := r.Store.SettleToolCancellation(ctx, work, resultJSON, "cancelled", "sandbox execution was cancelled", r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_tool_cancel_settle", err)
+		}
 		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -187,6 +207,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 
 func (r *SandboxToolCancelJobRunner) settleUnknown(ctx context.Context, work SandboxToolCancellationWork, kind string, message string) error {
 	if err := r.Store.SettleToolCancellation(ctx, work, "", kind, message, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_tool_cancel_settle", err)
+		}
 		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -202,6 +225,9 @@ func (r *SandboxToolCancelJobRunner) retry(ctx context.Context, job *queuev1.Que
 			return err
 		}
 		if err := r.Store.FinalizeToolCancellation(ctx, decoded, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {

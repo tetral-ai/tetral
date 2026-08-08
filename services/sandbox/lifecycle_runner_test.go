@@ -1,17 +1,95 @@
 package tetralsandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/sandbox"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
+
+func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+	work := sandboxActivationTestWork(true)
+	work.Labels["private.test"] = "must-not-appear"
+	store := &recordingSandboxLifecycleStore{activation: work, current: true}
+	adapter := &recordingLifecycleAdapter{
+		resolution: ProviderOutcome[ActivationResolution]{Value: ActivationResolution{
+			Found:  true,
+			Handle: sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_adopted", Metadata: map[string]string{"daytona_state": "started"}},
+		}},
+		inspection: ProviderOutcome[ExecutionReadiness]{Value: ExecutionReady},
+	}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxActivationJobRunner{
+		Queue: queueClient, Store: store, Providers: registry, Logger: logger,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	got := logs.String()
+	for _, want := range []string{
+		`"event":"sandbox_activation_resolved"`, `"resolution":"owned_found"`, `"provider.state":"started"`,
+		`"event":"sandbox_activation_attempt_completed"`, `"outcome":"success"`,
+		`"workspace.id":"ws_lifecycle"`, `"session.id":"sesn_lifecycle"`, `"sandbox.id":"sbox_lifecycle"`,
+		`"operation.id":"sop_activation"`, `"job.id":"qjob_activation"`, `"provider.name":"daytona"`, `"duration.ms":`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("activation log missing %s: %s", want, got)
+		}
+	}
+	if strings.Count(got, `"event":"sandbox_activation_resolved"`) != 1 || strings.Count(got, `"event":"sandbox_activation_attempt_completed"`) != 1 {
+		t.Fatalf("activation lifecycle events were not emitted exactly once: %s", got)
+	}
+	if strings.Contains(got, "must-not-appear") || strings.Contains(got, "private.test") {
+		t.Fatalf("activation log contains provider-label payload: %s", got)
+	}
+}
+
+func TestSandboxActivationRunnerLogsTransactionAuthorityLossAtInfo(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+	store := &recordingSandboxLifecycleStore{claimActivationErr: errQueueLeaseLost}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{}})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxActivationJobRunner{
+		Queue: queueClient, Store: store, Providers: registry, Logger: logger,
+		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+	}
+	if err := runner.RunOnce(context.Background()); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("RunOnce = %v; want Queue authority loss", err)
+	}
+	got := logs.String()
+	for _, want := range []string{
+		`"level":"INFO"`, `"event":"sandbox_queue_authority_lost"`, `"writer":"sandbox_activation_claim"`,
+		`"queue.kind":"sandbox_activate"`, `"workspace.id":"ws_lifecycle"`, `"job.id":"qjob_activation"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("authority-loss log missing %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "sandbox_activation_attempt_completed") || len(queueClient.transitions) != 0 {
+		t.Fatalf("authority loss recorded a durable attempt outcome: logs=%s transitions=%v", got, queueClient.transitions)
+	}
+}
 
 func TestSandboxActivationRunnerAdoptsBeforeCreateAndDoesNotReplayUnknownCreate(t *testing.T) {
 	tests := []struct {
@@ -186,6 +264,75 @@ func TestSandboxReleaseRunnerParksBlockedReleaseWithoutSpendingRetryBudget(t *te
 	}
 	if len(queueClient.transitions) != 0 {
 		t.Fatalf("queue transitions = %v; blocked release ACK belongs to the store transaction", queueClient.transitions)
+	}
+}
+
+func TestSandboxReleaseRunnerReclaimsReadyReleaseAfterLockedBlockedRecheck(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+		SET execution_state='running', authorized_binding_revision=1,
+		    authorized_provider_resource_id='provider_execution_store', preparation_deadline=NULL
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`); err != nil {
+		t.Fatalf("seed release blocker: %v", err)
+	}
+	settlementCtx := sandboxTestQueueContext(t, runtimeDB)
+	client := dbconnect.NewClientForTesting(runtimeDB)
+	if err := client.WithWorkspaceTx(context.Background(), "ws_execution_store", "test.release.runner_recheck", func(tx *dbconnect.Tx) error {
+		_, _, err := EnsureSandboxReleaseTx(
+			context.Background(), tx, "ws_execution_store", "sesn_execution_store",
+			SandboxReleaseSessionDelete, "provider_execution_store", now,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("EnsureSandboxReleaseTx: %v", err)
+	}
+	releaseJob := leaseReleaseJob(t, queue.NewPostgreSQLStore(client), now, time.Minute, "release-recheck")
+	heartbeatObserved := make(chan struct{}, 1)
+	queueClient := &releaseRecheckQueue{
+		recordingSandboxQueue: recordingSandboxQueue{leased: []*queuev1.QueueJob{releaseJob.QueueJob}},
+		heartbeatObserved:     heartbeatObserved,
+	}
+	realStore := NewPostgreSQLSandboxLifecycleStore(client, nil, 0)
+	store := &releaseRecheckStore{
+		SandboxLifecycleStore: realStore,
+		coordinator:           NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute),
+		settlementCtx:         settlementCtx,
+		heartbeatObserved:     heartbeatObserved,
+	}
+	registry, err := NewProviderRegistry(map[string]ProviderAdapter{
+		sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{
+			releasePresenceSet: true,
+			releasePresence:    ProviderOutcome[bool]{Value: false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewProviderRegistry: %v", err)
+	}
+	runner := &SandboxReleaseJobRunner{
+		Queue: queueClient, Store: store, Providers: registry,
+		Config: SandboxLifecycleRunnerConfig{
+			WorkspaceID: "ws_execution_store", LeaseDuration: time.Minute, HeartbeatInterval: time.Millisecond,
+		},
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if store.claims != 2 || store.firstAuthority == nil || store.firstAuthority != store.secondAuthority {
+		t.Fatalf("release claims = %d authorities %p/%p; want two claims under one live lease", store.claims, store.firstAuthority, store.secondAuthority)
+	}
+	if !store.heartbeatWasLive {
+		t.Fatal("release heartbeat was not live during locked blocked-to-ready recheck")
+	}
+	var state string
+	if err := adminDB.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND queue_job_id=$1`, releaseJob.JobID).Scan(&state); err != nil {
+		t.Fatalf("read release after recheck: %v", err)
+	}
+	if state != "completed" {
+		t.Fatalf("release state = %q; want completed", state)
 	}
 }
 
@@ -838,16 +985,73 @@ func sandboxReleaseQueueJob() *queuev1.QueueJob {
 }
 
 type recordingSandboxLifecycleStore struct {
-	activation      SandboxActivationWork
-	replacement     SandboxActivationWork
-	materialization SandboxMaterializationWork
-	release         SandboxReleaseWork
-	current         bool
-	disposition     SandboxLifecycleDisposition
-	finalizer       SandboxLifecycleDisposition
-	waitDisposition SandboxLifecycleDisposition
-	claimReleaseErr error
-	calls           []string
+	activation         SandboxActivationWork
+	replacement        SandboxActivationWork
+	materialization    SandboxMaterializationWork
+	release            SandboxReleaseWork
+	current            bool
+	disposition        SandboxLifecycleDisposition
+	finalizer          SandboxLifecycleDisposition
+	waitDisposition    SandboxLifecycleDisposition
+	claimReleaseErr    error
+	claimActivationErr error
+	calls              []string
+}
+
+type releaseRecheckQueue struct {
+	recordingSandboxQueue
+	heartbeatObserved chan<- struct{}
+}
+
+func (q *releaseRecheckQueue) Heartbeat(ctx context.Context, request *queuev1.HeartbeatRequest) (*queuev1.HeartbeatResponse, error) {
+	select {
+	case q.heartbeatObserved <- struct{}{}:
+	default:
+	}
+	return q.recordingSandboxQueue.Heartbeat(ctx, request)
+}
+
+type releaseRecheckStore struct {
+	SandboxLifecycleStore
+	coordinator       *PostgreSQLSandboxExecutionCoordinator
+	settlementCtx     context.Context
+	heartbeatObserved <-chan struct{}
+	claims            int
+	firstAuthority    *sandboxQueueAuthority
+	secondAuthority   *sandboxQueueAuthority
+	heartbeatWasLive  bool
+}
+
+func (s *releaseRecheckStore) ClaimRelease(ctx context.Context, job SandboxLifecycleJob, now time.Time) (SandboxReleaseWork, SandboxLifecycleDisposition, error) {
+	s.claims++
+	switch s.claims {
+	case 1:
+		s.firstAuthority = sandboxQueueAuthorityFromContext(ctx)
+	case 2:
+		s.secondAuthority = sandboxQueueAuthorityFromContext(ctx)
+	}
+	return s.SandboxLifecycleStore.ClaimRelease(ctx, job, now)
+}
+
+func (s *releaseRecheckStore) ParkBlockedRelease(ctx context.Context, job SandboxLifecycleJob, now time.Time) (SandboxLifecycleDisposition, error) {
+	select {
+	case <-s.heartbeatObserved:
+		s.heartbeatWasLive = true
+	case <-time.After(time.Second):
+		return SandboxLifecycleNotApplicable, errors.New("release heartbeat was not observed before blocked recheck")
+	}
+	if err := s.coordinator.SettleExecution(s.settlementCtx, SandboxExecutionWork{
+		Ref: SandboxExecutionRef{
+			WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+			SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",
+		},
+		AttemptGeneration: 1,
+	}, SandboxExecutionSettlement{
+		Kind: SandboxExecutionFailed, ErrorKind: "cancelled", SafeMessage: "sandbox execution was cancelled",
+	}); err != nil {
+		return SandboxLifecycleNotApplicable, err
+	}
+	return s.SandboxLifecycleStore.ParkBlockedRelease(ctx, job, now)
 }
 
 func (s *recordingSandboxLifecycleStore) finalizerDisposition() SandboxLifecycleDisposition {
@@ -869,7 +1073,7 @@ func (s *recordingSandboxLifecycleStore) lifecycleDisposition() SandboxLifecycle
 
 func (s *recordingSandboxLifecycleStore) ClaimActivation(context.Context, SandboxLifecycleJob, time.Time) (SandboxActivationWork, SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "claim")
-	return s.activation, s.lifecycleDisposition(), nil
+	return s.activation, s.lifecycleDisposition(), s.claimActivationErr
 }
 func (s *recordingSandboxLifecycleStore) CompleteActivation(_ context.Context, _ SandboxActivationWork, handle sandbox.ProviderHandle, _ time.Time) (SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "complete:"+handle.SandboxID)

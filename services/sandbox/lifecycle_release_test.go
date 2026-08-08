@@ -214,39 +214,24 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnsureSandboxReleaseTx: %v", err)
 	}
-	var firstJobID string
-	var firstPartition, firstDedupe string
-	if err := adminDB.QueryRow(`SELECT queue_job_id, queue_partition_key, queue_dedupe_key FROM sandbox_lifecycle_operations
-		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, releaseOperationID).Scan(&firstJobID, &firstPartition, &firstDedupe); err != nil {
-		t.Fatalf("read first release job: %v", err)
-	}
-	const leaseToken = "lease_release_park"
-	leaseExpiresAt := now.Add(time.Second + time.Minute)
-	if _, err := adminDB.Exec(`UPDATE queue_jobs
-		SET status='leased', lease_token=$2, leased_by='sandbox-test', leased_at=$3,
-		    leased_until=$3::timestamptz + interval '1 minute', attempt_count=attempt_count+1, updated_at=$3
-		WHERE workspace_id='ws_execution_store' AND id=$1`, firstJobID, leaseToken, now.Add(time.Second)); err != nil {
-		t.Fatalf("lease first release notification: %v", err)
-	}
-	parkJob := SandboxLifecycleJob{
-		JobID: firstJobID, LeaseOwner: "sandbox-test", LeaseToken: leaseToken,
-		LeaseExpiresAt: leaseExpiresAt, AttemptCount: 1, WorkspaceID: "ws_execution_store",
-		SessionID: "sesn_execution_store", LogicalSandboxID: "sbox_execution_store",
-		OperationID: releaseOperationID,
-		QueueJob: &queuev1.QueueJob{Id: firstJobID, WorkspaceId: "ws_execution_store", Kind: queue.KindSandboxRelease,
-			PartitionKey: firstPartition, DedupeKey: firstDedupe, LeasedBy: "sandbox-test",
-			LeaseToken: leaseToken, LeasedUntil: leaseExpiresAt.Format(time.RFC3339Nano), AttemptCount: 1},
-	}
+	queueStore := queue.NewPostgreSQLStore(client)
+	first := leaseReleaseJob(t, queueStore, time.Now().UTC(), time.Second, "sandbox-park-first")
+	firstJobID := first.JobID
 	store := NewPostgreSQLSandboxLifecycleStore(client, nil, 0)
 	if _, err := adminDB.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp() - interval '1 second'
 		WHERE workspace_id='ws_execution_store' AND id=$1`, firstJobID); err != nil {
 		t.Fatalf("expire first release notification: %v", err)
 	}
-	expiredJob := parkJob
-	expiredJob.LeaseExpiresAt = now.Add(-time.Second)
-	disposition, err := store.ParkBlockedRelease(context.Background(), expiredJob, now.Add(time.Second))
-	if err != nil || disposition != SandboxLifecycleLostAuthority {
-		t.Fatalf("expired ParkBlockedRelease = %s, %v; want lost_authority", disposition, err)
+	if reclaimed, err := queueStore.ReclaimExpiredLeases(context.Background(), queue.ReclaimExpiredLeasesRequest{
+		WorkspaceID: workspace.ID(first.WorkspaceID), Limit: 1,
+	}); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim expired release notification = %d, %v; want 1,nil", reclaimed, err)
+	}
+	second := leaseReleaseJob(t, queueStore, time.Now().UTC(), time.Minute, "sandbox-park-second")
+	firstCtx := withLifecycleJobQueueAuthority(context.Background(), first)
+	disposition, err := store.ParkBlockedRelease(firstCtx, first, now.Add(time.Second))
+	if !errors.Is(err, errQueueLeaseLost) || disposition != SandboxLifecycleLostAuthority {
+		t.Fatalf("superseded ParkBlockedRelease = %s, %v; want direct Queue authority loss", disposition, err)
 	}
 	var state string
 	var retainedJobID string
@@ -260,16 +245,20 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	if state != "pending" || retainedJobID != firstJobID || retainedQueueStatus != queue.StatusLeased {
 		t.Fatalf("release after expired park = %s/%s/%s; want pending/%s/leased", state, retainedJobID, retainedQueueStatus, firstJobID)
 	}
-	if _, err := adminDB.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp() + interval '1 minute'
-		WHERE workspace_id='ws_execution_store' AND id=$1`, firstJobID); err != nil {
-		t.Fatalf("restore first release notification lease: %v", err)
+	queueClient := sandboxProductionQueueClient(t, queueStore)
+	guardCtx, finishGuard, err := startQueueLeaseGuard(context.Background(), queueClient, second.QueueJob, second.LeaseExpiresAt, 10*time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("start release Queue lease guard: %v", err)
 	}
-	parked, err := store.ParkBlockedRelease(context.Background(), parkJob, now.Add(time.Second))
+	parked, err := store.ParkBlockedRelease(guardCtx, second, now.Add(time.Second))
 	if err != nil {
 		t.Fatalf("ParkBlockedRelease: %v", err)
 	}
 	if parked != SandboxLifecycleApplied {
 		t.Fatal("blocked release was not parked")
+	}
+	if err := finishGuard(); err != nil {
+		t.Fatalf("consumed release Queue lease guard: %v", err)
 	}
 	var firstStatus string
 	var parkedJobID sql.NullString
@@ -328,7 +317,6 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	if attemptCount != 0 || storedLeaseOwner.Valid || storedLeaseToken.Valid || storedLeaseExpiresAt.Valid {
 		t.Fatalf("replacement release authority = attempt %d owner %v token %v expiry %v; want fresh generation", attemptCount, storedLeaseOwner, storedLeaseToken, storedLeaseExpiresAt)
 	}
-	queueStore := queue.NewPostgreSQLStore(client)
 	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 		WorkspaceID: "ws_execution_store", Kinds: []string{queue.KindSandboxRelease},
 		LeaseOwner: "sandbox-successor", MaxJobs: 1, LeaseDuration: time.Minute,
@@ -341,6 +329,7 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	claimJob.LeaseToken = leased[0].LeaseToken
 	claimJob.LeaseExpiresAt = *leased[0].LeasedUntil
 	claimJob.AttemptCount = leased[0].AttemptCount
+	setLifecycleQueueLeaseForTest(t, adminDB, claimJob.JobID, claimJob.LeaseOwner, claimJob.LeaseToken, claimJob.AttemptCount, claimJob.LeaseExpiresAt)
 	claimCtx := withSandboxQueueAuthority(context.Background(), &sandboxQueueAuthority{
 		workspaceID: "ws_execution_store", jobID: leased[0].ID,
 		leaseToken: leased[0].LeaseToken, leasedUntil: *leased[0].LeasedUntil,
@@ -815,7 +804,8 @@ func TestSandboxReleaseRejectsSupersededLeaseWriters(t *testing.T) {
 	queueStore := queue.NewPostgreSQLStore(client)
 	first := leaseReleaseJob(t, queueStore, now, time.Second, "release-worker-a")
 	store := NewPostgreSQLSandboxLifecycleStore(client, nil, 0)
-	firstWork, claimed, err := store.ClaimRelease(context.Background(), first, now)
+	firstCtx := withLifecycleJobQueueAuthority(context.Background(), first)
+	firstWork, claimed, err := store.ClaimRelease(firstCtx, first, now)
 	if err != nil || claimed != SandboxLifecycleApplied {
 		t.Fatalf("ClaimRelease(first) = claimed %s err %v; want true/nil", claimed, err)
 	}
@@ -828,27 +818,28 @@ func TestSandboxReleaseRejectsSupersededLeaseWriters(t *testing.T) {
 		t.Fatalf("ReclaimExpiredLeases = %d, %v; want 1/nil", reclaimed, err)
 	}
 	second := leaseReleaseJob(t, queueStore, time.Now().UTC().Add(time.Second), time.Minute, "release-worker-b")
-	secondWork, claimed, err := store.ClaimRelease(context.Background(), second, now.Add(2*time.Second))
+	secondCtx := withLifecycleJobQueueAuthority(context.Background(), second)
+	secondWork, claimed, err := store.ClaimRelease(secondCtx, second, now.Add(2*time.Second))
 	if err != nil || claimed != SandboxLifecycleApplied {
 		t.Fatalf("ClaimRelease(second) = claimed %s err %v; want true/nil", claimed, err)
 	}
-	if authorized, err := store.AuthorizeRelease(context.Background(), secondWork, now.Add(3*time.Second)); err != nil || !authorized {
+	if authorized, err := store.AuthorizeRelease(secondCtx, secondWork, now.Add(3*time.Second)); err != nil || !authorized {
 		t.Fatalf("AuthorizeRelease(second) = %t, %v; want true/nil", authorized, err)
 	}
-	if authorized, err := store.AuthorizeRelease(context.Background(), firstWork, now.Add(4*time.Second)); err != nil || authorized {
-		t.Fatalf("AuthorizeRelease(stale) = %t, %v; want false/nil", authorized, err)
+	if authorized, err := store.AuthorizeRelease(firstCtx, firstWork, now.Add(4*time.Second)); !errors.Is(err, errQueueLeaseLost) || authorized {
+		t.Fatalf("AuthorizeRelease(stale) = %t, %v; want false/lost authority", authorized, err)
 	}
-	if err := store.RearmRelease(context.Background(), firstWork, now.Add(4*time.Second)); err != nil {
-		t.Fatalf("RearmRelease(stale): %v", err)
+	if err := store.RearmRelease(firstCtx, firstWork, now.Add(4*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("RearmRelease(stale) = %v; want lost authority", err)
 	}
-	if err := store.ObserveUnknownRelease(context.Background(), firstWork, "stale_unknown", now.Add(4*time.Second)); err != nil {
-		t.Fatalf("ObserveUnknownRelease(stale): %v", err)
+	if err := store.ObserveUnknownRelease(firstCtx, firstWork, "stale_unknown", now.Add(4*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("ObserveUnknownRelease(stale) = %v; want lost authority", err)
 	}
-	if err := store.FailRelease(context.Background(), firstWork, ProviderProvedNotStarted, ProviderTerminal, "stale_failure", "stale worker", now.Add(4*time.Second)); err != nil {
-		t.Fatalf("FailRelease(stale): %v", err)
+	if err := store.FailRelease(firstCtx, firstWork, ProviderProvedNotStarted, ProviderTerminal, "stale_failure", "stale worker", now.Add(4*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("FailRelease(stale) = %v; want lost authority", err)
 	}
-	if err := store.CompleteRelease(context.Background(), firstWork, now.Add(4*time.Second)); err != nil {
-		t.Fatalf("CompleteRelease(stale): %v", err)
+	if err := store.CompleteRelease(firstCtx, firstWork, now.Add(4*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("CompleteRelease(stale) = %v; want lost authority", err)
 	}
 	var state, boundary string
 	var leaseOwner, leaseToken sql.NullString
@@ -862,7 +853,7 @@ func TestSandboxReleaseRejectsSupersededLeaseWriters(t *testing.T) {
 	if state != "running" || boundary != string(ProviderSubmitted) || leaseOwner.String != second.LeaseOwner || leaseToken.String != second.LeaseToken {
 		t.Fatalf("release operation = %q/%q/%q/%q; want current running submission", state, boundary, leaseOwner.String, leaseToken.String)
 	}
-	if err := store.CompleteRelease(context.Background(), secondWork, now.Add(5*time.Second)); err != nil {
+	if err := store.CompleteRelease(secondCtx, secondWork, now.Add(5*time.Second)); err != nil {
 		t.Fatalf("CompleteRelease(second): %v", err)
 	}
 	if err := adminDB.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
@@ -878,7 +869,7 @@ func leaseReleaseJob(t *testing.T, store *queue.PostgreSQLQueueStore, now time.T
 	t.Helper()
 	leased, err := store.Lease(context.Background(), queue.LeaseRequest{
 		WorkspaceID: workspace.ID("ws_execution_store"), Kinds: []string{queue.KindSandboxRelease},
-		LeaseOwner: owner, MaxJobs: 1, LeaseDuration: duration, Now: now,
+		LeaseOwner: owner, MaxJobs: 1, LeaseDuration: duration, Now: time.Now().UTC(),
 	})
 	if err != nil || len(leased) != 1 {
 		t.Fatalf("Lease release = %#v, %v; want one job", leased, err)

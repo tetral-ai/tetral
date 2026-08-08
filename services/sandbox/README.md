@@ -94,8 +94,13 @@ response proves absence, while every successful Get is a present handle that
 must receive provider Release regardless of its execution state. Provider-side
 outcomes commit only while their durable operation lease is still current.
 Environment artifact rows carry the current build job, lease token, and attempt
-number so a successor claim fences every stale authorization and outcome write
-without locking a Queue row.
+number for business re-entry, while the live Queue row remains the final
+authority for every artifact and fanout mutation.
+
+Provider adoption resolves the logical Sandbox name against exactly the stable
+workspace, Session, Environment, Sandbox, and lifecycle-owner labels. Durable
+lifecycle operation IDs correlate Queue work and logs; they are not provider
+resource ownership, so a later operation can adopt the same stable resource.
 
 Resource materialization is a separate single-flight gate. It converges the
 binding's Environment generation, Session resource revision, bounded resource
@@ -234,8 +239,10 @@ memory projection, and output capture/cleanup, receive the shared wake hint.
 `duration.ms` for the database Lease call and `queue.ready_wait.ms` from a
 job becoming available to being leased. Sandbox provider completion lines
 use `sandbox.provider.operation_completed` with `operation`, `outcome`,
-`duration.ms`, available workspace/session/thread/lifecycle/provider IDs, and a
-normalized error kind. Materialization arm operations identify helper health,
+`duration.ms`, available workspace/Session/thread/operation/provider IDs, and a
+normalized error class and code. Activation lifecycle lines separately record
+stable-name resolution, final Queue-authority loss, and the durable outcome of
+each current attempt. Materialization arm operations identify helper health,
 base directories, credential mint, file staging, mount/bind verification,
 skills, memory projection, and repository checkout separately.
 

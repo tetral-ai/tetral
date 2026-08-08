@@ -147,7 +147,7 @@ func TestPostgreSQLSandboxExecutionCoordinatorJoinsConcurrentFirstActivation(t *
 	if err := json.Unmarshal([]byte(labelsJSON), &labels); err != nil {
 		t.Fatalf("decode activation labels: %v", err)
 	}
-	wantLabels := sandboxActivationLabels("ws_execution_store", "sesn_execution_store", "env_execution_store", labels["tetral.sandbox_id"], links[0])
+	wantLabels := stableSandboxOwnershipLabels("ws_execution_store", "sesn_execution_store", "env_execution_store", labels["tetral.sandbox_id"])
 	if !reflect.DeepEqual(labels, wantLabels) {
 		t.Fatalf("activation labels = %v; want exact ownership labels %v", labels, wantLabels)
 	}

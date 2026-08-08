@@ -39,9 +39,9 @@ func TestProviderCompletionLogsDurableIdentityAndRedactsUnsafeFailureDetail(t *t
 	for _, want := range []string{
 		`"operation":"sandbox.provider.create"`, `"workspace.id":"ws_log"`,
 		`"session.id":"sesn_log"`, `"environment.id":"env_log"`,
-		`"sandbox.lifecycle_operation.id":"slop_log"`, `"outcome":"success"`,
+		`"operation.id":"slop_log"`, `"outcome":"success"`,
 		`"operation":"sandbox.provider.inspect_execution"`, `"duration.ms":1500`,
-		`"provider.status_code":401`, `"error.kind":"auth_failed"`,
+		`"provider.status_code":401`, `"error.class":"sandbox_provider_error"`, `"error.code":"auth_failed"`,
 		`"error.message_safe":"sandbox provider failure detail redacted"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -83,6 +83,16 @@ func TestDaytonaAdapterNormalizesExecutionReadiness(t *testing.T) {
 				t.Fatalf("outcome = %+v; want readiness=%q boundary=%q disposition=%q", outcome, test.wantReady, test.wantBoundary, test.wantRetry)
 			}
 		})
+	}
+}
+
+func TestDaytonaAdapterClassifiesStableOwnershipMismatch(t *testing.T) {
+	resolver := &adapterLifecycleFake{resolveErr: sandboxdriver.ErrSandboxOwnershipMismatch}
+	outcome := (&DaytonaAdapter{Resolver: resolver}).ResolveActivation(context.Background(), ActivationResolutionRequest{
+		StableName: "sbox_stable", Labels: map[string]string{"tetral.workspace_id": "ws_stable"},
+	})
+	if outcome.EffectBoundary != ProviderProvedNotStarted || outcome.Disposition != ProviderTerminal || outcome.ErrorKind != "sandbox_identity_mismatch" {
+		t.Fatalf("ownership mismatch outcome = %+v; want proved-not-started terminal identity mismatch", outcome)
 	}
 }
 
@@ -208,7 +218,10 @@ func TestDaytonaAdapterClassifiesEnvironmentArtifactCreateRejection(t *testing.T
 	adapter := &DaytonaAdapter{Artifacts: &recordingArtifactBuilder{
 		err: sandboxdriver.MarkProviderOperationNotSubmitted(retryable),
 	}}
-	outcome := adapter.BuildEnvironmentArtifact(context.Background(), sandbox.BuildArtifactRequest{})
+	outcome, err := adapter.BuildEnvironmentArtifact(context.Background(), sandbox.BuildArtifactRequest{})
+	if err != nil {
+		t.Fatalf("BuildEnvironmentArtifact control error: %v", err)
+	}
 	if outcome.EffectBoundary != ProviderProvedNotStarted || outcome.Disposition != ProviderRetryable {
 		t.Fatalf("artifact rejection outcome = %+v; want proved-not-started retry", outcome)
 	}
@@ -328,7 +341,8 @@ func TestDaytonaAdapterRejectsMalformedToolResultAfterSubmission(t *testing.T) {
 				t.Fatalf("malformed tool result outcome = %+v; want submitted terminal malformed response", outcome)
 			}
 			if !strings.Contains(logs.String(), `"outcome":"error"`) ||
-				!strings.Contains(logs.String(), `"error.kind":"provider_response_malformed"`) ||
+				!strings.Contains(logs.String(), `"error.class":"sandbox_provider_error"`) ||
+				!strings.Contains(logs.String(), `"error.code":"provider_response_malformed"`) ||
 				strings.Contains(logs.String(), `"outcome":"success"`) {
 				t.Fatalf("malformed tool result log = %s; want only normalized failure", logs.String())
 			}
@@ -404,6 +418,7 @@ type adapterLifecycleFake struct {
 	startErr     error
 	releaseErr   error
 	healthChecks int
+	resolveErr   error
 }
 
 func (f *adapterLifecycleFake) CreateSandbox(context.Context, sandbox.CreateSandboxRequest) (sandbox.ProviderHandle, error) {
@@ -426,7 +441,7 @@ func (f *adapterLifecycleFake) ReleaseSandbox(context.Context, sandbox.ProviderH
 	return f.releaseErr
 }
 func (f *adapterLifecycleFake) ResolveSandbox(context.Context, string, map[string]string) (sandbox.ProviderHandle, bool, error) {
-	return sandbox.ProviderHandle{}, false, nil
+	return sandbox.ProviderHandle{}, false, f.resolveErr
 }
 
 type adapterResourceMaterializerFake struct {

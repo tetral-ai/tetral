@@ -110,6 +110,33 @@ func testSandboxLeaseExpiry() string {
 	return time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
 }
 
+func withLifecycleJobQueueAuthority(ctx context.Context, job SandboxLifecycleJob) context.Context {
+	return withSandboxQueueAuthority(ctx, &sandboxQueueAuthority{
+		workspaceID: job.WorkspaceID,
+		jobID:       job.JobID,
+		leaseToken:  job.LeaseToken,
+		leasedUntil: job.LeaseExpiresAt,
+	})
+}
+
+func withEnvironmentBuildQueueAuthority(ctx context.Context, job EnvironmentBuildJob) context.Context {
+	return withSandboxQueueAuthority(ctx, &sandboxQueueAuthority{
+		workspaceID: job.WorkspaceID,
+		jobID:       job.JobID,
+		leaseToken:  job.LeaseToken,
+	})
+}
+
+func withTransportQueueAuthority(ctx context.Context, job *queuev1.QueueJob) context.Context {
+	leasedUntil, _ := time.Parse(time.RFC3339Nano, job.GetLeasedUntil())
+	return withSandboxQueueAuthority(ctx, &sandboxQueueAuthority{
+		workspaceID: job.GetWorkspaceId(),
+		jobID:       job.GetId(),
+		leaseToken:  job.GetLeaseToken(),
+		leasedUntil: leasedUntil,
+	})
+}
+
 func sandboxTestQueueContext(t *testing.T, runtimeDB *sql.DB) context.Context {
 	t.Helper()
 	store := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtimeDB))

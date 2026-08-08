@@ -118,9 +118,11 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 		name       string
 		resultJSON string
 		finalize   bool
+		submit     bool
 	}{
 		{name: "success", resultJSON: `{"status":"cancelled"}`},
 		{name: "unknown outcome"},
+		{name: "provider submission", resultJSON: `{"status":"cancelled"}`, submit: true},
 		{name: "attempt exhaustion", finalize: true},
 	}
 	for _, test := range tests {
@@ -181,7 +183,11 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 				if claimErr != nil || !current {
 					t.Fatalf("successor ClaimToolCancellation = current %t, %v", current, claimErr)
 				}
-				err = coordinator.SettleToolCancellation(firstCtx, firstWork, test.resultJSON, "cancelled", "sandbox execution was cancelled", now)
+				if test.submit {
+					_, err = coordinator.MarkToolCancellationSubmitted(firstCtx, firstWork, now)
+				} else {
+					err = coordinator.SettleToolCancellation(firstCtx, firstWork, test.resultJSON, "cancelled", "sandbox execution was cancelled", now)
+				}
 				firstWork = secondWork
 			} else {
 				err = coordinator.FinalizeToolCancellation(firstCtx, firstJob, now)
@@ -198,6 +204,12 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 				t.Fatalf("execution after stale cancellation = %q; want running", state)
 			}
 			if !test.finalize {
+				if test.submit {
+					submitted, submitErr := coordinator.MarkToolCancellationSubmitted(secondCtx, firstWork, now)
+					if submitErr != nil || !submitted {
+						t.Fatalf("successor cancellation submission = %t, %v", submitted, submitErr)
+					}
+				}
 				err = coordinator.SettleToolCancellation(secondCtx, firstWork, test.resultJSON, "cancelled", "sandbox execution was cancelled", now)
 			} else {
 				err = coordinator.FinalizeToolCancellation(secondCtx, secondJob, now)

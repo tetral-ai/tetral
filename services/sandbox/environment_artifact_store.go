@@ -49,7 +49,8 @@ func (s *EnvironmentArtifactStore) ClaimEnvironmentBuild(ctx context.Context, jo
 	}
 	var input EnvironmentArtifactBuildInput
 	var claimed bool
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.claim", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.claim", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var (
 			status            string
 			provider          string
@@ -140,7 +141,8 @@ func (s *EnvironmentArtifactStore) AuthorizeEnvironmentArtifactCreate(ctx contex
 		now = storage.Now()
 	}
 	var authorized bool
-	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.authorize_create", func(tx *dbconnect.Tx) error {
+	err := s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.authorize_create", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		var leaseJobID, leaseToken sql.NullString
 		var leaseAttemptCount sql.NullInt64
@@ -190,7 +192,8 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildReady(ctx context.Context
 	if now.IsZero() {
 		now = storage.Now()
 	}
-	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.ready", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.ready", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		var artifactInputHash string
 		var leaseJobID, leaseToken sql.NullString
@@ -274,7 +277,8 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildRetryableFailure(ctx cont
 	if now.IsZero() {
 		now = storage.Now()
 	}
-	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.retryable_failure", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.retryable_failure", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		var status string
 		var leaseJobID, leaseToken sql.NullString
 		var leaseAttemptCount sql.NullInt64
@@ -324,7 +328,8 @@ func (s *EnvironmentArtifactStore) MarkEnvironmentBuildTerminalFailure(ctx conte
 	if now.IsZero() {
 		now = storage.Now()
 	}
-	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.terminal_failure", func(tx *dbconnect.Tx) error {
+	return s.client.WithWorkspaceTx(ctx, job.WorkspaceID, "sandbox.environment_build.terminal_failure", func(tx *dbconnect.Tx) (txErr error) {
+		defer finishSandboxQueueAuthorityTx(ctx, tx, &txErr)
 		timestamp := now.UTC()
 		var artifactInputHash string
 		var leaseJobID, leaseToken sql.NullString

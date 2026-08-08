@@ -41,6 +41,7 @@ type sandboxQueueLeaseGuard struct {
 	localExpiry        time.Time
 	transitionTimer    *time.Timer
 	transitionFinished bool
+	queueLeaseConsumed bool
 	once               sync.Once
 }
 
@@ -197,9 +198,25 @@ func (g *sandboxQueueLeaseGuard) finish() error {
 		g.transitionTimer.Stop()
 	}
 	err := g.err
+	if g.queueLeaseConsumed {
+		err = nil
+	}
 	g.mu.Unlock()
 	g.cancelWork()
 	return err
+}
+
+// markQueueLeaseConsumed closes the local transition window after the same
+// transaction has committed its exact Queue ACK. It suppresses only the
+// heartbeat/timer absence caused by this worker's own terminal Queue write.
+func (g *sandboxQueueLeaseGuard) markQueueLeaseConsumed() {
+	g.mu.Lock()
+	g.queueLeaseConsumed = true
+	g.transitionFinished = true
+	if g.transitionTimer != nil {
+		g.transitionTimer.Stop()
+	}
+	g.mu.Unlock()
 }
 
 func stopQueueLeaseGuard(ctx context.Context) error {
@@ -208,4 +225,21 @@ func stopQueueLeaseGuard(ctx context.Context) error {
 		return nil
 	}
 	return guard.stopHeartbeat()
+}
+
+func queueLeaseGuardError(ctx context.Context) error {
+	guard, _ := ctx.Value(sandboxQueueLeaseGuardContextKey{}).(*sandboxQueueLeaseGuard)
+	if guard == nil {
+		return nil
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	return guard.err
+}
+
+func markQueueLeaseConsumed(ctx context.Context) {
+	guard, _ := ctx.Value(sandboxQueueLeaseGuardContextKey{}).(*sandboxQueueLeaseGuard)
+	if guard != nil {
+		guard.markQueueLeaseConsumed()
+	}
 }

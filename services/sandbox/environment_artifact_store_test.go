@@ -26,6 +26,7 @@ func TestEnvironmentArtifactStoreBuildReadyEnqueuesFanout(t *testing.T) {
 	seedEnvironmentArtifact(t, admin, "ws_env_store", "env_build", 7, "pending", "", `{"pip":["pandas==2.2.0"],"apt":["git"]}`)
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_env_store", "env_build", 7, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 
 	input, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime)
 	if err != nil {
@@ -53,6 +54,7 @@ func TestEnvironmentArtifactStoreAuthorizesProviderCreateOnlyOnce(t *testing.T) 
 	seedEnvironmentArtifact(t, admin, "ws_env_create_fence", "env_build", 7, "pending", "", `{"apt":["git"]}`)
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_env_create_fence", "env_build", 7, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -82,6 +84,7 @@ func TestEnvironmentArtifactStoreTerminalFailureSettlesIdenticalArtifactGenerati
 	seedEnvironmentArtifact(t, admin, "ws_env_finalize", "env_build", 8, "pending", "", `{"apt":["git"]}`)
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_env_finalize", "env_build", 7, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -115,6 +118,7 @@ func TestEnvironmentArtifactStoreTerminalFailureSettlesWaitingActivation(t *test
 	}
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_execution_store", "env_execution_store", 1, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -145,6 +149,7 @@ func TestEnvironmentArtifactStoreRearmsCreateAfterExplicitProviderRejection(t *t
 	seedEnvironmentArtifact(t, admin, "ws_env_create_rearm", "env_build", 7, "pending", "", `{"apt":["git"]}`)
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_env_create_rearm", "env_build", 7, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -185,6 +190,7 @@ func TestEnvironmentArtifactReadyFanoutWakesWaitingSandboxActivation(t *testing.
 	}
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_execution_store", "env_execution_store", 1, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -239,7 +245,7 @@ func TestEnvironmentArtifactReadyFanoutWaitsForActivePredecessorNotification(t *
 		t.Fatalf("mark artifact ready: %v", err)
 	}
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
-	job := EnvironmentReadyFanoutJob{WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	job := leaseEnvironmentReadyFanoutJob(t, runtime, "ws_execution_store", "env_execution_store", 1)
 	if _, err := store.FanoutReadyEnvironment(ctx, job, fixedEnvironmentStoreTime); err == nil {
 		t.Fatal("fanout succeeded while the predecessor notification still owned the dedupe key")
 	}
@@ -298,6 +304,7 @@ func TestEnvironmentArtifactReadyFanoutWaitsForActivePredecessorNotification(t *
 	claimJob.LeaseToken = leased[0].LeaseToken
 	claimJob.LeaseExpiresAt = *leased[0].LeasedUntil
 	claimJob.AttemptCount = leased[0].AttemptCount
+	setLifecycleQueueLeaseForTest(t, admin, claimJob.JobID, claimJob.LeaseOwner, claimJob.LeaseToken, claimJob.AttemptCount, claimJob.LeaseExpiresAt)
 	claimCtx := withSandboxQueueAuthority(context.Background(), &sandboxQueueAuthority{
 		workspaceID: "ws_execution_store", jobID: leased[0].ID,
 		leaseToken: leased[0].LeaseToken, leasedUntil: *leased[0].LeasedUntil,
@@ -327,7 +334,7 @@ func TestEnvironmentReadyFanoutFinalizerRejectsSupersededQueueLease(t *testing.T
 		WHERE workspace_id='ws_execution_store' AND environment_id='env_execution_store' AND generation=1`); err != nil {
 		t.Fatalf("mark artifact ready: %v", err)
 	}
-	firstCtx, secondCtx, _, _ := supersedeSandboxQueueLease(t, runtime, admin, queue.EnqueueRequest{
+	firstCtx, secondCtx, firstTransport, secondTransport := supersedeSandboxQueueLease(t, runtime, admin, queue.EnqueueRequest{
 		ID: queue.NewJobID(), WorkspaceID: "ws_execution_store", Kind: queue.KindEnvironmentReadyFanout,
 		PartitionKey:   queue.FormatEnvironmentPartitionKey("ws_execution_store", "env_execution_store"),
 		DedupeKey:      queue.FormatEnvironmentReadyFanoutDedupeKey("ws_execution_store", "env_execution_store", "1"),
@@ -336,8 +343,9 @@ func TestEnvironmentReadyFanoutFinalizerRejectsSupersededQueueLease(t *testing.T
 		MaxAttempts:    3,
 	})
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
-	job := EnvironmentReadyFanoutJob{WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
-	if err := store.FinalizeReadyEnvironmentFanout(firstCtx, job, fixedEnvironmentStoreTime); !errors.Is(err, errQueueLeaseLost) {
+	firstJob := EnvironmentReadyFanoutJob{JobID: firstTransport.GetId(), LeaseToken: firstTransport.GetLeaseToken(), WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	secondJob := EnvironmentReadyFanoutJob{JobID: secondTransport.GetId(), LeaseToken: secondTransport.GetLeaseToken(), WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	if err := store.FinalizeReadyEnvironmentFanout(firstCtx, firstJob, fixedEnvironmentStoreTime); !errors.Is(err, errQueueLeaseLost) {
 		t.Fatalf("superseded FinalizeReadyEnvironmentFanout error = %v; want Queue authority loss", err)
 	}
 	var state string
@@ -348,7 +356,7 @@ func TestEnvironmentReadyFanoutFinalizerRejectsSupersededQueueLease(t *testing.T
 	if state != "waiting_artifact" {
 		t.Fatalf("activation after stale finalizer = %q; want waiting_artifact", state)
 	}
-	if err := store.FinalizeReadyEnvironmentFanout(secondCtx, job, fixedEnvironmentStoreTime.Add(time.Second)); err != nil {
+	if err := store.FinalizeReadyEnvironmentFanout(secondCtx, secondJob, fixedEnvironmentStoreTime.Add(time.Second)); err != nil {
 		t.Fatalf("successor FinalizeReadyEnvironmentFanout: %v", err)
 	}
 	if err := admin.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
@@ -376,6 +384,7 @@ func TestEnvironmentArtifactFailureSettlesWaitingSandboxActivation(t *testing.T)
 	}
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_execution_store", "env_execution_store", 1, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -407,9 +416,8 @@ func TestEnvironmentReadyFanoutExhaustionSettlesWaitingSandboxActivation(t *test
 		t.Fatalf("mark artifact ready: %v", err)
 	}
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
-	if err := store.FinalizeReadyEnvironmentFanout(ctx, EnvironmentReadyFanoutJob{
-		WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1,
-	}, fixedEnvironmentStoreTime); err != nil {
+	job := leaseEnvironmentReadyFanoutJob(t, runtime, "ws_execution_store", "env_execution_store", 1)
+	if err := store.FinalizeReadyEnvironmentFanout(ctx, job, fixedEnvironmentStoreTime); err != nil {
 		t.Fatalf("FinalizeReadyEnvironmentFanout: %v", err)
 	}
 	assertSandboxExecutionState(t, admin, "evt_execution_a", "terminal_unconsumed", 1)
@@ -496,6 +504,7 @@ func TestEnvironmentArtifactStoreBuildReadyAdvancesSameInputFollowers(t *testing
 	seedEnvironmentArtifact(t, admin, "ws_env_follow", "env_build", 8, "pending", "", `{"pip":["pandas==2.2.0"]}`)
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	job := leaseEnvironmentBuildJob(t, runtime, "ws_env_follow", "env_build", 7, fixedEnvironmentStoreTime, 10*time.Minute)
+	ctx = withEnvironmentBuildQueueAuthority(ctx, job)
 	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, job, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild = claimed %t err %v; want true/nil", claimed, err)
 	}
@@ -515,7 +524,8 @@ func TestEnvironmentArtifactStoreRejectsExpiredWriterAfterLeaseTransfer(t *testi
 	seedEnvironmentArtifact(t, admin, "ws_env_lease", "env_build", 7, "pending", "", `{"apt":["git"]}`)
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
 	first := leaseEnvironmentBuildJob(t, runtime, "ws_env_lease", "env_build", 7, fixedEnvironmentStoreTime, time.Second)
-	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, first, fixedEnvironmentStoreTime); err != nil || !claimed {
+	firstCtx := withEnvironmentBuildQueueAuthority(ctx, first)
+	if _, claimed, err := store.ClaimEnvironmentBuild(firstCtx, first, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild(first) = claimed %t err %v; want true/nil", claimed, err)
 	}
 	assertEnvironmentArtifactLease(t, admin, "ws_env_lease", "env_build", 7, first.JobID, first.LeaseToken, first.AttemptCount)
@@ -540,33 +550,34 @@ func TestEnvironmentArtifactStoreRejectsExpiredWriterAfterLeaseTransfer(t *testi
 		WorkspaceID:   string(leased[0].WorkspaceID),
 		EnvironmentID: "env_build", Generation: 7,
 	}
-	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, second, fixedEnvironmentStoreTime.Add(2*time.Second)); err != nil || !claimed {
+	secondCtx := withEnvironmentBuildQueueAuthority(ctx, second)
+	if _, claimed, err := store.ClaimEnvironmentBuild(secondCtx, second, fixedEnvironmentStoreTime.Add(2*time.Second)); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild(second) = claimed %t err %v; want true/nil", claimed, err)
 	}
 	assertEnvironmentArtifactLease(t, admin, "ws_env_lease", "env_build", 7, second.JobID, second.LeaseToken, second.AttemptCount)
-	if _, claimed, err := store.ClaimEnvironmentBuild(ctx, first, fixedEnvironmentStoreTime.Add(3*time.Second)); err != nil || claimed {
-		t.Fatalf("ClaimEnvironmentBuild(stale) = claimed %t err %v; want false/nil", claimed, err)
+	if _, claimed, err := store.ClaimEnvironmentBuild(firstCtx, first, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) || claimed {
+		t.Fatalf("ClaimEnvironmentBuild(stale) = claimed %t err %v; want false/lost authority", claimed, err)
 	}
-	if authorized, err := store.AuthorizeEnvironmentArtifactCreate(ctx, first, fixedEnvironmentStoreTime.Add(3*time.Second)); err != nil || authorized {
-		t.Fatalf("AuthorizeEnvironmentArtifactCreate(stale) = %t, %v; want false/nil", authorized, err)
+	if authorized, err := store.AuthorizeEnvironmentArtifactCreate(firstCtx, first, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) || authorized {
+		t.Fatalf("AuthorizeEnvironmentArtifactCreate(stale) = %t, %v; want false/lost authority", authorized, err)
 	}
-	if err := store.MarkEnvironmentBuildReady(ctx, first, "snapshot_stale", fixedEnvironmentStoreTime.Add(3*time.Second)); err != nil {
-		t.Fatalf("MarkEnvironmentBuildReady(stale): %v", err)
+	if err := store.MarkEnvironmentBuildReady(firstCtx, first, "snapshot_stale", fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("MarkEnvironmentBuildReady(stale) = %v; want lost authority", err)
 	}
 	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "building", "")
-	if err := store.MarkEnvironmentBuildRetryableFailure(ctx, first, EnvironmentArtifactFailure{
+	if err := store.MarkEnvironmentBuildRetryableFailure(firstCtx, first, EnvironmentArtifactFailure{
 		Stage: "build_artifact", LastErrorKind: "stale_failure", Retryable: true,
-	}, true, fixedEnvironmentStoreTime.Add(3*time.Second)); err != nil {
-		t.Fatalf("MarkEnvironmentBuildRetryableFailure(stale): %v", err)
+	}, true, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("MarkEnvironmentBuildRetryableFailure(stale) = %v; want lost authority", err)
 	}
 	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "building", "")
-	if err := store.MarkEnvironmentBuildTerminalFailure(ctx, first, EnvironmentArtifactFailure{
+	if err := store.MarkEnvironmentBuildTerminalFailure(firstCtx, first, EnvironmentArtifactFailure{
 		Stage: "build_artifact", LastErrorKind: "stale_terminal", Retryable: false,
-	}, fixedEnvironmentStoreTime.Add(3*time.Second)); err != nil {
-		t.Fatalf("MarkEnvironmentBuildTerminalFailure(stale): %v", err)
+	}, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("MarkEnvironmentBuildTerminalFailure(stale) = %v; want lost authority", err)
 	}
 	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "building", "")
-	if err := store.MarkEnvironmentBuildReady(ctx, second, "snapshot_current", fixedEnvironmentStoreTime.Add(4*time.Second)); err != nil {
+	if err := store.MarkEnvironmentBuildReady(secondCtx, second, "snapshot_current", fixedEnvironmentStoreTime.Add(4*time.Second)); err != nil {
 		t.Fatalf("MarkEnvironmentBuildReady(current): %v", err)
 	}
 	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "ready", "snapshot_current")
@@ -578,6 +589,7 @@ func firstWorkspace(job EnvironmentBuildJob) workspace.ID {
 
 func leaseEnvironmentBuildJob(t *testing.T, runtime *sql.DB, workspaceID string, environmentID string, generation int64, now time.Time, duration time.Duration) EnvironmentBuildJob {
 	t.Helper()
+	queueNow := time.Now().UTC()
 	payload, err := json.Marshal(map[string]string{
 		"workspace_id": workspaceID, "environment_id": environmentID, "generation": strconv.FormatInt(generation, 10),
 	})
@@ -591,19 +603,51 @@ func leaseEnvironmentBuildJob(t *testing.T, runtime *sql.DB, workspaceID string,
 		ID: jobID, WorkspaceID: ws, Kind: queue.KindEnvironmentBuild,
 		PartitionKey:   queue.FormatEnvironmentPartitionKey(ws, environmentID),
 		DedupeKey:      queue.FormatEnvironmentBuildDedupeKey(ws, environmentID, strconv.FormatInt(generation, 10)),
-		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: queue.DefaultMaxAttempts, Now: now,
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: queue.DefaultMaxAttempts, Now: queueNow,
 	}); err != nil {
 		t.Fatalf("enqueue environment build: %v", err)
 	}
 	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 		WorkspaceID: ws, Kinds: []string{queue.KindEnvironmentBuild}, LeaseOwner: "environment-worker-a",
-		MaxJobs: 1, LeaseDuration: duration, Now: now,
+		MaxJobs: 1, LeaseDuration: duration, Now: queueNow,
 	})
 	if err != nil || len(leased) != 1 || leased[0].ID != jobID {
 		t.Fatalf("lease environment build = %#v, %v; want %s", leased, err, jobID)
 	}
 	return EnvironmentBuildJob{
 		JobID: leased[0].ID, LeaseToken: leased[0].LeaseToken, AttemptCount: leased[0].AttemptCount, WorkspaceID: workspaceID,
+		EnvironmentID: environmentID, Generation: generation,
+	}
+}
+
+func leaseEnvironmentReadyFanoutJob(t *testing.T, runtime *sql.DB, workspaceID string, environmentID string, generation int64) EnvironmentReadyFanoutJob {
+	t.Helper()
+	ws := workspace.ID(workspaceID)
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": workspaceID, "environment_id": environmentID, "generation": generation,
+	})
+	if err != nil {
+		t.Fatalf("encode environment fanout payload: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	jobID := queue.NewJobID()
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: jobID, WorkspaceID: ws, Kind: queue.KindEnvironmentReadyFanout,
+		PartitionKey:   queue.FormatEnvironmentPartitionKey(ws, environmentID),
+		DedupeKey:      queue.FormatEnvironmentReadyFanoutDedupeKey(ws, environmentID, strconv.FormatInt(generation, 10)),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: queue.DefaultMaxAttempts,
+	}); err != nil {
+		t.Fatalf("enqueue environment fanout: %v", err)
+	}
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{queue.KindEnvironmentReadyFanout}, LeaseOwner: "environment-fanout-test",
+		MaxJobs: 1, LeaseDuration: 10 * time.Minute,
+	})
+	if err != nil || len(leased) != 1 || leased[0].ID != jobID {
+		t.Fatalf("lease environment fanout = %#v, %v; want %s", leased, err, jobID)
+	}
+	return EnvironmentReadyFanoutJob{
+		JobID: leased[0].ID, LeaseToken: leased[0].LeaseToken, WorkspaceID: workspaceID,
 		EnvironmentID: environmentID, Generation: generation,
 	}
 }
