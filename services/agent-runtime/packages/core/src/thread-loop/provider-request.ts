@@ -24,7 +24,7 @@ import { MaxTextBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type {
   RuntimeFailure,
   RuntimeJsonValue,
-  RuntimeMessageDraft,
+  RuntimeAssistantPartAppend,
   RuntimeRequestErrorKind,
   SessionEventWriterAppendResult,
   SessionEventWriterRequestEndEnvelope,
@@ -122,11 +122,15 @@ export interface RejectedProviderAttachment {
 }
 
 interface RequestEndProjection {
-  stableReasoningParts(): readonly NonNullable<SessionEventWriterRequestEndEnvelope["stableReasoningParts"]>[number][];
-  applyRequestEndSeal(
+  applyRequestEndAppend(
     eventId: string,
-    seal: RuntimeMessageDraft | undefined,
+    append: RuntimeAssistantPartAppend | undefined,
     declaration: NonNullable<Extract<SessionEventWriterAppendResult, { readonly ok: true }>["declaration"]>,
+    seal: {
+      readonly status: "completed" | "failed";
+      readonly finishReason: SessionEventWriterRequestEndEnvelope["finishReason"];
+      readonly usage?: SessionEventWriterRequestEndEnvelope["usage"] | undefined;
+    },
   ): boolean;
 }
 
@@ -335,12 +339,6 @@ export function requestErrorKindFromFailure(failure: RuntimeFailure): RuntimeReq
   return "runtime_persistence_error";
 }
 
-export function stableReasoningParts(
-  processor: RequestEndProjection,
-): NonNullable<SessionEventWriterRequestEndEnvelope["stableReasoningParts"]> {
-  return [...processor.stableReasoningParts()];
-}
-
 export type RequestEndSealApplication =
   | { readonly type: "applied" }
   | { readonly type: "stale_custody" }
@@ -348,17 +346,25 @@ export type RequestEndSealApplication =
 
 export function applyRequestEndSeal(
   processor: RequestEndProjection,
-  seal: RuntimeMessageDraft | undefined,
+  append: RuntimeAssistantPartAppend | undefined,
   result: {
     readonly eventId: string;
     readonly declaration?: NonNullable<Extract<SessionEventWriterAppendResult, { readonly ok: true }>["declaration"]> | undefined;
+    readonly assistantSeal: {
+      readonly status: "completed" | "failed";
+      readonly finishReason: SessionEventWriterRequestEndEnvelope["finishReason"];
+      readonly usage?: SessionEventWriterRequestEndEnvelope["usage"] | undefined;
+    };
   },
 ): RequestEndSealApplication {
   if (result.declaration?.applicationDisposition === "stale_custody") {
     return { type: "stale_custody" };
   }
   try {
-    if (result.declaration !== undefined && processor.applyRequestEndSeal(result.eventId, seal, result.declaration)) {
+    if (
+      result.declaration !== undefined &&
+      processor.applyRequestEndAppend(result.eventId, append, result.declaration, result.assistantSeal)
+    ) {
       return { type: "applied" };
     }
   } catch {

@@ -16,8 +16,11 @@ function envelope(writeId = "write-1"): SessionEventEnvelope {
     bindingGeneration: 1,
     targetPodUid: "pod-1",
     writeId,
+    modelRequestId: "model-request-1",
     event: { type: "agent.message", content: [{ type: "text", text: "hello" }] },
-    drafts: [],
+    assistantPartAppend: {
+      parts: [{ type: "text", text: "hello", truncated: false, status: "completed" }],
+    },
   };
 }
 
@@ -153,6 +156,8 @@ describe("SessionEventWriter boundary", () => {
 
     const result = await writer.append({
       ...envelope("terminal-write"),
+      modelRequestId: undefined,
+      assistantPartAppend: undefined,
       event: {
         type: "session.error",
         error: {

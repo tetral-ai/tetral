@@ -15,7 +15,7 @@
  *
  * INVARIANTS (hot state, binding):
  *   1. Request-turn accumulation state is scoped to exactly one provider turn and
- *      never leaks across turns (the SessionProcessor accumulator is per-turn).
+ *      never leaks across turns (the ProviderStreamAccumulator accumulator is per-turn).
  *   2. Thread-scoped hot state is fully released with its thread-entry cleanup — no
  *      orphaned fibers, timers, or maps survive the thread.
  *   3. A thread does not serve inbound commands until its cold load (durable context,
@@ -71,12 +71,22 @@ type ThreadVisibility = RuntimeThreadVisibilityState;
 type ThreadStatus = RuntimeThreadStatusState;
 
 /** Fenced interrupt command; active runs close in-run, while idle ingress commits directly. */
-export interface RuntimeInterruptControlCommand extends RuntimeThreadControlState {}
+export interface RuntimeInterruptControlCommand extends RuntimeThreadControlState {
+  readonly origin: "user" | "agent";
+}
 
 /** Fenced command that releases one session's disposable hot state. */
 export interface RuntimeCleanupSessionCommand extends RuntimeThreadControlState {}
 
 export type { RuntimeTaskNotificationCommit } from "../thread-loop/thread-state.js";
+
+function unfinishedToolUseEventIds(messages: readonly RuntimeMessage[]): string[] {
+  return messages.flatMap((message) => message.parts
+    .filter((part) => part.type === "tool" && part.toolUseEventId !== undefined &&
+      part.state.status !== "completed" && part.state.status !== "error" && part.state.status !== "cancelled")
+    .sort((left, right) => left.sequence - right.sequence)
+    .map((part) => part.type === "tool" ? part.toolUseEventId! : ""));
+}
 
 /** Outcome of an interrupt command after its run-slot and input-commit closeout. */
 export type InterruptControlResult =
@@ -272,7 +282,6 @@ export interface Interface {
     command: RuntimeThreadControlState,
     options?: { readonly requirePendingApprovalToolJobs?: boolean | undefined },
   ) => Effect.Effect<ThreadLifecycleResult>;
-  readonly interruptThread: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: ReviewerExecutionToken) => Effect.Effect<ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
   readonly markThreadActive: (command: RuntimeThreadControlState) => Effect.Effect<ThreadLifecycleResult>;
@@ -1138,6 +1147,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         command: RuntimeInterruptControlCommand,
         commitInput: RuntimeControlInputCommit,
         threadResult: ResidentThreadResult,
+        markReloadRequired: () => void,
       ): Effect.Effect<InterruptControlResult> =>
         Effect.gen(function* () {
           const threadEntry = threadResult.threadEntry;
@@ -1158,27 +1168,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           if (command.eventIds.length !== 1) {
             return { ok: false, sessionId, reason: "context_load_failed" } as const;
           }
-          const pendingTools = threadEntry.runtimeThread.state.pendingApprovalToolJobs();
-          const failure = normalizeRuntimeFailure({
-            type: "runtime",
-            code: "runtime_invalid_sequence",
-            retryable: false,
-            fatal: false,
-            reason: "aborted",
-            retryStatus: { type: "terminal" },
-            sessionId,
-          });
-          const declaration = ThreadLoop.interruptPendingToolDeclarations({
-            workspaceId: command.workspaceId,
-            sessionId,
-            sessionThreadId: command.sessionThreadId,
-            runtimeInputId: command.runtimeInputId,
-            sourceEventId: command.eventIds[0]!,
-            pendingTools,
-            pendingSandboxExecutions: threadEntry.runtimeThread.state.pendingSandboxExecutionJobs(),
-            failure,
-            completedAt: options.now(),
-          });
+          const declaration = { messageCreates: [] };
           const application = yield* Effect.promise(() =>
             threadEntry.runtimeThread.state.commitUserInterruptInput(declaration)
           );
@@ -1188,20 +1178,17 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           }
           if ("receipt" in committed) {
             try {
-              const messages = ThreadLoop.applyInterruptInputReceipt({
-                sessionId,
+              const existingMessages = threadEntry.runtimeThread.state.contextManager.messages();
+              const expectedToolUseEventIds = unfinishedToolUseEventIds(existingMessages);
+              const projections = ThreadLoop.applyInterruptInputReceipt({
                 sessionThreadId: command.sessionThreadId,
                 runtimeInputId: command.runtimeInputId,
                 eventIds: command.eventIds,
-                drafts: application.declaration.drafts,
-                pendingToolCancellations: application.declaration.pendingToolCancellations,
-                sandboxExecutionToolUseEventIds: application.declaration.sandboxExecutionToolUseEventIds,
-                existingMessages: threadEntry.runtimeThread.state.contextManager.messages(),
+                expectedToolUseEventIds,
               }, committed.receipt);
+              const messages = ThreadLoop.applyInterruptToolProjections(existingMessages, projections);
               threadEntry.runtimeThread.state.contextManager.replaceMessages(messages);
-              const interruptEventId = committed.receipt.events.find((event) =>
-                command.eventIds.includes(event.sourceEventId)
-              )?.eventId;
+              const interruptEventId = committed.receipt.events[0]?.eventId;
               if (interruptEventId === undefined) {
                 throw new Error("Interrupt receipt has no durable source event identity");
               }
@@ -1209,7 +1196,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 fact: "interrupt_committed",
                 eventId: interruptEventId,
               });
-              for (const cancellation of application.declaration.pendingToolCancellations) {
+              for (const cancellation of projections) {
                 if (threadEntry.runtimeThread.state.pendingApprovalToolJobs().some(
                   (pending) => pending.toolUseEventId === cancellation.toolUseEventId,
                 )) {
@@ -1218,11 +1205,12 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 }
                 threadEntry.runtimeThread.state.clearThreadToolRoute(cancellation.toolUseEventId);
               }
-              for (const toolUseEventId of application.declaration.sandboxExecutionToolUseEventIds) {
+              for (const toolUseEventId of projections.map((projection) => projection.toolUseEventId)) {
                 threadEntry.runtimeThread.state.removePendingSandboxExecutionJob(toolUseEventId);
                 threadEntry.runtimeThread.state.clearThreadToolRoute(toolUseEventId);
               }
             } catch {
+              markReloadRequired();
               return { ok: false, sessionId, reason: "context_load_failed" } as const;
             }
           }
@@ -1250,6 +1238,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           const threadEntry = sessionEntry?.threads.get(command.sessionThreadId);
           if (sessionEntry === undefined || threadEntry === undefined) {
             let installedTarget: ResidentThreadResult | undefined;
+            let reloadRequired = false;
             const result = yield* submitInstalledThreadCommand<
               InterruptControlResult
             >(
@@ -1258,7 +1247,9 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               (threadResult) => {
                 installedTarget = threadResult;
                 threadResult.threadEntry.runtimeThread.updateIdentity(controlIdentity(command));
-                return settleIdleInterrupt(sessionId, command, commitInput, threadResult);
+                return settleIdleInterrupt(sessionId, command, commitInput, threadResult, () => {
+                  reloadRequired = true;
+                });
               },
               (reason) => ({
                 ok: false,
@@ -1267,8 +1258,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               }),
             );
             if (
-              result.ok &&
-              "stale" in result &&
+              ((result.ok && "stale" in result) || reloadRequired) &&
               installedTarget !== undefined &&
               installedTarget.sessionEntry.threads.get(command.sessionThreadId) === installedTarget.threadEntry
             ) {
@@ -1307,7 +1297,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 if (result === "applied") {
                   runSlot.stopping = true;
                   runSlot.pendingWake = false;
-                  threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(command.sequenceTo);
+				  threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(command.sequenceTo, command.origin === "user");
                 }
                 return result;
               }),
@@ -1352,6 +1342,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             }
             return { ok: true, sessionId, created: false, interrupted: true, idleInterrupt: false };
           }
+          let reloadRequired = false;
           const result = yield* submitThreadCommand(
             threadEntry,
             settleIdleInterrupt(sessionId, command, commitInput, {
@@ -1359,12 +1350,13 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               threadEntry,
               sessionCreated: false,
               threadCreated: false,
+            }, () => {
+              reloadRequired = true;
             }),
             { ok: false, sessionId, reason: "control_busy" } as const,
           );
           if (
-            result.ok &&
-            "stale" in result &&
+            ((result.ok && "stale" in result) || reloadRequired) &&
             sessionEntry.threads.get(command.sessionThreadId) === threadEntry
           ) {
             yield* discardThreadEntryForStaleCustody(sessionEntry, threadEntry);
@@ -1401,11 +1393,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               ) {
                 return { ok: false, sessionId, reason: "control_conflict" } as const;
               }
-              const draft = ThreadLoop.toolConfirmationDraft({
-                workspaceId: command.workspaceId,
-                sessionId,
-                sessionThreadId: command.sessionThreadId,
-                runtimeInputId: command.runtimeInputId,
+              const create = ThreadLoop.toolConfirmationCreate({
                 sourceEventId: command.sourceEventId,
                 toolUseEventId: command.toolUseEventId,
                 pendingTool,
@@ -1413,9 +1401,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 ...(command.denyMessage === undefined ? {} : { denyMessage: command.denyMessage }),
               });
               const committed = yield* Effect.promise(() => commit({
-                drafts: [draft],
-                pendingToolCancellations: [],
-                sandboxExecutionToolUseEventIds: [],
+                messageCreates: [create],
               }));
               if (!committed.ok) {
                 return { ok: false, sessionId, reason: "context_load_failed" } as const;
@@ -1433,15 +1419,17 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               if (!("receipt" in committed)) {
                 return { ok: false, sessionId, reason: "control_conflict" } as const;
               }
-              const messages = ThreadLoop.applyToolConfirmationReceipt({
+              const message = ThreadLoop.applyToolConfirmationReceipt({
                 sessionId,
                 sessionThreadId: command.sessionThreadId,
                 runtimeInputId: command.runtimeInputId,
                 sourceEventId: command.sourceEventId,
-                draft,
-                existingMessages: threadResult.threadEntry.runtimeThread.state.contextManager.messages(),
+                create,
               }, committed.receipt);
-              threadResult.threadEntry.runtimeThread.state.contextManager.replaceMessages(messages);
+              threadResult.threadEntry.runtimeThread.state.contextManager.replaceMessages([
+                ...threadResult.threadEntry.runtimeThread.state.contextManager.messages(),
+                message,
+              ]);
               threadResult.threadEntry.bridgeScope = command;
               const confirmation = threadResult.threadEntry.controlQueue.resolveToolConfirmation(command);
               if (confirmation === "conflict") {
@@ -1874,39 +1862,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           return result;
         });
 
-      const interruptThread = (command: RuntimeThreadControlState): Effect.Effect<ThreadLifecycleResult> =>
-        Effect.gen(function* () {
-          const sessionEntry = sessions.get(commandSessionKey(command));
-          const threadEntry = sessionEntry?.threads.get(command.sessionThreadId);
-          if (sessionEntry === undefined || threadEntry === undefined) {
-            return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
-          }
-          threadEntry.runtimeThread.updateIdentity(controlIdentity(command));
-          const runSlot = threadEntry.runSlot;
-          if (runSlot?.ownerFiber === undefined) {
-            return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
-          }
-          yield* submitThreadCommand(
-            threadEntry,
-            Effect.sync(() => {
-              threadEntry.bridgeScope = command;
-              runSlot.stopping = true;
-              runSlot.pendingWake = false;
-            }),
-            undefined,
-          );
-          yield* Fiber.interrupt(runSlot.ownerFiber).pipe(Effect.exit, Effect.asVoid);
-          const runExit = yield* awaitRunSlot(runSlot);
-          const runExitOutcome = classifyRunExitOutcome(runExit);
-          return {
-            ok: true,
-            sessionId: command.sessionId,
-            sessionThreadId: command.sessionThreadId,
-            applied: runExitOutcome === "interrupt_applied",
-            runExitOutcome,
-          };
-        });
-
       const interruptReviewerExecution = (
         command: RuntimeThreadControlState,
         token: ReviewerExecutionToken,
@@ -2236,7 +2191,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         commitTaskNotification,
         preloadThread,
         ensureThreadInstalled,
-        interruptThread,
         interruptReviewerExecution,
         interruptControl,
         markThreadActive,

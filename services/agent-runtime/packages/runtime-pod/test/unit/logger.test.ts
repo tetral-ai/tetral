@@ -9,6 +9,7 @@ describe("Runtime Pod JSON logger", () => {
       serviceName: "agent-runtime",
       deploymentEnvironment: "test",
       serviceVersion: "unit",
+      clock: () => new Date("2026-08-08T12:34:56.789Z"),
     });
 
     logger.info({
@@ -28,6 +29,7 @@ describe("Runtime Pod JSON logger", () => {
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     expect(record).toMatchObject({
       level: "info",
+      time: "2026-08-08T12:34:56.789Z",
       "service.name": "agent-runtime",
       "deployment.environment": "test",
       "service.version": "unit",
@@ -43,6 +45,16 @@ describe("Runtime Pod JSON logger", () => {
       "request.id": "req_1",
     });
     expect(record).not.toHaveProperty("error.class");
+  });
+
+  test("logger owns the event time even when a caller supplies one", () => {
+    const lines: string[] = [];
+    const logger = createJsonLogger({
+      write: (line) => lines.push(line),
+      clock: () => new Date("2026-08-08T00:00:00.000Z"),
+    });
+    logger.info({ event: "clock_test", time: "2000-01-01T00:00:00.000Z" });
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ time: "2026-08-08T00:00:00.000Z" });
   });
 
   test("startup and shutdown failures include shared safe error fields", () => {
@@ -169,7 +181,7 @@ describe("Runtime Pod JSON logger", () => {
       sessionThreadId: "thrd_1",
       operation: "write_event",
       sourceKind: "agent.message",
-      sourceId: "rwrite_1",
+      operationId: "rwrite_1",
       declarationDigest: "digest_1",
       bindingId: "bind_1",
       bindingGeneration: 2,
@@ -198,7 +210,7 @@ describe("Runtime Pod JSON logger", () => {
     expect(records[0]).toMatchObject({
       event: "runtime_receipt_applied",
       "event.kind": "runtime_receipt_applied",
-      "declaration.source.id": "rwrite_1",
+      "operation.id": "rwrite_1",
       "declaration.digest": "digest_1",
       "receipt.application_disposition": "current_custody",
     });
@@ -207,6 +219,8 @@ describe("Runtime Pod JSON logger", () => {
       "receipt.discard_reason": "stale_custody",
     });
     expect(JSON.stringify(records)).not.toContain("prompt");
+    expect(JSON.stringify(records)).not.toContain("declaration.source.id");
+    expect(JSON.stringify(records)).not.toContain("session.thread.id");
     expect(outcomes).toEqual(["applied"]);
   });
 });

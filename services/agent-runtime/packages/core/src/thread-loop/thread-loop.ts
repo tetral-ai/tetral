@@ -37,7 +37,8 @@ import type {
   RuntimeFinishReason,
   DurableRuntimeMessage,
   RuntimeMessage,
-  RuntimeMessageDraft,
+  RuntimeAssistantPartAppend,
+  RuntimeMessageCreate,
   RuntimeInternalToolRepairStore,
   RuntimeMessageStoreError,
   RuntimeDeclarationOperationControls,
@@ -102,6 +103,7 @@ import {
   pendingSandboxExecutionToolUseEventIds,
   publicToolEventForEntry,
   registerRuntimeToolCall,
+  runtimeToolSettlement,
   runRuntimeToolEffect,
 } from "./tool-execution.js";
 import type {
@@ -142,7 +144,6 @@ import {
   requestErrorKindFromFailure,
   requestEndKindFromRequest,
   runtimeProviderStreamKindFromRequest,
-  stableReasoningParts,
 } from "./provider-request.js";
 import type {
   MemoryStorePromptEntry,
@@ -151,12 +152,13 @@ import type {
   RejectedProviderAttachment,
   SkillGuidanceIndexEntry,
 } from "./provider-request.js";
-import type { PublicToolEvent, RuntimeProcessorSource, SessionProcessorOptions, SessionProcessorResult } from "../runtime/accumulator.js";
+import type { PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorOptions, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
 import {
   ContextLoaderErrorSchema,
   DurableRuntimeMessageSchema,
   RuntimeJsonValueSchema,
   RuntimeMessageSchema,
+  RuntimeToolSettlementDeclarationSchema,
   SessionEventWriterRetryPolicy,
   isRuntimeTerminationFailure,
   normalizeContextLoaderError,
@@ -164,21 +166,25 @@ import {
   normalizeSessionEventWriterError,
   ownRuntimeDeclarationRawOperations,
 } from "../contracts/runtime.js";
-import { internalToolRepairKey, SessionProcessor } from "../runtime/accumulator.js";
+import {
+  internalToolRepairKey,
+  ProviderStreamAccumulator,
+  runtimeMcpErrorSessionEvent,
+  runtimeToolResultEvent,
+} from "../runtime/accumulator.js";
 import { toGatewayRuntimeMessages } from "../runtime/message-projection.js";
 import {
-  acceptedInputDrafts,
+  acceptedInputCreates,
   applyAcceptedInputReceipt,
   applyCompactionReceipt,
   applyInterruptInputReceipt,
+  applyInterruptToolProjections,
+  applyToolSettlementProjection,
+  applyToolSettlementReceipt,
   applyToolConfirmationReceipt,
-  compactionCheckpointDraft,
-  interruptPendingToolDeclarations,
+  compactionCheckpointCreate,
   runtimeTurnOpenWriteId,
-  runtimeOutputDraft,
-  runtimeWorkingAssistantDraft,
-  runtimeWorkingDraftForPendingTool,
-  toolConfirmationDraft,
+  toolConfirmationCreate,
 } from "../runtime/runtime-declaration.js";
 import {
   DefaultProviderCallRuntimeConfig,
@@ -203,9 +209,9 @@ import type {
 
 export {
   applyInterruptInputReceipt,
+  applyInterruptToolProjections,
   applyToolConfirmationReceipt,
-  interruptPendingToolDeclarations,
-  toolConfirmationDraft,
+  toolConfirmationCreate,
 };
 
 export interface InterpretedThreadTurnAction {
@@ -416,7 +422,7 @@ export interface ThreadLoopRuntimeOptions {
   readonly llmService: LLMServiceInterface;
   readonly storeOperationTimeoutMs: number;
   readonly maxNormalizedTextPreviewBytes?: number;
-  readonly createProcessor?: (options: SessionProcessorOptions) => SessionProcessor;
+  readonly createProcessor?: (options: ProviderStreamAccumulatorOptions) => ProviderStreamAccumulator;
   readonly providerCallRuntime?: ProviderCallRuntimeConfig;
   readonly providerCallAssembler?: ProviderCallAssembler;
   readonly compaction?: ThreadLoopCompactionOptions;
@@ -749,6 +755,11 @@ function runThreadLoopEffect(
               }),
             ));
           }
+		  if ("deferred" in committed) {
+			session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
+			acceptedContextCommitted = true;
+			continue;
+		  }
           if ("stale" in committed) {
             session.state.clear();
             return { type: "interrupted", discardHotState: true };
@@ -797,7 +808,7 @@ function runThreadLoopEffect(
             }
             const durableMessages = applyAcceptedInputReceipt(
               acceptedInput,
-              declaration.drafts,
+              declaration.messageCreates,
               declaration.result.receipt,
             );
             session.state.addPendingAttachments(declaration.result.receipt.pendingAttachmentDelta);
@@ -1259,11 +1270,11 @@ async function commitAcceptedInput(
   | {
       readonly ok: true;
       readonly result: AcceptedInputCommitResult;
-      readonly drafts: ReturnType<typeof acceptedInputDrafts>;
+      readonly messageCreates: ReturnType<typeof acceptedInputCreates>;
     }
   | { readonly ok: false; readonly error: unknown }
 > {
-  const drafts = acceptedInputDrafts(input);
+  const messageCreates = acceptedInputCreates(input);
   if (contextLoader.commitAcceptedInput === undefined) {
     return {
       ok: false,
@@ -1281,9 +1292,9 @@ async function commitAcceptedInput(
         result: await observeContextLoad(
           options,
           "commit_accepted_input",
-          () => contextLoader.commitAcceptedInput!(input, { drafts }),
+          () => contextLoader.commitAcceptedInput!(input, { messageCreates }),
         ),
-        drafts,
+        messageCreates,
       };
     } catch (error) {
       const parsed = ContextLoaderErrorSchema.safeParse(error);
@@ -1565,7 +1576,7 @@ function runOwnedCompactionSummaryAttemptEffect(
         const startAppend = yield* Effect.promise(() => appendRetriedEvent(options, session, {
           type: "span.model_request_start",
           model_request_id: request.modelRequestId,
-        }, undefined, undefined, undefined, undefined, undefined, undefined, {
+        }, undefined, undefined, undefined, undefined, undefined, {
           contextThroughMessageSequence,
           requestKind: "compaction_summary",
         }));
@@ -1709,14 +1720,10 @@ function runOwnedCompactionSummaryAttemptEffect(
               [],
               "compaction_summary",
               undefined,
-              [],
               undefined,
               undefined,
               {
                 command: interruptCommand,
-                drafts: [],
-                pendingToolCancellations: [],
-                sandboxExecutionToolUseEventIds: [],
               },
             )
           );
@@ -1767,11 +1774,7 @@ function runOwnedCompactionSummaryAttemptEffect(
             turnRetryCounters,
           ));
         }
-        const checkpointDraft = compactionCheckpointDraft({
-          workspaceId: session.identity.workspaceId,
-          sessionId: session.sessionId,
-          sessionThreadId: session.identity.sessionThreadId,
-          modelRequestId: request.modelRequestId,
+        const checkpointCreate = compactionCheckpointCreate({
           text: mintCompactionCheckpoint(summary, recentContext),
         });
         const compactionBoundarySequence = compactionBoundaryMessageSequence(messages);
@@ -1780,7 +1783,6 @@ function runOwnedCompactionSummaryAttemptEffect(
           : {
               childThreadId: prefix.childThreadId,
               parentBoundaryEventId: prefix.parentBoundaryEventId,
-              checkpointRuntimeLocalId: checkpointDraft.runtimeLocalId,
             };
         const end = yield* Effect.promise(() =>
           appendModelRequestEndEvent(
@@ -1795,9 +1797,9 @@ function runOwnedCompactionSummaryAttemptEffect(
             [],
             "compaction_summary",
             undefined,
-            [],
+            undefined,
             {
-              draft: checkpointDraft,
+              create: checkpointCreate,
               compactedThroughMessageSequence: compactionBoundarySequence,
               compactionEventPayloadJson: JSON.stringify({
                 type: "agent.thread_context_compacted",
@@ -1838,7 +1840,7 @@ function runOwnedCompactionSummaryAttemptEffect(
             modelRequestId: request.modelRequestId,
             requestEndEventId: end.eventId,
             compactedThroughMessageSequence: compactionBoundarySequence,
-            draft: checkpointDraft,
+            create: checkpointCreate,
             ...(prefixConsumption === undefined
               ? {}
               : {
@@ -1927,14 +1929,10 @@ function closeStartedCompactionForUserInterruptEffect(
         [],
         "compaction_summary",
         undefined,
-        [],
         undefined,
         undefined,
         {
           command,
-          drafts: [],
-          pendingToolCancellations: [],
-          sandboxExecutionToolUseEventIds: [],
         },
       )
     );
@@ -2063,12 +2061,6 @@ function coordinateProviderTurnEffect(
       return providerTurnInterrupted();
     }
     const source = { providerId: request.model?.providerId ?? "", modelId: request.model?.modelId ?? "" };
-    const shell = runtimeWorkingAssistantDraft({
-      workspaceId: session.identity.workspaceId,
-      sessionId: session.sessionId,
-      sessionThreadId: session.identity.sessionThreadId,
-      modelRequestId: request.modelRequestId,
-    });
     if (session.state.runtimeShutdownRequested()) {
       return providerTurnInterrupted();
     }
@@ -2095,9 +2087,9 @@ function coordinateProviderTurnEffect(
       settlementWriteController?.abort();
       settlementWriteController = undefined;
     };
-    let processor: SessionProcessor;
+    let processor: ProviderStreamAccumulator;
     try {
-      processor = (options.createProcessor ?? ((processorOptions: SessionProcessorOptions) => new SessionProcessor(processorOptions)))({
+      processor = (options.createProcessor ?? ((processorOptions: ProviderStreamAccumulatorOptions) => new ProviderStreamAccumulator(processorOptions)))({
         modelRequestId: request.modelRequestId,
         requestId: request.requestId,
         workspaceId: session.identity.workspaceId,
@@ -2106,20 +2098,22 @@ function coordinateProviderTurnEffect(
         bindingId: session.identity.bindingId,
         bindingGeneration: session.identity.bindingGeneration,
         targetPodUid: session.identity.targetPodUid,
-        message: shell,
+        durableMessages: session.state.contextManager.messages().filter((message): message is DurableRuntimeMessage => "owningEventId" in message),
         ...(options.maxNormalizedTextPreviewBytes !== undefined
           ? { maxNormalizedTextPreviewBytes: options.maxNormalizedTextPreviewBytes }
           : {}),
         now: options.runtime.now,
         writer: {
-          appendEvent: async (event, _source, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest) =>
-            await appendProcessorEvent(options, session, event, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest),
+          appendEvent: async (event, _source, declaration, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest) =>
+            await appendProcessorEvent(options, session, event, declaration, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest),
           commitInternalToolRepair: async (repair, envelope) => await commitInternalToolRepairStable(session, options, repair, envelope, processorWriteSignal()),
         },
         onInternalToolRepairCommitted: (fact) => {
+          commitProcessorProjection(session, processor);
           session.state.applyThreadTurnFact({ fact: "internal_tool_repair_committed", ...fact });
         },
         onToolResultCommitted: (fact) => {
+          commitProcessorProjection(session, processor);
           session.state.applyThreadTurnFact({ fact: "tool_result_committed", ...fact });
           session.state.clearThreadToolRoute(fact.toolUseEventId);
         },
@@ -2161,7 +2155,7 @@ function coordinateProviderTurnEffect(
     const spanStartAppend = yield* nonAbandonablePromise(() => appendRetriedEvent(options, session, {
       type: "span.model_request_start",
       model_request_id: request.modelRequestId,
-    }, undefined, undefined, undefined, undefined, undefined, undefined, {
+    }, undefined, undefined, undefined, undefined, undefined, {
       contextThroughMessageSequence: requestContextAnchorSequence,
       requestKind: runtimeProviderStreamKindFromRequest(request),
     }));
@@ -2375,7 +2369,8 @@ function coordinateProviderTurnEffect(
               "event_write_failed",
             );
           }
-          const terminalSeal = processor.requestEndSeal(true);
+          yield* Effect.promise(() => processor.awaitAssistantMembersDrained());
+          const trailingAppend = processor.requestEndAppend();
           const spanEndAppend = yield* Effect.promise(() =>
             appendModelRequestEndEvent(
               options,
@@ -2389,15 +2384,13 @@ function coordinateProviderTurnEffect(
               attachmentConsumptionUnion(request.attachments, streamState.rejectedAttachments),
               requestEndKind,
               undefined,
-              stableReasoningParts(processor),
-              undefined,
-              terminalSeal,
+              trailingAppend,
             ),
           );
           if (!spanEndAppend.ok) {
             return yield* settleToolsAfterRequestEndFailureEffect(session, processor, source, streamState, spanEndAppend.error);
           }
-          const sealApplication = applyRequestEndSeal(processor, terminalSeal, spanEndAppend);
+          const sealApplication = applyRequestEndSeal(processor, trailingAppend, spanEndAppend);
           if (sealApplication.type === "stale_custody") {
             yield* interruptAndJoinToolFibersEffect(streamState);
             return requestEndCommitted(providerTurnInterrupted(), "discard_hot_state");
@@ -2423,8 +2416,22 @@ function coordinateProviderTurnEffect(
           } else if (recordsCompactionHint) {
             session.state.clearLastRequestCompletion();
           }
-          processor.markStableReasoningDurable(processor.stableReasoningParts());
           commitProcessorProjection(session, processor);
+          if (session.state.userInterruptRequested()) {
+            return yield* settleUserInterruptAfterRequestEndEffect(
+              session,
+              options,
+              streamState,
+            );
+          }
+          if (session.state.cooperativeCancelRequested()) {
+            return yield* settleCooperativeCancellationAfterRequestEndEffect(
+              session,
+              processor,
+              source,
+              streamState,
+            );
+          }
           const toolJoin = yield* restore(
             joinToolFibersEffect(session, options, processor, source, request.modelRequestId, streamState).pipe(
               Effect.map((result) => ({ type: "joined" as const, result })),
@@ -2441,8 +2448,6 @@ function coordinateProviderTurnEffect(
                   return settleUserInterruptAfterRequestEndEffect(
                     session,
                     options,
-                    processor,
-                    source,
                     streamState,
                   ).pipe(Effect.asVoid);
                 }
@@ -2546,7 +2551,7 @@ function coordinateProviderTurnEffect(
 function processProviderEventEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   request: LLMRequest,
   modelRequestStartId: string,
@@ -2569,18 +2574,18 @@ function processProviderEventEffect(
     if (event.type === "attachment-rejections") {
       recordAttachmentRejections(request.attachments, state.rejectedAttachments, event.rejections);
     }
-    const processEvent = async (): Promise<SessionProcessorResult> => {
+    const processEvent = async (): Promise<ProviderStreamAccumulatorResult> => {
       const result = await processor.process({ ...source, event });
       if (result.ok) {
         commitProcessorProjectionWithoutStableReasoning(session, processor);
       }
       return result;
     };
-    const processed = yield* state.assistantProjectionGate.withPermit(Effect.promise(() =>
+    const processed = yield* Effect.promise(() =>
       event.type === "provider-error"
         ? state.durableOperations.run(processEvent)
         : processEvent()
-    ));
+    );
     if (!processed.ok) {
       const result = yield* Effect.promise(() => closeStartedRequestAfterProcessorFailure(
         session,
@@ -2613,7 +2618,7 @@ function processProviderEventEffect(
     }
     const terminalFailure = terminalFailureFromProcessorResult(processed);
     if (terminalFailure !== undefined) {
-      const terminalSeal = processor.requestEndSeal(false);
+      processor.discardUnreceiptedMembers();
       const spanEndAppend = yield* Effect.promise(() =>
         appendModelRequestEndEvent(
           options,
@@ -2627,15 +2632,14 @@ function processProviderEventEffect(
           request.attachments,
           requestEndKindFromRequest(request),
           undefined,
-          [],
           undefined,
-          terminalSeal,
+          undefined,
         ),
       );
       if (!spanEndAppend.ok) {
         return yield* Effect.fail(new ProviderTurnShortCircuit(providerTurnFailed(spanEndAppend.error, "event_write_failed")));
       }
-      const sealApplication = applyRequestEndSeal(processor, terminalSeal, spanEndAppend);
+      const sealApplication = applyRequestEndSeal(processor, undefined, spanEndAppend);
       if (sealApplication.type === "stale_custody") {
         yield* interruptAndJoinToolFibersEffect(state);
         return yield* Effect.fail(new ProviderTurnShortCircuit(
@@ -2708,6 +2712,14 @@ function processProviderEventEffect(
           "event_write_failed",
         )));
       }
+      const entry = state.toolEntries[job.id];
+      if (entry === undefined || !processor.reservePublicToolUse(source, job.modelToolCallId, publicToolEventForEntry(entry))) {
+        yield* Deferred.succeed(declarationBarrier, false);
+        return yield* Effect.fail(new ProviderTurnShortCircuit(providerTurnFailed(
+          pendingApprovalResumeFailure(session.sessionId, source, "registered Tool member could not reserve provider order"),
+          "event_write_failed",
+        )));
+      }
       const toolFiber = yield* coordinateRuntimeToolJobEffect(
         session,
         options,
@@ -2725,54 +2737,6 @@ function processProviderEventEffect(
   });
 }
 
-function createPendingApprovalSettlementProcessor(
-  session: ThreadRuntime,
-  options: ThreadLoopRuntimeOptions,
-  pending: RuntimeRecoveredToolJobState,
-  assistantMessage: DurableRuntimeMessage,
-  toolPart: Extract<RuntimePart, { readonly type: "tool" }>,
-  durability: {
-    readonly durableOperations: HotDurableOperationOwner;
-    readonly writeSignal: () => AbortSignal;
-  },
-): SessionProcessor {
-  const processor = (options.createProcessor ?? ((processorOptions: SessionProcessorOptions) => new SessionProcessor(processorOptions)))({
-    modelRequestId: pending.modelRequestId,
-    requestId: pending.modelRequestId,
-    workspaceId: session.identity.workspaceId,
-    sessionId: session.sessionId,
-    sessionThreadId: session.identity.sessionThreadId,
-    bindingId: session.identity.bindingId,
-    bindingGeneration: session.identity.bindingGeneration,
-    targetPodUid: session.identity.targetPodUid,
-    message: runtimeWorkingDraftForPendingTool({
-      workspaceId: session.identity.workspaceId,
-      sessionId: session.sessionId,
-      sessionThreadId: session.identity.sessionThreadId,
-      modelRequestId: pending.modelRequestId,
-      message: assistantMessage,
-      part: toolPart,
-    }),
-    ...(options.maxNormalizedTextPreviewBytes !== undefined
-      ? { maxNormalizedTextPreviewBytes: options.maxNormalizedTextPreviewBytes }
-      : {}),
-    now: options.runtime.now,
-    writer: {
-      appendEvent: async (event, _source, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest) =>
-        await appendProcessorEvent(options, session, event, output, stableReasoning, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest),
-      commitInternalToolRepair: async (repair, envelope) => await commitInternalToolRepairStable(session, options, repair, envelope, durability.writeSignal()),
-    },
-    onInternalToolRepairCommitted: (fact) => {
-      session.state.applyThreadTurnFact({ fact: "internal_tool_repair_committed", ...fact });
-    },
-    onToolResultCommitted: (fact) => {
-      session.state.applyThreadTurnFact({ fact: "tool_result_committed", ...fact });
-      session.state.clearThreadToolRoute(fact.toolUseEventId);
-    },
-  });
-  return processor;
-}
-
 type PendingApprovalResumeResult =
   | { readonly type: "none" }
   | { readonly type: "resumed" }
@@ -2782,28 +2746,21 @@ type PendingApprovalToolSettlementResult =
   | { readonly type: "settled" }
   | Extract<ProviderTurnResult, { readonly type: "interrupted" | "failed" }>;
 
-interface PendingApprovalProcessorState {
-  readonly processor: SessionProcessor;
-  readonly settlementGate: Semaphore.Semaphore;
-}
-
 function resumeRecoveredToolJobsEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
   custody: ThreadLoopRunCustody,
 ): Effect.Effect<PendingApprovalResumeResult, unknown> {
   const durableOperations = new HotDurableOperationOwner();
-  const processorWriteController = new AbortController();
-  const releaseProcessorRawOperationOwner = ownRuntimeDeclarationRawOperations(
-    processorWriteController.signal,
+  const settlementWriteController = new AbortController();
+  const releaseSettlementRawOperationOwner = ownRuntimeDeclarationRawOperations(
+    settlementWriteController.signal,
     () => durableOperations.begin(true),
   );
-  const processors = Object.create(null) as Record<string, PendingApprovalProcessorState | undefined>;
   let activeSettlementFibers: readonly Fiber.Fiber<PendingApprovalToolSettlementResult, never>[] = [];
-  const writeSignal = (): AbortSignal => processorWriteController.signal;
   const fenceWrites = (): void => {
     durableOperations.fence();
-    processorWriteController.abort();
+    settlementWriteController.abort();
   };
 
   const closeForRuntimeControl = (
@@ -2830,84 +2787,23 @@ function resumeRecoveredToolJobsEffect(
       return { type: "none" as const };
     }
 
-    const pendingGroups = Object.create(null) as Record<
-      string,
-      RuntimeRecoveredToolJobState[] | undefined
-    >;
     for (const pending of pendingJobs) {
-      const group = pendingGroups[pending.modelRequestId];
-      if (group === undefined) {
-        pendingGroups[pending.modelRequestId] = [pending];
-      } else {
-        group.push(pending);
-      }
-    }
-    for (const [modelRequestId, pendings] of Object.entries(pendingGroups)) {
-      if (pendings === undefined) {
-        continue;
-      }
-      const pendingAssistantMessage = [...pendings]
-        .map((pending) => pending.assistantMessage)
-        .sort((left, right) =>
-          right.parts.filter((part) => part.type === "tool" && part.toolUseEventId !== undefined).length -
-            left.parts.filter((part) => part.type === "tool" && part.toolUseEventId !== undefined).length ||
-          right.parts.length - left.parts.length ||
-          (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt)
-        )[0];
-      if (pendingAssistantMessage === undefined) {
-        continue;
-      }
-      const assistantMessage = DurableRuntimeMessageSchema.parse(
-        session.state.contextManager.messages().find((message) => message.id === pendingAssistantMessage.id) ??
-          pendingAssistantMessage,
-      );
-      if (pendings.some((pending) =>
-        pending.assistantMessage.id !== assistantMessage.id ||
-        pending.assistantMessage.owningEventId !== assistantMessage.owningEventId
-      )) {
-        return pendingApprovalResumeFailed(pendingApprovalResumeFailure(
-          session.sessionId,
-          pendings[0]!.source,
-          "pending approvals for one model request do not share a durable assistant message",
-        ));
-      }
-      const first = pendings[0]!;
-      const firstDescriptor = findPendingApprovalSettlementDescriptor(
-        [assistantMessage],
-        first.job.modelToolCallId,
-        first.toolUseEventId,
-      );
-      if (firstDescriptor === undefined) {
-        return pendingApprovalResumeFailed(pendingApprovalResumeFailure(
-          session.sessionId,
-          first.source,
-          "pending approval processor is missing its durable tool part",
-        ));
-      }
-      const processor = createPendingApprovalSettlementProcessor(
-        session,
-        options,
-        first,
-        assistantMessage,
-        firstDescriptor.part,
-        { durableOperations, writeSignal },
-      );
-      const settlementGate = Semaphore.makeUnsafe(1);
-      for (const pending of pendings) {
-        const descriptor = findPendingApprovalSettlementDescriptor(
-          [assistantMessage],
+      const currentAssistant = session.state.contextManager.message(pending.assistantMessage.id);
+      if (
+        currentAssistant === undefined ||
+        !("owningEventId" in currentAssistant) ||
+        currentAssistant.owningEventId !== pending.assistantMessage.owningEventId ||
+        findPendingApprovalSettlementDescriptor(
+          [currentAssistant],
           pending.job.modelToolCallId,
           pending.toolUseEventId,
-        );
-        if (descriptor === undefined) {
-          return pendingApprovalResumeFailed(pendingApprovalResumeFailure(
-            session.sessionId,
-            pending.source,
-            "pending approval processor is missing a durable tool part",
-          ));
-        }
-        processor.hydratePendingToolUse(assistantMessage, descriptor.part);
-        processors[pending.toolUseEventId] = { processor, settlementGate };
+        ) === undefined
+      ) {
+        return pendingApprovalResumeFailed(pendingApprovalResumeFailure(
+          session.sessionId,
+          pending.source,
+          "pending Tool settlement target is absent from the resident durable turn",
+        ));
       }
     }
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
@@ -2952,15 +2848,11 @@ function resumeRecoveredToolJobsEffect(
         if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
           return yield* closeForRuntimeControl([]);
         }
-        const processor = processors[pending.toolUseEventId]?.processor;
-        if (processor === undefined) {
-          return pendingApprovalResumeFailed(pendingApprovalResumeFailure(session.sessionId, pending.source, "pending approval processor missing"));
-        }
         const denied = yield* Effect.promise(() => durableOperations.run(
-          () => commitRuntimeToolSettlement(processor, pending.source, pending.job.modelToolCallId, {
+          () => commitRecoveredToolSettlement(session, options, pending, {
             type: "error",
             error: deniedToolCallFailure(session.sessionId, pending.source, confirmation.denyMessage ?? "The user denied this tool call."),
-          }, () => commitProcessorProjection(session, processor)),
+          }),
         ));
         if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
           return yield* closeForRuntimeControl([]);
@@ -3017,25 +2909,14 @@ function resumeRecoveredToolJobsEffect(
             return yield* closeForRuntimeControl(active.map(({ fiber }) => fiber));
           }
           const pending = statesByJobId[job.id];
-          const processor = pending === undefined ? undefined : processors[pending.toolUseEventId]?.processor;
-          if (pending === undefined || processor === undefined) {
+          if (pending === undefined) {
             return pendingApprovalResumeFailed(pendingApprovalResumeFailure(session.sessionId, { providerId: "unknown", modelId: "unknown" }, "approved tool job state missing"));
-          }
-          const settlementGate = processors[pending.toolUseEventId]?.settlementGate;
-          if (settlementGate === undefined) {
-            return pendingApprovalResumeFailed(pendingApprovalResumeFailure(
-              session.sessionId,
-              pending.source,
-              "approved tool settlement gate is missing",
-            ));
           }
           const fiber = yield* resumeRecoveredToolJobEffect(
             session,
             options,
             pending,
-            processor,
             durableOperations,
-            settlementGate,
           ).pipe(
             Effect.forkIn(batchScope),
           );
@@ -3085,7 +2966,7 @@ function resumeRecoveredToolJobsEffect(
       Effect.sync(fenceWrites).pipe(
         Effect.andThen(Effect.promise(() => durableOperations.awaitIdle())),
         Effect.andThen(Effect.sync(() => {
-          releaseProcessorRawOperationOwner();
+          releaseSettlementRawOperationOwner();
         })),
       ),
     ),
@@ -3106,9 +2987,7 @@ function resumeRecoveredToolJobEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
   pending: RuntimeRecoveredToolJobState,
-  processor: SessionProcessor,
   durableOperations: HotDurableOperationOwner,
-  settlementGate: Semaphore.Semaphore,
 ): Effect.Effect<PendingApprovalToolSettlementResult, never> {
   return session.toolCoordinator.withPermit(pending.job.runPolicy, Effect.gen(function* () {
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
@@ -3195,15 +3074,9 @@ function resumeRecoveredToolJobEffect(
     if (session.state.runtimeShutdownRequested() || session.state.userInterruptRequested()) {
       return { type: "interrupted" as const };
     }
-    const settlement = yield* settlementGate.withPermit(Effect.gen(function* () {
+    const settlement = yield* Effect.gen(function* () {
       const settled = yield* Effect.promise(() => durableOperations.run(
-        () => commitRuntimeToolSettlement(
-          processor,
-          pending.source,
-          pending.job.modelToolCallId,
-          executionResult,
-          () => commitProcessorProjection(session, processor),
-        ),
+        () => commitRecoveredToolSettlement(session, options, pending, executionResult),
       ));
       if (!settled.ok) {
         return { ok: false as const, error: settled.error };
@@ -3215,7 +3088,7 @@ function resumeRecoveredToolJobEffect(
         runtimeMetrics(options).addPendingApprovals(-1);
       }
       return { ok: true as const };
-    }));
+    });
     if (!settlement.ok) {
       return yield* Effect.promise(() => handleProcessorFailure(session, options, settlement.error));
     }
@@ -3235,10 +3108,107 @@ function resumeRecoveredToolJobEffect(
   }));
 }
 
+/** Settles one recovered Tool by durable target identity through the resident turn owner. */
+async function commitRecoveredToolSettlement(
+  session: ThreadRuntime,
+  options: ThreadLoopRuntimeOptions,
+  pending: RuntimeRecoveredToolJobState,
+  executionResult: Exclude<RuntimeToolExecutionResult, { readonly type: "stale_custody" }>,
+): Promise<ProviderStreamAccumulatorResult> {
+  const settlement = runtimeToolSettlement(executionResult);
+  const event = runtimeToolResultEvent(
+    pending.toolUseEventId,
+    publicToolEventForEntry(pending.entry),
+    settlement,
+  );
+  const declaration = RuntimeToolSettlementDeclarationSchema.parse({
+    toolUseEventId: pending.toolUseEventId,
+    outcome: settlement,
+  });
+  const result = await appendProcessorEvent(
+    options,
+    session,
+    event,
+    { toolSettlement: declaration },
+    pending.modelRequestId,
+    settlement.type === "completed" || settlement.type === "error" ? settlement.serverToolUse : undefined,
+    settlement.type === "completed" || settlement.type === "error" ? settlement.mcpMaterializationHandle : undefined,
+    settlement.sandboxResultDigest,
+  );
+  if (!result.ok) {
+    return { ok: false, events: [], error: runtimeFailureFromEventWriter(result.error) };
+  }
+  if (result.declaration?.applicationDisposition !== "current_custody") {
+    return {
+      ok: false,
+      events: [],
+      error: normalizeRuntimeFailure({
+        type: "runtime",
+        code: "runtime_invalid_sequence",
+        retryable: false,
+        fatal: true,
+        reason: "runtime_contract_validation",
+        sessionId: session.sessionId,
+      }),
+    };
+  }
+  try {
+    applyToolSettlementReceipt({
+      sessionThreadId: session.identity.sessionThreadId,
+      operationKind: "write_event",
+      sourceKind: event.type,
+      operationId: result.writeId,
+      eventId: result.eventId,
+      settlement: declaration,
+    }, result.declaration.receipt);
+    const messages = applyToolSettlementProjection(
+      session.state.contextManager.messages(),
+      pending.toolUseEventId,
+      settlement,
+      result.processedAt,
+    );
+    session.state.contextManager.replaceMessages(messages);
+    session.state.applyThreadTurnFact({
+      fact: "tool_result_committed",
+      eventId: result.eventId,
+      toolUseEventId: pending.toolUseEventId,
+      outcome: settlement.type === "completed" ? "success" : settlement.type,
+    });
+    session.state.clearThreadToolRoute(pending.toolUseEventId);
+  } catch (error) {
+    return {
+      ok: false,
+      events: [],
+      error: normalizeRuntimeFailure({
+        type: "runtime",
+        code: "runtime_invalid_sequence",
+        rawError: error,
+        retryable: false,
+        fatal: true,
+        reason: "runtime_contract_validation",
+        sessionId: session.sessionId,
+      }),
+    };
+  }
+  const committed: ProviderStreamAccumulatorResult = {
+    ok: true,
+    events: [event],
+    durableEventIds: [result.eventId],
+  };
+  if (settlement.type !== "error" || settlement.publicErrorEvent === undefined) {
+    return committed;
+  }
+  const publicError = runtimeMcpErrorSessionEvent(settlement.publicErrorEvent);
+  const publicErrorResult = await appendProcessorEvent(options, session, publicError);
+  return publicErrorResult.ok
+    ? { ...committed, events: [...committed.events, publicError] }
+    : { ok: false, events: committed.events, error: runtimeFailureFromEventWriter(publicErrorResult.error) };
+}
+
 function joinToolFibersEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   modelRequestId: string,
   state: ProviderTurnStreamState,
@@ -3262,7 +3232,7 @@ function joinToolFibersEffect(
 
 function settleToolsAfterRequestEndFailureEffect(
   session: ThreadRuntime,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   state: ProviderTurnStreamState,
   failure: RuntimeFailure,
@@ -3296,7 +3266,7 @@ function settleToolsAfterRequestEndFailureEffect(
 function coordinateRuntimeToolJobEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   modelRequestId: string,
   state: ProviderTurnStreamState,
@@ -3399,30 +3369,42 @@ function coordinateRuntimeToolJobEffect(
       return providerTurnCompleted();
     }
 
-    const toolUse = yield* state.assistantProjectionGate.withPermit(Effect.promise(async () => {
-      const result = await state.durableOperations.run(
-        () => processor.commitPublicToolUse(source, job.modelToolCallId, job.input, gateDecision.evaluatedPermission, publicToolEventForEntry(entry)),
-      );
-      if (result.ok) {
+    const toolUse = yield* Effect.promise(() => state.durableOperations.run(
+      () => processor.commitPublicToolUse(
+        source,
+        job.modelToolCallId,
+        job.input,
+        gateDecision.evaluatedPermission,
+        publicToolEventForEntry(entry),
+      ).then((result) => {
+        if (!result.ok) return result;
         commitProcessorProjectionWithoutStableReasoning(session, processor);
-      }
-      return result;
-    }));
+        const toolUseReduction = session.state.applyThreadTurnFact({
+          fact: "tool_use_committed",
+          eventId: result.toolUseEventId,
+          modelRequestId,
+          modelToolCallId: job.modelToolCallId,
+          toolName: job.name,
+        });
+        const toolUseAction = interpretThreadTurnAction(toolUseReduction.action).action;
+        const dispatchAuthorized = toolUseAction.action === "dispatch_tool_use" &&
+          toolUseAction.toolUseEventId === result.toolUseEventId;
+        if (dispatchAuthorized) {
+          session.state.recordThreadToolRoute(
+            result.toolUseEventId,
+            gateDecision.type === "ask" || gateDecision.type === "review_required"
+              ? "requires_user_action"
+              : "hot_execution",
+          );
+          session.state.consumeThreadTurnEdge();
+        }
+        return { ...result, dispatchAuthorized };
+      }),
+    ));
     if (!toolUse.ok) {
       return yield* Effect.promise(() => handleProcessorFailure(session, options, toolUse.error));
     }
-    const toolUseReduction = session.state.applyThreadTurnFact({
-      fact: "tool_use_committed",
-      eventId: toolUse.toolUseEventId,
-      modelRequestId,
-      modelToolCallId: job.modelToolCallId,
-      toolName: job.name,
-    });
-    const toolUseAction = interpretThreadTurnAction(toolUseReduction.action).action;
-    if (
-      toolUseAction.action !== "dispatch_tool_use" ||
-      toolUseAction.toolUseEventId !== toolUse.toolUseEventId
-    ) {
+    if (!toolUse.dispatchAuthorized) {
       return yield* Effect.promise(() => handleProcessorFailure(
         session,
         options,
@@ -3433,13 +3415,6 @@ function coordinateRuntimeToolJobEffect(
         ),
       ));
     }
-    session.state.recordThreadToolRoute(
-      toolUse.toolUseEventId,
-      gateDecision.type === "ask" || gateDecision.type === "review_required"
-        ? "requires_user_action"
-        : "hot_execution",
-    );
-    session.state.consumeThreadTurnEdge();
     const declarationBarrier = state.toolDeclarationBarriers[job.id];
     if (declarationBarrier !== undefined) {
       yield* Deferred.succeed(declarationBarrier, true);
@@ -3687,7 +3662,7 @@ type RuntimeBindingTokenRefreshResult =
 function handleProviderStreamExhaustedEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   request: LLMRequest,
   modelRequestStartId: string,
@@ -3737,7 +3712,7 @@ function handleProviderStreamExhaustedEffect(
 function closeProviderFailureEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   request: LLMRequest,
   modelRequestStartId: string,
@@ -3749,7 +3724,7 @@ function closeProviderFailureEffect(
 ): Effect.Effect<ProviderTurnResult, unknown> {
   return Effect.gen(function* () {
     const plan = providerRequestReschedulePlan(session, options, counters, "provider", failure, state.executionPolicy);
-    const terminalSeal = processor.requestEndSeal(false);
+    processor.discardUnreceiptedMembers();
     const requestEnd = yield* Effect.promise(() => appendModelRequestEndEvent(
       options,
       session,
@@ -3762,14 +3737,12 @@ function closeProviderFailureEffect(
       request.attachments,
       requestEndKindFromRequest(request),
       plan.type === "proposed" ? plan.reschedule : undefined,
-      [],
       undefined,
-      terminalSeal,
     ));
     if (!requestEnd.ok) {
       return providerTurnFailed(requestEnd.error, "event_write_failed");
     }
-    const sealApplication = applyRequestEndSeal(processor, terminalSeal, requestEnd);
+    const sealApplication = applyRequestEndSeal(processor, undefined, requestEnd);
     if (sealApplication.type === "stale_custody") {
       yield* interruptAndJoinToolFibersEffect(state);
       return requestEndCommitted(providerTurnInterrupted(), "discard_hot_state");
@@ -3830,7 +3803,7 @@ function closeProviderFailureEffect(
 
 function settleProviderErrorToolsEffect(
   session: ThreadRuntime,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   state: ProviderTurnStreamState,
 ): Effect.Effect<ProviderTurnResult | undefined, never> {
@@ -3968,7 +3941,7 @@ function settleUnstartedUserInterruptEffect(
 function settleRuntimeShutdownEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   modelRequestStartId: string | undefined,
   modelRequestId: string | undefined,
@@ -4003,14 +3976,8 @@ function settleRuntimeShutdownEffect(
           sessionId: session.sessionId,
         }));
       }
-      let settlement;
       try {
-        settlement = processor.prepareInterruptSettlement(
-          command,
-          failure,
-          new Set(session.state.pendingApprovalToolJobs().map((pending) => pending.toolUseEventId)),
-          new Set(session.state.pendingSandboxExecutionJobs().map((pending) => pending.toolUseEventId)),
-        );
+        processor.prepareInterruptSettlement(command, failure);
       } catch (error) {
         return yield* failRequestCloseout(normalizeRuntimeFailure({
           type: "runtime",
@@ -4035,14 +4002,10 @@ function settleRuntimeShutdownEffect(
           consumedAttachments,
           requestEndKindForSession(session),
           undefined,
-          [],
           undefined,
-          settlement.terminalAssistantSeal,
+          undefined,
           {
             command,
-            drafts: settlement.drafts,
-            pendingToolCancellations: settlement.pendingToolCancellations,
-            sandboxExecutionToolUseEventIds: settlement.sandboxExecutionToolUseEventIds,
           },
         )
       );
@@ -4051,15 +4014,15 @@ function settleRuntimeShutdownEffect(
           ok: false,
           retryable: spanEndAppend.error.retryable,
           errorCode: spanEndAppend.error.code,
-        }, settlement);
+        }, { messageCreates: [] });
         return yield* failRequestCloseout(spanEndAppend.error);
       }
-      const sealApplication = applyRequestEndSeal(processor, settlement.terminalAssistantSeal, spanEndAppend);
+      const sealApplication = applyRequestEndSeal(processor, undefined, spanEndAppend);
       if (sealApplication.type === "stale_custody") {
         if (!session.state.recordJoinedUserInterruptResult(
           command.runtimeInputId,
           { ok: true, stale: true },
-          settlement,
+          { messageCreates: [] },
         )) {
           return yield* failRequestCloseout(normalizeRuntimeFailure({
             type: "runtime",
@@ -4079,7 +4042,7 @@ function settleRuntimeShutdownEffect(
         (receipt) =>
           receipt.operationKind === "commit_inputs" &&
           receipt.sourceKind === "interrupt_control" &&
-          receipt.sourceId === command.runtimeInputId,
+          receipt.operationId === command.runtimeInputId,
       );
       if (interruptReceipt === undefined) {
         return yield* failRequestCloseout(normalizeRuntimeFailure({
@@ -4092,10 +4055,8 @@ function settleRuntimeShutdownEffect(
         }));
       }
       try {
-        processor.applyInterruptSettlement(command, settlement, interruptReceipt);
-        const interruptEventId = interruptReceipt.events.find((event) =>
-          command.eventIds.includes(event.sourceEventId)
-        )?.eventId;
+        processor.applyInterruptSettlement(command, interruptReceipt);
+        const interruptEventId = interruptReceipt.events[0]?.eventId;
         if (interruptEventId === undefined) {
           throw new Error("Interrupt receipt has no durable source event identity");
         }
@@ -4114,10 +4075,21 @@ function settleRuntimeShutdownEffect(
           sessionId: session.sessionId,
         }));
       }
+      const requestSealFailure = reconcileRequestEndTurn(
+        session,
+        spanEndAppend.eventId,
+        modelRequestId,
+        true,
+        "runtime_interrupted",
+        false,
+      );
+      if (requestSealFailure !== undefined) {
+        return yield* failRequestCloseout(requestSealFailure);
+      }
       if (!session.state.recordJoinedUserInterruptResult(
         command.runtimeInputId,
         { ok: true, joined: true },
-        settlement,
+        { messageCreates: [] },
       )) {
         return yield* failRequestCloseout(normalizeRuntimeFailure({
           type: "runtime",
@@ -4128,12 +4100,7 @@ function settleRuntimeShutdownEffect(
           sessionId: session.sessionId,
         }));
       }
-      releaseInterruptedPendingTools(
-        session,
-        options,
-        settlement.pendingToolCancellations,
-        settlement.sandboxExecutionToolUseEventIds,
-      );
+      releaseInterruptedPendingTools(session, options, interruptReceipt.interruptToolProjections.map((projection) => projection.toolUseEventId));
       committedRequestEnd = true;
     }
     commitProcessorProjectionWithoutStableReasoning(session, processor);
@@ -4155,7 +4122,7 @@ function settleRuntimeShutdownEffect(
 function settleCooperativeCancellationEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   modelRequestStartId: string,
   modelRequestId: string,
@@ -4173,11 +4140,7 @@ function settleCooperativeCancellationEffect(
     yield* Effect.promise(() => durableOperations.awaitIdle());
     const cancelled = yield* Effect.sync(beginSettlementWrites).pipe(
       Effect.andThen(Effect.promise(() => durableOperations.run(
-        () => processor.cancel(
-          source,
-          cooperativeCancellationFailure(session.sessionId, source),
-          pendingSandboxExecutionToolUseEventIds(session),
-        ),
+        () => processor.cancel(source, cooperativeCancellationFailure(session.sessionId, source)),
         true,
       ))),
       Effect.ensuring(Effect.sync(endSettlementWrites)),
@@ -4186,7 +4149,7 @@ function settleCooperativeCancellationEffect(
     if (!cancelled.ok) {
       return yield* failRequestCloseout(cancelled.error);
     }
-    const terminalSeal = processor.requestEndSeal(false);
+    processor.discardUnreceiptedMembers();
     const requestEnd = yield* Effect.promise(() => appendModelRequestEndEvent(
       options,
       session,
@@ -4199,14 +4162,12 @@ function settleCooperativeCancellationEffect(
       consumedAttachments,
       requestEndKindForSession(session),
       undefined,
-      [],
       undefined,
-      terminalSeal,
     ));
     if (!requestEnd.ok) {
       return yield* failRequestCloseout(requestEnd.error);
     }
-    const sealApplication = applyRequestEndSeal(processor, terminalSeal, requestEnd);
+    const sealApplication = applyRequestEndSeal(processor, undefined, requestEnd);
     if (sealApplication.type === "stale_custody") {
       return requestEndCommitted(providerTurnInterrupted(), "discard_hot_state");
     }
@@ -4223,7 +4184,7 @@ function settleCooperativeCancellationEffect(
 
 function settleCooperativeCancellationAfterRequestEndEffect(
   session: ThreadRuntime,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   streamState: ProviderTurnStreamState,
 ): Effect.Effect<ProviderTurnResult, unknown> {
@@ -4251,47 +4212,17 @@ function settleCooperativeCancellationAfterRequestEndEffect(
 function settleUserInterruptAfterRequestEndEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
-  source: RuntimeProcessorSource,
   streamState: ProviderTurnStreamState,
 ): Effect.Effect<ProviderTurnResult, unknown> {
   return Effect.gen(function* () {
     yield* interruptAndJoinToolFibersEffect(streamState);
     yield* Effect.promise(() => streamState.durableOperations.awaitIdle());
-    const failure = userInterruptFailure(session.sessionId, source);
-    let declaration;
-    const command = session.state.userInterruptCommand();
-    if (command === undefined) {
-      return yield* failRequestCloseout(normalizeRuntimeFailure({
-        type: "runtime",
-        code: "runtime_invalid_sequence",
-        retryable: true,
-        fatal: false,
-        reason: "runtime_contract_validation",
-        sessionId: session.sessionId,
-      }));
-    }
-    try {
-      declaration = processor.prepareInterruptToolDeclarations(
-        command,
-        failure,
-        new Set(session.state.pendingApprovalToolJobs().map((pending) => pending.toolUseEventId)),
-        new Set(session.state.pendingSandboxExecutionJobs().map((pending) => pending.toolUseEventId)),
-      );
-    } catch (error) {
-      return yield* failRequestCloseout(normalizeRuntimeFailure({
-        type: "runtime",
-        code: "runtime_invalid_sequence",
-        rawError: error,
-        retryable: false,
-        fatal: true,
-        reason: "runtime_contract_validation",
-        sessionId: session.sessionId,
-      }));
-    }
     session.state.markUserInterruptCloseoutEligible();
-    const interruptFence = yield* settleUserInterruptFenceEffect(session, options, declaration);
+    const interruptFence = yield* settleUserInterruptFenceEffect(session, options);
     if (!interruptFence.ok) {
+      // Request End already consumed this ride at Bridge; a later control-fence
+      // failure cannot put those attachment origins back into the hot queue.
+      session.state.settlePendingAttachmentRide();
       return yield* failRequestCloseout(interruptFence.error);
     }
     if ("stale" in interruptFence) {
@@ -4304,14 +4235,6 @@ function settleUserInterruptAfterRequestEndEffect(
 function settleUserInterruptFenceEffect(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  frozenDeclaration?: {
-    readonly drafts: readonly RuntimeMessageDraft[];
-    readonly pendingToolCancellations: readonly {
-      readonly toolUseEventId: string;
-      readonly runtimeLocalId: string;
-    }[];
-    readonly sandboxExecutionToolUseEventIds: readonly string[];
-  },
 ): Effect.Effect<
   | { readonly ok: true }
   | { readonly ok: true; readonly stale: true }
@@ -4339,67 +4262,11 @@ function settleUserInterruptFenceEffect(
     if (session.state.userInterruptReceiptApplied()) {
       return { ok: true };
     }
-    let declaration = frozenDeclaration;
-    if (declaration === undefined) {
-      if (command.eventIds.length !== 1) {
-        return {
-          ok: false,
-          error: normalizeRuntimeFailure({
-            type: "runtime",
-            code: "runtime_invalid_sequence",
-            retryable: false,
-            fatal: true,
-            reason: "runtime_contract_validation",
-            sessionId: session.sessionId,
-          }),
-        };
-      }
-      const pendingTools = session.state.pendingApprovalToolJobs();
-      const pendingSandboxExecutions = session.state.pendingSandboxExecutionJobs();
-      const source = pendingTools[0]?.source;
-      const failure = source === undefined
-        ? normalizeRuntimeFailure({
-            type: "runtime",
-            code: "runtime_invalid_sequence",
-            retryable: false,
-            fatal: false,
-            reason: "aborted",
-            retryStatus: { type: "terminal" },
-            sessionId: session.sessionId,
-          })
-        : userInterruptFailure(session.sessionId, source);
-      try {
-        declaration = interruptPendingToolDeclarations({
-          workspaceId: session.identity.workspaceId,
-          sessionId: session.sessionId,
-          sessionThreadId: session.identity.sessionThreadId,
-          runtimeInputId: command.runtimeInputId,
-          sourceEventId: command.eventIds[0]!,
-          pendingTools,
-          pendingSandboxExecutions,
-          failure,
-          completedAt: options.runtime.now(),
-        });
-      } catch (error) {
-        return {
-          ok: false,
-          error: normalizeRuntimeFailure({
-            type: "runtime",
-            code: "runtime_invalid_sequence",
-            rawError: error,
-            retryable: false,
-            fatal: true,
-            reason: "runtime_contract_validation",
-            sessionId: session.sessionId,
-          }),
-        };
-      }
-    }
+    const declaration = { messageCreates: [] } as const;
     let committed;
     try {
       const application = await session.state.commitUserInterruptInput(declaration);
       committed = application.result;
-      declaration = application.declaration;
     } catch (error) {
       return {
         ok: false,
@@ -4432,20 +4299,21 @@ function settleUserInterruptFenceEffect(
     }
     if ("receipt" in committed) {
       try {
-        const messages = applyInterruptInputReceipt({
-          sessionId: session.sessionId,
+        const expectedToolUseEventIds = unfinishedToolUseEventIds(
+          session.state.contextManager.messages(),
+        );
+        const projections = applyInterruptInputReceipt({
           sessionThreadId: session.identity.sessionThreadId,
           runtimeInputId: command.runtimeInputId,
           eventIds: command.eventIds,
-          drafts: declaration.drafts,
-      pendingToolCancellations: declaration.pendingToolCancellations,
-      sandboxExecutionToolUseEventIds: declaration.sandboxExecutionToolUseEventIds,
-          existingMessages: session.state.contextManager.messages(),
+          expectedToolUseEventIds,
         }, committed.receipt);
+        const messages = applyInterruptToolProjections(
+          session.state.contextManager.messages(),
+          projections,
+        );
         session.state.contextManager.replaceMessages(messages);
-        const interruptEventId = committed.receipt.events.find((event) =>
-          command.eventIds.includes(event.sourceEventId)
-        )?.eventId;
+        const interruptEventId = committed.receipt.events[0]?.eventId;
         if (interruptEventId === undefined) {
           throw new Error("Interrupt receipt has no durable source event identity");
         }
@@ -4470,8 +4338,7 @@ function settleUserInterruptFenceEffect(
       releaseInterruptedPendingTools(
         session,
         options,
-        declaration.pendingToolCancellations,
-        declaration.sandboxExecutionToolUseEventIds,
+        committed.receipt.interruptToolProjections.map((projection) => projection.toolUseEventId),
       );
       session.state.markUserInterruptReceiptApplied();
     }
@@ -4482,23 +4349,36 @@ function settleUserInterruptFenceEffect(
 function releaseInterruptedPendingTools(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  cancellations: readonly { readonly toolUseEventId: string }[],
-  sandboxExecutionToolUseEventIds: readonly string[],
+  toolUseEventIds: readonly string[],
 ): void {
-  for (const cancellation of cancellations) {
+  for (const toolUseEventId of toolUseEventIds) {
     if (
       session.state.pendingApprovalToolJobs()
-        .some((pending) => pending.toolUseEventId === cancellation.toolUseEventId)
+        .some((pending) => pending.toolUseEventId === toolUseEventId)
     ) {
-      session.state.removePendingApprovalToolJob(cancellation.toolUseEventId);
+      session.state.removePendingApprovalToolJob(toolUseEventId);
       runtimeMetrics(options).addPendingApprovals(-1);
     }
-    session.state.clearThreadToolRoute(cancellation.toolUseEventId);
-  }
-  for (const toolUseEventId of sandboxExecutionToolUseEventIds) {
     session.state.removePendingSandboxExecutionJob(toolUseEventId);
     session.state.clearThreadToolRoute(toolUseEventId);
   }
+}
+
+function unfinishedToolUseEventIds(messages: readonly RuntimeMessage[]): readonly string[] {
+  return messages.flatMap((message) => message.parts.flatMap((part) => {
+    if (
+      part.type !== "tool" ||
+      part.toolUseEventId === undefined ||
+      part.state.status === "completed" ||
+      part.state.status === "error" ||
+      part.state.status === "cancelled"
+    ) {
+      return [];
+    }
+    return [{ toolUseEventId: part.toolUseEventId, sequence: part.sequence }];
+  }))
+    .sort((left, right) => left.sequence - right.sequence)
+    .map((entry) => entry.toolUseEventId);
 }
 
 function interruptAndJoinToolFibersEffect(state: ProviderTurnStreamState): Effect.Effect<void, never> {
@@ -4579,7 +4459,7 @@ async function handleProcessorFailure(
 async function closeStartedRequestAfterProcessorFailure(
   session: ThreadRuntime,
   options: ThreadLoopRuntimeOptions,
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   modelRequestId: string,
   modelRequestStartId: string,
   failure: RuntimeFailure,
@@ -4587,7 +4467,7 @@ async function closeStartedRequestAfterProcessorFailure(
   consumedAttachments: readonly ProviderRequestAttachment[],
   requestKind: SessionEventWriterRequestEndEnvelope["requestKind"],
 ): Promise<ProviderTurnResult> {
-  const terminalSeal = processor.requestEndFailureSeal(failure);
+  processor.discardUnreceiptedMembers();
   const requestEnd = await appendModelRequestEndEvent(
     options,
     session,
@@ -4600,14 +4480,12 @@ async function closeStartedRequestAfterProcessorFailure(
     consumedAttachments,
     requestKind,
     undefined,
-    [],
     undefined,
-    terminalSeal,
   );
   if (!requestEnd.ok) {
     return providerTurnFailed(requestEnd.error, "event_write_failed");
   }
-  const sealApplication = applyRequestEndSeal(processor, terminalSeal, requestEnd);
+  const sealApplication = applyRequestEndSeal(processor, undefined, requestEnd);
   if (sealApplication.type === "stale_custody") {
     return requestEndCommitted(providerTurnInterrupted(), "discard_hot_state");
   }
@@ -4679,22 +4557,15 @@ async function appendModelRequestEndEvent(
   consumedAttachments: readonly ProviderRequestAttachment[] = [],
   requestKind?: NonNullable<SessionEventWriterRequestEndEnvelope["requestKind"]>,
   reschedule?: NonNullable<SessionEventWriterRequestEndEnvelope["reschedule"]>,
-  stableReasoningParts: NonNullable<SessionEventWriterRequestEndEnvelope["stableReasoningParts"]> = [],
+  trailingPartAppend?: RuntimeAssistantPartAppend,
   compaction?: {
-    readonly draft: RuntimeMessageDraft;
+    readonly create: RuntimeMessageCreate;
     readonly compactedThroughMessageSequence: number;
     readonly compactionEventPayloadJson: string;
     readonly prefixConsumption?: NonNullable<SessionEventWriterRequestEndEnvelope["prefixConsumption"]>;
   },
-  terminalAssistantSeal?: RuntimeMessageDraft,
   interrupt?: {
     readonly command: NonNullable<ReturnType<ThreadRuntime["state"]["userInterruptCommand"]>>;
-    readonly drafts: readonly RuntimeMessageDraft[];
-    readonly pendingToolCancellations: readonly {
-      readonly toolUseEventId: string;
-      readonly runtimeLocalId: string;
-    }[];
-    readonly sandboxExecutionToolUseEventIds: readonly string[];
   },
 ): Promise<
   | {
@@ -4702,6 +4573,11 @@ async function appendModelRequestEndEvent(
       readonly eventId: string;
       readonly declaration?: NonNullable<SessionEventWriterAppendResult & { readonly ok: true }>["declaration"];
       readonly rescheduleDisposition?: ProviderRequestRescheduleDisposition;
+      readonly assistantSeal: {
+        readonly status: "completed" | "failed";
+        readonly finishReason: RuntimeFinishReason;
+        readonly usage?: RuntimeUsage | undefined;
+      };
     }
   | { readonly ok: false; readonly error: RuntimeFailure }
 > {
@@ -4718,11 +4594,6 @@ async function appendModelRequestEndEvent(
           fileId: attachment.fileBacked.fileId,
       }]
   );
-  const primaryDrafts = compaction === undefined
-    ? terminalAssistantSeal === undefined
-      ? []
-      : [terminalAssistantSeal]
-    : [compaction.draft];
   const envelope: SessionEventWriterRequestEndEnvelope = {
     requestId: writeId,
     workspaceId: session.identity.workspaceId,
@@ -4742,17 +4613,13 @@ async function appendModelRequestEndEvent(
     ...(consumedAttachmentRefs.length > 0 ? { consumedAttachmentRefs: [...consumedAttachmentRefs] } : {}),
     ...(consumedFileAttachments.length > 0 ? { consumedFileAttachments } : {}),
     ...(reschedule !== undefined ? { reschedule } : {}),
-    ...(stableReasoningParts.length > 0 ? { stableReasoningParts: [...stableReasoningParts] } : {}),
-    ...(
-      primaryDrafts.length === 0 && (interrupt?.drafts.length ?? 0) === 0
-        ? {}
-        : { drafts: [...primaryDrafts, ...(interrupt?.drafts ?? [])] }
-    ),
+    ...(trailingPartAppend === undefined ? {} : { trailingPartAppend }),
     ...(compaction === undefined
       ? {}
       : {
           compactedThroughMessageSequence: compaction.compactedThroughMessageSequence,
           compactionEventPayloadJson: compaction.compactionEventPayloadJson,
+          compactionCheckpointCreate: compaction.create,
           ...(compaction.prefixConsumption === undefined
             ? {}
             : { prefixConsumption: compaction.prefixConsumption }),
@@ -4765,8 +4632,6 @@ async function appendModelRequestEndEvent(
             eventIds: [...interrupt.command.eventIds],
             sequenceFrom: interrupt.command.sequenceFrom,
             sequenceTo: interrupt.command.sequenceTo,
-            pendingToolCancellations: [...interrupt.pendingToolCancellations],
-            sandboxExecutionToolUseEventIds: [...interrupt.sandboxExecutionToolUseEventIds],
           },
         }),
   };
@@ -4774,36 +4639,68 @@ async function appendModelRequestEndEvent(
   if (!result.ok) {
     return { ok: false, error: runtimeFailureFromEventWriter(result.error) };
   }
-  const requestEndReduction = session.state.applyThreadTurnFact({
-    fact: "request_ended",
-    eventId: result.eventId,
-    modelRequestId,
-    isError,
-    ...(errorKind !== undefined ? { errorKind } : {}),
-    rescheduled: result.rescheduleDisposition?.status === "accepted",
-  });
-  if (interpretThreadTurnAction(requestEndReduction.action).action.action !== "reconcile_request_seal") {
-    return {
-      ok: false,
-      error: normalizeRuntimeFailure({
-        type: "runtime",
-        code: "runtime_invalid_sequence",
-        retryable: false,
-        fatal: true,
-        reason: "runtime_contract_validation",
-        sessionId: session.sessionId,
-      }),
-    };
+  if (interrupt === undefined) {
+    const requestSealFailure = reconcileRequestEndTurn(
+      session,
+      result.eventId,
+      modelRequestId,
+      isError,
+      errorKind,
+      result.rescheduleDisposition?.status === "accepted",
+    );
+    if (requestSealFailure !== undefined) {
+      return { ok: false, error: requestSealFailure };
+    }
   }
-  session.state.reconcileThreadTurnSeal();
   return {
     ok: true,
     eventId: result.eventId,
+    assistantSeal: {
+      status: isError || reschedule !== undefined ? "failed" : "completed",
+      finishReason,
+      ...(usage === undefined ? {} : { usage }),
+    },
     ...(result.declaration !== undefined ? { declaration: result.declaration } : {}),
     ...(result.rescheduleDisposition !== undefined
       ? { rescheduleDisposition: result.rescheduleDisposition }
       : {}),
   };
+}
+
+/** Applies the reducer half of a durable Request End after all co-committed Tool facts are projected. */
+function reconcileRequestEndTurn(
+  session: ThreadRuntime,
+  eventId: string,
+  modelRequestId: string,
+  isError: boolean,
+  errorKind: RuntimeRequestErrorKind | undefined,
+  rescheduled: boolean,
+): RuntimeFailure | undefined {
+  try {
+    const requestEndReduction = session.state.applyThreadTurnFact({
+      fact: "request_ended",
+      eventId,
+      modelRequestId,
+      isError,
+      ...(errorKind !== undefined ? { errorKind } : {}),
+      rescheduled,
+    });
+    if (interpretThreadTurnAction(requestEndReduction.action).action.action !== "reconcile_request_seal") {
+      throw new Error("Request End did not enter the reducer seal boundary");
+    }
+    session.state.reconcileThreadTurnSeal();
+    return undefined;
+  } catch (error) {
+    return normalizeRuntimeFailure({
+      type: "runtime",
+      code: "runtime_invalid_sequence",
+      rawError: error,
+      retryable: false,
+      fatal: true,
+      reason: "runtime_contract_validation",
+      sessionId: session.sessionId,
+    });
+  }
 }
 
 async function writeRequestEndWithRetry(
@@ -4865,11 +4762,7 @@ async function appendEvent(
   options: ThreadLoopRuntimeOptions,
   session: ThreadRuntime,
   event: SessionEvent,
-  output?: string | {
-    readonly draftKind: RuntimeMessageDraft["draftKind"];
-    readonly message: RuntimeMessageDraft;
-  },
-  stableReasoningParts?: Readonly<NonNullable<SessionEventEnvelope["stableReasoningParts"]>>,
+  declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
@@ -4880,18 +4773,14 @@ async function appendEvent(
   },
 ): Promise<SessionEventWriterAppendResult> {
   const writeId = options.runtime.createId("event_write");
-  return await appendEventWithWriteId(options, session, writeId, event, output, stableReasoningParts, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest, requestStart);
+  return await appendEventWithWriteId(options, session, writeId, event, declaration, modelRequestId, serverToolUse, mcpMaterializationHandle, sandboxResultDigest, requestStart);
 }
 
 async function appendProcessorEvent(
   options: ThreadLoopRuntimeOptions,
   session: ThreadRuntime,
   event: SessionEvent,
-  output?: string | {
-    readonly draftKind: RuntimeMessageDraft["draftKind"];
-    readonly message: RuntimeMessageDraft;
-  },
-  stableReasoningParts?: Readonly<NonNullable<SessionEventEnvelope["stableReasoningParts"]>>,
+  declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
@@ -4902,8 +4791,7 @@ async function appendProcessorEvent(
       options,
       session,
       event,
-      output,
-      stableReasoningParts,
+      declaration,
       modelRequestId,
       serverToolUse,
       mcpMaterializationHandle,
@@ -4914,8 +4802,7 @@ async function appendProcessorEvent(
     options,
     session,
     event,
-    output,
-    stableReasoningParts,
+    declaration,
     modelRequestId,
     serverToolUse,
     mcpMaterializationHandle,
@@ -4927,11 +4814,7 @@ async function appendRetriedEvent(
   options: ThreadLoopRuntimeOptions,
   session: ThreadRuntime,
   event: SessionEvent,
-  output?: string | {
-    readonly draftKind: RuntimeMessageDraft["draftKind"];
-    readonly message: RuntimeMessageDraft;
-  },
-  stableReasoningParts?: Readonly<NonNullable<SessionEventEnvelope["stableReasoningParts"]>>,
+  declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
@@ -4947,8 +4830,7 @@ async function appendRetriedEvent(
     session,
     writeId,
     event,
-    output,
-    stableReasoningParts,
+    declaration,
     modelRequestId,
     serverToolUse,
     mcpMaterializationHandle,
@@ -5008,11 +4890,7 @@ async function appendEventWithRetry(
   session: ThreadRuntime,
   writeId: string,
   event: SessionEvent,
-  output?: string | {
-    readonly draftKind: RuntimeMessageDraft["draftKind"];
-    readonly message: RuntimeMessageDraft;
-  },
-  stableReasoningParts?: Readonly<NonNullable<SessionEventEnvelope["stableReasoningParts"]>>,
+  declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
@@ -5029,8 +4907,7 @@ async function appendEventWithRetry(
       session,
       writeId,
       event,
-      output,
-      stableReasoningParts,
+      declaration,
       modelRequestId,
       serverToolUse,
       mcpMaterializationHandle,
@@ -5074,11 +4951,7 @@ async function appendEventWithWriteId(
   session: ThreadRuntime,
   writeId: string,
   event: SessionEvent,
-  output?: string | {
-    readonly draftKind: RuntimeMessageDraft["draftKind"];
-    readonly message: RuntimeMessageDraft;
-  },
-  stableReasoningParts?: Readonly<NonNullable<SessionEventEnvelope["stableReasoningParts"]>>,
+  declaration?: { readonly assistantPartAppend: RuntimeAssistantPartAppend } | { readonly toolSettlement: NonNullable<SessionEventEnvelope["toolSettlement"]> },
   modelRequestId?: string,
   serverToolUse?: NonNullable<SessionEventEnvelope["serverToolUse"]>,
   mcpMaterializationHandle?: string,
@@ -5090,17 +4963,6 @@ async function appendEventWithWriteId(
 ): Promise<SessionEventWriterAppendResult> {
   const startedAt = options.runtime.monotonicMs();
   try {
-    const drafts = typeof output === "object"
-      ? [runtimeOutputDraft({
-          workspaceId: session.identity.workspaceId,
-          sessionId: session.sessionId,
-          sessionThreadId: session.identity.sessionThreadId,
-          runtimeWriteId: writeId,
-          eventType: event.type,
-          draftKind: output.draftKind,
-          message: output.message,
-        })]
-      : [];
     const result = await options.sessionEventWriter.append({
       requestId: writeId,
       workspaceId: session.identity.workspaceId,
@@ -5111,9 +4973,8 @@ async function appendEventWithWriteId(
       targetPodUid: session.identity.targetPodUid,
       writeId,
       event,
-      drafts,
       ...(modelRequestId !== undefined ? { modelRequestId } : {}),
-      ...(stableReasoningParts !== undefined ? { stableReasoningParts: [...stableReasoningParts] } : {}),
+      ...(declaration ?? {}),
       ...(serverToolUse !== undefined ? { serverToolUse } : {}),
       ...(mcpMaterializationHandle !== undefined ? { mcpMaterializationHandle } : {}),
       ...(sandboxResultDigest !== undefined ? { sandboxResultDigest } : {}),
@@ -5141,37 +5002,14 @@ function storeControls(
   };
 }
 
-function commitProcessorProjection(session: ThreadRuntime, processor: SessionProcessor): void {
+function commitProcessorProjection(session: ThreadRuntime, processor: ProviderStreamAccumulator): void {
   for (const message of processor.messages()) {
     upsertContextMessage(session, message);
   }
 }
 
-function commitProcessorProjectionWithoutStableReasoning(session: ThreadRuntime, processor: SessionProcessor): void {
-  for (const message of processor.messages()) {
-    upsertContextMessage(session, DurableRuntimeMessageSchema.parse({
-      ...message,
-      parts: message.parts.filter((part) => failureProjectionPartIsDurablyCommitted(processor, message, part)),
-    }));
-  }
-}
-
-function failureProjectionPartIsDurablyCommitted(processor: SessionProcessor, message: RuntimeMessage, part: RuntimePart): boolean {
-  if (part.type === "text") {
-    return part.status === "completed" && part.text.length > 0;
-  }
-  if (part.type === "reasoning") {
-    return part.status === "completed" && processor.isReasoningPartDurable(part.id);
-  }
-  if (part.type !== "tool") {
-    return false;
-  }
-  if (part.toolUseEventId !== undefined) {
-    return true;
-  }
-  return message.status === "completed" &&
-    message.parts.length === 1 &&
-    part.state.status === "error";
+function commitProcessorProjectionWithoutStableReasoning(session: ThreadRuntime, processor: ProviderStreamAccumulator): void {
+  commitProcessorProjection(session, processor);
 }
 
 function upsertContextMessage(session: ThreadRuntime, message: RuntimeMessage): void {
@@ -5199,7 +5037,7 @@ function runtimeFailureFromStore(error: RuntimeMessageStoreError): RuntimeFailur
   });
 }
 
-function terminalFailureFromProcessorResult(result: SessionProcessorResult): RuntimeFailure | undefined {
+function terminalFailureFromProcessorResult(result: ProviderStreamAccumulatorResult): RuntimeFailure | undefined {
   if (!result.ok) {
     return undefined;
   }
@@ -5248,21 +5086,29 @@ function acknowledgeJoinedInterruptRequestEnd(
     (candidate) =>
       candidate.operationKind === "commit_inputs" &&
       candidate.sourceKind === "interrupt_control" &&
-      candidate.sourceId === command.runtimeInputId,
+      candidate.operationId === command.runtimeInputId,
   );
-  if (
-    receipt === undefined ||
-    receipt.messages.length !== 0 ||
-    receipt.pendingToolDelta.length !== 0
-  ) {
+  if (receipt === undefined) {
     return false;
   }
-  const interruptEventId = receipt.events.find((event) =>
-    command.eventIds.includes(event.sourceEventId)
-  )?.eventId;
-  if (interruptEventId === undefined) {
+  try {
+    const projections = applyInterruptInputReceipt({
+      sessionThreadId: session.identity.sessionThreadId,
+      runtimeInputId: command.runtimeInputId,
+      eventIds: command.eventIds,
+      expectedToolUseEventIds: unfinishedToolUseEventIds(
+        session.state.contextManager.messages(),
+      ),
+    }, receipt);
+    session.state.contextManager.replaceMessages(applyInterruptToolProjections(
+      session.state.contextManager.messages(),
+      projections,
+    ));
+  } catch {
     return false;
   }
+  const interruptEventId = receipt.events[0]?.eventId;
+  if (interruptEventId === undefined) return false;
   session.state.applyThreadTurnFact({
     fact: "interrupt_committed",
     eventId: interruptEventId,

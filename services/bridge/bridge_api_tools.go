@@ -555,7 +555,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		receipt, err = commitInternalToolRepairDraftTx(
+		receipt, err = commitInternalToolRepairCreateTx(
 			ctx,
 			tx,
 			request.GetScope(),
@@ -564,7 +564,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitInternalToolRepair(ctx context.Context,
 			eventSequence,
 			request.GetModelToolCallId(),
 			request.GetToolName(),
-			request.GetDrafts()[0],
+			request.GetMessageCreate(),
 			now,
 		)
 		if err != nil {
@@ -634,7 +634,7 @@ func validateInternalToolRepairRequest(request *bridgev1.CommitInternalToolRepai
 	if err := validateRuntimeScope(request.GetScope()); err != nil {
 		return err
 	}
-	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || len(request.GetDrafts()) != 1 {
+	if request.GetModelRequestId() == "" || request.GetModelToolCallId() == "" || request.GetToolName() == "" || request.GetMessageCreate() == nil {
 		return status.Error(codes.InvalidArgument, "invalid internal tool repair request")
 	}
 	if len([]byte(request.GetModelToolCallId())) > internalToolRepairIDMaxBytes || len([]byte(request.GetToolName())) > internalToolRepairIDMaxBytes {

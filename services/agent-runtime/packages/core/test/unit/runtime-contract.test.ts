@@ -15,7 +15,6 @@ import {
   RuntimeDeclarationOperationControlsSchema,
   RuntimePartSchema,
   RuntimeToolErrorSchema,
-  MaxStableReasoningPartsPerRequest,
   SessionEventEnvelopeSchema,
   SessionEventSchema,
   SessionEventWriterAppendResultSchema,
@@ -272,12 +271,8 @@ function internalToolRepairCommit(): RuntimeInternalToolRepairCommit {
     modelToolCallId,
     toolName,
     repairKey: "repair-key-1",
-    draft: {
-      runtimeLocalId: "stid_repair_message_1",
-      sourceKind: "internal_tool_repair",
-      sourceId: "repair-key-1",
-      draftKind: "internal_tool_repair",
-      ordinal: 0,
+    messageCreate: {
+      messageKind: "internal_tool_repair",
       role: "assistant",
       origin: "agent",
       status: "completed",
@@ -286,8 +281,6 @@ function internalToolRepairCommit(): RuntimeInternalToolRepairCommit {
         toolCallId: repairPart.toolCallId,
         toolName: repairPart.toolName,
         state: repairPart.state,
-        runtimeLocalPartId: "stid_repair_part_1",
-        ordinal: 0,
       }],
     },
   });
@@ -306,7 +299,7 @@ function expectSanitized(value: unknown): void {
 
 class UnitRuntimeInternalToolRepairStore extends RuntimeInternalToolRepairStore {
   protected override async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit): Promise<RuntimeInternalToolRepairCommitResult> {
-    const [runtimePart] = repair.draft.parts;
+    const [runtimePart] = repair.messageCreate.parts;
     if (runtimePart === undefined) {
       throw new Error("repair draft missing part");
     }
@@ -315,7 +308,7 @@ class UnitRuntimeInternalToolRepairStore extends RuntimeInternalToolRepairStore 
 }
 
 function internalToolRepairResult(repair: RuntimeInternalToolRepairCommit): RuntimeInternalToolRepairCommitResult {
-  const part = repair.draft.parts[0];
+  const part = repair.messageCreate.parts[0];
   if (part === undefined) {
     throw new Error("repair draft missing part");
   }
@@ -330,22 +323,20 @@ function internalToolRepairResult(repair: RuntimeInternalToolRepairCommit): Runt
         sessionThreadId: repair.sessionThreadId,
         operationKind: "commit_internal_tool_repair",
         sourceKind: "internal_tool_repair",
-        sourceId: repair.repairKey,
+        operationId: repair.repairKey,
         declarationDigest: "repair-digest",
         pendingAttachmentDelta: [],
-              pendingToolDelta: [],
+								interruptToolProjections: [],
               prefixConsumptions: [],
 
               childLifecycle: [],
         events: [{
           sessionThreadId: repair.sessionThreadId,
-          sourceEventId: repair.repairKey,
           eventId: "event-repair-1",
           eventSequence: 2,
           disposition: "created",
         }],
         messages: [{
-          runtimeLocalId: repair.draft.runtimeLocalId,
           sessionThreadId: repair.sessionThreadId,
           owningEventId: "event-repair-1",
           messageId: "message-repair-1",
@@ -354,7 +345,6 @@ function internalToolRepairResult(repair: RuntimeInternalToolRepairCommit): Runt
           updatedAt: createdAt,
           disposition: "created",
           parts: [{
-            runtimeLocalPartId: part.runtimeLocalPartId,
             partId: "part-repair-1",
             messageId: "message-repair-1",
             partSequence: 0,
@@ -370,23 +360,20 @@ function internalToolRepairResult(repair: RuntimeInternalToolRepairCommit): Runt
 
 describe("runtime boundary contracts", () => {
   test("assistant projection events carry model request identity under the closed association law", () => {
-    const part = {
-      reasoningPartId: "part_anchor_1",
-      providerPartId: "provider_anchor_1",
-      partSequence: 0,
-      text: "thinking",
-      providerMetadata: {},
-      truncated: false,
-    };
     const base = {
       ...writerIdentity("rwrite_1"),
       workspaceId: "workspace-1",
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_1",
-      drafts: [],
-      stableReasoningParts: [part],
       modelRequestId: "mreq_anchor_1",
+      assistantPartAppend: { parts: [{
+        type: "tool" as const,
+        toolCallId: "call_1",
+        toolName: "bash",
+        state: { status: "running" as const, input: { value: {}, preview: "{}", truncated: false } },
+        startedAt: createdAt,
+      }] },
     };
     for (const event of [
       { type: "agent.tool_use" as const, name: "bash", input: {}, evaluated_permission: "allow" as const },
@@ -407,24 +394,13 @@ describe("runtime boundary contracts", () => {
       sessionId: "sesn_1",
       sessionThreadId: "thr_1",
       writeId: "rwrite_2",
-      drafts: [{
-        runtimeLocalId: "draft_tool",
-        sourceKind: "agent.tool_use",
-        sourceId: "rwrite_2",
-        draftKind: "tool_use",
-        ordinal: 0,
-        role: "assistant",
-        origin: "agent",
-        status: "streaming",
-        parts: [{
-          runtimeLocalPartId: "draft_tool_part",
+      assistantPartAppend: { parts: [{
           type: "tool",
-          ordinal: 0,
           toolCallId: "call_1",
           toolName: "bash",
           state: { status: "running", input: { value: {}, preview: "{}", truncated: false } },
-        }],
-      }],
+          startedAt: createdAt,
+        }] },
       event: { type: "agent.tool_use", name: "bash", input: {}, evaluated_permission: "allow" },
       modelRequestId: "mreq_without_anchor",
     }).success).toBe(true);
@@ -436,26 +412,23 @@ describe("runtime boundary contracts", () => {
       sessionThreadId: "thr_1",
       writeId: "rwrite_projection",
       modelRequestId: "mreq_projection",
-      drafts: [{
-        runtimeLocalId: "draft_projection",
-        sourceKind: "agent_output",
-        sourceId: "rwrite_projection",
-        draftKind: "assistant_text",
-        ordinal: 0,
-        role: "assistant",
-        origin: "agent",
-        status: "completed",
-        parts: [],
-      }],
     };
-    for (const [event, mcpMaterializationHandle] of [
-      [{ type: "agent.tool_result" as const, tool_use_id: "sevt_tool", content: [{ type: "text" as const, text: "done" }] }, undefined],
-      [{ type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] }, "sevt_mcp"],
-      [{ type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] }, undefined],
+    for (const { event, mcpMaterializationHandle } of [
+      { event: { type: "agent.tool_result" as const, tool_use_id: "sevt_tool", content: [{ type: "text" as const, text: "done" }] } },
+      { event: { type: "agent.mcp_tool_result" as const, mcp_tool_use_id: "sevt_mcp", content: [{ type: "text" as const, text: "done" }] }, mcpMaterializationHandle: "sevt_mcp" },
+      { event: { type: "agent.message" as const, content: [{ type: "text" as const, text: "answer" }] } },
     ]) {
       const envelope = {
         ...projectionBase,
         event,
+        ...(event.type === "agent.message" ? {
+          assistantPartAppend: { parts: [{ type: "text" as const, text: "answer", truncated: false, status: "completed" as const }] },
+        } : {
+          toolSettlement: {
+            toolUseEventId: event.type === "agent.tool_result" ? event.tool_use_id : event.mcp_tool_use_id,
+            outcome: { type: "completed" as const, output: { text: "done", truncated: false } },
+          },
+        }),
         ...(mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle }),
       };
       expect(SessionEventEnvelopeSchema.safeParse(envelope).success).toBe(true);
@@ -467,7 +440,7 @@ describe("runtime boundary contracts", () => {
     }).success).toBe(false);
   });
 
-  test("request-end stable reasoning contract enforces count aggregate identity order and success-only bounds", () => {
+  test("request-end carries only the trailing incremental Assistant append on successful completion", () => {
     const base = {
       ...writerIdentity("rwrite_1"),
       workspaceId: "workspace-1",
@@ -479,53 +452,22 @@ describe("runtime boundary contracts", () => {
       isError: false,
       finishReason: "stop" as const,
     };
-    const part = (id: string, partSequence: number, text = "x") => ({
-      reasoningPartId: id,
-      providerPartId: `provider_${id}`,
-      partSequence,
-      text,
+    const trailingPartAppend = { parts: [{
+      type: "reasoning" as const,
+      providerPartId: "provider_reasoning",
+      text: "thinking",
       providerMetadata: {},
       truncated: false,
-    });
-    const exactCount = Array.from({ length: MaxStableReasoningPartsPerRequest }, (_, sequence) => part(`part_${sequence}`, sequence));
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: exactCount }).success).toBe(true);
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: [...exactCount, part("part_16", 16)] }).success).toBe(false);
+      status: "completed" as const,
+    }] };
+    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, trailingPartAppend }).success).toBe(true);
     expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({
       ...base,
-      drafts: [{
-        runtimeLocalId: "stid_terminal_message",
-        sourceKind: "model_request",
-        sourceId: base.modelRequestId,
-        draftKind: "assistant_text",
-        ordinal: 0,
-        role: "assistant",
-        origin: "agent",
-        status: "completed",
-        finishReason: "stop",
-        parts: [{
-          runtimeLocalPartId: "stid_terminal_text",
-          ordinal: 0,
-          type: "text",
-          text: "done",
-          truncated: false,
-          status: "completed",
-        }],
-      }],
-    }).success).toBe(true);
-
-    const exactAggregate = [
-      part("aggregate_1", 0, "a".repeat(1024 * 1024 - 2)),
-      part("aggregate_2", 1, "b".repeat(1024 * 1024 - 2)),
-    ];
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: exactAggregate }).success).toBe(true);
-    exactAggregate[1] = part("aggregate_2", 1, "b".repeat(1024 * 1024 - 1));
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: exactAggregate }).success).toBe(false);
-
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: [part("same", 0), part("same", 1)] }).success).toBe(false);
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: [part("one", 0), part("two", 0)] }).success).toBe(false);
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: [part("two", 2), part("one", 1)] }).success).toBe(false);
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, isError: true, errorKind: "provider_error", stableReasoningParts: [part("error", 0)] }).success).toBe(false);
-    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, isError: true, errorKind: "provider_error", reschedule: { attempt: 1, deadline: createdAt, backoffMs: 1 }, stableReasoningParts: [part("retry", 0)] }).success).toBe(false);
+      isError: true,
+      errorKind: "provider_error",
+      trailingPartAppend,
+    }).success).toBe(false);
+    expect(SessionEventWriterRequestEndEnvelopeSchema.safeParse({ ...base, stableReasoningParts: [] }).success).toBe(false);
   });
 
   test("request-end attachment settlement is combined-bounded and absent on reschedule", () => {
@@ -763,7 +705,6 @@ describe("runtime boundary contracts", () => {
       sessionId: "session-1",
       sessionThreadId: "thread-1",
       writeId: "write-1",
-      drafts: [],
       event: { type: "session.status_running" },
     }).writeId).toBe("write-1");
     const appendResult = SessionEventWriterAppendResultSchema.parse({

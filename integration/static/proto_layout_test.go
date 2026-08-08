@@ -83,7 +83,7 @@ func TestBridgeServiceLocalProtoLayoutAndPackages(t *testing.T) {
 	}
 }
 
-func TestBridgeStableReasoningUsesOnlyAuthorizedDualBoundaries(t *testing.T) {
+func TestBridgeStableReasoningIsDerivedFromDurableAssistantMembers(t *testing.T) {
 	root := finalArchitectureEngineRoot(t)
 	path := filepath.Join(root, "services/bridge/proto/tetral/bridge/v1/bridge.proto")
 	body, err := os.ReadFile(path) //nolint:gosec // repository-local protocol source.
@@ -91,38 +91,11 @@ func TestBridgeStableReasoningUsesOnlyAuthorizedDualBoundaries(t *testing.T) {
 		t.Fatalf("read bridge proto: %v", err)
 	}
 	text := string(body)
-	for _, required := range []string{
-		"message StableReasoningPart",
-		"repeated StableReasoningPart stable_reasoning_parts = 8;",
-		"repeated StableReasoningPart stable_reasoning_parts = 12;",
-		"string reasoning_part_id = 1;",
-		"string provider_part_id = 2;",
-		"int32 part_sequence = 3;",
-		"string text = 4;",
-		"string metadata_json = 5;",
-		"bool truncated = 6;",
-	} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("bridge stable reasoning settlement proto missing %q", required)
-		}
-	}
-	if count := strings.Count(text, "repeated StableReasoningPart stable_reasoning_parts"); count != 2 {
-		t.Fatalf("bridge stable reasoning boundary count = %d; want exactly WriteEvent and WriteRequestEnd", count)
+	if strings.Contains(text, "StableReasoningPart") || strings.Contains(text, "stable_reasoning_parts") {
+		t.Fatal("bridge proto retained Runtime-authored stable reasoning transport")
 	}
 	if forbidden := "CommitStable" + "ReasoningPart"; strings.Contains(text, forbidden) {
 		t.Fatalf("bridge proto retained standalone stable reasoning surface %q", forbidden)
-	}
-	stableReasoningStart := strings.Index(text, "message StableReasoningPart {")
-	if stableReasoningStart < 0 {
-		t.Fatal("bridge proto stable reasoning part block is missing")
-	}
-	stableReasoningEnd := strings.Index(text[stableReasoningStart:], "}")
-	if stableReasoningEnd < 0 {
-		t.Fatal("bridge proto stable reasoning part block is malformed")
-	}
-	stableReasoningBlock := text[stableReasoningStart : stableReasoningStart+stableReasoningEnd]
-	if strings.Contains(stableReasoningBlock, "message_id") {
-		t.Fatal("bridge proto stable reasoning part retained caller-selected message identity")
 	}
 }
 

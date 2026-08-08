@@ -84,10 +84,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesRawTurnFactsAndMessageLineage
 	committed, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: "rin_turn_input", InputKind: "messages",
 		EventIds: []string{"evt_turn_input"}, SequenceFrom: 1, SequenceTo: 1,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInputDraftForTest(
-			"default", sessionID, threadID, "messages", "rin_turn_input", "evt_turn_input",
-			bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT, "user", "hello",
-		)},
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
+			"default", sessionID, threadID, "rin_turn_input", "evt_turn_input",
+			"hello")},
 	})
 	if err != nil {
 		t.Fatalf("commit input: %v", err)
@@ -192,24 +191,15 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCutsTurnFactsAtLatestCompaction(t *t
 		"compaction_summary", 1,
 	)
 	const checkpointText = "<conversation-checkpoint><summary>Old request compacted.</summary><recent-context></recent-context></conversation-checkpoint>"
-	checkpointID := stableRuntimeID(
-		"runtime_message_draft", "default", sessionID, threadID,
-		"agent.thread_context_compacted", "mreq_context_compaction",
-		runtimeDraftKindToken(bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT), "0",
-	)
 	compactedThrough := int64(1)
 	if _, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_context_compaction_end", ModelRequestId: "mreq_context_compaction",
 		ModelRequestStartEventId: start.GetEventId(), RequestKind: "compaction_summary", FinishReason: "stop", UsageJson: `{}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{{
-			RuntimeLocalId: checkpointID, SourceKind: "agent.thread_context_compacted", SourceId: "mreq_context_compaction",
-			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT,
-			MessageInfoJson: `{"role":"user","origin":"runtime","status":"completed"}`,
-			Parts: []*bridgev1.RuntimePartDraft{{
-				RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", checkpointID, "text", "0"),
-				PartKind:           "text", PartJson: `{"type":"text","text":"` + checkpointText + `","truncated":false,"status":"completed"}`,
-			}},
-		}},
+		CompactionCheckpointCreate: bridgeMessageCreateForTest(
+			bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT,
+			"user", "runtime", nil,
+			bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"` + checkpointText + `","truncated":false,"status":"completed"}`},
+		),
 		CompactedThroughMessageSequence: &compactedThrough,
 		CompactionEventPayloadJson:      `{"type":"agent.thread_context_compacted","summary":"Old request compacted.","recent_context":[]}`,
 	}); err != nil {
@@ -260,9 +250,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesMCPPodLossRepairLineage(t *te
 		Scope: scope, RuntimeWriteId: "rwrite_context_mcp_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.mcp_tool_use",
 		PayloadJson: `{"type":"agent.mcp_tool_use","name":"search_code","mcp_server_name":"github","input":{"q":"x"},"evaluated_permission":"allow"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_context_mcp_tool", "agent.mcp_tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`},
 		)},
 	})
 	if err != nil {
@@ -324,9 +314,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesEveryPodLossRepairOnSharedMes
 	first, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_context_multi_tool_1", ModelRequestId: modelRequestID,
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_context_multi_tool_1", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_multi_1","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_multi_1","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 		)},
 	})
 	if err != nil {
@@ -335,10 +325,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesEveryPodLossRepairOnSharedMes
 	second, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_context_multi_tool_2", ModelRequestId: modelRequestID,
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Bash","input":{},"evaluated_permission":"allow"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_context_multi_tool_2", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_multi_1","toolName":"Read","toolUseEventId":"` + first.GetEventId() + `","toolEvent":{"kind":"tool"},"state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_multi_2","toolName":"Bash","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_context_multi_2","toolName":"Bash","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 		)},
 	})
 	if err != nil {
@@ -474,9 +463,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesIdleCleanupRepairLineage(t *t
 		Scope: scope, RuntimeWriteId: "rwrite_context_cleanup_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(toolInputJSON) + `,"evaluated_permission":"ask"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_context_cleanup_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: string(toolPartJSON)},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: string(toolPartJSON)},
 		)},
 	})
 	if err != nil {
@@ -592,9 +581,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecution
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_recovery_tool", ModelRequestId: "mrq_pending_approval",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"dangerous_tool","input":{},"evaluated_permission":"ask"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_bridge_sandbox_recovery_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"toolu_cleanup_wait","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"toolu_cleanup_wait","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 		)},
 	})
 	if err != nil {
@@ -680,10 +669,7 @@ func TestPostgreSQLBridgeAPIStoreLoadContextSeparatesApprovalAndSandboxExecution
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_sandbox_recovery_result", ModelRequestId: "mrq_pending_approval",
 		EventType: "agent.tool_result", SandboxResultDigest: &resultDigest,
 		PayloadJson: `{"type":"agent.tool_result","tool_use_id":"` + toolUseEventID + `","content":[{"type":"text","text":"already settled"}],"is_error":false}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t, scope, "rwrite_bridge_sandbox_recovery_result", "agent.tool_result", "completed",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"toolu_cleanup_wait","toolName":"dangerous_tool","toolUseEventId":"` + toolUseEventID + `","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{},"preview":"{}","truncated":false},"output":{"text":"already settled","truncated":false}}}`},
-		)},
+		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUseEventID, "already settled")},
 	}); err != nil {
 		t.Fatalf("write sandbox terminal result: %v", err)
 	}
@@ -1141,9 +1127,9 @@ func TestPostgreSQLBridgeAPIStoreLoadContextReturnsRuntimeSurface(t *testing.T) 
 	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_bridge_load_surface_tool", ModelRequestId: "mrq_pending_approval",
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"dangerous_tool","input":{},"evaluated_permission":"ask"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_bridge_load_surface_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"toolu_cleanup_wait","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"toolu_cleanup_wait","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 		)},
 	})
 	if err != nil {
@@ -1417,6 +1403,13 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 	scope := bridgeAPIScope("sesn_bridge_tool_result", "thr_bridge_tool_result", "bind_bridge_tool_result", 1, "pod_uid_tool_result")
 	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_tool_result_start", "mrq_pending_approval", "agent_provider_request", 0)
 	seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result", "evt_public_tool_use", 2)
+	seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_tool_result", "thr_bridge_tool_result", "mrq_pending_approval", "evt_public_tool_use", "tool-call-result", "search")
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_messages
+		    SET data_json=jsonb_set(data_json::jsonb, '{parts,0,state,input,value}', '{"q":"x"}'::jsonb)::text
+		  WHERE workspace_id='default' AND session_id='sesn_bridge_tool_result' AND source_event_id='evt_public_tool_use'`); err != nil {
+		t.Fatalf("seed tool input projection: %v", err)
+	}
 	toolOutput := "RESULT_HEAD" + strings.Repeat("r", 200_000-len("RESULT_HEAD")-len("RESULT_TAIL")) + "RESULT_TAIL"
 	if _, err := admin.ExecContext(context.Background(),
 		`UPDATE session_pending_tool_uses
@@ -1435,17 +1428,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_id":"evt_public_tool_use","content":[{"type":"text","text":"` + toolOutput + `"}]}`,
 		SessionVisible: true,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t,
-			scope,
-			"rwrite_bridge_tool_result",
-			"agent.tool_result",
-			"completed",
-			bridgeRuntimePartDraftForTest{
-				kind: "tool",
-				json: `{"type":"tool","toolCallId":"tool-call-result","toolName":"search","toolUseEventId":"evt_public_tool_use","toolEvent":{"kind":"tool"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"` + toolOutput + `","truncated":false}}}`,
-			},
-		)},
+		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest("evt_public_tool_use", toolOutput)},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent tool_result: %v", err)
@@ -1453,7 +1436,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventProjectsToolResultIntoLoadContext(t *
 
 	var messageDataJSON string
 	if err := admin.QueryRowContext(context.Background(),
-		`SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND source_event_id = $1 AND kind = 'assistant'`, response.GetEventId()).Scan(&messageDataJSON); err != nil {
+		`SELECT data_json FROM session_messages WHERE workspace_id = 'default' AND last_event_id = $1 AND kind = 'assistant'`, response.GetEventId()).Scan(&messageDataJSON); err != nil {
 		t.Fatalf("read projected tool result message: %v", err)
 	}
 	assertToolResultRuntimeMessage(t, messageDataJSON, "tool-call-result", "search", "evt_public_tool_use", "completed", toolOutput)
@@ -1639,13 +1622,13 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 		EventType:      "agent.mcp_tool_use",
 		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"search_code","input":{"q":"x"},"mcp_server_name":"github","evaluated_permission":"ask"}`,
 		SessionVisible: true,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_mcp_use",
 			"agent.mcp_tool_use",
 			"streaming",
-			bridgeRuntimePartDraftForTest{
+			bridgeRuntimePartCreateForTest{
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_bridge_mcp","toolName":"search_code","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false}}}`,
 			},
@@ -1687,17 +1670,7 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","tool_use_event_id":"evt_conflicting_mcp_alias","content":[{"type":"text","text":"done"}]}`,
 		SessionVisible:           true,
 		McpMaterializationHandle: materialized.MaterializationHandle,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t,
-			scope,
-			"rwrite_bridge_mcp_result_conflicting_identity",
-			"agent.mcp_tool_result",
-			"completed",
-			bridgeRuntimePartDraftForTest{
-				kind: "tool",
-				json: `{"type":"tool","toolCallId":"call_bridge_mcp","toolName":"search_code","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
-			},
-		)},
+		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("WriteEvent conflicting MCP identity err = %v; want FailedPrecondition", err)
@@ -1711,17 +1684,7 @@ func TestPostgreSQLBridgeAPIStoreProjectsMCPApprovalAndResultIntoLoadContext(t *
 		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"done"}]}`,
 		SessionVisible:           true,
 		McpMaterializationHandle: materialized.MaterializationHandle,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t,
-			scope,
-			"rwrite_bridge_mcp_result",
-			"agent.mcp_tool_result",
-			"completed",
-			bridgeRuntimePartDraftForTest{
-				kind: "tool",
-				json: `{"type":"tool","toolCallId":"call_bridge_mcp","toolName":"search_code","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"completed","input":{"value":{"q":"x"},"preview":"{\"q\":\"x\"}","truncated":false},"output":{"text":"done","truncated":false}}}`,
-			},
-		)},
+		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "done")},
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent MCP tool result: %v", err)

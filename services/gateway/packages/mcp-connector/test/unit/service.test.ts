@@ -1153,7 +1153,7 @@ function fakeMcpMaterializationDeclaration(request: CommitMcpToolResultRequest, 
       sessionThreadId: request.scope?.sessionThreadId ?? "",
       operationKind: "commit_mcp_tool_result",
       sourceKind: "mcp_tool_execution",
-      sourceId: fakeMcpMaterializationSourceId(request),
+      operationId: fakeMcpMaterializationOperationId(request),
       events: [],
       messages: [],
       pendingAttachmentDeltaJson: parsed.response.attachments.map((attachment) => JSON.stringify({
@@ -1168,7 +1168,7 @@ function fakeMcpMaterializationDeclaration(request: CommitMcpToolResultRequest, 
         mime: attachment.mime,
         filename: attachment.suggested_filename,
       })),
-      pendingToolDeltaJson: [],
+      interruptToolProjections: [],
       prefixConsumptions: [],
       declarationDigest: fakeMcpMaterializationDeclarationDigest(request),
       requestReschedule: undefined,
@@ -1183,7 +1183,7 @@ function fakeMcpMaterializationDeclaration(request: CommitMcpToolResultRequest, 
   };
 }
 
-function fakeMcpMaterializationSourceId(request: CommitMcpToolResultRequest): string {
+function fakeMcpMaterializationOperationId(request: CommitMcpToolResultRequest): string {
   const encoder = new TextEncoder();
   const parts = [
     "mcp_tool_execution",

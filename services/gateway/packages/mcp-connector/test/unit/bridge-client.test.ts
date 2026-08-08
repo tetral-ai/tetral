@@ -590,11 +590,11 @@ class StaleClaimReplayBridgeClient extends MaterializationBridgeClient {
           sessionThreadId: request.scope?.sessionThreadId ?? "",
           operationKind: "commit_mcp_tool_result",
           sourceKind: "mcp_tool_execution",
-          sourceId: stableMcpMaterializationSourceId(request),
+          operationId: stableMcpMaterializationOperationId(request),
           events: [],
           messages: [],
           pendingAttachmentDeltaJson: [],
-          pendingToolDeltaJson: [],
+          interruptToolProjections: [],
           prefixConsumptions: [],
           declarationDigest: "digest_from_durable_operation",
           requestReschedule: undefined,
@@ -662,11 +662,11 @@ function mcpMaterializationDeclaration(
       sessionThreadId: request.scope?.sessionThreadId ?? "",
       operationKind: "commit_mcp_tool_result",
       sourceKind: "mcp_tool_execution",
-      sourceId: stableMcpMaterializationSourceId(request),
+      operationId: stableMcpMaterializationOperationId(request),
       events: [],
       messages: [],
       pendingAttachmentDeltaJson: [],
-      pendingToolDeltaJson: [],
+      interruptToolProjections: [],
       prefixConsumptions: [],
       declarationDigest: mcpMaterializationDeclarationDigest(request),
       requestReschedule: undefined,
@@ -683,7 +683,7 @@ function mcpMaterializationDeclaration(
   };
 }
 
-function stableMcpMaterializationSourceId(
+function stableMcpMaterializationOperationId(
   request: Pick<ClaimMcpToolResultRequest, "toolUseEventId" | "normalizedInputHash">,
 ): string {
   const encoder = new TextEncoder();

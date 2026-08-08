@@ -59,7 +59,7 @@ import type {
   ThreadTurnFact,
   ThreadTurnReduction,
 } from "./thread-turn-reducer.js";
-import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageDraft, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
+import type { DurableRuntimeMessage, RuntimeDeclarationReceipt, RuntimeFailure, RuntimeJsonValue, RuntimeMessage, RuntimeMessageCreate, RuntimePart, RuntimeProcessorSource, RuntimeUsage } from "../contracts/runtime.js";
 import type { RuntimeModelLimits } from "../llm/llm-event.js";
 import type { ProviderRequestAttachment } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ToolEntry } from "../tools/tool-catalog.js";
@@ -95,12 +95,7 @@ export interface RuntimeThreadControlState extends RuntimeCommandScopeState {
 }
 
 export interface RuntimeControlInputDeclaration {
-  readonly drafts: readonly RuntimeMessageDraft[];
-  readonly pendingToolCancellations: readonly {
-    readonly toolUseEventId: string;
-    readonly runtimeLocalId: string;
-  }[];
-  readonly sandboxExecutionToolUseEventIds: readonly string[];
+  readonly messageCreates: readonly RuntimeMessageCreate[];
 }
 
 export type RuntimeControlInputCommitResult =
@@ -307,6 +302,7 @@ export interface RuntimeTaskNotificationCommandState extends RuntimeThreadContro
 /** Durable task-notification declaration invoked only by the owning thread run. */
 export type RuntimeTaskNotificationCommit = () => Promise<
   | { readonly ok: true; readonly stale: true }
+  | { readonly ok: true; readonly deferred: true }
   | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
   | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
 >;
@@ -331,6 +327,57 @@ export interface RuntimeBackgroundToolState {
 
 /** Generation-fenced runtime or per-server MCP configuration patch. */
 export interface RuntimeConfigPatchState extends RuntimeThreadControlState, RuntimeConfigurationPatch {}
+
+/** Sole resident owner of one Thread's derived current-Turn checkpoint and Tool routes. */
+export class ThreadProcessor {
+  #reduction: ThreadTurnReduction;
+  #toolRoutes: ThreadToolRouteView;
+
+  constructor(checkpoint: ThreadTurnCheckpoint, toolRoutes: ThreadToolRouteView) {
+    this.#toolRoutes = toolRoutes;
+    this.#reduction = initializeThreadTurnReduction(checkpoint, toolRoutes);
+  }
+
+  get checkpoint(): ThreadTurnCheckpoint { return this.#reduction.checkpoint; }
+  get toolRoutes(): ThreadToolRouteView { return this.#toolRoutes; }
+  reduction(): ThreadTurnReduction { return this.#reduction; }
+
+  apply(fact: ThreadTurnFact): ThreadTurnReduction {
+    this.#reduction = reduceThreadTurn(this.#reduction, fact, this.#toolRoutes);
+    const currentToolUseEventIds = new Set(
+      this.#reduction.checkpoint.request?.toolMembers.flatMap((member) =>
+        member.memberKind === "public_tool_use" ? [member.toolUseEventId] : []
+      ) ?? [],
+    );
+    this.#toolRoutes = {
+      routes: this.#toolRoutes.routes.filter((route) => currentToolUseEventIds.has(route.toolUseEventId)),
+    };
+    return this.#reduction;
+  }
+
+  reconcileSeal(): ThreadTurnReduction {
+    this.#reduction = reconcileThreadTurnSeal(this.#reduction, this.#toolRoutes);
+    return this.#reduction;
+  }
+
+  consumeEdge(): ThreadTurnReduction {
+    this.#reduction = consumeThreadTurnEdge(this.#reduction, this.#toolRoutes);
+    return this.#reduction;
+  }
+
+  recordRoute(toolUseEventId: string, disposition: ThreadToolRouteView["routes"][number]["disposition"]): void {
+    this.#toolRoutes = {
+      routes: [
+        ...this.#toolRoutes.routes.filter((route) => route.toolUseEventId !== toolUseEventId),
+        { toolUseEventId, disposition },
+      ],
+    };
+  }
+
+  clearRoute(toolUseEventId: string): void {
+    this.#toolRoutes = { routes: this.#toolRoutes.routes.filter((route) => route.toolUseEventId !== toolUseEventId) };
+  }
+}
 
 /** Recoverable thread-local working state for input, tools, config, media, and cancellation. */
 export class ThreadState {
@@ -362,8 +409,7 @@ export class ThreadState {
   >;
   #activeAttachmentRide: ProviderRequestAttachment[] | undefined;
   #pendingAttachments: ProviderRequestAttachment[] = [];
-  #threadTurnReduction: ThreadTurnReduction | undefined;
-  #threadToolRouteView: ThreadToolRouteView = { routes: [] };
+  #threadProcessor: ThreadProcessor | undefined;
   #lastRequestUsage: RuntimeUsage | undefined;
   #lastRequestModelLimits: RuntimeModelLimits | undefined;
   #lastRequestContextAnchorSequence: number | undefined;
@@ -390,76 +436,45 @@ export class ThreadState {
     checkpoint: ThreadTurnCheckpoint | undefined,
     routeView: ThreadToolRouteView | undefined,
   ): void {
-    this.#threadToolRouteView = routeView ?? { routes: [] };
-    this.#threadTurnReduction = initializeThreadTurnReduction(
+    this.#threadProcessor = new ThreadProcessor(
       checkpoint ?? { pendingInputMessageIds: [] },
-      this.#threadToolRouteView,
+      routeView ?? { routes: [] },
     );
   }
 
   threadTurnReduction(): ThreadTurnReduction {
-    if (this.#threadTurnReduction === undefined) {
+    if (this.#threadProcessor === undefined) {
       this.installThreadTurn(undefined, undefined);
     }
-    return this.#threadTurnReduction!;
+    return this.#threadProcessor!.reduction();
   }
 
   applyThreadTurnFact(fact: ThreadTurnFact): ThreadTurnReduction {
-    const reduction = reduceThreadTurn(
-      this.threadTurnReduction(),
-      fact,
-      this.#threadToolRouteView,
-    );
-    this.#threadTurnReduction = reduction;
-    const currentToolUseEventIds = new Set(
-      reduction.checkpoint.request?.toolMembers.flatMap((member) =>
-        member.memberKind === "public_tool_use" ? [member.toolUseEventId] : []
-      ) ?? [],
-    );
-    this.#threadToolRouteView = {
-      routes: this.#threadToolRouteView.routes.filter((route) =>
-        currentToolUseEventIds.has(route.toolUseEventId)
-      ),
-    };
-    return reduction;
+    this.threadTurnReduction();
+    return this.#threadProcessor!.apply(fact);
   }
 
   reconcileThreadTurnSeal(): ThreadTurnReduction {
-    const reduction = reconcileThreadTurnSeal(
-      this.threadTurnReduction(),
-      this.#threadToolRouteView,
-    );
-    this.#threadTurnReduction = reduction;
-    return reduction;
+    this.threadTurnReduction();
+    return this.#threadProcessor!.reconcileSeal();
   }
 
   consumeThreadTurnEdge(): ThreadTurnReduction {
-    const reduction = consumeThreadTurnEdge(
-      this.threadTurnReduction(),
-      this.#threadToolRouteView,
-    );
-    this.#threadTurnReduction = reduction;
-    return reduction;
+    this.threadTurnReduction();
+    return this.#threadProcessor!.consumeEdge();
   }
 
   recordThreadToolRoute(
     toolUseEventId: string,
     disposition: ThreadToolRouteView["routes"][number]["disposition"],
   ): void {
-    const routes = this.#threadToolRouteView.routes.filter(
-      (route) => route.toolUseEventId !== toolUseEventId,
-    );
-    this.#threadToolRouteView = {
-      routes: [...routes, { toolUseEventId, disposition }],
-    };
+    this.threadTurnReduction();
+    this.#threadProcessor!.recordRoute(toolUseEventId, disposition);
   }
 
   clearThreadToolRoute(toolUseEventId: string): void {
-    this.#threadToolRouteView = {
-      routes: this.#threadToolRouteView.routes.filter(
-        (route) => route.toolUseEventId !== toolUseEventId,
-      ),
-    };
+    this.threadTurnReduction();
+    this.#threadProcessor!.clearRoute(toolUseEventId);
   }
 
   currentModel(): SessionCurrentModel | undefined {
@@ -536,10 +551,10 @@ export class ThreadState {
     }
   }
 
-  discardQueuedAcceptedInputsBeforeFence(interruptFenceSequence: number): void {
+  discardQueuedAcceptedInputsBeforeFence(interruptFenceSequence: number, preserveTaskNotifications: boolean): void {
     this.#acceptedInputs = this.#acceptedInputs.filter((input) =>
       input.kind === "inter_agent_message" ||
-      input.kind === "task_notification" ||
+	  (preserveTaskNotifications && input.kind === "task_notification") ||
       input.runtimeInputId === this.#committingAcceptedInputId ||
       input.sequenceTo >= interruptFenceSequence
     );
@@ -870,9 +885,7 @@ export class ThreadState {
     runtimeInputId: string,
     result: RuntimeControlInputCommitResult = { ok: true, joined: true },
     declaration: RuntimeControlInputDeclaration = {
-      drafts: [],
-      pendingToolCancellations: [],
-      sandboxExecutionToolUseEventIds: [],
+      messageCreates: [],
     },
   ): boolean {
     const interrupt = this.#userInterrupt;
@@ -918,8 +931,7 @@ export class ThreadState {
     this.#backgroundTools = Object.create(null) as Record<string, RuntimeBackgroundToolState | undefined>;
     this.#activeAttachmentRide = undefined;
     this.#pendingAttachments = [];
-    this.#threadTurnReduction = undefined;
-    this.#threadToolRouteView = { routes: [] };
+    this.#threadProcessor = undefined;
     this.#lastRequestUsage = undefined;
     this.#lastRequestModelLimits = undefined;
     this.#lastRequestContextAnchorSequence = undefined;

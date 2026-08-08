@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -105,6 +106,20 @@ func (s *PostgreSQLSessionEventStore) AppendClientEvents(ctx context.Context, wo
 			targetThreadIDsByEvent, err := resolveEventTargetThreadIDsForIdempotency(ctx, tx, workspaceID, sessionID, admission, events, settings.now)
 			if err != nil {
 				return err
+			}
+			for index, event := range events {
+				if event.eventType == EventTypeUserInterrupt {
+					continue
+				}
+				for _, targetThreadID := range targetThreadIDsByEvent[index] {
+					closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, string(workspaceID), sessionID, targetThreadID)
+					if err != nil {
+						return err
+					}
+					if closing {
+						return &ConflictError{Message: "session thread is closing"}
+					}
+				}
 			}
 			if err := rejectMessageWhileApprovalPending(ctx, tx, workspaceID, sessionID, runtimeStatus, events); err != nil {
 				return err

@@ -2,7 +2,7 @@ import { expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { Cause, Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect";
 import { ProviderRequestKind, RuntimeMessageRole, SystemCacheHint, SystemSegmentKind, } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
-import type { DurableRuntimeMessage, PendingInputResult, RuntimeDependencies, RuntimeInternalToolRepairCommit, RuntimeMessage, RuntimeMessageDraft, RuntimeMessageInfo, RuntimeDeclarationOperationControls, RuntimePart, SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterAppendResult, SessionEventWriterFinishIdleEnvelope, SessionEventWriterRequestEndEnvelope, SessionEventWriterRuntimeTerminationEnvelope, } from "../../../src/contracts/runtime.js";
+import type { DurableRuntimeMessage, PendingInputResult, RuntimeDeclarationReceipt, RuntimeDependencies, RuntimeInternalToolRepairCommit, RuntimeMessage, RuntimeMessageInfo, RuntimeDeclarationOperationControls, RuntimePart, RuntimePartCreate, SessionEvent, SessionEventEnvelope, SessionEventWriter, SessionEventWriterAppendResult, SessionEventWriterFinishIdleEnvelope, SessionEventWriterRequestEndEnvelope, SessionEventWriterRuntimeTerminationEnvelope, } from "../../../src/contracts/runtime.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageSchema, RuntimeInternalToolRepairStore, SessionEventWriterRetryPolicy, normalizeContextLoaderError, normalizeRuntimeMessageStoreError, normalizeSessionEventWriterError, } from "../../../src/contracts/runtime.js";
 import { LLMEventSchema } from "../../../src/llm/llm-event.js";
 import type { LLMEvent, RuntimeUsage } from "../../../src/llm/llm-event.js";
@@ -22,7 +22,6 @@ import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "../../../src/session/approval-reviewer-manager.js";
 import type { RuntimeAcceptedInputState, RuntimeConfigPatchState, RuntimeControlInputDeclaration, } from "../../../src/thread-loop/thread-state.js";
-import { SessionProcessor } from "../../../src/runtime/accumulator.js";
 import { SessionToolCoordinator } from "../../../src/tools/tool-scheduler.js";
 import { runtimeModelForThread, runtimeToolPolicyFromPatchPayloads } from "../../../../runtime-pod/src/command.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage, buildRuntimeControlCommitResult, } from "../runtime-message-builders.js";
@@ -315,7 +314,7 @@ class ThreadLoopRuntimeStore extends RuntimeInternalToolRepairStore {
     }
     protected async commitInternalToolRepairRecord(repair: RuntimeInternalToolRepairCommit): Promise<unknown> {
         await this.beforeInternalToolRepair?.(repair);
-        const part = repair.draft.parts[0];
+        const part = repair.messageCreate.parts[0];
         if (part === undefined) {
             throw new Error("missing internal repair part");
         }
@@ -341,18 +340,16 @@ class ThreadLoopRuntimeStore extends RuntimeInternalToolRepairStore {
                     sessionThreadId: repair.sessionThreadId,
                     operationKind: "commit_internal_tool_repair",
                     sourceKind: "internal_tool_repair",
-                    sourceId: repair.repairKey,
+					operationId: repair.repairKey,
                     declarationDigest: "test-repair-digest",
                     pendingAttachmentDelta: [],
                     events: [{
                             sessionThreadId: repair.sessionThreadId,
-                            sourceEventId: repair.repairKey,
                             eventId,
                             eventSequence,
                             disposition: "created",
                         }],
                     messages: [{
-                            runtimeLocalId: repair.draft.runtimeLocalId,
                             sessionThreadId: repair.sessionThreadId,
                             owningEventId: eventId,
                             messageId,
@@ -361,7 +358,6 @@ class ThreadLoopRuntimeStore extends RuntimeInternalToolRepairStore {
                             updatedAt: createdAt,
                             disposition: "created",
                             parts: [{
-                                    runtimeLocalPartId: part.runtimeLocalPartId,
                                     partId,
                                     messageId,
                                     partSequence: 0,
@@ -369,7 +365,10 @@ class ThreadLoopRuntimeStore extends RuntimeInternalToolRepairStore {
                                     updatedAt: createdAt,
                                     disposition: "created",
                                 }],
-                        }],
+						}],
+					interruptToolProjections: [],
+					prefixConsumptions: [],
+					childLifecycle: [],
                 },
             },
         };
@@ -455,467 +454,361 @@ interface TestDurableSequence {
     messageSequence: number;
 }
 
+interface TestAssistantProjection {
+    readonly messageId: string;
+    readonly messageSequence: number;
+    readonly owningEventId: string;
+    readonly owningEventSequence: number;
+    nextPartSequence: number;
+    unfinishedTools: Array<{ readonly toolUseEventId: string; readonly partSequence: number }>;
+}
+
 class TestRuntimeDeclarationReceipts {
-    constructor(private readonly durableSequence: TestDurableSequence = {
-        eventSequence: 100000,
-        messageSequence: 100000,
-    }) { }
-    private readonly activeMessages = new Map<string, {
-        readonly messageId: string;
-        readonly messageSequence: number;
-        readonly owningEventId: string;
-        readonly parts: Map<string, {
-            readonly partId: string;
-            readonly createdAt: string;
-        }>;
-    }>();
+    private readonly sequence: TestDurableSequence;
+    private readonly assistants = new Map<string, TestAssistantProjection>();
+
+    constructor(sequence: TestDurableSequence = { eventSequence: 0, messageSequence: 0 }) {
+        this.sequence = sequence;
+    }
+
     seedMessage(sessionThreadId: string, message: DurableRuntimeMessage): void {
-        this.durableSequence.eventSequence = Math.max(this.durableSequence.eventSequence, message.eventSequence);
-        this.durableSequence.messageSequence = Math.max(this.durableSequence.messageSequence, message.sequence);
-        this.activeMessages.set(sessionThreadId, {
+        this.sequence.eventSequence = Math.max(this.sequence.eventSequence, message.eventSequence);
+        this.sequence.messageSequence = Math.max(this.sequence.messageSequence, message.sequence);
+        if (message.role !== "assistant") return;
+        const prior = this.assistants.get(sessionThreadId);
+        if (prior !== undefined && prior.messageSequence > message.sequence) return;
+        this.assistants.set(sessionThreadId, {
             messageId: message.id,
             messageSequence: message.sequence,
             owningEventId: message.owningEventId,
-            parts: new Map(message.parts.map((part) => [
-                part.type === "tool"
-                    ? `tool:${part.toolCallId}`
-                    : part.type === "reasoning"
-                        ? `reasoning:${part.providerPartId ?? part.sequence}`
-                        : `${part.type}:${part.sequence}`,
-                { partId: part.id, createdAt: part.createdAt },
-            ])),
+            owningEventSequence: message.eventSequence,
+            nextPartSequence: Math.max(-1, ...message.parts.map((part) => part.sequence)) + 1,
+            unfinishedTools: message.parts
+                .filter((part): part is Extract<RuntimePart, { readonly type: "tool" }> =>
+                    part.type === "tool" && part.toolUseEventId !== undefined &&
+                    part.state.status !== "completed" && part.state.status !== "error" && part.state.status !== "cancelled")
+                .map((part) => ({ toolUseEventId: part.toolUseEventId!, partSequence: part.sequence })),
         });
     }
+
     apply(envelope: SessionEventEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
+        if (!result.ok) return result;
         if (envelope.event.type === "span.model_request_start") {
-            this.activeMessages.delete(envelope.sessionThreadId);
+            this.assistants.delete(envelope.sessionThreadId);
         }
-        if (!result.ok || result.declaration !== undefined) {
-            return result;
+        const event = this.eventStamp(envelope.sessionThreadId, result.eventId);
+        let messages: RuntimeDeclarationReceipt["messages"] = [];
+        if (envelope.assistantPartAppend !== undefined) {
+            messages = [this.appendStamp(envelope.sessionThreadId, event, envelope.assistantPartAppend.parts)];
         }
-        this.durableSequence.eventSequence += 1;
-        const messages = envelope.drafts.length === 0
-            ? []
-            : (() => {
-                const current = this.activeMessages.get(envelope.sessionThreadId);
-                const message = current ?? {
-                    messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence + 1}`,
-                    messageSequence: this.durableSequence.messageSequence + 1,
-                    owningEventId: result.eventId,
-                    parts: new Map<string, {
-                        readonly partId: string;
-                        readonly createdAt: string;
-                    }>(),
-                };
-                if (current === undefined) {
-                    this.durableSequence.messageSequence += 1;
-                    this.activeMessages.set(envelope.sessionThreadId, message);
-                }
-                const messageDisposition = current === undefined ? "created" as const : "updated" as const;
-                return envelope.drafts.map((draft) => ({
-                    runtimeLocalId: draft.runtimeLocalId,
-                    sessionThreadId: envelope.sessionThreadId,
-                    owningEventId: message.owningEventId,
-                    messageId: message.messageId,
-                    messageSequence: message.messageSequence,
-                    createdAt,
-                    updatedAt: createdAt,
-                    disposition: messageDisposition,
-                    parts: draft.parts.map((part, partIndex) => {
-                        const association = testPartAssociation(part);
-                        const existing = message.parts.get(association);
-                        const durablePart = existing ?? {
-                            partId: `part-${message.messageId}-${message.parts.size + 1}`,
-                            createdAt,
-                        };
-                        message.parts.set(association, durablePart);
-                        return {
-                            runtimeLocalPartId: part.runtimeLocalPartId,
-                            partId: durablePart.partId,
-                            messageId: message.messageId,
-                            partSequence: partIndex,
-                            createdAt: durablePart.createdAt,
-                            updatedAt: createdAt,
-                            disposition: existing === undefined ? "created" as const : "updated" as const,
-                        };
-                    }),
-                }));
-            })();
-        const withReceipt: SessionEventWriterAppendResult = {
-            ...result,
-            declaration: {
-                applicationDisposition: "current_custody",
-                observedBindingId: envelope.bindingId,
-                observedBindingGeneration: envelope.bindingGeneration,
-                receipt: {
-                    sessionThreadId: envelope.sessionThreadId,
-                    operationKind: "write_event",
-                    sourceKind: envelope.event.type,
-                    sourceId: envelope.writeId,
-                    declarationDigest: `digest-${envelope.writeId}`,
-                    pendingAttachmentDelta: [],
-                    pendingToolDelta: [],
-                    prefixConsumptions: [],
-                    childLifecycle: [],
-                    events: [{
-                            sessionThreadId: envelope.sessionThreadId,
-                            sourceEventId: envelope.writeId,
-                            eventId: result.eventId,
-                            eventSequence: this.durableSequence.eventSequence,
-                            disposition: "created",
-                        }],
-                    messages,
-                },
-            },
-        };
-        return withReceipt;
-    }
-    applyRequestEnd(envelope: SessionEventWriterRequestEndEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
-        if (!result.ok || result.declaration !== undefined) {
-            return result;
+        if (envelope.toolSettlement !== undefined) {
+            this.settleTool(envelope.sessionThreadId, envelope.toolSettlement.toolUseEventId);
         }
-        this.durableSequence.eventSequence += 1;
-        const requestEndEventSequence = this.durableSequence.eventSequence;
-        const requestEndEventId = result.eventId;
-        const events = [{
-                sessionThreadId: envelope.sessionThreadId,
-                sourceEventId: envelope.modelRequestId,
-                eventId: requestEndEventId,
-                eventSequence: requestEndEventSequence,
-                disposition: "created" as const,
-            }];
-        const drafts = envelope.drafts ?? [];
-        const primaryDrafts = drafts.filter((draft) => draft.draftKind !== "cancellation");
-        const cancellationDrafts = drafts.filter((draft) => draft.draftKind === "cancellation");
-        const messages = primaryDrafts.length === 0
-            ? []
-            : envelope.requestKind === "compaction_summary"
-                ? (() => {
-                    this.durableSequence.eventSequence += 1;
-                    this.durableSequence.messageSequence = envelope.compactedThroughMessageSequence === undefined
-                        ? this.durableSequence.messageSequence + 1
-                        : envelope.compactedThroughMessageSequence + 1;
-                    const compactionEventId = `bridge-compaction-${envelope.modelRequestId}`;
-                    events.push({
-                        sessionThreadId: envelope.sessionThreadId,
-                        sourceEventId: envelope.modelRequestId,
-                        eventId: compactionEventId,
-                        eventSequence: this.durableSequence.eventSequence,
-                        disposition: "created" as const,
-                    });
-                    return primaryDrafts.map((draft) => ({
-                        runtimeLocalId: draft.runtimeLocalId,
-                        sessionThreadId: envelope.sessionThreadId,
-                        owningEventId: compactionEventId,
-                        messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}`,
-                        messageSequence: this.durableSequence.messageSequence,
-                        createdAt,
-                        updatedAt: createdAt,
-                        disposition: "created" as const,
-                        parts: draft.parts.map((part, partIndex) => ({
-                            runtimeLocalPartId: part.runtimeLocalPartId,
-                            partId: `part-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}-${partIndex}`,
-                            messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}`,
-                            partSequence: partIndex,
-                            createdAt,
-                            updatedAt: createdAt,
-                            disposition: "created" as const,
-                        })),
-                    }));
-                })()
-                : (() => {
-                    const current = this.activeMessages.get(envelope.sessionThreadId);
-                    const message = current ?? {
-                        messageId: `message-${envelope.sessionThreadId}-${this.durableSequence.messageSequence + 1}`,
-                        messageSequence: this.durableSequence.messageSequence + 1,
-                        owningEventId: requestEndEventId,
-                        parts: new Map<string, {
-                            readonly partId: string;
-                            readonly createdAt: string;
-                        }>(),
-                    };
-                    if (current === undefined) {
-                        this.durableSequence.messageSequence += 1;
-                        this.activeMessages.set(envelope.sessionThreadId, message);
-                    }
-                    return primaryDrafts.map((draft) => ({
-                        runtimeLocalId: draft.runtimeLocalId,
-                        sessionThreadId: envelope.sessionThreadId,
-                        owningEventId: message.owningEventId,
-                        messageId: message.messageId,
-                        messageSequence: message.messageSequence,
-                        createdAt,
-                        updatedAt: createdAt,
-                        disposition: current === undefined ? "created" as const : "updated" as const,
-                        parts: draft.parts.map((part, partIndex) => {
-                            const association = testPartAssociation(part);
-                            const existing = message.parts.get(association);
-                            const durablePart = existing ?? {
-                                partId: `part-${message.messageId}-${message.parts.size + 1}`,
-                                createdAt,
-                            };
-                            message.parts.set(association, durablePart);
-                            return {
-                                runtimeLocalPartId: part.runtimeLocalPartId,
-                                partId: durablePart.partId,
-                                messageId: message.messageId,
-                                partSequence: partIndex,
-                                createdAt: durablePart.createdAt,
-                                updatedAt: createdAt,
-                                disposition: existing === undefined ? "created" as const : "updated" as const,
-                            };
-                        }),
-                    }));
-                })();
-        const checkpointMessage = messages[0];
-        const interruptReceipt = envelope.interruptSettlement === undefined
-            ? undefined
-            : (() => {
-                const eventId = envelope.interruptSettlement.eventIds[0]!;
-                const interruptMessages = cancellationDrafts.map((draft) => {
-                    this.durableSequence.messageSequence += 1;
-                    const messageId = `message-interrupt-${envelope.sessionThreadId}-${this.durableSequence.messageSequence}`;
-                    return {
-                        runtimeLocalId: draft.runtimeLocalId,
-                        sessionThreadId: envelope.sessionThreadId,
-                        owningEventId: eventId,
-                        messageId,
-                        messageSequence: this.durableSequence.messageSequence,
-                        createdAt,
-                        updatedAt: createdAt,
-                        disposition: "created" as const,
-                        parts: draft.parts.map((part, partIndex) => ({
-                            runtimeLocalPartId: part.runtimeLocalPartId,
-                            partId: `part-${messageId}-${partIndex}`,
-                            messageId,
-                            partSequence: partIndex,
-                            createdAt,
-                            updatedAt: createdAt,
-                            disposition: "created" as const,
-                        })),
-                    };
-                });
-                return {
-                    sessionThreadId: envelope.sessionThreadId,
-                    operationKind: "commit_inputs",
-                    sourceKind: "interrupt_control",
-                    sourceId: envelope.interruptSettlement.runtimeInputId,
-                    declarationDigest: `digest-interrupt-${envelope.interruptSettlement.runtimeInputId}`,
-                    pendingAttachmentDelta: [],
-                    pendingToolDelta: envelope.interruptSettlement.pendingToolCancellations.map((pending) => JSON.stringify({
-                        result_event_id: eventId,
-                        runtime_local_id: pending.runtimeLocalId,
-                        status: "cancelled",
-                        tool_use_event_id: pending.toolUseEventId,
-                    })),
-                    prefixConsumptions: [],
-                    childLifecycle: [],
-                    events: [{
-                            sessionThreadId: envelope.sessionThreadId,
-                            sourceEventId: eventId,
-                            eventId,
-                            eventSequence: envelope.interruptSettlement.sequenceFrom,
-                            disposition: "existing" as const,
-                        }],
-                    messages: interruptMessages,
-                };
-            })();
-        return {
-            ...result,
-            declaration: {
-                applicationDisposition: "current_custody",
-                observedBindingId: envelope.bindingId,
-                observedBindingGeneration: envelope.bindingGeneration,
-                receipt: {
-                    sessionThreadId: envelope.sessionThreadId,
-                    operationKind: "write_request_end",
-                    sourceKind: "model_request",
-                    sourceId: envelope.modelRequestId,
-                    declarationDigest: `digest-${envelope.modelRequestId}`,
-                    pendingAttachmentDelta: [],
-                    pendingToolDelta: [],
-                    prefixConsumptions: envelope.prefixConsumption === undefined || checkpointMessage === undefined
-                        ? []
-                        : [{
-                                childThreadId: envelope.prefixConsumption.childThreadId,
-                                parentBoundaryEventId: envelope.prefixConsumption.parentBoundaryEventId,
-                                checkpointMessageId: checkpointMessage.messageId,
-                                disposition: "consumed",
-                            }],
-                    childLifecycle: [],
-                    events,
-                    messages,
-                    ...(envelope.reschedule === undefined
-                        ? {}
-                        : {
-                            requestReschedule: {
-                                disposition: "accepted",
-                                requestKind: envelope.requestKind ?? "agent_provider_request",
-                                attempt: envelope.reschedule.attempt,
-                                effectiveDeadline: envelope.reschedule.deadline,
-                            },
-                        }),
-                    ...(envelope.compactedThroughMessageSequence === undefined
-                        ? {}
-                        : { compactedThroughMessageSequence: envelope.compactedThroughMessageSequence }),
-                },
-                ...(interruptReceipt === undefined ? {} : { relatedReceipts: [interruptReceipt] }),
-            },
-            ...(envelope.reschedule === undefined
-                ? {}
-                : {
-                    rescheduleDisposition: {
-                        status: "accepted",
-                        attempt: envelope.reschedule.attempt,
-                        effectiveDeadline: envelope.reschedule.deadline,
-                    },
-                }),
-        };
-    }
-    applyFinishIdle(envelope: SessionEventWriterFinishIdleEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
-        if (!result.ok || result.declaration !== undefined) {
-            return result;
-        }
-        this.durableSequence.eventSequence += 1;
-        const idleEvent = {
+        const receipt = this.receipt({
             sessionThreadId: envelope.sessionThreadId,
-            sourceEventId: envelope.durableTurnId,
-            eventId: result.eventId,
-            eventSequence: this.durableSequence.eventSequence,
-            disposition: "created" as const,
-        };
-        const events = [idleEvent];
-        const drafts = envelope.drafts ?? [];
-        const messages = drafts.map((draft) => {
-            this.durableSequence.eventSequence += 1;
-            const completionEventId = `bridge-completion-${envelope.durableTurnId}`;
-            events.push({
-                sessionThreadId: envelope.sessionThreadId,
-                sourceEventId: `delivery-${envelope.durableTurnId}`,
-                eventId: completionEventId,
-                eventSequence: this.durableSequence.eventSequence,
-                disposition: "created" as const,
-            });
-            const messageId = `message-completion-${envelope.durableTurnId}`;
-            return {
-                runtimeLocalId: draft.runtimeLocalId,
-                sessionThreadId: envelope.sessionThreadId,
-                owningEventId: completionEventId,
-                messageId,
-                messageSequence: 0,
-                createdAt,
-                updatedAt: createdAt,
-                disposition: "created" as const,
-                parts: draft.parts.map((part, partIndex) => ({
-                    runtimeLocalPartId: part.runtimeLocalPartId,
-                    partId: `part-completion-${envelope.durableTurnId}-${partIndex}`,
-                    messageId,
-                    partSequence: partIndex,
-                    createdAt,
-                    updatedAt: createdAt,
-                    disposition: "created" as const,
-                })),
-            };
-        });
-        return {
-            ...result,
-            declaration: {
-                applicationDisposition: "current_custody",
-                observedBindingId: envelope.bindingId,
-                observedBindingGeneration: envelope.bindingGeneration,
-                receipt: {
-                    sessionThreadId: envelope.sessionThreadId,
-                    operationKind: "finish_idle",
-                    sourceKind: "turn_closeout",
-                    sourceId: envelope.durableTurnId,
-                    declarationDigest: `digest-finish-${envelope.durableTurnId}`,
-                    pendingAttachmentDelta: [],
-                    pendingToolDelta: [],
-                    prefixConsumptions: [],
-                    childLifecycle: [],
-                    events,
-                    messages,
-                    idleCloseout: {
-                        durableTurnId: envelope.durableTurnId,
-                        idleEventId: result.eventId,
-                        idleEventSequence: idleEvent.eventSequence,
-                        committedIdleAt: createdAt,
-                    },
+            operationKind: "write_event",
+            sourceKind: envelope.event.type,
+            operationId: envelope.writeId,
+            events: [event],
+            messages,
+            ...(envelope.event.type === "span.model_request_start" ? {
+                requestStart: {
+                    requestKind: envelope.requestKind!,
+                    contextThroughMessageSequence: envelope.contextThroughMessageSequence!,
                 },
+            } : {}),
+        });
+        return this.withDeclaration(envelope, result, receipt);
+    }
+
+    applyRequestEnd(envelope: SessionEventWriterRequestEndEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
+        if (!result.ok) return result;
+        const requestEnd = this.eventStamp(envelope.sessionThreadId, result.eventId);
+        const events: RuntimeDeclarationReceipt["events"][number][] = [requestEnd];
+        let messages: RuntimeDeclarationReceipt["messages"] = [];
+        if (envelope.trailingPartAppend !== undefined) {
+            messages = [this.appendStamp(envelope.sessionThreadId, requestEnd, envelope.trailingPartAppend.parts)];
+        }
+        if (envelope.compactionCheckpointCreate !== undefined) {
+            const compactionEvent = this.eventStamp(envelope.sessionThreadId, `sevt_compaction_${this.sequence.eventSequence + 1}`);
+            events.push(compactionEvent);
+            const messageSequence = (envelope.compactedThroughMessageSequence ?? this.sequence.messageSequence) + 1;
+            messages = [this.createStamp(
+                envelope.sessionThreadId,
+                compactionEvent,
+                envelope.compactionCheckpointCreate.parts,
+                messageSequence,
+            )];
+        }
+        const receipt = this.receipt({
+            sessionThreadId: envelope.sessionThreadId,
+            operationKind: "write_request_end",
+            sourceKind: "model_request",
+            operationId: envelope.modelRequestId,
+            events,
+            messages,
+            ...(envelope.prefixConsumption === undefined || messages[0] === undefined ? {} : {
+                prefixConsumptions: [{
+                    childThreadId: envelope.prefixConsumption.childThreadId,
+                    parentBoundaryEventId: envelope.prefixConsumption.parentBoundaryEventId,
+                    checkpointMessageId: messages[0].messageId,
+                    disposition: "consumed" as const,
+                }],
+            }),
+            ...(envelope.compactedThroughMessageSequence === undefined ? {} : {
+                compactedThroughMessageSequence: envelope.compactedThroughMessageSequence,
+            }),
+            ...(envelope.reschedule === undefined ? {} : {
+                requestReschedule: {
+                    disposition: "accepted" as const,
+                    requestKind: envelope.requestKind ?? "agent_provider_request",
+                    attempt: envelope.reschedule.attempt,
+                    effectiveDeadline: envelope.reschedule.deadline,
+                },
+            }),
+        });
+        const relatedReceipts = envelope.interruptSettlement === undefined
+            ? undefined
+            : [this.interruptReceipt(envelope, envelope.interruptSettlement)];
+        return this.withDeclaration(envelope, result, receipt, relatedReceipts);
+    }
+
+    applyFinishIdle(envelope: SessionEventWriterFinishIdleEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
+        if (!result.ok) return result;
+        const idleEvent = this.eventStamp(envelope.sessionThreadId, result.eventId);
+        const events: RuntimeDeclarationReceipt["events"][number][] = [idleEvent];
+        let messages: RuntimeDeclarationReceipt["messages"] = [];
+        if (envelope.completionMailCreate !== undefined) {
+            const mailEvent = this.eventStamp(envelope.sessionThreadId, `sevt_completion_${this.sequence.eventSequence + 1}`);
+            events.push(mailEvent);
+            messages = [this.createStamp(envelope.sessionThreadId, mailEvent, envelope.completionMailCreate.parts)];
+        }
+        const receipt = this.receipt({
+            sessionThreadId: envelope.sessionThreadId,
+            operationKind: "finish_idle",
+            sourceKind: "turn_closeout",
+            operationId: envelope.durableTurnId,
+            events,
+            messages,
+            idleCloseout: {
+                durableTurnId: envelope.durableTurnId,
+                idleEventId: idleEvent.eventId,
+                idleEventSequence: idleEvent.eventSequence,
+                committedIdleAt: result.processedAt,
             },
+        });
+        return this.withDeclaration(envelope, result, receipt);
+    }
+
+    applyRuntimeTermination(envelope: SessionEventWriterRuntimeTerminationEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
+        if (!result.ok) return result;
+        const events: RuntimeDeclarationReceipt["events"][number][] = [];
+        for (const settlement of envelope.toolSettlements) {
+            events.push(this.eventStamp(envelope.sessionThreadId, `sevt_tool_result_${this.sequence.eventSequence + 1}`));
+            this.settleTool(envelope.sessionThreadId, settlement.toolUseEventId);
+        }
+        let messages: RuntimeDeclarationReceipt["messages"] = [];
+        if (envelope.completionMailCreate !== undefined) {
+            const mailEvent = this.eventStamp(envelope.sessionThreadId, `sevt_completion_${this.sequence.eventSequence + 1}`);
+            events.push(mailEvent);
+            messages = [this.createStamp(envelope.sessionThreadId, mailEvent, envelope.completionMailCreate.parts)];
+        }
+        events.push(this.eventStamp(envelope.sessionThreadId, `sevt_failure_${this.sequence.eventSequence + 1}`));
+        events.push(this.eventStamp(envelope.sessionThreadId, result.eventId));
+        const receipt = this.receipt({
+            sessionThreadId: envelope.sessionThreadId,
+            operationKind: "commit_runtime_termination",
+            sourceKind: "runtime_termination",
+            operationId: envelope.writeId,
+            events,
+            messages,
+        });
+        return this.withDeclaration(envelope, result, receipt);
+    }
+
+    private interruptReceipt(
+        envelope: SessionEventWriterRequestEndEnvelope,
+        interrupt: NonNullable<SessionEventWriterRequestEndEnvelope["interruptSettlement"]>,
+    ): RuntimeDeclarationReceipt {
+        const active = this.assistants.get(envelope.sessionThreadId);
+        const unfinished = [...(active?.unfinishedTools ?? [])].sort((left, right) => left.partSequence - right.partSequence);
+        const projections = unfinished.map(({ toolUseEventId }) => ({
+            toolUseEventId,
+            resultEvent: this.eventStamp(envelope.sessionThreadId, `sevt_interrupt_result_${this.sequence.eventSequence + 1}`),
+            terminalState: { type: "cancelled" as const },
+        }));
+        if (active !== undefined) active.unfinishedTools = [];
+        return this.receipt({
+            sessionThreadId: envelope.sessionThreadId,
+            operationKind: "commit_inputs",
+            sourceKind: "interrupt_control",
+            operationId: interrupt.runtimeInputId,
+            events: [{
+                sessionThreadId: envelope.sessionThreadId,
+                eventId: interrupt.eventIds[0]!,
+                eventSequence: interrupt.sequenceFrom,
+                disposition: "existing",
+            }],
+            messages: [],
+            interruptToolProjections: projections,
+        });
+    }
+
+    private appendStamp(
+        sessionThreadId: string,
+        event: RuntimeDeclarationReceipt["events"][number],
+        parts: readonly RuntimePartCreate[],
+    ): RuntimeDeclarationReceipt["messages"][number] {
+        let assistant = this.assistants.get(sessionThreadId);
+        const created = assistant === undefined;
+        if (assistant === undefined) {
+            this.sequence.messageSequence += 1;
+            assistant = {
+                messageId: `msg_assistant_${this.sequence.messageSequence}`,
+                messageSequence: this.sequence.messageSequence,
+                owningEventId: event.eventId,
+                owningEventSequence: event.eventSequence,
+                nextPartSequence: 0,
+                unfinishedTools: [],
+            };
+            this.assistants.set(sessionThreadId, assistant);
+        }
+        const partStamps = this.partStamps(assistant.messageId, assistant.nextPartSequence, parts.length);
+        parts.forEach((part, index) => {
+            if (part.type !== "tool") return;
+            const toolUseEventId = part.toolUseEventId ??
+                (index === parts.length - 1 ? event.eventId : undefined);
+            if (toolUseEventId !== undefined && part.state.status !== "completed" && part.state.status !== "error" && part.state.status !== "cancelled") {
+                assistant!.unfinishedTools.push({ toolUseEventId, partSequence: partStamps[index]!.partSequence });
+            }
+        });
+        assistant.nextPartSequence += parts.length;
+        return {
+            sessionThreadId,
+            owningEventId: assistant.owningEventId,
+            messageId: assistant.messageId,
+            messageSequence: assistant.messageSequence,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: created ? "created" : "updated",
+            parts: partStamps,
         };
     }
-    applyRuntimeTermination(envelope: SessionEventWriterRuntimeTerminationEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
-        if (!result.ok || result.declaration !== undefined) {
-            return result;
-        }
-        const events = ["failure", "idle"].map((kind) => {
-            this.durableSequence.eventSequence += 1;
-            return {
-                sessionThreadId: envelope.sessionThreadId,
-                sourceEventId: envelope.writeId,
-                eventId: `bridge-termination-${kind}-${envelope.writeId}`,
-                eventSequence: this.durableSequence.eventSequence,
-                disposition: "created" as const,
-            };
-        });
-        const messageEvents = envelope.drafts.map((_draft, index) => {
-            this.durableSequence.eventSequence += 1;
-            return {
-                sessionThreadId: envelope.sessionThreadId,
-                sourceEventId: envelope.writeId,
-                eventId: `bridge-termination-${envelope.writeId}-${index}`,
-                eventSequence: this.durableSequence.eventSequence,
-                disposition: "created" as const,
-            };
-        });
-        events.push(...messageEvents);
-        const messages = envelope.drafts.map((draft, index) => {
-            this.durableSequence.messageSequence += 1;
-            const messageId = `message-termination-${envelope.writeId}-${index}`;
-            return {
-                runtimeLocalId: draft.runtimeLocalId,
-                sessionThreadId: envelope.sessionThreadId,
-                owningEventId: messageEvents[index]!.eventId,
-                messageId,
-                messageSequence: this.durableSequence.messageSequence,
-                createdAt,
-                updatedAt: createdAt,
-                disposition: "created" as const,
-                parts: draft.parts.map((part, partIndex) => ({
-                    runtimeLocalPartId: part.runtimeLocalPartId,
-                    partId: `part-termination-${envelope.writeId}-${index}-${partIndex}`,
-                    messageId,
-                    partSequence: partIndex,
-                    createdAt,
-                    updatedAt: createdAt,
-                    disposition: "created" as const,
-                })),
-            };
-        });
+
+    private createStamp(
+        sessionThreadId: string,
+        event: RuntimeDeclarationReceipt["events"][number],
+        parts: readonly RuntimePartCreate[],
+        forcedMessageSequence?: number,
+    ): RuntimeDeclarationReceipt["messages"][number] {
+        const messageSequence = forcedMessageSequence ?? this.sequence.messageSequence + 1;
+        this.sequence.messageSequence = Math.max(this.sequence.messageSequence, messageSequence);
+        const messageId = `msg_created_${messageSequence}`;
+        return {
+            sessionThreadId,
+            owningEventId: event.eventId,
+            messageId,
+            messageSequence,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created",
+            parts: this.partStamps(messageId, 0, parts.length),
+        };
+    }
+
+    private partStamps(messageId: string, firstSequence: number, count: number): RuntimeDeclarationReceipt["messages"][number]["parts"] {
+        return Array.from({ length: count }, (_, index) => ({
+            partId: `part_${messageId}_${firstSequence + index}`,
+            messageId,
+            partSequence: firstSequence + index,
+            createdAt,
+            updatedAt: createdAt,
+            disposition: "created" as const,
+        }));
+    }
+
+    private eventStamp(sessionThreadId: string, eventId: string): RuntimeDeclarationReceipt["events"][number] {
+        this.sequence.eventSequence += 1;
+        return {
+            sessionThreadId,
+            eventId,
+            eventSequence: this.sequence.eventSequence,
+            disposition: "created",
+        };
+    }
+
+    private settleTool(sessionThreadId: string, toolUseEventId: string): void {
+        const active = this.assistants.get(sessionThreadId);
+        if (active === undefined) return;
+        active.unfinishedTools = active.unfinishedTools.filter((tool) => tool.toolUseEventId !== toolUseEventId);
+    }
+
+    private receipt(input: {
+        readonly sessionThreadId: string;
+        readonly operationKind: string;
+        readonly sourceKind: string;
+        readonly operationId: string;
+        readonly events: RuntimeDeclarationReceipt["events"];
+        readonly messages: RuntimeDeclarationReceipt["messages"];
+        readonly interruptToolProjections?: RuntimeDeclarationReceipt["interruptToolProjections"];
+        readonly prefixConsumptions?: RuntimeDeclarationReceipt["prefixConsumptions"];
+        readonly requestReschedule?: RuntimeDeclarationReceipt["requestReschedule"];
+        readonly requestStart?: RuntimeDeclarationReceipt["requestStart"];
+        readonly idleCloseout?: RuntimeDeclarationReceipt["idleCloseout"];
+        readonly compactedThroughMessageSequence?: number;
+    }): RuntimeDeclarationReceipt {
+        return {
+            sessionThreadId: input.sessionThreadId,
+            operationKind: input.operationKind,
+            sourceKind: input.sourceKind,
+            operationId: input.operationId,
+            declarationDigest: `digest_${input.operationId}`,
+            events: input.events,
+            messages: input.messages,
+            pendingAttachmentDelta: [],
+            interruptToolProjections: input.interruptToolProjections ?? [],
+            prefixConsumptions: input.prefixConsumptions ?? [],
+            childLifecycle: [],
+            ...(input.requestReschedule === undefined ? {} : { requestReschedule: input.requestReschedule }),
+            ...(input.requestStart === undefined ? {} : { requestStart: input.requestStart }),
+            ...(input.idleCloseout === undefined ? {} : { idleCloseout: input.idleCloseout }),
+            ...(input.compactedThroughMessageSequence === undefined ? {} : {
+                compactedThroughMessageSequence: input.compactedThroughMessageSequence,
+            }),
+        };
+    }
+
+    private withDeclaration(
+        envelope: { readonly bindingId: string; readonly bindingGeneration: number },
+        result: Extract<SessionEventWriterAppendResult, { readonly ok: true }>,
+        receipt: RuntimeDeclarationReceipt,
+        relatedReceipts?: readonly RuntimeDeclarationReceipt[],
+    ): SessionEventWriterAppendResult {
+        const reschedule = receipt.requestReschedule;
         return {
             ...result,
             declaration: {
+                receipt,
+                ...(relatedReceipts === undefined ? {} : { relatedReceipts: [...relatedReceipts] }),
                 applicationDisposition: "current_custody",
                 observedBindingId: envelope.bindingId,
                 observedBindingGeneration: envelope.bindingGeneration,
-                receipt: {
-                    sessionThreadId: envelope.sessionThreadId,
-                    operationKind: "commit_runtime_termination",
-                    sourceKind: "runtime_termination",
-                    sourceId: envelope.writeId,
-                    declarationDigest: `digest-termination-${envelope.writeId}`,
-                    pendingAttachmentDelta: [],
-                    pendingToolDelta: envelope.pendingToolCancellations.map((pending) => JSON.stringify({
-                        status: "cancelled",
-                        tool_use_event_id: pending.toolUseEventId,
-                    })),
-                    prefixConsumptions: [],
-                    childLifecycle: [],
-                    events,
-                    messages,
-                },
             },
+            ...(reschedule === undefined ? {} : {
+                rescheduleDisposition: reschedule.disposition === "accepted"
+                    ? {
+                        status: "accepted" as const,
+                        attempt: reschedule.attempt,
+                        effectiveDeadline: reschedule.effectiveDeadline,
+                    }
+                    : {
+                        status: "denied" as const,
+                        reason: reschedule.disposition === "denied_attempt_mismatch"
+                            ? "attempt_mismatch" as const
+                            : "budget_exhausted" as const,
+                        attempt: reschedule.attempt,
+                    },
+            }),
         };
     }
 }
@@ -926,16 +819,6 @@ function withFinishIdleReceiptForTest(envelope: SessionEventWriterFinishIdleEnve
 
 function withRuntimeTerminationReceiptForTest(envelope: SessionEventWriterRuntimeTerminationEnvelope, result: SessionEventWriterAppendResult): SessionEventWriterAppendResult {
     return new TestRuntimeDeclarationReceipts().applyRuntimeTermination(envelope, result);
-}
-
-function testPartAssociation(part: RuntimeMessageDraft["parts"][number]): string {
-    if (part.type === "tool") {
-        return `tool:${part.toolCallId}`;
-    }
-    if (part.type === "reasoning") {
-        return `reasoning:${part.providerPartId ?? part.ordinal}`;
-    }
-    return `${part.type}:${part.ordinal}`;
 }
 
 function writerFrom(append: (envelope: SessionEventEnvelope) => SessionEventWriterAppendResult, writeRequestEnd?: SessionEventWriter["writeRequestEnd"], existingMessages: readonly {
@@ -971,7 +854,6 @@ function writerFrom(append: (envelope: SessionEventEnvelope) => SessionEventWrit
                         speed: null,
                     },
                 },
-                drafts: [],
             })
             : await writeRequestEnd(envelope);
         return receipts.applyRequestEnd(envelope, result);
@@ -989,12 +871,11 @@ function writerFrom(append: (envelope: SessionEventEnvelope) => SessionEventWrit
             targetPodUid: envelope.targetPodUid,
             writeId: envelope.durableTurnId,
             event: { type: "session.status_idle", stop_reason: envelope.stopReason },
-            drafts: envelope.drafts ?? [],
         })),
         commitRuntimeTermination: async (envelope) => receipts.applyRuntimeTermination(envelope, {
             ok: true,
             writeId: envelope.writeId,
-            eventId: envelope.writeId,
+            eventId: `sevt_termination_${envelope.writeId}`,
             processedAt: createdAt,
         }),
     };
@@ -1358,7 +1239,6 @@ export {
   sleepUntilAborted,
   testAcceptedInputSequence,
   testControlCommit,
-  testPartAssociation,
   testRunCustody,
   threadLoopRuntime,
   utf8RoundTrip,

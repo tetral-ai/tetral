@@ -27,7 +27,7 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "startup.cause_class"?: string;
   readonly "startup.cause_category"?: RuntimeStartupCauseCategory;
   readonly "declaration.source.kind"?: string;
-  readonly "declaration.source.id"?: string;
+  readonly "operation.id"?: string;
   readonly "declaration.digest"?: string;
   readonly "receipt.application_disposition"?: "current_custody" | "stale_custody";
   readonly "receipt.discard_reason"?: Exclude<RuntimeReceiptEvidenceOutcome, "applied">;
@@ -43,7 +43,7 @@ export interface RuntimeReceiptEvidence {
   readonly sessionThreadId: string;
   readonly operation: string;
   readonly sourceKind: string;
-  readonly sourceId: string;
+  readonly operationId: string;
   readonly declarationDigest: string;
   readonly bindingId: string;
   readonly bindingGeneration: number;
@@ -77,7 +77,7 @@ export function recordRuntimeReceiptEvidence(
       "binding.id": evidence.bindingId,
       "binding.generation": evidence.bindingGeneration,
       "declaration.source.kind": evidence.sourceKind,
-      "declaration.source.id": evidence.sourceId,
+      "operation.id": evidence.operationId,
       "declaration.digest": evidence.declarationDigest,
       ...(evidence.applicationDisposition === undefined
         ? {}
@@ -95,6 +95,7 @@ export interface JsonLoggerOptions {
   readonly serviceName?: string;
   readonly deploymentEnvironment?: string;
   readonly serviceVersion?: string;
+  readonly clock?: (() => Date) | undefined;
 }
 
 /** Creates a Runtime Pod JSON logger backed by the shared observability serializer. */
@@ -104,6 +105,7 @@ export function createJsonLogger(options: JsonLoggerOptions): RuntimePodLogger {
     serviceName: options.serviceName ?? "agent-runtime",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
+    clock: options.clock,
   });
 }
 

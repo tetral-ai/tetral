@@ -68,9 +68,8 @@ func TestRuntimeDeliveryExhaustionDoesNotProjectMessageOrAdvanceRequestBoundary(
 	committed, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: scope, RuntimeInputId: "rin_exhaustion_message", InputKind: "messages",
 		EventIds: []string{"evt_exhaustion_message"}, SequenceFrom: 1, SequenceTo: 1,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInputDraftForTest(
-			"default", sessionID, threadID, "messages", "rin_exhaustion_message", "evt_exhaustion_message",
-			bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT, "user", "hello",
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
+			"default", sessionID, threadID, "rin_exhaustion_message", "evt_exhaustion_message", "hello",
 		)},
 	})
 	if err != nil {

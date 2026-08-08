@@ -16,8 +16,8 @@ import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeToolExecutionResult } from "../../../src/thread-loop/tool-execution.js";
 import { AutoApprovalReviewerManager } from "../../../src/session/approval-reviewer-manager.js";
-import type { RuntimeAcceptedInputState, RuntimeControlInputDeclaration } from "../../../src/thread-loop/thread-state.js";
-import { SessionProcessor } from "../../../src/runtime/accumulator.js";
+import type { RuntimeAcceptedInputState, RuntimeControlInputDeclaration, RuntimeThreadControlState } from "../../../src/thread-loop/thread-state.js";
+import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { SessionToolCoordinator } from "../../../src/tools/tool-scheduler.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopRuntimeNotificationMessage as runtimeNotificationMessage, buildThreadLoopDurableRuntimeNotificationMessage as durableRuntimeNotificationMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
@@ -25,6 +25,33 @@ import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, T
 import type { TestContextLoader, TestDurableSequence } from "./thread-loop-test-support.js";
 
 describe("ThreadLoop", () => {
+function interruptCommitResult(
+    command: RuntimeThreadControlState,
+    declaration: RuntimeControlInputDeclaration,
+    unfinishedToolUseEventIds: readonly string[],
+) {
+    const result = buildRuntimeControlCommitResult(command, "interrupt_control", declaration);
+    if (!result.ok || !("receipt" in result)) {
+        return result;
+    }
+    return {
+        ...result,
+        receipt: {
+            ...result.receipt,
+            interruptToolProjections: unfinishedToolUseEventIds.map((toolUseEventId, index) => ({
+                toolUseEventId,
+                resultEvent: {
+                    sessionThreadId: command.sessionThreadId,
+                    eventId: `sevt_interrupt_${command.runtimeInputId}_${index}`,
+                    eventSequence: command.sequenceTo + index + 1,
+                    disposition: "created" as const,
+                },
+                terminalState: { type: "cancelled" as const },
+            })),
+        },
+    };
+}
+
 test("first accepted turn rides the file attachments returned by CommitInputs", async () => {
     const session = new ThreadRuntime("sesn_first_turn_media");
     const input = acceptedInput("rin_first_turn_media", session.sessionId);
@@ -480,8 +507,8 @@ test("provider reschedule does not repeat committed RunTool effect", async () =>
     expect(occurrenceCount(requestThreeContext, successfulReasoning)).toBe(0);
     expect(requestEnds).toHaveLength(3);
     expect(requestEnds[1]?.reschedule).toMatchObject({ attempt: 1 });
-    expect(requestEnds[1]?.stableReasoningParts).toBeUndefined();
-    expect(requestEnds[2]?.stableReasoningParts?.map((part) => part.text)).toEqual([successfulReasoning]);
+    expect(requestEnds[1]?.trailingPartAppend).toBeUndefined();
+    expect(requestEnds[2]?.trailingPartAppend).toBeUndefined();
     expect(new Set(requestEnds.map((envelope) => envelope.modelRequestId)).size).toBe(3);
     expect(new Set(requestEnds.map((envelope) => envelope.modelRequestStartEventId)).size).toBe(3);
     expect(durableAppendEvents).not.toContain(failedReasoning);
@@ -594,12 +621,12 @@ test("same-request committed tool is repaired and rebased before provider resche
         expect(retryContext.split(durableValue)).toHaveLength(2);
     }
     const toolAnchor = appended.find((envelope) => envelope.event.type === "agent.tool_use");
-    expect(toolAnchor?.stableReasoningParts?.map((part) => part.text)).toEqual(["reason before mutation"]);
+    expect(toolAnchor?.assistantPartAppend?.parts.flatMap((part) => part.type === "reasoning" ? [part.text] : [])).toEqual(["reason before mutation"]);
     expect(toolAnchor?.modelRequestId).toBe(requestEnds[0]?.modelRequestId);
-    expect(appended.filter((envelope) => (envelope.stableReasoningParts?.length ?? 0) > 0)).toHaveLength(1);
+    expect(appended.filter((envelope) => (envelope.assistantPartAppend?.parts.some((part) => part.type === "reasoning") ?? false))).toHaveLength(1);
     expect(appended.filter((envelope) => envelope.event.type === "agent.tool_result")).toHaveLength(1);
     expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
-    expect(requestEnds[0]?.stableReasoningParts).toBeUndefined();
+    expect(requestEnds[0]?.trailingPartAppend).toBeUndefined();
 });
 test("runtime layer discards hot state when a tool route observes stale custody", async () => {
     const session = new ThreadRuntime("sesn_1");
@@ -1070,7 +1097,8 @@ test("request end waits for an in-flight Tool Result declaration ACK", async () 
     }))));
     await resultAppendArrived.promise;
     await flushMicrotasks(50);
-    expect(requestEnds).toHaveLength(0);
+    expect(requestEnds).toHaveLength(1);
+    expect(providerRequests).toBe(1);
     releaseResultAppend.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(requestEnds).toHaveLength(2);
@@ -1774,15 +1802,15 @@ test("serializes one shared-message declaration stream while four safe tools exe
     releaseExecutions.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(settlements).toHaveLength(4);
-    const toolCallIds = declarations.map((envelope) => envelope.drafts[0]?.parts.filter((part) => part.type === "tool").map((part) => part.toolCallId));
+    const toolCallIds = declarations.map((envelope) => envelope.assistantPartAppend?.parts.filter((part) => part.type === "tool").map((part) => part.toolCallId));
     expect(toolCallIds).toEqual([
         ["tool-1"],
-        ["tool-1", "tool-2"],
-        ["tool-1", "tool-2", "tool-3"],
-        ["tool-1", "tool-2", "tool-3", "tool-4"],
+        ["tool-2"],
+        ["tool-3"],
+        ["tool-4"],
     ]);
 });
-test("holds an earlier Tool Result behind a sibling Tool Use declaration ACK", async () => {
+test("settles an earlier Tool Result independently of a sibling Tool Use declaration ACK", async () => {
     const session = new ThreadRuntime("sesn_tool_projection_order");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
     const secondDeclarationArrived = deferred<void>();
@@ -1848,7 +1876,7 @@ test("holds an earlier Tool Result behind a sibling Tool Use declaration ACK", a
     await secondDeclarationArrived.promise;
     releaseFirstExecution.resolve(undefined);
     await flushMicrotasks(50);
-    expect(settlements).toHaveLength(0);
+    expect(settlements).toHaveLength(1);
     releaseSecondDeclaration.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(settlements).toHaveLength(2);
@@ -2084,11 +2112,11 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
         }));
         await Effect.runPromise(manager.acceptInput(input));
         await toolUseAppendStarted.promise;
-        const command = { ...acceptedInput("rin_gated_tool_use_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
+        const command = { ...acceptedInput("rin_gated_tool_use_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
             interruptCommitStarted = true;
             order.push("commit:interrupt");
-            return buildRuntimeControlCommitResult(command, "interrupt_control", declaration);
+            return interruptCommitResult(command, declaration, ["sevt_gated_tool_use"]);
         }));
         await new Promise<void>((resolve) => setImmediate(resolve));
         jest.useFakeTimers();
@@ -2107,27 +2135,11 @@ test("interrupt joins a pre-fence agent.tool_use Bridge ACK beyond the route bou
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(1);
         expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
         expect(requestEnds).toHaveLength(1);
-        const cancellationDraft = requestEnds[0]?.drafts?.find((draft) => draft.draftKind === "cancellation");
-        expect(cancellationDraft).toMatchObject({
-            sourceKind: "interrupt_control",
-            sourceId: command.runtimeInputId,
-            sourceEventId: command.eventIds[0],
-            parts: [expect.objectContaining({
-                    type: "tool",
-                    toolUseEventId: "sevt_gated_tool_use",
-                    state: expect.objectContaining({ status: "cancelled" }),
-                })],
-        });
-        if (cancellationDraft === undefined) {
-            throw new Error("missing joined interrupt cancellation draft");
-        }
         expect(requestEnds[0]?.interruptSettlement).toEqual({
             runtimeInputId: command.runtimeInputId,
             eventIds: [...command.eventIds],
             sequenceFrom: command.sequenceFrom,
             sequenceTo: command.sequenceTo,
-            pendingToolCancellations: [],
-            sandboxExecutionToolUseEventIds: [],
         });
         expect(await Effect.runPromise(manager.inspectThread(command))).toMatchObject({
             ok: true,
@@ -2231,11 +2243,11 @@ test("interrupt joins a raw CommitInternalToolRepair ACK before snapshot and per
         }));
         await Effect.runPromise(manager.acceptInput(input));
         await repairStarted.promise;
-        const command = { ...acceptedInput("rin_gated_internal_repair_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
+        const command = { ...acceptedInput("rin_gated_internal_repair_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
             interruptCommitStarted = true;
             order.push("commit:interrupt");
-            return buildRuntimeControlCommitResult(command, "interrupt_control", declaration);
+            return interruptCommitResult(command, declaration, []);
         }));
         await flushMicrotasks();
         expect(interruptCommitStarted).toBe(false);
@@ -2549,10 +2561,11 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
         eventIds: ["sevt_interrupt"],
         sequenceFrom: 9,
         sequenceTo: 9,
+        origin: "user",
     } as const;
     session.state.beginUserInterrupt(interruptCommand, async (declaration) => {
         closeoutOrder.push("commit:interrupt");
-        return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+        return interruptCommitResult(interruptCommand, declaration, ["sevt_memory_projection_cancel"]);
     });
     const interrupt = Effect.runPromise(Fiber.interrupt(runFiber));
     await waitForCondition(() => observedToolSignal?.aborted === true, "Memory projection ToolFiber abort");
@@ -2566,28 +2579,12 @@ test("user interrupt repairs a committed ToolFiber before CommitInputs and Finis
     expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
     expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
     expect(requestEnds).toHaveLength(1);
-    const cancellationDraft = requestEnds[0]?.drafts?.find((draft) => draft.draftKind === "cancellation");
-    expect(cancellationDraft).toBeDefined();
     expect(requestEnds[0]?.interruptSettlement).toEqual({
         runtimeInputId: "rin_interrupt",
         eventIds: ["sevt_interrupt"],
         sequenceFrom: 9,
         sequenceTo: 9,
-        pendingToolCancellations: [],
-        sandboxExecutionToolUseEventIds: [],
     });
-    expect(requestEnds[0]?.drafts?.filter((draft) => draft.draftKind === "cancellation")).toEqual([
-        expect.objectContaining({
-            sourceKind: "interrupt_control",
-            sourceId: "rin_interrupt",
-            sourceEventId: "sevt_interrupt",
-            parts: [expect.objectContaining({
-                    type: "tool",
-                    toolUseEventId: "sevt_memory_projection_cancel",
-                    state: expect.objectContaining({ status: "cancelled" }),
-                })],
-        }),
-    ]);
     expect(closeoutOrder).not.toContain("commit:interrupt");
     expect(closeoutOrder.indexOf("event:span.model_request_end")).toBeLessThan(closeoutOrder.indexOf("event:session.status_idle"));
     expect(session.state.contextManager.messages().flatMap((message) => message.parts).find((part) => part.type === "tool" && part.toolUseEventId === "sevt_memory_projection_cancel" && part.state.status === "cancelled")).toBeDefined();
@@ -2811,6 +2808,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(order).toContain("event:session.status_idle:requires_action");
         const interruptCommand = {
             ...acceptedInput("rin_mixed_interrupt"),
+            origin: "user" as const,
             eventIds: ["sevt_mixed_interrupt"],
             sequenceFrom: 9,
             sequenceTo: 9,
@@ -2818,7 +2816,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             interruptDeclaration = declaration;
             order.push("commit:interrupt");
-            return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+            return interruptCommitResult(interruptCommand, declaration, ["sevt_mixed_tool_2"]);
         }));
         await new Promise<void>((resolve) => setImmediate(resolve));
         await flushMicrotasks();
@@ -2839,26 +2837,7 @@ test("SessionManager enforces the five-state interrupt fence across tools and Co
         expect(appended.filter((event) => event.type === "agent.tool_use")).toHaveLength(2);
         expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_1")).toHaveLength(1);
         expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_mixed_tool_2")).toEqual([]);
-        expect(interruptDeclaration?.pendingToolCancellations).toEqual([
-            expect.objectContaining({
-                toolUseEventId: "sevt_mixed_tool_2",
-                runtimeLocalId: expect.any(String),
-            }),
-        ]);
-        expect(interruptDeclaration?.pendingToolCancellations[0]?.runtimeLocalId)
-            .toBe(interruptDeclaration?.drafts[0]?.runtimeLocalId);
-        expect(interruptDeclaration?.drafts).toEqual([
-            expect.objectContaining({
-                draftKind: "cancellation",
-                sourceKind: "interrupt_control",
-                sourceId: "rin_mixed_interrupt",
-                parts: [expect.objectContaining({
-                        type: "tool",
-                        toolUseEventId: "sevt_mixed_tool_2",
-                        state: expect.objectContaining({ status: "cancelled" }),
-                    })],
-            }),
-        ]);
+        expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(JSON.stringify(appended)).not.toContain("tool-uncommitted");
         expect(JSON.stringify(appended)).not.toContain("must-not-commit");
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
@@ -2998,6 +2977,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         expect(appended.filter((event) => event.type === "agent.tool_result")).toHaveLength(0);
         const interruptCommand = {
             ...acceptedInput("rin_non_cooperative_route_interrupt"),
+            origin: "user" as const,
             eventIds: ["sevt_non_cooperative_route_interrupt"],
             sequenceFrom: 9,
             sequenceTo: 9,
@@ -3006,7 +2986,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             interruptDeclaration = declaration;
             order.push("commit:interrupt");
-            return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+            return interruptCommitResult(interruptCommand, declaration, ["sevt_non_cooperative_route_1"]);
         })).then((result) => {
             interruptSettled = true;
             return result;
@@ -3026,19 +3006,7 @@ test("SessionManager bounds a non-cooperative post-stream ToolFiber and fences i
         expect(interruptSettled).toBe(true);
         await Effect.runPromise(manager.waitThread(postFenceInput, 1000));
         expect(appended.filter((event) => event.type === "agent.tool_result" && event.tool_use_id === "sevt_non_cooperative_route_1")).toEqual([]);
-        expect(interruptDeclaration?.pendingToolCancellations).toEqual([]);
-        expect(interruptDeclaration?.drafts).toEqual([
-            expect.objectContaining({
-                draftKind: "cancellation",
-                sourceKind: "interrupt_control",
-                sourceId: "rin_non_cooperative_route_interrupt",
-                parts: [expect.objectContaining({
-                        type: "tool",
-                        toolUseEventId: "sevt_non_cooperative_route_1",
-                        state: expect.objectContaining({ status: "cancelled" }),
-                    })],
-            }),
-        ]);
+        expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
         expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("event:session.status_idle:end_turn"));
         expect(order.indexOf("event:session.status_idle:end_turn")).toBeLessThan(order.indexOf("commit:rin_after_non_cooperative_route"));
@@ -3266,6 +3234,7 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
         await Promise.all([lateRouteStarted.promise, settledResultAcked.promise]);
         const interruptCommand = {
             ...acceptedInput("rin_rehydrated_approved_interrupt"),
+            origin: "user" as const,
             eventIds: ["sevt_rehydrated_approved_interrupt"],
             sequenceFrom: 9,
             sequenceTo: 9,
@@ -3274,7 +3243,7 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
         interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             interruptDeclaration = declaration;
             order.push("commit:interrupt");
-            return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+            return interruptCommitResult(interruptCommand, declaration, ["sevt_approved_late"]);
         }));
         void interrupt.then(() => {
             interruptSettled = true;
@@ -3290,26 +3259,7 @@ test("SessionManager interrupts rehydrated approved tools, repairs every open si
         expect(settledResults).toHaveLength(1);
         expect(settledResults[0]).not.toMatchObject({ is_error: true });
         expect(repairedResults).toEqual([]);
-        expect(interruptDeclaration?.pendingToolCancellations).toEqual([
-            expect.objectContaining({
-                toolUseEventId: "sevt_approved_late",
-                runtimeLocalId: expect.any(String),
-            }),
-        ]);
-        expect(interruptDeclaration?.pendingToolCancellations[0]?.runtimeLocalId)
-            .toBe(interruptDeclaration?.drafts[0]?.runtimeLocalId);
-        expect(interruptDeclaration?.drafts).toEqual([
-            expect.objectContaining({
-                draftKind: "cancellation",
-                sourceKind: "interrupt_control",
-                sourceId: "rin_rehydrated_approved_interrupt",
-                parts: [expect.objectContaining({
-                        type: "tool",
-                        toolUseEventId: "sevt_approved_late",
-                        state: expect.objectContaining({ status: "cancelled" }),
-                    })],
-            }),
-        ]);
+        expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
         expect(order.indexOf("commit:interrupt")).toBeLessThan(order.indexOf("event:session.status_idle"));
         expect(providerCalls).toBe(0);
@@ -3491,6 +3441,7 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
         await acceptanceStarted.promise;
         const command = {
             ...acceptedInput("rin_interrupt_acceptance_control"),
+            origin: "user" as const,
             eventIds: ["sevt_interrupt_acceptance_control"],
             sequenceFrom: 9,
             sequenceTo: 9,
@@ -3498,14 +3449,14 @@ test("user interrupt joins an unknown Sandbox acceptance ACK before taking its c
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", command, async (declaration) => {
             interruptCommitStarted = true;
             interruptDeclaration = declaration;
-            return buildRuntimeControlCommitResult(command, "interrupt_control", declaration);
+            return interruptCommitResult(command, declaration, ["sevt_interrupt_acceptance"]);
         }));
         await new Promise<void>((resolve) => setImmediate(resolve));
         await flushMicrotasks(20);
         expect(interruptCommitStarted).toBe(false);
         releaseAcceptance.resolve();
         await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
-        expect(interruptDeclaration?.sandboxExecutionToolUseEventIds).toEqual(["sevt_interrupt_acceptance"]);
+        expect(interruptDeclaration).toEqual({ messageCreates: [] });
         expect(awaitCalls).toBe(0);
         expect(appended.filter((event) => event.type === "agent.tool_result")).toEqual([]);
         expect(appended.filter((event) => event.type === "session.error")).toEqual([]);
@@ -3902,7 +3853,7 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
     const requests: LLMRequest[] = [];
     const runToolCalls: string[] = [];
     const sandboxAcceptanceCalls: string[] = [];
-    const processors: SessionProcessor[] = [];
+    const processors: ProviderStreamAccumulator[] = [];
     const store = new ThreadLoopRuntimeStore([]);
     const layer = runtimeThreadLoopLayer(loader, {
         store,
@@ -3946,7 +3897,7 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
             return { type: "accepted" };
         },
         createProcessor: (options) => {
-            const processor = new SessionProcessor(options);
+            const processor = new ProviderStreamAccumulator(options);
             processors.push(processor);
             return processor;
         },
@@ -3961,10 +3912,10 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
     expect(sandboxAcceptanceCalls).toEqual([]);
     expect(processors).toHaveLength(1);
     const pendingApproval = session.state.pendingApprovalToolJobs()[0];
-    expect(pendingApproval?.assistantMessage.role).toBe("assistant");
-    expect(pendingApproval?.assistantMessage.status).toBe("completed");
-    expect(pendingApproval?.toolPart.type).toBe("tool");
-    expect(pendingApproval?.toolPart.toolUseEventId).toBe("sevt_tool_1");
+    const pendingAssistant = session.state.contextManager.messages().find((message) =>
+        message.parts.some((part) => part.type === "tool" && part.toolUseEventId === "sevt_tool_1"));
+    expect(pendingAssistant?.role).toBe("assistant");
+    expect(pendingAssistant?.status).toBe("completed");
     expect(pendingApproval).not.toHaveProperty("processor");
     expect(appended.at(-1)).toEqual({
         type: "session.status_idle",
@@ -3996,7 +3947,7 @@ test("ask approval resumes the pending ToolJob instead of rerunning the old Tool
     expect(runToolCalls).toEqual(["tool-1:sevt_tool_1"]);
     expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
     expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
-    expect(processors).toHaveLength(3);
+    expect(processors).toHaveLength(2);
     expect(processors[1]).not.toBe(processors[0]);
     expect(appended.map((event) => event.type)).toEqual([
         "session.status_running",

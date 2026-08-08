@@ -16,6 +16,7 @@ import type {
   RuntimeJsonValue,
   RuntimeMessage,
   RuntimePart,
+  RuntimeToolSettlement,
 } from "../contracts/runtime.js";
 import {
   DurableRuntimeMessageSchema,
@@ -24,8 +25,8 @@ import {
   normalizeRuntimeFailure,
 } from "../contracts/runtime.js";
 import type { LLMEvent } from "../llm/llm-event.js";
-import { SessionProcessor } from "../runtime/accumulator.js";
-import type { PublicMcpErrorEvent, PublicToolEvent, RuntimeProcessorSource, SessionProcessorResult } from "../runtime/accumulator.js";
+import { ProviderStreamAccumulator } from "../runtime/accumulator.js";
+import type { PublicMcpErrorEvent, PublicToolEvent, RuntimeProcessorSource, ProviderStreamAccumulatorResult } from "../runtime/accumulator.js";
 import type { AutoApprovalReviewerManager, ParentTranscriptView } from "../session/approval-reviewer-manager.js";
 import type { ApprovalReviewerOutcome } from "../tools/tool-gate.js";
 import type { ToolCatalog, ToolEntry } from "../tools/tool-catalog.js";
@@ -41,7 +42,7 @@ import type {
 import type { ThreadRuntime } from "./thread-runtime.js";
 import type * as ContextLoader from "../context/context-loader.js";
 
-/** Normalizes a concrete tool route outcome before SessionProcessor persists it. */
+/** Normalizes a concrete tool route outcome before ProviderStreamAccumulator persists it. */
 export type RuntimeToolExecutionResult =
   | { readonly type: "completed"; readonly output: RuntimeBoundedText; readonly attachments?: readonly ProviderRequestAttachment[]; readonly backgroundTask?: RuntimeToolExecutionBackgroundTask | undefined; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
   | { readonly type: "error"; readonly error: RuntimeFailure; readonly publicErrorEvent?: PublicMcpErrorEvent | undefined; readonly attachments?: readonly ProviderRequestAttachment[]; readonly serverToolUse?: { readonly webSearchRequests: number; readonly webFetchRequests: number }; readonly mcpMaterializationHandle?: string; readonly sandboxResultDigest?: string }
@@ -84,17 +85,51 @@ export type RuntimeToolRunner = (
 
 /** Persists one post-ACK tool outcome and publishes the resulting hot projection. */
 export async function commitRuntimeToolSettlement(
-  processor: SessionProcessor,
+  processor: ProviderStreamAccumulator,
   source: RuntimeProcessorSource,
   modelToolCallId: string,
   result: Exclude<RuntimeToolExecutionResult, { readonly type: "stale_custody" }>,
   applyProjection: () => void,
-): Promise<SessionProcessorResult> {
-  const settlement = await processor.commitToolSettlement(source, modelToolCallId, result);
+): Promise<ProviderStreamAccumulatorResult> {
+  const settlement = await processor.commitToolSettlement(
+    source,
+    modelToolCallId,
+    runtimeToolSettlement(result),
+  );
   if (settlement.ok) {
     applyProjection();
   }
   return settlement;
+}
+
+export function runtimeToolSettlement(
+  result: Exclude<RuntimeToolExecutionResult, { readonly type: "stale_custody" }>,
+): RuntimeToolSettlement {
+  switch (result.type) {
+    case "completed":
+      return {
+        type: result.type,
+        output: result.output,
+        ...(result.serverToolUse === undefined ? {} : { serverToolUse: result.serverToolUse }),
+        ...(result.mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle: result.mcpMaterializationHandle }),
+        ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
+      };
+    case "error":
+      return {
+        type: result.type,
+        error: result.error,
+        ...(result.publicErrorEvent === undefined ? {} : { publicErrorEvent: result.publicErrorEvent }),
+        ...(result.serverToolUse === undefined ? {} : { serverToolUse: result.serverToolUse }),
+        ...(result.mcpMaterializationHandle === undefined ? {} : { mcpMaterializationHandle: result.mcpMaterializationHandle }),
+        ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
+      };
+    case "cancelled":
+      return {
+        type: result.type,
+        ...(result.error === undefined ? {} : { error: result.error }),
+        ...(result.sandboxResultDigest === undefined ? {} : { sandboxResultDigest: result.sandboxResultDigest }),
+      };
+  }
 }
 
 /** Carries one Sandbox declaration before its independently cancellable result wait. */

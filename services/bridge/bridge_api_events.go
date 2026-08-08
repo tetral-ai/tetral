@@ -57,43 +57,42 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return nil, status.Error(codes.InvalidArgument, "sandbox result digest requires a valid tool-result event")
 		}
 	}
-	stableReasoning, err := normalizeStableReasoningParts(request)
-	if err != nil {
-		return nil, err
-	}
 	serverToolUse, err := normalizeServerToolUseUsage(request)
 	if err != nil {
 		return nil, err
-	}
-	if len(stableReasoning.Parts) > 0 {
-		if request.GetEventType() != "agent.tool_use" && request.GetEventType() != "agent.mcp_tool_use" {
-			return nil, status.Error(codes.InvalidArgument, "stable reasoning requires a public tool-use event")
-		}
-		if request.GetModelRequestId() == "" {
-			return nil, status.Error(codes.InvalidArgument, "stable reasoning requires a model request id")
-		}
-		if !stableReasoning.StrictlyOrdered {
-			return nil, status.Error(codes.InvalidArgument, "stable reasoning parts must be strictly ordered")
-		}
 	}
 	if !json.Valid([]byte(request.GetPayloadJson())) {
 		return nil, status.Error(codes.InvalidArgument, "event payload must be JSON")
 	}
 	payloadJSON := stripInternalProviderFields(request.GetPayloadJson())
-	if _, _, projected := writeEventDraftClass(request.GetEventType()); projected {
-		if len(request.GetDrafts()) != 1 {
-			return nil, status.Error(codes.InvalidArgument, "projected write event requires exactly one runtime message draft")
+	switch request.GetEventType() {
+	case "agent.message", "agent.tool_use", "agent.mcp_tool_use":
+		if request.GetAssistantPartAppend() == nil || request.GetToolSettlement() != nil {
+			return nil, status.Error(codes.InvalidArgument, "Assistant member event requires exactly one part append")
 		}
-	} else if len(request.GetDrafts()) != 0 {
-		return nil, status.Error(codes.InvalidArgument, "event type does not accept runtime message drafts")
-	}
-	if len(stableReasoning.Parts) > 0 && len(request.GetDrafts()) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "stable reasoning requires a runtime message draft")
+	case "agent.tool_result", "agent.mcp_tool_result":
+		if request.GetToolSettlement() == nil || request.GetAssistantPartAppend() != nil {
+			return nil, status.Error(codes.InvalidArgument, "Tool Result event requires exactly one target settlement")
+		}
+		var resultPayload runtimeToolResultEventPayload
+		if err := json.Unmarshal([]byte(payloadJSON), &resultPayload); err != nil {
+			return nil, status.Error(codes.InvalidArgument, "Tool Result payload is invalid")
+		}
+		toolUseEventID, err := runtimeToolResultUseEventID(request.GetEventType(), resultPayload)
+		if err != nil {
+			return nil, err
+		}
+		if request.GetToolSettlement().GetToolUseEventId() != toolUseEventID {
+			return nil, status.Error(codes.InvalidArgument, "Tool settlement target does not match its public event")
+		}
+	default:
+		if request.GetAssistantPartAppend() != nil || request.GetToolSettlement() != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "event type %q does not accept a Runtime declaration", request.GetEventType())
+		}
 	}
 	declarationDigest, err := writeEventDeclarationDigest(
 		request,
 		payloadJSON,
-		stableReasoning.CanonicalJSON,
 		serverToolUse.CanonicalJSON,
 	)
 	if err != nil {
@@ -153,7 +152,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
-		if request.GetEventType() == "agent.tool_use" || request.GetEventType() == "agent.mcp_tool_use" {
+		if request.GetAssistantPartAppend() != nil {
 			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 				return err
 			}
@@ -175,17 +174,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 				return err
 			}
 			if err := verifyRequestStartMessageBoundaryTx(ctx, tx, request.GetScope(), requestStart.GetContextThroughMessageSequence()); err != nil {
-				return err
-			}
-		}
-		if len(stableReasoning.Parts) > 0 {
-			if err := validateStableReasoningAnchorBudgetTx(
-				ctx,
-				tx,
-				request.GetScope(),
-				request.GetModelRequestId(),
-				stableReasoning,
-			); err != nil {
 				return err
 			}
 		}
@@ -239,7 +227,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			sessionVisible,
 			key,
 			request.GetModelRequestId(),
-			stableReasoning.ledgerJSON(),
+			nil,
 			projectionJSON,
 			now,
 		); err != nil {
@@ -248,7 +236,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if _, err := appendSessionEventStreamChangeTx(ctx, tx, request.GetScope(), eventID, visibility, sessionVisible, now); err != nil {
 			return err
 		}
-		receipt, err = commitWriteEventDraftsTx(
+		receipt, err = commitWriteEventDeclarationTx(
 			ctx,
 			tx,
 			request.GetScope(),
@@ -257,20 +245,38 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			eventID,
 			sequence,
 			request.GetModelRequestId(),
-			request.GetDrafts(),
-			stableReasoning,
+			request.GetAssistantPartAppend(),
+			request.GetToolSettlement(),
 			now,
 		)
 		if err != nil {
 			return err
 		}
+		if eventType == "agent.message" || eventType == "agent.tool_use" || eventType == "agent.mcp_tool_use" {
+			stableReasoning, err := stableReasoningLedgerTx(ctx, tx, request.GetScope(), request.GetModelRequestId())
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE session_events SET stable_reasoning_json = $5
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
+				request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+				request.GetScope().GetSessionThreadId(), eventID, stableReasoning.ledgerJSON(),
+			); err != nil {
+				return err
+			}
+		}
 		receipt.DeclarationDigest = declarationDigest
 		receipt.RequestStart = requestStart
 		toolProjection, err := runtimeToolProjectionFromDeclaration(
+			ctx,
+			tx,
+			request.GetScope(),
 			eventID,
 			eventType,
-			eventPayloadJSON,
-			request.GetDrafts(),
+			request.GetModelRequestId(),
+			request.GetAssistantPartAppend(),
+			request.GetToolSettlement(),
 			receipt.GetMessages(),
 		)
 		if err != nil {
@@ -742,7 +748,7 @@ func logMCPMaterializationConsumed(
 		slog.String("component", ServiceNameBridgeAPI),
 		slog.String("workspace.id", scope.GetWorkspaceId()),
 		slog.String("session.id", scope.GetSessionId()),
-		slog.String("session.thread.id", scope.GetSessionThreadId()),
+		slog.String("thread.id", scope.GetSessionThreadId()),
 		slog.String("mcp.tool_use_event_id", identity.ToolUseEventID),
 		slog.String("mcp.server.name", identity.MCPServerName),
 		slog.String("mcp.tool.name", identity.ToolName),
@@ -1352,122 +1358,83 @@ type runtimeToolProjectionPayload struct {
 }
 
 func runtimeToolProjectionFromDeclaration(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
 	eventID string,
 	eventType string,
-	payloadJSON string,
-	drafts []*bridgev1.RuntimeMessageDraft,
+	modelRequestID string,
+	appendValue *bridgev1.RuntimeAssistantPartAppend,
+	settlement *bridgev1.RuntimeToolSettlement,
 	messageStamps []*bridgev1.DurableMessageStamp,
 ) (runtimeToolProjectionPayload, error) {
-	if len(drafts) == 0 {
-		return runtimeToolProjectionPayload{}, nil
-	}
-	if len(drafts) != 1 || len(messageStamps) != 1 || drafts[0] == nil || messageStamps[0] == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool declaration is malformed")
-	}
-	draft := drafts[0]
-	messageStamp := messageStamps[0]
-	if len(draft.GetParts()) != len(messageStamp.GetParts()) {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "runtime tool declaration stamp set is incomplete")
-	}
-	targetToolUseEventID := ""
 	switch eventType {
+	case "agent.message":
+		if appendValue == nil || settlement != nil || len(messageStamps) != 1 ||
+			len(appendValue.GetParts()) != len(messageStamps[0].GetParts()) {
+			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Assistant message append receipt is incomplete")
+		}
+		return runtimeToolProjectionPayload{}, nil
 	case "agent.tool_use", "agent.mcp_tool_use":
-		if eventID == "" {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "runtime tool declaration event id is missing")
+		if appendValue == nil || len(messageStamps) != 1 ||
+			len(appendValue.GetParts()) != len(messageStamps[0].GetParts()) {
+			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Use append receipt is incomplete")
 		}
+		var selected *runtimeToolProjectionPayload
+		for index, partCreate := range appendValue.GetParts() {
+			if partCreate == nil || partCreate.GetPartKind() != "tool" {
+				continue
+			}
+			var part map[string]any
+			if err := json.Unmarshal([]byte(partCreate.GetPartJson()), &part); err != nil {
+				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Use append payload is invalid")
+			}
+			part["id"] = messageStamps[0].GetParts()[index].GetPartId()
+			part["sequence"] = messageStamps[0].GetParts()[index].GetPartSequence()
+			part["toolUseEventId"] = eventID
+			projection := runtimeToolProjectionFromDurablePart(messageStamps[0].GetMessageId(), part)
+			if selected != nil {
+				return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Use append is ambiguous")
+			}
+			selected = &projection
+		}
+		if selected == nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Use append is missing its Tool member")
+		}
+		return *selected, nil
 	case "agent.tool_result", "agent.mcp_tool_result":
-		var payload runtimeToolResultEventPayload
-		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "tool result event payload is invalid")
+		if settlement == nil || settlement.GetToolUseEventId() == "" {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "Tool Result settlement is missing")
 		}
-		var err error
-		targetToolUseEventID, err = runtimeToolResultUseEventID(eventType, payload)
-		if err != nil {
+		var messageID, dataJSON string
+		if err := tx.QueryRow(ctx,
+			`SELECT message_id, data_json
+			   FROM session_messages
+			  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
+			    AND model_request_id = $4 AND kind = 'assistant'
+			  FOR UPDATE`,
+			scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
+		).Scan(&messageID, &dataJSON); err != nil {
 			return runtimeToolProjectionPayload{}, err
 		}
+		var message struct {
+			Parts []map[string]any `json:"parts"`
+		}
+		if err := json.Unmarshal([]byte(dataJSON), &message); err != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "durable Assistant message is invalid")
+		}
+		for _, part := range message.Parts {
+			if part["type"] == "tool" && part["toolUseEventId"] == settlement.GetToolUseEventId() {
+				return runtimeToolProjectionFromDurablePart(messageID, part), nil
+			}
+		}
+		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "Tool Result target is missing")
 	default:
+		if appendValue != nil || settlement != nil {
+			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "event type does not accept a Runtime declaration")
+		}
 		return runtimeToolProjectionPayload{}, nil
 	}
-	var selected *runtimeToolProjectionPayload
-	for index, partDraft := range draft.GetParts() {
-		if partDraft == nil || partDraft.GetPartKind() != "tool" {
-			continue
-		}
-		partStamp := messageStamp.GetParts()[index]
-		if partStamp == nil || partStamp.GetRuntimeLocalPartId() != partDraft.GetRuntimeLocalPartId() {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "runtime tool declaration stamp is invalid")
-		}
-		var part struct {
-			ToolCallID     string `json:"toolCallId"`
-			ToolName       string `json:"toolName"`
-			ToolUseEventID string `json:"toolUseEventId"`
-			ToolEvent      *struct {
-				Kind          string `json:"kind"`
-				MCPServerName string `json:"mcpServerName"`
-			} `json:"toolEvent"`
-			State struct {
-				Status string          `json:"status"`
-				Input  json.RawMessage `json:"input"`
-				Output *struct {
-					Text      string `json:"text"`
-					Truncated bool   `json:"truncated"`
-				} `json:"output"`
-				Error *struct {
-					Type      string `json:"type"`
-					Message   string `json:"message"`
-					Retryable bool   `json:"retryable"`
-				} `json:"error"`
-			} `json:"state"`
-		}
-		if err := json.Unmarshal([]byte(partDraft.GetPartJson()), &part); err != nil ||
-			part.ToolCallID == "" || part.ToolName == "" {
-			return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool declaration part is invalid")
-		}
-		selectedForEvent := false
-		switch eventType {
-		case "agent.tool_use", "agent.mcp_tool_use":
-			selectedForEvent = part.ToolUseEventID == ""
-		case "agent.tool_result", "agent.mcp_tool_result":
-			selectedForEvent = part.ToolUseEventID == targetToolUseEventID
-		}
-		if !selectedForEvent {
-			continue
-		}
-		input := json.RawMessage(`{}`)
-		if len(part.State.Input) > 0 && string(part.State.Input) != "null" {
-			var bounded struct {
-				Value json.RawMessage `json:"value"`
-			}
-			if err := json.Unmarshal(part.State.Input, &bounded); err != nil {
-				return runtimeToolProjectionPayload{}, status.Error(codes.InvalidArgument, "runtime tool declaration input is invalid")
-			}
-			if len(bounded.Value) > 0 && string(bounded.Value) != "null" {
-				input = bounded.Value
-			}
-		}
-		projection := runtimeToolProjectionPayload{
-			MessageID:       messageStamp.GetMessageId(),
-			PartID:          partStamp.GetPartId(),
-			PartSequence:    int(partStamp.GetPartSequence()),
-			ModelToolCallID: part.ToolCallID,
-			ToolName:        part.ToolName,
-			Input:           input,
-			State:           part.State.Status,
-			Output:          part.State.Output,
-			Error:           part.State.Error,
-		}
-		if part.ToolEvent != nil && part.ToolEvent.Kind == "mcp" {
-			projection.MCPServerName = part.ToolEvent.MCPServerName
-		}
-		if selected != nil {
-			return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "runtime tool declaration has an ambiguous current tool part")
-		}
-		selected = &projection
-	}
-	if selected == nil {
-		return runtimeToolProjectionPayload{}, status.Error(codes.FailedPrecondition, "runtime tool declaration is missing its current tool part")
-	}
-	return *selected, nil
 }
 
 func applyWriteEventToolBookkeepingTx(
@@ -1670,7 +1637,7 @@ func consumeSandboxExecutionForTerminalWriterTx(
 	reason string,
 	now time.Time,
 ) error {
-	if reason != "pod_lost" && reason != "runtime_terminated" && reason != "cleanup_wait_expired" {
+	if reason != "pod_lost" && reason != "runtime_terminated" && reason != "cleanup_wait_expired" && reason != "conversation_tool_result" {
 		return status.Error(codes.Internal, "sandbox execution terminal consumption reason is invalid")
 	}
 	var terminalPayloadJSON string
@@ -1690,13 +1657,16 @@ func consumeSandboxExecutionForTerminalWriterTx(
 	fallbackDigest := sha256Hex(terminalPayloadJSON)
 	result, err := tx.Exec(ctx,
 		`UPDATE session_runtime_tool_results
-		    SET execution_state = 'consumed', result_json = NULL,
+		    SET execution_state = CASE WHEN tool_kind='sandbox_tool' THEN 'consumed' ELSE execution_state END,
+		        background_operation_state = CASE WHEN tool_kind='sandbox_background' THEN 'terminal' ELSE background_operation_state END,
+		        result_json = NULL,
 		        result_digest = COALESCE(NULLIF(result_digest, ''), $8),
 		        consumed_by_terminal_event_id = $5,
 		        consumption_reason = $6, updated_at = $7
 		  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3
-		    AND tool_use_event_id = $4 AND tool_kind = 'sandbox_tool'
-		    AND execution_state <> 'consumed'`,
+		    AND tool_use_event_id = $4 AND tool_kind IN ('sandbox_tool','sandbox_background')
+		    AND (tool_kind='sandbox_tool' AND execution_state <> 'consumed'
+		      OR tool_kind='sandbox_background' AND consumed_by_terminal_event_id IS NULL)`,
 		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(),
 		toolUseEventID, terminalEventID, reason, now, fallbackDigest,
 	)

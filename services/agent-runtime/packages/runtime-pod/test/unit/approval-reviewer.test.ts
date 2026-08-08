@@ -1485,15 +1485,6 @@ class RecordingReviewerHost {
     return { ok: true, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true };
   }
 
-  async interruptThread(command: RuntimeThreadControlState): Promise<SessionManager.ThreadLifecycleResult> {
-    this.interruptions.push(command.sessionThreadId);
-    await this.options.interruptGate?.(command);
-    if (this.options.interruptOk === false) {
-      return { ok: false, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, reason: "thread_busy" };
-    }
-    return { ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
-  }
-
   readonly reviewerWaits: SessionManager.ReviewerExecutionToken[] = [];
   readonly reviewerInterruptions: SessionManager.ReviewerExecutionToken[] = [];
 

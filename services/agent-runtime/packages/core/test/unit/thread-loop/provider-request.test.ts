@@ -362,12 +362,12 @@ test("a bounded live rejection is authored by the loop and committed before prov
     };
     session.state.enqueueAcceptedInput(firstInput);
     session.state.enqueueAcceptedInput(secondInput);
-    const submittedDrafts: Array<readonly unknown[]> = [];
+    const submittedCreates: Array<readonly unknown[]> = [];
     const loader: TestContextLoader = {
         buildContext: async () => [],
         loadPendingInput: async () => ({ type: "empty" }),
         commitAcceptedInput: async (accepted, options) => {
-            submittedDrafts.push([...(options?.drafts ?? [])]);
+            submittedCreates.push([...(options?.messageCreates ?? [])]);
             return acceptedInputReceipt(accepted);
         },
     };
@@ -380,9 +380,9 @@ test("a bounded live rejection is authored by the loop and committed before prov
         },
     }))));
     expect(result).toMatchObject({ type: "completed" });
-    expect(submittedDrafts).toHaveLength(2);
-    for (const drafts of submittedDrafts) {
-        expect(drafts).toEqual([
+    expect(submittedCreates).toHaveLength(2);
+    for (const creates of submittedCreates) {
+        expect(creates).toEqual([
             expect.objectContaining({
                 role: "assistant",
                 origin: "agent",
@@ -699,7 +699,6 @@ test("runtime layer compacts context before the next provider request", async ()
     expect(requestEndEnvelopes[0]?.prefixConsumption).toEqual({
         childThreadId: "thrd_child",
         parentBoundaryEventId: "sevt_parent_boundary",
-        checkpointRuntimeLocalId: expect.any(String),
     });
     expect(compactionBoundaryOrder).toEqual([
         "compaction-start-ack",
@@ -817,14 +816,14 @@ test("failed-attempt reasoning is absent from reschedule and successful retry co
     expect(requestEnds).toHaveLength(2);
     expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
     expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
-    expect(requestEnds[0]?.stableReasoningParts).toBeUndefined();
+    expect(requestEnds[0]?.trailingPartAppend).toBeUndefined();
     expect(requestEnds[1]?.reschedule).toBeUndefined();
     expect(requestEnds[1]?.consumedFileAttachments).toEqual([{
             sourceEventId: "sevt_retry_file",
             fileId: "file_retry",
         }]);
-    expect(requestEnds[1]?.stableReasoningParts?.map((part) => part.text)).toEqual(successfulReasoning);
-    expect(requestEnds.filter((envelope) => (envelope.stableReasoningParts?.length ?? 0) > 0)).toHaveLength(1);
+    expect(requestEnds[1]?.trailingPartAppend).toBeUndefined();
+    expect(requestEnds.filter((envelope) => (envelope.trailingPartAppend?.parts.length ?? 0) > 0)).toHaveLength(0);
     expect(new Set(requestEnds.map((envelope) => envelope.modelRequestId)).size).toBe(2);
     const durableEvents = JSON.stringify(appended);
     const hotContext = JSON.stringify(session.state.contextManager.messages());
@@ -1195,18 +1194,16 @@ test("commits completed reasoning with provider metadata only after durable requ
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(requestEnds).toHaveLength(1);
-    expect(requestEnds[0]?.stableReasoningParts).toEqual([
+    expect(requestEnds[0]?.trailingPartAppend?.parts).toEqual([
         expect.objectContaining({
             text: "thinking",
             providerPartId: "reasoning-1",
             providerMetadata: { anthropic: { signature: "sig_round_trip" } },
-            partSequence: 0,
         }),
         expect.objectContaining({
             text: "again",
             providerPartId: "reasoning-2",
             providerMetadata: { openai: { encrypted_content: "ciphertext" } },
-            partSequence: 1,
         }),
     ]);
     expect(order.filter((entry) => entry === "event:span.model_request_end")).toHaveLength(1);
@@ -1282,7 +1279,7 @@ test("retries a transient request-end failure with the identical ordered reasoni
     expect(result).toMatchObject({ type: "completed" });
     expect(attempts).toHaveLength(2);
     expect(attempts[1]).toEqual(attempts[0]);
-    expect(attempts[0]?.stableReasoningParts?.map((part) => part.text)).toEqual(["first", "second"]);
+    expect(attempts[0]?.trailingPartAppend?.parts.flatMap((part) => part.type === "reasoning" ? [part.text] : [])).toEqual(["first", "second"]);
     expect(session.state.contextManager.messages().flatMap((message) => message.parts).filter((part) => part.type === "reasoning")).toHaveLength(2);
 });
 test("discards completed reasoning when the provider attempt ends with a non-retryable error", async () => {
@@ -1339,7 +1336,7 @@ test("discards completed reasoning when the provider attempt ends with a non-ret
     expect(result).toMatchObject({ type: "failed" });
     expect(requestEnds).toHaveLength(1);
     expect(requestEnds[0]).toMatchObject({ isError: true, errorKind: "provider_error" });
-    expect(requestEnds[0]?.stableReasoningParts).toBeUndefined();
+    expect(requestEnds[0]?.trailingPartAppend).toBeUndefined();
     expect(requestEnds[0]?.consumedAttachmentRefs ?? []).toEqual([]);
     expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
     expect(session.state.contextManager.messages().flatMap((message) => message.parts).some((part) => part.type === "reasoning")).toBe(false);

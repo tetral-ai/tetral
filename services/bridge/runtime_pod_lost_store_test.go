@@ -672,17 +672,7 @@ func TestRuntimePodLossSettlesToolUseAwaitingApproval(t *testing.T) {
 					EventType:      "agent.tool_result",
 					PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUseEventID + `","content":[{"type":"text","text":"Approval denied: cancel"}],"is_error":true}`,
 					SessionVisible: true,
-					Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-						t,
-						bridgeAPIScope(sessionID, threadID, bindingID, 1, binding.PodUID),
-						confirmationWriteID,
-						"agent.tool_result",
-						"completed",
-						bridgeRuntimePartDraftForTest{
-							kind: "tool",
-							json: `{"type":"tool","toolCallId":"tool-call-pod-loss-approval-` + suffix + `","toolName":"Write","toolUseEventId":"` + toolUseEventID + `","toolEvent":{"kind":"tool"},"state":{"status":"error","input":{"value":{"file_path":"src/a.ts"},"preview":"{\"file_path\":\"src/a.ts\"}","truncated":false},"error":{"type":"tool_denied","message":"Approval denied: cancel","retryable":false}}}`,
-						},
-					)},
+					Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUseEventID, "Approval denied: cancel")},
 				}
 				start := make(chan struct{})
 				repairResult := make(chan error, 1)

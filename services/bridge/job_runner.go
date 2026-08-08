@@ -124,10 +124,11 @@ const (
 )
 
 type RuntimeDeliveryResult struct {
-	Status       RuntimeDeliveryStatus
-	Retryable    bool
-	ErrorKind    string
-	ErrorMessage string
+	Status            RuntimeDeliveryStatus
+	Retryable         bool
+	ErrorKind         string
+	ErrorMessage      string
+	QueueLeaseSettled bool
 }
 
 func (r *JobRunner) RunOnce(ctx context.Context) error {
@@ -273,8 +274,11 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}
 	}
 	result, deliverErr := r.Deliverer.DeliverRuntimeJob(workCtx, job)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil && !result.QueueLeaseSettled {
 		return heartbeatErr
+	}
+	if result.QueueLeaseSettled {
+		return deliverErr
 	}
 	if deliverErr != nil {
 		result = RuntimeDeliveryResult{

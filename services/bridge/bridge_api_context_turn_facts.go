@@ -78,7 +78,6 @@ type bridgeLoadContextMessageLineageEntry struct {
 	LineageKind    string `json:"lineageKind"`
 	OperationKind  string `json:"operationKind,omitempty"`
 	SourceKind     string `json:"sourceKind,omitempty"`
-	SourceID       string `json:"sourceId,omitempty"`
 	EventID        string `json:"eventId,omitempty"`
 	RepairEventID  string `json:"repairEventId,omitempty"`
 	EventSequence  int64  `json:"eventSequence"`
@@ -97,6 +96,7 @@ var bridgeLoadContextTurnEventTypes = []string{
 	"agent.tool_result",
 	"agent.mcp_tool_result",
 	"user.interrupt",
+	childInterruptRequestedEventType,
 	"session.error",
 	"session.status_rescheduled",
 	"session.thread_status_rescheduled",
@@ -146,6 +146,7 @@ func loadThreadTurnFactsTx(
 		      'agent.tool_result',
 		      'agent.mcp_tool_result',
 		      'user.interrupt',
+		      'agent.thread_interrupt_requested',
 		      'session.error',
 		      'session.status_rescheduled',
 		      'session.thread_status_rescheduled',
@@ -627,7 +628,6 @@ func loadContextMessageLineageTx(
 				LineageKind:   "declaration_receipt",
 				OperationKind: receipt.GetOperationKind(),
 				SourceKind:    receipt.GetSourceKind(),
-				SourceID:      receipt.GetSourceId(),
 				EventID:       eventID,
 				EventSequence: eventSequence,
 				Disposition:   disposition,

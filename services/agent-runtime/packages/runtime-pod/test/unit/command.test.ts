@@ -659,6 +659,7 @@ describe("Runtime Pod command entrypoint", () => {
         validCommand({
           commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
           runtimeInputId: "rin_interrupt",
+          payloadJson: JSON.stringify({ origin: "user" }),
         }),
         authMetadata(),
       );
@@ -889,7 +890,6 @@ function fakeDependencies(records: string[]): RuntimePodCommandDependencies {
       subAgentRunHost: {
         enqueueThreadInput: async (input) => ({ ok: true, sessionId: input.sessionId, created: false, started: false, pendingWake: false }),
         preloadThread: async (input) => ({ ok: true, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true }),
-        interruptThread: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true }),
         interruptReviewerExecution: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true }),
         markThreadClosed: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true }),
         markThreadActive: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true }),

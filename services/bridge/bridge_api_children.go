@@ -14,8 +14,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/queue"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 )
 
@@ -62,6 +65,9 @@ func (s *PostgreSQLBridgeAPIStore) CreateChildThread(ctx context.Context, reques
 	now := s.now()
 	var response *bridgev1.CreateChildThreadResponse
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.create_child_thread", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
+			return err
+		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
@@ -81,6 +87,11 @@ func (s *PostgreSQLBridgeAPIStore) CreateChildThread(ctx context.Context, reques
 		}
 		if err := verifyChildParentThreadTx(ctx, tx, request.GetScope(), parentThreadID); err != nil {
 			return err
+		}
+		if closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), parentThreadID); err != nil {
+			return err
+		} else if closing {
+			return status.Error(codes.FailedPrecondition, "parent thread is closing")
 		}
 		if role == "approval_reviewer" && isTrunk {
 			if err := demoteApprovalReviewerTrunkTx(ctx, tx, request.GetScope(), parentThreadID, now); err != nil {
@@ -292,10 +303,11 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 	if request.GetChildThreadId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "child thread id is required")
 	}
+	now := s.now()
 	command, err := parseChildLifecycleCommand(
 		request.GetScope(),
 		request.GetChildThreadId(),
-		request.GetClosedAt(),
+		now,
 		request.GetSource(),
 		bridgeOpMarkChildThreadClosed,
 		"close",
@@ -303,7 +315,6 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 	if err != nil {
 		return nil, err
 	}
-	now := s.now()
 	var (
 		ack      *bridgev1.BridgeWriteAck
 		receipts []*bridgev1.DeclarationReceipt
@@ -334,6 +345,11 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadClosed(ctx context.Context, re
 		targetIDs, err := childLifecycleSubtreeIDsTx(ctx, tx, request.GetScope(), request.GetChildThreadId())
 		if err != nil {
 			return err
+		}
+		if command.sourceKind == "tool_use" {
+			if err := validateChildCloseCensusTx(ctx, tx, request, targetIDs, command.sourceCommandID); err != nil {
+				return err
+			}
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -418,23 +434,24 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 	if request.GetChildThreadId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "child thread id is required")
 	}
+	now := s.now()
 	command, err := parseChildLifecycleCommand(
 		request.GetScope(),
 		request.GetChildThreadId(),
-		request.GetActiveAt(),
+		now,
 		request.GetSource(),
 		bridgeOpMarkChildThreadActive,
 		"resume",
 	)
 	if err != nil {
+		logThreadResumeRejected(s.Logger, request.GetScope(), request.GetChildThreadId(), err)
 		return nil, err
 	}
-	now := s.now()
 	var (
 		ack      *bridgev1.BridgeWriteAck
 		receipts []*bridgev1.DeclarationReceipt
 	)
-	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadActive, func(tx *dbconnect.Tx) error {
+	err = s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge."+bridgeOpMarkChildThreadActive, func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
@@ -469,6 +486,11 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		if threadScope.role == "main" {
 			return status.Error(codes.FailedPrecondition, "main thread cannot be marked as child")
 		}
+		if closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetChildThreadId()); err != nil {
+			return err
+		} else if closing {
+			return status.Error(codes.FailedPrecondition, "child thread is closing")
+		}
 		disposition := bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_ALREADY_ACTIVE
 		switch threadScope.status {
 		case "failed":
@@ -502,6 +524,11 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 			}
 			disposition = bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED
 		}
+		if disposition == bridgev1.ChildLifecycleDisposition_CHILD_LIFECYCLE_DISPOSITION_RESUMED {
+			if err := resumeTaskNotificationsTx(ctx, tx, childScope, now); err != nil {
+				return err
+			}
+		}
 		receipt := childLifecycleReceipt(childScope, command, bridgeOpMarkChildThreadActive, request.GetChildThreadId(), disposition)
 		receiptJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {
@@ -523,14 +550,61 @@ func (s *PostgreSQLBridgeAPIStore) MarkChildThreadActive(ctx context.Context, re
 		receipts = []*bridgev1.DeclarationReceipt{receipt}
 		ack = committedAck("", command.operationID)
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
+		logThreadResumeRejected(s.Logger, request.GetScope(), request.GetChildThreadId(), err)
 		return nil, err
 	}
 	declaration, err := s.childLifecycleDeclarationResponse(ctx, request.GetScope(), receipts, ack)
 	if err != nil {
+		logThreadResumeRejected(s.Logger, request.GetScope(), request.GetChildThreadId(), err)
 		return nil, err
 	}
 	return &bridgev1.MarkChildThreadActiveResponse{Ack: ack, Declaration: declaration}, nil
+}
+
+// resumeTaskNotificationsTx reactivates only durable notification inboxes after
+// the Thread has passed its cold-resume validation. Queue birth and the status
+// transition share the lifecycle transaction, so no stale close-time lease can
+// race the resumed delivery.
+func resumeTaskNotificationsTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, now time.Time) error {
+	rows, err := tx.Query(ctx, `UPDATE session_runtime_inbox inbox SET
+		status='queued', binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$4
+		FROM session_background_tasks task
+		WHERE inbox.workspace_id=$1 AND inbox.session_id=$2 AND inbox.session_thread_id=$3
+		 AND inbox.input_kind='task_notification' AND inbox.status IN ('queued','parked')
+		 AND task.workspace_id=inbox.workspace_id AND task.session_id=inbox.session_id
+		 AND task.session_thread_id=inbox.session_thread_id
+		 AND inbox.runtime_input_id='task_notification:' || task.task_id
+		 AND task.terminal_event_id IS NULL
+		RETURNING inbox.runtime_input_id,task.task_id`, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), now)
+	if err != nil {
+		return err
+	}
+	type notification struct{ runtimeInputID, taskID string }
+	var notifications []notification
+	for rows.Next() {
+		var value notification
+		if err := rows.Scan(&value.runtimeInputID, &value.taskID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		notifications = append(notifications, value)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	ws := workspace.ID(scope.GetWorkspaceId())
+	requests := make([]queue.EnqueueRequest, 0, len(notifications))
+	for _, notification := range notifications {
+		request, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(ws, scope.GetSessionId(), scope.GetSessionThreadId(), notification.taskID, now)
+		if err != nil {
+			return err
+		}
+		requests = append(requests, request)
+	}
+	_, err = queue.EnqueueBatchTx(ctx, tx, requests)
+	return err
 }
 
 type childLifecycleCommand struct {
@@ -547,18 +621,12 @@ type childLifecycleCommand struct {
 func parseChildLifecycleCommand(
 	scope *bridgev1.RuntimeScope,
 	childThreadID string,
-	requestedAt string,
+	requestedTime time.Time,
 	source *bridgev1.ChildLifecycleSource,
 	operationKind string,
 	action string,
 ) (childLifecycleCommand, error) {
-	if requestedAt == "" {
-		return childLifecycleCommand{}, status.Error(codes.InvalidArgument, "child lifecycle timestamp is required")
-	}
-	requestedTime, err := time.Parse(time.RFC3339Nano, requestedAt)
-	if err != nil {
-		return childLifecycleCommand{}, status.Error(codes.InvalidArgument, "child lifecycle timestamp must be RFC 3339")
-	}
+	requestedAt := requestedTime.UTC().Format(time.RFC3339Nano)
 	var sourceKind, sourceCommandID string
 	switch identity := source.GetIdentity().(type) {
 	case *bridgev1.ChildLifecycleSource_SourceToolUseEventId:
@@ -587,7 +655,6 @@ func parseChildLifecycleCommand(
 		childThreadID,
 		sourceKind,
 		sourceCommandID,
-		requestedAt,
 	)
 	if err != nil {
 		return childLifecycleCommand{}, err
@@ -634,6 +701,9 @@ func validateChildLifecycleSourceTx(
 		if role != "approval_reviewer" || visibility != "internal" || parentThreadID != scope.GetSessionThreadId() {
 			return status.Error(codes.FailedPrecondition, "child lifecycle reviewer source does not match the durable reviewer thread")
 		}
+		if command.action == "close" {
+			return validateSettledApprovalReviewerCloseTx(ctx, tx, scope, childThreadID, command.sourceCommandID)
+		}
 		return nil
 	}
 	var role, visibility, parentThreadID string
@@ -676,6 +746,44 @@ func validateChildLifecycleSourceTx(
 	}
 	if !exists {
 		return status.Error(codes.FailedPrecondition, "child lifecycle tool source is invalid")
+	}
+	return nil
+}
+
+func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string) error {
+	var settled bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		 AND type IN ('approval_review.decision','approval_review.failure')
+		 AND payload_json::jsonb->>'review_id'=$4)`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&settled)
+	if err != nil {
+		return err
+	}
+	if !settled {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome")
+	}
+	var unfinished bool
+	err = tx.QueryRow(ctx, `SELECT
+		EXISTS (
+		 SELECT 1 FROM session_events start_event
+		 WHERE start_event.workspace_id=$1 AND start_event.session_id=$2 AND start_event.session_thread_id=$3
+		  AND start_event.type='span.model_request_start'
+		  AND NOT EXISTS (SELECT 1 FROM session_events end_event
+		   WHERE end_event.workspace_id=start_event.workspace_id AND end_event.session_id=start_event.session_id
+		    AND end_event.session_thread_id=start_event.session_thread_id
+		    AND end_event.model_request_id=start_event.model_request_id AND end_event.type='span.model_request_end'))
+		OR EXISTS (
+		 SELECT 1 FROM session_pending_tool_uses WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND status IN ('pending','resolving'))
+		OR EXISTS (
+		 SELECT 1 FROM session_runtime_inbox WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+		  AND status IN ('queued','delivering','accepted','parked'))`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID).Scan(&unfinished)
+	if err != nil {
+		return err
+	}
+	if unfinished {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close requires quiescent durable state")
 	}
 	return nil
 }
@@ -783,13 +891,13 @@ func validStoredChildLifecycleReceipt(
 		receipt.GetSessionThreadId() != targetID ||
 		receipt.GetOperationKind() != operationKind ||
 		receipt.GetSourceKind() != command.operationSourceKind ||
-		receipt.GetSourceId() != command.operationID ||
+		receipt.GetOperationId() != command.operationID ||
 		receipt.GetDeclarationDigest() != command.declarationDigest ||
 		len(receipt.GetChildLifecycle()) != 1 {
 		return false
 	}
 	stamp := receipt.GetChildLifecycle()[0]
-	if stamp.GetChildThreadId() != targetID || stamp.GetEffectiveAt() != command.requestedAt {
+	if stamp.GetChildThreadId() != targetID || stamp.GetEffectiveAt() == "" {
 		return false
 	}
 	if command.action == "close" {
@@ -815,7 +923,7 @@ func childLifecycleReceipt(
 		SessionThreadId:   targetScope.GetSessionThreadId(),
 		OperationKind:     operationKind,
 		SourceKind:        command.operationSourceKind,
-		SourceId:          command.operationID,
+		OperationId:       command.operationID,
 		DeclarationDigest: command.declarationDigest,
 		ChildLifecycle: []*bridgev1.ChildLifecycleStamp{{
 			ChildThreadId: targetID,
@@ -890,7 +998,7 @@ func (s *PostgreSQLBridgeAPIStore) childLifecycleDeclarationResponse(
 			scope,
 			receipt.GetOperationKind(),
 			receipt.GetSourceKind(),
-			receipt.GetSourceId(),
+			receipt.GetOperationId(),
 			receipt.GetDeclarationDigest(),
 			ack,
 			observation,

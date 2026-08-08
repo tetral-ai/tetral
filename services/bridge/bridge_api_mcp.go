@@ -391,7 +391,7 @@ func mcpMaterializationDeclarationReceipt(
 		SessionThreadId:   request.GetScope().GetSessionThreadId(),
 		OperationKind:     bridgeOpCommitMcpToolResult,
 		SourceKind:        "mcp_tool_execution",
-		SourceId:          sourceID,
+		OperationId:       sourceID,
 		DeclarationDigest: declarationDigest,
 	}
 	if attachment == nil {
@@ -449,11 +449,11 @@ func validStoredMCPMaterializationReceipt(
 		receipt.GetSessionThreadId() != sessionThreadID ||
 		receipt.GetOperationKind() != bridgeOpCommitMcpToolResult ||
 		receipt.GetSourceKind() != "mcp_tool_execution" ||
-		receipt.GetSourceId() != sourceID ||
+		receipt.GetOperationId() != sourceID ||
 		receipt.GetDeclarationDigest() != declarationDigest ||
 		len(receipt.GetEvents()) != 0 ||
 		len(receipt.GetMessages()) != 0 ||
-		len(receipt.GetPendingToolDeltaJson()) != 0 ||
+		len(receipt.GetInterruptToolProjections()) != 0 ||
 		len(receipt.GetPrefixConsumptions()) != 0 ||
 		receipt.GetRequestReschedule() != nil ||
 		len(receipt.GetChildLifecycle()) != 0 ||

@@ -398,7 +398,7 @@ test("task notification survives interrupted compaction and commits on the next 
     })).toBe("applied");
     const interruptCommand = acceptedInput("rin_task_compaction_interrupt");
     active.session.state.beginUserInterrupt(interruptCommand, testControlCommit(interruptCommand));
-    active.session.state.discardQueuedAcceptedInputsBeforeFence(interruptCommand.sequenceTo);
+		active.session.state.discardQueuedAcceptedInputsBeforeFence(interruptCommand.sequenceTo, true);
     const interrupt = Effect.runPromise(Fiber.interrupt(active.runFiber));
     try {
         await active.requestEndStarted.promise;

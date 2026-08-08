@@ -391,98 +391,43 @@ export const RuntimePartSchema = z.discriminatedUnion("type", [
 /** Persisted or hot-projected message part with stable ownership and sequence identity. */
 export type RuntimePart = z.infer<typeof RuntimePartSchema>;
 
-const RuntimePartDraftBaseSchema = {
-  runtimeLocalPartId: RuntimeIdentifierSchema,
-  ordinal: NonNegativeIntegerSchema,
-} as const;
-
-const TextRuntimePartDraftSchema = z.strictObject({
-  ...RuntimePartDraftBaseSchema,
-  type: z.literal("text"),
-  text: RuntimeTextSchema,
-  truncated: z.boolean(),
-  status: RuntimePartStatusSchema,
-  startedAt: TimestampSchema.optional(),
-  completedAt: TimestampSchema.optional(),
-});
-
-const ReasoningRuntimePartDraftSchema = z.strictObject({
-  ...RuntimePartDraftBaseSchema,
-  type: z.literal("reasoning"),
-  providerPartId: RuntimeIdentifierSchema.optional(),
-  providerMetadata: ProviderMetadataSchema.optional(),
-  text: RuntimeTextSchema,
-  truncated: z.boolean(),
-  status: RuntimePartStatusSchema,
-  startedAt: TimestampSchema.optional(),
-  completedAt: TimestampSchema.optional(),
-});
-
-const ToolRuntimePartDraftSchema = z.strictObject({
-  ...RuntimePartDraftBaseSchema,
-  type: z.literal("tool"),
-  toolCallId: RuntimeIdentifierSchema,
-  toolName: RuntimeIdentifierSchema,
-  toolUseEventId: RuntimeIdentifierSchema.optional(),
-  toolEvent: z.discriminatedUnion("kind", [
-    z.strictObject({ kind: z.literal("tool") }),
-    z.strictObject({ kind: z.literal("mcp"), mcpServerName: RuntimeIdentifierSchema }),
-  ]).optional(),
-  state: ToolStateSchema,
-  startedAt: TimestampSchema.optional(),
-  completedAt: TimestampSchema.optional(),
-});
-
-const StepStartRuntimePartDraftSchema = z.strictObject({
-  ...RuntimePartDraftBaseSchema,
-  type: z.literal("step-start"),
-  stepIndex: NonNegativeIntegerSchema.optional(),
-});
-
-const StepFinishRuntimePartDraftSchema = z.strictObject({
-  ...RuntimePartDraftBaseSchema,
-  type: z.literal("step-finish"),
-  stepIndex: NonNegativeIntegerSchema.optional(),
-  finishReason: RuntimeFinishReasonSchema,
-  usage: RuntimeUsageSchema.optional(),
-});
-
-/** Closed semantic part set authored before Bridge assigns durable part stamps. */
-export const RuntimePartDraftSchema = z.discriminatedUnion("type", [
-  TextRuntimePartDraftSchema,
-  ReasoningRuntimePartDraftSchema,
-  ToolRuntimePartDraftSchema,
-  StepStartRuntimePartDraftSchema,
-  StepFinishRuntimePartDraftSchema,
+export const RuntimePartCreateSchema = z.discriminatedUnion("type", [
+  TextRuntimePartSchema.omit({
+    id: true, sessionId: true, messageId: true, sequence: true, createdAt: true, updatedAt: true,
+  }),
+  ReasoningRuntimePartSchema.omit({
+    id: true, sessionId: true, messageId: true, sequence: true, createdAt: true, updatedAt: true,
+  }),
+  ToolRuntimePartSchema.omit({
+    id: true, sessionId: true, messageId: true, sequence: true, createdAt: true, updatedAt: true,
+  }),
+  StepStartRuntimePartSchema.omit({
+    id: true, sessionId: true, messageId: true, sequence: true, createdAt: true, updatedAt: true,
+  }),
+  StepFinishRuntimePartSchema.omit({
+    id: true, sessionId: true, messageId: true, sequence: true, createdAt: true, updatedAt: true,
+  }),
 ]);
-export type RuntimePartDraft = z.infer<typeof RuntimePartDraftSchema>;
+export type RuntimePartCreate = z.infer<typeof RuntimePartCreateSchema>;
 
-export const RuntimeDraftKindSchema = z.enum([
+export const RuntimeMessageCreateKindSchema = z.enum([
   "user_input",
   "approval_input",
   "reviewer_input",
   "agent_mail_input",
-  "assistant_text",
-  "tool_use",
-  "tool_result",
   "task_notification",
   "rejection",
-  "cancellation",
   "completion_mail",
   "compaction_checkpoint",
   "internal_tool_repair",
   "termination",
 ]);
-export type RuntimeDraftKind = z.infer<typeof RuntimeDraftKindSchema>;
+export type RuntimeMessageCreateKind = z.infer<typeof RuntimeMessageCreateKindSchema>;
 
-/** Loop-authored message declaration before any durable identity is assigned. */
-export const RuntimeMessageDraftSchema = z.strictObject({
-  runtimeLocalId: RuntimeIdentifierSchema,
-  sourceKind: RuntimeIdentifierSchema,
-  sourceId: RuntimeIdentifierSchema,
+/** Creates one brand-new message; Bridge assigns all durable identity by position. */
+export const RuntimeMessageCreateSchema = z.strictObject({
   sourceEventId: RuntimeIdentifierSchema.optional(),
-  draftKind: RuntimeDraftKindSchema,
-  ordinal: NonNegativeIntegerSchema,
+  messageKind: RuntimeMessageCreateKindSchema,
   role: z.enum(["user", "assistant"]),
   origin: z.enum(["user", "agent", "runtime"]),
   status: RuntimeMessageStatusSchema,
@@ -490,20 +435,29 @@ export const RuntimeMessageDraftSchema = z.strictObject({
   finishReason: RuntimeFinishReasonSchema.optional(),
   usage: RuntimeUsageSchema.optional(),
   responseId: RuntimeIdentifierSchema.optional(),
-  parts: z.array(RuntimePartDraftSchema),
+  parts: z.array(RuntimePartCreateSchema),
 });
-export type RuntimeMessageDraft = z.infer<typeof RuntimeMessageDraftSchema>;
+export type RuntimeMessageCreate = z.infer<typeof RuntimeMessageCreateSchema>;
+
+export const RuntimeAssistantPartAppendSchema = z.strictObject({
+  parts: z.array(RuntimePartCreateSchema).min(1),
+});
+export type RuntimeAssistantPartAppend = z.infer<typeof RuntimeAssistantPartAppendSchema>;
+
+export const RuntimeToolSettlementDeclarationSchema = z.strictObject({
+  toolUseEventId: RuntimeIdentifierSchema,
+  outcome: z.lazy(() => RuntimeToolSettlementSchema),
+});
+export type RuntimeToolSettlementDeclaration = z.infer<typeof RuntimeToolSettlementDeclarationSchema>;
 
 export interface RuntimeDurableEventStamp {
   readonly sessionThreadId: string;
-  readonly sourceEventId: string;
   readonly eventId: string;
   readonly eventSequence: number;
   readonly disposition: "existing" | "created";
 }
 
 export interface RuntimeDurablePartStamp {
-  readonly runtimeLocalPartId: string;
   readonly partId: string;
   readonly messageId: string;
   readonly partSequence: number;
@@ -513,7 +467,6 @@ export interface RuntimeDurablePartStamp {
 }
 
 export interface RuntimeDurableMessageStamp {
-  readonly runtimeLocalId: string;
   readonly sessionThreadId: string;
   readonly owningEventId: string;
   readonly messageId: string;
@@ -566,18 +519,26 @@ export interface RuntimeDeclarationReceipt {
   readonly sessionThreadId: string;
   readonly operationKind: string;
   readonly sourceKind: string;
-  readonly sourceId: string;
+  readonly operationId: string;
   readonly declarationDigest: string;
   readonly events: readonly RuntimeDurableEventStamp[];
   readonly messages: readonly RuntimeDurableMessageStamp[];
   readonly pendingAttachmentDelta: readonly ProviderRequestAttachment[];
-  readonly pendingToolDelta: readonly string[];
+  readonly interruptToolProjections: readonly RuntimeInterruptToolProjection[];
   readonly prefixConsumptions: readonly RuntimePrefixConsumptionStamp[];
   readonly requestReschedule?: RuntimeRequestRescheduleStamp | undefined;
   readonly requestStart?: RuntimeRequestStartStamp | undefined;
   readonly idleCloseout?: RuntimeIdleCloseoutStamp | undefined;
   readonly compactedThroughMessageSequence?: number | undefined;
   readonly childLifecycle: readonly RuntimeChildLifecycleStamp[];
+}
+
+export interface RuntimeInterruptToolProjection {
+  readonly toolUseEventId: string;
+  readonly resultEvent: RuntimeDurableEventStamp;
+  readonly terminalState:
+    | { readonly type: "error"; readonly error: RuntimeFailure }
+    | { readonly type: "cancelled"; readonly error?: RuntimeFailure | undefined };
 }
 
 // Boundary contract for persisted runtime parts, not a backend table definition.
@@ -629,29 +590,26 @@ export const RuntimeInternalToolRepairCommitSchema = z.strictObject({
   modelToolCallId: SanitizedIdentifierSchema,
   toolName: SanitizedIdentifierSchema,
   repairKey: SanitizedIdentifierSchema,
-  draft: RuntimeMessageDraftSchema,
+  messageCreate: RuntimeMessageCreateSchema,
 })
   .refine((repair) =>
-    repair.draft.sourceKind === "internal_tool_repair" &&
-    repair.draft.sourceId === repair.repairKey &&
-    repair.draft.sourceEventId === undefined &&
-    repair.draft.draftKind === "internal_tool_repair" &&
-    repair.draft.ordinal === 0,
-  "repair draft identity must match the repair operation")
+    repair.messageCreate.sourceEventId === undefined &&
+    repair.messageCreate.messageKind === "internal_tool_repair",
+  "repair message create must match the repair operation")
   .refine((repair) =>
-    repair.draft.role === "assistant" &&
-    repair.draft.origin === "agent" &&
-    repair.draft.status === "completed",
-  "repair draft must be a completed assistant agent message")
-  .refine((repair) => repair.draft.parts.length === 1, "repair draft must carry exactly one part")
+    repair.messageCreate.role === "assistant" &&
+    repair.messageCreate.origin === "agent" &&
+    repair.messageCreate.status === "completed",
+  "repair message create must be a completed assistant agent message")
+  .refine((repair) => repair.messageCreate.parts.length === 1, "repair message create must carry exactly one part")
   .refine((repair) => {
-    const [part] = repair.draft.parts;
+    const [part] = repair.messageCreate.parts;
     return part?.type === "tool" &&
       part.toolCallId === repair.modelToolCallId &&
       part.toolName === repair.toolName &&
       part.toolUseEventId === undefined &&
       part.state.status === "error";
-  }, "repair draft part must be an internal terminal tool error without a public tool use id");
+  }, "repair message create part must be an internal terminal tool error without a public tool use id");
 export type RuntimeInternalToolRepairCommit = z.infer<typeof RuntimeInternalToolRepairCommitSchema>;
 
 const UserRuntimeMessageSchema = RuntimeMessageSchema.refine((message) => message.role === "user", "pending input messages must be user messages");
@@ -802,6 +760,29 @@ export const RuntimeFailureSchema = z.strictObject({
   retryAfterMs: NonNegativeIntegerSchema.optional(),
 });
 export type RuntimeFailure = z.infer<typeof RuntimeFailureSchema>;
+
+const RuntimeToolSettlementSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("completed"),
+    output: RuntimeBoundedTextSchema,
+    serverToolUse: z.strictObject({ webSearchRequests: NonNegativeIntegerSchema, webFetchRequests: NonNegativeIntegerSchema }).optional(),
+    mcpMaterializationHandle: RuntimeIdentifierSchema.optional(),
+    sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }),
+  z.strictObject({
+    type: z.literal("error"),
+    error: RuntimeFailureSchema,
+    publicErrorEvent: z.custom<PublicMcpErrorEvent>().optional(),
+    serverToolUse: z.strictObject({ webSearchRequests: NonNegativeIntegerSchema, webFetchRequests: NonNegativeIntegerSchema }).optional(),
+    mcpMaterializationHandle: RuntimeIdentifierSchema.optional(),
+    sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }),
+  z.strictObject({
+    type: z.literal("cancelled"),
+    error: RuntimeFailureSchema.optional(),
+    sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  }),
+]);
 
 const NonTerminalProviderFailureCodes = new Set([
   "credential_required",
@@ -982,7 +963,7 @@ function validateStableReasoningSet(
   }
 }
 
-/** WriteEvent payload with identity, projection, reasoning, and server-tool bounds. */
+/** WriteEvent payload with one operation-specific declaration shape. */
 export const SessionEventEnvelopeSchema = z.strictObject({
   requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
@@ -993,24 +974,32 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
   event: SessionEventSchema,
-  drafts: z.array(RuntimeMessageDraftSchema),
+  assistantPartAppend: RuntimeAssistantPartAppendSchema.optional(),
+  toolSettlement: RuntimeToolSettlementDeclarationSchema.optional(),
   modelRequestId: SanitizedIdentifierSchema.optional(),
-  stableReasoningParts: z.array(SessionEventWriterStableReasoningPartSchema).max(MaxStableReasoningPartsPerRequest).optional(),
   serverToolUse: SessionEventWriterServerToolUseSchema.optional(),
   mcpMaterializationHandle: SanitizedIdentifierSchema.optional(),
   sandboxResultDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   contextThroughMessageSequence: NonNegativeIntegerSchema.optional(),
   requestKind: z.enum(["agent_provider_request", "compaction_summary", "approval_reviewer"]).optional(),
 }).superRefine((envelope, context) => {
-  const parts = envelope.stableReasoningParts ?? [];
-  if (parts.length > 0 && envelope.event.type !== "agent.tool_use" && envelope.event.type !== "agent.mcp_tool_use") {
-    context.addIssue({ code: "custom", message: "stable reasoning requires a public tool-use event" });
+  const memberEvent = envelope.event.type === "agent.message" ||
+    envelope.event.type === "agent.tool_use" ||
+    envelope.event.type === "agent.mcp_tool_use";
+  const settlementEvent = envelope.event.type === "agent.tool_result" ||
+    envelope.event.type === "agent.mcp_tool_result";
+  if (memberEvent && (envelope.assistantPartAppend === undefined || envelope.toolSettlement !== undefined)) {
+    context.addIssue({ code: "custom", message: "Assistant member event requires one part append" });
   }
-  if (parts.length > 0 && envelope.modelRequestId === undefined) {
-    context.addIssue({ code: "custom", message: "stable reasoning requires a model request id" });
+  if (settlementEvent && (envelope.toolSettlement === undefined || envelope.assistantPartAppend !== undefined)) {
+    context.addIssue({ code: "custom", message: "Tool Result event requires one target settlement" });
   }
-  if (envelope.drafts.length > 0 && envelope.modelRequestId === undefined) {
-    context.addIssue({ code: "custom", message: "runtime output projection requires a model request id" });
+  if (!memberEvent && !settlementEvent &&
+    (envelope.assistantPartAppend !== undefined || envelope.toolSettlement !== undefined)) {
+    context.addIssue({ code: "custom", message: "event forbids a Runtime declaration shape" });
+  }
+  if ((memberEvent || settlementEvent) && envelope.modelRequestId === undefined) {
+    context.addIssue({ code: "custom", message: "Assistant declaration requires a model request id" });
   }
   if ((envelope.event.type.startsWith("session.") || envelope.event.type.startsWith("span.")) && envelope.modelRequestId !== undefined) {
     context.addIssue({ code: "custom", message: "non-assistant event forbids a model request id" });
@@ -1034,11 +1023,10 @@ export const SessionEventEnvelopeSchema = z.strictObject({
   } else if (envelope.contextThroughMessageSequence !== undefined || envelope.requestKind !== undefined) {
     context.addIssue({ code: "custom", message: "private request stamp requires a model request start" });
   }
-  validateStableReasoningSet(parts, context);
 });
 export type SessionEventEnvelope = z.infer<typeof SessionEventEnvelopeSchema>;
 
-/** Request-end settlement payload, including retry and attachment consumption facts. */
+/** Request-end settlement payload and its disjoint append/checkpoint declarations. */
 export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
   requestId: SanitizedIdentifierSchema,
   workspaceId: SanitizedIdentifierSchema,
@@ -1065,12 +1053,11 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
     deadline: TimestampSchema,
     backoffMs: NonNegativeIntegerSchema,
   }).optional(),
-  stableReasoningParts: z.array(SessionEventWriterStableReasoningPartSchema).max(MaxStableReasoningPartsPerRequest).optional(),
-  drafts: z.array(RuntimeMessageDraftSchema).optional(),
+  trailingPartAppend: RuntimeAssistantPartAppendSchema.optional(),
+  compactionCheckpointCreate: RuntimeMessageCreateSchema.optional(),
   prefixConsumption: z.strictObject({
     childThreadId: SanitizedIdentifierSchema,
     parentBoundaryEventId: SanitizedIdentifierSchema,
-    checkpointRuntimeLocalId: SanitizedIdentifierSchema,
   }).optional(),
   compactedThroughMessageSequence: NonNegativeIntegerSchema.optional(),
   compactionEventPayloadJson: z.string().superRefine((value, context) => {
@@ -1088,17 +1075,8 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
     eventIds: z.array(SanitizedIdentifierSchema).length(1),
     sequenceFrom: NonNegativeIntegerSchema,
     sequenceTo: NonNegativeIntegerSchema,
-    pendingToolCancellations: z.array(z.strictObject({
-      toolUseEventId: SanitizedIdentifierSchema,
-      runtimeLocalId: SanitizedIdentifierSchema,
-    })),
-    sandboxExecutionToolUseEventIds: z.array(SanitizedIdentifierSchema),
   }).optional(),
 }).superRefine((envelope, context) => {
-  const parts = envelope.stableReasoningParts ?? [];
-  if (parts.length > 0 && (envelope.isError || envelope.reschedule !== undefined)) {
-    context.addIssue({ code: "custom", message: "stable reasoning requires a successful request end" });
-  }
   const consumedAttachmentCount =
     (envelope.consumedAttachmentRefs?.length ?? 0) +
     (envelope.consumedFileAttachments?.length ?? 0);
@@ -1108,98 +1086,34 @@ export const SessionEventWriterRequestEndEnvelopeSchema = z.strictObject({
   if (envelope.reschedule !== undefined && consumedAttachmentCount > 0) {
     context.addIssue({ code: "custom", message: "rescheduled request ends cannot consume attachments" });
   }
-  const isCompaction = envelope.requestKind === "compaction_summary";
-  const drafts = envelope.drafts ?? [];
-  const cancellationDrafts = drafts.filter((draft) => draft.draftKind === "cancellation");
-  const primaryDrafts = drafts.filter((draft) => draft.draftKind !== "cancellation");
-  if (envelope.interruptSettlement === undefined) {
-    if (cancellationDrafts.length > 0) {
-      context.addIssue({ code: "custom", message: "request-end cancellation drafts require interrupt settlement" });
-    }
-  } else {
-    if (
-      !envelope.isError ||
-      envelope.errorKind !== "runtime_interrupted" ||
+  if (envelope.interruptSettlement !== undefined &&
+    (!envelope.isError || envelope.errorKind !== "runtime_interrupted" ||
       envelope.reschedule !== undefined ||
-      envelope.interruptSettlement.sequenceTo < envelope.interruptSettlement.sequenceFrom
-    ) {
-      context.addIssue({ code: "custom", message: "request-end interrupt settlement requires an interrupted terminal end" });
-    }
-    if (
-      cancellationDrafts.some((draft) =>
-        draft.sourceKind !== "interrupt_control" ||
-        draft.sourceId !== envelope.interruptSettlement?.runtimeInputId ||
-        draft.sourceEventId !== envelope.interruptSettlement?.eventIds[0]
-      )
-    ) {
-      context.addIssue({ code: "custom", message: "request-end interrupt cancellation drafts are incomplete" });
-    }
-    const cancellationIDs = new Set(cancellationDrafts.map((draft) => draft.runtimeLocalId));
-    const pendingToolIDs = new Set(
-      envelope.interruptSettlement.pendingToolCancellations.map((pending) => pending.toolUseEventId),
-    );
-    const sandboxExecutionIDs = new Set(envelope.interruptSettlement.sandboxExecutionToolUseEventIds);
-    if (
-      cancellationIDs.size !== cancellationDrafts.length ||
-      pendingToolIDs.size !== envelope.interruptSettlement.pendingToolCancellations.length ||
-      sandboxExecutionIDs.size !== envelope.interruptSettlement.sandboxExecutionToolUseEventIds.length ||
-      envelope.interruptSettlement.pendingToolCancellations.some((pending) => sandboxExecutionIDs.has(pending.toolUseEventId)) ||
-      envelope.interruptSettlement.pendingToolCancellations.some(
-        (pending) => !cancellationIDs.has(pending.runtimeLocalId),
-      )
-    ) {
-      context.addIssue({ code: "custom", message: "request-end interrupt cancellation mapping is invalid" });
-    }
+      envelope.interruptSettlement.sequenceTo < envelope.interruptSettlement.sequenceFrom)) {
+    context.addIssue({ code: "custom", message: "request-end interrupt settlement requires an interrupted terminal end" });
   }
-  if (isCompaction) {
-    if (!envelope.isError && envelope.reschedule === undefined) {
-      if (
-        primaryDrafts.length !== 1 ||
-        primaryDrafts[0]?.draftKind !== "compaction_checkpoint" ||
-        envelope.compactedThroughMessageSequence === undefined ||
-        envelope.compactionEventPayloadJson === undefined
-      ) {
-        context.addIssue({ code: "custom", message: "successful compaction requires its event, checkpoint, and sequence boundary" });
-      }
-      if (
-        envelope.prefixConsumption !== undefined &&
-        envelope.prefixConsumption.checkpointRuntimeLocalId !== primaryDrafts[0]?.runtimeLocalId
-      ) {
-        context.addIssue({ code: "custom", message: "prefix consumption must name the compaction checkpoint draft" });
-      }
-    } else {
-      if (primaryDrafts.length !== 0) {
-        context.addIssue({ code: "custom", message: "failed compaction request ends permit cancellation drafts only" });
-      }
-      if (
-        envelope.prefixConsumption !== undefined ||
-        envelope.compactedThroughMessageSequence !== undefined ||
-        envelope.compactionEventPayloadJson !== undefined
-      ) {
-        context.addIssue({ code: "custom", message: "failed compaction request ends forbid checkpoint declaration fields" });
-      }
-    }
-  } else {
-    if (
-      envelope.prefixConsumption !== undefined ||
-      envelope.compactedThroughMessageSequence !== undefined ||
-      envelope.compactionEventPayloadJson !== undefined
-    ) {
-      context.addIssue({ code: "custom", message: "non-compaction request ends forbid checkpoint declaration fields" });
-    }
-    if (
-      primaryDrafts.length > 1 ||
-      primaryDrafts.some((draft) =>
-        draft.draftKind !== "assistant_text" ||
-        draft.sourceKind !== "model_request" ||
-        draft.sourceId !== envelope.modelRequestId ||
-        draft.status === "streaming"
-      )
-    ) {
-      context.addIssue({ code: "custom", message: "ordinary request ends permit one terminal assistant seal only" });
-    }
+  const successful = !envelope.isError && envelope.reschedule === undefined;
+  const isCompaction = envelope.requestKind === "compaction_summary";
+  if (!successful && (envelope.trailingPartAppend !== undefined || envelope.compactionCheckpointCreate !== undefined)) {
+    context.addIssue({ code: "custom", message: "unsuccessful request end forbids append and checkpoint declarations" });
   }
-  validateStableReasoningSet(parts, context);
+  if (isCompaction && successful) {
+    if (
+      envelope.trailingPartAppend !== undefined ||
+      envelope.compactionCheckpointCreate?.messageKind !== "compaction_checkpoint" ||
+      envelope.compactedThroughMessageSequence === undefined ||
+      envelope.compactionEventPayloadJson === undefined
+    ) {
+      context.addIssue({ code: "custom", message: "successful compaction requires its event, checkpoint, and sequence boundary" });
+    }
+  } else if (
+    envelope.compactionCheckpointCreate !== undefined ||
+    envelope.prefixConsumption !== undefined ||
+    envelope.compactedThroughMessageSequence !== undefined ||
+    envelope.compactionEventPayloadJson !== undefined
+  ) {
+    context.addIssue({ code: "custom", message: "non-successful-compaction request end forbids checkpoint fields" });
+  }
 });
 export type SessionEventWriterRequestEndEnvelope = z.infer<typeof SessionEventWriterRequestEndEnvelopeSchema>;
 
@@ -1212,10 +1126,11 @@ export const SessionEventWriterFinishIdleEnvelopeSchema = z.strictObject({
   targetPodUid: SanitizedIdentifierSchema,
   durableTurnId: SanitizedIdentifierSchema,
   stopReason: SessionIdleStopReasonSchema,
-  drafts: z.array(RuntimeMessageDraftSchema).max(1).optional(),
+  completionMailCreate: RuntimeMessageCreateSchema.optional(),
 }).superRefine((envelope, context) => {
-  if ((envelope.drafts ?? []).some((draft) => draft.draftKind !== "completion_mail")) {
-    context.addIssue({ code: "custom", message: "idle closeout permits a completion-mail draft only" });
+  if (envelope.completionMailCreate !== undefined &&
+    envelope.completionMailCreate.messageKind !== "completion_mail") {
+    context.addIssue({ code: "custom", message: "idle closeout permits a completion-mail create only" });
   }
 });
 export type SessionEventWriterFinishIdleEnvelope = z.infer<typeof SessionEventWriterFinishIdleEnvelopeSchema>;
@@ -1230,56 +1145,16 @@ export const SessionEventWriterRuntimeTerminationEnvelopeSchema = z.strictObject
   targetPodUid: SanitizedIdentifierSchema,
   writeId: SanitizedIdentifierSchema,
   failure: RuntimeFailureSchema,
-  drafts: z.array(RuntimeMessageDraftSchema),
-  pendingToolCancellations: z.array(z.strictObject({
-    toolUseEventId: SanitizedIdentifierSchema,
-    runtimeLocalId: SanitizedIdentifierSchema,
-  })),
-  sandboxExecutionToolUseEventIds: z.array(SanitizedIdentifierSchema),
+  toolSettlements: z.array(RuntimeToolSettlementDeclarationSchema),
+  completionMailCreate: RuntimeMessageCreateSchema.optional(),
 }).superRefine((envelope, context) => {
-  const cancellationDrafts = envelope.drafts.filter((draft) => draft.draftKind === "termination");
-  const completionDrafts = envelope.drafts.filter((draft) => draft.draftKind === "completion_mail");
-  if (
-    cancellationDrafts.length + completionDrafts.length !== envelope.drafts.length ||
-    completionDrafts.length > 1 ||
-    envelope.drafts.some((draft, ordinal) =>
-      draft.sourceKind !== "runtime_termination" ||
-      draft.sourceId !== envelope.writeId ||
-      draft.sourceEventId !== undefined ||
-      draft.ordinal !== ordinal
-    )
-  ) {
-    context.addIssue({ code: "custom", message: "runtime termination draft set is invalid" });
-  }
-  const cancellationIDs = new Set(cancellationDrafts.map((draft) => draft.runtimeLocalId));
-  const toolUseIDs = new Set(envelope.pendingToolCancellations.map((pending) => pending.toolUseEventId));
-  const sandboxExecutionIDs = new Set(envelope.sandboxExecutionToolUseEventIds);
-  if (
-    cancellationIDs.size !== cancellationDrafts.length ||
-    toolUseIDs.size !== envelope.pendingToolCancellations.length ||
-    sandboxExecutionIDs.size !== envelope.sandboxExecutionToolUseEventIds.length ||
-    envelope.pendingToolCancellations.some((pending) => sandboxExecutionIDs.has(pending.toolUseEventId)) ||
-    cancellationDrafts.length !== envelope.pendingToolCancellations.length ||
-    envelope.pendingToolCancellations.some((pending) => !cancellationIDs.has(pending.runtimeLocalId)) ||
-    cancellationDrafts.some((draft) =>
-      draft.role !== "assistant" ||
-      draft.origin !== "agent" ||
-      draft.status !== "completed" ||
-      draft.parts.length !== 1 ||
-      draft.parts[0]?.type !== "tool" ||
-      draft.parts[0].state.status !== "cancelled"
-    )
-  ) {
-    context.addIssue({ code: "custom", message: "runtime termination pending-tool declaration is incomplete" });
-  }
-  if (completionDrafts.some((draft) =>
-    draft.role !== "user" ||
-    draft.origin !== "runtime" ||
-    draft.status !== "completed" ||
-    draft.parts.length !== 1 ||
-    draft.parts[0]?.type !== "text"
-  )) {
+  if (envelope.completionMailCreate !== undefined &&
+    envelope.completionMailCreate.messageKind !== "completion_mail") {
     context.addIssue({ code: "custom", message: "runtime termination completion mail is invalid" });
+  }
+  const targets = new Set(envelope.toolSettlements.map((settlement) => settlement.toolUseEventId));
+  if (targets.size !== envelope.toolSettlements.length) {
+    context.addIssue({ code: "custom", message: "runtime termination Tool settlements are duplicated" });
   }
 });
 export type SessionEventWriterRuntimeTerminationEnvelope = z.infer<typeof SessionEventWriterRuntimeTerminationEnvelopeSchema>;

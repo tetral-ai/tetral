@@ -305,6 +305,7 @@ const TurnEventTypeSchema = z.enum([
   "agent.tool_result",
   "agent.mcp_tool_result",
   "user.interrupt",
+  "agent.thread_interrupt_requested",
   "session.error",
   "session.status_rescheduled",
   "session.thread_status_rescheduled",
@@ -394,7 +395,6 @@ const DeclarationLineageEntrySchema = z.strictObject({
   lineageKind: z.literal("declaration_receipt"),
   operationKind: IdentitySchema,
   sourceKind: IdentitySchema,
-  sourceId: IdentitySchema,
   eventId: IdentitySchema,
   eventSequence: SequenceSchema,
   disposition: z.enum(["created", "updated"]),
@@ -1007,7 +1007,9 @@ function extractRunCloseout(events: ThreadTurnLoadFacts["events"]): Pick<
   const relevant = running === undefined
     ? events
     : events.filter((event) => event.eventSequence >= running.eventSequence);
-  const interrupt = relevant.filter((event) => event.type === "user.interrupt").at(-1);
+  const interrupt = relevant.filter((event) =>
+    event.type === "user.interrupt" || event.type === "agent.thread_interrupt_requested"
+  ).at(-1);
   const idle = relevant.filter((event) =>
     event.type === "session.status_idle" || event.type === "session.thread_status_idle"
   ).at(-1);

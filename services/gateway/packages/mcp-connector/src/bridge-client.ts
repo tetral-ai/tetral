@@ -402,7 +402,7 @@ function mcpCommitDisposition(
       request.scope?.sessionThreadId ?? "",
       request.toolUseEventId,
       request.mcpServerName,
-      stableMcpMaterializationSourceId(request),
+      stableMcpMaterializationOperationId(request),
       mcpMaterializationDeclarationDigest(request),
       response.refsOnlyResultJson,
     )
@@ -429,7 +429,7 @@ function mcpClaimReplayDisposition(
       request.scope?.sessionThreadId ?? "",
       request.toolUseEventId,
       request.mcpServerName,
-      stableMcpMaterializationSourceId(request),
+      stableMcpMaterializationOperationId(request),
       receipt.declarationDigest,
       response.resultJson,
     )
@@ -461,7 +461,7 @@ function validMcpMaterializationReceipt(
   sessionThreadId: string,
   toolUseEventId: string,
   mcpServerName: string,
-  sourceId: string,
+  operationId: string,
   declarationDigest: string,
   refsOnlyResultJson: string,
 ): boolean {
@@ -475,7 +475,7 @@ function validMcpMaterializationReceipt(
     receipt.sessionThreadId !== sessionThreadId ||
     receipt.operationKind !== "commit_mcp_tool_result" ||
     receipt.sourceKind !== "mcp_tool_execution" ||
-    receipt.sourceId !== sourceId ||
+    receipt.operationId !== operationId ||
     receipt.declarationDigest !== declarationDigest
   ) {
     return false;
@@ -484,7 +484,7 @@ function validMcpMaterializationReceipt(
     receipt.events.length !== 0 ||
     receipt.messages.length !== 0 ||
     receipt.pendingAttachmentDeltaJson.length !== stored.response.attachments.length ||
-    receipt.pendingToolDeltaJson.length !== 0 ||
+    receipt.interruptToolProjections.length !== 0 ||
     receipt.prefixConsumptions.length !== 0 ||
     receipt.requestReschedule !== undefined ||
     receipt.childLifecycle.length !== 0 ||
@@ -518,7 +518,7 @@ function validMcpMaterializationReceipt(
   });
 }
 
-function stableMcpMaterializationSourceId(
+function stableMcpMaterializationOperationId(
   request: Pick<ClaimMcpToolResultRequest, "toolUseEventId" | "normalizedInputHash">,
 ): string {
   const encoder = new TextEncoder();

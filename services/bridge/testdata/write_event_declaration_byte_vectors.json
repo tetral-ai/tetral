@@ -1,41 +1,0 @@
-{
-  "html_raw": {
-    "payload_json": "{\"type\":\"agent.message\",\"content\":[{\"type\":\"text\",\"text\":\"&<>\"}]}",
-    "stripped_payload_json": "{\"content\":[{\"text\":\"&<>\",\"type\":\"text\"}],\"type\":\"agent.message\"}",
-    "digest": "2c88477dbc1fc7ccf47e2bd2afa37f8a11ae3e0193056654eba43aba023a71f3"
-  },
-  "line_separators_raw": {
-    "payload_json": "{\"type\":\"agent.message\",\"content\":[{\"type\":\"text\",\"text\":\"before middle after\"}]}",
-    "stripped_payload_json": "{\"content\":[{\"text\":\"before middle after\",\"type\":\"text\"}],\"type\":\"agent.message\"}",
-    "digest": "e985fa8fc355fa1dde611d0698918872b23b321638ca79b2b662c43692b7fef0"
-  },
-  "preescaped_html": {
-    "payload_json": "{\"type\":\"agent.message\",\"content\":[{\"type\":\"text\",\"text\":\"\\u0026\\u003c\\u003e\"}]}",
-    "stripped_payload_json": "{\"content\":[{\"text\":\"\\u0026\\u003c\\u003e\",\"type\":\"text\"}],\"type\":\"agent.message\"}",
-    "digest": "f69d6313bb8c92b02e433322a6485d27e831d22493d3e4766c15f916e07b3588"
-  },
-  "internal_fields": {
-    "payload_json": "{\"type\":\"agent.message\",\"background_task\":{\"id\":\"hidden\"},\"content\":[{\"type\":\"text\",\"text\":\"safe\",\"provider_metadata\":{\"raw\":\"hidden\"}}],\"nested\":{\"provider_command_id\":\"hidden\",\"value\":\"keep\"}}",
-    "stripped_payload_json": "{\"content\":[{\"text\":\"safe\",\"type\":\"text\"}],\"nested\":{\"value\":\"keep\"},\"type\":\"agent.message\"}",
-    "digest": "28d8d30d69a15bc591ef22c9231646bcba28a7d787fa3dd085e91eb718eb61a5"
-  },
-  "tool_use_with_draft": {
-    "payload_json": "{\"type\":\"agent.tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"printf '&<>' && printf 'before middle after'\"},\"evaluated_permission\":\"allow\"}",
-    "stripped_payload_json": "{\"evaluated_permission\":\"allow\",\"input\":{\"command\":\"printf '&<>' && printf 'before middle after'\"},\"name\":\"Bash\",\"type\":\"agent.tool_use\"}",
-    "draft": {
-      "runtime_local_id": "msg_digest_bytes",
-      "source_kind": "agent.tool_use",
-      "source_id": "rwrite_digest_bytes",
-      "source_event_id": "",
-      "ordinal": 0,
-      "message_info_json": "{\"role\":\"assistant\",\"origin\":\"agent\",\"status\":\"streaming\"}",
-      "part": {
-        "runtime_local_part_id": "part_digest_bytes",
-        "part_kind": "tool",
-        "ordinal": 0,
-        "part_json": "{\"type\":\"tool\",\"toolCallId\":\"call_digest_bytes\",\"toolName\":\"Bash\",\"state\":{\"status\":\"running\",\"input\":{\"value\":{\"command\":\"printf '&<>' && printf 'before middle after'\"},\"preview\":\"command\",\"truncated\":false}}}"
-      }
-    },
-    "digest": "724603165a6483155a771c2197196c7b4fa7cbf573c1f3970c15669d49d4abb1"
-  }
-}
