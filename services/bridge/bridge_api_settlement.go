@@ -20,13 +20,10 @@ import (
 
 // This file owns the Bridge settlement protocol-family boundary.
 
-// normalizedStableReasoningPart is a completed reasoning part in Bridge-internal
-// form. Its Metadata field is the single carve-out to the no-provider-metadata
-// projection rule: Metadata durably retains bounded provider-native provenance
-// (Anthropic signature/redacted data, OpenAI encrypted-reasoning metadata) so a
-// cold reload round-trips reasoning without stripping signatures. That metadata
-// is Bridge-size-bounded, internal cold-start context only, and never surfaces
-// on any public Event or message API.
+// normalizedStableReasoningPart is the bounded, internal audit projection of a
+// completed durable reasoning member. Bridge derives it only from the locked
+// Assistant message while committing its owning event; it is not a recovery or
+// state-machine input and is never exposed by the public Event or message API.
 type normalizedStableReasoningPart struct {
 	ReasoningPartID string         `json:"reasoning_part_id"`
 	ProviderPartID  string         `json:"provider_part_id"`

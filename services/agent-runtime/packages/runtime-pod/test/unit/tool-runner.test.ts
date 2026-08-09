@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Metadata, status as GrpcStatus } from "@grpc/grpc-js";
 import type { CallOptions } from "@grpc/grpc-js";
+import { Stream } from "effect";
 import {
   BridgeWriteStatus,
 	ChildInterruptDisposition,
@@ -45,8 +46,9 @@ import type {
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
-import type { RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import { SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { DurableRuntimeMessage, RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeInternalToolRepairStore, SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
@@ -54,11 +56,15 @@ import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import { childLifecycleDeclarationDigest } from "../../src/runtime-declaration-wire.js";
-import type { RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
+import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
+import type { RuntimeCoreHostsOptions, RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
 import {
+  buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
+  buildCoreHostsUserMessage as userMessage,
   buildToolRunnerCompletedToolMessage as completedToolMessage,
   buildToolRunnerRuntimeTextMessage as runtimeTextMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
+import { acceptedInputReceipt } from "../../../core/test/unit/runtime-declaration-fixtures.js";
 
 describe("RuntimePodToolRunner", () => {
   test("shares exact raw JSON canonical vectors with Bridge", () => {
@@ -2117,6 +2123,26 @@ describe("RuntimePodToolRunner", () => {
     expect(subAgentHost.actions).toEqual([]);
   });
 
+  test("interrupt_agent settles a durable control delivery failure without retrying", async () => {
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "running";
+    bridge.childInterruptOutcome = ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED;
+    bridge.childInterruptErrorCode = "child_interrupt_delivery_failed";
+    const runner = makeRunner({ bridge, subAgentHost: new RecordingSubAgentHost() });
+
+    const result = await runner.runTool(toolRequest("interrupt_agent", { task_name: "worker" }));
+
+    expect(result).toMatchObject({
+      type: "error",
+      error: {
+        message: "child_interrupt_delivery_failed",
+        retryable: false,
+      },
+    });
+    expect(bridge.admitChildInterruptRequests).toHaveLength(1);
+    expect(bridge.awaitChildInterruptRequests).toHaveLength(1);
+  });
+
   test("withResolvedChild settles an oversized route result as a non-retryable tool failure", async () => {
     const bridge = new RecordingBridgeClient();
     bridge.childStatus = "running";
@@ -2151,6 +2177,122 @@ describe("RuntimePodToolRunner", () => {
 
     await expect(waiting).resolves.toMatchObject({ type: "cancelled" });
     expect(subAgentHost.waitDetached).toBe(true);
+  });
+
+  test("resume_agent admits only a quiescent closed checkpoint before durable activation", async () => {
+    const closedThread = {
+      parentThreadId: "thrd_1",
+      role: "subagent" as const,
+      visibility: "public" as const,
+      taskName: "worker",
+      agentType: "worker" as const,
+      status: "closed_for_runtime" as const,
+    };
+    const pendingMessages = [
+      userMessage("sesn_1", "user-resume-checkpoint", 1, "hello"),
+      {
+        ...assistantRunningToolMessage(
+          "sesn_1", "assistant-resume-checkpoint", 2,
+          "tool-resume-checkpoint", "Read", "sevt_tool_resume_checkpoint", { file_path: "a.txt" },
+        ),
+        eventSequence: 3,
+      },
+    ];
+    const pendingFacts = resumeTurnFactsForPendingTool({
+      messages: pendingMessages,
+      modelRequestId: "mreq_resume_checkpoint",
+      toolUseEventId: "sevt_tool_resume_checkpoint",
+      modelToolCallId: "tool-resume-checkpoint",
+      toolName: "Read",
+    });
+    const pendingInput = userMessage("sesn_1", "user-pending-resume", 1, "pending");
+    const cases = [
+      {
+        name: "open request",
+        context: {
+          messages: [], thread: closedThread, durableTurnId: "sevt_resume_running",
+          turnFacts: {
+            events: [
+              { eventId: "sevt_resume_running", eventSequence: 1, type: "session.status_running" as const },
+              { eventId: "sevt_resume_start", eventSequence: 2, type: "span.model_request_start" as const, modelRequestId: "mreq_resume_open", requestStart: { requestKind: "agent_provider_request" as const, contextThroughMessageSequence: 0 } },
+            ],
+            messageLineage: [],
+          },
+        },
+      },
+      {
+        name: "pending tool route",
+        context: {
+          messages: pendingMessages, thread: closedThread, turnFacts: pendingFacts,
+          pendingToolUses: [{ toolUseEventId: "sevt_tool_resume_checkpoint", modelRequestId: "mreq_resume_checkpoint", modelToolCallId: "tool-resume-checkpoint", toolName: "Read", input: { file_path: "a.txt" }, status: "pending" as const }],
+        },
+      },
+      {
+        name: "unfinished sandbox route",
+        context: {
+          messages: pendingMessages, thread: closedThread, turnFacts: pendingFacts,
+          pendingSandboxExecutions: [{ toolUseEventId: "sevt_tool_resume_checkpoint", modelRequestId: "mreq_resume_checkpoint", modelToolCallId: "tool-resume-checkpoint", toolName: "Read", input: { file_path: "a.txt" }, executionState: "running" as const }],
+        },
+      },
+      {
+        name: "unresolved interrupt",
+        context: {
+          messages: [], thread: closedThread,
+          turnFacts: { events: [{ eventId: "sevt_resume_interrupt", eventSequence: 1, type: "agent.thread_interrupt_requested" as const }], messageLineage: [] },
+        },
+      },
+      {
+        name: "reducer has pending input",
+        context: { messages: [pendingInput], thread: closedThread, turnFacts: resumeTurnFactsFor([pendingInput]) },
+      },
+    ];
+    for (const testCase of cases) {
+      const hosts = await buildResumeTestHosts(async () => ({
+        ...testCase.context,
+        runtimeBindingToken: "runtime-binding-token-resume-checkpoint",
+        coldCoverage: emptyResumeColdCoverage,
+      }));
+      const bridge = new RecordingBridgeClient();
+      bridge.childStatus = "closed_for_runtime";
+      try {
+        const result = await makeRunner({ bridge, subAgentHost: hosts.subAgentRunHost }).runTool(
+          toolRequest("resume_agent", { task_name: "worker" }),
+        );
+        expect(result, testCase.name).toMatchObject({
+          type: "error",
+          error: { message: expect.stringContaining("context preload failed") },
+        });
+        expect(bridge.markChildThreadActiveRequests, testCase.name).toHaveLength(0);
+        expect(await hosts.subAgentRunHost.inspectThread(resumeChildControl()), testCase.name).toMatchObject({
+          ok: true,
+          observed: false,
+        });
+      } finally {
+        await hosts.close();
+      }
+    }
+
+    const hosts = await buildResumeTestHosts(async () => ({
+      messages: [],
+      thread: closedThread,
+      turnFacts: emptyResumeTurnFacts,
+      runtimeBindingToken: "runtime-binding-token-quiescent-resume",
+      coldCoverage: emptyResumeColdCoverage,
+    }));
+    const bridge = new RecordingBridgeClient();
+    bridge.childStatus = "closed_for_runtime";
+    try {
+      expect(await makeRunner({ bridge, subAgentHost: hosts.subAgentRunHost }).runTool(
+        toolRequest("resume_agent", { task_name: "worker" }),
+      )).toMatchObject({ type: "completed" });
+      expect(bridge.markChildThreadActiveRequests).toHaveLength(1);
+      expect(await hosts.subAgentRunHost.inspectThread(resumeChildControl())).toMatchObject({
+        ok: true,
+        observed: true,
+      });
+    } finally {
+      await hosts.close();
+    }
   });
 
   test("resume_agent marks a closed child active and preloads context without enqueueing new input", async () => {
@@ -2330,11 +2472,143 @@ describe("RuntimePodToolRunner", () => {
   }
 });
 
+const emptyResumeColdCoverage = {
+  pendingToolIds: [],
+  pendingSandboxExecutionIds: [],
+  pendingAttachmentIdentities: [],
+  undeliveredMailDeliveryIds: [],
+} as const;
+
+const emptyResumeTurnFacts: ThreadTurnLoadFacts = { events: [], messageLineage: [] };
+
+function resumeTurnFactsFor(messages: readonly DurableRuntimeMessage[]): ThreadTurnLoadFacts {
+  return {
+    events: [],
+    messageLineage: messages.map((message) => ({
+      messageId: message.id,
+      messageSequence: message.sequence,
+      owningEventId: message.owningEventId,
+      entries: [{
+        lineageKind: "declaration_receipt",
+        operationKind: message.origin === "agent" ? "write_event" : "commit_inputs",
+        sourceKind: message.origin === "agent" ? "runtime_event" : message.origin === "runtime" ? "agent_mail" : "messages",
+        eventId: message.owningEventId,
+        eventSequence: message.eventSequence,
+        disposition: "created",
+      }],
+    })),
+  };
+}
+
+function resumeTurnFactsForPendingTool(input: {
+  readonly messages: readonly DurableRuntimeMessage[];
+  readonly modelRequestId: string;
+  readonly toolUseEventId: string;
+  readonly modelToolCallId: string;
+  readonly toolName: string;
+}): ThreadTurnLoadFacts {
+  const toolMessage = input.messages.find((message) => message.owningEventId === input.toolUseEventId);
+  if (toolMessage === undefined || toolMessage.eventSequence < 2) {
+    throw new Error("pending Tool Use fixture requires an ordered assistant projection");
+  }
+  return {
+    events: [
+      {
+        eventId: `start_${input.modelRequestId}`,
+        eventSequence: toolMessage.eventSequence - 1,
+        type: "span.model_request_start",
+        modelRequestId: input.modelRequestId,
+        requestStart: { requestKind: "agent_provider_request", contextThroughMessageSequence: 1 },
+      },
+      {
+        eventId: input.toolUseEventId,
+        eventSequence: toolMessage.eventSequence,
+        type: "agent.tool_use",
+        modelRequestId: input.modelRequestId,
+        toolUse: { modelToolCallId: input.modelToolCallId, toolName: input.toolName },
+      },
+      {
+        eventId: `end_${input.modelRequestId}`,
+        eventSequence: toolMessage.eventSequence + 1,
+        type: "span.model_request_end",
+        modelRequestId: input.modelRequestId,
+        requestEnd: {
+          requestStartEventId: `start_${input.modelRequestId}`,
+          isError: false,
+          rescheduled: false,
+        },
+      },
+    ],
+    messageLineage: resumeTurnFactsFor(input.messages).messageLineage.map((lineage) =>
+      lineage.messageId === toolMessage.id
+        ? {
+            ...lineage,
+            modelRequestId: input.modelRequestId,
+            entries: lineage.entries.map((entry) => ({ ...entry, sourceKind: "agent.tool_use" as const })),
+          }
+        : lineage
+    ),
+  };
+}
+
+function resumeChildControl() {
+  return {
+    requestId: "req_resume_inspect",
+    workspaceId: "wksp_1",
+    sessionId: "sesn_1",
+    sessionThreadId: "thr_child_1",
+    bindingId: "bind_1",
+    bindingGeneration: 42,
+    targetPodUid: "pod_1",
+    runtimeInputId: "rin_resume_inspect",
+    eventIds: [],
+    sequenceFrom: 0,
+    sequenceTo: 0,
+  };
+}
+
+async function buildResumeTestHosts(
+  loadThreadContext: NonNullable<RuntimeCoreHostsOptions["contextLoader"]["loadThreadContext"]>,
+) {
+  return await buildRuntimeCoreHosts({
+    maxLocalSessions: 4,
+    now: () => "2026-06-16T00:00:00.000Z",
+    contextLoader: {
+      loadThreadContext,
+      commitAcceptedInput: async (input) => acceptedInputReceipt(input),
+    },
+    threadLoop: {
+      internalToolRepairStore: new ResumeTestRepairStore(),
+      sessionEventWriter: {
+        append: async () => { throw new Error("resume checkpoint test does not append events"); },
+        writeRequestEnd: async () => { throw new Error("resume checkpoint test does not end requests"); },
+        finishIdle: async () => { throw new Error("resume checkpoint test does not finish turns"); },
+      },
+      runtime: {
+        now: () => "2026-06-16T00:00:00.000Z",
+        monotonicMs: () => 0,
+        createId: (prefix) => `${prefix}_resume_test`,
+        sleep: async () => true,
+      },
+      llmService: { stream: () => Stream.empty },
+      storeOperationTimeoutMs: 100,
+      runtimeModel: () => ({ providerId: "fake", modelId: "fake-chat" }),
+      runtimePolicy: () => ({ toolCatalog: createToolCatalog({ family: "claude" }) }),
+    },
+  });
+}
+
+class ResumeTestRepairStore extends RuntimeInternalToolRepairStore {
+  protected async commitInternalToolRepairRecord(): Promise<never> {
+    throw new Error("resume checkpoint test does not repair internal Tools");
+  }
+}
+
 function makeRunner(options: {
   readonly bridge?: RecordingBridgeClient;
   readonly gateway?: RecordingGatewayClient;
   readonly mcp?: RecordingMcpConnectorClient;
-  readonly subAgentHost?: RecordingSubAgentHost;
+  readonly subAgentHost?: RuntimeSubAgentRunHost;
   readonly metadataFactory?: () => Promise<Metadata>;
   readonly sleep?: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
 }): RuntimePodToolRunner {
@@ -2502,6 +2776,7 @@ class RecordingBridgeClient {
   childTaskName = "worker";
   childStatus = "idle";
   childInterruptOutcome = ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_COMPLETED;
+  childInterruptErrorCode: string | undefined;
   awaitSandboxExecutionResultJson = '{"status":"success","result":{"text":"ok"}}';
   awaitSandboxExecutionResultDigest = sha256(this.awaitSandboxExecutionResultJson);
   awaitSandboxExecutionBackgroundTaskStarted = false;
@@ -2598,6 +2873,7 @@ class RecordingBridgeClient {
 			outcomes: request.targets.map((target) => ({
 				target,
 				outcome: this.childInterruptOutcome,
+				...(this.childInterruptErrorCode === undefined ? {} : { errorCode: this.childInterruptErrorCode }),
 			})),
 		});
 		return grpcCall();

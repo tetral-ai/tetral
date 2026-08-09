@@ -289,7 +289,8 @@ replacement must preserve, and the conformance suites that prove it.
   the durable Assistant message, not per append. Bridge derives the cumulative
   `stable_reasoning_json` ledger from locked durable reasoning members after a
   successful member append or Request End; Runtime does not transport or cache
-  a cumulative ledger.
+  a cumulative ledger. No production reader consumes this audit projection: it
+  is not a recovery input and does not participate in Runtime or Bridge state.
 - **Invariants a replacement must preserve.** Each append and create is atomic,
   positional, and idempotent under its owning operation key. Tool settlement
   is independent of prior reasoning, text, and sibling Tool Uses. Replay must
@@ -302,10 +303,11 @@ replacement must preserve, and the conformance suites that prove it.
   their anchor. Error and reschedule closeout therefore preserve that prefix
   without re-submitting it as the successful settlement set; a failed turn can
   leave a durable anchored prefix while its unanchored suffix is discarded.
-- **Conformance.** `bridge_api_events_test.go`,
-  `bridge_api_settlement_test.go`, and Runtime declaration/accumulator tests
-  cover ordered incremental appends, target-only Tool settlement, trailing
-  Request End members, replay, and stable-reasoning bounds.
+- **Conformance.** `bridge_api_events_test.go` drives PostgreSQL `WriteEvent`
+  and `WriteRequestEnd` to prove cumulative R1/R2 ledgers, deterministic replay,
+  target-only Tool settlement, public redaction, and exact/one-over count and
+  byte bounds with transactional rollback. Runtime's thread-loop and accumulator
+  tests prove the corresponding incremental producer stream and trailing suffix.
 
 ### Delivery and durable wake machinery
 

@@ -229,6 +229,271 @@ func TestPostgreSQLBridgeAPIStoreWriteEventPersistsStreamProjectionAndIdempotenc
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedSettlement(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_stable_reasoning"
+	const threadID = "thr_stable_reasoning"
+	const requestID = "mreq_stable_reasoning"
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_stable_reasoning", 1, "pod_stable_reasoning")
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	scope := bridgeAPIScope(sessionID, threadID, "bind_stable_reasoning", 1, "pod_stable_reasoning")
+	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_stable_start", requestID, "agent_provider_request", 0)
+
+	writeTool := func(writeID, callID, reasoningID, reasoningText string) *bridgev1.WriteEventResponse {
+		t.Helper()
+		request := &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID,
+			EventType: "agent.tool_use", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_use","name":"Read","input":{"path":%q},"evaluated_permission":"allow"}`, callID),
+			Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, writeID, "agent.tool_use", "streaming",
+				bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":%q,"text":%q,"providerMetadata":{},"truncated":false}`, reasoningID, reasoningText)},
+				bridgeRuntimePartCreateForTest{kind: "tool", json: fmt.Sprintf(`{"type":"tool","toolCallId":%q,"toolName":"Read","state":{"status":"running","input":{"value":{"path":%q}}}}`, callID, callID)},
+			)},
+		}
+		response, err := store.WriteEvent(context.Background(), request)
+		if err != nil {
+			t.Fatalf("WriteEvent %s: %v", callID, err)
+		}
+		replay, err := store.WriteEvent(context.Background(), request)
+		if err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetEventId() != response.GetEventId() {
+			t.Fatalf("WriteEvent replay %s = %+v, %v; want duplicate original event", callID, replay, err)
+		}
+		return response
+	}
+	toolA := writeTool("rwrite_stable_tool_a", "call_stable_a", "provider_reasoning_a", "R1")
+	toolB := writeTool("rwrite_stable_tool_b", "call_stable_b", "provider_reasoning_b", "R2")
+
+	readLedger := func(eventID string) []normalizedStableReasoningPart {
+		t.Helper()
+		var raw sql.NullString
+		if err := admin.QueryRow(`SELECT stable_reasoning_json FROM session_events WHERE workspace_id='default' AND event_id=$1`, eventID).Scan(&raw); err != nil {
+			t.Fatalf("read stable reasoning for %s: %v", eventID, err)
+		}
+		if !raw.Valid {
+			return nil
+		}
+		var parts []normalizedStableReasoningPart
+		if err := json.Unmarshal([]byte(raw.String), &parts); err != nil {
+			t.Fatalf("decode stable reasoning for %s: %v", eventID, err)
+		}
+		return parts
+	}
+	assertLedger := func(eventID string, texts []string, sequences []int32) {
+		t.Helper()
+		parts := readLedger(eventID)
+		if len(parts) != len(texts) {
+			t.Fatalf("stable reasoning for %s = %+v; want texts %v", eventID, parts, texts)
+		}
+		for i, text := range texts {
+			if parts[i].Text != text || parts[i].PartSequence != sequences[i] || parts[i].ReasoningPartID == "" {
+				t.Fatalf("stable reasoning part %d for %s = %+v; want deterministic sequence/text", i, eventID, parts[i])
+			}
+		}
+	}
+	assertLedger(toolA.GetEventId(), []string{"R1"}, []int32{0})
+	assertLedger(toolB.GetEventId(), []string{"R1", "R2"}, []int32{0, 2})
+
+	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_stable_end", ModelRequestId: requestID,
+		ModelRequestStartEventId: start.GetEventId(), RequestKind: "agent_provider_request",
+		FinishReason: "tool-calls", UsageJson: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("WriteRequestEnd: %v", err)
+	}
+	var endEventID string
+	if err := admin.QueryRow(`SELECT event_id FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3 AND type='span.model_request_end'`, sessionID, threadID, requestID).Scan(&endEventID); err != nil {
+		t.Fatalf("read Request End event: %v", err)
+	}
+	assertLedger(endEventID, []string{"R1", "R2"}, []int32{0, 2})
+
+	type storedMessage struct {
+		Parts []json.RawMessage `json:"parts"`
+	}
+	readParts := func() []json.RawMessage {
+		t.Helper()
+		var raw string
+		if err := admin.QueryRow(`SELECT data_json FROM session_messages WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3 AND kind='assistant'`, sessionID, threadID, requestID).Scan(&raw); err != nil {
+			t.Fatalf("read Assistant message: %v", err)
+		}
+		var message storedMessage
+		if err := json.Unmarshal([]byte(raw), &message); err != nil {
+			t.Fatalf("decode Assistant message: %v", err)
+		}
+		return message.Parts
+	}
+	before := readParts()
+	if len(before) != 4 {
+		t.Fatalf("Assistant parts before settlement = %d; want R1/A/R2/B", len(before))
+	}
+	settle := func(writeID string, target *bridgev1.WriteEventResponse, textValue string) *bridgev1.WriteEventResponse {
+		t.Helper()
+		response, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID,
+			EventType: "agent.tool_result", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":%q}]}`, target.GetEventId(), textValue),
+			Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(target.GetEventId(), textValue)},
+		})
+		if err != nil {
+			t.Fatalf("settle %s: %v", target.GetEventId(), err)
+		}
+		if got := readLedger(response.GetEventId()); got != nil {
+			t.Fatalf("Tool Result stable ledger = %+v; want absent", got)
+		}
+		return response
+	}
+	settle("rwrite_stable_result_b", toolB, "done B")
+	afterB := readParts()
+	for _, index := range []int{0, 1, 2} {
+		if string(afterB[index]) != string(before[index]) {
+			t.Fatalf("settling B changed sibling part %d: before %s after %s", index, before[index], afterB[index])
+		}
+	}
+	if string(afterB[3]) == string(before[3]) {
+		t.Fatal("settling B did not change target Tool part")
+	}
+	settle("rwrite_stable_result_a", toolA, "done A")
+	afterA := readParts()
+	for _, index := range []int{0, 2, 3} {
+		if string(afterA[index]) != string(afterB[index]) {
+			t.Fatalf("settling A changed sibling part %d: before %s after %s", index, afterB[index], afterA[index])
+		}
+	}
+	if string(afterA[1]) == string(afterB[1]) {
+		t.Fatal("settling A did not change target Tool part")
+	}
+	for _, target := range []*bridgev1.WriteEventResponse{toolA, toolB} {
+		var results int
+		if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$3`, sessionID, threadID, target.GetEventId()).Scan(&results); err != nil {
+			t.Fatalf("count Tool Results: %v", err)
+		}
+		if results != 1 {
+			t.Fatalf("Tool Result count for %s = %d; want one", target.GetEventId(), results)
+		}
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreStableReasoningEnforcesCumulativeBoundsAtomically(t *testing.T) {
+	tests := []struct {
+		name      string
+		partCount int
+		textBytes int
+		wantCode  codes.Code
+	}{
+		{name: "part count at limit", partCount: MaxStableReasoningPartsPerRequest, wantCode: codes.OK},
+		{name: "part count over limit", partCount: MaxStableReasoningPartsPerRequest + 1, wantCode: codes.InvalidArgument},
+		{name: "aggregate bytes at limit", partCount: 1, textBytes: MaxStableReasoningBytesPerRequest - len(`{}`), wantCode: codes.OK},
+		{name: "aggregate bytes over limit", partCount: 1, textBytes: MaxStableReasoningBytesPerRequest - len(`{}`) + 1, wantCode: codes.InvalidArgument},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(test.name, " ", "_")
+			sessionID, threadID := "sesn_reasoning_bound_"+suffix, "thr_reasoning_bound_"+suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_reasoning_bound_"+suffix, 1, "pod_reasoning_bound_"+suffix)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			scope := bridgeAPIScope(sessionID, threadID, "bind_reasoning_bound_"+suffix, 1, "pod_reasoning_bound_"+suffix)
+			seedBridgeAPIRequestStart(t, store, scope, "rwrite_reasoning_bound_start_"+suffix, "mreq_reasoning_bound_"+suffix, "agent_provider_request", 0)
+			parts := make([]bridgeRuntimePartCreateForTest, 0, test.partCount+1)
+			for i := 0; i < test.partCount; i++ {
+				textValue := fmt.Sprintf("reasoning-%d", i)
+				if test.textBytes > 0 {
+					textValue = strings.Repeat("x", test.textBytes)
+				}
+				encodedText, err := json.Marshal(textValue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parts = append(parts, bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider-%d","text":%s,"providerMetadata":{},"truncated":false}`, i, encodedText)})
+			}
+			parts = append(parts, bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"anchor","truncated":false,"status":"completed"}`})
+			request := &bridgev1.WriteEventRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_reasoning_bound_member_" + suffix,
+				ModelRequestId: "mreq_reasoning_bound_" + suffix, EventType: "agent.message",
+				PayloadJson: `{"type":"agent.message","content":[{"type":"text","text":"anchor"}]}`,
+				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "", parts...)},
+			}
+			var beforeEvents, beforeMessages, beforeOperations int
+			if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1),(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&beforeEvents, &beforeMessages, &beforeOperations); err != nil {
+				t.Fatalf("count state before append: %v", err)
+			}
+			response, err := store.WriteEvent(context.Background(), request)
+			if status.Code(err) != test.wantCode {
+				t.Fatalf("WriteEvent error = %v; want %v", err, test.wantCode)
+			}
+			if test.wantCode == codes.OK {
+				var ledger string
+				if err := admin.QueryRow(`SELECT stable_reasoning_json FROM session_events WHERE workspace_id='default' AND event_id=$1`, response.GetEventId()).Scan(&ledger); err != nil {
+					t.Fatalf("read accepted stable ledger: %v", err)
+				}
+				var persisted []normalizedStableReasoningPart
+				if err := json.Unmarshal([]byte(ledger), &persisted); err != nil || len(persisted) != test.partCount {
+					t.Fatalf("accepted stable ledger = %d parts, %v; want %d", len(persisted), err, test.partCount)
+				}
+				return
+			}
+			var afterEvents, afterMessages, afterOperations int
+			if err := admin.QueryRow(`SELECT (SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1),(SELECT count(*) FROM session_messages WHERE workspace_id='default' AND session_id=$1),(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1)`, sessionID).Scan(&afterEvents, &afterMessages, &afterOperations); err != nil {
+				t.Fatalf("count state after rejected append: %v", err)
+			}
+			if afterEvents != beforeEvents || afterMessages != beforeMessages || afterOperations != beforeOperations {
+				t.Fatalf("over-limit append mutated events/messages/operations: before %d/%d/%d after %d/%d/%d", beforeEvents, beforeMessages, beforeOperations, afterEvents, afterMessages, afterOperations)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreFailedAndRescheduledEndsDoNotPublishStableReasoning(t *testing.T) {
+	for _, rescheduled := range []bool{false, true} {
+		name := map[bool]string{false: "failed", true: "rescheduled"}[rescheduled]
+		t.Run(name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			sessionID, threadID, requestID := "sesn_reasoning_"+name, "thr_reasoning_"+name, "mreq_reasoning_"+name
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_reasoning_"+name, 1, "pod_reasoning_"+name)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			now := time.Date(2026, time.August, 9, 0, 0, 0, 0, time.UTC)
+			store.Clock = func() time.Time { return now }
+			store.ProviderRescheduleBudget = 1
+			scope := bridgeAPIScope(sessionID, threadID, "bind_reasoning_"+name, 1, "pod_reasoning_"+name)
+			start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_reasoning_start_"+name, requestID, "agent_provider_request", 0)
+			member, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_reasoning_member_" + name, ModelRequestId: requestID,
+				EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
+				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "",
+					bridgeRuntimePartCreateForTest{kind: "reasoning", json: `{"type":"reasoning","providerPartId":"provider-reasoning","text":"anchored","providerMetadata":{},"truncated":false}`},
+					bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call-reasoning-end","toolName":"Read","state":{"status":"running","input":{"value":{}}}}`},
+				)},
+			})
+			if err != nil {
+				t.Fatalf("WriteEvent anchored prefix: %v", err)
+			}
+			var anchoredLedger sql.NullString
+			if err := admin.QueryRow(`SELECT stable_reasoning_json FROM session_events WHERE workspace_id='default' AND event_id=$1`, member.GetEventId()).Scan(&anchoredLedger); err != nil || !anchoredLedger.Valid {
+				t.Fatalf("anchored member ledger = %v, %v; want present", anchoredLedger, err)
+			}
+			endRequest := &bridgev1.WriteRequestEndRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_reasoning_end_" + name, ModelRequestId: requestID,
+				ModelRequestStartEventId: start.GetEventId(), RequestKind: "agent_provider_request",
+				FinishReason: "error", IsError: true, ErrorKind: "provider_error", UsageJson: `{}`,
+			}
+			if rescheduled {
+				endRequest.Reschedule = &bridgev1.RequestEndReschedule{Attempt: 1, Deadline: now.Add(time.Minute).Format(time.RFC3339Nano)}
+			}
+			if _, err := store.WriteRequestEnd(context.Background(), endRequest); err != nil {
+				t.Fatalf("WriteRequestEnd: %v", err)
+			}
+			var endLedger sql.NullString
+			if err := admin.QueryRow(`SELECT stable_reasoning_json FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND model_request_id=$3 AND type='span.model_request_end'`, sessionID, threadID, requestID).Scan(&endLedger); err != nil {
+				t.Fatalf("read Request End stable ledger: %v", err)
+			}
+			if endLedger.Valid {
+				t.Fatalf("%s Request End stable ledger = %q; want absent", name, endLedger.String)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteEventRejectsAssistantMembersOutsideOpenRequestWithoutMutation(t *testing.T) {
 	for _, membership := range []string{"missing_start", "sealed"} {
 		for _, eventType := range []string{"agent.message", "agent.tool_use", "agent.mcp_tool_use"} {

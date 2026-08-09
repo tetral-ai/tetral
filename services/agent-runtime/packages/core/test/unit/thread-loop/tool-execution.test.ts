@@ -1820,9 +1820,6 @@ test("serializes one shared-message declaration stream while four safe tools exe
             { type: "reasoning-start", id: "reasoning-1" },
             { type: "reasoning-delta", id: "reasoning-1", text_delta: "first completed reasoning part" },
             { type: "reasoning-end", id: "reasoning-1" },
-            { type: "reasoning-start", id: "reasoning-2" },
-            { type: "reasoning-delta", id: "reasoning-2", text_delta: "second completed reasoning part" },
-            { type: "reasoning-end", id: "reasoning-2" },
             {
                 type: "tool-call",
                 id: "tool-1",
@@ -1837,6 +1834,9 @@ test("serializes one shared-message declaration stream while four safe tools exe
                 input: { file_path: "src/b.ts" },
                 inputPreview: { preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
             },
+            { type: "reasoning-start", id: "reasoning-2" },
+            { type: "reasoning-delta", id: "reasoning-2", text_delta: "second completed reasoning part" },
+            { type: "reasoning-end", id: "reasoning-2" },
             {
                 type: "tool-call",
                 id: "tool-3",
@@ -1879,20 +1879,24 @@ test("serializes one shared-message declaration stream while four safe tools exe
     releaseExecutions.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(settlements).toHaveLength(4);
-    const toolCallIds = declarations.map((envelope) => envelope.assistantPartAppend?.parts.filter((part) => part.type === "tool").map((part) => part.toolCallId));
-    expect(toolCallIds).toEqual([
-        ["tool-1"],
-        ["tool-2"],
-        ["tool-3"],
-        ["tool-4"],
+    const appendMembers = declarations.map((envelope) => envelope.assistantPartAppend?.parts.map((part) => {
+        if (part.type === "reasoning") return `reasoning:${part.text}`;
+        if (part.type === "tool") return `tool:${part.toolCallId}`;
+        return part.type;
+    }));
+    expect(appendMembers).toEqual([
+        ["reasoning:first completed reasoning part", "tool:tool-1"],
+        ["tool:tool-2"],
+        ["reasoning:second completed reasoning part", "tool:tool-3"],
+        ["tool:tool-4"],
     ]);
 });
-test("settles an earlier Tool Result independently of a sibling Tool Use declaration ACK", async () => {
+test("settles parallel Tool Results in completion order with target-only envelopes", async () => {
     const session = new ThreadRuntime("sesn_tool_projection_order");
     const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "hello")] });
-    const secondDeclarationArrived = deferred<void>();
-    const releaseSecondDeclaration = deferred<void>();
+    const bothExecutionsStarted = deferred<void>();
     const releaseFirstExecution = deferred<void>();
+    const releaseSecondExecution = deferred<void>();
     const declarations: SessionEventEnvelope[] = [];
     const settlements: SessionEventEnvelope[] = [];
     const baseWriter = writerFrom((envelope) => ({
@@ -1906,10 +1910,6 @@ test("settles an earlier Tool Result independently of a sibling Tool Use declara
         append: async (envelope) => {
             if (envelope.event.type === "agent.tool_use") {
                 declarations.push(envelope);
-                if (declarations.length === 2) {
-                    secondDeclarationArrived.resolve(undefined);
-                    await releaseSecondDeclaration.promise;
-                }
             }
             else if (envelope.event.type === "agent.tool_result") {
                 settlements.push(envelope);
@@ -1944,19 +1944,34 @@ test("settles an earlier Tool Result independently of a sibling Tool Use declara
             toolCatalog: catalogForTest({ name: "Read", description: "Read file", inputSchema: { type: "object" } }),
         },
         runTool: async (request) => {
+            if (declarations.length === 2) bothExecutionsStarted.resolve(undefined);
             if (request.modelToolCallId === "tool-1") {
                 await releaseFirstExecution.promise;
+            } else {
+                await releaseSecondExecution.promise;
             }
             return { type: "completed", output: { text: `done ${request.modelToolCallId}`, truncated: false } };
         },
     }))));
-    await secondDeclarationArrived.promise;
-    releaseFirstExecution.resolve(undefined);
+    await bothExecutionsStarted.promise;
+    releaseSecondExecution.resolve(undefined);
     await flushMicrotasks(50);
     expect(settlements).toHaveLength(1);
-    releaseSecondDeclaration.resolve(undefined);
+    const firstToolUseEventId = `bridge-${declarations[0]?.writeId}`;
+    const secondToolUseEventId = `bridge-${declarations[1]?.writeId}`;
+    expect(settlements[0]?.toolSettlement).toEqual(expect.objectContaining({
+        toolUseEventId: secondToolUseEventId,
+        outcome: expect.objectContaining({ type: "completed" }),
+    }));
+    expect(settlements[0]?.assistantPartAppend).toBeUndefined();
+    releaseFirstExecution.resolve(undefined);
     expect(await runPromise).toMatchObject({ type: "completed" });
     expect(settlements).toHaveLength(2);
+    expect(settlements.map((envelope) => envelope.toolSettlement?.toolUseEventId)).toEqual([
+        secondToolUseEventId,
+        firstToolUseEventId,
+    ]);
+    expect(settlements.every((envelope) => envelope.assistantPartAppend === undefined && envelope.toolSettlement?.outcome.type === "completed")).toBe(true);
 });
 test("separate thread provider requests share session-wide tool admission", async () => {
     const coordinator = new SessionToolCoordinator({ maxConcurrentTools: 8 });

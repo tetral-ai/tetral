@@ -346,8 +346,12 @@ func insertChildInterruptTargetTx(ctx context.Context, tx *dbconnect.Tx, request
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO session_events (workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,runtime_write_id,processed_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'internal',false,$4,$8,$8,$8)`,
-		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), targetID, eventID, sequence, childInterruptRequestedEventType, payloadJSON, now); err != nil {
+	processedAt := any(now)
+	if disposition == bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL {
+		processedAt = nil
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO session_events (workspace_id,session_id,session_thread_id,event_id,sequence,type,payload_json,visibility,session_visible,runtime_write_id,processed_at,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'internal',false,$4,$8,$9,$9)`,
+		request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), targetID, eventID, sequence, childInterruptRequestedEventType, payloadJSON, processedAt, now); err != nil {
 		return nil, err
 	}
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scopeForThread(request.GetScope(), targetID), eventID, "internal", false, now); err != nil {
