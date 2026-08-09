@@ -18,6 +18,16 @@ const approvalReviewerOutputSchemaJson = await readFile(
 );
 
 describe("anthropic request lowering", () => {
+  test("rejects freeform tools before an unsupported provider adapter runs", () => {
+    expect(() => lowerAnthropicRequest(anthropicRequest({
+      tools: [{
+        name: "apply_patch",
+        description: "Apply a patch",
+        freeform: { larkGrammar: "start: PATCH" },
+      }],
+    }))).toThrow("does not support freeform tool declarations");
+  });
+
   test("anthropic-content-normalization drops empty text and unsigned empty reasoning while preserving signed reasoning", () => {
     const lowered = lowerAnthropicRequest(anthropicRequest({
       messages: [
@@ -285,12 +295,15 @@ describe("anthropic request lowering", () => {
       tools: [{
         name: "Read",
         description: "Read a file",
-        inputSchemaJson: JSON.stringify(inputSchema),
-        outputSchemaJson: JSON.stringify({ type: "object", properties: { text: { type: "string" } } }),
+        function: {
+          inputSchemaJson: JSON.stringify(inputSchema),
+          outputSchemaJson: JSON.stringify({ type: "object", properties: { text: { type: "string" } } }),
+        },
       }],
     }));
 
     expect(lowered.tools.Read).toEqual({
+      kind: "function",
       description: "Read a file",
       inputSchema: { kind: "ai-sdk-json-schema", schema: inputSchema },
       outputSchema: { kind: "ai-sdk-json-schema", schema: { type: "object", properties: { text: { type: "string" } } } },
@@ -310,7 +323,7 @@ describe("anthropic request lowering", () => {
       required: ["command"],
     };
     const lowered = lowerAnthropicRequest(anthropicRequest({
-      tools: [{ name: "Bash", description: "Run a command", inputSchemaJson: JSON.stringify(bashSchema) }],
+      tools: [{ name: "Bash", description: "Run a command", function: { inputSchemaJson: JSON.stringify(bashSchema) } }],
     }));
 
     expect(lowered.tools.Bash?.inputSchema).toEqual({ kind: "ai-sdk-json-schema", schema: bashSchema });
@@ -398,8 +411,10 @@ describe("anthropic request lowering", () => {
       tools: [{
         name: "Read",
         description: "bad \uD800 description",
-        inputSchemaJson: JSON.stringify({ type: "object", properties: { q: { const: "bad \uD800 schema" } } }),
-        outputSchemaJson: undefined,
+        function: {
+          inputSchemaJson: JSON.stringify({ type: "object", properties: { q: { const: "bad \uD800 schema" } } }),
+          outputSchemaJson: undefined,
+        },
       }],
     }));
 

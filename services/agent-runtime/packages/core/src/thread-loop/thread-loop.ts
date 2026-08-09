@@ -435,10 +435,41 @@ export interface ThreadLoopRuntimeOptions {
   readonly awaitSandboxExecution?: RuntimeToolRunner;
   readonly reviewApproval?: RuntimeApprovalReviewer;
   readonly metrics?: RuntimeMetricsSink | undefined;
+  /** Side-channel observation emitted only after Bridge accepts a provider reschedule. */
+  readonly recordProviderReschedule?: ((event: RuntimeProviderRescheduleObservation) => void) | undefined;
+  /** Side-channel observation for a deterministic tool declaration rejection before request open. */
+  readonly recordProviderToolDeclarationRejection?: (
+    (event: RuntimeProviderToolDeclarationRejectionObservation) => void
+  ) | undefined;
   readonly refreshRuntimeBindingToken?: (
     identity: ThreadRuntime["identity"],
     options?: { readonly force?: boolean | undefined },
   ) => Promise<string>;
+}
+
+/** Bounded facts selected by the Runtime-owned provider retry policy. */
+export interface RuntimeProviderRescheduleObservation {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly requestId: string;
+  readonly modelRequestId: string;
+  readonly attempt: number;
+  readonly delayMs: number;
+  readonly delaySource: "provider" | "runtime_fallback";
+  readonly failureCode: string;
+}
+
+/** Bounded request and declaration facts for a pre-provider structural rejection. */
+export interface RuntimeProviderToolDeclarationRejectionObservation {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly sessionThreadId: string;
+  readonly requestId: string;
+  readonly modelRequestId: string;
+  readonly declarationKind: "function" | "freeform" | "unknown";
+  readonly family: "claude" | "gpt" | "unspecified";
+  readonly validationMember: "declaration_kind" | "tool_family" | "function_schema" | "freeform_grammar";
 }
 
 /** Provides request-time policy and provider context for one resident thread. */
@@ -3762,6 +3793,7 @@ function closeProviderFailureEffect(
     if (plan.type === "proposed") {
       if (disposition?.status === "accepted") {
         counters.providerAttempts = disposition.attempt;
+        recordProviderReschedule(options, session, request, disposition.attempt, plan.reschedule.backoffMs, failure);
         const retryingFailure = compactionFailureWithRetryStatus(failure, {
           type: "retrying",
           attempt: disposition.attempt,
@@ -3799,6 +3831,31 @@ function closeProviderFailureEffect(
       providerTurnFailed(terminalAppend.settledFailure, undefined, terminalAppend.failureEventId),
     );
   });
+}
+
+function recordProviderReschedule(
+  options: ThreadLoopRuntimeOptions,
+  session: ThreadRuntime,
+  request: LLMRequest,
+  attempt: number,
+  delayMs: number,
+  failure: RuntimeFailure,
+): void {
+  try {
+    options.recordProviderReschedule?.({
+      workspaceId: session.identity.workspaceId,
+      sessionId: session.sessionId,
+      sessionThreadId: session.identity.sessionThreadId,
+      requestId: request.requestId,
+      modelRequestId: request.modelRequestId,
+      attempt,
+      delayMs,
+      delaySource: (failure.retryAfterMs ?? 0) > 0 ? "provider" : "runtime_fallback",
+      failureCode: failure.code,
+    });
+  } catch {
+    // Retry settlement is authoritative; observability remains a side channel.
+  }
 }
 
 function settleProviderErrorToolsEffect(

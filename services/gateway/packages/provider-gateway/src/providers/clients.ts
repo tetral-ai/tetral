@@ -42,7 +42,7 @@ import type {
 } from "ai";
 import type { JSONValue } from "@ai-sdk/provider";
 import type { FetchFunction, ProviderOptions } from "@ai-sdk/provider-utils";
-import type { OpenAIProviderSettings as AIOpenAIProviderSettings } from "@ai-sdk/openai";
+import type { OpenAIProvider as AIOpenAIProvider, OpenAIProviderSettings as AIOpenAIProviderSettings } from "@ai-sdk/openai";
 import type { OpenAICompatibleProviderSettings as AIOpenAICompatibleProviderSettings } from "@ai-sdk/openai-compatible";
 import type { ProviderRequest, ProviderStreamEvent } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import type { ProviderRules } from "@tetral/gateway-lowering/src/rules/rules.js";
@@ -88,7 +88,8 @@ export type AnthropicProviderFactory = (settings: AnthropicProviderSettings) => 
 export type OpenAIProviderSettings = Pick<AIOpenAIProviderSettings, "apiKey" | "baseURL" | "fetch" | "headers" | "name">;
 /** Minimal OpenAI provider surface required to select the Responses API model. */
 export interface OpenAIProvider {
-  readonly responses: (modelId: string) => unknown;
+  readonly responses: (modelId: Parameters<AIOpenAIProvider["responses"]>[0]) => unknown;
+  readonly tools?: Pick<AIOpenAIProvider["tools"], "customTool">;
 }
 /** Creates the OpenAI provider used for official and OAuth Responses routes. */
 export type OpenAIProviderFactory = (settings: OpenAIProviderSettings) => OpenAIProvider;
@@ -122,13 +123,11 @@ export interface GatewayStreamTextResult {
 /** Injectable boundary around the AI SDK `streamText` operation. */
 export type GatewayStreamTextFunction = (input: GatewayStreamTextInput) => GatewayStreamTextResult;
 
-/** Header and inter-chunk watchdog durations for outbound provider fetches. */
+/** Raw provider-body inter-chunk watchdog duration. First normalized event liveness is service-owned. */
 export interface ProviderFetchTimeoutOptions {
-  readonly headerTimeoutMs?: number | undefined;
   readonly interChunkTimeoutMs?: number | undefined;
 }
 
-const DefaultProviderFetchHeaderTimeoutMs = 10_000;
 const DefaultProviderFetchInterChunkTimeoutMs = 30_000;
 const MaxProviderRedirects = 5;
 
@@ -154,7 +153,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
   constructor(options: ProviderClientRegistryOptions = {}) {
     this.streamText = options.streamText ?? defaultStreamText;
     this.anthropicProviderFactory = options.anthropicProviderFactory ?? ((settings) => createAnthropic(settings));
-    this.openAIProviderFactory = options.openAIProviderFactory ?? ((settings) => createOpenAI(settings) as OpenAIProvider);
+    this.openAIProviderFactory = options.openAIProviderFactory ?? ((settings) => createOpenAI(settings));
     this.openAICompatibleProviderFactory = options.openAICompatibleProviderFactory ?? ((settings) => createOpenAICompatible(settings));
     this.fetch = options.fetch;
     this.providerFetchTimeouts = options.providerFetchTimeouts ?? {};
@@ -377,7 +376,7 @@ export class ProviderClientRegistry implements ProviderRequestStreamer {
     const result = this.streamText({
       model: provider.responses(entry.apiModelId),
       messages: callShape.messages,
-      tools: toAITools(lowered.tools),
+      tools: toAITools(lowered.tools, provider.tools?.customTool),
       ...(lowered.outputSchema !== undefined ? { output: toAIOutput(lowered.outputSchema) } : {}),
       providerOptions: callShape.providerOptions as ProviderOptions,
       ...(lowered.options.maxOutputTokens !== undefined ? { maxOutputTokens: lowered.options.maxOutputTokens } : {}),
@@ -556,12 +555,9 @@ function officialOpenAIProviderFetch(
   }));
 }
 
-// Provider egress fetch with allowlist enforcement and three stream timeouts. For
-// a non-redirect final response, the first-byte timer clears at headers, the
-// inter-chunk timer is re-armed by wrapProviderResponseBody, and the absolute timer
-// remains armed until stream closure. Followed redirect responses are not body-
-// wrapped; a redirect without Location clears all timers and returns directly. On
-// wrapped bodies, any abort becomes a deterministic stream error.
+// Provider egress fetch with allowlist enforcement, raw inter-chunk liveness, and
+// the request's absolute deadline. The Gateway service owns first normalized event
+// liveness; this raw HTTP layer begins its watchdog only after a response body exists.
 function providerFetch(options: {
   readonly fetchImpl: FetchFunction | undefined;
   readonly allowedBaseURLs: readonly string[];
@@ -578,14 +574,12 @@ function providerFetch(options: {
       callerSignal: request.signal,
       registrySignal: options.abortSignal,
       overallTimeoutMs: options.overallTimeoutMs,
-      headerTimeoutMs: options.timeouts.headerTimeoutMs ?? DefaultProviderFetchHeaderTimeoutMs,
       interChunkTimeoutMs: options.timeouts.interChunkTimeoutMs ?? DefaultProviderFetchInterChunkTimeoutMs,
     });
     try {
       for (let redirectCount = 0; redirectCount <= MaxProviderRedirects; redirectCount += 1) {
         const response = await targetFetch(new Request(request.clone(), { signal: timers.signal, redirect: "manual" }));
         if (!providerRedirectStatus(response.status)) {
-          timers.clearHeader();
           return wrapProviderResponseBody(response, timers);
         }
         const location = response.headers.get("location");
@@ -750,7 +744,7 @@ function providerRedirectRequest(request: Request, location: string, statusCode:
 class ProviderFetchTimeoutError extends Error {
   readonly timeout = true;
 
-  constructor(readonly kind: "header" | "inter_chunk" | "overall") {
+  constructor(readonly kind: "inter_chunk" | "overall") {
     super(`provider ${kind.replace("_", "-")} timeout`);
     this.name = "ProviderFetchTimeoutError";
   }
@@ -760,40 +754,27 @@ function providerFetchTimers(input: {
   readonly callerSignal: AbortSignal;
   readonly registrySignal?: AbortSignal | undefined;
   readonly overallTimeoutMs?: number | undefined;
-  readonly headerTimeoutMs: number;
   readonly interChunkTimeoutMs: number;
 }) {
-  const headerController = new AbortController();
   const overallController = new AbortController();
   const chunkController = new AbortController();
   let timeoutError: ProviderFetchTimeoutError | undefined;
-  let headerTimer: ReturnType<typeof setTimeout> | undefined;
   let overallTimer: ReturnType<typeof setTimeout> | undefined;
   let chunkTimer: ReturnType<typeof setTimeout> | undefined;
   const abortWithTimeout = (kind: ProviderFetchTimeoutError["kind"], controller: AbortController): void => {
     timeoutError = new ProviderFetchTimeoutError(kind);
     controller.abort(timeoutError);
   };
-  if (input.headerTimeoutMs > 0) {
-    headerTimer = setTimeout(() => abortWithTimeout("header", headerController), input.headerTimeoutMs);
-  }
   if (input.overallTimeoutMs !== undefined && input.overallTimeoutMs > 0) {
     overallTimer = setTimeout(() => abortWithTimeout("overall", overallController), input.overallTimeoutMs);
   }
   const signals = [
     input.callerSignal,
     ...(input.registrySignal !== undefined ? [input.registrySignal] : []),
-    headerController.signal,
     overallController.signal,
     chunkController.signal,
   ];
   const signal = AbortSignal.any(signals);
-  const clearHeader = (): void => {
-    if (headerTimer !== undefined) {
-      clearTimeout(headerTimer);
-      headerTimer = undefined;
-    }
-  };
   const clearChunk = (): void => {
     if (chunkTimer !== undefined) {
       clearTimeout(chunkTimer);
@@ -801,7 +782,6 @@ function providerFetchTimers(input: {
     }
   };
   const clearAll = (): void => {
-    clearHeader();
     clearChunk();
     if (overallTimer !== undefined) {
       clearTimeout(overallTimer);
@@ -816,7 +796,6 @@ function providerFetchTimers(input: {
   };
   return {
     signal,
-    clearHeader,
     clearAll,
     armChunk,
     clearChunk,
@@ -1033,20 +1012,32 @@ function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function toAITools(tools: Readonly<Record<string, LoweredToolDefinition>>): ToolSet | undefined {
+function toAITools(
+  tools: Readonly<Record<string, LoweredToolDefinition>>,
+  customTool?: NonNullable<OpenAIProvider["tools"]>["customTool"],
+): ToolSet | undefined {
   const entries = Object.entries(tools);
   if (entries.length === 0) {
     return undefined;
   }
-  return Object.fromEntries(entries.map(([name, definition]) => [
-    name,
-    {
+  return Object.fromEntries(entries.map(([name, definition]) => {
+    if (definition.kind === "freeform") {
+      if (customTool === undefined) {
+        throw new Error("gateway_protocol_error: freeform tool adapter is unavailable");
+      }
+      return [name, customTool({
+        name,
+        description: definition.description,
+        format: { type: "grammar", syntax: "lark", definition: definition.larkGrammar },
+      })];
+    }
+    return [name, {
       description: definition.description,
       inputSchema: jsonSchema(definition.inputSchema.schema as Parameters<typeof jsonSchema>[0]),
       ...(toolStrictOption(definition.providerOptions) !== undefined ? { strict: toolStrictOption(definition.providerOptions) } : {}),
       ...(definition.providerOptions !== undefined ? { providerOptions: definition.providerOptions as ProviderOptions } : {}),
-    } as Tool<unknown, never>,
-  ])) as ToolSet;
+    } as Tool<unknown, never>];
+  })) as ToolSet;
 }
 
 function toAIOutput(outputSchema: NonNullable<ReturnType<typeof lowerProviderRequest>["outputSchema"]>): ReturnType<typeof Output.object> {

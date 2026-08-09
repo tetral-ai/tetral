@@ -503,13 +503,12 @@ function openAIGoldenRequest(): ProviderRequest {
     tools: [{
       name: "Search",
       description: "Search.",
-      inputSchemaJson: JSON.stringify({
+      function: { inputSchemaJson: JSON.stringify({
         type: "object",
         properties: { query: { type: "string" } },
         required: ["query"],
         additionalProperties: false,
-      }),
-      outputSchemaJson: undefined,
+      }), outputSchemaJson: undefined },
     }],
     attachments: [],
     limits: { maxOutputTokens: 1024, timeoutMs: 60_000 },

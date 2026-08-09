@@ -55,6 +55,7 @@ export const MoonshotKimiK3Rules: ProviderRules = {
   effort: undefined,
   requestOptions: undefined,
   toolOptions: undefined,
+  freeformTools: undefined,
   providerOptions: {
     anthropic: {
       sendReasoning: true,

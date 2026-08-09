@@ -1,7 +1,60 @@
 import { describe, expect, test } from "bun:test";
-import { createJsonLogger, logWorkloadStarted, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Runtime Pod JSON logger", () => {
+  test("provider reschedule record pins accepted attempt and selected delay", () => {
+    expect(providerRescheduleSelectedLogRecord({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_1",
+      requestId: "req_1",
+      modelRequestId: "mreq_1",
+      attempt: 2,
+      delayMs: 2_000,
+      delaySource: "runtime_fallback",
+      failureCode: "provider_unavailable",
+    })).toEqual(expect.objectContaining({
+      event: "provider_reschedule_selected",
+      "request.id": "req_1",
+      "model_request.id": "mreq_1",
+      "retry.attempt": 2,
+      "delay.ms": 2_000,
+      "delay.source": "runtime_fallback",
+      "provider.failure.code": "provider_unavailable",
+      retryable: true,
+    }));
+  });
+
+  test("provider tool declaration rejection contains only bounded identities and discriminators", () => {
+    const record = providerToolDeclarationRejectedLogRecord({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_1",
+      requestId: "req_1",
+      modelRequestId: "mreq_1",
+      declarationKind: "freeform",
+      family: "claude",
+      validationMember: "tool_family",
+    });
+
+    expect(record).toEqual(expect.objectContaining({
+      event: "provider_tool_declaration_rejected",
+      "workspace.id": "wksp_1",
+      "session.id": "sesn_1",
+      "thread.id": "thr_1",
+      "request.id": "req_1",
+      "model_request.id": "mreq_1",
+      "tool.declaration.kind": "freeform",
+      "tool.family": "claude",
+      "validation.member": "tool_family",
+      "error.class": "provider_tool_declaration",
+      "error.code": "invalid_tool_definition",
+      "error.message_safe": "provider tool declaration rejected",
+    }));
+    expect(JSON.stringify(record)).not.toContain("lark");
+    expect(JSON.stringify(record)).not.toContain("input_schema");
+  });
+
   test("emits service identity fields on structured records", () => {
     const lines: string[] = [];
     const logger = createJsonLogger({

@@ -26,6 +26,7 @@ import {
 import { normalizeProviderError } from "@tetral/gateway-lowering/src/errors.js";
 import { lookupGatewayModel } from "./catalog.js";
 import { decryptAES256GCM } from "./crypto.js";
+import { parseCanonicalOpenAIOAuthExpiry } from "./openai-oauth-expiry.js";
 import {
   decryptPlatformProviderKeyRows,
   PlatformKeyPool,
@@ -476,7 +477,7 @@ export class ProviderCredentialResolver {
       !nonEmptyString(auth.refresh_token) ||
       !nonEmptyString(auth.expires_at) ||
       !nonEmptyString(auth.account_id) ||
-      !Number.isFinite(Date.parse(auth.expires_at))
+      parseCanonicalOpenAIOAuthExpiry(auth.expires_at) === undefined
     ) {
       return credentialUnavailable();
     }

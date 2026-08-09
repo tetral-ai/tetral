@@ -33,7 +33,7 @@ import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
 import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
 import { createRuntimePodApp } from "./app.js";
 import type { RuntimePodApp } from "./app.js";
-import { createJsonLogger, logWorkloadStarted, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
+import { createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
 import type { RuntimePodLogger } from "./logger.js";
 import type { RuntimeControlInputCommitter, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
 import { RuntimePodToolRunner } from "./tool-runner.js";
@@ -234,6 +234,12 @@ export async function buildRuntimePodCommandDependencies(input: {
       },
       llmService: createLLMService(gatewayClient),
       storeOperationTimeoutMs: 5_000,
+      recordProviderReschedule: (event) => {
+        input.logger.info(providerRescheduleSelectedLogRecord(event));
+      },
+      recordProviderToolDeclarationRejection: (event) => {
+        input.logger.error(providerToolDeclarationRejectedLogRecord(event));
+      },
       providerCallRuntime: {
         ...DefaultProviderCallRuntimeConfig,
         ...streamTimeoutOptions.providerCallRuntime,

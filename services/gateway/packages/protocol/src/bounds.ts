@@ -212,12 +212,17 @@ export function validateProviderRequest(request: ProviderRequest): ValidationRes
     }
   }
   for (const tool of request.tools) {
-    if (
-      invalidBytes(tool.name, MaxIdBytes) ||
-      invalidBytes(tool.description, MaxTextBytes) ||
-      !validJsonObject(tool.inputSchemaJson, MaxSchemaBytes) ||
-      (tool.outputSchemaJson !== undefined && !validJsonObject(tool.outputSchemaJson, MaxSchemaBytes))
-    ) {
+    const declarationCount = Number(tool.function !== undefined) + Number(tool.freeform !== undefined);
+    if (invalidBytes(tool.name, MaxIdBytes) || invalidBytes(tool.description, MaxTextBytes) || declarationCount !== 1) {
+      return invalidRequest("invalid_tool_definition", "tools");
+    }
+    if (tool.function !== undefined && (
+      !validJsonObject(tool.function.inputSchemaJson, MaxSchemaBytes) ||
+      (tool.function.outputSchemaJson !== undefined && !validJsonObject(tool.function.outputSchemaJson, MaxSchemaBytes))
+    )) {
+      return invalidRequest("invalid_tool_definition", "tools");
+    }
+    if (tool.freeform !== undefined && invalidBytes(tool.freeform.larkGrammar, MaxSchemaBytes)) {
       return invalidRequest("invalid_tool_definition", "tools");
     }
   }

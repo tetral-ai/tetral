@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Metadata, status } from "@grpc/grpc-js";
 import {
   ProviderRequestKind,
+  ProviderStreamEventType,
   RuntimeMessageRole,
   SystemCacheHint,
   SystemSegmentKind,
@@ -29,15 +30,46 @@ describe("Runtime Pod Gateway client", () => {
 
     expect(error).toMatchObject({ code: "gateway_protocol_error", fatal: true });
     expect(records).toEqual([expect.objectContaining({
-      event: "provider_stream_failed_before_first_event",
+      event: "provider_stream_failed",
+      "stream.phase": "pre_first_event",
+      "stream.received_event": false,
+      "rpc.grpc.status_code": status.INVALID_ARGUMENT,
+      "rpc.grpc.status_name": "INVALID_ARGUMENT",
       "workspace.id": request.workspaceId,
       "session.id": request.sessionId,
       "thread.id": request.sessionThreadId,
       "request.id": request.requestId,
-      "provider.request.id": request.modelRequestId,
+      "model_request.id": request.modelRequestId,
       "error.code": "gateway_protocol_error",
     })]);
     expect(JSON.stringify(records)).not.toContain("secret raw rejection");
+  });
+
+  test("logs the same bounded event with post-first-event phase after stream progress", async () => {
+    const records: unknown[] = [];
+    const request = providerRequest();
+    const error = await collectGatewayError(new RuntimePodGatewayClient({
+      address: "gateway.test:9090",
+      tokenPath: "/var/run/token",
+      client: eventThenFailingGatewayClient(status.UNAVAILABLE, "secret post-stream rejection"),
+      metadataFactory: async () => new Metadata(),
+      logger: { info: (record) => records.push(record), error: (record) => records.push(record) },
+    }), request);
+
+    expect(error).toMatchObject({ code: "gateway_unavailable", retryable: true, fatal: false });
+    expect(records).toEqual([expect.objectContaining({
+      event: "provider_stream_failed",
+      "stream.phase": "post_first_event",
+      "stream.received_event": true,
+      "rpc.grpc.status_code": status.UNAVAILABLE,
+      "rpc.grpc.status_name": "UNAVAILABLE",
+      "request.id": request.requestId,
+      "model_request.id": request.modelRequestId,
+      retryable: true,
+      terminal: false,
+      "error.code": "gateway_unavailable",
+    })]);
+    expect(JSON.stringify(records)).not.toContain("secret post-stream rejection");
   });
 
   test("classifies the closed set of remote gRPC statuses", async () => {
@@ -129,9 +161,13 @@ describe("Runtime Pod Gateway client", () => {
     expect(metadataCalls).toBe(0);
     expect(transportCalls).toBe(0);
     expect(records).toEqual([expect.objectContaining({
-      event: "provider_stream_failed_before_first_event",
+      event: "provider_stream_failed",
+      "stream.phase": "pre_first_event",
+      "stream.received_event": false,
+      "rpc.grpc.status_code": status.RESOURCE_EXHAUSTED,
+      "rpc.grpc.status_name": "RESOURCE_EXHAUSTED",
       "request.id": request.requestId,
-      "provider.request.id": request.modelRequestId,
+      "model_request.id": request.modelRequestId,
       "error.code": "gateway_protocol_error",
     })]);
   });
@@ -199,6 +235,25 @@ function failingGatewayClient(code: number, details = "gateway request failed"):
   return recordingGatewayClient(() => {
     throw Object.assign(new Error(details), { code, details });
   });
+}
+
+function eventThenFailingGatewayClient(code: number, details: string): ProviderGatewayServiceClient {
+  return {
+    streamProviderRequest(request: ProviderRequest) {
+      return {
+        cancel() {},
+        async *[Symbol.asyncIterator](): AsyncIterator<ProviderStreamEvent> {
+          yield {
+            requestId: request.requestId,
+            modelRequestId: request.modelRequestId,
+            type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+            text: { id: "text_1", text: "", metadataJson: "" },
+          };
+          throw Object.assign(new Error(details), { code, details });
+        },
+      };
+    },
+  } as unknown as ProviderGatewayServiceClient;
 }
 
 function recordingGatewayClient(onIterate: () => void): ProviderGatewayServiceClient {

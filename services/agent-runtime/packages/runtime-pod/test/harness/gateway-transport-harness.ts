@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { Metadata, Server, ServerCredentials } from "@grpc/grpc-js";
 import type { CallOptions, ClientUnaryCall } from "@grpc/grpc-js";
 import {
@@ -316,6 +317,80 @@ export async function runLargeToolInputMappingProof() {
   }
 }
 
+/** Replays the recorded GLM stream through the provider adapter, Gateway gRPC, and Runtime validator. */
+export async function runRecordedGLMTransportProof() {
+  const fixture = await readFile(new URL(
+    "../../../../../gateway/packages/provider-gateway/test/golden/fixtures/zai-glm-5.2-live-2026-07-04.sse",
+    import.meta.url,
+  ), "utf8");
+  const base = assembledVector("glm_recorded_stream", [textMessage("glm_recorded_prompt", 1, "use Search")]);
+  const request: ProviderRequest = {
+    ...base.request,
+    requestId: "req_glm_recorded_stream",
+    modelRequestId: "mreq_glm_recorded_stream",
+    model: { providerId: "zai", modelId: "glm-5.2", variant: "" },
+    tools: [{
+      name: "Search",
+      description: "Search.",
+      function: {
+        inputSchemaJson: JSON.stringify({
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+          additionalProperties: false,
+        }),
+      },
+    }],
+  };
+  const providerRegistry = new ProviderClientRegistry({
+    fetch: Object.assign(async () => new Response(fixture, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }), { preconnect: () => undefined }),
+  });
+  const service = new ProviderGatewayServiceShell({
+    authenticator: {
+      authenticate: async () => ({
+        ok: true,
+        serviceAccount: { namespace: "tetral", name: "agent-runtime", podUid: "pod_glm_recorded_stream" },
+      }),
+    },
+    runtimeBindingTokenVerifier: { verify: () => true },
+    ready: () => true,
+    logger: { info: () => undefined, error: () => undefined },
+    providerStreamer: { stream: (input) => providerRegistry.stream(input) },
+    credentialResolver: {
+      resolve: async () => ({
+        ok: true,
+        credential: {
+          source: "session",
+          authType: "provider_api_key",
+          providerId: "zai",
+          supplyMode: "zai-api-key",
+          vaultId: "vault_glm_recorded_stream",
+          credentialId: "credential_glm_recorded_stream",
+          accessMode: "api_key",
+          apiKey: "fixture-zai-key",
+        },
+      }),
+      recordPlatformFailure: () => undefined,
+    } as unknown as ProviderCredentialResolver,
+  });
+  const server = createGatewayGrpcServer(service);
+  const port = await server.bind("127.0.0.1:0");
+  const client = new RuntimePodGatewayClient({
+    address: `127.0.0.1:${port}`,
+    tokenPath: "/unused",
+    channelOptions: gatewayGrpcChannelOptions(),
+    metadataFactory: async () => new Metadata(),
+  });
+  try {
+    return Array.from(await Effect.runPromise(Stream.runCollect(createLLMService(client).stream(request))));
+  } finally {
+    server.server.forceShutdown();
+  }
+}
+
 function largeMemoryToolInputs() {
   return [
     { action: "create", path: "notes/large.md", content: `CREATE_HEAD${"\u0001".repeat(9_000)}CREATE_TAIL` },
@@ -527,6 +602,61 @@ export async function runPreEventGatewayFailureProof() {
   };
 }
 
+/** Proves that the private wire's zero sentinel becomes delay absence at Runtime. */
+export async function runGatewayAbsentRetryDelayProof() {
+  const base = assembledVector("absent_retry_delay", [textMessage("absent_retry_delay_prompt", 1, "test")]);
+  const request = requestForRoute(base.request, CapacityRoutes[0]);
+  const service = new ProviderGatewayServiceShell({
+    authenticator: {
+      authenticate: async () => ({
+        ok: true,
+        serviceAccount: { namespace: "tetral", name: "agent-runtime", podUid: "pod_capacity" },
+      }),
+    },
+    runtimeBindingTokenVerifier: { verify: () => true },
+    ready: () => true,
+    logger: { info: () => undefined, error: () => undefined },
+    providerStreamer: {
+      stream: async function* () {
+        yield {
+          requestId: request.requestId,
+          modelRequestId: request.modelRequestId,
+          type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+          providerError: {
+            metadataJson: "{}",
+            error: {
+              code: "provider_unavailable",
+              message: "Provider capacity is unavailable.",
+              retryable: true,
+              fatal: false,
+              statusCode: 503,
+              retryAfterMs: 0,
+            },
+          },
+        };
+      },
+    },
+  });
+  const server = createGatewayGrpcServer(service);
+  const port = await server.bind("127.0.0.1:0");
+  const client = new RuntimePodGatewayClient({
+    address: `127.0.0.1:${port}`,
+    tokenPath: "/unused",
+    channelOptions: gatewayGrpcChannelOptions(),
+    metadataFactory: async () => new Metadata(),
+  });
+  try {
+    const events = Array.from(await Effect.runPromise(Stream.runCollect(createLLMService(client).stream(request))));
+    const terminal = events.at(-1);
+    if (terminal?.type !== "provider-error") {
+      throw new Error("absent retry delay proof did not receive provider error");
+    }
+    return terminal.error;
+  } finally {
+    server.server.forceShutdown();
+  }
+}
+
 async function collectPreEventGatewayFailure(request: ProviderRequest, ready: boolean) {
   const service = new ProviderGatewayServiceShell({
     authenticator: {
@@ -560,6 +690,9 @@ function requestForRoute(request: ProviderRequest, route: CapacityRoute): Provid
     requestId: `${request.requestId}_${route.family}`,
     modelRequestId: `${request.modelRequestId}_${route.family}`,
     model: { providerId: route.providerId, modelId: route.modelId, variant: "" },
+    // The capacity matrix exercises ordinary declarations on every transport;
+    // the OpenAI-only freeform declaration remains on its sole supported route.
+    tools: route.family === "openai" ? request.tools : request.tools.filter((tool) => tool.freeform === undefined),
   };
 }
 

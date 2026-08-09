@@ -579,6 +579,17 @@ describe("LLMService Gateway boundary", () => {
           event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
             toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
           }),
+          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL, {
+            toolCall: { id: "call-1", name: "lookup", inputJson: "{\"q\":\"hi\"}", metadataJson: "{}" },
+          }),
+        ],
+        prefixTypes: ["tool-input-start"],
+      },
+      {
+        events: [
+          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
+            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
+          }),
           event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, {
             toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
           }),
@@ -609,23 +620,8 @@ describe("LLMService Gateway boundary", () => {
     }
   });
 
-  test("rejects terminal provider events while any stream fragment is open", async () => {
-    const terminalError = event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
-      providerError: {
-        metadataJson: "{}",
-        error: {
-          code: "provider_unavailable",
-          message: "provider failed",
-          retryable: true,
-          fatal: false,
-          statusCode: 503,
-          retryAfterMs: 0,
-        },
-      },
-    });
-    const terminalFinish = event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH, {
-      finish: { reason: ProviderFinishReason.PROVIDER_FINISH_REASON_STOP, metadataJson: "{}" },
-    });
+  test("rejects successful finish while any stream fragment lifecycle is incomplete", async () => {
+    const terminalFinish = successfulFinish(ProviderFinishReason.PROVIDER_FINISH_REASON_STOP);
     const cases = [
       {
         events: [
@@ -637,7 +633,7 @@ describe("LLMService Gateway boundary", () => {
       {
         events: [
           event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, { reasoning: { id: "reasoning-1", text: "", metadataJson: "{}" } }),
-          terminalError,
+          terminalFinish,
         ],
         prefixTypes: ["reasoning-start"],
       },
@@ -649,6 +645,18 @@ describe("LLMService Gateway boundary", () => {
           terminalFinish,
         ],
         prefixTypes: ["tool-input-start"],
+      },
+      {
+        events: [
+          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
+            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
+          }),
+          event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, {
+            toolInput: { id: "call-1", name: "lookup", text: "", metadataJson: "{}" },
+          }),
+          terminalFinish,
+        ],
+        prefixTypes: ["tool-input-start", "tool-input-end"],
       },
     ] satisfies ReadonlyArray<{ readonly events: readonly ProviderStreamEvent[]; readonly prefixTypes: readonly LLMEvent["type"][] }>;
 
@@ -669,6 +677,52 @@ describe("LLMService Gateway boundary", () => {
         }),
       });
     }
+  });
+
+  test("preserves an explicit provider error while discarding open fragments", async () => {
+    const service = createLLMService(gatewayClient([
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, {
+        text: { id: "text-open", text: "", metadataJson: "{}" },
+      }),
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START, {
+        reasoning: { id: "reasoning-open", text: "", metadataJson: "{}" },
+      }),
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, {
+        toolInput: { id: "tool-open", name: "lookup", text: "", metadataJson: "{}" },
+      }),
+      event(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR, {
+        providerError: {
+          metadataJson: "{}",
+          error: {
+            code: "provider_unavailable",
+            message: "provider failed",
+            retryable: true,
+            fatal: false,
+            statusCode: 503,
+            retryAfterMs: 0,
+          },
+        },
+      }),
+    ]));
+
+    const output = await collect(service.stream(request()));
+    expect(output.map((item) => item.type)).toEqual([
+      "text-start",
+      "reasoning-start",
+      "tool-input-start",
+      "provider-error",
+    ]);
+    expect(output.at(-1)).toEqual({
+      type: "provider-error",
+      error: expect.objectContaining({
+        type: "provider",
+        code: "provider_unavailable",
+        retryable: true,
+        fatal: false,
+      }),
+    });
+    expect((output.at(-1) as Extract<LLMEvent, { readonly type: "provider-error" }>).error)
+      .not.toHaveProperty("retryAfterMs");
   });
 
   test("rejects malformed ProviderStreamEvent payloads as gateway_protocol_error", async () => {

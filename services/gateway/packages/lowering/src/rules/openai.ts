@@ -63,6 +63,7 @@ export const OpenAIGPT55Rules: ProviderRules = {
     providerKey: "openai",
     strict: false,
   },
+  freeformTools: "openai-custom",
   providerOptions: {
     openai: {
       store: false,

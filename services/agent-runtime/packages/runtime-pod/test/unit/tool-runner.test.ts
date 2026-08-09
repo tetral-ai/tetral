@@ -2396,10 +2396,12 @@ function mcpToolEntry(): ToolEntry {
   return {
     name: "github_search",
     definition: {
+      kind: "function",
       name: "github_search",
       description: "Search GitHub through MCP.",
       inputSchema: { type: "object", properties: { query: { type: "string" } } },
     },
+    inputContract: { kind: "json_object" },
     route: { kind: "gateway", operation: "RunMcpTool", mcpServerName: "github" },
     formatter: {
       successShape: "MCP formatted text.",

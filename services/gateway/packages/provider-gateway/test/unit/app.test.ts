@@ -32,6 +32,7 @@ describe("ProviderGatewayApp lifecycle", () => {
           await new Promise<void>((resolve) => {
             releaseStream = resolve;
           });
+          yield textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END, "");
           yield finishEvent(request);
         },
       },
@@ -73,20 +74,21 @@ describe("ProviderGatewayApp lifecycle", () => {
 
       expect(events.map((event) => event.type)).toEqual([
         ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
+        ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
         ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
       ]);
       expect(logs).toContainEqual(expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "ok",
-        "provider.request.id": request.modelRequestId,
+        "model_request.id": request.modelRequestId,
       }));
       expect(logs.filter((record) =>
         typeof record === "object"
         && record !== null
         && "event" in record
         && record.event === "provider_request_streamed"
-        && "provider.request.id" in record
-        && record["provider.request.id"] === request.modelRequestId
+        && "model_request.id" in record
+        && record["model_request.id"] === request.modelRequestId
       )).toHaveLength(1);
       expect(logs.filter((record) =>
         typeof record === "object"
@@ -103,7 +105,7 @@ describe("ProviderGatewayApp lifecycle", () => {
         }),
       ]);
       expect(logs).not.toContainEqual(expect.objectContaining({
-        "provider.request.id": rejectedRequest.modelRequestId,
+        "model_request.id": rejectedRequest.modelRequestId,
       }));
     } finally {
       releaseStream();

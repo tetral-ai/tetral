@@ -206,7 +206,7 @@ test("assembles non-persistent runtime inputs into LLMRequest without storing th
             {
                 name: "third_group_lookup",
                 description: toolDescriptionCanary,
-                inputSchemaJson: JSON.stringify(tools[0]?.inputSchema),
+                function: { inputSchemaJson: JSON.stringify(tools[0]?.inputSchema) },
             },
         ],
         attachments: [],
@@ -981,7 +981,7 @@ test("runtime layer admits an input accepted during an empty request before idle
             {
                 name: "third_group_follow_up",
                 description: "follow-up tool",
-                inputSchemaJson: "{\"type\":\"object\",\"properties\":{}}",
+                function: { inputSchemaJson: "{\"type\":\"object\",\"properties\":{}}" },
             },
         ]);
         expect(request.limits?.maxOutputTokens).toBe(222);

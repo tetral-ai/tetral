@@ -436,7 +436,7 @@ function normalizeInputPath(input: RuntimeJsonValue): string | undefined {
 }
 
 function applyPatchPaths(input: RuntimeJsonValue): readonly string[] {
-  const patch = typeof input === "string" ? input : stringField(input, "patch") ?? stringField(input, "content");
+  const patch = stringField(input, "patch");
   if (patch === undefined) {
     return [];
   }

@@ -52,6 +52,83 @@ function interruptCommitResult(
     };
 }
 
+test("cold apply_patch recovery accepts only the canonical execution object", async () => {
+    const patch = "*** Begin Patch\n*** Add File: note.txt\n+ok\n*** End Patch\n";
+    const cases = [
+        { name: "canonical", input: { patch }, ok: true },
+        { name: "scalar", input: patch, ok: false },
+        { name: "wrong field", input: { content: patch }, ok: false },
+        { name: "null patch", input: { patch: null }, ok: false },
+        { name: "numeric patch", input: { patch: 7 }, ok: false },
+        { name: "extra field", input: { patch, content: patch }, ok: false },
+    ] as const;
+    for (const recoveryKind of ["approval", "sandbox"] as const) {
+        for (const candidate of cases) {
+            const suffix = `${recoveryKind}_${candidate.name.replaceAll(" ", "_")}`;
+            const session = new ThreadRuntime(`sesn_patch_${suffix}`);
+            const toolUseEventId = `sevt_patch_${suffix}`;
+            const modelRequestId = `mreq_patch_${suffix}`;
+            const message = DurableRuntimeMessageSchema.parse({
+                id: `msg_patch_${suffix}`,
+                sessionId: session.sessionId,
+                owningEventId: toolUseEventId,
+                eventSequence: 1,
+                sequence: 1,
+                role: "assistant",
+                origin: "agent",
+                status: "completed",
+                createdAt,
+                parts: [{
+                    id: `part_patch_${suffix}`,
+                    sessionId: session.sessionId,
+                    messageId: `msg_patch_${suffix}`,
+                    sequence: 0,
+                    type: "tool",
+                    toolCallId: `call_patch_${suffix}`,
+                    toolName: "apply_patch",
+                    toolUseEventId,
+                    toolEvent: { kind: "tool" },
+                    state: { status: "running", input: { value: patch, preview: patch, truncated: false } },
+                    createdAt,
+                }],
+            });
+            const catalog = createToolCatalog({ family: "gpt" });
+            const result = await Effect.runPromise(Effect.gen(function* () {
+                const threadLoop = yield* ThreadLoop.Service;
+                session.state.markPersistentContextLoaded();
+                threadLoop.seedRuntimeModel(session);
+                installRecoveredToolTurn(session, modelRequestId, [{
+                    modelToolCallId: `call_patch_${suffix}`,
+                    toolUseEventId,
+                    toolName: "apply_patch",
+                    ...(recoveryKind === "sandbox" ? { disposition: "resume_sandbox_execution" as const } : {}),
+                }]);
+                return recoveryKind === "approval"
+                    ? yield* threadLoop.installLoadedPendingToolUses(session, [{
+                        toolUseEventId,
+                        modelRequestId,
+                        modelToolCallId: `call_patch_${suffix}`,
+                        toolName: "apply_patch",
+                        input: candidate.input,
+                        status: "pending" as const,
+                    }], [message])
+                    : yield* threadLoop.installLoadedSandboxExecutions(session, [{
+                        toolUseEventId,
+                        modelRequestId,
+                        modelToolCallId: `call_patch_${suffix}`,
+                        toolName: "apply_patch",
+                        input: candidate.input,
+                        executionState: "running" as const,
+                    }], [message]);
+            }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], []), {
+                providerCallRuntime: { systemInstructions: "cold apply patch contract", toolCatalog: catalog },
+            }))));
+            if (candidate.ok && !result.ok) throw result.error;
+            expect(result.ok, `${recoveryKind}: ${candidate.name}`).toBe(candidate.ok);
+        }
+    }
+});
+
 test("first accepted turn rides the file attachments returned by CommitInputs", async () => {
     const session = new ThreadRuntime("sesn_first_turn_media");
     const input = acceptedInput("rin_first_turn_media", session.sessionId);

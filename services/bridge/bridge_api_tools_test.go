@@ -239,6 +239,159 @@ func TestPostgreSQLBridgeAPIStoreAcceptSandboxExecutionCommitsBeforeIndependentW
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreApplyPatchInputSplitRoundTrips(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID       = "sesn_bridge_patch_split"
+		threadID        = "thr_bridge_patch_split"
+		bindingID       = "bind_bridge_patch_split"
+		podUID          = "pod_bridge_patch_split"
+		modelRequestID  = "mreq_bridge_patch_split"
+		modelToolCallID = "call_bridge_patch_split"
+		rawPatch        = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("bridge-patch-split-key-32-bytes!")
+	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+	seedBridgeAPIRequestStart(t, store, scope, "rwrite_bridge_patch_split_start", modelRequestID, "agent_provider_request", 0)
+
+	publicInputJSON, err := json.Marshal(map[string]string{"patch": rawPatch})
+	if err != nil {
+		t.Fatalf("marshal public patch input: %v", err)
+	}
+	runtimePartJSON, err := json.Marshal(map[string]any{
+		"type":       "tool",
+		"toolCallId": modelToolCallID,
+		"toolName":   "apply_patch",
+		"state": map[string]any{
+			"status": "running",
+			"input": map[string]any{
+				"value":     rawPatch,
+				"preview":   rawPatch,
+				"truncated": false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal Runtime patch part: %v", err)
+	}
+	toolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_bridge_patch_split_tool", ModelRequestId: modelRequestID,
+		EventType:   "agent.tool_use",
+		PayloadJson: `{"type":"agent.tool_use","name":"apply_patch","input":` + string(publicInputJSON) + `,"evaluated_permission":"ask"}`,
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			t, scope, "rwrite_bridge_patch_split_tool", "agent.tool_use", "streaming",
+			bridgeRuntimePartCreateForTest{kind: "tool", json: string(runtimePartJSON)},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent apply_patch: %v", err)
+	}
+	toolUseEventID := toolUse.GetEventId()
+
+	load := func(runtimeInputID string) bridgeLoadContextPayload {
+		t.Helper()
+		response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+			Scope: scope, RuntimeInputId: runtimeInputID,
+		})
+		if err != nil {
+			t.Fatalf("LoadContext: %v", err)
+		}
+		var payload bridgeLoadContextPayload
+		if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
+			t.Fatalf("decode LoadContext: %v", err)
+		}
+		return payload
+	}
+	assertRuntimeScalar := func(payload bridgeLoadContextPayload) {
+		t.Helper()
+		for _, rawMessage := range payload.Messages {
+			var message struct {
+				Parts []struct {
+					ToolCallID string `json:"toolCallId"`
+					ToolName   string `json:"toolName"`
+					State      struct {
+						Input struct {
+							Value any `json:"value"`
+						} `json:"input"`
+					} `json:"state"`
+				} `json:"parts"`
+			}
+			if err := json.Unmarshal(rawMessage, &message); err != nil {
+				t.Fatalf("decode Runtime message: %v", err)
+			}
+			for _, part := range message.Parts {
+				if part.ToolCallID == modelToolCallID {
+					if part.ToolName != "apply_patch" || part.State.Input.Value != rawPatch {
+						t.Fatalf("Runtime patch input = %#v; want exact scalar", part)
+					}
+					return
+				}
+			}
+		}
+		t.Fatal("LoadContext omitted apply_patch Runtime message")
+	}
+
+	beforeApproval := load("rin_bridge_patch_split_before_approval")
+	assertRuntimeScalar(beforeApproval)
+	if len(beforeApproval.PendingToolUses) != 1 ||
+		beforeApproval.PendingToolUses[0].ToolUseEventID != toolUseEventID ||
+		beforeApproval.PendingToolUses[0].ModelRequestID != modelRequestID ||
+		beforeApproval.PendingToolUses[0].ModelToolCallID != modelToolCallID ||
+		beforeApproval.PendingToolUses[0].ToolName != "apply_patch" ||
+		string(beforeApproval.PendingToolUses[0].Input) != string(publicInputJSON) {
+		t.Fatalf("pending apply_patch approval = %#v; want object execution identity", beforeApproval.PendingToolUses)
+	}
+
+	setBridgeAPIPendingApprovalStatus(t, admin, "default", sessionID, threadID, toolUseEventID, "resolving")
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, "evt_bridge_patch_split_allow", 3, "user.tool_confirmation",
+		`{"type":"user.tool_confirmation","tool_use_id":"`+toolUseEventID+`","result":"allow"}`)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, "rin_bridge_patch_split_allow", "tool_confirmation",
+		`["evt_bridge_patch_split_allow"]`, "accepted", bindingID, podUID, 3, 3)
+	if _, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+		Scope: scope, RuntimeInputId: "rin_bridge_patch_split_allow", InputKind: "tool_confirmation",
+		EventIds: []string{"evt_bridge_patch_split_allow"}, SequenceFrom: 3, SequenceTo: 3,
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{
+			bridgeApprovalInputCreateForTest("default", sessionID, threadID, "rin_bridge_patch_split_allow", "evt_bridge_patch_split_allow", "Approval allowed"),
+		},
+	}); err != nil {
+		t.Fatalf("CommitInputs allow approval: %v", err)
+	}
+
+	canonicalInput, inputHash, err := canonicalRunToolInput(string(publicInputJSON))
+	if err != nil {
+		t.Fatalf("canonical patch input: %v", err)
+	}
+	if canonicalInput != string(publicInputJSON) {
+		t.Fatalf("canonical patch input = %q; want %q", canonicalInput, publicInputJSON)
+	}
+	accepted, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
+		Scope: scope, ToolUseEventId: toolUseEventID, ModelToolCallId: modelToolCallID,
+		NormalizedInputHash: inputHash, ToolName: "apply_patch", InputJson: string(publicInputJSON),
+	})
+	if err != nil {
+		t.Fatalf("AcceptSandboxExecution apply_patch: %v", err)
+	}
+	if accepted.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+		t.Fatalf("AcceptSandboxExecution ack = %s; want committed", accepted.GetAck().GetStatus())
+	}
+
+	afterAcceptance := load("rin_bridge_patch_split_after_acceptance")
+	assertRuntimeScalar(afterAcceptance)
+	if len(afterAcceptance.PendingToolUses) != 0 || len(afterAcceptance.PendingSandboxExecutions) != 1 {
+		t.Fatalf("post-acceptance recovery = approvals %#v executions %#v; want execution only",
+			afterAcceptance.PendingToolUses, afterAcceptance.PendingSandboxExecutions)
+	}
+	execution := afterAcceptance.PendingSandboxExecutions[0]
+	if execution.ToolUseEventID != toolUseEventID || execution.ModelRequestID != modelRequestID ||
+		execution.ModelToolCallID != modelToolCallID || execution.ToolName != "apply_patch" ||
+		string(execution.Input) != string(publicInputJSON) {
+		t.Fatalf("pending apply_patch execution = %#v; want unchanged object identity", execution)
+	}
+}
+
 func TestSandboxSettlementAndBridgeConsumptionConvergeUnderSessionLockRace(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

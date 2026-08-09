@@ -775,8 +775,17 @@ export interface RuntimeToolPart {
 export interface RuntimeToolDefinition {
   name: string;
   description: string;
+  function?: RuntimeFunctionToolDefinition | undefined;
+  freeform?: RuntimeFreeformToolDefinition | undefined;
+}
+
+export interface RuntimeFunctionToolDefinition {
   inputSchemaJson: string;
   outputSchemaJson?: string | undefined;
+}
+
+export interface RuntimeFreeformToolDefinition {
+  larkGrammar: string;
 }
 
 export interface ProviderRequestAttachment {
@@ -2121,7 +2130,7 @@ export const RuntimeToolPart: MessageFns<RuntimeToolPart> = {
 };
 
 function createBaseRuntimeToolDefinition(): RuntimeToolDefinition {
-  return { name: "", description: "", inputSchemaJson: "", outputSchemaJson: undefined };
+  return { name: "", description: "", function: undefined, freeform: undefined };
 }
 
 export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
@@ -2132,11 +2141,11 @@ export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
     if (message.description !== "") {
       writer.uint32(18).string(message.description);
     }
-    if (message.inputSchemaJson !== "") {
-      writer.uint32(26).string(message.inputSchemaJson);
+    if (message.function !== undefined) {
+      RuntimeFunctionToolDefinition.encode(message.function, writer.uint32(26).fork()).join();
     }
-    if (message.outputSchemaJson !== undefined) {
-      writer.uint32(34).string(message.outputSchemaJson);
+    if (message.freeform !== undefined) {
+      RuntimeFreeformToolDefinition.encode(message.freeform, writer.uint32(34).fork()).join();
     }
     return writer;
   },
@@ -2169,7 +2178,7 @@ export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
             break;
           }
 
-          message.inputSchemaJson = reader.string();
+          message.function = RuntimeFunctionToolDefinition.decode(reader, reader.uint32());
           continue;
         }
         case 4: {
@@ -2177,7 +2186,7 @@ export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
             break;
           }
 
-          message.outputSchemaJson = reader.string();
+          message.freeform = RuntimeFreeformToolDefinition.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -2193,6 +2202,94 @@ export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
     return {
       name: isSet(object.name) ? globalThis.String(object.name) : "",
       description: isSet(object.description) ? globalThis.String(object.description) : "",
+      function: isSet(object.function) ? RuntimeFunctionToolDefinition.fromJSON(object.function) : undefined,
+      freeform: isSet(object.freeform) ? RuntimeFreeformToolDefinition.fromJSON(object.freeform) : undefined,
+    };
+  },
+
+  toJSON(message: RuntimeToolDefinition): unknown {
+    const obj: any = {};
+    if (message.name !== "") {
+      obj.name = message.name;
+    }
+    if (message.description !== "") {
+      obj.description = message.description;
+    }
+    if (message.function !== undefined) {
+      obj.function = RuntimeFunctionToolDefinition.toJSON(message.function);
+    }
+    if (message.freeform !== undefined) {
+      obj.freeform = RuntimeFreeformToolDefinition.toJSON(message.freeform);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolDefinition>, I>>(base?: I): RuntimeToolDefinition {
+    return RuntimeToolDefinition.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolDefinition>, I>>(object: I): RuntimeToolDefinition {
+    const message = createBaseRuntimeToolDefinition();
+    message.name = object.name ?? "";
+    message.description = object.description ?? "";
+    message.function = (object.function !== undefined && object.function !== null)
+      ? RuntimeFunctionToolDefinition.fromPartial(object.function)
+      : undefined;
+    message.freeform = (object.freeform !== undefined && object.freeform !== null)
+      ? RuntimeFreeformToolDefinition.fromPartial(object.freeform)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeFunctionToolDefinition(): RuntimeFunctionToolDefinition {
+  return { inputSchemaJson: "", outputSchemaJson: undefined };
+}
+
+export const RuntimeFunctionToolDefinition: MessageFns<RuntimeFunctionToolDefinition> = {
+  encode(message: RuntimeFunctionToolDefinition, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.inputSchemaJson !== "") {
+      writer.uint32(10).string(message.inputSchemaJson);
+    }
+    if (message.outputSchemaJson !== undefined) {
+      writer.uint32(18).string(message.outputSchemaJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeFunctionToolDefinition {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeFunctionToolDefinition();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.inputSchemaJson = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.outputSchemaJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeFunctionToolDefinition {
+    return {
       inputSchemaJson: isSet(object.inputSchemaJson)
         ? globalThis.String(object.inputSchemaJson)
         : isSet(object.input_schema_json)
@@ -2206,14 +2303,8 @@ export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
     };
   },
 
-  toJSON(message: RuntimeToolDefinition): unknown {
+  toJSON(message: RuntimeFunctionToolDefinition): unknown {
     const obj: any = {};
-    if (message.name !== "") {
-      obj.name = message.name;
-    }
-    if (message.description !== "") {
-      obj.description = message.description;
-    }
     if (message.inputSchemaJson !== "") {
       obj.inputSchemaJson = message.inputSchemaJson;
     }
@@ -2223,15 +2314,81 @@ export const RuntimeToolDefinition: MessageFns<RuntimeToolDefinition> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeToolDefinition>, I>>(base?: I): RuntimeToolDefinition {
-    return RuntimeToolDefinition.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<RuntimeFunctionToolDefinition>, I>>(base?: I): RuntimeFunctionToolDefinition {
+    return RuntimeFunctionToolDefinition.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeToolDefinition>, I>>(object: I): RuntimeToolDefinition {
-    const message = createBaseRuntimeToolDefinition();
-    message.name = object.name ?? "";
-    message.description = object.description ?? "";
+  fromPartial<I extends Exact<DeepPartial<RuntimeFunctionToolDefinition>, I>>(
+    object: I,
+  ): RuntimeFunctionToolDefinition {
+    const message = createBaseRuntimeFunctionToolDefinition();
     message.inputSchemaJson = object.inputSchemaJson ?? "";
     message.outputSchemaJson = object.outputSchemaJson ?? undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeFreeformToolDefinition(): RuntimeFreeformToolDefinition {
+  return { larkGrammar: "" };
+}
+
+export const RuntimeFreeformToolDefinition: MessageFns<RuntimeFreeformToolDefinition> = {
+  encode(message: RuntimeFreeformToolDefinition, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.larkGrammar !== "") {
+      writer.uint32(10).string(message.larkGrammar);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeFreeformToolDefinition {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeFreeformToolDefinition();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.larkGrammar = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeFreeformToolDefinition {
+    return {
+      larkGrammar: isSet(object.larkGrammar)
+        ? globalThis.String(object.larkGrammar)
+        : isSet(object.lark_grammar)
+        ? globalThis.String(object.lark_grammar)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeFreeformToolDefinition): unknown {
+    const obj: any = {};
+    if (message.larkGrammar !== "") {
+      obj.larkGrammar = message.larkGrammar;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeFreeformToolDefinition>, I>>(base?: I): RuntimeFreeformToolDefinition {
+    return RuntimeFreeformToolDefinition.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeFreeformToolDefinition>, I>>(
+    object: I,
+  ): RuntimeFreeformToolDefinition {
+    const message = createBaseRuntimeFreeformToolDefinition();
+    message.larkGrammar = object.larkGrammar ?? "";
     return message;
   },
 };

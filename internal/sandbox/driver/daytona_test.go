@@ -972,14 +972,25 @@ func TestSynthesizeHelperBackgroundTaskFromRunningEnvelope(t *testing.T) {
 	}
 }
 
-func TestHelperRunToolInputAdaptsApplyPatchJSONString(t *testing.T) {
-	input, err := helperRunToolInput("apply_patch", "apply_patch", `"*** Begin Patch\n*** End Patch\n"`, "evt_patch")
+func TestHelperRunToolInputRequiresApplyPatchObject(t *testing.T) {
+	input, err := helperRunToolInput("apply_patch", "apply_patch", `{"patch":"*** Begin Patch\n*** End Patch\n"}`, "evt_patch")
 	if err != nil {
 		t.Fatalf("helperRunToolInput apply_patch: %v", err)
 	}
 	payload, ok := input.(map[string]any)
 	if !ok || payload["patch"] != "*** Begin Patch\n*** End Patch\n" {
 		t.Fatalf("apply_patch input = %#v; want patch object", input)
+	}
+	for _, inputJSON := range []string{
+		`"*** Begin Patch\n*** End Patch\n"`,
+		`{}`,
+		`{"patch":null}`,
+		`{"patch":7}`,
+		`{"patch":"*** Begin Patch\n*** End Patch\n","content":"duplicate"}`,
+	} {
+		if _, err := helperRunToolInput("apply_patch", "apply_patch", inputJSON, "evt_patch"); err == nil {
+			t.Fatalf("non-canonical apply_patch input %s succeeded", inputJSON)
+		}
 	}
 }
 

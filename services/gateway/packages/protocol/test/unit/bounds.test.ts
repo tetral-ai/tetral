@@ -20,6 +20,7 @@ import {
   MaxProviderRequestMessagePartJsonBytes,
   MaxProviderToolCallInputJsonBytes,
   MaxProviderUsageJsonBytes,
+  MaxSchemaBytes,
   MaxTextBytes,
   truncateUtf8Bytes,
   validateProviderRequest,
@@ -58,6 +59,27 @@ describe("Gateway protocol bounds", () => {
 
   test("accepts a valid Runtime-to-Gateway ProviderRequest snapshot", () => {
     expect(validateProviderRequest(validProviderRequest())).toEqual({ ok: true });
+  });
+
+  test("admits exactly one bounded function or freeform tool declaration arm", () => {
+    const base = validProviderRequest();
+    const tool = base.tools[0]!;
+    expect(validateProviderRequest({
+      ...base,
+      tools: [{ ...tool, function: undefined, freeform: { larkGrammar: "start: PATCH" } }],
+    })).toEqual({ ok: true });
+
+    for (const invalidTool of [
+      { ...tool, function: undefined },
+      { ...tool, freeform: { larkGrammar: "start: PATCH" } },
+      { ...tool, function: { inputSchemaJson: "[]" } },
+      { ...tool, function: { inputSchemaJson: "not-json" } },
+      { ...tool, function: { inputSchemaJson: JSON.stringify({ type: "object" }), outputSchemaJson: "[]" } },
+      { ...tool, function: undefined, freeform: { larkGrammar: "" } },
+      { ...tool, function: undefined, freeform: { larkGrammar: "x".repeat(MaxSchemaBytes + 1) } },
+    ]) {
+      expectInvalid(validateProviderRequest({ ...base, tools: [invalidTool] }));
+    }
   });
 
   test("admits multi-megabyte message parts while keeping system segments at 64 KiB", () => {
@@ -447,8 +469,8 @@ describe("Gateway protocol bounds", () => {
       { ...base, requestKind: 0 },
       { ...base, model: undefined },
       { ...base, model: { providerId: "", modelId: "gpt-test", variant: "" } },
-      { ...base, tools: [{ ...base.tools[0]!, inputSchemaJson: "[]" }] },
-      { ...base, tools: [{ ...base.tools[0]!, inputSchemaJson: "not-json" }] },
+      { ...base, tools: [{ ...base.tools[0]!, function: { inputSchemaJson: "[]" } }] },
+      { ...base, tools: [{ ...base.tools[0]!, function: { inputSchemaJson: "not-json" } }] },
       { ...base, attachments: [{ ...base.attachments[0]!, mime: "text/plain" }] },
       { ...base, limits: undefined },
       { ...base, limits: { maxOutputTokens: -1, timeoutMs: 30_000 } },

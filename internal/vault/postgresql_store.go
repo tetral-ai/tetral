@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/storage"
@@ -651,6 +652,13 @@ func (s *PostgreSQLCredentialStore) Update(ctx context.Context, ws workspace.ID,
 				return err
 			}
 		}
+		if nextSecret.Type == credentialAuthTypeProviderOAuth {
+			nextSecret, err = normalizeProviderOAuthAuth(nextSecret)
+			if err != nil {
+				return err
+			}
+			nextPublicAuth = publicAuthFromSecret(nextSecret)
+		}
 		now := storage.Now()
 		metadataJSON, err := json.Marshal(materialized.Metadata)
 		if err != nil {
@@ -750,6 +758,13 @@ func (s *PostgreSQLCredentialStore) UpdateWithLockedCredential(ctx context.Conte
 			if err != nil {
 				return err
 			}
+		}
+		if nextSecret.Type == credentialAuthTypeProviderOAuth {
+			nextSecret, err = normalizeProviderOAuthAuth(nextSecret)
+			if err != nil {
+				return err
+			}
+			nextPublicAuth = publicAuthFromSecret(nextSecret)
 		}
 		now := storage.Now()
 		metadataJSON, err := json.Marshal(materialized.Metadata)
@@ -973,23 +988,9 @@ func normalizeCredentialAuthForCreate(auth CredentialAuth) (CredentialAuth, Cred
 		}
 		return normalized, publicAuthFromSecret(normalized), nil
 	case credentialAuthTypeProviderOAuth:
-		if auth.ProviderID == "" {
-			return CredentialAuth{}, CredentialAuthPublic{}, &ValidationError{Message: "auth.provider_id is required"}
-		}
-		if auth.AccessMode == "" {
-			return CredentialAuth{}, CredentialAuthPublic{}, &ValidationError{Message: "auth.access_mode is required"}
-		}
-		if auth.AccessToken == "" {
-			return CredentialAuth{}, CredentialAuthPublic{}, &ValidationError{Message: "auth.access_token is required"}
-		}
-		normalized := CredentialAuth{
-			Type:         credentialAuthTypeProviderOAuth,
-			ProviderID:   auth.ProviderID,
-			AccessMode:   auth.AccessMode,
-			AccessToken:  auth.AccessToken,
-			RefreshToken: auth.RefreshToken,
-			ExpiresAt:    auth.ExpiresAt,
-			AccountID:    auth.AccountID,
+		normalized, err := normalizeProviderOAuthAuth(auth)
+		if err != nil {
+			return CredentialAuth{}, CredentialAuthPublic{}, err
 		}
 		return normalized, publicAuthFromSecret(normalized), nil
 	default:
@@ -1268,6 +1269,68 @@ func applyCredentialAuthPatch(currentSecret CredentialAuth, currentPublic Creden
 		return CredentialAuth{}, CredentialAuthPublic{}, unsupportedCredentialAuthTypeError()
 	}
 	return nextSecret, publicAuthFromSecret(nextSecret), nil
+}
+
+func normalizeProviderOAuthAuth(auth CredentialAuth) (CredentialAuth, error) {
+	if auth.ProviderID != "openai" {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "provider_id", "auth.provider_id must be openai")
+	}
+	if auth.AccessMode != "oauth" {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "access_mode", "auth.access_mode must be oauth")
+	}
+	if auth.AccessToken == "" {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "access_token", "auth.access_token is required")
+	}
+	if auth.RefreshToken == "" {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "refresh_token", "auth.refresh_token is required")
+	}
+	if auth.ExpiresAt == "" {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "expires_at", "auth.expires_at is required")
+	}
+	if auth.AccountID == "" {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "account_id", "auth.account_id is required")
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, auth.ExpiresAt)
+	if err != nil || !providerOAuthExpiryHasExplicitZone(auth.ExpiresAt) {
+		return CredentialAuth{}, providerOAuthValidationError(auth.ProviderID, "expires_at", "auth.expires_at must be an RFC 3339 timestamp with an explicit timezone")
+	}
+	return CredentialAuth{
+		Type:         credentialAuthTypeProviderOAuth,
+		ProviderID:   "openai",
+		AccessMode:   "oauth",
+		AccessToken:  auth.AccessToken,
+		RefreshToken: auth.RefreshToken,
+		ExpiresAt:    expiresAt.UTC().Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z"),
+		AccountID:    auth.AccountID,
+	}, nil
+}
+
+func providerOAuthValidationError(providerID string, member string, message string) error {
+	slog.Error("provider credential rejected",
+		"event", "provider_credential_rejected",
+		"event.kind", "provider_credential_rejected",
+		"component", "vault",
+		"provider.id", providerID,
+		"validation.member", member,
+		"error.class", "validation",
+		"error.code", "invalid_provider_oauth",
+		"error.message_safe", "provider credential rejected",
+	)
+	return &ValidationError{Message: message}
+}
+
+func providerOAuthExpiryHasExplicitZone(value string) bool {
+	if len(value) < len("2006-01-02T15:04:05Z") || value[10] != 'T' {
+		return false
+	}
+	if value[len(value)-1] == 'Z' {
+		return true
+	}
+	if len(value) < 6 {
+		return false
+	}
+	zone := value[len(value)-6:]
+	return (zone[0] == '+' || zone[0] == '-') && zone[3] == ':'
 }
 
 func rejectCredentialAuthPatchFieldsForStoredType(storedType string, rawAuth map[string]json.RawMessage) error {

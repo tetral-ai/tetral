@@ -1275,7 +1275,7 @@ func logMCPMaterialization(logger *slog.Logger, eventKind string, request *bridg
 		slog.String("component", ServiceNameBridgeAPI),
 		slog.String("workspace.id", request.GetScope().GetWorkspaceId()),
 		slog.String("session.id", request.GetScope().GetSessionId()),
-		slog.String("session.thread.id", request.GetScope().GetSessionThreadId()),
+		slog.String("thread.id", request.GetScope().GetSessionThreadId()),
 		slog.String("mcp.tool_use_event_id", request.GetToolUseEventId()),
 		slog.String("mcp.server.name", request.GetMcpServerName()),
 		slog.String("mcp.tool.name", request.GetToolName()),

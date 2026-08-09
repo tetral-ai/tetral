@@ -891,7 +891,8 @@ function catalogForTest(tool: {
         entries: [
             {
                 name: tool.name,
-                definition: tool,
+                definition: { kind: "function", ...tool },
+                inputContract: { kind: "json_object" },
                 route: { kind: "gateway", operation: "RunWeb" },
                 formatter: {
                     successShape: "test success text",
@@ -910,7 +911,8 @@ function memoryCatalogForTest(): ToolCatalog {
     return {
         entries: [{
                 name: "memory",
-                definition: { name: "memory", description: "Memory", inputSchema: { type: "object" } },
+                definition: { kind: "function", name: "memory", description: "Memory", inputSchema: { type: "object" } },
+                inputContract: { kind: "json_object" },
                 route: { kind: "bridge", operation: "RunMemory" },
                 formatter: {
                     successShape: "memory success text",
@@ -1113,6 +1115,8 @@ function runtimeThreadLoopLayer(loader: TestContextLoader, options: {
     readonly runtimePolicy?: Parameters<typeof ThreadLoop.layer>[0]["runtimePolicy"];
     readonly runtime?: RuntimeDependencies;
     readonly metrics?: RuntimeMetricsSink;
+    readonly recordProviderReschedule?: Parameters<typeof ThreadLoop.layer>[0]["recordProviderReschedule"];
+    readonly recordProviderToolDeclarationRejection?: Parameters<typeof ThreadLoop.layer>[0]["recordProviderToolDeclarationRejection"];
     readonly refreshRuntimeBindingToken?: Parameters<typeof ThreadLoop.layer>[0]["refreshRuntimeBindingToken"];
     readonly installLoaderState?: boolean;
 } = {}): Layer.Layer<ThreadLoop.Service> {
@@ -1160,6 +1164,10 @@ function runtimeThreadLoopLayer(loader: TestContextLoader, options: {
             toolCatalog: options.providerCallRuntime?.toolCatalog ?? createToolCatalog({ family: "claude" }),
         })),
         ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
+        ...(options.recordProviderReschedule !== undefined ? { recordProviderReschedule: options.recordProviderReschedule } : {}),
+        ...(options.recordProviderToolDeclarationRejection !== undefined
+            ? { recordProviderToolDeclarationRejection: options.recordProviderToolDeclarationRejection }
+            : {}),
         ...(options.refreshRuntimeBindingToken !== undefined ? { refreshRuntimeBindingToken: options.refreshRuntimeBindingToken } : {}),
     }).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(loader)));
     if (options.installLoaderState === false) {

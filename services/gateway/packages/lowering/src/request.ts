@@ -142,12 +142,25 @@ export interface LoweredToolResultPart {
 }
 
 /** Intermediate tool definition whose input schema is consumed by the provider adapter. */
-export interface LoweredToolDefinition {
+export interface LoweredFunctionToolDefinition {
+  readonly kind: "function";
   readonly description: string;
   readonly inputSchema: LoweredJsonSchema;
   readonly outputSchema?: LoweredJsonSchema;
   readonly providerOptions?: Readonly<Record<string, unknown>>;
+  readonly larkGrammar?: never;
 }
+
+export interface LoweredFreeformToolDefinition {
+  readonly kind: "freeform";
+  readonly description: string;
+  readonly larkGrammar: string;
+  readonly inputSchema?: never;
+  readonly outputSchema?: never;
+  readonly providerOptions?: never;
+}
+
+export type LoweredToolDefinition = LoweredFunctionToolDefinition | LoweredFreeformToolDefinition;
 
 /**
  * SDK-free schema plan consumed for tool input and request-level structured
@@ -598,12 +611,29 @@ function lowerTools(tools: readonly RuntimeToolDefinition[], rules: ProviderRule
     if (Object.hasOwn(loweredTools, toolName)) {
       throw new Error("gateway_protocol_error: tool names collide after surrogate sanitization");
     }
-    const lowered: LoweredToolDefinition = {
-      description: sanitizeText(tool.description),
-      inputSchema: wrapJsonSchema(lowerJsonSchema(parseProviderJson(tool.inputSchemaJson, `${tool.name} input schema`), rules)),
-      ...(tool.outputSchemaJson !== undefined ? { outputSchema: wrapJsonSchema(lowerJsonSchema(parseProviderJson(tool.outputSchemaJson, `${tool.name} output schema`), rules)) } : {}),
-      ...(rules.toolOptions !== undefined ? { providerOptions: providerToolOptions(rules.toolOptions) } : {}),
-    };
+    const declarationCount = Number(tool.function !== undefined) + Number(tool.freeform !== undefined);
+    if (declarationCount !== 1) {
+      throw new Error("gateway_protocol_error: tool declaration must select exactly one arm");
+    }
+    let lowered: LoweredToolDefinition;
+    if (tool.function !== undefined) {
+      lowered = {
+        kind: "function",
+        description: sanitizeText(tool.description),
+        inputSchema: wrapJsonSchema(lowerJsonSchema(parseProviderJson(tool.function.inputSchemaJson, `${tool.name} input schema`), rules)),
+        ...(tool.function.outputSchemaJson !== undefined ? { outputSchema: wrapJsonSchema(lowerJsonSchema(parseProviderJson(tool.function.outputSchemaJson, `${tool.name} output schema`), rules)) } : {}),
+        ...(rules.toolOptions !== undefined ? { providerOptions: providerToolOptions(rules.toolOptions) } : {}),
+      };
+    } else {
+      if (rules.freeformTools !== "openai-custom" || tool.freeform === undefined || tool.freeform.larkGrammar.length === 0) {
+        throw new Error("gateway_protocol_error: provider does not support freeform tool declarations");
+      }
+      lowered = {
+        kind: "freeform",
+        description: sanitizeText(tool.description),
+        larkGrammar: tool.freeform.larkGrammar,
+      };
+    }
     loweredTools[toolName] = lowered;
   }
   return loweredTools;

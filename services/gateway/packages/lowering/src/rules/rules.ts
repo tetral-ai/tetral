@@ -25,6 +25,8 @@ export interface ProviderRules {
   readonly effort: ProviderEffortRules | undefined;
   readonly requestOptions: ProviderRequestOptionRules | undefined;
   readonly toolOptions: ProviderToolOptionRules | undefined;
+  /** Provider-visible freeform declaration supported by this exact route. */
+  readonly freeformTools: "openai-custom" | undefined;
   readonly providerOptions: Readonly<Record<string, unknown>>;
   readonly dynamicProviderOptions: ProviderDynamicOptionRules | undefined;
   readonly headers: Readonly<Record<string, string>>;

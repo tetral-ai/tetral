@@ -69,6 +69,7 @@ export class Service extends Context.Service<Service, Interface>()("tetral-agent
 interface FragmentState {
   readonly name?: string | undefined;
   ended: boolean;
+  consumed?: boolean | undefined;
 }
 
 type RuntimeFinishReason = Exclude<Extract<LLMEvent, { readonly type: "finish" }>["finishReason"], undefined>;
@@ -130,10 +131,13 @@ class ProviderStreamValidator {
             : {}),
         }));
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
+        if (event.toolInput !== undefined && this.toolCalls.has(event.toolInput.id)) {
+          return gatewayProtocolFailure(this.request);
+        }
         return this.startFragment(this.toolInputFragments, event.toolInput?.id, () => {
           const id = event.toolInput?.id ?? "";
           const name = event.toolInput?.name ?? "";
-          this.toolInputFragments.set(id, { name, ended: false });
+          this.toolInputFragments.set(id, { name, ended: false, consumed: false });
           return { type: "tool-input-start", id, toolName: name };
         });
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
@@ -168,9 +172,10 @@ class ProviderStreamValidator {
             : {}),
         };
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
-        if (this.hasOpenFragments()) {
-          return gatewayProtocolFailure(this.request);
-        }
+        this.textFragments.clear();
+        this.reasoningFragments.clear();
+        this.toolInputFragments.clear();
+        this.toolCalls.clear();
         this.terminal = true;
         return {
           type: "provider-error",
@@ -285,7 +290,10 @@ class ProviderStreamValidator {
       return gatewayProtocolFailure(this.request);
     }
     const streamedInput = this.toolInputFragments.get(toolCall.id);
-    if (streamedInput !== undefined && streamedInput.name !== undefined && streamedInput.name !== toolCall.name) {
+    if (
+      streamedInput !== undefined &&
+      (streamedInput.name !== toolCall.name || !streamedInput.ended || streamedInput.consumed === true)
+    ) {
       return gatewayProtocolFailure(this.request);
     }
     const toolInput = runtimeJsonFromString(toolCall.inputJson);
@@ -293,6 +301,9 @@ class ProviderStreamValidator {
       return gatewayProtocolFailure(this.request);
     }
     this.toolCalls.add(toolCall.id);
+    if (streamedInput !== undefined) {
+      streamedInput.consumed = true;
+    }
     return {
       type: "tool-call",
       id: toolCall.id,
@@ -333,7 +344,7 @@ class ProviderStreamValidator {
   private hasOpenFragments(): boolean {
     return hasOpenFragment(this.textFragments) ||
       hasOpenFragment(this.reasoningFragments) ||
-      hasOpenFragment(this.toolInputFragments);
+      hasUnconsumedToolInput(this.toolInputFragments);
   }
 }
 
@@ -372,6 +383,15 @@ function runtimeAttachmentRejectionOriginIdentity(
 function hasOpenFragment(fragments: ReadonlyMap<string, FragmentState>): boolean {
   for (const fragment of fragments.values()) {
     if (!fragment.ended) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasUnconsumedToolInput(fragments: ReadonlyMap<string, FragmentState>): boolean {
+  for (const fragment of fragments.values()) {
+    if (!fragment.ended || fragment.consumed !== true) {
       return true;
     }
   }
@@ -449,7 +469,7 @@ function runtimeFailureFromGatewayProviderError(error: GatewayProviderError | un
       retryable: error?.retryable,
       fatal: error?.fatal,
       statusCode: error?.statusCode,
-      retryAfterMs: error?.retryAfterMs,
+      retryAfterMs: (error?.retryAfterMs ?? 0) > 0 ? error?.retryAfterMs : undefined,
     }),
     { type: "terminal" },
   );

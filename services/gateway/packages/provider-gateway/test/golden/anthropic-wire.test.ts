@@ -1744,13 +1744,12 @@ function openAIGoldenRequest(): ProviderRequest {
       {
         name: "Search",
         description: "Search.",
-        inputSchemaJson: JSON.stringify({
+        function: { inputSchemaJson: JSON.stringify({
           type: "object",
           properties: { query: { type: "string" } },
           required: ["query"],
           additionalProperties: false,
-        }),
-        outputSchemaJson: undefined,
+        }), outputSchemaJson: undefined },
       },
     ],
     attachments: [],
@@ -1826,13 +1825,12 @@ function anthropicGoldenRequest(): ProviderRequest {
       {
         name: "Read",
         description: "Read a file.",
-        inputSchemaJson: JSON.stringify({
+        function: { inputSchemaJson: JSON.stringify({
           type: "object",
           properties: { path: { type: "string" } },
           required: ["path"],
           additionalProperties: false,
-        }),
-        outputSchemaJson: undefined,
+        }), outputSchemaJson: undefined },
       },
     ],
     attachments: [],
@@ -1948,13 +1946,12 @@ function kimiK3ToolGoldenRequest(): ProviderRequest {
     tools: [{
       name: "Read",
       description: "Read a file.",
-      inputSchemaJson: JSON.stringify({
+      function: { inputSchemaJson: JSON.stringify({
         type: "object",
         properties: { path: { type: "string" } },
         required: ["path"],
         additionalProperties: false,
-      }),
-      outputSchemaJson: undefined,
+      }), outputSchemaJson: undefined },
     }],
   });
 }
@@ -2080,13 +2077,12 @@ function zaiGoldenRequest(overrides: Partial<ProviderRequest> = {}): ProviderReq
       {
         name: "Search",
         description: "Search.",
-        inputSchemaJson: JSON.stringify({
+        function: { inputSchemaJson: JSON.stringify({
           type: "object",
           properties: { query: { type: "string" } },
           required: ["query"],
           additionalProperties: false,
-        }),
-        outputSchemaJson: undefined,
+        }), outputSchemaJson: undefined },
       },
     ],
     attachments: [],

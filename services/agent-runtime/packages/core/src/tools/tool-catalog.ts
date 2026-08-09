@@ -10,17 +10,34 @@
  */
 import { builtinToolDescription, builtinToolParameterDescription } from "./tool-copy.js";
 import type { DocumentedBuiltinToolName } from "./tool-copy.js";
+import { ApplyPatchLarkGrammar } from "./apply-patch-grammar.js";
 
 /** Approval policy attached to an enabled tool after catalog materialization. */
 export type ToolPermissionPolicy = "always_allow" | "always_ask";
 
 /** Provider-visible tool shape after Runtime-only execution fields are removed. */
-export interface ProviderToolDefinition {
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: unknown;
-  readonly outputSchema?: unknown;
-}
+export type ProviderToolDefinition =
+  | {
+      readonly kind: "function";
+      readonly name: string;
+      readonly description: string;
+      readonly inputSchema: unknown;
+      readonly outputSchema?: unknown;
+      readonly larkGrammar?: never;
+    }
+  | {
+      readonly kind: "freeform";
+      readonly name: string;
+      readonly description: string;
+      readonly larkGrammar: string;
+      readonly inputSchema?: never;
+      readonly outputSchema?: never;
+    };
+
+/** Runtime-only normalization applied once when a completed provider Tool Call is registered. */
+export type ToolInputContract =
+  | { readonly kind: "json_object" }
+  | { readonly kind: "freeform_string"; readonly executionField: "patch" };
 
 /** Runtime-only dispatch route paired with each materialized provider definition. */
 export type ToolRoute =
@@ -81,6 +98,7 @@ export interface ToolFormatterContract {
 export interface ToolEntry {
   readonly name: string;
   readonly definition: ProviderToolDefinition;
+  readonly inputContract: ToolInputContract;
   readonly route: ToolRoute;
   readonly formatter: ToolFormatterContract;
   readonly defaultPermissionPolicy: ToolPermissionPolicy;
@@ -144,21 +162,6 @@ export type InstalledBuiltinFamily = "claude" | "gpt";
 const ApprovalReviewerToolNames = ["Read", "Grep", "Glob"] as const;
 
 const AlwaysAllowSandboxToolNames = new Set(["Read", "Grep", "Glob", "view_image"]);
-
-const ForbiddenExecutionFields = [
-  "route",
-  "routeKind",
-  "operation",
-  "formatter",
-  "permission_policy",
-  "permissionPolicy",
-  "sandboxBinding",
-  "sandbox_binding",
-  "binding",
-  "bindingId",
-  "credentials",
-  "runtimeBindingToken",
-] as const;
 
 const CommandFormatter: ToolFormatterContract = {
   successShape: "bounded text stdout/stderr plus exit status",
@@ -292,13 +295,24 @@ const BuiltinEntries: readonly ToolEntry[] = [
     required: ["pattern"],
   }),
   sandboxTool("view_image", builtinToolDescription("view_image"), "view_image", pathOnlySchema("view_image", "path")),
-  sandboxTool("apply_patch", builtinToolDescription("apply_patch"), "apply_patch", {
-    type: "string",
-    description: builtinToolParameterDescription("apply_patch", "(raw string input)"),
-  }),
+  {
+    name: "apply_patch",
+    definition: {
+      kind: "freeform",
+      name: "apply_patch",
+      description: builtinToolDescription("apply_patch"),
+      larkGrammar: ApplyPatchLarkGrammar,
+    },
+    inputContract: { kind: "freeform_string", executionField: "patch" },
+    route: { kind: "sandbox", operation: "RunTool", helperSubcommand: "apply_patch" },
+    formatter: FileFormatter,
+    defaultPermissionPolicy: "always_ask",
+    required: true,
+  },
   {
     name: "web",
     definition: {
+      kind: "function",
       name: "web",
       description: builtinToolDescription("web"),
       inputSchema: {
@@ -349,6 +363,7 @@ const BuiltinEntries: readonly ToolEntry[] = [
         },
       },
     },
+    inputContract: { kind: "json_object" },
     route: { kind: "gateway", operation: "RunWeb" },
     formatter: WebFormatter,
     defaultPermissionPolicy: "always_ask",
@@ -357,6 +372,7 @@ const BuiltinEntries: readonly ToolEntry[] = [
   {
     name: "memory",
     definition: {
+      kind: "function",
       name: "memory",
       description: builtinToolDescription("memory"),
       inputSchema: {
@@ -375,6 +391,7 @@ const BuiltinEntries: readonly ToolEntry[] = [
         required: ["action", "path"],
       },
     },
+    inputContract: { kind: "json_object" },
     route: { kind: "bridge", operation: "RunMemory" },
     formatter: MemoryFormatter,
     defaultPermissionPolicy: "always_ask",
@@ -398,9 +415,9 @@ export function createToolCatalog(options: ToolCatalogOptions): ToolCatalog {
   }
   const includeSubAgentTools = options.includeSubAgentTools ?? true;
   const configs = options.configs ?? [];
-  rejectDisabledRequiredTools(configs);
   const installedBuiltinEntries = builtinEntriesForFamily(options.family)
     .filter((entry) => includeSubAgentTools || entry.route.kind !== "subagent");
+  rejectDisabledRequiredTools(installedBuiltinEntries, configs);
   const builtinEntries = installedBuiltinEntries
     .filter((entry) => entry.required || toolEnabled(entry.name, configs));
   const builtinNames = new Set(installedBuiltinEntries.map((entry) => entry.name));
@@ -429,8 +446,8 @@ function builtinEntriesForFamily(family: InstalledBuiltinFamily): readonly ToolE
   return [...selected, ...platformEntries];
 }
 
-function rejectDisabledRequiredTools(configs: readonly ToolConfig[]): void {
-  const requiredNames = new Set(BuiltinEntries.filter((entry) => entry.required).map((entry) => entry.name));
+function rejectDisabledRequiredTools(entries: readonly ToolEntry[], configs: readonly ToolConfig[]): void {
+  const requiredNames = new Set(entries.filter((entry) => entry.required).map((entry) => entry.name));
   const disabledRequired = configs.find((config) => requiredNames.has(config.name) && !config.enabled);
   if (disabledRequired !== undefined) {
     throw new Error(`required tool ${disabledRequired.name} cannot be disabled`);
@@ -480,10 +497,12 @@ function mcpManifestEntries(manifests: readonly MCPManifest[], builtinNames: Rea
       entries.push({
         name: tool.name,
         definition: {
+          kind: "function",
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
         },
+        inputContract: { kind: "json_object" },
         route: { kind: "gateway", operation: "RunMcpTool", mcpServerName: manifest.mcpServerName },
         formatter: mcpFormatter(manifest.mcpServerName),
         defaultPermissionPolicy: mcpToolPermissionPolicy(tool.name, manifest),
@@ -514,19 +533,21 @@ function mcpFormatter(mcpServerName: string): ToolFormatterContract {
 }
 
 function stripExecutionFields(definition: ProviderToolDefinition): ProviderToolDefinition {
-  const sanitized: ProviderToolDefinition = {
+  if (definition.kind === "freeform") {
+    return {
+      kind: "freeform",
+      name: definition.name,
+      description: definition.description,
+      larkGrammar: definition.larkGrammar,
+    };
+  }
+  return {
+    kind: "function",
     name: definition.name,
     description: definition.description,
     inputSchema: definition.inputSchema,
     ...(definition.outputSchema !== undefined ? { outputSchema: definition.outputSchema } : {}),
   };
-  const serialized = JSON.stringify(sanitized);
-  for (const forbidden of ForbiddenExecutionFields) {
-    if (serialized.includes(forbidden)) {
-      throw new Error(`provider-visible tool definition leaks execution field ${forbidden}`);
-    }
-  }
-  return sanitized;
 }
 
 function sandboxTool(
@@ -537,7 +558,8 @@ function sandboxTool(
 ): ToolEntry {
   return {
     name,
-    definition: { name, description, inputSchema },
+    definition: { kind: "function", name, description, inputSchema },
+    inputContract: { kind: "json_object" },
     route: { kind: "sandbox", operation: helperSubcommand === "stdin" ? "CommandIO" : "RunTool", helperSubcommand },
     formatter: helperSubcommand === "exec" || helperSubcommand === "stdin" ? CommandFormatter : FileFormatter,
     defaultPermissionPolicy: AlwaysAllowSandboxToolNames.has(name) ? "always_allow" : "always_ask",
@@ -549,10 +571,12 @@ function subAgentTool(name: Extract<ToolRoute, { readonly kind: "subagent" }>["o
   return {
     name,
     definition: {
+      kind: "function",
       name,
       description: builtinToolDescription(name),
       inputSchema: subAgentInputSchema(name),
     },
+    inputContract: { kind: "json_object" },
     route: { kind: "subagent", operation: name },
     formatter: SubAgentFormatter,
     defaultPermissionPolicy: "always_ask",

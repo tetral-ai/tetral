@@ -65,6 +65,7 @@ export const AnthropicOpus48Rules: ProviderRules = {
   },
   requestOptions: undefined,
   toolOptions: undefined,
+  freeformTools: undefined,
   providerOptions: {
     anthropic: {
       thinking: { type: "adaptive", display: "summarized" },

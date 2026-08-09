@@ -53,6 +53,7 @@ export const DeepSeekV4ProRules: ProviderRules = {
   },
   requestOptions: undefined,
   toolOptions: undefined,
+  freeformTools: undefined,
   providerOptions: {
     deepseek: {
       reasoningEffort: DeepSeekV4ProDefaultEffort,

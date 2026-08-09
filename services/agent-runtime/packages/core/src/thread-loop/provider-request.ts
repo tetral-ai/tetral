@@ -106,6 +106,14 @@ export interface ProviderCallAssemblySuccess {
 export interface ProviderCallAssemblyFailure {
   readonly ok: false;
   readonly error: RuntimeFailure;
+  readonly toolDeclarationRejection?: ProviderToolDeclarationRejection;
+}
+
+/** Bounded structural fact for a model-visible declaration rejected before request open. */
+export interface ProviderToolDeclarationRejection {
+  readonly declarationKind: "function" | "freeform" | "unknown";
+  readonly family: "claude" | "gpt" | "unspecified";
+  readonly validationMember: "declaration_kind" | "tool_family" | "function_schema" | "freeform_grammar";
 }
 
 export type ProviderCallAssemblyResult = ProviderCallAssemblySuccess | ProviderCallAssemblyFailure;
@@ -194,15 +202,26 @@ export async function assembleLLMRequest(
   executionPolicy: Readonly<ThreadLoopRuntimePolicy>,
 ): Promise<{ readonly ok: true; readonly request: LLMRequest } | { readonly ok: false; readonly error: RuntimeFailure }> {
   const assembler = options.providerCallAssembler ?? assembleProviderCallRequest;
+  const requestId = options.runtime.createId("provider_request");
+  const modelRequestId = options.runtime.createId("model_request");
   try {
     const result = await assembler({
       identity: session.identity,
-      requestId: options.runtime.createId("provider_request"),
-      modelRequestId: options.runtime.createId("model_request"),
+      requestId,
+      modelRequestId,
       currentModel,
       runtimeMessages,
       runtime: providerCallRuntimeForSession(session, options, executionPolicy),
     });
+    if (!result.ok && result.toolDeclarationRejection !== undefined) {
+      recordProviderToolDeclarationRejection(
+        options,
+        session,
+        requestId,
+        modelRequestId,
+        result.toolDeclarationRejection,
+      );
+    }
     return result.ok ? { ok: true, request: result.request } : { ok: false, error: result.error };
   } catch (error) {
     return {
@@ -219,6 +238,27 @@ export async function assembleLLMRequest(
         modelId: currentModel.modelId,
       }),
     };
+  }
+}
+
+function recordProviderToolDeclarationRejection(
+  options: ThreadLoopRuntimeOptions,
+  session: ThreadRuntime,
+  requestId: string,
+  modelRequestId: string,
+  rejection: ProviderToolDeclarationRejection,
+): void {
+  try {
+    options.recordProviderToolDeclarationRejection?.({
+      workspaceId: session.identity.workspaceId,
+      sessionId: session.identity.sessionId,
+      sessionThreadId: session.identity.sessionThreadId,
+      requestId,
+      modelRequestId,
+      ...rejection,
+    });
+  } catch {
+    // Declaration settlement is authoritative; observability stays a side channel.
   }
 }
 
@@ -521,9 +561,9 @@ End := "*** End Patch" NEWLINE
 FileOp := AddFile | DeleteFile | UpdateFile
 AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
 DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] Change { Change }
 MoveTo := "*** Move to: " newPath NEWLINE
-Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
+Change := [ "@@" [ header ] NEWLINE ] HunkLine { HunkLine } [ "*** End of File" NEWLINE ]
 HunkLine := (" " | "-" | "+") text NEWLINE
 
 A full patch can combine several operations:
@@ -558,6 +598,7 @@ const SkillDescriptionPerEntryMaxBytes = 4 * 1_024;
 function assemblyFailure(
   input: ProviderCallAssemblyInput,
   reason: "bounded" | "runtime_contract_validation",
+  toolDeclarationRejection?: ProviderToolDeclarationRejection,
 ): ProviderCallAssemblyFailure {
   return {
     ok: false,
@@ -571,6 +612,7 @@ function assemblyFailure(
       providerId: input.currentModel.providerId,
       modelId: input.currentModel.modelId,
     }),
+    ...(toolDeclarationRejection === undefined ? {} : { toolDeclarationRejection }),
   };
 }
 
@@ -676,13 +718,11 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
       cacheHint: SystemCacheHint.SYSTEM_CACHE_HINT_STABLE,
     });
   }
-  const toolDefinitions = input.runtime.toolCatalog === undefined ? [] : providerToolDefinitions(input.runtime.toolCatalog);
-  const tools = toolDefinitions.map((tool): GatewayRuntimeToolDefinition => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchemaJson: JSON.stringify(tool.inputSchema),
-    ...(tool.outputSchema !== undefined ? { outputSchemaJson: JSON.stringify(tool.outputSchema) } : {}),
-  }));
+  const projectedTools = projectProviderTools(input);
+  if (!projectedTools.ok) {
+    return assemblyFailure(input, "runtime_contract_validation", projectedTools.rejection);
+  }
+  const tools = projectedTools.tools;
   const request: ProviderRequest = {
     requestId: input.requestId,
     modelRequestId: input.modelRequestId,
@@ -720,6 +760,65 @@ export function assembleProviderCallRequest(input: ProviderCallAssemblyInput): P
     timeoutMs,
     request,
   };
+}
+
+function projectProviderTools(input: ProviderCallAssemblyInput):
+  | { readonly ok: true; readonly tools: GatewayRuntimeToolDefinition[] }
+  | { readonly ok: false; readonly rejection: ProviderToolDeclarationRejection } {
+  const family = input.runtime.toolsetFamily ?? "unspecified";
+  const definitions = input.runtime.toolCatalog === undefined ? [] : providerToolDefinitions(input.runtime.toolCatalog);
+  const tools: GatewayRuntimeToolDefinition[] = [];
+  for (const definition of definitions) {
+    if (definition.kind === "freeform") {
+      if ((family !== "gpt" && family !== "unspecified") || definition.name !== "apply_patch") {
+        return {
+          ok: false,
+          rejection: { declarationKind: "freeform", family, validationMember: "tool_family" },
+        };
+      }
+      if (typeof definition.larkGrammar !== "string" || definition.larkGrammar.length === 0) {
+        return {
+          ok: false,
+          rejection: { declarationKind: "freeform", family, validationMember: "freeform_grammar" },
+        };
+      }
+      tools.push({
+        name: definition.name,
+        description: definition.description,
+        freeform: { larkGrammar: definition.larkGrammar },
+      });
+      continue;
+    }
+    if (definition.kind !== "function") {
+      return {
+        ok: false,
+        rejection: { declarationKind: "unknown", family, validationMember: "declaration_kind" },
+      };
+    }
+    try {
+      const inputSchemaJson = JSON.stringify(definition.inputSchema);
+      const outputSchemaJson = definition.outputSchema === undefined
+        ? undefined
+        : JSON.stringify(definition.outputSchema);
+      if (inputSchemaJson === undefined || (definition.outputSchema !== undefined && outputSchemaJson === undefined)) {
+        throw new Error("tool schema is not JSON serializable");
+      }
+      tools.push({
+        name: definition.name,
+        description: definition.description,
+        function: {
+          inputSchemaJson,
+          ...(outputSchemaJson !== undefined ? { outputSchemaJson } : {}),
+        },
+      });
+    } catch {
+      return {
+        ok: false,
+        rejection: { declarationKind: "function", family, validationMember: "function_schema" },
+      };
+    }
+  }
+  return { ok: true, tools };
 }
 
 function renderMemoryStoreSegment(memoryStore: MemoryStorePromptEntry): string | undefined {

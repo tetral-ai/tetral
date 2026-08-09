@@ -180,12 +180,15 @@ describe("deepseek request lowering", () => {
       tools: [{
         name: "Read",
         description: "Read a file",
-        inputSchemaJson: JSON.stringify(inputSchema),
-        outputSchemaJson: JSON.stringify({ type: "object", properties: { text: { type: "string" } } }),
+        function: {
+          inputSchemaJson: JSON.stringify(inputSchema),
+          outputSchemaJson: JSON.stringify({ type: "object", properties: { text: { type: "string" } } }),
+        },
       }],
     }));
 
     expect(lowered.tools.Read).toEqual({
+      kind: "function",
       description: "Read a file",
       inputSchema: { kind: "ai-sdk-json-schema", schema: inputSchema },
       outputSchema: { kind: "ai-sdk-json-schema", schema: { type: "object", properties: { text: { type: "string" } } } },

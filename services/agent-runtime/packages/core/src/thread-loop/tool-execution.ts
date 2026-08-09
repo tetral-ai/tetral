@@ -199,6 +199,10 @@ export function registerRuntimeToolCall(
   if (entry === undefined || toolCatalog === undefined) {
     return { type: "invalid" };
   }
+  const input = executionInputForToolCall(entry, event.input);
+  if (input === undefined) {
+    return { type: "invalid" };
+  }
   const jobId = `${modelRequestId}:${event.id}`;
   const job: ToolJob = {
     id: jobId,
@@ -207,14 +211,37 @@ export function registerRuntimeToolCall(
     kind: entry.route.kind === "gateway" && entry.route.operation === "RunMcpTool" ? "mcp" : "builtin",
     name: event.toolName,
     route: entry.route,
-    input: event.input,
-    runPolicy: inferToolRunPolicy(entry, event.input),
+    input,
+    runPolicy: inferToolRunPolicy(entry, input),
     gateState: "runnable",
   };
   state.nextToolModelOrder += 1;
   state.toolEntries[job.id] = entry;
   state.toolScheduler.addJob(job);
   return { type: "registered", jobId };
+}
+
+function executionInputForToolCall(entry: ToolEntry, input: RuntimeJsonValue): RuntimeJsonValue | undefined {
+  if (entry.inputContract.kind === "freeform_string") {
+    return typeof input === "string" ? { [entry.inputContract.executionField]: input } : undefined;
+  }
+  return typeof input === "object" && input !== null && !Array.isArray(input) ? input : undefined;
+}
+
+function recoveredExecutionInput(entry: ToolEntry, input: RuntimeJsonValue): RuntimeJsonValue {
+  const object = RuntimeJsonValueSchema.parse(input);
+  if (typeof object !== "object" || object === null || Array.isArray(object)) {
+    throw new Error("recovered tool input must be an object");
+  }
+  const record = object as Readonly<Record<string, RuntimeJsonValue>>;
+  if (entry.inputContract.kind === "freeform_string") {
+    const keys = Object.keys(record);
+    if (keys.length !== 1 || keys[0] !== entry.inputContract.executionField ||
+      typeof record[entry.inputContract.executionField] !== "string") {
+      throw new Error("recovered freeform tool input is not canonical");
+    }
+  }
+  return record;
 }
 
 export function installLoadedPendingToolUses(
@@ -246,7 +273,7 @@ export function installLoadedPendingToolUses(
       if (entry === undefined) {
         throw new Error("pending tool use context references an unavailable tool");
       }
-      const input = RuntimeJsonValueSchema.parse(pending.input);
+      const input = recoveredExecutionInput(entry, pending.input);
       const loadedPart = findLoadedPendingToolUsePart(messages, pending);
       if (loadedPart === undefined) {
         throw new Error("pending tool use context is missing its durable message");
@@ -348,7 +375,7 @@ export function installLoadedSandboxExecutions(
       if (entry === undefined || entry.route.kind !== "sandbox" || entry.route.operation !== "RunTool") {
         throw new Error("sandbox execution context references an unavailable sandbox tool");
       }
-      const input = RuntimeJsonValueSchema.parse(execution.input);
+      const input = recoveredExecutionInput(entry, execution.input);
       const loadedPart = findLoadedPendingToolUsePart(messages, execution);
       if (loadedPart === undefined) {
         throw new Error("sandbox execution context is missing its durable message");
