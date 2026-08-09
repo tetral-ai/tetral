@@ -14,6 +14,8 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
@@ -1102,6 +1104,18 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, request.GetScope(), request.GetRuntimeWriteId(), now); err != nil {
 				return err
 			}
+		}
+		// Runtime termination removes every current-thread and, for the main
+		// thread, sibling Sandbox blocker before release readiness is evaluated
+		// once for the Session. Queue custody is assigned in this transaction.
+		releaseJobs, err := sandboxrelease.ReadyRequestsTx(
+			ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), now, nil,
+		)
+		if err != nil {
+			return err
+		}
+		if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
+			return err
 		}
 		errorStamp, err := appendRuntimeTerminationErrorTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failureJSON, now)
 		if err != nil {

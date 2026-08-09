@@ -17,7 +17,10 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
+	"github.com/tetral-ai/tetral/internal/session"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 )
 
@@ -363,6 +366,83 @@ func TestPostgreSQLRuntimePodLossSweepConvergesConcurrentReplicasAndActiveFences
 	_ = candidate
 }
 
+func TestPostgreSQLRuntimePodLossSweepTreatsDeletedFrozenCandidateAsInactiveAndContinues(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	deleted := seedRuntimePodLossSweepSession(t, admin, 311, "running")
+	later := seedRuntimePodLossSweepSession(t, admin, 312, "running")
+	client := dbconnect.NewClientForTesting(runtime)
+	deleteStore := session.NewPostgreSQLSessionStore(client, session.WithSessionDeleteSandboxRelease(
+		func(ctx context.Context, tx *dbconnect.Tx, ws workspace.ID, sessionID string, now time.Time) error {
+			_, _, err := sandboxrelease.EnsureTx(ctx, tx, string(ws), sessionID, sandboxrelease.SessionDelete, "", now)
+			return err
+		},
+	))
+	var deletedAfterCensus atomic.Bool
+	var logs bytes.Buffer
+	store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
+		if deletedAfterCensus.CompareAndSwap(false, true) {
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_status SET status='idle'
+				WHERE workspace_id='default' AND session_id=$1`, deleted.sessionID); err != nil {
+				t.Fatalf("finish frozen candidate before production deletion: %v", err)
+			}
+			if err := deleteStore.WithWorkspaceTx(context.Background(), workspace.DefaultID, func(tx session.Transaction) error {
+				return tx.DeleteSession(context.Background(), deleted.sessionID)
+			}); err != nil {
+				t.Fatalf("delete frozen pod-loss candidate through Session store: %v", err)
+			}
+		}
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
+	if err != nil || repaired != 1 {
+		t.Fatalf("pod-loss sweep after frozen candidate deletion = %d/%v; want 1/nil", repaired, err)
+	}
+	if !deletedAfterCensus.Load() {
+		t.Fatal("pod-loss census did not run deletion race hook")
+	}
+	var lifecycleState, bindingID string
+	var bindingGeneration int64
+	var closeoutEvents int
+	if err := admin.QueryRowContext(context.Background(), `SELECT lifecycle_state FROM sessions
+		WHERE workspace_id='default' AND id=$1`, deleted.sessionID).Scan(&lifecycleState); err != nil {
+		t.Fatalf("read deleted frozen candidate: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT binding_id, binding_generation
+		FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, deleted.sessionID).Scan(&bindingID, &bindingGeneration); err != nil {
+		t.Fatalf("read deleted frozen binding: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
+		WHERE workspace_id='default' AND session_id=$1
+		  AND type IN ('session.error','span.model_request_end','agent.tool_result')`, deleted.sessionID).Scan(&closeoutEvents); err != nil {
+		t.Fatalf("count deleted frozen closeout events: %v", err)
+	}
+	if lifecycleState != "deleted" || bindingID != deleted.binding.BindingID || bindingGeneration != deleted.binding.BindingGeneration || closeoutEvents != 0 {
+		t.Fatalf("deleted frozen candidate = lifecycle %q binding %q/%d closeout %d; want deleted original binding and no repair",
+			lifecycleState, bindingID, bindingGeneration, closeoutEvents)
+	}
+	var laterBindings int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings
+		WHERE workspace_id='default' AND session_id=$1`, later.sessionID).Scan(&laterBindings); err != nil || laterBindings != 0 {
+		t.Fatalf("later candidate binding rows = %d/%v; want repaired", laterBindings, err)
+	}
+	records := decodeRuntimePodLossLogRecords(t, &logs)
+	var staleRecord, summary map[string]any
+	for _, record := range records {
+		if record["event"] == "runtime_pod_loss_stale" && record["session.id"] == deleted.sessionID {
+			staleRecord = record
+		}
+		if record["event"] == "runtime_pod_loss_sweep_completed" {
+			summary = record
+		}
+	}
+	if staleRecord == nil || staleRecord["stale.reason"] != "inactive" {
+		t.Fatalf("deleted frozen stale record = %#v; want inactive", staleRecord)
+	}
+	if summary == nil || summary["repaired.count"] != float64(1) || summary["stale.count"] != float64(1) || summary["failed.count"] != float64(0) {
+		t.Fatalf("deleted frozen sweep summary = %#v; want repaired/stale/failed 1/1/0", summary)
+	}
+}
+
 func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	fixture := seedRuntimePodLostDeliveryFixture(t, admin, 212, "Write", "idle", false, false, false, false, true)
@@ -466,11 +546,34 @@ func TestPostgreSQLRuntimePodLossSweepIsolatesEarlyPageFailureWithListenerConnec
 		t.Fatalf("corrupt early candidate binding: %v", err)
 	}
 	runtime.SetMaxOpenConns(2)
-	listenerConn, err := runtime.Conn(context.Background())
-	if err != nil {
-		t.Fatalf("occupy notification-listener connection: %v", err)
+	client := dbconnect.NewClientForTesting(runtime)
+	wake := queue.NewWakeSignal()
+	listenerCtx, cancelListener := context.WithCancel(context.Background())
+	listenerDone := make(chan error, 1)
+	readySnapshot := wake.Snapshot()
+	go func() {
+		listenerDone <- queue.RunNotificationListener(
+			listenerCtx, queue.PostgreSQLNotificationListener{Client: client}, queue.ConsumerClassBridge, wake, nil,
+		)
+	}()
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := wake.Wait(readyCtx, time.Hour, readySnapshot); err != nil {
+		cancelReady()
+		cancelListener()
+		t.Fatalf("wait for PostgreSQL notification listener: %v", err)
 	}
-	defer func() { _ = listenerConn.Close() }()
+	cancelReady()
+	defer func() {
+		cancelListener()
+		select {
+		case err := <-listenerDone:
+			if err != nil {
+				t.Errorf("notification listener shutdown: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("notification listener did not stop")
+		}
+	}()
 	var logs bytes.Buffer
 	store := runtimePodLossSweepStore(runtime, &logs, func() enginekubernetes.BindingVisibilitySnapshot {
 		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)

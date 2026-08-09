@@ -189,6 +189,15 @@ func loadThreadTurnFactsTx(
 		return facts, err
 	}
 	for _, raw := range rawEvents {
+		if raw.eventType == childInterruptRequestedEventType {
+			include, err := includeChildInterruptTurnFact(raw.payloadJSON)
+			if err != nil {
+				return facts, err
+			}
+			if !include {
+				continue
+			}
+		}
 		event, err := bridgeTurnEventFact(
 			ctx, tx, scope, raw.eventID, raw.eventSequence, raw.eventType, raw.modelRequestID,
 			raw.payloadJSON, raw.projectionJSON, raw.runtimeWriteID, toolParts,
@@ -204,6 +213,26 @@ func loadThreadTurnFactsTx(
 	}
 	facts.MessageLineage = lineage
 	return facts, nil
+}
+
+// Child-control admission stores its complete durable census as events, but
+// only pending_control is Runtime work. Cold projection validates the closed
+// disposition set before omitting terminal census evidence from the hot turn.
+func includeChildInterruptTurnFact(payloadJSON string) (bool, error) {
+	var payload struct {
+		Disposition string `json:"disposition"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return false, status.Error(codes.FailedPrecondition, "child interrupt disposition is malformed")
+	}
+	switch payload.Disposition {
+	case "pending_control":
+		return true, nil
+	case "already_closed", "preserved_failed", "preserved_terminated":
+		return false, nil
+	default:
+		return false, status.Error(codes.FailedPrecondition, "child interrupt disposition is malformed")
+	}
 }
 
 func loadContextTurnEventFloorTx(

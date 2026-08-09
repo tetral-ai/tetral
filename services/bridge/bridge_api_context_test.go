@@ -133,6 +133,100 @@ func TestPostgreSQLBridgeAPIStoreLoadContextCarriesRawTurnFactsAndMessageLineage
 	}
 }
 
+func TestPostgreSQLBridgeAPIStoreLoadContextProjectsOnlyPendingChildInterruptWork(t *testing.T) {
+	tests := []struct {
+		name               string
+		threadStatus       string
+		corruptDisposition string
+		wantDisposition    bridgev1.ChildInterruptDisposition
+		wantIncluded       bool
+		wantError          bool
+	}{
+		{name: "pending control", threadStatus: "idle", wantDisposition: bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL, wantIncluded: true},
+		{name: "already closed", threadStatus: "closed_for_runtime", wantDisposition: bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED},
+		{name: "preserved failed", threadStatus: "failed", wantDisposition: bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED},
+		{name: "preserved terminated", threadStatus: "terminated", wantDisposition: bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED},
+		{name: "missing disposition", threadStatus: "idle", corruptDisposition: "missing", wantDisposition: bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL, wantError: true},
+		{name: "unknown disposition", threadStatus: "idle", corruptDisposition: "unknown", wantDisposition: bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			suffix := strings.ReplaceAll(test.name, " ", "_")
+			sessionID := "sesn_child_interrupt_projection_" + suffix
+			mainID := "thr_child_interrupt_projection_main_" + suffix
+			childID := "thr_child_interrupt_projection_child_" + suffix
+			bindingID := "bind_child_interrupt_projection_" + suffix
+			podUID := "pod_child_interrupt_projection_" + suffix
+			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
+			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
+				SET status=$1 WHERE workspace_id='default' AND session_id=$2 AND id=$3`, test.threadStatus, sessionID, childID); err != nil {
+				t.Fatalf("set child status: %v", err)
+			}
+			sourceID := "evt_child_interrupt_projection_source_" + suffix
+			seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, sourceID)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+			store.RuntimeBindingTokenHMACKey = []byte("child-interrupt-projection-key-32")
+			parentScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+			admitted, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+				Scope: parentScope, RootChildThreadId: childID, SourceToolUseEventId: sourceID,
+				Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE, IncludeDescendants: true,
+			})
+			if err != nil {
+				t.Fatalf("AdmitChildInterrupt: %v", err)
+			}
+			if len(admitted.GetTargets()) != 1 || admitted.GetTargets()[0].GetDisposition() != test.wantDisposition {
+				t.Fatalf("admitted disposition = %+v; want %s", admitted.GetTargets(), test.wantDisposition)
+			}
+			switch test.corruptDisposition {
+			case "missing":
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+					SET payload_json=(payload_json::jsonb - 'disposition')::text
+					WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+					  AND type=$3 AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4`,
+					sessionID, childID, childInterruptRequestedEventType, sourceID); err != nil {
+					t.Fatalf("remove stored disposition: %v", err)
+				}
+			case "unknown":
+				if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
+					SET payload_json=jsonb_set(payload_json::jsonb, '{disposition}', '"unexpected"')::text
+					WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+					  AND type=$3 AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4`,
+					sessionID, childID, childInterruptRequestedEventType, sourceID); err != nil {
+					t.Fatalf("corrupt stored disposition: %v", err)
+				}
+			}
+			response, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+				Scope: scopeForThread(parentScope, childID), RuntimeInputId: "rin_child_interrupt_projection_" + suffix,
+			})
+			if test.wantError {
+				if status.Code(err) != codes.FailedPrecondition {
+					t.Fatalf("LoadContext error = %v; want FailedPrecondition", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadContext: %v", err)
+			}
+			var payload bridgeLoadContextPayload
+			if err := json.Unmarshal([]byte(response.GetContextJson()), &payload); err != nil {
+				t.Fatalf("decode LoadContext: %v", err)
+			}
+			included := false
+			for _, event := range payload.TurnFacts.Events {
+				if event.Type == childInterruptRequestedEventType {
+					included = true
+				}
+			}
+			if included != test.wantIncluded {
+				t.Fatalf("child interrupt projected = %t; want %t in %+v", included, test.wantIncluded, payload.TurnFacts.Events)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreLoadContextCutsTurnFactsAtLatestCompaction(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (

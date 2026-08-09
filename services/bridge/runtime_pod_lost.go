@@ -496,6 +496,10 @@ func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
 	result := runtimePodLossMutationResult{status: runtimePodLossMutationRepaired}
 	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+			if code, ok := closeoutSentinelCode(err); requireActive && ok && code == closeoutScopeSupersededCode {
+				result = runtimePodLossMutationResult{status: runtimePodLossMutationStale, staleReason: "inactive"}
+				return nil
+			}
 			return err
 		}
 		current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, workspaceID, sessionID)

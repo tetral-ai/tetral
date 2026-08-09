@@ -22,6 +22,8 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/files"
 	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
+	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 )
 
@@ -1771,13 +1773,17 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 	); err != nil {
 		t.Fatalf("seed dispatched sandbox execution: %v", err)
 	}
+	releaseOperationID, oldReleaseJobID := parkBridgeSandboxRelease(
+		t, runtime, admin, "sesn_bridge_terminate_direct_sandbox", "sbox_bridge_terminate_direct_sandbox", "provider_terminate_direct_sandbox",
+	)
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
-	response, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
+	request := &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_direct_sandbox", FailureJson: failureJSON,
 		ToolSettlements: []*bridgev1.RuntimeToolSettlement{
 			bridgeCancelledToolSettlementForTest(toolUse.GetEventId(), "Runtime terminated."),
 		},
-	})
+	}
+	response, err := store.CommitRuntimeTermination(context.Background(), request)
 	if err != nil {
 		t.Fatalf("CommitRuntimeTermination dispatched sandbox execution: %v", err)
 	}
@@ -1808,6 +1814,13 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 		consumptionReason != "runtime_terminated" || toolResultCount != 1 {
 		t.Fatalf("termination ack=%s execution=%q result=%v terminal=%q reason=%q events=%d; want committed consumed thin receipt and one Tool Result",
 			response.GetAck().GetStatus(), executionState, resultJSON, terminalEventID, consumptionReason, toolResultCount)
+	}
+	newReleaseJobID := assertBridgeSandboxReleaseWoken(t, admin, releaseOperationID, oldReleaseJobID, 2)
+	if replay, err := store.CommitRuntimeTermination(context.Background(), request); err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
+		t.Fatalf("CommitRuntimeTermination replay = %#v, %v; want duplicate", replay, err)
+	}
+	if got := assertBridgeSandboxReleaseWoken(t, admin, releaseOperationID, oldReleaseJobID, 2); got != newReleaseJobID {
+		t.Fatalf("termination replay release job = %q; want retained %q", got, newReleaseJobID)
 	}
 }
 
@@ -1880,6 +1893,9 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 	); err != nil {
 		t.Fatalf("seed staged sandbox execution: %v", err)
 	}
+	releaseOperationID, oldReleaseJobID := parkBridgeSandboxRelease(
+		t, runtime, admin, "sesn_bridge_terminate_sandbox", "sbox_bridge_terminate_sandbox", "provider_terminate_sandbox",
+	)
 	failureJSON := `{"type":"runtime","code":"runtime_invalid_sequence","message":"Runtime operation failed.","retryable":false,"fatal":true,"retryStatus":{"type":"terminal"},"reason":"runtime_contract_validation"}`
 	response, err := store.CommitRuntimeTermination(context.Background(), &bridgev1.CommitRuntimeTerminationRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_terminate_sandbox", FailureJson: failureJSON,
@@ -1949,6 +1965,80 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 			response.GetAck().GetStatus(), siblingStatus, mcpSiblingStatus, executionState, resultJSON, resultDigest,
 			terminalEventID, toolResultEventID, consumptionReason, toolResultCount, mcpResultCount, toolResultPayload, mcpResultPayload)
 	}
+	assertBridgeSandboxReleaseWoken(t, admin, releaseOperationID, oldReleaseJobID, 2)
+}
+
+func parkBridgeSandboxRelease(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, logicalSandboxID string, providerResourceID string) (string, string) {
+	t.Helper()
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		materialized_resource_revision, resource_credential_expires_at,
+		resource_roots_json, helper_verified_at, created_at, updated_at
+	) VALUES (
+		'default',$1,$2,$3,1,'daytona',$4,1,1,
+		'2027-01-01T00:00:00Z','[]','2026-01-01T00:00:00Z',
+		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'
+	)`, sessionID, logicalSandboxID, "env_"+sessionID, providerResourceID); err != nil {
+		t.Fatalf("seed terminated Sandbox binding: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtime)
+	var operationID string
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.runtime_termination_release", func(tx *dbconnect.Tx) error {
+		var err error
+		operationID, _, err = sandboxrelease.EnsureTx(
+			context.Background(), tx, "default", sessionID,
+			sandboxrelease.SessionDelete, providerResourceID, time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed terminated Sandbox release: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(client)
+	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: "default", Kinds: []string{queue.KindSandboxRelease},
+		LeaseOwner: "sandbox-runtime-termination-park", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease release before termination = %#v, %v; want one job", leased, err)
+	}
+	oldJobID := leased[0].ID
+	if updated, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: "default", JobID: oldJobID, LeaseToken: leased[0].LeaseToken,
+	}); err != nil || !updated {
+		t.Fatalf("ACK parked termination release = %t, %v; want true,nil", updated, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
+		SET queue_job_id=NULL, queue_kind=NULL, queue_partition_key=NULL, queue_dedupe_key=NULL,
+		    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+		WHERE workspace_id='default' AND operation_id=$1`, operationID); err != nil {
+		t.Fatalf("park terminated Sandbox release: %v", err)
+	}
+	return operationID, oldJobID
+}
+
+func assertBridgeSandboxReleaseWoken(t *testing.T, admin *sql.DB, operationID string, oldJobID string, wantJobCount int) string {
+	t.Helper()
+	var jobID, status string
+	if err := admin.QueryRowContext(context.Background(), `SELECT o.queue_job_id, q.status
+		FROM sandbox_lifecycle_operations o
+		JOIN queue_jobs q ON q.workspace_id=o.workspace_id AND q.id=o.queue_job_id
+		WHERE o.workspace_id='default' AND o.operation_id=$1`, operationID).Scan(&jobID, &status); err != nil {
+		t.Fatalf("read termination release custody: %v", err)
+	}
+	if jobID == oldJobID || status != queue.StatusPending {
+		t.Fatalf("termination release job = %q/%q; want fresh pending successor", jobID, status)
+	}
+	var count int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1
+		  AND payload_json::jsonb ->> 'operation_id'=$2`, queue.KindSandboxRelease, operationID).Scan(&count); err != nil {
+		t.Fatalf("count termination release jobs: %v", err)
+	}
+	if count != wantJobCount {
+		t.Fatalf("termination release jobs = %d; want %d", count, wantJobCount)
+	}
+	return jobID
 }
 
 func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLocal(t *testing.T) {
