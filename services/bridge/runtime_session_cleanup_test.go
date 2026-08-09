@@ -1076,9 +1076,9 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 		Scope: scope, RuntimeWriteId: "rwrite_cleanup_cold_approval_tool", ModelRequestId: modelRequestID,
 		EventType:   "agent.tool_use",
 		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":` + string(approvalInputJSON) + `,"evaluated_permission":"ask"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_cleanup_cold_approval_tool", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{
+			bridgeRuntimePartCreateForTest{
 				kind: "tool",
 				json: string(approvalPartJSON),
 			},
@@ -1229,48 +1229,18 @@ func TestPostgreSQLRuntimeDeliveryStoreCleanupSessionPreservesApprovalForColdSet
 	if _, err := bridgeStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope: recoveryScope, RuntimeInputId: "rin_cleanup_cold_approval_deny", InputKind: "tool_confirmation",
 		EventIds: []string{confirmationEventID}, SequenceFrom: confirmationSequence, SequenceTo: confirmationSequence,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeInputDraftForTest(
-			"default", sessionID, threadID, "tool_confirmation", "rin_cleanup_cold_approval_deny", confirmationEventID,
-			bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_APPROVAL_INPUT, "user", "Approval denied: not safe",
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeApprovalInputCreateForTest(
+			"default", sessionID, threadID, "rin_cleanup_cold_approval_deny", confirmationEventID, "Approval denied: not safe",
 		)},
 	}); err != nil {
 		t.Fatalf("commit cleanup approval denial: %v", err)
-	}
-	terminalApprovalPartJSON, err := json.Marshal(map[string]any{
-		"type":           "tool",
-		"toolCallId":     "tool-call-cleanup-cold-approval",
-		"toolName":       "Write",
-		"toolUseEventId": toolUse.GetEventId(),
-		"toolEvent":      map[string]any{"kind": "tool"},
-		"state": map[string]any{
-			"status": "error",
-			"input": map[string]any{
-				"value":     approvalInputValue,
-				"preview":   string(initialPreviewBytes),
-				"truncated": true,
-			},
-			"error": map[string]any{
-				"type":      "tool_denied",
-				"message":   "Approval denied: not safe",
-				"retryable": false,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal cleanup approval terminal part: %v", err)
 	}
 	terminal, err := bridgeStore.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: recoveryScope, RuntimeWriteId: "rwrite_cleanup_cold_approval_result", ModelRequestId: modelRequestID,
 		EventType:      "agent.tool_result",
 		PayloadJson:    `{"type":"agent.tool_result","tool_use_event_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"Approval denied: not safe"}],"is_error":true}`,
 		SessionVisible: true,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t, recoveryScope, "rwrite_cleanup_cold_approval_result", "agent.tool_result", "completed",
-			bridgeRuntimePartDraftForTest{
-				kind: "tool",
-				json: string(terminalApprovalPartJSON),
-			},
-		)},
+		Declaration:    &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolUse.GetEventId(), "Approval denied: not safe")},
 	})
 	if err != nil {
 		t.Fatalf("write cleanup approval denial result: %v", err)

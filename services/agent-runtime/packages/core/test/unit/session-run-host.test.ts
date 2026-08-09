@@ -63,7 +63,7 @@ function acceptedInput(sessionId: string, runtimeInputId = `rin_${sessionId}`): 
 function threadControl(
   sessionId: string,
   runtimeInputId = `rin_control_${sessionId}`,
-): RuntimeThreadControlState {
+): RuntimeThreadControlState & { readonly origin: "user" } {
   return {
     requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_test",
@@ -76,6 +76,7 @@ function threadControl(
     eventIds: [`sevt_${runtimeInputId}`],
     sequenceFrom: 1,
     sequenceTo: 1,
+		origin: "user",
   };
 }
 
@@ -89,7 +90,6 @@ interface ManagerCall {
     | "cleanupSession"
     | "preloadThread"
     | "ensureThreadInstalled"
-    | "interruptThread"
     | "interruptReviewerExecution"
     | "markThreadClosed"
     | "markThreadActive"
@@ -157,12 +157,6 @@ function fakeManagerLayer(calls: ManagerCall[]): Layer.Layer<SessionManager.Serv
           calls.push({ method: "ensureThreadInstalled", args });
           const command = args[0];
           return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: false };
-        }),
-      interruptThread: (...args: readonly [Parameters<SessionManager.Interface["interruptThread"]>[0], ...unknown[]]) =>
-        Effect.sync(() => {
-          calls.push({ method: "interruptThread", args });
-          const command = args[0];
-          return { ok: true as const, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true };
         }),
       interruptReviewerExecution: (...args: readonly [Parameters<SessionManager.Interface["interruptReviewerExecution"]>[0], SessionManager.ReviewerExecutionToken, ...unknown[]]) =>
         Effect.sync(() => {
@@ -524,7 +518,6 @@ describe("SessionRunHost", () => {
       "handleInspectThread",
       "handleInterruptControl",
       "handleInterruptReviewerExecution",
-      "handleInterruptThread",
       "handleMarkThreadActive",
       "handleMarkThreadClosed",
       "handlePreloadThread",

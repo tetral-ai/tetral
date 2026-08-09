@@ -18,6 +18,8 @@ import type { RuntimeAcceptedInputState, RuntimeApprovalReviewAcceptedInputState
 import type { RuntimeResolvedAgentMail } from "@tetral/agent-runtime-core/src/context/context-loader.js";
 import type { SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
+import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
@@ -43,7 +45,6 @@ export interface RuntimeCoreHosts {
 export interface RuntimeSubAgentRunHost {
   readonly enqueueThreadInput: (input: RuntimeAcceptedInputState) => Promise<SessionManager.AcceptInputResult>;
   readonly preloadThread: (input: Omit<RuntimeThreadPreloadState, "messages" | "turnCheckpoint" | "turnToolRouteView" | "durableTurnId" | "runtimeBindingToken" | "runtimeConfigPatch" | "mcpManifests" | "pendingToolUses" | "pendingSandboxExecutions" | "backgroundTools" | "pendingAttachments" | "pendingAgentMail" | "coldCoverage">) => Promise<SessionManager.ThreadLifecycleResult>;
-  readonly interruptThread: (command: Parameters<SessionRunHost.Interface["handleInterruptThread"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly interruptReviewerExecution: (command: RuntimeThreadControlState, token: SessionManager.ReviewerExecutionToken) => Promise<SessionManager.ReviewerExecutionControlResult>;
   readonly markThreadClosed: (command: Parameters<SessionRunHost.Interface["handleMarkThreadClosed"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
   readonly markThreadActive: (command: Parameters<SessionRunHost.Interface["handleMarkThreadActive"]>[0]) => Promise<SessionManager.ThreadLifecycleResult>;
@@ -124,6 +125,14 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               pendingToolUses: context.pendingToolUses ?? [],
               pendingSandboxExecutions: context.pendingSandboxExecutions ?? [],
             });
+			if (context.thread?.status === "closed_for_runtime") {
+			  validateClosedThreadResumeCheckpoint(
+				turnCheckpoint,
+				turnToolRouteView,
+				context.pendingToolUses ?? [],
+				context.pendingSandboxExecutions ?? [],
+			  );
+			}
             return {
               ...command,
               ...(context.thread !== undefined ? { thread: context.thread } : {}),
@@ -213,7 +222,6 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       preloadThread: async (input) => {
         return await Effect.runPromise(host.handleEnsureThreadInstalled(input));
       },
-      interruptThread: async (command) => await Effect.runPromise(host.handleInterruptThread(command)),
       interruptReviewerExecution: async (command, token) => await Effect.runPromise(host.handleInterruptReviewerExecution(command, token)),
       markThreadClosed: async (command) => await Effect.runPromise(host.handleMarkThreadClosed(command)),
       markThreadActive: async (command) => await Effect.runPromise(host.handleMarkThreadActive(command)),
@@ -255,7 +263,6 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         targetPodUid: command.targetPodUid,
         writeId: `rwrite_${event.review_id}_decision`,
         event,
-        drafts: [],
       }),
       commitApprovalReviewFailure: async (command, event) => await options.threadLoop.sessionEventWriter.append({
         requestId: command.requestId,
@@ -267,7 +274,6 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         targetPodUid: command.targetPodUid,
         writeId: `rwrite_${event.review_id}_failure`,
         event,
-        drafts: [],
       }),
     },
     cleanupRunHost: {
@@ -280,6 +286,37 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       await Effect.runPromise(Scope.close(scope, Exit.void));
     },
   };
+}
+
+/**
+ * Accepts only a quiescent cold checkpoint for resume. Deferred task
+ * notifications are intentionally absent from this execution checkpoint and
+ * are reactivated by Bridge after the durable lifecycle transition wins.
+ */
+export function validateClosedThreadResumeCheckpoint(
+  checkpoint: ThreadTurnCheckpoint,
+  routeView: ThreadToolRouteView,
+  pendingToolUses: readonly unknown[],
+  pendingSandboxExecutions: readonly unknown[],
+): void {
+  const decision = deriveThreadTurnDecision(checkpoint, routeView);
+  const incompleteToolUse = checkpoint.request?.toolMembers.some((member) =>
+    member.memberKind === "public_tool_use" && member.terminalResult === undefined
+  ) ?? false;
+  if (
+    checkpoint.executionRunId !== undefined ||
+    checkpoint.interruptEventId !== undefined ||
+    checkpoint.terminalCloseout !== undefined ||
+    checkpoint.request?.requestEnd === undefined && checkpoint.request !== undefined ||
+    incompleteToolUse ||
+    pendingToolUses.length !== 0 ||
+    pendingSandboxExecutions.length !== 0 ||
+    routeView.routes.length !== 0 ||
+    decision.state.state !== "idle" ||
+    decision.action.action !== "await_input"
+  ) {
+    throw new Error("closed Thread resume requires a quiescent durable checkpoint");
+  }
 }
 
 function acceptedResolvedAgentMail(

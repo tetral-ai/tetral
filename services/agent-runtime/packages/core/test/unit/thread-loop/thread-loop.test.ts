@@ -206,7 +206,7 @@ test("assembles non-persistent runtime inputs into LLMRequest without storing th
             {
                 name: "third_group_lookup",
                 description: toolDescriptionCanary,
-                inputSchemaJson: JSON.stringify(tools[0]?.inputSchema),
+                function: { inputSchemaJson: JSON.stringify(tools[0]?.inputSchema) },
             },
         ],
         attachments: [],
@@ -320,14 +320,14 @@ test("lost CommitInputs response retries the frozen declaration without duplicat
     const session = new ThreadRuntime("sesn_lost_commit_response");
     const input = acceptedInput("rin_lost_commit_response", session.sessionId);
     session.state.enqueueAcceptedInput(input);
-    const submittedDrafts: string[] = [];
+    const submittedCreates: string[] = [];
     let attempts = 0;
     const loader: TestContextLoader = {
         buildContext: async () => [],
         loadPendingInput: async () => ({ type: "empty" }),
         commitAcceptedInput: async (accepted, options) => {
             attempts += 1;
-            submittedDrafts.push(JSON.stringify(options?.drafts ?? []));
+            submittedCreates.push(JSON.stringify(options?.messageCreates ?? []));
             if (attempts === 1) {
                 throw normalizeContextLoaderError({
                     code: "unavailable",
@@ -343,7 +343,7 @@ test("lost CommitInputs response retries the frozen declaration without duplicat
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader))));
     expect(result).toMatchObject({ type: "completed" });
     expect(attempts).toBe(2);
-    expect(new Set(submittedDrafts).size).toBe(1);
+    expect(new Set(submittedCreates).size).toBe(1);
     expect(session.state.contextManager.messages().filter((message) => message.origin === "user")).toHaveLength(1);
 });
 test("one request cut commits every input accepted before the boundary", async () => {
@@ -981,7 +981,7 @@ test("runtime layer admits an input accepted during an empty request before idle
             {
                 name: "third_group_follow_up",
                 description: "follow-up tool",
-                inputSchemaJson: "{\"type\":\"object\",\"properties\":{}}",
+                function: { inputSchemaJson: "{\"type\":\"object\",\"properties\":{}}" },
             },
         ]);
         expect(request.limits?.maxOutputTokens).toBe(222);
@@ -1309,7 +1309,7 @@ describe("ThreadState", () => {
     } satisfies RuntimeAcceptedInputState;
 
     expect(state.enqueueAcceptedInput(mail)).toBe("applied");
-    state.discardQueuedAcceptedInputsBeforeFence(10);
+    state.discardQueuedAcceptedInputsBeforeFence(10, true);
 
     expect(state.peekAcceptedInput()).toEqual(mail);
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");

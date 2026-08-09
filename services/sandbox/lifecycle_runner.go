@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -118,6 +119,7 @@ type SandboxActivationJobRunner struct {
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
 	Clock     func() time.Time
+	Logger    *slog.Logger
 }
 
 func (r *SandboxActivationJobRunner) RunOnce(ctx context.Context) error {
@@ -150,6 +152,7 @@ func (r *SandboxActivationJobRunner) RunOnceWithActivity(ctx context.Context) (b
 }
 
 func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg SandboxLifecycleRunnerConfig, localExpiry time.Time) (resultErr error) {
+	attemptStarted := time.Now()
 	workCtx, stopHeartbeat, err := startQueueLeaseGuard(ctx, r.Queue, queueJob, localExpiry, cfg.HeartbeatInterval, cfg.LeaseDuration)
 	if err != nil {
 		return err
@@ -160,49 +163,81 @@ func (r *SandboxActivationJobRunner) processJob(ctx context.Context, queueJob *q
 		}
 	}()
 	ctx = workCtx
+	ctx = withActivationAttemptStarted(ctx, attemptStarted)
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindSandboxActivate, writer)
+		}
+	}()
 	if queueJob.GetMaxAttempts() <= 0 {
 		if err := lifecycleFinalizerError(r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxActivate, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
-		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		err := transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
 			ErrorKind: "sandbox_queue_integrity_error", ErrorMessage: "sandbox activation job has no attempt budget",
 		}))
+		if err == nil {
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "sandbox_queue_integrity_error", "sandbox activation job has no attempt budget")
+		}
+		return err
 	}
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, queueJob, queue.KindSandboxActivate, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
-		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		err := transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
 			ErrorKind: "sandbox_activation_attempts_exhausted", ErrorMessage: "sandbox activation attempt budget exhausted",
 		}))
+		if err == nil {
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "sandbox_activation_attempts_exhausted", "sandbox activation attempt budget exhausted")
+		}
+		return err
 	}
 	job, err := DecodeSandboxLifecycleJob(queueJob, queue.KindSandboxActivate)
 	if err != nil {
 		if err := lifecycleFinalizerError(r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxActivate, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
-		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		err := transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: queueJob.GetWorkspaceId(), JobId: queueJob.GetId(), LeaseToken: queueJob.GetLeaseToken(),
 			ErrorKind: "invalid_sandbox_activate_payload", ErrorMessage: "sandbox activation queue payload is invalid",
 		}))
+		if err == nil {
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, jobIdentity, "terminal_failure", "invalid_sandbox_activate_payload", "sandbox activation queue payload is invalid")
+		}
+		return err
 	}
+	jobIdentity = job
 	work, disposition, err := r.Store.ClaimActivation(ctx, job, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_activation_claim", err)
+		}
 		return r.retry(ctx, job, "sandbox_activation_store_error")
 	}
 	if disposition == SandboxLifecycleLostAuthority {
-		return errQueueLeaseLost
+		return queueAuthorityLostBy("sandbox_activation_claim", errQueueLeaseLost)
 	}
 	if disposition == SandboxLifecycleNotApplicable {
 		return r.ack(ctx, job)
@@ -219,9 +254,15 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 	case ActivationCreate, ActivationReplace:
 		resolution := adapter.ResolveActivation(ctx, ActivationResolutionRequest{StableName: work.StableName, Labels: work.Labels})
 		if resolution.Failed() {
+			resolved := "outcome_unknown"
+			if resolution.ErrorKind == "sandbox_identity_mismatch" {
+				resolved = "identity_mismatch"
+			}
+			logSandboxActivationResolved(r.Logger, job, resolved, "")
 			return r.handleActivationFailure(ctx, job, work, resolution.EffectBoundary, resolution.Disposition, resolution.ErrorKind, resolution.SafeMessage)
 		}
 		if resolution.Value.Found {
+			logSandboxActivationResolved(r.Logger, job, "owned_found", finiteDaytonaProviderState(resolution.Value.Handle.Metadata["daytona_state"]))
 			inspection := adapter.InspectForExecution(ctx, resolution.Value.Handle.SandboxID)
 			if inspection.Failed() {
 				return r.handleActivationFailure(ctx, job, work, inspection.EffectBoundary, inspection.Disposition, inspection.ErrorKind, inspection.SafeMessage)
@@ -238,6 +279,7 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 			}
 			return r.confirmActivationReady(ctx, job, work, adapter, outcome.Value)
 		}
+		logSandboxActivationResolved(r.Logger, job, "absent", "")
 		if !work.MayCreate {
 			return r.retry(ctx, job, "activation_observation_not_visible")
 		}
@@ -247,34 +289,45 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 	case ActivationStart:
 		inspection := adapter.InspectForExecution(ctx, work.CurrentHandle.SandboxID)
 		if inspection.Failed() {
+			logSandboxActivationResolved(r.Logger, job, "outcome_unknown", "")
 			return r.handleActivationFailure(ctx, job, work, inspection.EffectBoundary, inspection.Disposition, inspection.ErrorKind, inspection.SafeMessage)
 		}
 		if inspection.Value == ExecutionReady {
+			logSandboxActivationResolved(r.Logger, job, "owned_found", "started")
 			disposition, err := r.Store.CompleteActivation(ctx, work, work.CurrentHandle, r.now())
 			if err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_activation_complete", err)
+				}
 				return r.retry(ctx, job, "sandbox_activation_store_error")
 			}
 			if disposition == SandboxLifecycleLostAuthority {
-				return errQueueLeaseLost
+				return queueAuthorityLostBy("sandbox_activation_complete", errQueueLeaseLost)
 			}
 			return r.ack(ctx, job)
 		}
 		if inspection.Value != ExecutionNeedsActivation {
 			replacement, disposition, err := r.Store.ReplaceMissingActivation(ctx, work, r.now())
 			if err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_activation_replace_missing", err)
+				}
 				return r.retry(ctx, job, "sandbox_activation_store_error")
 			}
 			if disposition == SandboxLifecycleLostAuthority {
-				return errQueueLeaseLost
+				return queueAuthorityLostBy("sandbox_activation_replace_missing", errQueueLeaseLost)
 			}
 			if disposition == SandboxLifecycleNotApplicable {
+				logSandboxActivationResolved(r.Logger, job, "absent", "")
 				return r.ack(ctx, job)
 			}
 			if replacement.Kind == "" {
+				logSandboxActivationResolved(r.Logger, job, "absent", "")
 				return r.ack(ctx, job)
 			}
 			return r.activate(ctx, job, replacement, adapter)
 		}
+		logSandboxActivationResolved(r.Logger, job, "owned_found", "stopped")
 	}
 	outcome := adapter.Activate(ctx, ActivationRequest{Kind: work.Kind, Setup: work.Setup, CurrentHandle: work.CurrentHandle})
 	if outcome.Failed() {
@@ -297,10 +350,13 @@ func (r *SandboxActivationJobRunner) confirmActivationReady(ctx context.Context,
 func (r *SandboxActivationJobRunner) completeReadyActivation(ctx context.Context, job SandboxLifecycleJob, work SandboxActivationWork, handle sandbox.ProviderHandle) error {
 	disposition, err := r.Store.CompleteActivation(ctx, work, handle, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_activation_complete", err)
+		}
 		return r.retry(ctx, job, "sandbox_activation_store_error")
 	}
 	if disposition == SandboxLifecycleLostAuthority {
-		return errQueueLeaseLost
+		return queueAuthorityLostBy("sandbox_activation_complete", errQueueLeaseLost)
 	}
 	return r.ack(ctx, job)
 }
@@ -310,10 +366,13 @@ func (r *SandboxActivationJobRunner) handleActivationFailure(ctx context.Context
 	if boundary == ProviderOutcomeUnknown && (work.Kind == ActivationCreate || work.Kind == ActivationReplace) {
 		disposition, err := r.Store.ObserveUnknownActivation(ctx, work, kind, r.now())
 		if err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_activation_observe_unknown", err)
+			}
 			return err
 		}
 		if disposition == SandboxLifecycleLostAuthority {
-			return errQueueLeaseLost
+			return queueAuthorityLostBy("sandbox_activation_observe_unknown", errQueueLeaseLost)
 		}
 		if disposition == SandboxLifecycleNotApplicable {
 			return r.ack(ctx, job)
@@ -332,10 +391,13 @@ func (r *SandboxActivationJobRunner) handleActivationFailure(ctx context.Context
 func (r *SandboxActivationJobRunner) fail(ctx context.Context, job SandboxLifecycleJob, work SandboxActivationWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string) error {
 	lifecycleDisposition, err := r.Store.FailActivation(ctx, work, boundary, disposition, kind, message, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_activation_fail", err)
+		}
 		return err
 	}
 	if lifecycleDisposition == SandboxLifecycleLostAuthority {
-		return errQueueLeaseLost
+		return queueAuthorityLostBy("sandbox_activation_fail", errQueueLeaseLost)
 	}
 	if lifecycleDisposition == SandboxLifecycleNotApplicable {
 		return r.ack(ctx, job)
@@ -343,39 +405,67 @@ func (r *SandboxActivationJobRunner) fail(ctx context.Context, job SandboxLifecy
 	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
-	return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+	err = transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
 		ErrorKind: kind, ErrorMessage: "sandbox activation failed",
 	}))
+	if err == nil {
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "terminal_failure", kind, "sandbox activation failed")
+	}
+	return err
 }
 
 func (r *SandboxActivationJobRunner) retry(ctx context.Context, job SandboxLifecycleJob, kind string) error {
 	if job.AttemptCount >= job.MaxAttempts {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, job.QueueJob, queue.KindSandboxActivate, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
 			return err
 		}
-		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
+		err := transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
 			ErrorKind: "sandbox_activation_attempts_exhausted", ErrorMessage: "sandbox activation attempt budget exhausted",
 		}))
+		if err == nil {
+			logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "terminal_failure", "sandbox_activation_attempts_exhausted", "sandbox activation attempt budget exhausted")
+		}
+		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
-	return transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
+	err := transitionUpdated(r.Queue.Retry(ctx, &queuev1.RetryRequest{
 		WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken,
 		ErrorKind: kind, ErrorMessage: "sandbox activation will be retried",
 	}))
+	if err == nil {
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "retry", "", "")
+	}
+	return err
 }
 
 func (r *SandboxActivationJobRunner) ack(ctx context.Context, job SandboxLifecycleJob) error {
 	if err := stopQueueLeaseGuard(ctx); err != nil {
 		return err
 	}
-	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
+	err := transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{WorkspaceId: job.WorkspaceID, JobId: job.JobID, LeaseToken: job.LeaseToken}))
+	if err == nil {
+		logSandboxActivationAttemptCompleted(ctx, r.Logger, job, "success", "", "")
+	}
+	return err
+}
+
+func finiteDaytonaProviderState(state string) string {
+	switch state {
+	case "started", "stopped", "archived", "paused", "destroyed", "deleted", "creating", "pending_build", "building_snapshot", "pulling_snapshot", "resizing", "snapshotting", "forking", "restoring", "starting", "stopping", "archiving", "destroying", "pausing", "resuming", "deleting":
+		return state
+	default:
+		return ""
+	}
 }
 
 func (r *SandboxActivationJobRunner) now() time.Time {
@@ -391,6 +481,7 @@ type SandboxMaterializationJobRunner struct {
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
 	Clock     func() time.Time
+	Logger    *slog.Logger
 }
 
 func (r *SandboxMaterializationJobRunner) RunOnce(ctx context.Context) error {
@@ -433,8 +524,17 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 		}
 	}()
 	ctx = workCtx
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindSandboxMaterialize, writer)
+		}
+	}()
 	if queueJob.GetMaxAttempts() <= 0 {
 		if err := lifecycleFinalizerError(r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxMaterialize, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -447,6 +547,9 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 	}
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, queueJob, queue.KindSandboxMaterialize, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -460,6 +563,9 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 	job, err := DecodeSandboxLifecycleJob(queueJob, queue.KindSandboxMaterialize)
 	if err != nil {
 		if err := lifecycleFinalizerError(r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxMaterialize, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -470,12 +576,16 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 			ErrorKind: "invalid_sandbox_materialize_payload", ErrorMessage: "sandbox materialization queue payload is invalid",
 		}))
 	}
+	jobIdentity = job
 	work, disposition, err := r.Store.ClaimMaterialization(ctx, job, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_materialization_claim", err)
+		}
 		return r.retry(ctx, job, "sandbox_materialization_store_error")
 	}
 	if disposition == SandboxLifecycleLostAuthority {
-		return errQueueLeaseLost
+		return queueAuthorityLostBy("sandbox_materialization_claim", errQueueLeaseLost)
 	}
 	if disposition == SandboxLifecycleNotApplicable {
 		return r.ack(ctx, job)
@@ -492,15 +602,15 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 		return r.fail(ctx, job, work, inspection.EffectBoundary, inspection.Disposition, valueOrDefault(inspection.ErrorKind, "sandbox_inspection_failed"), inspection.SafeMessage)
 	}
 	if inspection.Value != ExecutionReady {
-		if err := stopQueueLeaseGuard(ctx); err != nil {
-			return err
-		}
 		disposition, err := r.Store.WaitMaterializationForActivation(ctx, work, inspection.Value, r.now())
 		if err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_materialization_wait_for_activation", err)
+			}
 			return err
 		}
 		if disposition == SandboxLifecycleLostAuthority {
-			return errQueueLeaseLost
+			return queueAuthorityLostBy("sandbox_materialization_wait_for_activation", errQueueLeaseLost)
 		}
 		if disposition == SandboxLifecycleApplied {
 			return nil
@@ -519,6 +629,9 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 		return r.fail(ctx, job, work, outcome.EffectBoundary, outcome.Disposition, valueOrDefault(outcome.ErrorKind, "sandbox_materialization_failed"), outcome.SafeMessage)
 	}
 	if err := r.Store.CompleteMaterialization(ctx, work, outcome.Value, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_materialization_complete", err)
+		}
 		return r.retry(ctx, job, "sandbox_materialization_store_error")
 	}
 	return r.ack(ctx, job)
@@ -527,6 +640,9 @@ func (r *SandboxMaterializationJobRunner) processJob(ctx context.Context, queueJ
 func (r *SandboxMaterializationJobRunner) retry(ctx context.Context, job SandboxLifecycleJob, kind string) error {
 	if job.AttemptCount >= job.MaxAttempts {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, job.QueueJob, queue.KindSandboxMaterialize, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -548,6 +664,9 @@ func (r *SandboxMaterializationJobRunner) retry(ctx context.Context, job Sandbox
 
 func (r *SandboxMaterializationJobRunner) fail(ctx context.Context, job SandboxLifecycleJob, work SandboxMaterializationWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string) error {
 	if err := r.Store.FailMaterialization(ctx, work, boundary, disposition, kind, message, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_materialization_fail", err)
+		}
 		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -579,6 +698,7 @@ type SandboxReleaseJobRunner struct {
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
 	Clock     func() time.Time
+	Logger    *slog.Logger
 }
 
 func (r *SandboxReleaseJobRunner) RunOnce(ctx context.Context) error {
@@ -621,8 +741,17 @@ func (r *SandboxReleaseJobRunner) processJob(ctx context.Context, queueJob *queu
 		}
 	}()
 	ctx = workCtx
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindSandboxRelease, writer)
+		}
+	}()
 	if queueJob.GetMaxAttempts() <= 0 {
 		if err := lifecycleFinalizerError(r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxRelease, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -635,6 +764,9 @@ func (r *SandboxReleaseJobRunner) processJob(ctx context.Context, queueJob *queu
 	}
 	if queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, queueJob, queue.KindSandboxRelease, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -648,6 +780,9 @@ func (r *SandboxReleaseJobRunner) processJob(ctx context.Context, queueJob *queu
 	job, err := DecodeSandboxLifecycleJob(queueJob, queue.KindSandboxRelease)
 	if err != nil {
 		if err := lifecycleFinalizerError(r.Store.FinalizeInvalidLifecycle(ctx, queueJob, queue.KindSandboxRelease, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -658,29 +793,39 @@ func (r *SandboxReleaseJobRunner) processJob(ctx context.Context, queueJob *queu
 			ErrorKind: "invalid_sandbox_release_payload", ErrorMessage: "sandbox release queue payload is invalid",
 		}))
 	}
+	jobIdentity = job
 	work, disposition, err := r.Store.ClaimRelease(ctx, job, r.now())
 	if err != nil {
 		if errors.Is(err, errSandboxReleaseBlocked) {
 			parkDisposition, parkErr := r.Store.ParkBlockedRelease(ctx, job, r.now())
 			if parkErr != nil {
+				if errors.Is(parkErr, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_release_park_blocked", parkErr)
+				}
 				return parkErr
 			}
 			if parkDisposition == SandboxLifecycleLostAuthority {
-				return errQueueLeaseLost
+				return queueAuthorityLostBy("sandbox_release_park_blocked", errQueueLeaseLost)
 			}
 			if parkDisposition == SandboxLifecycleApplied {
 				return nil
 			}
 			work, disposition, err = r.Store.ClaimRelease(ctx, job, r.now())
 			if err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_release_claim", err)
+				}
 				return err
 			}
 		} else {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_release_claim", err)
+			}
 			return r.retry(ctx, job, "sandbox_release_store_error")
 		}
 	}
 	if disposition == SandboxLifecycleLostAuthority {
-		return errQueueLeaseLost
+		return queueAuthorityLostBy("sandbox_release_claim", errQueueLeaseLost)
 	}
 	if disposition == SandboxLifecycleNotApplicable {
 		return r.ack(ctx, job)
@@ -702,6 +847,9 @@ func (r *SandboxReleaseJobRunner) release(ctx context.Context, job SandboxLifecy
 	}
 	if !inspection.Value {
 		if err := r.Store.CompleteRelease(ctx, work, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_release_complete", err)
+			}
 			return r.retry(ctx, job, "sandbox_release_store_error")
 		}
 		return r.ack(ctx, job)
@@ -711,6 +859,9 @@ func (r *SandboxReleaseJobRunner) release(ctx context.Context, job SandboxLifecy
 	}
 	authorized, err := r.Store.AuthorizeRelease(ctx, work, r.now())
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_release_authorize", err)
+		}
 		return r.retry(ctx, job, "sandbox_release_store_error")
 	}
 	if !authorized {
@@ -724,6 +875,9 @@ func (r *SandboxReleaseJobRunner) release(ctx context.Context, job SandboxLifecy
 		if outcome.EffectBoundary == ProviderSubmitted || outcome.EffectBoundary == ProviderOutcomeUnknown {
 			kind := valueOrDefault(outcome.ErrorKind, "sandbox_release_outcome_unknown")
 			if err := r.Store.ObserveUnknownRelease(ctx, work, kind, r.now()); err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_release_observe_unknown", err)
+				}
 				return err
 			}
 			return r.retry(ctx, job, kind)
@@ -731,6 +885,9 @@ func (r *SandboxReleaseJobRunner) release(ctx context.Context, job SandboxLifecy
 		return r.fail(ctx, job, work, outcome.EffectBoundary, outcome.Disposition, valueOrDefault(outcome.ErrorKind, "sandbox_release_failed"), outcome.SafeMessage)
 	}
 	if err := r.Store.CompleteRelease(ctx, work, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_release_complete", err)
+		}
 		return r.retry(ctx, job, "sandbox_release_store_error")
 	}
 	return r.ack(ctx, job)
@@ -738,6 +895,9 @@ func (r *SandboxReleaseJobRunner) release(ctx context.Context, job SandboxLifecy
 
 func (r *SandboxReleaseJobRunner) retryProvedNotStarted(ctx context.Context, job SandboxLifecycleJob, work SandboxReleaseWork, kind string) error {
 	if err := r.Store.RearmRelease(ctx, work, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_release_rearm", err)
+		}
 		return err
 	}
 	return r.retry(ctx, job, kind)
@@ -746,6 +906,9 @@ func (r *SandboxReleaseJobRunner) retryProvedNotStarted(ctx context.Context, job
 func (r *SandboxReleaseJobRunner) retry(ctx context.Context, job SandboxLifecycleJob, kind string) error {
 	if job.AttemptCount >= job.MaxAttempts {
 		if err := lifecycleFinalizerError(r.Store.FinalizeExhaustedLifecycle(ctx, job.QueueJob, queue.KindSandboxRelease, r.now())); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_lifecycle_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -767,6 +930,9 @@ func (r *SandboxReleaseJobRunner) retry(ctx context.Context, job SandboxLifecycl
 
 func (r *SandboxReleaseJobRunner) fail(ctx context.Context, job SandboxLifecycleJob, work SandboxReleaseWork, boundary ProviderEffectBoundary, disposition ProviderDisposition, kind string, message string) error {
 	if err := r.Store.FailRelease(ctx, work, boundary, disposition, kind, message, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_release_fail", err)
+		}
 		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {

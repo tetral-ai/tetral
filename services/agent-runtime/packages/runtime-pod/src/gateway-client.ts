@@ -89,8 +89,9 @@ export class RuntimePodGatewayClient implements GatewayClient {
         message: "Gateway provider request exceeds the transport fuse.",
         retryable: false,
         fatal: true,
+        statusCode: status.RESOURCE_EXHAUSTED,
       };
-      logProviderStreamFailureBeforeFirstEvent(this.options.logger, request, error);
+      logProviderStreamFailure(this.options.logger, request, error, false);
       return Stream.fail(error);
     }
     return Stream.fromAsyncIterable(
@@ -139,39 +140,68 @@ async function* streamProviderRequest(
     }
   } catch (error) {
     const classified = gatewayClientError(error);
-    if (!receivedEvent && classified.code !== "gateway_cancelled") {
-      logProviderStreamFailureBeforeFirstEvent(logger, request, classified);
+    if (classified.code !== "gateway_cancelled") {
+      logProviderStreamFailure(logger, request, classified, receivedEvent);
     }
     throw error;
   }
 }
 
-function logProviderStreamFailureBeforeFirstEvent(
+function logProviderStreamFailure(
   logger: RuntimePodLogger | undefined,
   request: ProviderRequest,
   error: GatewayClientError,
+  receivedEvent: boolean,
 ): void {
   try {
+    const statusCode = error.statusCode ?? status.UNKNOWN;
     logger?.error({
-      event: "provider_stream_failed_before_first_event",
-      "event.kind": "provider_stream_failed_before_first_event",
+      event: "provider_stream_failed",
+      "event.kind": "provider_stream_failed",
       operation: "StreamProviderRequest",
       component: "agent-runtime",
-      message: "provider stream failed before first event",
+      message: "provider stream failed",
       "workspace.id": request.workspaceId,
       "session.id": request.sessionId,
       "thread.id": request.sessionThreadId,
       "request.id": request.requestId,
-      "provider.request.id": request.modelRequestId,
       "model_request.id": request.modelRequestId,
+      "rpc.grpc.status_code": statusCode,
+      "rpc.grpc.status_name": grpcStatusName(statusCode),
+      "stream.phase": receivedEvent ? "post_first_event" : "pre_first_event",
+      "stream.received_event": receivedEvent,
+      retryable: error.retryable,
+      terminal: error.fatal,
       ...semanticErrorFields({
         errorClass: "gateway_client",
         errorCode: error.code,
-        messageSafe: "provider stream failed before first event",
+        messageSafe: "provider stream failed",
       }),
     });
   } catch {
     // Observability cannot replace provider-stream settlement.
+  }
+}
+
+function grpcStatusName(code: number): string {
+  switch (code) {
+    case status.OK: return "OK";
+    case status.CANCELLED: return "CANCELLED";
+    case status.UNKNOWN: return "UNKNOWN";
+    case status.INVALID_ARGUMENT: return "INVALID_ARGUMENT";
+    case status.DEADLINE_EXCEEDED: return "DEADLINE_EXCEEDED";
+    case status.NOT_FOUND: return "NOT_FOUND";
+    case status.PERMISSION_DENIED: return "PERMISSION_DENIED";
+    case status.RESOURCE_EXHAUSTED: return "RESOURCE_EXHAUSTED";
+    case status.FAILED_PRECONDITION: return "FAILED_PRECONDITION";
+    case status.ABORTED: return "ABORTED";
+    case status.OUT_OF_RANGE: return "OUT_OF_RANGE";
+    case status.UNIMPLEMENTED: return "UNIMPLEMENTED";
+    case status.INTERNAL: return "INTERNAL";
+    case status.UNAVAILABLE: return "UNAVAILABLE";
+    case status.DATA_LOSS: return "DATA_LOSS";
+    case status.UNAUTHENTICATED: return "UNAUTHENTICATED";
+    default: return "UNRECOGNIZED";
   }
 }
 

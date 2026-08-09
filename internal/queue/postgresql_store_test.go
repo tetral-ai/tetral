@@ -1137,7 +1137,7 @@ func TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases(t *testing.T) {
 		MaxAttempts:  2,
 		Now:          now,
 	})
-	mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Second, Now: now.Add(10 * time.Second)})
+	firstExpiredLease := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-a", MaxJobs: 1, LeaseDuration: time.Second, Now: now.Add(10 * time.Second)})
 	expireQueueJobLease(t, admin, ws, expiring.ID)
 	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Kind: KindCleanupSession}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases first = (%d,%v); want 1,nil", reclaimed, err)
@@ -1145,16 +1145,32 @@ func TestPostgreSQLStoreRetryDeadLetterAndReclaimExpiredLeases(t *testing.T) {
 	if got := queueJobStatus(t, admin, ws, expiring.ID); got != StatusPending {
 		t.Fatalf("first expired reclaim status = %s; want pending", got)
 	}
+	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: firstExpiredLease.LeaseToken}); err != nil || updated {
+		t.Fatalf("Ack reclaimed first lease = (%v,%v); want stale token rejection", updated, err)
+	}
 	if got := queueJobPartitionSequence(t, admin, ws, expiring.ID); got != expiring.QueuePartitionSequence {
 		t.Fatalf("partition sequence after reclaim = %d; want original %d", got, expiring.QueuePartitionSequence)
 	}
-	mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge", MaxJobs: 1, LeaseDuration: time.Second, Now: time.Now().UTC().Add(time.Second)})
+	secondExpiredLease := mustLeaseOne(t, store, LeaseRequest{WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-b", MaxJobs: 1, LeaseDuration: time.Second, Now: time.Now().UTC().Add(time.Second)})
 	expireQueueJobLease(t, admin, ws, expiring.ID)
 	if reclaimed, err := store.ReclaimExpiredLeases(ctx, ReclaimExpiredLeasesRequest{WorkspaceID: ws, Kind: KindCleanupSession}); err != nil || reclaimed != 1 {
 		t.Fatalf("ReclaimExpiredLeases second = (%d,%v); want 1,nil", reclaimed, err)
 	}
 	if got := queueJobStatus(t, admin, ws, expiring.ID); got != StatusPending {
 		t.Fatalf("second expired reclaim status = %s; want pending because lease expiration alone never dead-letters", got)
+	}
+	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: secondExpiredLease.LeaseToken}); err != nil || updated {
+		t.Fatalf("Ack reclaimed second lease = (%v,%v); want stale token rejection", updated, err)
+	}
+	currentLease := mustLeaseOne(t, store, LeaseRequest{
+		WorkspaceID: ws, Kinds: []string{KindCleanupSession}, LeaseOwner: "bridge-c",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC().Add(2 * time.Second),
+	})
+	if currentLease.AttemptCount != 3 {
+		t.Fatalf("current lease attempt count = %d; want three acquisitions independent of two reclaims", currentLease.AttemptCount)
+	}
+	if updated, err := store.Ack(ctx, AckRequest{WorkspaceID: ws, JobID: expiring.ID, LeaseToken: currentLease.LeaseToken}); err != nil || !updated {
+		t.Fatalf("Ack current lease = (%v,%v); want eventual settlement", updated, err)
 	}
 }
 

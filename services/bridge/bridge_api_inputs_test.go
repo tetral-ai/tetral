@@ -37,35 +37,15 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	store.RuntimeBindingTokenHMACKey = []byte("bridge-commit-inputs-test-key-32")
 	var declarationLogs bytes.Buffer
 	store.Logger = slog.New(slog.NewJSONHandler(&declarationLogs, nil))
-	runtimeLocalID := stableRuntimeID(
-		"runtime_message_draft",
-		"default",
-		"sesn_bridge_commit",
-		"thr_bridge_commit",
-		"messages",
-		"rin_bridge_commit",
-		"user_input",
-		"0",
-	)
 	request := &bridgev1.CommitInputsRequest{
 		Scope:          bridgeAPIScope("sesn_bridge_commit", "thr_bridge_commit", "bind_bridge_commit", 1, "pod_uid_commit"),
 		RuntimeInputId: "rin_bridge_commit",
 		EventIds:       []string{"evt_bridge_commit"},
 		SequenceFrom:   1,
 		SequenceTo:     1,
-		Drafts: []*bridgev1.RuntimeMessageDraft{{
-			RuntimeLocalId:  runtimeLocalID,
-			SourceKind:      "messages",
-			SourceId:        "rin_bridge_commit",
-			SourceEventId:   "evt_bridge_commit",
-			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
-			MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
-			Parts: []*bridgev1.RuntimePartDraft{{
-				RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
-				PartKind:           "text",
-				PartJson:           `{"type":"text","text":"hello","truncated":false,"status":"completed"}`,
-			}},
-		}},
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeUserInputCreateForTest(
+			"default", "sesn_bridge_commit", "thr_bridge_commit", "rin_bridge_commit", "evt_bridge_commit", "hello",
+		)},
 	}
 	response, err := store.CommitInputs(context.Background(), request)
 	if err != nil {
@@ -171,7 +151,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 		`"event.kind":"runtime_declaration_committed"`,
 		`"event.kind":"runtime_declaration_replayed"`,
 		`"declaration.source.kind":"messages"`,
-		`"declaration.source.id":"rin_bridge_commit"`,
+		`"operation.id":"rin_bridge_commit"`,
+		`"thread.id":"thr_bridge_commit"`,
 		`"receipt.application_disposition":"current_custody"`,
 		`"receipt.application_disposition":"stale_custody"`,
 		`"binding.id":"bind_bridge_commit_replacement"`,
@@ -182,6 +163,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	}
 	if strings.Contains(logText, `"text":"hello"`) {
 		t.Fatalf("declaration logs contain model-visible input: %s", logText)
+	}
+	if strings.Contains(logText, `"declaration.source.id"`) || strings.Contains(logText, `"session.thread.id"`) {
+		t.Fatalf("declaration logs contain retired identity fields: %s", logText)
 	}
 
 	var inboxStatus string
@@ -226,426 +210,9 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsAcceptedMessage(t *testing.
 	}
 
 	conflict := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-	conflict.Drafts[0].Parts[0].PartJson = `{"type":"text","text":"different","truncated":false,"status":"completed"}`
+	conflict.MessageCreates[0].Parts[0].PartJson = `{"type":"text","text":"different","truncated":false,"status":"completed"}`
 	if _, err := store.CommitInputs(context.Background(), conflict); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CommitInputs err = %v; want AlreadyExists", err)
-	}
-}
-
-func TestValidatePendingToolCancellationDraftsAllowsApprovalLessToolDrafts(t *testing.T) {
-	const interruptEventID = "evt_interrupt"
-	cancellationDraft := func(localID string, toolUseEventIDs ...string) *bridgev1.RuntimeMessageDraft {
-		parts := make([]*bridgev1.RuntimePartDraft, 0, len(toolUseEventIDs))
-		for _, toolUseEventID := range toolUseEventIDs {
-			parts = append(parts, &bridgev1.RuntimePartDraft{
-				PartKind: "tool",
-				PartJson: `{"type":"tool","toolUseEventId":"` + toolUseEventID + `","state":{"status":"cancelled"}}`,
-			})
-		}
-		return &bridgev1.RuntimeMessageDraft{
-			RuntimeLocalId: localID,
-			SourceEventId:  interruptEventID,
-			DraftKind:      bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
-			Parts:          parts,
-		}
-	}
-
-	err := validatePendingToolCancellationDrafts(
-		interruptEventID,
-		[]*bridgev1.PendingToolCancellationDraft{{
-			ToolUseEventId: "evt_pending_tool",
-			RuntimeLocalId: "draft_expected",
-		}},
-		[]*bridgev1.RuntimeMessageDraft{
-			cancellationDraft("draft_expected", "evt_pending_tool"),
-			cancellationDraft("draft_unmatched", "evt_other_tool"),
-		},
-	)
-	if err != nil {
-		t.Fatalf("approval-less cancellation draft error = %v; want nil", err)
-	}
-
-	err = validatePendingToolCancellationDrafts(
-		interruptEventID,
-		[]*bridgev1.PendingToolCancellationDraft{
-			{ToolUseEventId: "evt_pending_tool_a", RuntimeLocalId: "draft_shared"},
-			{ToolUseEventId: "evt_pending_tool_b", RuntimeLocalId: "draft_shared"},
-		},
-		[]*bridgev1.RuntimeMessageDraft{
-			cancellationDraft("draft_shared", "evt_pending_tool_a", "evt_pending_tool_b"),
-		},
-	)
-	if err != nil {
-		t.Fatalf("shared cancellation draft error = %v; want nil", err)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreInterruptSettlesApprovalLessLoopOwnedTools(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		toolEventType string
-		toolPayload   string
-	}{
-		{
-			name:          "direct sandbox tool before acceptance",
-			toolEventType: "agent.tool_use",
-			toolPayload:   `{"type":"agent.tool_use","name":"Write","input":{"file_path":"a.txt"},"evaluated_permission":"allow"}`,
-		},
-		{
-			name:          "running gateway tool",
-			toolEventType: "agent.mcp_tool_use",
-			toolPayload:   `{"type":"agent.mcp_tool_use","name":"lookup","mcp_server_name":"github","input":{},"evaluated_permission":"allow"}`,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			const (
-				sessionID      = "sesn_interrupt_loop_owned"
-				threadID       = "thr_interrupt_loop_owned"
-				toolUseEventID = "evt_interrupt_loop_owned_tool"
-				interruptID    = "evt_interrupt_loop_owned"
-				runtimeInputID = "rin_interrupt_loop_owned"
-			)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_interrupt_loop_owned", 1, "pod_interrupt_loop_owned")
-			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseEventID, 1, tc.toolEventType, tc.toolPayload)
-			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptID, 2, "user.interrupt", `{"type":"user.interrupt"}`)
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+interruptID+`"]`, "accepted", "bind_interrupt_loop_owned", "pod_interrupt_loop_owned", 2, 2)
-
-			localID := stableRuntimeID(
-				"runtime_message_draft", "default", sessionID, threadID,
-				"interrupt_control", runtimeInputID, "cancellation", "0",
-			)
-			request := &bridgev1.CommitInputsRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_loop_owned", 1, "pod_interrupt_loop_owned"),
-				RuntimeInputId: runtimeInputID,
-				InputKind:      "interrupt_control",
-				EventIds:       []string{interruptID},
-				SequenceFrom:   2,
-				SequenceTo:     2,
-				Drafts: []*bridgev1.RuntimeMessageDraft{{
-					RuntimeLocalId:  localID,
-					SourceKind:      "interrupt_control",
-					SourceId:        runtimeInputID,
-					SourceEventId:   interruptID,
-					DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
-					Ordinal:         0,
-					MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
-					Parts: []*bridgev1.RuntimePartDraft{{
-						RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", localID, "tool", "0"),
-						PartKind:           "tool",
-						Ordinal:            0,
-						PartJson:           `{"type":"tool","toolCallId":"tool-loop-owned","toolName":"Write","toolUseEventId":"` + toolUseEventID + `","state":{"status":"cancelled","error":{"type":"runtime","message":"aborted","retryable":false}},"completedAt":"2026-07-30T00:00:00Z"}`,
-					}},
-				}},
-			}
-
-			response, err := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime)).CommitInputs(context.Background(), request)
-			if err != nil {
-				t.Fatalf("CommitInputs approval-less interrupt: %v", err)
-			}
-			if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-				len(response.GetDeclaration().GetReceipts()) != 1 ||
-				len(response.GetDeclaration().GetReceipts()[0].GetPendingToolDeltaJson()) != 0 {
-				t.Fatalf("approval-less interrupt response = %#v; want committed without approval delta", response)
-			}
-			var messageJSON string
-			if err := admin.QueryRowContext(context.Background(),
-				`SELECT data_json FROM session_messages
-				  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND source_event_id=$3`,
-				sessionID, threadID, interruptID,
-			).Scan(&messageJSON); err != nil {
-				t.Fatalf("read approval-less cancellation message: %v", err)
-			}
-			var message struct {
-				Parts []struct {
-					Type           string `json:"type"`
-					ToolUseEventID string `json:"toolUseEventId"`
-					State          struct {
-						Status string `json:"status"`
-					} `json:"state"`
-				} `json:"parts"`
-			}
-			if err := json.Unmarshal([]byte(messageJSON), &message); err != nil {
-				t.Fatalf("decode approval-less cancellation message: %v", err)
-			}
-			if len(message.Parts) != 1 || message.Parts[0].Type != "tool" ||
-				message.Parts[0].ToolUseEventID != toolUseEventID || message.Parts[0].State.Status != "cancelled" {
-				t.Fatalf("approval-less cancellation parts = %#v; want one cancelled tool", message.Parts)
-			}
-		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreInterruptRejectsCancellationDraftForAcceptedSandboxExecution(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID      = "sesn_interrupt_accepted"
-		threadID       = "thr_interrupt_accepted"
-		toolUseEventID = "evt_interrupt_accepted_tool"
-		interruptID    = "evt_interrupt_accepted"
-		runtimeInputID = "rin_interrupt_accepted"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_interrupt_accepted", 1, "pod_interrupt_accepted")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Write","input":{},"evaluated_permission":"allow"}`)
-	if _, err := admin.ExecContext(context.Background(), `UPDATE session_events SET model_request_id='mreq_interrupt_accepted' WHERE workspace_id='default' AND event_id=$1`, toolUseEventID); err != nil {
-		t.Fatalf("stamp accepted tool model request: %v", err)
-	}
-	seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, "mreq_interrupt_accepted", toolUseEventID, "tool-accepted", "Write")
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
-		Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_accepted", 1, "pod_interrupt_accepted"),
-		ToolUseEventId: toolUseEventID, ModelToolCallId: "tool-accepted",
-		NormalizedInputHash: sha256Hex(`{}`), ToolName: "Write", InputJson: `{}`,
-	}); err != nil {
-		t.Fatalf("AcceptSandboxExecution: %v", err)
-	}
-	const terminalResult = `{"status":"success","result":{"text":"done"}}`
-	if _, err := admin.ExecContext(context.Background(),
-		`UPDATE session_runtime_tool_results
-		    SET execution_state='terminal_unconsumed', result_json=$4, result_digest=$5
-		  WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND tool_use_event_id=$3`,
-		sessionID, threadID, toolUseEventID, terminalResult, sha256Hex(terminalResult),
-	); err != nil {
-		t.Fatalf("complete accepted sandbox execution: %v", err)
-	}
-	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptID, 2, "user.interrupt", `{"type":"user.interrupt"}`)
-	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+interruptID+`"]`, "accepted", "bind_interrupt_accepted", "pod_interrupt_accepted", 2, 2)
-	localID := stableRuntimeID("runtime_message_draft", "default", sessionID, threadID, "interrupt_control", runtimeInputID, "cancellation", "0")
-	request := &bridgev1.CommitInputsRequest{
-		Scope:                           bridgeAPIScope(sessionID, threadID, "bind_interrupt_accepted", 1, "pod_interrupt_accepted"),
-		RuntimeInputId:                  runtimeInputID,
-		InputKind:                       "interrupt_control",
-		EventIds:                        []string{interruptID},
-		SequenceFrom:                    2,
-		SequenceTo:                      2,
-		SandboxExecutionToolUseEventIds: []string{toolUseEventID},
-		Drafts: []*bridgev1.RuntimeMessageDraft{{
-			RuntimeLocalId: localID, SourceKind: "interrupt_control", SourceId: runtimeInputID,
-			SourceEventId: interruptID, DraftKind: bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
-			MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
-			Parts: []*bridgev1.RuntimePartDraft{{
-				RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", localID, "tool", "0"),
-				PartKind:           "tool", PartJson: `{"type":"tool","toolCallId":"tool-accepted","toolName":"Write","toolUseEventId":"` + toolUseEventID + `","state":{"status":"cancelled"}}`,
-			}},
-		}},
-	}
-
-	_, err := store.CommitInputs(context.Background(), request)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("accepted-execution cancellation draft error = %v; want FailedPrecondition", err)
-	}
-	if !strings.Contains(status.Convert(err).Message(), "interrupt loop-owned tool coverage is incomplete") {
-		t.Fatalf("accepted-execution cancellation draft error = %v; want loop-owned coverage rejection", err)
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreInterruptSettlesAcceptedSandboxExecutionTimingArms(t *testing.T) {
-	for _, test := range []struct {
-		name              string
-		state             string
-		acceptanceACKLost bool
-		wantState         string
-	}{
-		{name: "while acceptance ACK is lost", state: "pending", acceptanceACKLost: true, wantState: "terminal_unconsumed"},
-		{name: "after acceptance before worker lease", state: "pending", wantState: "terminal_unconsumed"},
-		{name: "during activation", state: "waiting_activation", wantState: "terminal_unconsumed"},
-		{name: "during provider execution", state: "running", wantState: "running"},
-		{name: "after provider completion", state: "terminal_unconsumed", wantState: "terminal_unconsumed"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-			const (
-				sessionID       = "sesn_interrupt_timing"
-				threadID        = "thr_interrupt_timing"
-				toolUseEventID  = "evt_interrupt_timing_tool"
-				interruptID     = "evt_interrupt_timing"
-				runtimeInputID  = "rin_interrupt_timing"
-				modelRequestID  = "mreq_interrupt_timing"
-				modelToolCallID = "call_interrupt_timing"
-			)
-			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_interrupt_timing", 1, "pod_interrupt_timing")
-			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, toolUseEventID, 1, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`)
-			if _, err := admin.Exec(`UPDATE session_events SET model_request_id=$2 WHERE workspace_id='default' AND event_id=$1`, toolUseEventID, modelRequestID); err != nil {
-				t.Fatalf("stamp timing Tool Use model request: %v", err)
-			}
-			seedBridgeAPIDurableToolMessage(t, admin, "default", sessionID, threadID, modelRequestID, toolUseEventID, modelToolCallID, "Read")
-			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-			acceptance, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_timing", 1, "pod_interrupt_timing"),
-				ToolUseEventId: toolUseEventID, ModelToolCallId: modelToolCallID,
-				NormalizedInputHash: sha256Hex(`{}`), ToolName: "Read", InputJson: `{}`,
-			})
-			if err != nil {
-				t.Fatalf("AcceptSandboxExecution: %v", err)
-			}
-			if !test.acceptanceACKLost && acceptance.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
-				t.Fatalf("acceptance ACK = %s; want committed", acceptance.GetAck().GetStatus())
-			}
-			// Acceptance owns the durable birth; direct state advancement keeps this
-			// test focused on Bridge interrupt settlement rather than Sandbox workers.
-			switch test.state {
-			case "waiting_activation":
-				if _, err := admin.Exec(`INSERT INTO session_sandbox_bindings (
-					workspace_id, session_id, logical_sandbox_id, environment_id,
-					environment_generation, provider, provider_resource_id, binding_revision,
-					materialized_resource_revision, resource_roots_json, provider_metadata_json,
-					created_at, updated_at
-				) VALUES ('default',$1,'sbox_interrupt_timing','env_' || $1,
-					1,'daytona','provider_interrupt_timing',1,
-					1,'[]','{}','2026-08-02T00:00:00Z','2026-08-02T00:00:00Z')`, sessionID); err != nil {
-					t.Fatalf("seed sandbox binding: %v", err)
-				}
-				if _, err := admin.Exec(`INSERT INTO sandbox_lifecycle_operations (
-					workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
-					observed_binding_revision, target_provider_resource_id,
-					created_at, updated_at
-				) VALUES ('default','sop_interrupt_timing',$1,'sbox_interrupt_timing','start','pending',
-					1,'provider_interrupt_timing',
-					'2026-08-02T00:00:00Z','2026-08-02T00:00:00Z')`, sessionID); err != nil {
-					t.Fatalf("seed activation dependency: %v", err)
-				}
-				if _, err := admin.Exec(`UPDATE sandbox_lifecycle_operations
-					SET state='running' WHERE workspace_id='default' AND operation_id='sop_interrupt_timing'`); err != nil {
-					t.Fatalf("start activation dependency: %v", err)
-				}
-				if _, err := admin.Exec(`UPDATE session_runtime_tool_results
-					SET execution_state='waiting_activation', waiting_activation_operation_id='sop_interrupt_timing'
-					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID); err != nil {
-					t.Fatalf("move execution into activation wait: %v", err)
-				}
-			case "terminal_unconsumed":
-				const resultJSON = `{"status":"success","result":{"text":"done"}}`
-				if _, err := admin.Exec(`UPDATE session_runtime_tool_results
-					SET execution_state='terminal_unconsumed', result_json=$3, result_digest=$4
-					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID, resultJSON, sha256Hex(resultJSON)); err != nil {
-					t.Fatalf("complete execution before interrupt: %v", err)
-				}
-			case "running":
-				if _, err := admin.Exec(`UPDATE session_runtime_tool_results
-					SET execution_state='running', provider_command_reference_json='{}'
-					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID); err != nil {
-					t.Fatalf("move execution into provider call: %v", err)
-				}
-			}
-			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptID, 2, "user.interrupt", `{"type":"user.interrupt"}`)
-			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+interruptID+`"]`, "accepted", "bind_interrupt_timing", "pod_interrupt_timing", 2, 2)
-			request := &bridgev1.CommitInputsRequest{
-				Scope:          bridgeAPIScope(sessionID, threadID, "bind_interrupt_timing", 1, "pod_interrupt_timing"),
-				RuntimeInputId: runtimeInputID, InputKind: "interrupt_control", EventIds: []string{interruptID}, SequenceFrom: 2, SequenceTo: 2,
-				SandboxExecutionToolUseEventIds: []string{toolUseEventID},
-			}
-			if _, err := store.CommitInputs(context.Background(), request); err != nil {
-				t.Fatalf("CommitInputs: %v", err)
-			}
-			var state string
-			var resultJSON sql.NullString
-			if err := admin.QueryRow(`SELECT execution_state, result_json FROM session_runtime_tool_results
-				WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&state, &resultJSON); err != nil {
-				t.Fatalf("read interrupted execution: %v", err)
-			}
-			if state != test.wantState {
-				t.Fatalf("execution state = %q; want %q", state, test.wantState)
-			}
-			if test.state == "waiting_activation" {
-				var operationState string
-				if err := admin.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
-					WHERE workspace_id='default' AND operation_id='sop_interrupt_timing'`).Scan(&operationState); err != nil {
-					t.Fatalf("read interrupted activation: %v", err)
-				}
-				if operationState != "running" {
-					t.Fatalf("interrupted shared activation state = %q; want running", operationState)
-				}
-			}
-			if test.state == "terminal_unconsumed" {
-				if !resultJSON.Valid || resultJSON.String != `{"status":"success","result":{"text":"done"}}` {
-					t.Fatalf("completed provider result = %v; want unchanged", resultJSON)
-				}
-			} else if test.state == "running" {
-				var cancelState string
-				var cancelJobs int
-				if err := admin.QueryRow(`SELECT cancel_state FROM session_runtime_tool_results
-					WHERE workspace_id='default' AND session_id=$1 AND tool_use_event_id=$2`, sessionID, toolUseEventID).Scan(&cancelState); err != nil {
-					t.Fatalf("read running cancellation state: %v", err)
-				}
-				if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs
-					WHERE workspace_id='default' AND kind=$1 AND payload_json::jsonb ->> 'tool_use_event_id'=$2`, queue.KindSandboxToolCancel, toolUseEventID).Scan(&cancelJobs); err != nil {
-					t.Fatalf("count running cancellation jobs: %v", err)
-				}
-				if resultJSON.Valid || cancelState != "pending" || cancelJobs != 1 {
-					t.Fatalf("running interrupt = result %v cancel %q jobs %d; want pending cancel transport", resultJSON, cancelState, cancelJobs)
-				}
-			} else if !resultJSON.Valid || !strings.Contains(resultJSON.String, `"status":"cancelled"`) {
-				t.Fatalf("interrupted result = %v; want cancelled", resultJSON)
-			}
-		})
-	}
-}
-
-func TestPostgreSQLBridgeAPIStoreLaterInterruptDoesNotResettleCancelledTool(t *testing.T) {
-	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-	const (
-		sessionID = "sesn_interrupt_cancelled_once"
-		threadID  = "thr_interrupt_cancelled_once"
-		bindingID = "bind_interrupt_cancelled_once"
-		podUID    = "pod_interrupt_cancelled_once"
-	)
-	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
-	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-	scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
-	seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_cancelled_once_start", "mreq_interrupt_cancelled_once", "agent_provider_request", 0)
-	written, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
-		Scope: scope, RuntimeWriteId: "rwrite_interrupt_cancelled_once", ModelRequestId: "mreq_interrupt_cancelled_once",
-		EventType:   "agent.tool_use",
-		PayloadJson: `{"type":"agent.tool_use","name":"Write","input":{"file_path":"a.txt"},"evaluated_permission":"allow"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t, scope, "rwrite_interrupt_cancelled_once", "agent.tool_use", "streaming",
-			bridgeRuntimePartDraftForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call-cancelled-once","toolName":"Write","state":{"status":"running","input":{"value":{"file_path":"a.txt"},"preview":"{}","truncated":false}}}`},
-		)},
-	})
-	if err != nil {
-		t.Fatalf("WriteEvent loop-owned tool: %v", err)
-	}
-	toolUseEventID := written.GetEventId()
-	commitInterrupt := func(eventID string, runtimeInputID string, sequence int64, drafts []*bridgev1.RuntimeMessageDraft) error {
-		seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, eventID, sequence, "user.interrupt", `{"type":"user.interrupt"}`)
-		seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, runtimeInputID, "interrupt_control", `["`+eventID+`"]`, "accepted", bindingID, podUID, sequence, sequence)
-		_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope: scope, RuntimeInputId: runtimeInputID, InputKind: "interrupt_control",
-			EventIds: []string{eventID}, SequenceFrom: sequence, SequenceTo: sequence, Drafts: drafts,
-		})
-		return err
-	}
-	firstEventID := "evt_interrupt_cancelled_once_first"
-	firstInputID := "rin_interrupt_cancelled_once_first"
-	localID := stableRuntimeID("runtime_message_draft", "default", sessionID, threadID, "interrupt_control", firstInputID, "cancellation", "0")
-	if err := commitInterrupt(firstEventID, firstInputID, 3, []*bridgev1.RuntimeMessageDraft{{
-		RuntimeLocalId: localID, SourceKind: "interrupt_control", SourceId: firstInputID,
-		SourceEventId: firstEventID, DraftKind: bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
-		MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
-		Parts: []*bridgev1.RuntimePartDraft{{
-			RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", localID, "tool", "0"),
-			PartKind:           "tool", PartJson: `{"type":"tool","toolCallId":"call-cancelled-once","toolName":"Write","toolUseEventId":"` + toolUseEventID + `","state":{"status":"cancelled"}}`,
-		}},
-	}}); err != nil {
-		t.Fatalf("commit first interrupt: %v", err)
-	}
-	if err := commitInterrupt("evt_interrupt_cancelled_once_second", "rin_interrupt_cancelled_once_second", 4, nil); err != nil {
-		t.Fatalf("commit later interrupt: %v", err)
-	}
-	var cancellations int
-	if err := admin.QueryRowContext(context.Background(), `SELECT count(*)
-		FROM session_messages m, jsonb_array_elements(m.data_json::jsonb -> 'parts') part
-		WHERE m.workspace_id='default' AND m.session_id=$1 AND m.session_thread_id=$2
-		  AND part ->> 'type'='tool' AND part ->> 'toolUseEventId'=$3
-		  AND part #>> '{state,status}'='cancelled'`, sessionID, threadID, toolUseEventID).Scan(&cancellations); err != nil {
-		t.Fatalf("count cancellation settlements: %v", err)
-	}
-	if cancellations != 1 {
-		t.Fatalf("cancellation settlements = %d; want exactly one", cancellations)
 	}
 }
 
@@ -675,8 +242,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsReturnsFirstTurnFileAttachmentDelta
 		EventIds:       []string{eventID},
 		SequenceFrom:   1,
 		SequenceTo:     1,
-		Drafts: []*bridgev1.RuntimeMessageDraft{
-			bridgeUserInputDraftForTest("default", sessionID, threadID, runtimeInputID, eventID, "inspect"),
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{
+			bridgeUserInputCreateForTest("default", sessionID, threadID, runtimeInputID, eventID, "inspect"),
 		},
 	})
 	if err != nil {
@@ -735,8 +302,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsFencesRuntimeInboxBinding(t *testin
 		Scope:          bridgeAPIScope("sesn_bridge_commit_fence", "thr_bridge_commit_fence", "bind_bridge_commit_fence", 1, "pod_uid_commit_fence"),
 		RuntimeInputId: "rin_bridge_commit_fence",
 		EventIds:       []string{"evt_bridge_commit_fence"},
-		Drafts: []*bridgev1.RuntimeMessageDraft{
-			bridgeUserInputDraftForTest("default", "sesn_bridge_commit_fence", "thr_bridge_commit_fence", "rin_bridge_commit_fence", "evt_bridge_commit_fence", "hello"),
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{
+			bridgeUserInputCreateForTest("default", "sesn_bridge_commit_fence", "thr_bridge_commit_fence", "rin_bridge_commit_fence", "evt_bridge_commit_fence", "hello"),
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -773,8 +340,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsInboxIdentityConflictWithout
 		EventIds:       []string{"evt_bridge_commit_other"},
 		SequenceFrom:   2,
 		SequenceTo:     2,
-		Drafts: []*bridgev1.RuntimeMessageDraft{
-			bridgeUserInputDraftForTest("default", "sesn_bridge_commit_payload_conflict", "thr_bridge_commit_payload_conflict", "rin_bridge_commit_payload_conflict", "evt_bridge_commit_other", "other"),
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{
+			bridgeUserInputCreateForTest("default", "sesn_bridge_commit_payload_conflict", "thr_bridge_commit_payload_conflict", "rin_bridge_commit_payload_conflict", "evt_bridge_commit_other", "other"),
 		},
 	}
 	if _, err := store.CommitInputs(context.Background(), request); status.Code(err) != codes.AlreadyExists {
@@ -786,7 +353,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsInboxIdentityConflictWithout
 	request.SequenceFrom = 1
 	request.SequenceTo = 1
 	request.InputKind = "interrupt_control"
-	request.Drafts = nil
+	request.MessageCreates = nil
 	if _, err := store.CommitInputs(context.Background(), request); status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("CommitInputs conflicting inbox kind err = %v; want AlreadyExists", err)
 	}
@@ -810,8 +377,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsToolConfirmationAsMessage(t 
 		EventIds:       []string{"evt_bridge_confirmation_as_message"},
 		SequenceFrom:   2,
 		SequenceTo:     2,
-		Drafts: []*bridgev1.RuntimeMessageDraft{
-			bridgeUserInputDraftForTest("default", "sesn_bridge_commit_confirmation_message", "thr_bridge_commit_confirmation_message", "rin_bridge_confirmation_as_message", "evt_bridge_confirmation_as_message", "allow"),
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{
+			bridgeUserInputCreateForTest("default", "sesn_bridge_commit_confirmation_message", "thr_bridge_commit_confirmation_message", "rin_bridge_confirmation_as_message", "evt_bridge_confirmation_as_message", "allow"),
 		},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -844,513 +411,6 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRejectsToolConfirmationAsMessage(t 
 	}
 }
 
-func TestPostgreSQLBridgeAPIStoreCommitInputsSettlesControlInputs(t *testing.T) {
-	t.Run("interrupt_control", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_commit_interrupt", "bind_bridge_commit_interrupt", 1, "pod_uid_commit_interrupt")
-		seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_interrupted_tool", 1)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_active_tool", 2, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{"file_path":"README.md"},"evaluated_permission":"allow"}`)
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_preparing_tool", 3, "agent.tool_use", `{"type":"agent.tool_use","name":"Read","input":{"file_path":"release.txt"},"evaluated_permission":"allow"}`)
-		if _, err := admin.ExecContext(context.Background(), `UPDATE session_events
-				SET model_request_id=CASE event_id
-					WHEN 'evt_bridge_active_tool' THEN 'mreq_bridge_active_tool'
-					WHEN 'evt_bridge_preparing_tool' THEN 'mreq_bridge_preparing_tool'
-				END
-				WHERE workspace_id='default' AND event_id IN ('evt_bridge_active_tool','evt_bridge_preparing_tool')`); err != nil {
-			t.Fatalf("stamp interrupt tool requests: %v", err)
-		}
-		seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "mreq_bridge_active_tool", "evt_bridge_active_tool", "tool-2", "Read")
-		seedBridgeAPIDurableToolMessage(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "mreq_bridge_preparing_tool", "evt_bridge_preparing_tool", "tool-preparing", "Read")
-		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		for _, execution := range []struct {
-			toolUseEventID  string
-			modelToolCallID string
-			inputJSON       string
-		}{
-			{toolUseEventID: "evt_bridge_active_tool", modelToolCallID: "tool-2", inputJSON: `{"file_path":"README.md"}`},
-			{toolUseEventID: "evt_bridge_preparing_tool", modelToolCallID: "tool-preparing", inputJSON: `{"file_path":"release.txt"}`},
-		} {
-			if _, err := store.AcceptSandboxExecution(context.Background(), &bridgev1.AcceptSandboxExecutionRequest{
-				Scope:               bridgeAPIScope("sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "bind_bridge_commit_interrupt", 1, "pod_uid_commit_interrupt"),
-				ToolUseEventId:      execution.toolUseEventID,
-				ModelToolCallId:     execution.modelToolCallID,
-				NormalizedInputHash: sha256Hex(execution.inputJSON),
-				ToolName:            "Read",
-				InputJson:           execution.inputJSON,
-			}); err != nil {
-				t.Fatalf("AcceptSandboxExecution %s: %v", execution.toolUseEventID, err)
-			}
-		}
-		if _, err := admin.ExecContext(context.Background(),
-			`INSERT INTO session_sandbox_bindings (
-					workspace_id, session_id, logical_sandbox_id, environment_id,
-					environment_generation, provider, provider_resource_id, binding_revision,
-					materialized_resource_revision, resource_roots_json, provider_metadata_json,
-					created_at, updated_at
-				) VALUES ('default', 'sesn_bridge_commit_interrupt', 'sbox_bridge_commit_interrupt',
-					'env_sesn_bridge_commit_interrupt', 1, 'daytona', 'provider_bridge_interrupt_release', 1,
-					1, '[]', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
-			t.Fatalf("seed interrupted sandbox binding: %v", err)
-		}
-		retainedActivationJobID := "qjob_bridge_interrupt_retained_activation"
-		retainedActivationPartition := queue.FormatSandboxLifecyclePartitionKey(workspace.ID("default"), "sbox_bridge_commit_interrupt")
-		retainedActivationDedupe := queue.FormatSandboxLifecycleDedupeKey(
-			queue.KindSandboxActivate, workspace.ID("default"), "sbox_bridge_commit_interrupt", "sop_bridge_interrupt_retained_activation",
-		)
-		if _, err := admin.ExecContext(context.Background(),
-			`INSERT INTO sandbox_lifecycle_operations (
-				workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
-				observed_binding_revision, target_provider_resource_id,
-				queue_job_id, queue_kind, queue_partition_key, queue_dedupe_key,
-				created_at, updated_at
-			) VALUES ('default', 'sop_bridge_interrupt_retained_activation',
-				'sesn_bridge_commit_interrupt', 'sbox_bridge_commit_interrupt',
-				'start', 'pending', 1, 'provider_bridge_interrupt_release',
-				$1, $2, $3, $4,
-				'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-			retainedActivationJobID, queue.KindSandboxActivate, retainedActivationPartition, retainedActivationDedupe,
-		); err != nil {
-			t.Fatalf("seed retained interrupt dependency: %v", err)
-		}
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_runtime_tool_results
-					SET execution_state=CASE tool_use_event_id
-						WHEN 'evt_bridge_active_tool' THEN 'running'
-						WHEN 'evt_bridge_preparing_tool' THEN 'waiting_activation'
-					END,
-					authorized_binding_revision=CASE WHEN tool_use_event_id='evt_bridge_active_tool' THEN 1 END,
-					authorized_provider_resource_id=CASE WHEN tool_use_event_id='evt_bridge_active_tool' THEN 'provider_bridge_interrupt_release' END,
-					provider_command_reference_json=CASE WHEN tool_use_event_id='evt_bridge_active_tool' THEN $1::jsonb END,
-					waiting_activation_operation_id=CASE WHEN tool_use_event_id='evt_bridge_preparing_tool' THEN 'sop_bridge_interrupt_retained_activation' END
-					WHERE workspace_id='default' AND session_id='sesn_bridge_commit_interrupt'
-					  AND tool_use_event_id IN ('evt_bridge_active_tool','evt_bridge_preparing_tool')`,
-			`{"command_id":"cmd_bridge_interrupt"}`,
-		); err != nil {
-			t.Fatalf("advance accepted interrupt executions: %v", err)
-		}
-		// Durable acceptance above owns both births. These state-only advances
-		// isolate the Bridge interrupt transaction from Sandbox worker behavior.
-		if _, err := admin.ExecContext(context.Background(), `UPDATE session_sandbox_bindings
-				SET release_requested_at='2026-01-01T00:00:00Z', release_reason='session_delete'
-				WHERE workspace_id='default' AND session_id='sesn_bridge_commit_interrupt'`); err != nil {
-			t.Fatalf("request sandbox release: %v", err)
-		}
-		missingReleaseJobID := "qjob_bridge_interrupt_release_retained"
-		releasePartitionKey := queue.FormatSandboxLifecyclePartitionKey(workspace.ID("default"), "sbox_bridge_commit_interrupt")
-		releaseDedupeKey := queue.FormatSandboxLifecycleDedupeKey(queue.KindSandboxRelease, workspace.ID("default"), "sbox_bridge_commit_interrupt", "sop_bridge_interrupt_release")
-		if _, err := admin.ExecContext(context.Background(),
-			`INSERT INTO sandbox_lifecycle_operations (
-					workspace_id, operation_id, session_id, logical_sandbox_id, kind, state,
-					target_provider_resource_id, release_reason, queue_job_id, queue_kind,
-					queue_partition_key, queue_dedupe_key, created_at, updated_at
-				) VALUES ('default', 'sop_bridge_interrupt_release', 'sesn_bridge_commit_interrupt',
-					'sbox_bridge_commit_interrupt', 'release', 'pending',
-					'provider_bridge_interrupt_release', 'session_delete', $1, $2, $3, $4,
-					'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-			missingReleaseJobID, queue.KindSandboxRelease, releasePartitionKey, releaseDedupeKey,
-		); err != nil {
-			t.Fatalf("seed parked sandbox release: %v", err)
-		}
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "evt_bridge_commit_interrupt", 4, "user.interrupt", `{"type":"user.interrupt"}`)
-		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "rin_bridge_commit_interrupt", "interrupt_control", `["evt_bridge_commit_interrupt"]`, "accepted", "bind_bridge_commit_interrupt", "pod_uid_commit_interrupt", 4, 4)
-
-		cancellationLocalID := stableRuntimeID(
-			"runtime_message_draft",
-			"default",
-			"sesn_bridge_commit_interrupt",
-			"thr_bridge_commit_interrupt",
-			"interrupt_control",
-			"rin_bridge_commit_interrupt",
-			"cancellation",
-			"0",
-		)
-		request := &bridgev1.CommitInputsRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_commit_interrupt", "thr_bridge_commit_interrupt", "bind_bridge_commit_interrupt", 1, "pod_uid_commit_interrupt"),
-			RuntimeInputId: "rin_bridge_commit_interrupt",
-			InputKind:      "interrupt_control",
-			EventIds:       []string{"evt_bridge_commit_interrupt"},
-			SequenceFrom:   4,
-			SequenceTo:     4,
-			Drafts: []*bridgev1.RuntimeMessageDraft{{
-				RuntimeLocalId:  cancellationLocalID,
-				SourceKind:      "interrupt_control",
-				SourceId:        "rin_bridge_commit_interrupt",
-				SourceEventId:   "evt_bridge_commit_interrupt",
-				DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION,
-				Ordinal:         0,
-				MessageInfoJson: `{"role":"assistant","origin":"agent","status":"completed"}`,
-				Parts: []*bridgev1.RuntimePartDraft{
-					{
-						RuntimeLocalPartId: stableRuntimeID("runtime_message_part_draft", cancellationLocalID, "tool", "0"),
-						PartKind:           "tool",
-						Ordinal:            0,
-						PartJson:           `{"type":"tool","toolCallId":"tool-1","toolName":"Write","toolUseEventId":"evt_bridge_interrupted_tool","state":{"status":"cancelled","error":{"type":"runtime","message":"aborted","retryable":false}},"completedAt":"2026-07-30T00:00:00Z"}`,
-					},
-				},
-			}},
-			PendingToolCancellations: []*bridgev1.PendingToolCancellationDraft{{
-				ToolUseEventId: "evt_bridge_interrupted_tool",
-				RuntimeLocalId: cancellationLocalID,
-			}},
-			SandboxExecutionToolUseEventIds: []string{"evt_bridge_active_tool", "evt_bridge_preparing_tool"},
-		}
-		mismatched := proto.Clone(request).(*bridgev1.CommitInputsRequest)
-		mismatched.Drafts[0].Parts[0].PartJson = strings.Replace(
-			mismatched.Drafts[0].Parts[0].GetPartJson(),
-			"evt_bridge_interrupted_tool",
-			"evt_bridge_other_tool",
-			1,
-		)
-		if _, err := store.CommitInputs(context.Background(), mismatched); status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("CommitInputs mismatched interrupt tool identity error=%v; want InvalidArgument", err)
-		}
-		response, err := store.CommitInputs(context.Background(), request)
-		if err != nil {
-			t.Fatalf("CommitInputs interrupt_control: %v", err)
-		}
-		replay, err := store.CommitInputs(context.Background(), request)
-		if err != nil {
-			t.Fatalf("CommitInputs interrupt_control replay: %v", err)
-		}
-
-		var inboxStatus string
-		var processedAt sql.NullString
-		var messageCount int
-		var pendingStatus string
-		var pendingResultEventID sql.NullString
-		var terminalResultCount int
-		var cancellationMessageJSON string
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = 'rin_bridge_commit_interrupt'`).Scan(&inboxStatus); err != nil {
-			t.Fatalf("read interrupt inbox: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT processed_at FROM session_events WHERE workspace_id = 'default' AND event_id = 'evt_bridge_commit_interrupt'`).Scan(&processedAt); err != nil {
-			t.Fatalf("read interrupt processed_at: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND source_event_id = 'evt_bridge_commit_interrupt'`).Scan(&messageCount); err != nil {
-			t.Fatalf("read interrupt message count: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status, result_event_id FROM session_pending_tool_uses WHERE workspace_id = 'default' AND tool_use_event_id = 'evt_bridge_interrupted_tool'`).Scan(&pendingStatus, &pendingResultEventID); err != nil {
-			t.Fatalf("read interrupted pending tool: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT count(*) FROM session_events WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_commit_interrupt' AND type = 'agent.tool_result' AND payload_json::jsonb ->> 'tool_use_id' = 'evt_bridge_interrupted_tool'`).Scan(&terminalResultCount); err != nil {
-			t.Fatalf("read interrupted terminal result count: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT data_json
-			   FROM session_messages
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_commit_interrupt'
-			    AND session_thread_id = 'thr_bridge_commit_interrupt'
-			    AND source_event_id = 'evt_bridge_commit_interrupt'`,
-		).Scan(&cancellationMessageJSON); err != nil {
-			t.Fatalf("read durable interrupt cancellation message: %v", err)
-		}
-		var cancellationMessage struct {
-			Parts []struct {
-				Type           string `json:"type"`
-				ToolUseEventID string `json:"toolUseEventId"`
-				State          struct {
-					Status string `json:"status"`
-				} `json:"state"`
-			} `json:"parts"`
-		}
-		if err := json.Unmarshal([]byte(cancellationMessageJSON), &cancellationMessage); err != nil {
-			t.Fatalf("decode durable interrupt cancellation message: %v", err)
-		}
-		cancelledTools := make(map[string]bool, len(cancellationMessage.Parts))
-		for _, part := range cancellationMessage.Parts {
-			if part.Type != "tool" || part.State.Status != "cancelled" {
-				t.Fatalf("durable interrupt cancellation part = %+v; want cancelled tool part", part)
-			}
-			cancelledTools[part.ToolUseEventID] = true
-		}
-		if len(cancellationMessage.Parts) != 1 ||
-			!cancelledTools["evt_bridge_interrupted_tool"] ||
-			cancelledTools["evt_bridge_active_tool"] {
-			t.Fatalf("durable interrupt cancellation tools = %#v; want only approval-owned tool id", cancelledTools)
-		}
-		var executionState, cancelState string
-		var waitingExecutionState string
-		var retainedDependencyState string
-		var cancelRequestedAt sql.NullString
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT execution_state, cancel_state, cancel_requested_at
-			   FROM session_runtime_tool_results
-			  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_commit_interrupt'
-			    AND session_thread_id = 'thr_bridge_commit_interrupt'
-			    AND tool_use_event_id = 'evt_bridge_active_tool'`,
-		).Scan(&executionState, &cancelState, &cancelRequestedAt); err != nil {
-			t.Fatalf("read interrupted sandbox execution: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT execution_state
-			   FROM session_runtime_tool_results
-			  WHERE workspace_id = 'default' AND session_id = 'sesn_bridge_commit_interrupt'
-			    AND session_thread_id = 'thr_bridge_commit_interrupt'
-			    AND tool_use_event_id = 'evt_bridge_preparing_tool'`,
-		).Scan(&waitingExecutionState); err != nil {
-			t.Fatalf("read terminalized waiting execution: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT state FROM sandbox_lifecycle_operations
-			  WHERE workspace_id = 'default'
-			    AND operation_id = 'sop_bridge_interrupt_retained_activation'`,
-		).Scan(&retainedDependencyState); err != nil {
-			t.Fatalf("read retained interrupt dependency: %v", err)
-		}
-		var cancelJobCount int
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT count(*) FROM queue_jobs
-			  WHERE workspace_id = 'default' AND kind = 'sandbox_tool_cancel'
-			    AND payload_json::jsonb ->> 'session_id' = 'sesn_bridge_commit_interrupt'
-			    AND payload_json::jsonb ->> 'session_thread_id' = 'thr_bridge_commit_interrupt'
-			    AND payload_json::jsonb ->> 'tool_use_event_id' = 'evt_bridge_active_tool'`,
-		).Scan(&cancelJobCount); err != nil {
-			t.Fatalf("count sandbox cancellation jobs: %v", err)
-		}
-		var releaseJobCount int
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT count(*) FROM queue_jobs
-			  WHERE workspace_id = 'default' AND kind = 'sandbox_release'
-			    AND payload_json::jsonb ->> 'operation_id' = 'sop_bridge_interrupt_release'
-			    AND status = 'pending'`,
-		).Scan(&releaseJobCount); err != nil {
-			t.Fatalf("count woken sandbox release jobs: %v", err)
-		}
-		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-			inboxStatus != "committed" || !processedAt.Valid || messageCount != 1 || pendingStatus != "cancelled" ||
-			!pendingResultEventID.Valid || pendingResultEventID.String != "evt_bridge_commit_interrupt" || terminalResultCount != 0 ||
-			executionState != "running" || cancelState != "pending" || !cancelRequestedAt.Valid || cancelJobCount != 1 ||
-			waitingExecutionState != "terminal_unconsumed" || retainedDependencyState != "abandoned" || releaseJobCount != 0 ||
-			len(response.GetDeclaration().GetReceipts()) != 1 ||
-			len(response.GetDeclaration().GetReceipts()[0].GetPendingToolDeltaJson()) != 1 {
-			t.Fatalf("interrupt commit ack=%s replay=%s inbox=%q processed=%v messages=%d pending=%q result=%v terminal=%d execution=%q cancel=%q requested=%v jobs=%d waiting=%q retained=%q release_jobs=%d receipt=%#v; want disjoint approval settlement, one durable execution cancellation, retained dependency abandonment, and a blocked release",
-				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, messageCount, pendingStatus, pendingResultEventID, terminalResultCount,
-				executionState, cancelState, cancelRequestedAt, cancelJobCount, waitingExecutionState, retainedDependencyState, releaseJobCount, response.GetDeclaration())
-		}
-	})
-
-	t.Run("tool_confirmation", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_commit_confirm", "bind_bridge_commit_confirm", 1, "pod_uid_commit_confirm")
-		seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "evt_bridge_pending_tool", 1)
-		setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "evt_bridge_pending_tool", "resolving")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "evt_bridge_commit_confirm", 2, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"evt_bridge_pending_tool","result":"deny","deny_message":"not now"}`)
-		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "rin_bridge_commit_confirm", "tool_confirmation", `["evt_bridge_commit_confirm"]`, "accepted", "bind_bridge_commit_confirm", "pod_uid_commit_confirm", 2, 2)
-		if _, err := admin.ExecContext(context.Background(),
-			`INSERT INTO session_runtime_tool_results (
-				workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
-				normalized_input_hash, tool_name, input_json, ack_status, result_json,
-				model_tool_call_id, execution_state, execution_attempt_generation,
-				provider_command_reference_json, created_at, updated_at
-			) VALUES ('default', 'sesn_bridge_commit_confirm', 'thr_bridge_commit_confirm',
-				'evt_bridge_parallel_execution', 'sandbox_tool', $1, 'Read', $2, 'committed', NULL,
-				'tool-parallel', 'running', 1, $3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
-			sha256Hex(`{"file_path":"README.md"}`), `{"file_path":"README.md"}`, `{"command_id":"cmd_parallel"}`,
-		); err != nil {
-			t.Fatalf("seed parallel sandbox execution: %v", err)
-		}
-
-		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		request := &bridgev1.CommitInputsRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_commit_confirm", "thr_bridge_commit_confirm", "bind_bridge_commit_confirm", 1, "pod_uid_commit_confirm"),
-			RuntimeInputId: "rin_bridge_commit_confirm",
-			InputKind:      "tool_confirmation",
-			EventIds:       []string{"evt_bridge_commit_confirm"},
-			SequenceFrom:   2,
-			SequenceTo:     2,
-			Drafts: []*bridgev1.RuntimeMessageDraft{
-				bridgeInputDraftForTest(
-					"default",
-					"sesn_bridge_commit_confirm",
-					"thr_bridge_commit_confirm",
-					"tool_confirmation",
-					"rin_bridge_commit_confirm",
-					"evt_bridge_commit_confirm",
-					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_APPROVAL_INPUT,
-					"user",
-					"Approval denied: not now",
-				),
-			},
-		}
-		response, err := store.CommitInputs(context.Background(), request)
-		if err != nil {
-			t.Fatalf("CommitInputs tool_confirmation: %v", err)
-		}
-		replay, err := store.CommitInputs(context.Background(), request)
-		if err != nil {
-			t.Fatalf("CommitInputs tool_confirmation replay: %v", err)
-		}
-
-		var inboxStatus string
-		var processedAt sql.NullString
-		var pendingStatus string
-		var decision sql.NullString
-		var denyMessage sql.NullString
-		var resolvedAt sql.NullString
-		var messageCount int
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = 'rin_bridge_commit_confirm'`).Scan(&inboxStatus); err != nil {
-			t.Fatalf("read confirmation inbox: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT processed_at FROM session_events WHERE workspace_id = 'default' AND event_id = 'evt_bridge_commit_confirm'`).Scan(&processedAt); err != nil {
-			t.Fatalf("read confirmation processed_at: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status, decision, deny_message, resolved_at
-			   FROM session_pending_tool_uses
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_commit_confirm'
-			    AND session_thread_id = 'thr_bridge_commit_confirm'
-			    AND tool_use_event_id = 'evt_bridge_pending_tool'`).Scan(&pendingStatus, &decision, &denyMessage, &resolvedAt); err != nil {
-			t.Fatalf("read pending approval: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT count(*) FROM session_messages WHERE workspace_id = 'default' AND source_event_id = 'evt_bridge_commit_confirm'`).Scan(&messageCount); err != nil {
-			t.Fatalf("read confirmation message count: %v", err)
-		}
-		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED ||
-			replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
-			inboxStatus != "committed" || !processedAt.Valid || pendingStatus != "resolving" ||
-			!decision.Valid || decision.String != "deny" || !denyMessage.Valid || denyMessage.String != "not now" ||
-			resolvedAt.Valid || messageCount != 1 {
-			t.Fatalf("confirmation commit ack=%s replay=%s inbox=%q processed=%v pending=%q decision=%v deny=%v resolved=%v messages=%d; want committed/duplicate/committed/processed/resolving/deny/unresolved/1",
-				response.GetAck().GetStatus(), replay.GetAck().GetStatus(), inboxStatus, processedAt.Valid, pendingStatus, decision, denyMessage, resolvedAt.Valid, messageCount)
-		}
-	})
-
-	t.Run("tool_confirmation cannot flip recorded decision", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_commit_confirm_flip", "bind_bridge_commit_confirm_flip", 1, "pod_uid_commit_confirm_flip")
-		seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "evt_bridge_pending_tool_flip", 1)
-		setBridgeAPIPendingApprovalStatus(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "evt_bridge_pending_tool_flip", "resolving")
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "evt_bridge_commit_confirm_flip_deny", 2, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"evt_bridge_pending_tool_flip","result":"deny","deny_message":"first decision"}`)
-		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "rin_bridge_commit_confirm_flip_deny", "tool_confirmation", `["evt_bridge_commit_confirm_flip_deny"]`, "accepted", "bind_bridge_commit_confirm_flip", "pod_uid_commit_confirm_flip", 2, 2)
-
-		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "bind_bridge_commit_confirm_flip", 1, "pod_uid_commit_confirm_flip"),
-			RuntimeInputId: "rin_bridge_commit_confirm_flip_deny",
-			InputKind:      "tool_confirmation",
-			EventIds:       []string{"evt_bridge_commit_confirm_flip_deny"},
-			SequenceFrom:   2,
-			SequenceTo:     2,
-			Drafts: []*bridgev1.RuntimeMessageDraft{
-				bridgeApprovalInputDraftForTest("default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "rin_bridge_commit_confirm_flip_deny", "evt_bridge_commit_confirm_flip_deny", "Approval denied: first decision"),
-			},
-		})
-		if err != nil {
-			t.Fatalf("CommitInputs initial confirmation: %v", err)
-		}
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "evt_bridge_commit_confirm_flip_allow", 3, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"evt_bridge_pending_tool_flip","result":"allow"}`)
-		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "rin_bridge_commit_confirm_flip_allow", "tool_confirmation", `["evt_bridge_commit_confirm_flip_allow"]`, "accepted", "bind_bridge_commit_confirm_flip", "pod_uid_commit_confirm_flip", 3, 3)
-
-		_, err = store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "bind_bridge_commit_confirm_flip", 1, "pod_uid_commit_confirm_flip"),
-			RuntimeInputId: "rin_bridge_commit_confirm_flip_allow",
-			InputKind:      "tool_confirmation",
-			EventIds:       []string{"evt_bridge_commit_confirm_flip_allow"},
-			SequenceFrom:   3,
-			SequenceTo:     3,
-			Drafts: []*bridgev1.RuntimeMessageDraft{
-				bridgeApprovalInputDraftForTest("default", "sesn_bridge_commit_confirm_flip", "thr_bridge_commit_confirm_flip", "rin_bridge_commit_confirm_flip_allow", "evt_bridge_commit_confirm_flip_allow", "Approval allowed"),
-			},
-		})
-		if status.Code(err) != codes.FailedPrecondition {
-			t.Fatalf("flipped CommitInputs err = %v; want FailedPrecondition", err)
-		}
-
-		var pendingStatus string
-		var decision sql.NullString
-		var denyMessage sql.NullString
-		var resolvedAt sql.NullString
-		var allowInboxStatus string
-		var allowProcessedAt sql.NullString
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status, decision, deny_message, resolved_at
-			   FROM session_pending_tool_uses
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_commit_confirm_flip'
-			    AND session_thread_id = 'thr_bridge_commit_confirm_flip'
-			    AND tool_use_event_id = 'evt_bridge_pending_tool_flip'`).Scan(&pendingStatus, &decision, &denyMessage, &resolvedAt); err != nil {
-			t.Fatalf("read pending approval after flip attempt: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = 'rin_bridge_commit_confirm_flip_allow'`).Scan(&allowInboxStatus); err != nil {
-			t.Fatalf("read flipped confirmation inbox: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT processed_at FROM session_events WHERE workspace_id = 'default' AND event_id = 'evt_bridge_commit_confirm_flip_allow'`).Scan(&allowProcessedAt); err != nil {
-			t.Fatalf("read flipped confirmation processed_at: %v", err)
-		}
-		if pendingStatus != "resolving" || !decision.Valid || decision.String != "deny" ||
-			!denyMessage.Valid || denyMessage.String != "first decision" || resolvedAt.Valid ||
-			allowInboxStatus != "accepted" || allowProcessedAt.Valid {
-			t.Fatalf("flip side effects pending=%q decision=%v deny=%v resolved=%v inbox=%q processed=%v; want original resolving deny and rollback",
-				pendingStatus, decision, denyMessage, resolvedAt.Valid, allowInboxStatus, allowProcessedAt.Valid)
-		}
-	})
-
-	t.Run("stale tool_confirmation fails closed", func(t *testing.T) {
-		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
-		seedBridgeAPISession(t, admin, "default", "sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm")
-		seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_commit_stale_confirm", "bind_bridge_commit_stale_confirm", 1, "pod_uid_commit_stale_confirm")
-		seedBridgeAPIPendingApproval(t, admin, "default", "sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm", "evt_bridge_stale_tool", 1)
-		if _, err := admin.ExecContext(context.Background(),
-			`UPDATE session_pending_tool_uses
-			    SET status = 'resolved',
-			        resolved_at = '2026-01-01T00:00:01Z'
-			  WHERE workspace_id = 'default'
-			    AND session_id = 'sesn_bridge_commit_stale_confirm'
-			    AND session_thread_id = 'thr_bridge_commit_stale_confirm'
-			    AND tool_use_event_id = 'evt_bridge_stale_tool'`); err != nil {
-			t.Fatalf("mark pending row resolved: %v", err)
-		}
-		seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm", "evt_bridge_commit_stale_confirm", 2, "user.tool_confirmation", `{"type":"user.tool_confirmation","tool_use_id":"evt_bridge_stale_tool","result":"allow"}`)
-		seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm", "rin_bridge_commit_stale_confirm", "tool_confirmation", `["evt_bridge_commit_stale_confirm"]`, "accepted", "bind_bridge_commit_stale_confirm", "pod_uid_commit_stale_confirm", 2, 2)
-
-		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
-		_, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
-			Scope:          bridgeAPIScope("sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm", "bind_bridge_commit_stale_confirm", 1, "pod_uid_commit_stale_confirm"),
-			RuntimeInputId: "rin_bridge_commit_stale_confirm",
-			InputKind:      "tool_confirmation",
-			EventIds:       []string{"evt_bridge_commit_stale_confirm"},
-			SequenceFrom:   2,
-			SequenceTo:     2,
-			Drafts: []*bridgev1.RuntimeMessageDraft{
-				bridgeApprovalInputDraftForTest("default", "sesn_bridge_commit_stale_confirm", "thr_bridge_commit_stale_confirm", "rin_bridge_commit_stale_confirm", "evt_bridge_commit_stale_confirm", "Approval allowed"),
-			},
-		})
-		if status.Code(err) != codes.FailedPrecondition {
-			t.Fatalf("stale CommitInputs err = %v; want FailedPrecondition", err)
-		}
-
-		var inboxStatus string
-		var processedAt sql.NullString
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT status FROM session_runtime_inbox WHERE workspace_id = 'default' AND runtime_input_id = 'rin_bridge_commit_stale_confirm'`).Scan(&inboxStatus); err != nil {
-			t.Fatalf("read stale confirmation inbox: %v", err)
-		}
-		if err := admin.QueryRowContext(context.Background(),
-			`SELECT processed_at FROM session_events WHERE workspace_id = 'default' AND event_id = 'evt_bridge_commit_stale_confirm'`).Scan(&processedAt); err != nil {
-			t.Fatalf("read stale confirmation processed_at: %v", err)
-		}
-		if inboxStatus != "accepted" || processedAt.Valid {
-			t.Fatalf("stale confirmation side effects inbox=%q processed=%v; want accepted/unprocessed rollback", inboxStatus, processedAt.Valid)
-		}
-	})
-}
-
 func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDecision(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm")
@@ -1366,13 +426,13 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		EventType:      "agent.tool_use",
 		PayloadJson:    `{"type":"agent.tool_use","name":"dangerous_tool","input":{"path":"README.md"},"evaluated_permission":"ask"}`,
 		SessionVisible: true,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_bridge_generated_tool_use",
 			"agent.tool_use",
 			"streaming",
-			bridgeRuntimePartDraftForTest{
+			bridgeRuntimePartCreateForTest{
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"tool-call-generated","toolName":"dangerous_tool","state":{"status":"running","input":{"value":{"path":"README.md"},"preview":"{\"path\":\"README.md\"}","truncated":false}}}`,
 			},
@@ -1392,8 +452,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsRecordsGeneratedPendingApprovalDeci
 		EventIds:       []string{"evt_bridge_generated_confirm"},
 		SequenceFrom:   3,
 		SequenceTo:     3,
-		Drafts: []*bridgev1.RuntimeMessageDraft{
-			bridgeApprovalInputDraftForTest("default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "evt_bridge_generated_confirm", "Approval allowed"),
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{
+			bridgeApprovalInputCreateForTest("default", "sesn_bridge_generated_confirm", "thr_bridge_generated_confirm", "rin_bridge_generated_confirm", "evt_bridge_generated_confirm", "Approval allowed"),
 		},
 	})
 	if err != nil {
@@ -1505,7 +565,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		t.Fatalf("prepared inter-agent command = %#v; want exact stored envelope and admitted source stamps", plan.Request)
 	}
 	assertDurableInterAgentPublicContentPreservesRuntimeMessage(t, plan.Request.GetPayloadJson(), "hello child")
-	if err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, plan.Request); err != nil {
+	if _, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), job, plan.Request); err != nil {
 		t.Fatalf("MarkRuntimeInputAccepted inter-agent delivery: %v", err)
 	}
 	if acknowledged, err := queueStore.Ack(context.Background(), queue.AckRequest{
@@ -1516,18 +576,12 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}); err != nil || !acknowledged {
 		t.Fatalf("ACK resolved inter-agent wake = %v/%v; want true/nil", acknowledged, err)
 	}
-	draft := bridgeInputDraftForTest(
-		"default",
-		"sesn_bridge_inter_agent",
-		"thr_bridge_inter_agent_child",
-		"agent_mail",
-		runtimeInputID,
-		beforeReceived.GetReceivedEventId(),
-		bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT,
-		"user",
-		"hello child",
+	sourceEventID := beforeReceived.GetReceivedEventId()
+	create := bridgeMessageCreateForTest(
+		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
+		"user", "agent", &sourceEventID,
+		bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"hello child","truncated":false,"status":"completed"}`},
 	)
-	draft.MessageInfoJson = `{"role":"user","origin":"agent","status":"completed"}`
 	request := &bridgev1.CommitInputsRequest{
 		Scope:          childScope,
 		RuntimeInputId: runtimeInputID,
@@ -1535,7 +589,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 		EventIds:       []string{beforeReceived.GetReceivedEventId()},
 		SequenceFrom:   beforeReceived.GetReceivedSequence(),
 		SequenceTo:     beforeReceived.GetReceivedSequence(),
-		Drafts:         []*bridgev1.RuntimeMessageDraft{draft},
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{create},
 	}
 
 	response, err := store.CommitInputs(context.Background(), request)
@@ -1964,8 +1018,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	).Scan(&projectedRole, &projectedOrigin); err != nil {
 		t.Fatalf("read main completion message role: %v", err)
 	}
-	if projectedRole != "user" || projectedOrigin != "runtime" {
-		t.Fatalf("main completion message role/origin = %q/%q; want user/runtime", projectedRole, projectedOrigin)
+	if projectedRole != "user" || projectedOrigin != "agent" {
+		t.Fatalf("main completion message role/origin = %q/%q; want user/agent", projectedRole, projectedOrigin)
 	}
 }
 
@@ -2183,19 +1237,11 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			RuntimeInputId: inputID,
 			InputKind:      "approval_review",
 			EventIds:       []string{eventID},
-			Drafts: []*bridgev1.RuntimeMessageDraft{
-				bridgeInputDraftForTest(
-					"default",
-					sessionID,
-					reviewerID,
-					"approval_review",
-					inputID,
-					eventID,
-					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_REVIEWER_INPUT,
-					"user",
-					"approve",
-				),
-			},
+			MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeMessageCreateForTest(
+				bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT,
+				"user", "user", bridgeAPIString(eventID),
+				bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"approve","truncated":false,"status":"completed"}`},
+			)},
 		}
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 		response, err := store.CommitInputs(context.Background(), request)
@@ -2288,29 +1334,16 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			EventIds:       []string{eventID1, eventID2},
 			SequenceFrom:   1,
 			SequenceTo:     2,
-			Drafts: []*bridgev1.RuntimeMessageDraft{
-				bridgeInputDraftForTest(
-					"default",
-					sessionID,
-					threadID,
-					"rejection",
-					inputID,
-					eventID1,
-					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_REJECTION,
-					"assistant",
-					"Input was not accepted.",
+			MessageCreates: []*bridgev1.RuntimeMessageCreate{
+				bridgeMessageCreateForTest(
+					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
+					"assistant", "agent", bridgeAPIString(eventID1),
+					bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"Input was not accepted.","truncated":false,"status":"completed"}`},
 				),
-				bridgeInputDraftForTestOrdinal(
-					"default",
-					sessionID,
-					threadID,
-					"rejection",
-					inputID,
-					eventID2,
-					bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_REJECTION,
-					"assistant",
-					"Input was not accepted.",
-					1,
+				bridgeMessageCreateForTest(
+					bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION,
+					"assistant", "agent", bridgeAPIString(eventID2),
+					bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"Input was not accepted.","truncated":false,"status":"completed"}`},
 				),
 			},
 		}
@@ -2328,7 +1361,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 func assertSingleCommitInputReceipt(t *testing.T, response *bridgev1.CommitInputsResponse, sourceKind string, sourceID string, eventID string) {
 	t.Helper()
 	receipts := response.GetDeclaration().GetReceipts()
-	if len(receipts) != 1 || receipts[0].GetSourceKind() != sourceKind || receipts[0].GetSourceId() != sourceID ||
+	if len(receipts) != 1 || receipts[0].GetSourceKind() != sourceKind || receipts[0].GetOperationId() != sourceID ||
 		len(receipts[0].GetEvents()) != 1 || receipts[0].GetEvents()[0].GetEventId() != eventID ||
 		len(receipts[0].GetMessages()) != 1 || receipts[0].GetMessages()[0].GetOwningEventId() != eventID {
 		t.Fatalf("CommitInputs receipt = %+v; want one %s receipt for %s", response.GetDeclaration(), sourceKind, sourceID)

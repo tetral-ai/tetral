@@ -66,112 +66,88 @@ export function bridgeWriteStatusToJSON(object: BridgeWriteStatus): string {
   }
 }
 
-export enum RuntimeDraftKind {
-  RUNTIME_DRAFT_KIND_UNSPECIFIED = 0,
-  RUNTIME_DRAFT_KIND_USER_INPUT = 1,
-  RUNTIME_DRAFT_KIND_APPROVAL_INPUT = 2,
-  RUNTIME_DRAFT_KIND_REVIEWER_INPUT = 3,
-  RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT = 4,
-  RUNTIME_DRAFT_KIND_ASSISTANT_TEXT = 5,
-  RUNTIME_DRAFT_KIND_TOOL_USE = 6,
-  RUNTIME_DRAFT_KIND_TOOL_RESULT = 7,
-  RUNTIME_DRAFT_KIND_TASK_NOTIFICATION = 8,
-  RUNTIME_DRAFT_KIND_REJECTION = 9,
-  RUNTIME_DRAFT_KIND_CANCELLATION = 10,
-  RUNTIME_DRAFT_KIND_COMPLETION_MAIL = 11,
-  RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT = 12,
-  RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR = 13,
-  RUNTIME_DRAFT_KIND_TERMINATION = 14,
+export enum RuntimeMessageCreateKind {
+  RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED = 0,
+  RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT = 1,
+  RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT = 2,
+  RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT = 3,
+  RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT = 4,
+  RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION = 5,
+  RUNTIME_MESSAGE_CREATE_KIND_REJECTION = 6,
+  RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL = 7,
+  RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT = 8,
+  RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR = 9,
+  RUNTIME_MESSAGE_CREATE_KIND_TERMINATION = 10,
   UNRECOGNIZED = -1,
 }
 
-export function runtimeDraftKindFromJSON(object: any): RuntimeDraftKind {
+export function runtimeMessageCreateKindFromJSON(object: any): RuntimeMessageCreateKind {
   switch (object) {
     case 0:
-    case "RUNTIME_DRAFT_KIND_UNSPECIFIED":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_UNSPECIFIED;
+    case "RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED;
     case 1:
-    case "RUNTIME_DRAFT_KIND_USER_INPUT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_USER_INPUT;
+    case "RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT;
     case 2:
-    case "RUNTIME_DRAFT_KIND_APPROVAL_INPUT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_APPROVAL_INPUT;
+    case "RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT;
     case 3:
-    case "RUNTIME_DRAFT_KIND_REVIEWER_INPUT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_REVIEWER_INPUT;
+    case "RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT;
     case 4:
-    case "RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT;
+    case "RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT;
     case 5:
-    case "RUNTIME_DRAFT_KIND_ASSISTANT_TEXT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_ASSISTANT_TEXT;
+    case "RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION;
     case 6:
-    case "RUNTIME_DRAFT_KIND_TOOL_USE":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_USE;
+    case "RUNTIME_MESSAGE_CREATE_KIND_REJECTION":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_REJECTION;
     case 7:
-    case "RUNTIME_DRAFT_KIND_TOOL_RESULT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_RESULT;
+    case "RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL;
     case 8:
-    case "RUNTIME_DRAFT_KIND_TASK_NOTIFICATION":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TASK_NOTIFICATION;
+    case "RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT;
     case 9:
-    case "RUNTIME_DRAFT_KIND_REJECTION":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_REJECTION;
+    case "RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR;
     case 10:
-    case "RUNTIME_DRAFT_KIND_CANCELLATION":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION;
-    case 11:
-    case "RUNTIME_DRAFT_KIND_COMPLETION_MAIL":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPLETION_MAIL;
-    case 12:
-    case "RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT;
-    case 13:
-    case "RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR;
-    case 14:
-    case "RUNTIME_DRAFT_KIND_TERMINATION":
-      return RuntimeDraftKind.RUNTIME_DRAFT_KIND_TERMINATION;
+    case "RUNTIME_MESSAGE_CREATE_KIND_TERMINATION":
+      return RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_TERMINATION;
     case -1:
     case "UNRECOGNIZED":
     default:
-      return RuntimeDraftKind.UNRECOGNIZED;
+      return RuntimeMessageCreateKind.UNRECOGNIZED;
   }
 }
 
-export function runtimeDraftKindToJSON(object: RuntimeDraftKind): string {
+export function runtimeMessageCreateKindToJSON(object: RuntimeMessageCreateKind): string {
   switch (object) {
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_UNSPECIFIED:
-      return "RUNTIME_DRAFT_KIND_UNSPECIFIED";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_USER_INPUT:
-      return "RUNTIME_DRAFT_KIND_USER_INPUT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_APPROVAL_INPUT:
-      return "RUNTIME_DRAFT_KIND_APPROVAL_INPUT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_REVIEWER_INPUT:
-      return "RUNTIME_DRAFT_KIND_REVIEWER_INPUT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT:
-      return "RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_ASSISTANT_TEXT:
-      return "RUNTIME_DRAFT_KIND_ASSISTANT_TEXT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_USE:
-      return "RUNTIME_DRAFT_KIND_TOOL_USE";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TOOL_RESULT:
-      return "RUNTIME_DRAFT_KIND_TOOL_RESULT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TASK_NOTIFICATION:
-      return "RUNTIME_DRAFT_KIND_TASK_NOTIFICATION";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_REJECTION:
-      return "RUNTIME_DRAFT_KIND_REJECTION";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_CANCELLATION:
-      return "RUNTIME_DRAFT_KIND_CANCELLATION";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPLETION_MAIL:
-      return "RUNTIME_DRAFT_KIND_COMPLETION_MAIL";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT:
-      return "RUNTIME_DRAFT_KIND_COMPACTION_CHECKPOINT";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR:
-      return "RUNTIME_DRAFT_KIND_INTERNAL_TOOL_REPAIR";
-    case RuntimeDraftKind.RUNTIME_DRAFT_KIND_TERMINATION:
-      return "RUNTIME_DRAFT_KIND_TERMINATION";
-    case RuntimeDraftKind.UNRECOGNIZED:
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED:
+      return "RUNTIME_MESSAGE_CREATE_KIND_UNSPECIFIED";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT:
+      return "RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT:
+      return "RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT:
+      return "RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT:
+      return "RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION:
+      return "RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_REJECTION:
+      return "RUNTIME_MESSAGE_CREATE_KIND_REJECTION";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL:
+      return "RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT:
+      return "RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR:
+      return "RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR";
+    case RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_TERMINATION:
+      return "RUNTIME_MESSAGE_CREATE_KIND_TERMINATION";
+    case RuntimeMessageCreateKind.UNRECOGNIZED:
     default:
       return "UNRECOGNIZED";
   }
@@ -435,6 +411,153 @@ export function childLifecycleDispositionToJSON(object: ChildLifecycleDispositio
   }
 }
 
+export enum ChildControlAction {
+  CHILD_CONTROL_ACTION_UNSPECIFIED = 0,
+  CHILD_CONTROL_ACTION_INTERRUPT = 1,
+  CHILD_CONTROL_ACTION_CLOSE = 2,
+  UNRECOGNIZED = -1,
+}
+
+export function childControlActionFromJSON(object: any): ChildControlAction {
+  switch (object) {
+    case 0:
+    case "CHILD_CONTROL_ACTION_UNSPECIFIED":
+      return ChildControlAction.CHILD_CONTROL_ACTION_UNSPECIFIED;
+    case 1:
+    case "CHILD_CONTROL_ACTION_INTERRUPT":
+      return ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT;
+    case 2:
+    case "CHILD_CONTROL_ACTION_CLOSE":
+      return ChildControlAction.CHILD_CONTROL_ACTION_CLOSE;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ChildControlAction.UNRECOGNIZED;
+  }
+}
+
+export function childControlActionToJSON(object: ChildControlAction): string {
+  switch (object) {
+    case ChildControlAction.CHILD_CONTROL_ACTION_UNSPECIFIED:
+      return "CHILD_CONTROL_ACTION_UNSPECIFIED";
+    case ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT:
+      return "CHILD_CONTROL_ACTION_INTERRUPT";
+    case ChildControlAction.CHILD_CONTROL_ACTION_CLOSE:
+      return "CHILD_CONTROL_ACTION_CLOSE";
+    case ChildControlAction.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ChildInterruptDisposition {
+  CHILD_INTERRUPT_DISPOSITION_UNSPECIFIED = 0,
+  CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL = 1,
+  CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED = 2,
+  CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED = 3,
+  CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function childInterruptDispositionFromJSON(object: any): ChildInterruptDisposition {
+  switch (object) {
+    case 0:
+    case "CHILD_INTERRUPT_DISPOSITION_UNSPECIFIED":
+      return ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_UNSPECIFIED;
+    case 1:
+    case "CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL":
+      return ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL;
+    case 2:
+    case "CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED":
+      return ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED;
+    case 3:
+    case "CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED":
+      return ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED;
+    case 4:
+    case "CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED":
+      return ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ChildInterruptDisposition.UNRECOGNIZED;
+  }
+}
+
+export function childInterruptDispositionToJSON(object: ChildInterruptDisposition): string {
+  switch (object) {
+    case ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_UNSPECIFIED:
+      return "CHILD_INTERRUPT_DISPOSITION_UNSPECIFIED";
+    case ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL:
+      return "CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL";
+    case ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED:
+      return "CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED";
+    case ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED:
+      return "CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED";
+    case ChildInterruptDisposition.CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED:
+      return "CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED";
+    case ChildInterruptDisposition.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
+export enum ChildInterruptOutcome {
+  CHILD_INTERRUPT_OUTCOME_UNSPECIFIED = 0,
+  CHILD_INTERRUPT_OUTCOME_COMPLETED = 1,
+  CHILD_INTERRUPT_OUTCOME_DUPLICATE = 2,
+  CHILD_INTERRUPT_OUTCOME_PRESERVED_FAILED = 3,
+  CHILD_INTERRUPT_OUTCOME_PRESERVED_TERMINATED = 4,
+  CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED = 5,
+  UNRECOGNIZED = -1,
+}
+
+export function childInterruptOutcomeFromJSON(object: any): ChildInterruptOutcome {
+  switch (object) {
+    case 0:
+    case "CHILD_INTERRUPT_OUTCOME_UNSPECIFIED":
+      return ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_UNSPECIFIED;
+    case 1:
+    case "CHILD_INTERRUPT_OUTCOME_COMPLETED":
+      return ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_COMPLETED;
+    case 2:
+    case "CHILD_INTERRUPT_OUTCOME_DUPLICATE":
+      return ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DUPLICATE;
+    case 3:
+    case "CHILD_INTERRUPT_OUTCOME_PRESERVED_FAILED":
+      return ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_PRESERVED_FAILED;
+    case 4:
+    case "CHILD_INTERRUPT_OUTCOME_PRESERVED_TERMINATED":
+      return ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_PRESERVED_TERMINATED;
+    case 5:
+    case "CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED":
+      return ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return ChildInterruptOutcome.UNRECOGNIZED;
+  }
+}
+
+export function childInterruptOutcomeToJSON(object: ChildInterruptOutcome): string {
+  switch (object) {
+    case ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_UNSPECIFIED:
+      return "CHILD_INTERRUPT_OUTCOME_UNSPECIFIED";
+    case ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_COMPLETED:
+      return "CHILD_INTERRUPT_OUTCOME_COMPLETED";
+    case ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DUPLICATE:
+      return "CHILD_INTERRUPT_OUTCOME_DUPLICATE";
+    case ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_PRESERVED_FAILED:
+      return "CHILD_INTERRUPT_OUTCOME_PRESERVED_FAILED";
+    case ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_PRESERVED_TERMINATED:
+      return "CHILD_INTERRUPT_OUTCOME_PRESERVED_TERMINATED";
+    case ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED:
+      return "CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED";
+    case ChildInterruptOutcome.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export enum FileAttachmentRejectionReason {
   FILE_ATTACHMENT_REJECTION_REASON_UNSPECIFIED = 0,
   FILE_ATTACHMENT_REJECTION_REASON_DELETED = 1,
@@ -468,34 +591,49 @@ export function fileAttachmentRejectionReasonToJSON(object: FileAttachmentReject
   }
 }
 
-export interface RuntimeMessageDraft {
-  runtimeLocalId: string;
-  sourceKind: string;
-  sourceId: string;
-  sourceEventId: string;
-  draftKind: RuntimeDraftKind;
-  ordinal: number;
+export interface RuntimeMessageCreate {
+  sourceEventId?: string | undefined;
+  messageKind: RuntimeMessageCreateKind;
   messageInfoJson: string;
-  parts: RuntimePartDraft[];
+  parts: RuntimePartCreate[];
 }
 
-export interface RuntimePartDraft {
-  runtimeLocalPartId: string;
+export interface RuntimePartCreate {
   partKind: string;
-  ordinal: number;
   partJson: string;
+}
+
+export interface RuntimeAssistantPartAppend {
+  parts: RuntimePartCreate[];
+}
+
+export interface RuntimeToolSettlement {
+  toolUseEventId: string;
+  completed?: RuntimeToolCompleted | undefined;
+  error?: RuntimeToolError | undefined;
+  cancelled?: RuntimeToolCancelled | undefined;
+}
+
+export interface RuntimeToolCompleted {
+  outputJson: string;
+}
+
+export interface RuntimeToolError {
+  errorJson: string;
+}
+
+export interface RuntimeToolCancelled {
+  errorJson?: string | undefined;
 }
 
 export interface DurableEventStamp {
   sessionThreadId: string;
-  sourceEventId: string;
   eventId: string;
   eventSequence: number;
   disposition: DurableEventDisposition;
 }
 
 export interface DurablePartStamp {
-  runtimeLocalPartId: string;
   partId: string;
   messageId: string;
   partSequence: number;
@@ -505,7 +643,6 @@ export interface DurablePartStamp {
 }
 
 export interface DurableMessageStamp {
-  runtimeLocalId: string;
   sessionThreadId: string;
   owningEventId: string;
   messageId: string;
@@ -526,7 +663,6 @@ export interface PrefixConsumptionStamp {
 export interface PrefixConsumptionDraft {
   childThreadId: string;
   parentBoundaryEventId: string;
-  checkpointRuntimeLocalId: string;
 }
 
 export interface RequestRescheduleStamp {
@@ -558,11 +694,10 @@ export interface DeclarationReceipt {
   sessionThreadId: string;
   operationKind: string;
   sourceKind: string;
-  sourceId: string;
+  operationId: string;
   events: DurableEventStamp[];
   messages: DurableMessageStamp[];
   pendingAttachmentDeltaJson: string[];
-  pendingToolDeltaJson: string[];
   prefixConsumptions: PrefixConsumptionStamp[];
   declarationDigest: string;
   requestReschedule: RequestRescheduleStamp | undefined;
@@ -570,6 +705,14 @@ export interface DeclarationReceipt {
   requestStart: RequestStartStamp | undefined;
   idleCloseout: IdleCloseoutStamp | undefined;
   compactedThroughMessageSequence?: number | undefined;
+  interruptToolProjections: InterruptToolProjection[];
+}
+
+export interface InterruptToolProjection {
+  toolUseEventId: string;
+  resultEvent: DurableEventStamp | undefined;
+  error?: RuntimeToolError | undefined;
+  cancelled?: RuntimeToolCancelled | undefined;
 }
 
 export interface DeclarationResponse {
@@ -628,9 +771,7 @@ export interface CommitInputsRequest {
   sequenceFrom: number;
   sequenceTo: number;
   inputKind: string;
-  drafts: RuntimeMessageDraft[];
-  pendingToolCancellations: PendingToolCancellationDraft[];
-  sandboxExecutionToolUseEventIds: string[];
+  messageCreates: RuntimeMessageCreate[];
 }
 
 export interface CommitInputsResponse {
@@ -638,17 +779,12 @@ export interface CommitInputsResponse {
   declaration: DeclarationResponse | undefined;
 }
 
-export interface PendingToolCancellationDraft {
-  toolUseEventId: string;
-  runtimeLocalId: string;
-}
-
 export interface CommitTaskNotificationResultRequest {
   scope: RuntimeScope | undefined;
   runtimeInputId: string;
   taskId: string;
   resultJson: string;
-  draft: RuntimeMessageDraft | undefined;
+  messageCreate: RuntimeMessageCreate | undefined;
 }
 
 export interface CommitTaskNotificationResultResponse {
@@ -712,7 +848,7 @@ export interface CommitInternalToolRepairRequest {
   modelRequestId: string;
   modelToolCallId: string;
   toolName: string;
-  drafts: RuntimeMessageDraft[];
+  messageCreate: RuntimeMessageCreate | undefined;
 }
 
 export interface CommitInternalToolRepairResponse {
@@ -724,9 +860,8 @@ export interface CommitRuntimeTerminationRequest {
   scope: RuntimeScope | undefined;
   runtimeWriteId: string;
   failureJson: string;
-  drafts: RuntimeMessageDraft[];
-  pendingToolCancellations: PendingToolCancellationDraft[];
-  sandboxExecutionToolUseEventIds: string[];
+  toolSettlements: RuntimeToolSettlement[];
+  completionMailCreate: RuntimeMessageCreate | undefined;
 }
 
 export interface CommitRuntimeTerminationResponse {
@@ -814,9 +949,9 @@ export interface WriteEventRequest {
   eventType: string;
   payloadJson: string;
   sessionVisible: boolean;
-  stableReasoningParts: StableReasoningPart[];
   serverToolUse: ServerToolUseUsage | undefined;
-  drafts: RuntimeMessageDraft[];
+  assistantPartAppend?: RuntimeAssistantPartAppend | undefined;
+  toolSettlement?: RuntimeToolSettlement | undefined;
   mcpMaterializationHandle?: string | undefined;
   sandboxResultDigest?: string | undefined;
   contextThroughMessageSequence?: number | undefined;
@@ -847,13 +982,13 @@ export interface WriteRequestEndRequest {
   consumedAttachmentRefs: string[];
   requestKind: string;
   reschedule: RequestEndReschedule | undefined;
-  stableReasoningParts: StableReasoningPart[];
   consumedFileAttachments: FileAttachmentPair[];
-  drafts: RuntimeMessageDraft[];
+  trailingPartAppend: RuntimeAssistantPartAppend | undefined;
   prefixConsumption: PrefixConsumptionDraft | undefined;
   compactedThroughMessageSequence?: number | undefined;
   compactionEventPayloadJson: string;
   interruptSettlement: RequestEndInterruptSettlement | undefined;
+  compactionCheckpointCreate: RuntimeMessageCreate | undefined;
 }
 
 export interface RequestEndInterruptSettlement {
@@ -861,17 +996,6 @@ export interface RequestEndInterruptSettlement {
   eventIds: string[];
   sequenceFrom: number;
   sequenceTo: number;
-  pendingToolCancellations: PendingToolCancellationDraft[];
-  sandboxExecutionToolUseEventIds: string[];
-}
-
-export interface StableReasoningPart {
-  reasoningPartId: string;
-  providerPartId: string;
-  partSequence: number;
-  text: string;
-  metadataJson: string;
-  truncated: boolean;
 }
 
 export interface WriteRequestEndResponse {
@@ -896,7 +1020,7 @@ export interface FinishIdleRequest {
   scope: RuntimeScope | undefined;
   stopReasonJson: string;
   durableTurnId: string;
-  drafts: RuntimeMessageDraft[];
+  completionMailCreate: RuntimeMessageCreate | undefined;
 }
 
 export interface FinishIdleResponse {
@@ -961,11 +1085,53 @@ export interface ResolveInterAgentDeliveryResponse {
   messageJson: string;
 }
 
+export interface ChildInterruptTarget {
+  childThreadId: string;
+  disposition: ChildInterruptDisposition;
+  runtimeInputId?: string | undefined;
+  interruptEventId?: string | undefined;
+  interruptEventSequence?: number | undefined;
+}
+
+export interface AdmitChildInterruptRequest {
+  scope: RuntimeScope | undefined;
+  rootChildThreadId: string;
+  sourceToolUseEventId: string;
+  action: ChildControlAction;
+  includeDescendants: boolean;
+}
+
+export interface AdmitChildInterruptResponse {
+  ack: BridgeWriteAck | undefined;
+  targets: ChildInterruptTarget[];
+}
+
+export interface AwaitChildInterruptRequest {
+  scope: RuntimeScope | undefined;
+  rootChildThreadId: string;
+  sourceToolUseEventId: string;
+  action: ChildControlAction;
+  includeDescendants: boolean;
+  targets: ChildInterruptTarget[];
+}
+
+export interface ChildInterruptTargetOutcome {
+  target: ChildInterruptTarget | undefined;
+  outcome: ChildInterruptOutcome;
+  errorCode?: string | undefined;
+}
+
+export interface AwaitChildInterruptResponse {
+  ack: BridgeWriteAck | undefined;
+  outcomes: ChildInterruptTargetOutcome[];
+}
+
 export interface MarkChildThreadClosedRequest {
   scope: RuntimeScope | undefined;
   childThreadId: string;
-  closedAt: string;
   source: ChildLifecycleSource | undefined;
+  sourceToolUseEventId?: string | undefined;
+  targets: ChildInterruptTarget[];
 }
 
 export interface MarkChildThreadClosedResponse {
@@ -976,7 +1142,6 @@ export interface MarkChildThreadClosedResponse {
 export interface MarkChildThreadActiveRequest {
   scope: RuntimeScope | undefined;
   childThreadId: string;
-  activeAt: string;
   source: ChildLifecycleSource | undefined;
 }
 
@@ -1070,52 +1235,31 @@ export interface RunMemoryResponse {
   resultJson: string;
 }
 
-function createBaseRuntimeMessageDraft(): RuntimeMessageDraft {
-  return {
-    runtimeLocalId: "",
-    sourceKind: "",
-    sourceId: "",
-    sourceEventId: "",
-    draftKind: 0,
-    ordinal: 0,
-    messageInfoJson: "",
-    parts: [],
-  };
+function createBaseRuntimeMessageCreate(): RuntimeMessageCreate {
+  return { sourceEventId: undefined, messageKind: 0, messageInfoJson: "", parts: [] };
 }
 
-export const RuntimeMessageDraft: MessageFns<RuntimeMessageDraft> = {
-  encode(message: RuntimeMessageDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.runtimeLocalId !== "") {
-      writer.uint32(10).string(message.runtimeLocalId);
+export const RuntimeMessageCreate: MessageFns<RuntimeMessageCreate> = {
+  encode(message: RuntimeMessageCreate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sourceEventId !== undefined) {
+      writer.uint32(10).string(message.sourceEventId);
     }
-    if (message.sourceKind !== "") {
-      writer.uint32(18).string(message.sourceKind);
-    }
-    if (message.sourceId !== "") {
-      writer.uint32(26).string(message.sourceId);
-    }
-    if (message.sourceEventId !== "") {
-      writer.uint32(34).string(message.sourceEventId);
-    }
-    if (message.draftKind !== 0) {
-      writer.uint32(40).int32(message.draftKind);
-    }
-    if (message.ordinal !== 0) {
-      writer.uint32(48).int32(message.ordinal);
+    if (message.messageKind !== 0) {
+      writer.uint32(16).int32(message.messageKind);
     }
     if (message.messageInfoJson !== "") {
-      writer.uint32(58).string(message.messageInfoJson);
+      writer.uint32(26).string(message.messageInfoJson);
     }
     for (const v of message.parts) {
-      RuntimePartDraft.encode(v!, writer.uint32(66).fork()).join();
+      RuntimePartCreate.encode(v!, writer.uint32(34).fork()).join();
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeMessageDraft {
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeMessageCreate {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimeMessageDraft();
+    const message = createBaseRuntimeMessageCreate();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -1124,15 +1268,15 @@ export const RuntimeMessageDraft: MessageFns<RuntimeMessageDraft> = {
             break;
           }
 
-          message.runtimeLocalId = reader.string();
+          message.sourceEventId = reader.string();
           continue;
         }
         case 2: {
-          if (tag !== 18) {
+          if (tag !== 16) {
             break;
           }
 
-          message.sourceKind = reader.string();
+          message.messageKind = reader.int32() as any;
           continue;
         }
         case 3: {
@@ -1140,7 +1284,7 @@ export const RuntimeMessageDraft: MessageFns<RuntimeMessageDraft> = {
             break;
           }
 
-          message.sourceId = reader.string();
+          message.messageInfoJson = reader.string();
           continue;
         }
         case 4: {
@@ -1148,39 +1292,7 @@ export const RuntimeMessageDraft: MessageFns<RuntimeMessageDraft> = {
             break;
           }
 
-          message.sourceEventId = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 40) {
-            break;
-          }
-
-          message.draftKind = reader.int32() as any;
-          continue;
-        }
-        case 6: {
-          if (tag !== 48) {
-            break;
-          }
-
-          message.ordinal = reader.int32();
-          continue;
-        }
-        case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
-          message.messageInfoJson = reader.string();
-          continue;
-        }
-        case 8: {
-          if (tag !== 66) {
-            break;
-          }
-
-          message.parts.push(RuntimePartDraft.decode(reader, reader.uint32()));
+          message.parts.push(RuntimePartCreate.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -1192,116 +1304,76 @@ export const RuntimeMessageDraft: MessageFns<RuntimeMessageDraft> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimeMessageDraft {
+  fromJSON(object: any): RuntimeMessageCreate {
     return {
-      runtimeLocalId: isSet(object.runtimeLocalId)
-        ? globalThis.String(object.runtimeLocalId)
-        : isSet(object.runtime_local_id)
-        ? globalThis.String(object.runtime_local_id)
-        : "",
-      sourceKind: isSet(object.sourceKind)
-        ? globalThis.String(object.sourceKind)
-        : isSet(object.source_kind)
-        ? globalThis.String(object.source_kind)
-        : "",
-      sourceId: isSet(object.sourceId)
-        ? globalThis.String(object.sourceId)
-        : isSet(object.source_id)
-        ? globalThis.String(object.source_id)
-        : "",
       sourceEventId: isSet(object.sourceEventId)
         ? globalThis.String(object.sourceEventId)
         : isSet(object.source_event_id)
         ? globalThis.String(object.source_event_id)
-        : "",
-      draftKind: isSet(object.draftKind)
-        ? runtimeDraftKindFromJSON(object.draftKind)
-        : isSet(object.draft_kind)
-        ? runtimeDraftKindFromJSON(object.draft_kind)
+        : undefined,
+      messageKind: isSet(object.messageKind)
+        ? runtimeMessageCreateKindFromJSON(object.messageKind)
+        : isSet(object.message_kind)
+        ? runtimeMessageCreateKindFromJSON(object.message_kind)
         : 0,
-      ordinal: isSet(object.ordinal) ? globalThis.Number(object.ordinal) : 0,
       messageInfoJson: isSet(object.messageInfoJson)
         ? globalThis.String(object.messageInfoJson)
         : isSet(object.message_info_json)
         ? globalThis.String(object.message_info_json)
         : "",
-      parts: globalThis.Array.isArray(object?.parts)
-        ? object.parts.map((e: any) => RuntimePartDraft.fromJSON(e))
-        : [],
+      parts: globalThis.Array.isArray(object?.parts) ? object.parts.map((e: any) => RuntimePartCreate.fromJSON(e)) : [],
     };
   },
 
-  toJSON(message: RuntimeMessageDraft): unknown {
+  toJSON(message: RuntimeMessageCreate): unknown {
     const obj: any = {};
-    if (message.runtimeLocalId !== "") {
-      obj.runtimeLocalId = message.runtimeLocalId;
-    }
-    if (message.sourceKind !== "") {
-      obj.sourceKind = message.sourceKind;
-    }
-    if (message.sourceId !== "") {
-      obj.sourceId = message.sourceId;
-    }
-    if (message.sourceEventId !== "") {
+    if (message.sourceEventId !== undefined) {
       obj.sourceEventId = message.sourceEventId;
     }
-    if (message.draftKind !== 0) {
-      obj.draftKind = runtimeDraftKindToJSON(message.draftKind);
-    }
-    if (message.ordinal !== 0) {
-      obj.ordinal = Math.round(message.ordinal);
+    if (message.messageKind !== 0) {
+      obj.messageKind = runtimeMessageCreateKindToJSON(message.messageKind);
     }
     if (message.messageInfoJson !== "") {
       obj.messageInfoJson = message.messageInfoJson;
     }
     if (message.parts?.length) {
-      obj.parts = message.parts.map((e) => RuntimePartDraft.toJSON(e));
+      obj.parts = message.parts.map((e) => RuntimePartCreate.toJSON(e));
     }
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimeMessageDraft>, I>>(base?: I): RuntimeMessageDraft {
-    return RuntimeMessageDraft.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<RuntimeMessageCreate>, I>>(base?: I): RuntimeMessageCreate {
+    return RuntimeMessageCreate.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimeMessageDraft>, I>>(object: I): RuntimeMessageDraft {
-    const message = createBaseRuntimeMessageDraft();
-    message.runtimeLocalId = object.runtimeLocalId ?? "";
-    message.sourceKind = object.sourceKind ?? "";
-    message.sourceId = object.sourceId ?? "";
-    message.sourceEventId = object.sourceEventId ?? "";
-    message.draftKind = object.draftKind ?? 0;
-    message.ordinal = object.ordinal ?? 0;
+  fromPartial<I extends Exact<DeepPartial<RuntimeMessageCreate>, I>>(object: I): RuntimeMessageCreate {
+    const message = createBaseRuntimeMessageCreate();
+    message.sourceEventId = object.sourceEventId ?? undefined;
+    message.messageKind = object.messageKind ?? 0;
     message.messageInfoJson = object.messageInfoJson ?? "";
-    message.parts = object.parts?.map((e) => RuntimePartDraft.fromPartial(e)) || [];
+    message.parts = object.parts?.map((e) => RuntimePartCreate.fromPartial(e)) || [];
     return message;
   },
 };
 
-function createBaseRuntimePartDraft(): RuntimePartDraft {
-  return { runtimeLocalPartId: "", partKind: "", ordinal: 0, partJson: "" };
+function createBaseRuntimePartCreate(): RuntimePartCreate {
+  return { partKind: "", partJson: "" };
 }
 
-export const RuntimePartDraft: MessageFns<RuntimePartDraft> = {
-  encode(message: RuntimePartDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.runtimeLocalPartId !== "") {
-      writer.uint32(10).string(message.runtimeLocalPartId);
-    }
+export const RuntimePartCreate: MessageFns<RuntimePartCreate> = {
+  encode(message: RuntimePartCreate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
     if (message.partKind !== "") {
-      writer.uint32(18).string(message.partKind);
-    }
-    if (message.ordinal !== 0) {
-      writer.uint32(24).int32(message.ordinal);
+      writer.uint32(10).string(message.partKind);
     }
     if (message.partJson !== "") {
-      writer.uint32(34).string(message.partJson);
+      writer.uint32(18).string(message.partJson);
     }
     return writer;
   },
 
-  decode(input: BinaryReader | Uint8Array, length?: number): RuntimePartDraft {
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimePartCreate {
     const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
     const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseRuntimePartDraft();
+    const message = createBaseRuntimePartCreate();
     while (reader.pos < end) {
       const tag = reader.uint32();
       switch (tag >>> 3) {
@@ -1310,27 +1382,11 @@ export const RuntimePartDraft: MessageFns<RuntimePartDraft> = {
             break;
           }
 
-          message.runtimeLocalPartId = reader.string();
+          message.partKind = reader.string();
           continue;
         }
         case 2: {
           if (tag !== 18) {
-            break;
-          }
-
-          message.partKind = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.ordinal = reader.int32();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
             break;
           }
 
@@ -1346,19 +1402,13 @@ export const RuntimePartDraft: MessageFns<RuntimePartDraft> = {
     return message;
   },
 
-  fromJSON(object: any): RuntimePartDraft {
+  fromJSON(object: any): RuntimePartCreate {
     return {
-      runtimeLocalPartId: isSet(object.runtimeLocalPartId)
-        ? globalThis.String(object.runtimeLocalPartId)
-        : isSet(object.runtime_local_part_id)
-        ? globalThis.String(object.runtime_local_part_id)
-        : "",
       partKind: isSet(object.partKind)
         ? globalThis.String(object.partKind)
         : isSet(object.part_kind)
         ? globalThis.String(object.part_kind)
         : "",
-      ordinal: isSet(object.ordinal) ? globalThis.Number(object.ordinal) : 0,
       partJson: isSet(object.partJson)
         ? globalThis.String(object.partJson)
         : isSet(object.part_json)
@@ -1367,16 +1417,10 @@ export const RuntimePartDraft: MessageFns<RuntimePartDraft> = {
     };
   },
 
-  toJSON(message: RuntimePartDraft): unknown {
+  toJSON(message: RuntimePartCreate): unknown {
     const obj: any = {};
-    if (message.runtimeLocalPartId !== "") {
-      obj.runtimeLocalPartId = message.runtimeLocalPartId;
-    }
     if (message.partKind !== "") {
       obj.partKind = message.partKind;
-    }
-    if (message.ordinal !== 0) {
-      obj.ordinal = Math.round(message.ordinal);
     }
     if (message.partJson !== "") {
       obj.partJson = message.partJson;
@@ -1384,21 +1428,389 @@ export const RuntimePartDraft: MessageFns<RuntimePartDraft> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<RuntimePartDraft>, I>>(base?: I): RuntimePartDraft {
-    return RuntimePartDraft.fromPartial(base ?? ({} as any));
+  create<I extends Exact<DeepPartial<RuntimePartCreate>, I>>(base?: I): RuntimePartCreate {
+    return RuntimePartCreate.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<RuntimePartDraft>, I>>(object: I): RuntimePartDraft {
-    const message = createBaseRuntimePartDraft();
-    message.runtimeLocalPartId = object.runtimeLocalPartId ?? "";
+  fromPartial<I extends Exact<DeepPartial<RuntimePartCreate>, I>>(object: I): RuntimePartCreate {
+    const message = createBaseRuntimePartCreate();
     message.partKind = object.partKind ?? "";
-    message.ordinal = object.ordinal ?? 0;
     message.partJson = object.partJson ?? "";
     return message;
   },
 };
 
+function createBaseRuntimeAssistantPartAppend(): RuntimeAssistantPartAppend {
+  return { parts: [] };
+}
+
+export const RuntimeAssistantPartAppend: MessageFns<RuntimeAssistantPartAppend> = {
+  encode(message: RuntimeAssistantPartAppend, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.parts) {
+      RuntimePartCreate.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeAssistantPartAppend {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeAssistantPartAppend();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.parts.push(RuntimePartCreate.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeAssistantPartAppend {
+    return {
+      parts: globalThis.Array.isArray(object?.parts) ? object.parts.map((e: any) => RuntimePartCreate.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: RuntimeAssistantPartAppend): unknown {
+    const obj: any = {};
+    if (message.parts?.length) {
+      obj.parts = message.parts.map((e) => RuntimePartCreate.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeAssistantPartAppend>, I>>(base?: I): RuntimeAssistantPartAppend {
+    return RuntimeAssistantPartAppend.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeAssistantPartAppend>, I>>(object: I): RuntimeAssistantPartAppend {
+    const message = createBaseRuntimeAssistantPartAppend();
+    message.parts = object.parts?.map((e) => RuntimePartCreate.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseRuntimeToolSettlement(): RuntimeToolSettlement {
+  return { toolUseEventId: "", completed: undefined, error: undefined, cancelled: undefined };
+}
+
+export const RuntimeToolSettlement: MessageFns<RuntimeToolSettlement> = {
+  encode(message: RuntimeToolSettlement, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.toolUseEventId !== "") {
+      writer.uint32(10).string(message.toolUseEventId);
+    }
+    if (message.completed !== undefined) {
+      RuntimeToolCompleted.encode(message.completed, writer.uint32(18).fork()).join();
+    }
+    if (message.error !== undefined) {
+      RuntimeToolError.encode(message.error, writer.uint32(26).fork()).join();
+    }
+    if (message.cancelled !== undefined) {
+      RuntimeToolCancelled.encode(message.cancelled, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolSettlement {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeToolSettlement();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.completed = RuntimeToolCompleted.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.error = RuntimeToolError.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.cancelled = RuntimeToolCancelled.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeToolSettlement {
+    return {
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      completed: isSet(object.completed) ? RuntimeToolCompleted.fromJSON(object.completed) : undefined,
+      error: isSet(object.error) ? RuntimeToolError.fromJSON(object.error) : undefined,
+      cancelled: isSet(object.cancelled) ? RuntimeToolCancelled.fromJSON(object.cancelled) : undefined,
+    };
+  },
+
+  toJSON(message: RuntimeToolSettlement): unknown {
+    const obj: any = {};
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.completed !== undefined) {
+      obj.completed = RuntimeToolCompleted.toJSON(message.completed);
+    }
+    if (message.error !== undefined) {
+      obj.error = RuntimeToolError.toJSON(message.error);
+    }
+    if (message.cancelled !== undefined) {
+      obj.cancelled = RuntimeToolCancelled.toJSON(message.cancelled);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolSettlement>, I>>(base?: I): RuntimeToolSettlement {
+    return RuntimeToolSettlement.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolSettlement>, I>>(object: I): RuntimeToolSettlement {
+    const message = createBaseRuntimeToolSettlement();
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.completed = (object.completed !== undefined && object.completed !== null)
+      ? RuntimeToolCompleted.fromPartial(object.completed)
+      : undefined;
+    message.error = (object.error !== undefined && object.error !== null)
+      ? RuntimeToolError.fromPartial(object.error)
+      : undefined;
+    message.cancelled = (object.cancelled !== undefined && object.cancelled !== null)
+      ? RuntimeToolCancelled.fromPartial(object.cancelled)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseRuntimeToolCompleted(): RuntimeToolCompleted {
+  return { outputJson: "" };
+}
+
+export const RuntimeToolCompleted: MessageFns<RuntimeToolCompleted> = {
+  encode(message: RuntimeToolCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.outputJson !== "") {
+      writer.uint32(10).string(message.outputJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeToolCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.outputJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeToolCompleted {
+    return {
+      outputJson: isSet(object.outputJson)
+        ? globalThis.String(object.outputJson)
+        : isSet(object.output_json)
+        ? globalThis.String(object.output_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeToolCompleted): unknown {
+    const obj: any = {};
+    if (message.outputJson !== "") {
+      obj.outputJson = message.outputJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolCompleted>, I>>(base?: I): RuntimeToolCompleted {
+    return RuntimeToolCompleted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolCompleted>, I>>(object: I): RuntimeToolCompleted {
+    const message = createBaseRuntimeToolCompleted();
+    message.outputJson = object.outputJson ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeToolError(): RuntimeToolError {
+  return { errorJson: "" };
+}
+
+export const RuntimeToolError: MessageFns<RuntimeToolError> = {
+  encode(message: RuntimeToolError, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.errorJson !== "") {
+      writer.uint32(10).string(message.errorJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolError {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeToolError();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.errorJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeToolError {
+    return {
+      errorJson: isSet(object.errorJson)
+        ? globalThis.String(object.errorJson)
+        : isSet(object.error_json)
+        ? globalThis.String(object.error_json)
+        : "",
+    };
+  },
+
+  toJSON(message: RuntimeToolError): unknown {
+    const obj: any = {};
+    if (message.errorJson !== "") {
+      obj.errorJson = message.errorJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolError>, I>>(base?: I): RuntimeToolError {
+    return RuntimeToolError.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolError>, I>>(object: I): RuntimeToolError {
+    const message = createBaseRuntimeToolError();
+    message.errorJson = object.errorJson ?? "";
+    return message;
+  },
+};
+
+function createBaseRuntimeToolCancelled(): RuntimeToolCancelled {
+  return { errorJson: undefined };
+}
+
+export const RuntimeToolCancelled: MessageFns<RuntimeToolCancelled> = {
+  encode(message: RuntimeToolCancelled, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.errorJson !== undefined) {
+      writer.uint32(10).string(message.errorJson);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RuntimeToolCancelled {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRuntimeToolCancelled();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.errorJson = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): RuntimeToolCancelled {
+    return {
+      errorJson: isSet(object.errorJson)
+        ? globalThis.String(object.errorJson)
+        : isSet(object.error_json)
+        ? globalThis.String(object.error_json)
+        : undefined,
+    };
+  },
+
+  toJSON(message: RuntimeToolCancelled): unknown {
+    const obj: any = {};
+    if (message.errorJson !== undefined) {
+      obj.errorJson = message.errorJson;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<RuntimeToolCancelled>, I>>(base?: I): RuntimeToolCancelled {
+    return RuntimeToolCancelled.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RuntimeToolCancelled>, I>>(object: I): RuntimeToolCancelled {
+    const message = createBaseRuntimeToolCancelled();
+    message.errorJson = object.errorJson ?? undefined;
+    return message;
+  },
+};
+
 function createBaseDurableEventStamp(): DurableEventStamp {
-  return { sessionThreadId: "", sourceEventId: "", eventId: "", eventSequence: 0, disposition: 0 };
+  return { sessionThreadId: "", eventId: "", eventSequence: 0, disposition: 0 };
 }
 
 export const DurableEventStamp: MessageFns<DurableEventStamp> = {
@@ -1406,17 +1818,14 @@ export const DurableEventStamp: MessageFns<DurableEventStamp> = {
     if (message.sessionThreadId !== "") {
       writer.uint32(10).string(message.sessionThreadId);
     }
-    if (message.sourceEventId !== "") {
-      writer.uint32(18).string(message.sourceEventId);
-    }
     if (message.eventId !== "") {
-      writer.uint32(26).string(message.eventId);
+      writer.uint32(18).string(message.eventId);
     }
     if (message.eventSequence !== 0) {
-      writer.uint32(32).int64(message.eventSequence);
+      writer.uint32(24).int64(message.eventSequence);
     }
     if (message.disposition !== 0) {
-      writer.uint32(40).int32(message.disposition);
+      writer.uint32(32).int32(message.disposition);
     }
     return writer;
   },
@@ -1441,27 +1850,19 @@ export const DurableEventStamp: MessageFns<DurableEventStamp> = {
             break;
           }
 
-          message.sourceEventId = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
           message.eventId = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 32) {
+        case 3: {
+          if (tag !== 24) {
             break;
           }
 
           message.eventSequence = longToNumber(reader.int64());
           continue;
         }
-        case 5: {
-          if (tag !== 40) {
+        case 4: {
+          if (tag !== 32) {
             break;
           }
 
@@ -1484,11 +1885,6 @@ export const DurableEventStamp: MessageFns<DurableEventStamp> = {
         : isSet(object.session_thread_id)
         ? globalThis.String(object.session_thread_id)
         : "",
-      sourceEventId: isSet(object.sourceEventId)
-        ? globalThis.String(object.sourceEventId)
-        : isSet(object.source_event_id)
-        ? globalThis.String(object.source_event_id)
-        : "",
       eventId: isSet(object.eventId)
         ? globalThis.String(object.eventId)
         : isSet(object.event_id)
@@ -1508,9 +1904,6 @@ export const DurableEventStamp: MessageFns<DurableEventStamp> = {
     if (message.sessionThreadId !== "") {
       obj.sessionThreadId = message.sessionThreadId;
     }
-    if (message.sourceEventId !== "") {
-      obj.sourceEventId = message.sourceEventId;
-    }
     if (message.eventId !== "") {
       obj.eventId = message.eventId;
     }
@@ -1529,7 +1922,6 @@ export const DurableEventStamp: MessageFns<DurableEventStamp> = {
   fromPartial<I extends Exact<DeepPartial<DurableEventStamp>, I>>(object: I): DurableEventStamp {
     const message = createBaseDurableEventStamp();
     message.sessionThreadId = object.sessionThreadId ?? "";
-    message.sourceEventId = object.sourceEventId ?? "";
     message.eventId = object.eventId ?? "";
     message.eventSequence = object.eventSequence ?? 0;
     message.disposition = object.disposition ?? 0;
@@ -1538,39 +1930,28 @@ export const DurableEventStamp: MessageFns<DurableEventStamp> = {
 };
 
 function createBaseDurablePartStamp(): DurablePartStamp {
-  return {
-    runtimeLocalPartId: "",
-    partId: "",
-    messageId: "",
-    partSequence: 0,
-    createdAt: "",
-    updatedAt: "",
-    disposition: 0,
-  };
+  return { partId: "", messageId: "", partSequence: 0, createdAt: "", updatedAt: "", disposition: 0 };
 }
 
 export const DurablePartStamp: MessageFns<DurablePartStamp> = {
   encode(message: DurablePartStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.runtimeLocalPartId !== "") {
-      writer.uint32(10).string(message.runtimeLocalPartId);
-    }
     if (message.partId !== "") {
-      writer.uint32(18).string(message.partId);
+      writer.uint32(10).string(message.partId);
     }
     if (message.messageId !== "") {
-      writer.uint32(26).string(message.messageId);
+      writer.uint32(18).string(message.messageId);
     }
     if (message.partSequence !== 0) {
-      writer.uint32(32).int64(message.partSequence);
+      writer.uint32(24).int64(message.partSequence);
     }
     if (message.createdAt !== "") {
-      writer.uint32(42).string(message.createdAt);
+      writer.uint32(34).string(message.createdAt);
     }
     if (message.updatedAt !== "") {
-      writer.uint32(50).string(message.updatedAt);
+      writer.uint32(42).string(message.updatedAt);
     }
     if (message.disposition !== 0) {
-      writer.uint32(56).int32(message.disposition);
+      writer.uint32(48).int32(message.disposition);
     }
     return writer;
   },
@@ -1587,7 +1968,7 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
             break;
           }
 
-          message.runtimeLocalPartId = reader.string();
+          message.partId = reader.string();
           continue;
         }
         case 2: {
@@ -1595,23 +1976,23 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
             break;
           }
 
-          message.partId = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
           message.messageId = reader.string();
           continue;
         }
-        case 4: {
-          if (tag !== 32) {
+        case 3: {
+          if (tag !== 24) {
             break;
           }
 
           message.partSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.createdAt = reader.string();
           continue;
         }
         case 5: {
@@ -1619,19 +2000,11 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
             break;
           }
 
-          message.createdAt = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
           message.updatedAt = reader.string();
           continue;
         }
-        case 7: {
-          if (tag !== 56) {
+        case 6: {
+          if (tag !== 48) {
             break;
           }
 
@@ -1649,11 +2022,6 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
 
   fromJSON(object: any): DurablePartStamp {
     return {
-      runtimeLocalPartId: isSet(object.runtimeLocalPartId)
-        ? globalThis.String(object.runtimeLocalPartId)
-        : isSet(object.runtime_local_part_id)
-        ? globalThis.String(object.runtime_local_part_id)
-        : "",
       partId: isSet(object.partId)
         ? globalThis.String(object.partId)
         : isSet(object.part_id)
@@ -1685,9 +2053,6 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
 
   toJSON(message: DurablePartStamp): unknown {
     const obj: any = {};
-    if (message.runtimeLocalPartId !== "") {
-      obj.runtimeLocalPartId = message.runtimeLocalPartId;
-    }
     if (message.partId !== "") {
       obj.partId = message.partId;
     }
@@ -1714,7 +2079,6 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
   },
   fromPartial<I extends Exact<DeepPartial<DurablePartStamp>, I>>(object: I): DurablePartStamp {
     const message = createBaseDurablePartStamp();
-    message.runtimeLocalPartId = object.runtimeLocalPartId ?? "";
     message.partId = object.partId ?? "";
     message.messageId = object.messageId ?? "";
     message.partSequence = object.partSequence ?? 0;
@@ -1727,7 +2091,6 @@ export const DurablePartStamp: MessageFns<DurablePartStamp> = {
 
 function createBaseDurableMessageStamp(): DurableMessageStamp {
   return {
-    runtimeLocalId: "",
     sessionThreadId: "",
     owningEventId: "",
     messageId: "",
@@ -1741,32 +2104,29 @@ function createBaseDurableMessageStamp(): DurableMessageStamp {
 
 export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
   encode(message: DurableMessageStamp, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.runtimeLocalId !== "") {
-      writer.uint32(10).string(message.runtimeLocalId);
-    }
     if (message.sessionThreadId !== "") {
-      writer.uint32(18).string(message.sessionThreadId);
+      writer.uint32(10).string(message.sessionThreadId);
     }
     if (message.owningEventId !== "") {
-      writer.uint32(26).string(message.owningEventId);
+      writer.uint32(18).string(message.owningEventId);
     }
     if (message.messageId !== "") {
-      writer.uint32(34).string(message.messageId);
+      writer.uint32(26).string(message.messageId);
     }
     if (message.messageSequence !== 0) {
-      writer.uint32(40).int64(message.messageSequence);
+      writer.uint32(32).int64(message.messageSequence);
     }
     if (message.createdAt !== "") {
-      writer.uint32(50).string(message.createdAt);
+      writer.uint32(42).string(message.createdAt);
     }
     if (message.updatedAt !== "") {
-      writer.uint32(58).string(message.updatedAt);
+      writer.uint32(50).string(message.updatedAt);
     }
     if (message.disposition !== 0) {
-      writer.uint32(64).int32(message.disposition);
+      writer.uint32(56).int32(message.disposition);
     }
     for (const v of message.parts) {
-      DurablePartStamp.encode(v!, writer.uint32(74).fork()).join();
+      DurablePartStamp.encode(v!, writer.uint32(66).fork()).join();
     }
     return writer;
   },
@@ -1783,7 +2143,7 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
             break;
           }
 
-          message.runtimeLocalId = reader.string();
+          message.sessionThreadId = reader.string();
           continue;
         }
         case 2: {
@@ -1791,7 +2151,7 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
             break;
           }
 
-          message.sessionThreadId = reader.string();
+          message.owningEventId = reader.string();
           continue;
         }
         case 3: {
@@ -1799,23 +2159,23 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
             break;
           }
 
-          message.owningEventId = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
           message.messageId = reader.string();
           continue;
         }
-        case 5: {
-          if (tag !== 40) {
+        case 4: {
+          if (tag !== 32) {
             break;
           }
 
           message.messageSequence = longToNumber(reader.int64());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.createdAt = reader.string();
           continue;
         }
         case 6: {
@@ -1823,27 +2183,19 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
             break;
           }
 
-          message.createdAt = reader.string();
-          continue;
-        }
-        case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
           message.updatedAt = reader.string();
           continue;
         }
-        case 8: {
-          if (tag !== 64) {
+        case 7: {
+          if (tag !== 56) {
             break;
           }
 
           message.disposition = reader.int32() as any;
           continue;
         }
-        case 9: {
-          if (tag !== 74) {
+        case 8: {
+          if (tag !== 66) {
             break;
           }
 
@@ -1861,11 +2213,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
 
   fromJSON(object: any): DurableMessageStamp {
     return {
-      runtimeLocalId: isSet(object.runtimeLocalId)
-        ? globalThis.String(object.runtimeLocalId)
-        : isSet(object.runtime_local_id)
-        ? globalThis.String(object.runtime_local_id)
-        : "",
       sessionThreadId: isSet(object.sessionThreadId)
         ? globalThis.String(object.sessionThreadId)
         : isSet(object.session_thread_id)
@@ -1905,9 +2252,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
 
   toJSON(message: DurableMessageStamp): unknown {
     const obj: any = {};
-    if (message.runtimeLocalId !== "") {
-      obj.runtimeLocalId = message.runtimeLocalId;
-    }
     if (message.sessionThreadId !== "") {
       obj.sessionThreadId = message.sessionThreadId;
     }
@@ -1940,7 +2284,6 @@ export const DurableMessageStamp: MessageFns<DurableMessageStamp> = {
   },
   fromPartial<I extends Exact<DeepPartial<DurableMessageStamp>, I>>(object: I): DurableMessageStamp {
     const message = createBaseDurableMessageStamp();
-    message.runtimeLocalId = object.runtimeLocalId ?? "";
     message.sessionThreadId = object.sessionThreadId ?? "";
     message.owningEventId = object.owningEventId ?? "";
     message.messageId = object.messageId ?? "";
@@ -2074,7 +2417,7 @@ export const PrefixConsumptionStamp: MessageFns<PrefixConsumptionStamp> = {
 };
 
 function createBasePrefixConsumptionDraft(): PrefixConsumptionDraft {
-  return { childThreadId: "", parentBoundaryEventId: "", checkpointRuntimeLocalId: "" };
+  return { childThreadId: "", parentBoundaryEventId: "" };
 }
 
 export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
@@ -2084,9 +2427,6 @@ export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
     }
     if (message.parentBoundaryEventId !== "") {
       writer.uint32(18).string(message.parentBoundaryEventId);
-    }
-    if (message.checkpointRuntimeLocalId !== "") {
-      writer.uint32(26).string(message.checkpointRuntimeLocalId);
     }
     return writer;
   },
@@ -2114,14 +2454,6 @@ export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
           message.parentBoundaryEventId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.checkpointRuntimeLocalId = reader.string();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2143,11 +2475,6 @@ export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
         : isSet(object.parent_boundary_event_id)
         ? globalThis.String(object.parent_boundary_event_id)
         : "",
-      checkpointRuntimeLocalId: isSet(object.checkpointRuntimeLocalId)
-        ? globalThis.String(object.checkpointRuntimeLocalId)
-        : isSet(object.checkpoint_runtime_local_id)
-        ? globalThis.String(object.checkpoint_runtime_local_id)
-        : "",
     };
   },
 
@@ -2159,9 +2486,6 @@ export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
     if (message.parentBoundaryEventId !== "") {
       obj.parentBoundaryEventId = message.parentBoundaryEventId;
     }
-    if (message.checkpointRuntimeLocalId !== "") {
-      obj.checkpointRuntimeLocalId = message.checkpointRuntimeLocalId;
-    }
     return obj;
   },
 
@@ -2172,7 +2496,6 @@ export const PrefixConsumptionDraft: MessageFns<PrefixConsumptionDraft> = {
     const message = createBasePrefixConsumptionDraft();
     message.childThreadId = object.childThreadId ?? "";
     message.parentBoundaryEventId = object.parentBoundaryEventId ?? "";
-    message.checkpointRuntimeLocalId = object.checkpointRuntimeLocalId ?? "";
     return message;
   },
 };
@@ -2606,11 +2929,10 @@ function createBaseDeclarationReceipt(): DeclarationReceipt {
     sessionThreadId: "",
     operationKind: "",
     sourceKind: "",
-    sourceId: "",
+    operationId: "",
     events: [],
     messages: [],
     pendingAttachmentDeltaJson: [],
-    pendingToolDeltaJson: [],
     prefixConsumptions: [],
     declarationDigest: "",
     requestReschedule: undefined,
@@ -2618,6 +2940,7 @@ function createBaseDeclarationReceipt(): DeclarationReceipt {
     requestStart: undefined,
     idleCloseout: undefined,
     compactedThroughMessageSequence: undefined,
+    interruptToolProjections: [],
   };
 }
 
@@ -2632,8 +2955,8 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     if (message.sourceKind !== "") {
       writer.uint32(26).string(message.sourceKind);
     }
-    if (message.sourceId !== "") {
-      writer.uint32(34).string(message.sourceId);
+    if (message.operationId !== "") {
+      writer.uint32(34).string(message.operationId);
     }
     for (const v of message.events) {
       DurableEventStamp.encode(v!, writer.uint32(42).fork()).join();
@@ -2643,9 +2966,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     }
     for (const v of message.pendingAttachmentDeltaJson) {
       writer.uint32(58).string(v!);
-    }
-    for (const v of message.pendingToolDeltaJson) {
-      writer.uint32(66).string(v!);
     }
     for (const v of message.prefixConsumptions) {
       PrefixConsumptionStamp.encode(v!, writer.uint32(74).fork()).join();
@@ -2667,6 +2987,9 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     }
     if (message.compactedThroughMessageSequence !== undefined) {
       writer.uint32(120).int64(message.compactedThroughMessageSequence);
+    }
+    for (const v of message.interruptToolProjections) {
+      InterruptToolProjection.encode(v!, writer.uint32(130).fork()).join();
     }
     return writer;
   },
@@ -2707,7 +3030,7 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
             break;
           }
 
-          message.sourceId = reader.string();
+          message.operationId = reader.string();
           continue;
         }
         case 5: {
@@ -2732,14 +3055,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
           }
 
           message.pendingAttachmentDeltaJson.push(reader.string());
-          continue;
-        }
-        case 8: {
-          if (tag !== 66) {
-            break;
-          }
-
-          message.pendingToolDeltaJson.push(reader.string());
           continue;
         }
         case 9: {
@@ -2798,6 +3113,14 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
           message.compactedThroughMessageSequence = longToNumber(reader.int64());
           continue;
         }
+        case 16: {
+          if (tag !== 130) {
+            break;
+          }
+
+          message.interruptToolProjections.push(InterruptToolProjection.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2824,10 +3147,10 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
         : isSet(object.source_kind)
         ? globalThis.String(object.source_kind)
         : "",
-      sourceId: isSet(object.sourceId)
-        ? globalThis.String(object.sourceId)
-        : isSet(object.source_id)
-        ? globalThis.String(object.source_id)
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
         : "",
       events: globalThis.Array.isArray(object?.events)
         ? object.events.map((e: any) => DurableEventStamp.fromJSON(e))
@@ -2839,11 +3162,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
         ? object.pendingAttachmentDeltaJson.map((e: any) => globalThis.String(e))
         : globalThis.Array.isArray(object?.pending_attachment_delta_json)
         ? object.pending_attachment_delta_json.map((e: any) => globalThis.String(e))
-        : [],
-      pendingToolDeltaJson: globalThis.Array.isArray(object?.pendingToolDeltaJson)
-        ? object.pendingToolDeltaJson.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.pending_tool_delta_json)
-        ? object.pending_tool_delta_json.map((e: any) => globalThis.String(e))
         : [],
       prefixConsumptions: globalThis.Array.isArray(object?.prefixConsumptions)
         ? object.prefixConsumptions.map((e: any) => PrefixConsumptionStamp.fromJSON(e))
@@ -2880,6 +3198,11 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
         : isSet(object.compacted_through_message_sequence)
         ? globalThis.Number(object.compacted_through_message_sequence)
         : undefined,
+      interruptToolProjections: globalThis.Array.isArray(object?.interruptToolProjections)
+        ? object.interruptToolProjections.map((e: any) => InterruptToolProjection.fromJSON(e))
+        : globalThis.Array.isArray(object?.interrupt_tool_projections)
+        ? object.interrupt_tool_projections.map((e: any) => InterruptToolProjection.fromJSON(e))
+        : [],
     };
   },
 
@@ -2894,8 +3217,8 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     if (message.sourceKind !== "") {
       obj.sourceKind = message.sourceKind;
     }
-    if (message.sourceId !== "") {
-      obj.sourceId = message.sourceId;
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
     }
     if (message.events?.length) {
       obj.events = message.events.map((e) => DurableEventStamp.toJSON(e));
@@ -2905,9 +3228,6 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     }
     if (message.pendingAttachmentDeltaJson?.length) {
       obj.pendingAttachmentDeltaJson = message.pendingAttachmentDeltaJson;
-    }
-    if (message.pendingToolDeltaJson?.length) {
-      obj.pendingToolDeltaJson = message.pendingToolDeltaJson;
     }
     if (message.prefixConsumptions?.length) {
       obj.prefixConsumptions = message.prefixConsumptions.map((e) => PrefixConsumptionStamp.toJSON(e));
@@ -2930,6 +3250,9 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     if (message.compactedThroughMessageSequence !== undefined) {
       obj.compactedThroughMessageSequence = Math.round(message.compactedThroughMessageSequence);
     }
+    if (message.interruptToolProjections?.length) {
+      obj.interruptToolProjections = message.interruptToolProjections.map((e) => InterruptToolProjection.toJSON(e));
+    }
     return obj;
   },
 
@@ -2941,11 +3264,10 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
     message.sessionThreadId = object.sessionThreadId ?? "";
     message.operationKind = object.operationKind ?? "";
     message.sourceKind = object.sourceKind ?? "";
-    message.sourceId = object.sourceId ?? "";
+    message.operationId = object.operationId ?? "";
     message.events = object.events?.map((e) => DurableEventStamp.fromPartial(e)) || [];
     message.messages = object.messages?.map((e) => DurableMessageStamp.fromPartial(e)) || [];
     message.pendingAttachmentDeltaJson = object.pendingAttachmentDeltaJson?.map((e) => e) || [];
-    message.pendingToolDeltaJson = object.pendingToolDeltaJson?.map((e) => e) || [];
     message.prefixConsumptions = object.prefixConsumptions?.map((e) => PrefixConsumptionStamp.fromPartial(e)) || [];
     message.declarationDigest = object.declarationDigest ?? "";
     message.requestReschedule = (object.requestReschedule !== undefined && object.requestReschedule !== null)
@@ -2959,6 +3281,130 @@ export const DeclarationReceipt: MessageFns<DeclarationReceipt> = {
       ? IdleCloseoutStamp.fromPartial(object.idleCloseout)
       : undefined;
     message.compactedThroughMessageSequence = object.compactedThroughMessageSequence ?? undefined;
+    message.interruptToolProjections =
+      object.interruptToolProjections?.map((e) => InterruptToolProjection.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseInterruptToolProjection(): InterruptToolProjection {
+  return { toolUseEventId: "", resultEvent: undefined, error: undefined, cancelled: undefined };
+}
+
+export const InterruptToolProjection: MessageFns<InterruptToolProjection> = {
+  encode(message: InterruptToolProjection, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.toolUseEventId !== "") {
+      writer.uint32(10).string(message.toolUseEventId);
+    }
+    if (message.resultEvent !== undefined) {
+      DurableEventStamp.encode(message.resultEvent, writer.uint32(18).fork()).join();
+    }
+    if (message.error !== undefined) {
+      RuntimeToolError.encode(message.error, writer.uint32(26).fork()).join();
+    }
+    if (message.cancelled !== undefined) {
+      RuntimeToolCancelled.encode(message.cancelled, writer.uint32(34).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InterruptToolProjection {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInterruptToolProjection();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.toolUseEventId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.resultEvent = DurableEventStamp.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.error = RuntimeToolError.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.cancelled = RuntimeToolCancelled.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): InterruptToolProjection {
+    return {
+      toolUseEventId: isSet(object.toolUseEventId)
+        ? globalThis.String(object.toolUseEventId)
+        : isSet(object.tool_use_event_id)
+        ? globalThis.String(object.tool_use_event_id)
+        : "",
+      resultEvent: isSet(object.resultEvent)
+        ? DurableEventStamp.fromJSON(object.resultEvent)
+        : isSet(object.result_event)
+        ? DurableEventStamp.fromJSON(object.result_event)
+        : undefined,
+      error: isSet(object.error) ? RuntimeToolError.fromJSON(object.error) : undefined,
+      cancelled: isSet(object.cancelled) ? RuntimeToolCancelled.fromJSON(object.cancelled) : undefined,
+    };
+  },
+
+  toJSON(message: InterruptToolProjection): unknown {
+    const obj: any = {};
+    if (message.toolUseEventId !== "") {
+      obj.toolUseEventId = message.toolUseEventId;
+    }
+    if (message.resultEvent !== undefined) {
+      obj.resultEvent = DurableEventStamp.toJSON(message.resultEvent);
+    }
+    if (message.error !== undefined) {
+      obj.error = RuntimeToolError.toJSON(message.error);
+    }
+    if (message.cancelled !== undefined) {
+      obj.cancelled = RuntimeToolCancelled.toJSON(message.cancelled);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<InterruptToolProjection>, I>>(base?: I): InterruptToolProjection {
+    return InterruptToolProjection.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InterruptToolProjection>, I>>(object: I): InterruptToolProjection {
+    const message = createBaseInterruptToolProjection();
+    message.toolUseEventId = object.toolUseEventId ?? "";
+    message.resultEvent = (object.resultEvent !== undefined && object.resultEvent !== null)
+      ? DurableEventStamp.fromPartial(object.resultEvent)
+      : undefined;
+    message.error = (object.error !== undefined && object.error !== null)
+      ? RuntimeToolError.fromPartial(object.error)
+      : undefined;
+    message.cancelled = (object.cancelled !== undefined && object.cancelled !== null)
+      ? RuntimeToolCancelled.fromPartial(object.cancelled)
+      : undefined;
     return message;
   },
 };
@@ -3815,9 +4261,7 @@ function createBaseCommitInputsRequest(): CommitInputsRequest {
     sequenceFrom: 0,
     sequenceTo: 0,
     inputKind: "",
-    drafts: [],
-    pendingToolCancellations: [],
-    sandboxExecutionToolUseEventIds: [],
+    messageCreates: [],
   };
 }
 
@@ -3841,14 +4285,8 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.inputKind !== "") {
       writer.uint32(58).string(message.inputKind);
     }
-    for (const v of message.drafts) {
-      RuntimeMessageDraft.encode(v!, writer.uint32(82).fork()).join();
-    }
-    for (const v of message.pendingToolCancellations) {
-      PendingToolCancellationDraft.encode(v!, writer.uint32(90).fork()).join();
-    }
-    for (const v of message.sandboxExecutionToolUseEventIds) {
-      writer.uint32(98).string(v!);
+    for (const v of message.messageCreates) {
+      RuntimeMessageCreate.encode(v!, writer.uint32(82).fork()).join();
     }
     return writer;
   },
@@ -3913,23 +4351,7 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
             break;
           }
 
-          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 11: {
-          if (tag !== 90) {
-            break;
-          }
-
-          message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 12: {
-          if (tag !== 98) {
-            break;
-          }
-
-          message.sandboxExecutionToolUseEventIds.push(reader.string());
+          message.messageCreates.push(RuntimeMessageCreate.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -3969,18 +4391,10 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
         : isSet(object.input_kind)
         ? globalThis.String(object.input_kind)
         : "",
-      drafts: globalThis.Array.isArray(object?.drafts)
-        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
-        : [],
-      pendingToolCancellations: globalThis.Array.isArray(object?.pendingToolCancellations)
-        ? object.pendingToolCancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
-        : globalThis.Array.isArray(object?.pending_tool_cancellations)
-        ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
-        : [],
-      sandboxExecutionToolUseEventIds: globalThis.Array.isArray(object?.sandboxExecutionToolUseEventIds)
-        ? object.sandboxExecutionToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.sandbox_execution_tool_use_event_ids)
-        ? object.sandbox_execution_tool_use_event_ids.map((e: any) => globalThis.String(e))
+      messageCreates: globalThis.Array.isArray(object?.messageCreates)
+        ? object.messageCreates.map((e: any) => RuntimeMessageCreate.fromJSON(e))
+        : globalThis.Array.isArray(object?.message_creates)
+        ? object.message_creates.map((e: any) => RuntimeMessageCreate.fromJSON(e))
         : [],
     };
   },
@@ -4005,16 +4419,8 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     if (message.inputKind !== "") {
       obj.inputKind = message.inputKind;
     }
-    if (message.drafts?.length) {
-      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
-    }
-    if (message.pendingToolCancellations?.length) {
-      obj.pendingToolCancellations = message.pendingToolCancellations.map((e) =>
-        PendingToolCancellationDraft.toJSON(e)
-      );
-    }
-    if (message.sandboxExecutionToolUseEventIds?.length) {
-      obj.sandboxExecutionToolUseEventIds = message.sandboxExecutionToolUseEventIds;
+    if (message.messageCreates?.length) {
+      obj.messageCreates = message.messageCreates.map((e) => RuntimeMessageCreate.toJSON(e));
     }
     return obj;
   },
@@ -4032,10 +4438,7 @@ export const CommitInputsRequest: MessageFns<CommitInputsRequest> = {
     message.sequenceFrom = object.sequenceFrom ?? 0;
     message.sequenceTo = object.sequenceTo ?? 0;
     message.inputKind = object.inputKind ?? "";
-    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
-    message.pendingToolCancellations =
-      object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
-    message.sandboxExecutionToolUseEventIds = object.sandboxExecutionToolUseEventIds?.map((e) => e) || [];
+    message.messageCreates = object.messageCreates?.map((e) => RuntimeMessageCreate.fromPartial(e)) || [];
     return message;
   },
 };
@@ -4120,92 +4523,8 @@ export const CommitInputsResponse: MessageFns<CommitInputsResponse> = {
   },
 };
 
-function createBasePendingToolCancellationDraft(): PendingToolCancellationDraft {
-  return { toolUseEventId: "", runtimeLocalId: "" };
-}
-
-export const PendingToolCancellationDraft: MessageFns<PendingToolCancellationDraft> = {
-  encode(message: PendingToolCancellationDraft, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.toolUseEventId !== "") {
-      writer.uint32(10).string(message.toolUseEventId);
-    }
-    if (message.runtimeLocalId !== "") {
-      writer.uint32(18).string(message.runtimeLocalId);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PendingToolCancellationDraft {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePendingToolCancellationDraft();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.toolUseEventId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.runtimeLocalId = reader.string();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PendingToolCancellationDraft {
-    return {
-      toolUseEventId: isSet(object.toolUseEventId)
-        ? globalThis.String(object.toolUseEventId)
-        : isSet(object.tool_use_event_id)
-        ? globalThis.String(object.tool_use_event_id)
-        : "",
-      runtimeLocalId: isSet(object.runtimeLocalId)
-        ? globalThis.String(object.runtimeLocalId)
-        : isSet(object.runtime_local_id)
-        ? globalThis.String(object.runtime_local_id)
-        : "",
-    };
-  },
-
-  toJSON(message: PendingToolCancellationDraft): unknown {
-    const obj: any = {};
-    if (message.toolUseEventId !== "") {
-      obj.toolUseEventId = message.toolUseEventId;
-    }
-    if (message.runtimeLocalId !== "") {
-      obj.runtimeLocalId = message.runtimeLocalId;
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PendingToolCancellationDraft>, I>>(base?: I): PendingToolCancellationDraft {
-    return PendingToolCancellationDraft.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PendingToolCancellationDraft>, I>>(object: I): PendingToolCancellationDraft {
-    const message = createBasePendingToolCancellationDraft();
-    message.toolUseEventId = object.toolUseEventId ?? "";
-    message.runtimeLocalId = object.runtimeLocalId ?? "";
-    return message;
-  },
-};
-
 function createBaseCommitTaskNotificationResultRequest(): CommitTaskNotificationResultRequest {
-  return { scope: undefined, runtimeInputId: "", taskId: "", resultJson: "", draft: undefined };
+  return { scope: undefined, runtimeInputId: "", taskId: "", resultJson: "", messageCreate: undefined };
 }
 
 export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificationResultRequest> = {
@@ -4222,8 +4541,8 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     if (message.resultJson !== "") {
       writer.uint32(34).string(message.resultJson);
     }
-    if (message.draft !== undefined) {
-      RuntimeMessageDraft.encode(message.draft, writer.uint32(42).fork()).join();
+    if (message.messageCreate !== undefined) {
+      RuntimeMessageCreate.encode(message.messageCreate, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -4272,7 +4591,7 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
             break;
           }
 
-          message.draft = RuntimeMessageDraft.decode(reader, reader.uint32());
+          message.messageCreate = RuntimeMessageCreate.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -4302,7 +4621,11 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
         : isSet(object.result_json)
         ? globalThis.String(object.result_json)
         : "",
-      draft: isSet(object.draft) ? RuntimeMessageDraft.fromJSON(object.draft) : undefined,
+      messageCreate: isSet(object.messageCreate)
+        ? RuntimeMessageCreate.fromJSON(object.messageCreate)
+        : isSet(object.message_create)
+        ? RuntimeMessageCreate.fromJSON(object.message_create)
+        : undefined,
     };
   },
 
@@ -4320,8 +4643,8 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     if (message.resultJson !== "") {
       obj.resultJson = message.resultJson;
     }
-    if (message.draft !== undefined) {
-      obj.draft = RuntimeMessageDraft.toJSON(message.draft);
+    if (message.messageCreate !== undefined) {
+      obj.messageCreate = RuntimeMessageCreate.toJSON(message.messageCreate);
     }
     return obj;
   },
@@ -4341,8 +4664,8 @@ export const CommitTaskNotificationResultRequest: MessageFns<CommitTaskNotificat
     message.runtimeInputId = object.runtimeInputId ?? "";
     message.taskId = object.taskId ?? "";
     message.resultJson = object.resultJson ?? "";
-    message.draft = (object.draft !== undefined && object.draft !== null)
-      ? RuntimeMessageDraft.fromPartial(object.draft)
+    message.messageCreate = (object.messageCreate !== undefined && object.messageCreate !== null)
+      ? RuntimeMessageCreate.fromPartial(object.messageCreate)
       : undefined;
     return message;
   },
@@ -5333,7 +5656,7 @@ export const CommitMcpToolResultResponse: MessageFns<CommitMcpToolResultResponse
 };
 
 function createBaseCommitInternalToolRepairRequest(): CommitInternalToolRepairRequest {
-  return { scope: undefined, modelRequestId: "", modelToolCallId: "", toolName: "", drafts: [] };
+  return { scope: undefined, modelRequestId: "", modelToolCallId: "", toolName: "", messageCreate: undefined };
 }
 
 export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepairRequest> = {
@@ -5350,8 +5673,8 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     if (message.toolName !== "") {
       writer.uint32(34).string(message.toolName);
     }
-    for (const v of message.drafts) {
-      RuntimeMessageDraft.encode(v!, writer.uint32(42).fork()).join();
+    if (message.messageCreate !== undefined) {
+      RuntimeMessageCreate.encode(message.messageCreate, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -5400,7 +5723,7 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
             break;
           }
 
-          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          message.messageCreate = RuntimeMessageCreate.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -5430,9 +5753,11 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
         : isSet(object.tool_name)
         ? globalThis.String(object.tool_name)
         : "",
-      drafts: globalThis.Array.isArray(object?.drafts)
-        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
-        : [],
+      messageCreate: isSet(object.messageCreate)
+        ? RuntimeMessageCreate.fromJSON(object.messageCreate)
+        : isSet(object.message_create)
+        ? RuntimeMessageCreate.fromJSON(object.message_create)
+        : undefined,
     };
   },
 
@@ -5450,8 +5775,8 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     if (message.toolName !== "") {
       obj.toolName = message.toolName;
     }
-    if (message.drafts?.length) {
-      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    if (message.messageCreate !== undefined) {
+      obj.messageCreate = RuntimeMessageCreate.toJSON(message.messageCreate);
     }
     return obj;
   },
@@ -5469,7 +5794,9 @@ export const CommitInternalToolRepairRequest: MessageFns<CommitInternalToolRepai
     message.modelRequestId = object.modelRequestId ?? "";
     message.modelToolCallId = object.modelToolCallId ?? "";
     message.toolName = object.toolName ?? "";
-    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.messageCreate = (object.messageCreate !== undefined && object.messageCreate !== null)
+      ? RuntimeMessageCreate.fromPartial(object.messageCreate)
+      : undefined;
     return message;
   },
 };
@@ -5563,9 +5890,8 @@ function createBaseCommitRuntimeTerminationRequest(): CommitRuntimeTerminationRe
     scope: undefined,
     runtimeWriteId: "",
     failureJson: "",
-    drafts: [],
-    pendingToolCancellations: [],
-    sandboxExecutionToolUseEventIds: [],
+    toolSettlements: [],
+    completionMailCreate: undefined,
   };
 }
 
@@ -5580,14 +5906,11 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     if (message.failureJson !== "") {
       writer.uint32(26).string(message.failureJson);
     }
-    for (const v of message.drafts) {
-      RuntimeMessageDraft.encode(v!, writer.uint32(34).fork()).join();
+    for (const v of message.toolSettlements) {
+      RuntimeToolSettlement.encode(v!, writer.uint32(34).fork()).join();
     }
-    for (const v of message.pendingToolCancellations) {
-      PendingToolCancellationDraft.encode(v!, writer.uint32(42).fork()).join();
-    }
-    for (const v of message.sandboxExecutionToolUseEventIds) {
-      writer.uint32(50).string(v!);
+    if (message.completionMailCreate !== undefined) {
+      RuntimeMessageCreate.encode(message.completionMailCreate, writer.uint32(42).fork()).join();
     }
     return writer;
   },
@@ -5628,7 +5951,7 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
             break;
           }
 
-          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          message.toolSettlements.push(RuntimeToolSettlement.decode(reader, reader.uint32()));
           continue;
         }
         case 5: {
@@ -5636,15 +5959,7 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
             break;
           }
 
-          message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.sandboxExecutionToolUseEventIds.push(reader.string());
+          message.completionMailCreate = RuntimeMessageCreate.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -5669,19 +5984,16 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
         : isSet(object.failure_json)
         ? globalThis.String(object.failure_json)
         : "",
-      drafts: globalThis.Array.isArray(object?.drafts)
-        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
+      toolSettlements: globalThis.Array.isArray(object?.toolSettlements)
+        ? object.toolSettlements.map((e: any) => RuntimeToolSettlement.fromJSON(e))
+        : globalThis.Array.isArray(object?.tool_settlements)
+        ? object.tool_settlements.map((e: any) => RuntimeToolSettlement.fromJSON(e))
         : [],
-      pendingToolCancellations: globalThis.Array.isArray(object?.pendingToolCancellations)
-        ? object.pendingToolCancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
-        : globalThis.Array.isArray(object?.pending_tool_cancellations)
-        ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
-        : [],
-      sandboxExecutionToolUseEventIds: globalThis.Array.isArray(object?.sandboxExecutionToolUseEventIds)
-        ? object.sandboxExecutionToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.sandbox_execution_tool_use_event_ids)
-        ? object.sandbox_execution_tool_use_event_ids.map((e: any) => globalThis.String(e))
-        : [],
+      completionMailCreate: isSet(object.completionMailCreate)
+        ? RuntimeMessageCreate.fromJSON(object.completionMailCreate)
+        : isSet(object.completion_mail_create)
+        ? RuntimeMessageCreate.fromJSON(object.completion_mail_create)
+        : undefined,
     };
   },
 
@@ -5696,16 +6008,11 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
     if (message.failureJson !== "") {
       obj.failureJson = message.failureJson;
     }
-    if (message.drafts?.length) {
-      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    if (message.toolSettlements?.length) {
+      obj.toolSettlements = message.toolSettlements.map((e) => RuntimeToolSettlement.toJSON(e));
     }
-    if (message.pendingToolCancellations?.length) {
-      obj.pendingToolCancellations = message.pendingToolCancellations.map((e) =>
-        PendingToolCancellationDraft.toJSON(e)
-      );
-    }
-    if (message.sandboxExecutionToolUseEventIds?.length) {
-      obj.sandboxExecutionToolUseEventIds = message.sandboxExecutionToolUseEventIds;
+    if (message.completionMailCreate !== undefined) {
+      obj.completionMailCreate = RuntimeMessageCreate.toJSON(message.completionMailCreate);
     }
     return obj;
   },
@@ -5722,10 +6029,10 @@ export const CommitRuntimeTerminationRequest: MessageFns<CommitRuntimeTerminatio
       : undefined;
     message.runtimeWriteId = object.runtimeWriteId ?? "";
     message.failureJson = object.failureJson ?? "";
-    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
-    message.pendingToolCancellations =
-      object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
-    message.sandboxExecutionToolUseEventIds = object.sandboxExecutionToolUseEventIds?.map((e) => e) || [];
+    message.toolSettlements = object.toolSettlements?.map((e) => RuntimeToolSettlement.fromPartial(e)) || [];
+    message.completionMailCreate = (object.completionMailCreate !== undefined && object.completionMailCreate !== null)
+      ? RuntimeMessageCreate.fromPartial(object.completionMailCreate)
+      : undefined;
     return message;
   },
 };
@@ -7033,9 +7340,9 @@ function createBaseWriteEventRequest(): WriteEventRequest {
     eventType: "",
     payloadJson: "",
     sessionVisible: false,
-    stableReasoningParts: [],
     serverToolUse: undefined,
-    drafts: [],
+    assistantPartAppend: undefined,
+    toolSettlement: undefined,
     mcpMaterializationHandle: undefined,
     sandboxResultDigest: undefined,
     contextThroughMessageSequence: undefined,
@@ -7063,14 +7370,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.sessionVisible !== false) {
       writer.uint32(56).bool(message.sessionVisible);
     }
-    for (const v of message.stableReasoningParts) {
-      StableReasoningPart.encode(v!, writer.uint32(66).fork()).join();
-    }
     if (message.serverToolUse !== undefined) {
       ServerToolUseUsage.encode(message.serverToolUse, writer.uint32(74).fork()).join();
     }
-    for (const v of message.drafts) {
-      RuntimeMessageDraft.encode(v!, writer.uint32(82).fork()).join();
+    if (message.assistantPartAppend !== undefined) {
+      RuntimeAssistantPartAppend.encode(message.assistantPartAppend, writer.uint32(82).fork()).join();
+    }
+    if (message.toolSettlement !== undefined) {
+      RuntimeToolSettlement.encode(message.toolSettlement, writer.uint32(122).fork()).join();
     }
     if (message.mcpMaterializationHandle !== undefined) {
       writer.uint32(90).string(message.mcpMaterializationHandle);
@@ -7142,14 +7449,6 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
           message.sessionVisible = reader.bool();
           continue;
         }
-        case 8: {
-          if (tag !== 66) {
-            break;
-          }
-
-          message.stableReasoningParts.push(StableReasoningPart.decode(reader, reader.uint32()));
-          continue;
-        }
         case 9: {
           if (tag !== 74) {
             break;
@@ -7163,7 +7462,15 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
             break;
           }
 
-          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          message.assistantPartAppend = RuntimeAssistantPartAppend.decode(reader, reader.uint32());
+          continue;
+        }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.toolSettlement = RuntimeToolSettlement.decode(reader, reader.uint32());
           continue;
         }
         case 11: {
@@ -7235,19 +7542,21 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
         : isSet(object.session_visible)
         ? globalThis.Boolean(object.session_visible)
         : false,
-      stableReasoningParts: globalThis.Array.isArray(object?.stableReasoningParts)
-        ? object.stableReasoningParts.map((e: any) => StableReasoningPart.fromJSON(e))
-        : globalThis.Array.isArray(object?.stable_reasoning_parts)
-        ? object.stable_reasoning_parts.map((e: any) => StableReasoningPart.fromJSON(e))
-        : [],
       serverToolUse: isSet(object.serverToolUse)
         ? ServerToolUseUsage.fromJSON(object.serverToolUse)
         : isSet(object.server_tool_use)
         ? ServerToolUseUsage.fromJSON(object.server_tool_use)
         : undefined,
-      drafts: globalThis.Array.isArray(object?.drafts)
-        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
-        : [],
+      assistantPartAppend: isSet(object.assistantPartAppend)
+        ? RuntimeAssistantPartAppend.fromJSON(object.assistantPartAppend)
+        : isSet(object.assistant_part_append)
+        ? RuntimeAssistantPartAppend.fromJSON(object.assistant_part_append)
+        : undefined,
+      toolSettlement: isSet(object.toolSettlement)
+        ? RuntimeToolSettlement.fromJSON(object.toolSettlement)
+        : isSet(object.tool_settlement)
+        ? RuntimeToolSettlement.fromJSON(object.tool_settlement)
+        : undefined,
       mcpMaterializationHandle: isSet(object.mcpMaterializationHandle)
         ? globalThis.String(object.mcpMaterializationHandle)
         : isSet(object.mcp_materialization_handle)
@@ -7291,14 +7600,14 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     if (message.sessionVisible !== false) {
       obj.sessionVisible = message.sessionVisible;
     }
-    if (message.stableReasoningParts?.length) {
-      obj.stableReasoningParts = message.stableReasoningParts.map((e) => StableReasoningPart.toJSON(e));
-    }
     if (message.serverToolUse !== undefined) {
       obj.serverToolUse = ServerToolUseUsage.toJSON(message.serverToolUse);
     }
-    if (message.drafts?.length) {
-      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    if (message.assistantPartAppend !== undefined) {
+      obj.assistantPartAppend = RuntimeAssistantPartAppend.toJSON(message.assistantPartAppend);
+    }
+    if (message.toolSettlement !== undefined) {
+      obj.toolSettlement = RuntimeToolSettlement.toJSON(message.toolSettlement);
     }
     if (message.mcpMaterializationHandle !== undefined) {
       obj.mcpMaterializationHandle = message.mcpMaterializationHandle;
@@ -7328,11 +7637,15 @@ export const WriteEventRequest: MessageFns<WriteEventRequest> = {
     message.eventType = object.eventType ?? "";
     message.payloadJson = object.payloadJson ?? "";
     message.sessionVisible = object.sessionVisible ?? false;
-    message.stableReasoningParts = object.stableReasoningParts?.map((e) => StableReasoningPart.fromPartial(e)) || [];
     message.serverToolUse = (object.serverToolUse !== undefined && object.serverToolUse !== null)
       ? ServerToolUseUsage.fromPartial(object.serverToolUse)
       : undefined;
-    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.assistantPartAppend = (object.assistantPartAppend !== undefined && object.assistantPartAppend !== null)
+      ? RuntimeAssistantPartAppend.fromPartial(object.assistantPartAppend)
+      : undefined;
+    message.toolSettlement = (object.toolSettlement !== undefined && object.toolSettlement !== null)
+      ? RuntimeToolSettlement.fromPartial(object.toolSettlement)
+      : undefined;
     message.mcpMaterializationHandle = object.mcpMaterializationHandle ?? undefined;
     message.sandboxResultDigest = object.sandboxResultDigest ?? undefined;
     message.contextThroughMessageSequence = object.contextThroughMessageSequence ?? undefined;
@@ -7554,13 +7867,13 @@ function createBaseWriteRequestEndRequest(): WriteRequestEndRequest {
     consumedAttachmentRefs: [],
     requestKind: "",
     reschedule: undefined,
-    stableReasoningParts: [],
     consumedFileAttachments: [],
-    drafts: [],
+    trailingPartAppend: undefined,
     prefixConsumption: undefined,
     compactedThroughMessageSequence: undefined,
     compactionEventPayloadJson: "",
     interruptSettlement: undefined,
+    compactionCheckpointCreate: undefined,
   };
 }
 
@@ -7599,14 +7912,11 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     if (message.reschedule !== undefined) {
       RequestEndReschedule.encode(message.reschedule, writer.uint32(90).fork()).join();
     }
-    for (const v of message.stableReasoningParts) {
-      StableReasoningPart.encode(v!, writer.uint32(98).fork()).join();
-    }
     for (const v of message.consumedFileAttachments) {
       FileAttachmentPair.encode(v!, writer.uint32(106).fork()).join();
     }
-    for (const v of message.drafts) {
-      RuntimeMessageDraft.encode(v!, writer.uint32(114).fork()).join();
+    if (message.trailingPartAppend !== undefined) {
+      RuntimeAssistantPartAppend.encode(message.trailingPartAppend, writer.uint32(114).fork()).join();
     }
     if (message.prefixConsumption !== undefined) {
       PrefixConsumptionDraft.encode(message.prefixConsumption, writer.uint32(122).fork()).join();
@@ -7619,6 +7929,9 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     }
     if (message.interruptSettlement !== undefined) {
       RequestEndInterruptSettlement.encode(message.interruptSettlement, writer.uint32(146).fork()).join();
+    }
+    if (message.compactionCheckpointCreate !== undefined) {
+      RuntimeMessageCreate.encode(message.compactionCheckpointCreate, writer.uint32(154).fork()).join();
     }
     return writer;
   },
@@ -7718,14 +8031,6 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
           message.reschedule = RequestEndReschedule.decode(reader, reader.uint32());
           continue;
         }
-        case 12: {
-          if (tag !== 98) {
-            break;
-          }
-
-          message.stableReasoningParts.push(StableReasoningPart.decode(reader, reader.uint32()));
-          continue;
-        }
         case 13: {
           if (tag !== 106) {
             break;
@@ -7739,7 +8044,7 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
             break;
           }
 
-          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          message.trailingPartAppend = RuntimeAssistantPartAppend.decode(reader, reader.uint32());
           continue;
         }
         case 15: {
@@ -7772,6 +8077,14 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
           }
 
           message.interruptSettlement = RequestEndInterruptSettlement.decode(reader, reader.uint32());
+          continue;
+        }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.compactionCheckpointCreate = RuntimeMessageCreate.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -7832,19 +8145,16 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
         ? globalThis.String(object.request_kind)
         : "",
       reschedule: isSet(object.reschedule) ? RequestEndReschedule.fromJSON(object.reschedule) : undefined,
-      stableReasoningParts: globalThis.Array.isArray(object?.stableReasoningParts)
-        ? object.stableReasoningParts.map((e: any) => StableReasoningPart.fromJSON(e))
-        : globalThis.Array.isArray(object?.stable_reasoning_parts)
-        ? object.stable_reasoning_parts.map((e: any) => StableReasoningPart.fromJSON(e))
-        : [],
       consumedFileAttachments: globalThis.Array.isArray(object?.consumedFileAttachments)
         ? object.consumedFileAttachments.map((e: any) => FileAttachmentPair.fromJSON(e))
         : globalThis.Array.isArray(object?.consumed_file_attachments)
         ? object.consumed_file_attachments.map((e: any) => FileAttachmentPair.fromJSON(e))
         : [],
-      drafts: globalThis.Array.isArray(object?.drafts)
-        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
-        : [],
+      trailingPartAppend: isSet(object.trailingPartAppend)
+        ? RuntimeAssistantPartAppend.fromJSON(object.trailingPartAppend)
+        : isSet(object.trailing_part_append)
+        ? RuntimeAssistantPartAppend.fromJSON(object.trailing_part_append)
+        : undefined,
       prefixConsumption: isSet(object.prefixConsumption)
         ? PrefixConsumptionDraft.fromJSON(object.prefixConsumption)
         : isSet(object.prefix_consumption)
@@ -7864,6 +8174,11 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
         ? RequestEndInterruptSettlement.fromJSON(object.interruptSettlement)
         : isSet(object.interrupt_settlement)
         ? RequestEndInterruptSettlement.fromJSON(object.interrupt_settlement)
+        : undefined,
+      compactionCheckpointCreate: isSet(object.compactionCheckpointCreate)
+        ? RuntimeMessageCreate.fromJSON(object.compactionCheckpointCreate)
+        : isSet(object.compaction_checkpoint_create)
+        ? RuntimeMessageCreate.fromJSON(object.compaction_checkpoint_create)
         : undefined,
     };
   },
@@ -7903,14 +8218,11 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     if (message.reschedule !== undefined) {
       obj.reschedule = RequestEndReschedule.toJSON(message.reschedule);
     }
-    if (message.stableReasoningParts?.length) {
-      obj.stableReasoningParts = message.stableReasoningParts.map((e) => StableReasoningPart.toJSON(e));
-    }
     if (message.consumedFileAttachments?.length) {
       obj.consumedFileAttachments = message.consumedFileAttachments.map((e) => FileAttachmentPair.toJSON(e));
     }
-    if (message.drafts?.length) {
-      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    if (message.trailingPartAppend !== undefined) {
+      obj.trailingPartAppend = RuntimeAssistantPartAppend.toJSON(message.trailingPartAppend);
     }
     if (message.prefixConsumption !== undefined) {
       obj.prefixConsumption = PrefixConsumptionDraft.toJSON(message.prefixConsumption);
@@ -7923,6 +8235,9 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     }
     if (message.interruptSettlement !== undefined) {
       obj.interruptSettlement = RequestEndInterruptSettlement.toJSON(message.interruptSettlement);
+    }
+    if (message.compactionCheckpointCreate !== undefined) {
+      obj.compactionCheckpointCreate = RuntimeMessageCreate.toJSON(message.compactionCheckpointCreate);
     }
     return obj;
   },
@@ -7947,10 +8262,11 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     message.reschedule = (object.reschedule !== undefined && object.reschedule !== null)
       ? RequestEndReschedule.fromPartial(object.reschedule)
       : undefined;
-    message.stableReasoningParts = object.stableReasoningParts?.map((e) => StableReasoningPart.fromPartial(e)) || [];
     message.consumedFileAttachments = object.consumedFileAttachments?.map((e) => FileAttachmentPair.fromPartial(e)) ||
       [];
-    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.trailingPartAppend = (object.trailingPartAppend !== undefined && object.trailingPartAppend !== null)
+      ? RuntimeAssistantPartAppend.fromPartial(object.trailingPartAppend)
+      : undefined;
     message.prefixConsumption = (object.prefixConsumption !== undefined && object.prefixConsumption !== null)
       ? PrefixConsumptionDraft.fromPartial(object.prefixConsumption)
       : undefined;
@@ -7959,19 +8275,16 @@ export const WriteRequestEndRequest: MessageFns<WriteRequestEndRequest> = {
     message.interruptSettlement = (object.interruptSettlement !== undefined && object.interruptSettlement !== null)
       ? RequestEndInterruptSettlement.fromPartial(object.interruptSettlement)
       : undefined;
+    message.compactionCheckpointCreate =
+      (object.compactionCheckpointCreate !== undefined && object.compactionCheckpointCreate !== null)
+        ? RuntimeMessageCreate.fromPartial(object.compactionCheckpointCreate)
+        : undefined;
     return message;
   },
 };
 
 function createBaseRequestEndInterruptSettlement(): RequestEndInterruptSettlement {
-  return {
-    runtimeInputId: "",
-    eventIds: [],
-    sequenceFrom: 0,
-    sequenceTo: 0,
-    pendingToolCancellations: [],
-    sandboxExecutionToolUseEventIds: [],
-  };
+  return { runtimeInputId: "", eventIds: [], sequenceFrom: 0, sequenceTo: 0 };
 }
 
 export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettlement> = {
@@ -7987,12 +8300,6 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
     }
     if (message.sequenceTo !== 0) {
       writer.uint32(32).int64(message.sequenceTo);
-    }
-    for (const v of message.pendingToolCancellations) {
-      PendingToolCancellationDraft.encode(v!, writer.uint32(42).fork()).join();
-    }
-    for (const v of message.sandboxExecutionToolUseEventIds) {
-      writer.uint32(50).string(v!);
     }
     return writer;
   },
@@ -8036,22 +8343,6 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
           message.sequenceTo = longToNumber(reader.int64());
           continue;
         }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.pendingToolCancellations.push(PendingToolCancellationDraft.decode(reader, reader.uint32()));
-          continue;
-        }
-        case 6: {
-          if (tag !== 50) {
-            break;
-          }
-
-          message.sandboxExecutionToolUseEventIds.push(reader.string());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8083,16 +8374,6 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
         : isSet(object.sequence_to)
         ? globalThis.Number(object.sequence_to)
         : 0,
-      pendingToolCancellations: globalThis.Array.isArray(object?.pendingToolCancellations)
-        ? object.pendingToolCancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
-        : globalThis.Array.isArray(object?.pending_tool_cancellations)
-        ? object.pending_tool_cancellations.map((e: any) => PendingToolCancellationDraft.fromJSON(e))
-        : [],
-      sandboxExecutionToolUseEventIds: globalThis.Array.isArray(object?.sandboxExecutionToolUseEventIds)
-        ? object.sandboxExecutionToolUseEventIds.map((e: any) => globalThis.String(e))
-        : globalThis.Array.isArray(object?.sandbox_execution_tool_use_event_ids)
-        ? object.sandbox_execution_tool_use_event_ids.map((e: any) => globalThis.String(e))
-        : [],
     };
   },
 
@@ -8110,14 +8391,6 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
     if (message.sequenceTo !== 0) {
       obj.sequenceTo = Math.round(message.sequenceTo);
     }
-    if (message.pendingToolCancellations?.length) {
-      obj.pendingToolCancellations = message.pendingToolCancellations.map((e) =>
-        PendingToolCancellationDraft.toJSON(e)
-      );
-    }
-    if (message.sandboxExecutionToolUseEventIds?.length) {
-      obj.sandboxExecutionToolUseEventIds = message.sandboxExecutionToolUseEventIds;
-    }
     return obj;
   },
 
@@ -8132,165 +8405,6 @@ export const RequestEndInterruptSettlement: MessageFns<RequestEndInterruptSettle
     message.eventIds = object.eventIds?.map((e) => e) || [];
     message.sequenceFrom = object.sequenceFrom ?? 0;
     message.sequenceTo = object.sequenceTo ?? 0;
-    message.pendingToolCancellations =
-      object.pendingToolCancellations?.map((e) => PendingToolCancellationDraft.fromPartial(e)) || [];
-    message.sandboxExecutionToolUseEventIds = object.sandboxExecutionToolUseEventIds?.map((e) => e) || [];
-    return message;
-  },
-};
-
-function createBaseStableReasoningPart(): StableReasoningPart {
-  return { reasoningPartId: "", providerPartId: "", partSequence: 0, text: "", metadataJson: "", truncated: false };
-}
-
-export const StableReasoningPart: MessageFns<StableReasoningPart> = {
-  encode(message: StableReasoningPart, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.reasoningPartId !== "") {
-      writer.uint32(10).string(message.reasoningPartId);
-    }
-    if (message.providerPartId !== "") {
-      writer.uint32(18).string(message.providerPartId);
-    }
-    if (message.partSequence !== 0) {
-      writer.uint32(24).int32(message.partSequence);
-    }
-    if (message.text !== "") {
-      writer.uint32(34).string(message.text);
-    }
-    if (message.metadataJson !== "") {
-      writer.uint32(42).string(message.metadataJson);
-    }
-    if (message.truncated !== false) {
-      writer.uint32(48).bool(message.truncated);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): StableReasoningPart {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBaseStableReasoningPart();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.reasoningPartId = reader.string();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.providerPartId = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.partSequence = reader.int32();
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.text = reader.string();
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.metadataJson = reader.string();
-          continue;
-        }
-        case 6: {
-          if (tag !== 48) {
-            break;
-          }
-
-          message.truncated = reader.bool();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): StableReasoningPart {
-    return {
-      reasoningPartId: isSet(object.reasoningPartId)
-        ? globalThis.String(object.reasoningPartId)
-        : isSet(object.reasoning_part_id)
-        ? globalThis.String(object.reasoning_part_id)
-        : "",
-      providerPartId: isSet(object.providerPartId)
-        ? globalThis.String(object.providerPartId)
-        : isSet(object.provider_part_id)
-        ? globalThis.String(object.provider_part_id)
-        : "",
-      partSequence: isSet(object.partSequence)
-        ? globalThis.Number(object.partSequence)
-        : isSet(object.part_sequence)
-        ? globalThis.Number(object.part_sequence)
-        : 0,
-      text: isSet(object.text) ? globalThis.String(object.text) : "",
-      metadataJson: isSet(object.metadataJson)
-        ? globalThis.String(object.metadataJson)
-        : isSet(object.metadata_json)
-        ? globalThis.String(object.metadata_json)
-        : "",
-      truncated: isSet(object.truncated) ? globalThis.Boolean(object.truncated) : false,
-    };
-  },
-
-  toJSON(message: StableReasoningPart): unknown {
-    const obj: any = {};
-    if (message.reasoningPartId !== "") {
-      obj.reasoningPartId = message.reasoningPartId;
-    }
-    if (message.providerPartId !== "") {
-      obj.providerPartId = message.providerPartId;
-    }
-    if (message.partSequence !== 0) {
-      obj.partSequence = Math.round(message.partSequence);
-    }
-    if (message.text !== "") {
-      obj.text = message.text;
-    }
-    if (message.metadataJson !== "") {
-      obj.metadataJson = message.metadataJson;
-    }
-    if (message.truncated !== false) {
-      obj.truncated = message.truncated;
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<StableReasoningPart>, I>>(base?: I): StableReasoningPart {
-    return StableReasoningPart.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<StableReasoningPart>, I>>(object: I): StableReasoningPart {
-    const message = createBaseStableReasoningPart();
-    message.reasoningPartId = object.reasoningPartId ?? "";
-    message.providerPartId = object.providerPartId ?? "";
-    message.partSequence = object.partSequence ?? 0;
-    message.text = object.text ?? "";
-    message.metadataJson = object.metadataJson ?? "";
-    message.truncated = object.truncated ?? false;
     return message;
   },
 };
@@ -8590,7 +8704,7 @@ export const RequestEndRescheduleDisposition: MessageFns<RequestEndRescheduleDis
 };
 
 function createBaseFinishIdleRequest(): FinishIdleRequest {
-  return { scope: undefined, stopReasonJson: "", durableTurnId: "", drafts: [] };
+  return { scope: undefined, stopReasonJson: "", durableTurnId: "", completionMailCreate: undefined };
 }
 
 export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
@@ -8604,8 +8718,8 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
     if (message.durableTurnId !== "") {
       writer.uint32(42).string(message.durableTurnId);
     }
-    for (const v of message.drafts) {
-      RuntimeMessageDraft.encode(v!, writer.uint32(50).fork()).join();
+    if (message.completionMailCreate !== undefined) {
+      RuntimeMessageCreate.encode(message.completionMailCreate, writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -8646,7 +8760,7 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
             break;
           }
 
-          message.drafts.push(RuntimeMessageDraft.decode(reader, reader.uint32()));
+          message.completionMailCreate = RuntimeMessageCreate.decode(reader, reader.uint32());
           continue;
         }
       }
@@ -8671,9 +8785,11 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
         : isSet(object.durable_turn_id)
         ? globalThis.String(object.durable_turn_id)
         : "",
-      drafts: globalThis.Array.isArray(object?.drafts)
-        ? object.drafts.map((e: any) => RuntimeMessageDraft.fromJSON(e))
-        : [],
+      completionMailCreate: isSet(object.completionMailCreate)
+        ? RuntimeMessageCreate.fromJSON(object.completionMailCreate)
+        : isSet(object.completion_mail_create)
+        ? RuntimeMessageCreate.fromJSON(object.completion_mail_create)
+        : undefined,
     };
   },
 
@@ -8688,8 +8804,8 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
     if (message.durableTurnId !== "") {
       obj.durableTurnId = message.durableTurnId;
     }
-    if (message.drafts?.length) {
-      obj.drafts = message.drafts.map((e) => RuntimeMessageDraft.toJSON(e));
+    if (message.completionMailCreate !== undefined) {
+      obj.completionMailCreate = RuntimeMessageCreate.toJSON(message.completionMailCreate);
     }
     return obj;
   },
@@ -8704,7 +8820,9 @@ export const FinishIdleRequest: MessageFns<FinishIdleRequest> = {
       : undefined;
     message.stopReasonJson = object.stopReasonJson ?? "";
     message.durableTurnId = object.durableTurnId ?? "";
-    message.drafts = object.drafts?.map((e) => RuntimeMessageDraft.fromPartial(e)) || [];
+    message.completionMailCreate = (object.completionMailCreate !== undefined && object.completionMailCreate !== null)
+      ? RuntimeMessageCreate.fromPartial(object.completionMailCreate)
+      : undefined;
     return message;
   },
 };
@@ -9811,8 +9929,713 @@ export const ResolveInterAgentDeliveryResponse: MessageFns<ResolveInterAgentDeli
   },
 };
 
+function createBaseChildInterruptTarget(): ChildInterruptTarget {
+  return {
+    childThreadId: "",
+    disposition: 0,
+    runtimeInputId: undefined,
+    interruptEventId: undefined,
+    interruptEventSequence: undefined,
+  };
+}
+
+export const ChildInterruptTarget: MessageFns<ChildInterruptTarget> = {
+  encode(message: ChildInterruptTarget, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.childThreadId !== "") {
+      writer.uint32(10).string(message.childThreadId);
+    }
+    if (message.disposition !== 0) {
+      writer.uint32(16).int32(message.disposition);
+    }
+    if (message.runtimeInputId !== undefined) {
+      writer.uint32(26).string(message.runtimeInputId);
+    }
+    if (message.interruptEventId !== undefined) {
+      writer.uint32(34).string(message.interruptEventId);
+    }
+    if (message.interruptEventSequence !== undefined) {
+      writer.uint32(40).int64(message.interruptEventSequence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ChildInterruptTarget {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseChildInterruptTarget();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.childThreadId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.disposition = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.runtimeInputId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.interruptEventId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.interruptEventSequence = longToNumber(reader.int64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ChildInterruptTarget {
+    return {
+      childThreadId: isSet(object.childThreadId)
+        ? globalThis.String(object.childThreadId)
+        : isSet(object.child_thread_id)
+        ? globalThis.String(object.child_thread_id)
+        : "",
+      disposition: isSet(object.disposition) ? childInterruptDispositionFromJSON(object.disposition) : 0,
+      runtimeInputId: isSet(object.runtimeInputId)
+        ? globalThis.String(object.runtimeInputId)
+        : isSet(object.runtime_input_id)
+        ? globalThis.String(object.runtime_input_id)
+        : undefined,
+      interruptEventId: isSet(object.interruptEventId)
+        ? globalThis.String(object.interruptEventId)
+        : isSet(object.interrupt_event_id)
+        ? globalThis.String(object.interrupt_event_id)
+        : undefined,
+      interruptEventSequence: isSet(object.interruptEventSequence)
+        ? globalThis.Number(object.interruptEventSequence)
+        : isSet(object.interrupt_event_sequence)
+        ? globalThis.Number(object.interrupt_event_sequence)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ChildInterruptTarget): unknown {
+    const obj: any = {};
+    if (message.childThreadId !== "") {
+      obj.childThreadId = message.childThreadId;
+    }
+    if (message.disposition !== 0) {
+      obj.disposition = childInterruptDispositionToJSON(message.disposition);
+    }
+    if (message.runtimeInputId !== undefined) {
+      obj.runtimeInputId = message.runtimeInputId;
+    }
+    if (message.interruptEventId !== undefined) {
+      obj.interruptEventId = message.interruptEventId;
+    }
+    if (message.interruptEventSequence !== undefined) {
+      obj.interruptEventSequence = Math.round(message.interruptEventSequence);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ChildInterruptTarget>, I>>(base?: I): ChildInterruptTarget {
+    return ChildInterruptTarget.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ChildInterruptTarget>, I>>(object: I): ChildInterruptTarget {
+    const message = createBaseChildInterruptTarget();
+    message.childThreadId = object.childThreadId ?? "";
+    message.disposition = object.disposition ?? 0;
+    message.runtimeInputId = object.runtimeInputId ?? undefined;
+    message.interruptEventId = object.interruptEventId ?? undefined;
+    message.interruptEventSequence = object.interruptEventSequence ?? undefined;
+    return message;
+  },
+};
+
+function createBaseAdmitChildInterruptRequest(): AdmitChildInterruptRequest {
+  return { scope: undefined, rootChildThreadId: "", sourceToolUseEventId: "", action: 0, includeDescendants: false };
+}
+
+export const AdmitChildInterruptRequest: MessageFns<AdmitChildInterruptRequest> = {
+  encode(message: AdmitChildInterruptRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.rootChildThreadId !== "") {
+      writer.uint32(18).string(message.rootChildThreadId);
+    }
+    if (message.sourceToolUseEventId !== "") {
+      writer.uint32(26).string(message.sourceToolUseEventId);
+    }
+    if (message.action !== 0) {
+      writer.uint32(32).int32(message.action);
+    }
+    if (message.includeDescendants !== false) {
+      writer.uint32(40).bool(message.includeDescendants);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitChildInterruptRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitChildInterruptRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.rootChildThreadId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceToolUseEventId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.action = reader.int32() as any;
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.includeDescendants = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmitChildInterruptRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      rootChildThreadId: isSet(object.rootChildThreadId)
+        ? globalThis.String(object.rootChildThreadId)
+        : isSet(object.root_child_thread_id)
+        ? globalThis.String(object.root_child_thread_id)
+        : "",
+      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
+        ? globalThis.String(object.sourceToolUseEventId)
+        : isSet(object.source_tool_use_event_id)
+        ? globalThis.String(object.source_tool_use_event_id)
+        : "",
+      action: isSet(object.action) ? childControlActionFromJSON(object.action) : 0,
+      includeDescendants: isSet(object.includeDescendants)
+        ? globalThis.Boolean(object.includeDescendants)
+        : isSet(object.include_descendants)
+        ? globalThis.Boolean(object.include_descendants)
+        : false,
+    };
+  },
+
+  toJSON(message: AdmitChildInterruptRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.rootChildThreadId !== "") {
+      obj.rootChildThreadId = message.rootChildThreadId;
+    }
+    if (message.sourceToolUseEventId !== "") {
+      obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.action !== 0) {
+      obj.action = childControlActionToJSON(message.action);
+    }
+    if (message.includeDescendants !== false) {
+      obj.includeDescendants = message.includeDescendants;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitChildInterruptRequest>, I>>(base?: I): AdmitChildInterruptRequest {
+    return AdmitChildInterruptRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitChildInterruptRequest>, I>>(object: I): AdmitChildInterruptRequest {
+    const message = createBaseAdmitChildInterruptRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.rootChildThreadId = object.rootChildThreadId ?? "";
+    message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.action = object.action ?? 0;
+    message.includeDescendants = object.includeDescendants ?? false;
+    return message;
+  },
+};
+
+function createBaseAdmitChildInterruptResponse(): AdmitChildInterruptResponse {
+  return { ack: undefined, targets: [] };
+}
+
+export const AdmitChildInterruptResponse: MessageFns<AdmitChildInterruptResponse> = {
+  encode(message: AdmitChildInterruptResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.ack !== undefined) {
+      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.targets) {
+      ChildInterruptTarget.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmitChildInterruptResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmitChildInterruptResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.targets.push(ChildInterruptTarget.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmitChildInterruptResponse {
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      targets: globalThis.Array.isArray(object?.targets)
+        ? object.targets.map((e: any) => ChildInterruptTarget.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: AdmitChildInterruptResponse): unknown {
+    const obj: any = {};
+    if (message.ack !== undefined) {
+      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.targets?.length) {
+      obj.targets = message.targets.map((e) => ChildInterruptTarget.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmitChildInterruptResponse>, I>>(base?: I): AdmitChildInterruptResponse {
+    return AdmitChildInterruptResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmitChildInterruptResponse>, I>>(object: I): AdmitChildInterruptResponse {
+    const message = createBaseAdmitChildInterruptResponse();
+    message.ack = (object.ack !== undefined && object.ack !== null)
+      ? BridgeWriteAck.fromPartial(object.ack)
+      : undefined;
+    message.targets = object.targets?.map((e) => ChildInterruptTarget.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseAwaitChildInterruptRequest(): AwaitChildInterruptRequest {
+  return {
+    scope: undefined,
+    rootChildThreadId: "",
+    sourceToolUseEventId: "",
+    action: 0,
+    includeDescendants: false,
+    targets: [],
+  };
+}
+
+export const AwaitChildInterruptRequest: MessageFns<AwaitChildInterruptRequest> = {
+  encode(message: AwaitChildInterruptRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.scope !== undefined) {
+      RuntimeScope.encode(message.scope, writer.uint32(10).fork()).join();
+    }
+    if (message.rootChildThreadId !== "") {
+      writer.uint32(18).string(message.rootChildThreadId);
+    }
+    if (message.sourceToolUseEventId !== "") {
+      writer.uint32(26).string(message.sourceToolUseEventId);
+    }
+    if (message.action !== 0) {
+      writer.uint32(32).int32(message.action);
+    }
+    if (message.includeDescendants !== false) {
+      writer.uint32(40).bool(message.includeDescendants);
+    }
+    for (const v of message.targets) {
+      ChildInterruptTarget.encode(v!, writer.uint32(50).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AwaitChildInterruptRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAwaitChildInterruptRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.scope = RuntimeScope.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.rootChildThreadId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceToolUseEventId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.action = reader.int32() as any;
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.includeDescendants = reader.bool();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targets.push(ChildInterruptTarget.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AwaitChildInterruptRequest {
+    return {
+      scope: isSet(object.scope) ? RuntimeScope.fromJSON(object.scope) : undefined,
+      rootChildThreadId: isSet(object.rootChildThreadId)
+        ? globalThis.String(object.rootChildThreadId)
+        : isSet(object.root_child_thread_id)
+        ? globalThis.String(object.root_child_thread_id)
+        : "",
+      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
+        ? globalThis.String(object.sourceToolUseEventId)
+        : isSet(object.source_tool_use_event_id)
+        ? globalThis.String(object.source_tool_use_event_id)
+        : "",
+      action: isSet(object.action) ? childControlActionFromJSON(object.action) : 0,
+      includeDescendants: isSet(object.includeDescendants)
+        ? globalThis.Boolean(object.includeDescendants)
+        : isSet(object.include_descendants)
+        ? globalThis.Boolean(object.include_descendants)
+        : false,
+      targets: globalThis.Array.isArray(object?.targets)
+        ? object.targets.map((e: any) => ChildInterruptTarget.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: AwaitChildInterruptRequest): unknown {
+    const obj: any = {};
+    if (message.scope !== undefined) {
+      obj.scope = RuntimeScope.toJSON(message.scope);
+    }
+    if (message.rootChildThreadId !== "") {
+      obj.rootChildThreadId = message.rootChildThreadId;
+    }
+    if (message.sourceToolUseEventId !== "") {
+      obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.action !== 0) {
+      obj.action = childControlActionToJSON(message.action);
+    }
+    if (message.includeDescendants !== false) {
+      obj.includeDescendants = message.includeDescendants;
+    }
+    if (message.targets?.length) {
+      obj.targets = message.targets.map((e) => ChildInterruptTarget.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AwaitChildInterruptRequest>, I>>(base?: I): AwaitChildInterruptRequest {
+    return AwaitChildInterruptRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AwaitChildInterruptRequest>, I>>(object: I): AwaitChildInterruptRequest {
+    const message = createBaseAwaitChildInterruptRequest();
+    message.scope = (object.scope !== undefined && object.scope !== null)
+      ? RuntimeScope.fromPartial(object.scope)
+      : undefined;
+    message.rootChildThreadId = object.rootChildThreadId ?? "";
+    message.sourceToolUseEventId = object.sourceToolUseEventId ?? "";
+    message.action = object.action ?? 0;
+    message.includeDescendants = object.includeDescendants ?? false;
+    message.targets = object.targets?.map((e) => ChildInterruptTarget.fromPartial(e)) || [];
+    return message;
+  },
+};
+
+function createBaseChildInterruptTargetOutcome(): ChildInterruptTargetOutcome {
+  return { target: undefined, outcome: 0, errorCode: undefined };
+}
+
+export const ChildInterruptTargetOutcome: MessageFns<ChildInterruptTargetOutcome> = {
+  encode(message: ChildInterruptTargetOutcome, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.target !== undefined) {
+      ChildInterruptTarget.encode(message.target, writer.uint32(10).fork()).join();
+    }
+    if (message.outcome !== 0) {
+      writer.uint32(16).int32(message.outcome);
+    }
+    if (message.errorCode !== undefined) {
+      writer.uint32(26).string(message.errorCode);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ChildInterruptTargetOutcome {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseChildInterruptTargetOutcome();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.target = ChildInterruptTarget.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.outcome = reader.int32() as any;
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.errorCode = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ChildInterruptTargetOutcome {
+    return {
+      target: isSet(object.target) ? ChildInterruptTarget.fromJSON(object.target) : undefined,
+      outcome: isSet(object.outcome) ? childInterruptOutcomeFromJSON(object.outcome) : 0,
+      errorCode: isSet(object.errorCode)
+        ? globalThis.String(object.errorCode)
+        : isSet(object.error_code)
+        ? globalThis.String(object.error_code)
+        : undefined,
+    };
+  },
+
+  toJSON(message: ChildInterruptTargetOutcome): unknown {
+    const obj: any = {};
+    if (message.target !== undefined) {
+      obj.target = ChildInterruptTarget.toJSON(message.target);
+    }
+    if (message.outcome !== 0) {
+      obj.outcome = childInterruptOutcomeToJSON(message.outcome);
+    }
+    if (message.errorCode !== undefined) {
+      obj.errorCode = message.errorCode;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ChildInterruptTargetOutcome>, I>>(base?: I): ChildInterruptTargetOutcome {
+    return ChildInterruptTargetOutcome.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ChildInterruptTargetOutcome>, I>>(object: I): ChildInterruptTargetOutcome {
+    const message = createBaseChildInterruptTargetOutcome();
+    message.target = (object.target !== undefined && object.target !== null)
+      ? ChildInterruptTarget.fromPartial(object.target)
+      : undefined;
+    message.outcome = object.outcome ?? 0;
+    message.errorCode = object.errorCode ?? undefined;
+    return message;
+  },
+};
+
+function createBaseAwaitChildInterruptResponse(): AwaitChildInterruptResponse {
+  return { ack: undefined, outcomes: [] };
+}
+
+export const AwaitChildInterruptResponse: MessageFns<AwaitChildInterruptResponse> = {
+  encode(message: AwaitChildInterruptResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.ack !== undefined) {
+      BridgeWriteAck.encode(message.ack, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.outcomes) {
+      ChildInterruptTargetOutcome.encode(v!, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AwaitChildInterruptResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAwaitChildInterruptResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.ack = BridgeWriteAck.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.outcomes.push(ChildInterruptTargetOutcome.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AwaitChildInterruptResponse {
+    return {
+      ack: isSet(object.ack) ? BridgeWriteAck.fromJSON(object.ack) : undefined,
+      outcomes: globalThis.Array.isArray(object?.outcomes)
+        ? object.outcomes.map((e: any) => ChildInterruptTargetOutcome.fromJSON(e))
+        : [],
+    };
+  },
+
+  toJSON(message: AwaitChildInterruptResponse): unknown {
+    const obj: any = {};
+    if (message.ack !== undefined) {
+      obj.ack = BridgeWriteAck.toJSON(message.ack);
+    }
+    if (message.outcomes?.length) {
+      obj.outcomes = message.outcomes.map((e) => ChildInterruptTargetOutcome.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AwaitChildInterruptResponse>, I>>(base?: I): AwaitChildInterruptResponse {
+    return AwaitChildInterruptResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AwaitChildInterruptResponse>, I>>(object: I): AwaitChildInterruptResponse {
+    const message = createBaseAwaitChildInterruptResponse();
+    message.ack = (object.ack !== undefined && object.ack !== null)
+      ? BridgeWriteAck.fromPartial(object.ack)
+      : undefined;
+    message.outcomes = object.outcomes?.map((e) => ChildInterruptTargetOutcome.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBaseMarkChildThreadClosedRequest(): MarkChildThreadClosedRequest {
-  return { scope: undefined, childThreadId: "", closedAt: "", source: undefined };
+  return { scope: undefined, childThreadId: "", source: undefined, sourceToolUseEventId: undefined, targets: [] };
 }
 
 export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedRequest> = {
@@ -9823,11 +10646,14 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
     if (message.childThreadId !== "") {
       writer.uint32(18).string(message.childThreadId);
     }
-    if (message.closedAt !== "") {
-      writer.uint32(26).string(message.closedAt);
-    }
     if (message.source !== undefined) {
       ChildLifecycleSource.encode(message.source, writer.uint32(34).fork()).join();
+    }
+    if (message.sourceToolUseEventId !== undefined) {
+      writer.uint32(42).string(message.sourceToolUseEventId);
+    }
+    for (const v of message.targets) {
+      ChildInterruptTarget.encode(v!, writer.uint32(50).fork()).join();
     }
     return writer;
   },
@@ -9855,20 +10681,28 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
           message.childThreadId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.closedAt = reader.string();
-          continue;
-        }
         case 4: {
           if (tag !== 34) {
             break;
           }
 
           message.source = ChildLifecycleSource.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.sourceToolUseEventId = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.targets.push(ChildInterruptTarget.decode(reader, reader.uint32()));
           continue;
         }
       }
@@ -9888,12 +10722,15 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
         : isSet(object.child_thread_id)
         ? globalThis.String(object.child_thread_id)
         : "",
-      closedAt: isSet(object.closedAt)
-        ? globalThis.String(object.closedAt)
-        : isSet(object.closed_at)
-        ? globalThis.String(object.closed_at)
-        : "",
       source: isSet(object.source) ? ChildLifecycleSource.fromJSON(object.source) : undefined,
+      sourceToolUseEventId: isSet(object.sourceToolUseEventId)
+        ? globalThis.String(object.sourceToolUseEventId)
+        : isSet(object.source_tool_use_event_id)
+        ? globalThis.String(object.source_tool_use_event_id)
+        : undefined,
+      targets: globalThis.Array.isArray(object?.targets)
+        ? object.targets.map((e: any) => ChildInterruptTarget.fromJSON(e))
+        : [],
     };
   },
 
@@ -9905,11 +10742,14 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
     if (message.childThreadId !== "") {
       obj.childThreadId = message.childThreadId;
     }
-    if (message.closedAt !== "") {
-      obj.closedAt = message.closedAt;
-    }
     if (message.source !== undefined) {
       obj.source = ChildLifecycleSource.toJSON(message.source);
+    }
+    if (message.sourceToolUseEventId !== undefined) {
+      obj.sourceToolUseEventId = message.sourceToolUseEventId;
+    }
+    if (message.targets?.length) {
+      obj.targets = message.targets.map((e) => ChildInterruptTarget.toJSON(e));
     }
     return obj;
   },
@@ -9923,10 +10763,11 @@ export const MarkChildThreadClosedRequest: MessageFns<MarkChildThreadClosedReque
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.childThreadId = object.childThreadId ?? "";
-    message.closedAt = object.closedAt ?? "";
     message.source = (object.source !== undefined && object.source !== null)
       ? ChildLifecycleSource.fromPartial(object.source)
       : undefined;
+    message.sourceToolUseEventId = object.sourceToolUseEventId ?? undefined;
+    message.targets = object.targets?.map((e) => ChildInterruptTarget.fromPartial(e)) || [];
     return message;
   },
 };
@@ -10014,7 +10855,7 @@ export const MarkChildThreadClosedResponse: MessageFns<MarkChildThreadClosedResp
 };
 
 function createBaseMarkChildThreadActiveRequest(): MarkChildThreadActiveRequest {
-  return { scope: undefined, childThreadId: "", activeAt: "", source: undefined };
+  return { scope: undefined, childThreadId: "", source: undefined };
 }
 
 export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveRequest> = {
@@ -10024,9 +10865,6 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.childThreadId !== "") {
       writer.uint32(18).string(message.childThreadId);
-    }
-    if (message.activeAt !== "") {
-      writer.uint32(26).string(message.activeAt);
     }
     if (message.source !== undefined) {
       ChildLifecycleSource.encode(message.source, writer.uint32(34).fork()).join();
@@ -10057,14 +10895,6 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
           message.childThreadId = reader.string();
           continue;
         }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.activeAt = reader.string();
-          continue;
-        }
         case 4: {
           if (tag !== 34) {
             break;
@@ -10090,11 +10920,6 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
         : isSet(object.child_thread_id)
         ? globalThis.String(object.child_thread_id)
         : "",
-      activeAt: isSet(object.activeAt)
-        ? globalThis.String(object.activeAt)
-        : isSet(object.active_at)
-        ? globalThis.String(object.active_at)
-        : "",
       source: isSet(object.source) ? ChildLifecycleSource.fromJSON(object.source) : undefined,
     };
   },
@@ -10106,9 +10931,6 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
     }
     if (message.childThreadId !== "") {
       obj.childThreadId = message.childThreadId;
-    }
-    if (message.activeAt !== "") {
-      obj.activeAt = message.activeAt;
     }
     if (message.source !== undefined) {
       obj.source = ChildLifecycleSource.toJSON(message.source);
@@ -10125,7 +10947,6 @@ export const MarkChildThreadActiveRequest: MessageFns<MarkChildThreadActiveReque
       ? RuntimeScope.fromPartial(object.scope)
       : undefined;
     message.childThreadId = object.childThreadId ?? "";
-    message.activeAt = object.activeAt ?? "";
     message.source = (object.source !== undefined && object.source !== null)
       ? ChildLifecycleSource.fromPartial(object.source)
       : undefined;
@@ -11817,6 +12638,28 @@ export const AgentRuntimeBridgeServiceService = {
     responseDeserialize: (value: Buffer): ResolveInterAgentDeliveryResponse =>
       ResolveInterAgentDeliveryResponse.decode(value),
   },
+  admitChildInterrupt: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AdmitChildInterruptRequest): Buffer =>
+      Buffer.from(AdmitChildInterruptRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AdmitChildInterruptRequest => AdmitChildInterruptRequest.decode(value),
+    responseSerialize: (value: AdmitChildInterruptResponse): Buffer =>
+      Buffer.from(AdmitChildInterruptResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AdmitChildInterruptResponse => AdmitChildInterruptResponse.decode(value),
+  },
+  awaitChildInterrupt: {
+    path: "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt" as const,
+    requestStream: false as const,
+    responseStream: false as const,
+    requestSerialize: (value: AwaitChildInterruptRequest): Buffer =>
+      Buffer.from(AwaitChildInterruptRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer): AwaitChildInterruptRequest => AwaitChildInterruptRequest.decode(value),
+    responseSerialize: (value: AwaitChildInterruptResponse): Buffer =>
+      Buffer.from(AwaitChildInterruptResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer): AwaitChildInterruptResponse => AwaitChildInterruptResponse.decode(value),
+  },
   markChildThreadClosed: {
     path: "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadClosed" as const,
     requestStream: false as const,
@@ -12017,6 +12860,8 @@ export interface AgentRuntimeBridgeServiceServer extends UntypedServiceImplement
   resolveChildThread: handleUnaryCall<ResolveChildThreadRequest, ResolveChildThreadResponse>;
   listChildThreads: handleUnaryCall<ListChildThreadsRequest, ListChildThreadsResponse>;
   resolveInterAgentDelivery: handleUnaryCall<ResolveInterAgentDeliveryRequest, ResolveInterAgentDeliveryResponse>;
+  admitChildInterrupt: handleUnaryCall<AdmitChildInterruptRequest, AdmitChildInterruptResponse>;
+  awaitChildInterrupt: handleUnaryCall<AwaitChildInterruptRequest, AwaitChildInterruptResponse>;
   markChildThreadClosed: handleUnaryCall<MarkChildThreadClosedRequest, MarkChildThreadClosedResponse>;
   markChildThreadActive: handleUnaryCall<MarkChildThreadActiveRequest, MarkChildThreadActiveResponse>;
   acceptSandboxExecution: handleUnaryCall<AcceptSandboxExecutionRequest, AcceptSandboxExecutionResponse>;
@@ -12203,6 +13048,36 @@ export interface AgentRuntimeBridgeServiceClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: ResolveInterAgentDeliveryResponse) => void,
+  ): ClientUnaryCall;
+  admitChildInterrupt(
+    request: AdmitChildInterruptRequest,
+    callback: (error: ServiceError | null, response: AdmitChildInterruptResponse) => void,
+  ): ClientUnaryCall;
+  admitChildInterrupt(
+    request: AdmitChildInterruptRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AdmitChildInterruptResponse) => void,
+  ): ClientUnaryCall;
+  admitChildInterrupt(
+    request: AdmitChildInterruptRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AdmitChildInterruptResponse) => void,
+  ): ClientUnaryCall;
+  awaitChildInterrupt(
+    request: AwaitChildInterruptRequest,
+    callback: (error: ServiceError | null, response: AwaitChildInterruptResponse) => void,
+  ): ClientUnaryCall;
+  awaitChildInterrupt(
+    request: AwaitChildInterruptRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: AwaitChildInterruptResponse) => void,
+  ): ClientUnaryCall;
+  awaitChildInterrupt(
+    request: AwaitChildInterruptRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: AwaitChildInterruptResponse) => void,
   ): ClientUnaryCall;
   markChildThreadClosed(
     request: MarkChildThreadClosedRequest,

@@ -50,6 +50,8 @@ func isRuntimePodBridgeAPIMethod(method string) bool {
 		bridgev1.AgentRuntimeBridgeService_ResolveChildThread_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ListChildThreads_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_ResolveInterAgentDelivery_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName,
+		bridgev1.AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_MarkChildThreadClosed_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_MarkChildThreadActive_FullMethodName,
 		bridgev1.AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName,

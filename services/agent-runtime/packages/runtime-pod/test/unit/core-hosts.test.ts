@@ -43,7 +43,6 @@ function turnFactsFor(messages: readonly DurableRuntimeMessage[]): ThreadTurnLoa
         lineageKind: "declaration_receipt",
         operationKind: message.origin === "agent" ? "write_event" : "commit_inputs",
         sourceKind: message.origin === "agent" ? "runtime_event" : message.origin === "runtime" ? "agent_mail" : "messages",
-        sourceId: `source_${message.id}`,
         eventId: message.owningEventId,
         eventSequence: message.eventSequence,
         disposition: "created",
@@ -858,28 +857,32 @@ describe("Runtime core host production assembly", () => {
         interruptCommand,
         async (declaration) => {
           committedDeclaration = declaration;
-          return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+          const result = buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
+          if (!result.ok || !("receipt" in result)) return result;
+          return {
+            ...result,
+            receipt: {
+              ...result.receipt,
+              interruptToolProjections: [{
+                toolUseEventId: "sevt_tool_1",
+                resultEvent: {
+                  sessionThreadId: interruptCommand.sessionThreadId,
+                  eventId: "sevt_interrupt_tool_result",
+                  eventSequence: 5,
+                  disposition: "created" as const,
+                },
+                terminalState: { type: "cancelled" as const },
+              }],
+            },
+          };
         },
       );
       const shell = await hosts.subAgentRunHost.inspectThread(commandScope("sesn_interrupt_confirm"));
 
       expect(interrupt).toEqual({ ok: true, sessionId: "sesn_interrupt_confirm", created: false, interrupted: false, idleInterrupt: true });
       expect(observations).toEqual(["load:rin_interrupt_before_confirm"]);
-      expect(committedDeclaration).toMatchObject({
-        drafts: [{
-          sourceKind: "interrupt_control",
-          sourceId: "rin_interrupt_before_confirm",
-          sourceEventId: "sevt_interrupt_before_confirm",
-          draftKind: "cancellation",
-          parts: [{
-            type: "tool",
-            toolUseEventId: "sevt_tool_1",
-            state: { status: "cancelled" },
-          }],
-        }],
-        pendingToolCancellations: [{
-          toolUseEventId: "sevt_tool_1",
-        }],
+		expect(committedDeclaration).toMatchObject({
+			messageCreates: [],
       });
       expect(shell).toMatchObject({
         ok: true,
@@ -1138,6 +1141,7 @@ function commandScope(sessionId: string) {
     eventIds: [],
     sequenceFrom: 0,
     sequenceTo: 0,
+		origin: "user" as const,
   };
 }
 
@@ -1254,39 +1258,36 @@ function successfulEventAppend(envelope: SessionEventEnvelope): SessionEventWrit
         sessionThreadId: envelope.sessionThreadId,
         operationKind: "write_event",
         sourceKind: envelope.event.type,
-        sourceId: envelope.writeId,
+        operationId: envelope.writeId,
         declarationDigest: `digest_${envelope.writeId}`,
         pendingAttachmentDelta: [],
-        pendingToolDelta: [],
+		interruptToolProjections: [],
         prefixConsumptions: [],
 
         childLifecycle: [],
         events: [{
           sessionThreadId: envelope.sessionThreadId,
-          sourceEventId: envelope.writeId,
           eventId,
           eventSequence: 1,
           disposition: "created",
         }],
-        messages: envelope.drafts.map((draft, messageIndex) => ({
-          runtimeLocalId: draft.runtimeLocalId,
+		messages: envelope.assistantPartAppend === undefined ? [] : [{
           sessionThreadId: envelope.sessionThreadId,
           owningEventId: eventId,
-          messageId: `msg_${draft.runtimeLocalId}`,
-          messageSequence: messageIndex + 1,
+			messageId: `msg_${envelope.writeId}`,
+			messageSequence: 1,
           createdAt: committedAt,
           updatedAt: committedAt,
           disposition: "created",
-          parts: draft.parts.map((part, partIndex) => ({
-            runtimeLocalPartId: part.runtimeLocalPartId,
-            partId: `part_${part.runtimeLocalPartId}`,
-            messageId: `msg_${draft.runtimeLocalId}`,
+			parts: envelope.assistantPartAppend.parts.map((_part, partIndex) => ({
+			partId: `part_${envelope.writeId}_${partIndex}`,
+			messageId: `msg_${envelope.writeId}`,
             partSequence: partIndex,
             createdAt: committedAt,
             updatedAt: committedAt,
             disposition: "created",
           })),
-        })),
+		}],
       },
     },
   };

@@ -9,7 +9,7 @@
 import type {
   RuntimeFailure,
   RuntimeMessage,
-  RuntimeMessageDraft,
+  RuntimeMessageCreate,
   SessionEventWriterAppendResult,
   SessionEventWriterError,
   SessionEventWriterFinishIdleEnvelope,
@@ -23,9 +23,9 @@ import {
 } from "../contracts/runtime.js";
 import { runtimeFailureFromProviderError } from "../llm/llm-event.js";
 import {
-  completionMailDraft,
-  runtimeTerminationToolDeclarations,
-  runtimeTerminationCompletionMailDraft,
+  completionMailCreate,
+  runtimeTerminationToolSettlements,
+  runtimeTerminationCompletionMailCreate,
   validateFinishIdleReceipt,
   validateRuntimeTerminationReceipt,
 } from "../runtime/runtime-declaration.js";
@@ -116,26 +116,16 @@ export async function closeFailedThreadRun(
       : { type: "failed", error: idle.error, releaseSession: { reason: "event_write_failed" } };
   }
 
-  const pendingTools = session.state.pendingApprovalToolJobs();
-  const pendingSandboxExecutions = session.state.pendingSandboxExecutionJobs();
-  const toolDeclarations = runtimeTerminationToolDeclarations({
-    workspaceId: session.identity.workspaceId,
-    sessionId: session.identity.sessionId,
-    sessionThreadId: session.identity.sessionThreadId,
-    durableTurnId,
+  const pendingTools = unfinishedToolUseEventIds(session.state.contextManager.messages())
+    .map((toolUseEventId) => ({ toolUseEventId }));
+  const toolSettlements = runtimeTerminationToolSettlements({
     pendingTools,
     failure,
-    completedAt: options.runtime.now(),
   });
-  const completionDraft = runtimeTerminationCompletionDraft(
+  const completionMailCreate = runtimeTerminationCompletionCreate(
     session,
-    durableTurnId,
     failure,
-    toolDeclarations.drafts.length,
   );
-  const drafts = completionDraft === undefined
-    ? [...toolDeclarations.drafts]
-    : [...toolDeclarations.drafts, completionDraft];
   const termination = await commitRuntimeTerminationWithRetry(options, {
     requestId: durableTurnId,
     workspaceId: session.identity.workspaceId,
@@ -146,9 +136,8 @@ export async function closeFailedThreadRun(
     targetPodUid: session.identity.targetPodUid,
     writeId: durableTurnId,
     failure,
-    drafts,
-    pendingToolCancellations: [...toolDeclarations.pendingToolCancellations],
-    sandboxExecutionToolUseEventIds: pendingSandboxExecutions.map((pending) => pending.toolUseEventId),
+    toolSettlements: [...toolSettlements],
+    ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
   });
   if (!termination.ok) {
     return {
@@ -176,10 +165,9 @@ export async function closeFailedThreadRun(
   try {
     const terminalReceipt = validateRuntimeTerminationReceipt({
       sessionThreadId: session.identity.sessionThreadId,
-      durableTurnId,
-      drafts,
-      pendingToolCancellations: toolDeclarations.pendingToolCancellations,
-      sandboxExecutionToolUseEventIds: pendingSandboxExecutions.map((pending) => pending.toolUseEventId),
+      operationId: durableTurnId,
+      toolSettlements,
+      ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
     }, declaration.receipt);
     session.state.applyThreadTurnFact({
       fact: "terminal_closeout_committed",
@@ -250,12 +238,11 @@ export async function appendIdleEvent(
     };
   }
   let result: SessionEventWriterAppendResult;
-  let declaredDrafts: RuntimeMessageDraft[] = [];
+  let declaredCompletionMail: RuntimeMessageCreate | undefined;
   try {
-    const completionDraft = suppressCompletionMail
+    declaredCompletionMail = suppressCompletionMail
       ? undefined
-      : finishIdleCompletionDraft(session, durableTurnId, stopReason, failure);
-    declaredDrafts = completionDraft === undefined ? [] : [completionDraft];
+      : finishIdleCompletionCreate(session, stopReason, failure);
     result = options.sessionEventWriter.finishIdle === undefined
       ? {
         ok: false,
@@ -275,7 +262,7 @@ export async function appendIdleEvent(
         targetPodUid: session.identity.targetPodUid,
         durableTurnId,
         stopReason,
-        ...(declaredDrafts.length === 0 ? {} : { drafts: declaredDrafts }),
+        ...(declaredCompletionMail === undefined ? {} : { completionMailCreate: declaredCompletionMail }),
       });
   } catch (error) {
     result = {
@@ -291,7 +278,7 @@ export async function appendIdleEvent(
   if (!result.ok) {
     return { ok: false, error: runtimeFailureFromEventWriter(result.error) };
   }
-  const validated = validateFinishIdleResponse(session, durableTurnId, declaredDrafts, result);
+  const validated = validateFinishIdleResponse(session, durableTurnId, declaredCompletionMail, result);
   if (!validated.ok) {
     return { ok: false, error: runtimeFailureFromEventWriter(validated.error) };
   }
@@ -377,7 +364,7 @@ export async function closeFailedRunDurably(
     if (!idleAppend.ok) {
       return failedRunCloseoutFailure(idleAppend.error);
     }
-    const validatedIdle = validateFinishIdleResponse(session, durableTurnId, [], idleAppend);
+    const validatedIdle = validateFinishIdleResponse(session, durableTurnId, undefined, idleAppend);
     if (!validatedIdle.ok) {
       return failedRunCloseoutFailure(validatedIdle.error);
     }
@@ -613,12 +600,10 @@ function writerUnknown(sessionId: string, writeId: string): SessionEventWriterAp
   return { ok: false, error: normalizeSessionEventWriterError({ code: "unknown", sessionId, writeId }) };
 }
 
-export function runtimeTerminationCompletionDraft(
+export function runtimeTerminationCompletionCreate(
   runtimeThread: ThreadRuntime,
-  durableTurnId: string,
   failure: RuntimeFailure,
-  ordinal: number,
-): RuntimeMessageDraft | undefined {
+): RuntimeMessageCreate | undefined {
   if (runtimeThread.identity.threadRole !== "subagent") {
     return undefined;
   }
@@ -626,12 +611,7 @@ export function runtimeTerminationCompletionDraft(
   if (sender === undefined || sender.length === 0) {
     throw new Error("sub-agent runtime termination sender has no task name");
   }
-  return runtimeTerminationCompletionMailDraft({
-    workspaceId: runtimeThread.identity.workspaceId,
-    sessionId: runtimeThread.sessionId,
-    sessionThreadId: runtimeThread.identity.sessionThreadId,
-    durableTurnId,
-    ordinal,
+  return runtimeTerminationCompletionMailCreate({
     envelope: [
       "Message Type: FINAL_ANSWER",
       `Task name: ${runtimeThread.identity.parentTaskName ?? "main"}`,
@@ -642,12 +622,11 @@ export function runtimeTerminationCompletionDraft(
   });
 }
 
-export function finishIdleCompletionDraft(
+export function finishIdleCompletionCreate(
   runtimeThread: ThreadRuntime,
-  durableTurnId: string,
   stopReason: SessionEventWriterFinishIdleEnvelope["stopReason"],
   failure: RuntimeFailure | undefined,
-): RuntimeMessageDraft | undefined {
+): RuntimeMessageCreate | undefined {
   if (runtimeThread.identity.threadRole !== "subagent" || stopReason.type === "requires_action") {
     return undefined;
   }
@@ -658,11 +637,7 @@ export function finishIdleCompletionDraft(
   const payload = failure === undefined
     ? finalAssistantText(runtimeThread.state.contextManager.messages())
     : completionMailErrorPayload(failure.message);
-  return completionMailDraft({
-    workspaceId: runtimeThread.identity.workspaceId,
-    sessionId: runtimeThread.sessionId,
-    sessionThreadId: runtimeThread.identity.sessionThreadId,
-    durableTurnId,
+  return completionMailCreate({
     envelope: [
       "Message Type: FINAL_ANSWER",
       `Task name: ${runtimeThread.identity.parentTaskName ?? "main"}`,
@@ -676,7 +651,7 @@ export function finishIdleCompletionDraft(
 export function validateFinishIdleResponse(
   runtimeThread: ThreadRuntime,
   durableTurnId: string,
-  drafts: readonly RuntimeMessageDraft[],
+  completionMailCreate: RuntimeMessageCreate | undefined,
   result: Extract<SessionEventWriterAppendResult, { readonly ok: true }>,
 ): { readonly ok: true; readonly eventId: string } | { readonly ok: false; readonly error: SessionEventWriterError } {
   if (
@@ -696,7 +671,7 @@ export function validateFinishIdleResponse(
     validateFinishIdleReceipt({
       sessionThreadId: runtimeThread.identity.sessionThreadId,
       durableTurnId,
-      drafts,
+      ...(completionMailCreate === undefined ? {} : { completionMailCreate }),
     }, result.declaration.receipt);
     const eventId = result.declaration.receipt.idleCloseout?.idleEventId;
     if (eventId === undefined) {
@@ -724,6 +699,21 @@ function finalAssistantText(messages: readonly RuntimeMessage[]): string {
     }
   }
   return "";
+}
+
+function unfinishedToolUseEventIds(messages: readonly RuntimeMessage[]): string[] {
+  const result: string[] = [];
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (
+        part.type === "tool" && part.toolUseEventId !== undefined &&
+        part.state.status !== "completed" && part.state.status !== "error" && part.state.status !== "cancelled"
+      ) {
+        result.push(part.toolUseEventId);
+      }
+    }
+  }
+  return result;
 }
 
 const CompletionMailErrorReasonMaxBytes = 3600;

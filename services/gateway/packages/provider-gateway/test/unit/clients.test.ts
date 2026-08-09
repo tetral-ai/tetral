@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
   ProviderFinishReason,
   ProviderRequestKind,
   ProviderStreamEventType,
   RuntimeMessageRole,
+  RuntimeToolPartState,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { ProviderKeyFailureError } from "../../src/providers/pool.js";
 import { ProviderClientRegistry } from "../../src/providers/clients.js";
@@ -560,55 +561,51 @@ describe("ProviderClientRegistry provider streaming", () => {
     }
   });
 
-  test("provider custom fetch clears the header timeout after response headers arrive", async () => {
+  test("provider custom fetch leaves first-response liveness to the normalized service boundary", async () => {
     const providerSettings: AnthropicProviderSettings[] = [];
-    const registry = new ProviderClientRegistry({
-      providerFetchTimeouts: { headerTimeoutMs: 5, interChunkTimeoutMs: 100 },
-      fetch: Object.assign(async () =>
-        new Response(new ReadableStream<Uint8Array>({
-          async start(controller) {
-            await new Promise((resolve) => setTimeout(resolve, 20));
-            controller.enqueue(new TextEncoder().encode("ok"));
-            controller.close();
-          },
-        })), { preconnect: () => {} }) satisfies FetchFunction,
-      anthropicProviderFactory: (settings) => {
-        providerSettings.push(settings);
-        return () => ({});
-      },
-      streamText: () => streamTextResult([finishPart()]),
-    });
+    jest.useFakeTimers();
+    try {
+      const registry = new ProviderClientRegistry({
+        providerFetchTimeouts: { interChunkTimeoutMs: 100 },
+        fetch: Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init);
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, 10_001);
+            request.signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              reject(request.signal.reason);
+            }, { once: true });
+          });
+          return new Response(new ReadableStream<Uint8Array>({
+            async start(controller) {
+              controller.enqueue(new TextEncoder().encode("ok"));
+              controller.close();
+            },
+          }));
+        }, { preconnect: () => {} }) satisfies FetchFunction,
+        anthropicProviderFactory: (settings) => {
+          providerSettings.push(settings);
+          return () => ({});
+        },
+        streamText: () => streamTextResult([finishPart()]),
+      });
 
-    await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
-    const response = await providerSettings[0]?.fetch?.("https://api.anthropic.com/v1/messages");
+      await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
+      const responsePromise = providerSettings[0]?.fetch?.("https://api.anthropic.com/v1/messages");
+      await Promise.resolve();
+      jest.advanceTimersByTime(10_001);
+      const response = await responsePromise;
 
-    await expect(response?.text()).resolves.toBe("ok");
+      await expect(response?.text()).resolves.toBe("ok");
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
-  test("provider custom fetch classifies header and inter-chunk timeouts", async () => {
-    const providerSettings: AnthropicProviderSettings[] = [];
-    const registry = new ProviderClientRegistry({
-      providerFetchTimeouts: { headerTimeoutMs: 5, interChunkTimeoutMs: 5 },
-      fetch: Object.assign(async (input: Parameters<FetchFunction>[0], init?: Parameters<FetchFunction>[1]) =>
-        await new Promise<Response>((_resolve, reject) => {
-          const request = new Request(input, init);
-          request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
-        }), { preconnect: () => {} }) satisfies FetchFunction,
-      anthropicProviderFactory: (settings) => {
-        providerSettings.push(settings);
-        return () => ({});
-      },
-      streamText: () => streamTextResult([finishPart()]),
-    });
-    await collectEvents(registry.stream({ request: anthropicRequest({ attachments: [] }), credential: sessionAnthropicCredential() }));
-
-    const headerTimeout = await caughtError(providerSettings[0]?.fetch?.("https://api.anthropic.com/v1/messages"));
-
-    expect(headerTimeout).toMatchObject({ timeout: true, kind: "header" });
-
+  test("provider custom fetch classifies inter-chunk timeouts", async () => {
     const bodyProviderSettings: AnthropicProviderSettings[] = [];
     const bodyRegistry = new ProviderClientRegistry({
-      providerFetchTimeouts: { headerTimeoutMs: 100, interChunkTimeoutMs: 5 },
+      providerFetchTimeouts: { interChunkTimeoutMs: 5 },
       fetch: Object.assign(async () =>
         new Response(new ReadableStream<Uint8Array>({
           start(controller) {
@@ -734,6 +731,107 @@ describe("ProviderClientRegistry provider streaming", () => {
       inputLimitTokens: undefined,
       outputTokenLimit: 128_000,
     });
+  });
+
+  test("serializes the GPT patch declaration through the frozen OpenAI Responses adapter", async () => {
+    const grammar = "start: PATCH";
+    const rawPatch = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n";
+    let capturedBody: Record<string, unknown> | undefined;
+    const registry = new ProviderClientRegistry({
+      fetch: Object.assign(async (input: Parameters<FetchFunction>[0], init?: Parameters<FetchFunction>[1]) => {
+        const request = new Request(input, init);
+        capturedBody = JSON.parse(await request.text()) as Record<string, unknown>;
+        const chunks = [
+          { type: "response.created", response: { id: "resp_patch", created_at: 1_786_000_000, model: "gpt-5.5", service_tier: null } },
+          { type: "response.output_item.added", output_index: 0, item: { type: "custom_tool_call", id: "item_patch", call_id: "call_patch", name: "apply_patch", input: "" } },
+          { type: "response.custom_tool_call_input.delta", item_id: "item_patch", output_index: 0, delta: rawPatch },
+          { type: "response.output_item.done", output_index: 0, item: { type: "custom_tool_call", id: "item_patch", call_id: "call_patch", name: "apply_patch", input: rawPatch, status: "completed" } },
+          { type: "response.completed", response: { incomplete_details: null, usage: { input_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens: 4, output_tokens_details: { reasoning_tokens: 0 } }, service_tier: "default" } },
+        ];
+        return new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join(""), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }, { preconnect: () => {} }) satisfies FetchFunction,
+    });
+    const objectSchema = JSON.stringify({ type: "object", properties: {}, additionalProperties: false });
+    const events = await collectEvents(registry.stream({
+      request: openAIRequest({
+        messages: [
+          {
+            id: "msg_patch_user",
+            role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
+            status: "completed",
+            origin: "user",
+            parts: [{ id: "part_patch_user", text: { text: "apply this patch" } }],
+          },
+          {
+            id: "msg_patch_tool",
+            role: RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_ASSISTANT,
+            status: "completed",
+            origin: "agent",
+            parts: [{
+              id: "part_patch_tool",
+              tool: {
+                callId: "call_history_patch",
+                name: "apply_patch",
+                toolUseEventId: "sevt_history_patch",
+                state: RuntimeToolPartState.RUNTIME_TOOL_PART_STATE_COMPLETED,
+                inputJson: JSON.stringify(rawPatch),
+                outputOrErrorJson: JSON.stringify({ status: "success", result: "done" }),
+              },
+            }],
+          },
+        ],
+        tools: [
+          { name: "exec_command", description: "Execute a command", function: { inputSchemaJson: objectSchema } },
+          { name: "write_stdin", description: "Write command input", function: { inputSchemaJson: objectSchema } },
+          { name: "view_image", description: "View an image", function: { inputSchemaJson: objectSchema } },
+          { name: "apply_patch", description: "Apply a patch", freeform: { larkGrammar: grammar } },
+          { name: "web", description: "Use web search", function: { inputSchemaJson: objectSchema } },
+        ],
+      }),
+      credential: sessionOpenAICredential(),
+    }));
+
+    expect(events.map((event) => event.type)).toEqual([
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH,
+    ]);
+    expect(events[1]?.toolInput?.text).toBe(rawPatch);
+    expect(JSON.parse(events[3]?.toolCall?.inputJson ?? "null")).toBe(rawPatch);
+    const tools = capturedBody?.tools as ReadonlyArray<Record<string, unknown>> | undefined;
+    expect(tools).toHaveLength(5);
+    expect(tools?.filter((tool) => ["exec_command", "write_stdin", "view_image"].includes(String(tool.name))))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "function", name: "exec_command" }),
+        expect.objectContaining({ type: "function", name: "write_stdin" }),
+        expect.objectContaining({ type: "function", name: "view_image" }),
+      ]));
+    const patchTool = tools?.find((tool) => tool.name === "apply_patch");
+    expect(patchTool).toEqual({
+      type: "custom",
+      name: "apply_patch",
+      description: "Apply a patch",
+      format: { type: "grammar", syntax: "lark", definition: grammar },
+    });
+    expect(JSON.stringify(patchTool)).not.toContain("parameters");
+    expect(patchTool?.type).not.toBe("apply_patch");
+    const history = capturedBody?.input as ReadonlyArray<Record<string, unknown>> | undefined;
+    expect(history).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "custom_tool_call",
+        call_id: "call_history_patch",
+        name: "apply_patch",
+        input: rawPatch,
+      }),
+      expect.objectContaining({
+        type: "custom_tool_call_output",
+        call_id: "call_history_patch",
+      }),
+    ]));
   });
 
   test("T6 streams OpenAI OAuth through the subscription transport with header swap and system instructions", async () => {
@@ -898,7 +996,7 @@ describe("ProviderClientRegistry provider streaming", () => {
               ...credential,
               accessToken: "oauth-access-rotated",
               refreshToken: "oauth-refresh-rotated",
-              expiresAt: "2999-01-01T00:00:00Z",
+              expiresAt: "2999-01-01T00:00:00.000Z",
             },
           };
         },
@@ -922,7 +1020,7 @@ describe("ProviderClientRegistry provider streaming", () => {
 
     const events = await collectEvents(registry.stream({
       request: openAIRequest(),
-      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00Z" }),
+      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
     }));
     await providerSettings[0]?.fetch?.("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -953,7 +1051,7 @@ describe("ProviderClientRegistry provider streaming", () => {
 
     const events = await collectEvents(registry.stream({
       request: openAIRequest(),
-      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00Z" }),
+      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
     }));
 
     expect(events[0]?.providerError?.error).toMatchObject({
@@ -976,7 +1074,7 @@ describe("ProviderClientRegistry provider streaming", () => {
 
     const events = await collectEvents(registry.stream({
       request: openAIRequest(),
-      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00Z" }),
+      credential: sessionOpenAIOAuthCredential({ expiresAt: "2000-01-01T00:00:00.000Z" }),
     }));
 
     expect(events[0]?.providerError?.error).toMatchObject({
@@ -1452,7 +1550,7 @@ function sessionOpenAIOAuthCredential(overrides: Partial<Extract<ResolvedProvide
     accessMode: "oauth",
     accessToken: "oauth-access",
     refreshToken: "oauth-refresh",
-    expiresAt: "2999-01-01T00:00:00Z",
+    expiresAt: "2999-01-01T00:00:00.000Z",
     accountId: "acct_1",
     ...overrides,
   };

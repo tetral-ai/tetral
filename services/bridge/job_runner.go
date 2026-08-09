@@ -84,6 +84,10 @@ type CompletionMailRepairer interface {
 	RepairCompletionMail(context.Context, string, int) (int, error)
 }
 
+type RuntimePodLossRepairer interface {
+	RepairLostRuntimeBindings(context.Context, string) (int, error)
+}
+
 type JobRunner struct {
 	Queue      QueueClient
 	Workspaces WorkspaceLister
@@ -124,10 +128,11 @@ const (
 )
 
 type RuntimeDeliveryResult struct {
-	Status       RuntimeDeliveryStatus
-	Retryable    bool
-	ErrorKind    string
-	ErrorMessage string
+	Status            RuntimeDeliveryStatus
+	Retryable         bool
+	ErrorKind         string
+	ErrorMessage      string
+	QueueLeaseSettled bool
 }
 
 func (r *JobRunner) RunOnce(ctx context.Context) error {
@@ -189,18 +194,35 @@ func (r *JobRunner) RunOnceWithActivity(ctx context.Context) (bool, error) {
 
 func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cfg JobRunnerConfig) (bool, error) {
 	hadWork := false
-	if repairer, ok := r.Deliverer.(RuntimeInboxRepairer); ok {
-		repaired, err := repairer.RepairRuntimeInbox(ctx, workspaceID, defaultRuntimeInboxRepairBatch)
+	var phaseErrs []error
+	if repairer, ok := r.Deliverer.(RuntimePodLossRepairer); ok {
+		repaired, err := repairer.RepairLostRuntimeBindings(ctx, workspaceID)
 		hadWork = repaired > 0
 		if err != nil {
-			return hadWork, err
+			phaseErrs = append(phaseErrs, fmt.Errorf("runtime pod-loss repair: %w", err))
+		}
+		if ctx.Err() != nil {
+			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
+		}
+	}
+	if repairer, ok := r.Deliverer.(RuntimeInboxRepairer); ok {
+		repaired, err := repairer.RepairRuntimeInbox(ctx, workspaceID, defaultRuntimeInboxRepairBatch)
+		hadWork = hadWork || repaired > 0
+		if err != nil {
+			phaseErrs = append(phaseErrs, fmt.Errorf("runtime inbox repair: %w", err))
+		}
+		if ctx.Err() != nil {
+			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
 		}
 	}
 	if repairer, ok := r.Deliverer.(CompletionMailRepairer); ok {
 		repaired, err := repairer.RepairCompletionMail(ctx, workspaceID, defaultRuntimeInboxRepairBatch)
 		hadWork = hadWork || repaired > 0
 		if err != nil {
-			return hadWork, err
+			phaseErrs = append(phaseErrs, fmt.Errorf("completion-mail repair: %w", err))
+		}
+		if ctx.Err() != nil {
+			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
 		}
 	}
 	lease, err := r.Queue.Lease(ctx, &queuev1.LeaseRequest{
@@ -211,18 +233,21 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 		LeaseDurationMs: cfg.LeaseDuration.Milliseconds(),
 	})
 	if err != nil {
-		return hadWork, err
+		phaseErrs = append(phaseErrs, fmt.Errorf("queue lease: %w", err))
+		return hadWork, errors.Join(phaseErrs...)
 	}
 	hadWork = hadWork || len(lease.GetJobs()) > 0
 	for _, job := range lease.GetJobs() {
 		if job.GetWorkspaceId() != workspaceID {
-			return hadWork, errors.New("bridge queue returned a cross-workspace job")
+			phaseErrs = append(phaseErrs, errors.New("bridge queue returned a cross-workspace job"))
+			break
 		}
 		if err := r.processRuntimeJob(ctx, job, cfg); err != nil {
-			return hadWork, err
+			phaseErrs = append(phaseErrs, err)
+			break
 		}
 	}
-	return hadWork, nil
+	return hadWork, errors.Join(phaseErrs...)
 }
 
 func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.QueueJob, cfg JobRunnerConfig) error {
@@ -273,8 +298,11 @@ func (r *JobRunner) processRuntimeJob(ctx context.Context, queueJob *queuev1.Que
 		}
 	}
 	result, deliverErr := r.Deliverer.DeliverRuntimeJob(workCtx, job)
-	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil {
+	if heartbeatErr := stopHeartbeat(); heartbeatErr != nil && !result.QueueLeaseSettled {
 		return heartbeatErr
+	}
+	if result.QueueLeaseSettled {
+		return deliverErr
 	}
 	if deliverErr != nil {
 		result = RuntimeDeliveryResult{

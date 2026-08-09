@@ -11,7 +11,7 @@
  *
  * Each `info` or `error` call emits one JSON object followed by a newline. The
  * logger-supplied `level` and the configured or defaulted `service.name`,
- * `service.version`, and `deployment.environment` fields overwrite fields with
+ * UTC `time`, `service.version`, and `deployment.environment` fields overwrite fields with
  * the same names in the caller's record. Missing optional resource options use
  * `"unknown"`; record fields whose value is `undefined` are omitted.
  *
@@ -45,6 +45,8 @@ type TetralLogRecordFields = {
   readonly "workspace.id"?: string;
   readonly "session.id"?: string;
   readonly "thread.id"?: string;
+  readonly "operation.id"?: string;
+  readonly time?: string;
   readonly "job.id"?: string;
   readonly "queue.kind"?: string;
   readonly "binding.id"?: string;
@@ -117,6 +119,8 @@ export interface TetralJsonLoggerOptions {
   readonly serviceName: string;
   readonly deploymentEnvironment?: string | undefined;
   readonly serviceVersion?: string | undefined;
+  /** Supplies a deterministic instant in tests; production defaults to the wall clock. */
+  readonly clock?: (() => Date) | undefined;
 }
 
 /**
@@ -133,7 +137,8 @@ export function createTetralJsonLogger<TRecord extends TetralLogRecord = TetralL
     "service.version": options.serviceVersion ?? "unknown",
   };
   const emit = (level: "info" | "error", record: TRecord): void => {
-    options.write(`${JSON.stringify({ ...redactLogRecord(record), level, ...base })}\n`);
+    const time = (options.clock?.() ?? new Date()).toISOString();
+    options.write(`${JSON.stringify({ ...redactLogRecord(record), time, level, ...base })}\n`);
   };
   return {
     info: (record) => emit("info", record),

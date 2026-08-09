@@ -1624,7 +1624,7 @@ func TestCreateCredentialAcceptsProviderAuthVariants(t *testing.T) {
 	if oauthRec.Code != http.StatusOK {
 		t.Fatalf("create provider_oauth status = %d body=%s", oauthRec.Code, oauthRec.Body.String())
 	}
-	assertProviderCredentialHTTPBody(t, oauthRec.Body.String(), "provider_oauth", "openai", "oauth", "2026-05-04T05:00:00Z", "acct_http_old", oauthAccess, oauthRefresh)
+	assertProviderCredentialHTTPBody(t, oauthRec.Body.String(), "provider_oauth", "openai", "oauth", "2026-05-04T05:00:00.000Z", "acct_http_old", oauthAccess, oauthRefresh)
 	var oauthObj struct {
 		ID string `json:"id"`
 	}
@@ -1640,12 +1640,12 @@ func TestCreateCredentialAcceptsProviderAuthVariants(t *testing.T) {
 	if oauthUpdateRec.Code != http.StatusOK {
 		t.Fatalf("update provider_oauth status = %d body=%s", oauthUpdateRec.Code, oauthUpdateRec.Body.String())
 	}
-	assertProviderCredentialHTTPBody(t, oauthUpdateRec.Body.String(), "provider_oauth", "openai", "oauth", "2026-05-04T06:00:00Z", "acct_http_new", oauthAccessRotated, oauthRefreshRotated)
+	assertProviderCredentialHTTPBody(t, oauthUpdateRec.Body.String(), "provider_oauth", "openai", "oauth", "2026-05-04T06:00:00.000Z", "acct_http_new", oauthAccessRotated, oauthRefreshRotated)
 	oauthGetRec := vaultRequest(t, router, http.MethodGet, "/v1/vaults/"+vaultID+"/credentials/"+oauthObj.ID, "", "")
 	if oauthGetRec.Code != http.StatusOK {
 		t.Fatalf("get provider_oauth status = %d body=%s", oauthGetRec.Code, oauthGetRec.Body.String())
 	}
-	assertProviderCredentialHTTPBody(t, oauthGetRec.Body.String(), "provider_oauth", "openai", "oauth", "2026-05-04T06:00:00Z", "acct_http_new", oauthAccess, oauthRefresh, oauthAccessRotated, oauthRefreshRotated)
+	assertProviderCredentialHTTPBody(t, oauthGetRec.Body.String(), "provider_oauth", "openai", "oauth", "2026-05-04T06:00:00.000Z", "acct_http_new", oauthAccess, oauthRefresh, oauthAccessRotated, oauthRefreshRotated)
 
 	listRec := vaultRequest(t, router, http.MethodGet, "/v1/vaults/"+vaultID+"/credentials", "", "")
 	if listRec.Code != http.StatusOK {

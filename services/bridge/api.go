@@ -22,6 +22,8 @@ type BridgeAPIStore interface {
 	ResolveChildThread(context.Context, *bridgev1.ResolveChildThreadRequest) (*bridgev1.ResolveChildThreadResponse, error)
 	ListChildThreads(context.Context, *bridgev1.ListChildThreadsRequest) (*bridgev1.ListChildThreadsResponse, error)
 	ResolveInterAgentDelivery(context.Context, *bridgev1.ResolveInterAgentDeliveryRequest) (*bridgev1.ResolveInterAgentDeliveryResponse, error)
+	AdmitChildInterrupt(context.Context, *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error)
+	AwaitChildInterrupt(context.Context, *bridgev1.AwaitChildInterruptRequest) (*bridgev1.AwaitChildInterruptResponse, error)
 	MarkChildThreadClosed(context.Context, *bridgev1.MarkChildThreadClosedRequest) (*bridgev1.MarkChildThreadClosedResponse, error)
 	MarkChildThreadActive(context.Context, *bridgev1.MarkChildThreadActiveRequest) (*bridgev1.MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *bridgev1.AcceptSandboxExecutionRequest) (*bridgev1.AcceptSandboxExecutionResponse, error)
@@ -182,6 +184,22 @@ func (s BridgeAPIServer) ResolveInterAgentDelivery(ctx context.Context, request 
 		return nil, err
 	}
 	return store.ResolveInterAgentDelivery(ctx, request)
+}
+
+func (s BridgeAPIServer) AdmitChildInterrupt(ctx context.Context, request *bridgev1.AdmitChildInterruptRequest) (*bridgev1.AdmitChildInterruptResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AdmitChildInterrupt(ctx, request)
+}
+
+func (s BridgeAPIServer) AwaitChildInterrupt(ctx context.Context, request *bridgev1.AwaitChildInterruptRequest) (*bridgev1.AwaitChildInterruptResponse, error) {
+	store, err := s.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.AwaitChildInterrupt(ctx, request)
 }
 
 func (s BridgeAPIServer) MarkChildThreadClosed(ctx context.Context, request *bridgev1.MarkChildThreadClosedRequest) (*bridgev1.MarkChildThreadClosedResponse, error) {

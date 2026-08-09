@@ -14,6 +14,7 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
 	"github.com/tetral-ai/tetral/internal/workspace"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 )
@@ -233,6 +234,295 @@ func TestPostgreSQLSandboxQueueOverLimitFinalizerRollsBackWhenQueueObservationCh
 	}
 	if executionState != "pending" || queueStatus != queue.StatusPending {
 		t.Fatalf("execution/Queue state = %s/%s; want pending/pending after rollback", executionState, queueStatus)
+	}
+}
+
+func TestPostgreSQLSandboxQueueOverLimitFinalizerAtomicallyClosesOwnedLifecycleWork(t *testing.T) {
+	for _, kind := range []string{
+		queue.KindSandboxActivate,
+		queue.KindSandboxMaterialize,
+		queue.KindSandboxRelease,
+		queue.KindSandboxToolCancel,
+	} {
+		for _, changed := range []bool{false, true} {
+			name := kind + "/matching"
+			if changed {
+				name = kind + "/changed"
+			}
+			t.Run(name, func(t *testing.T) {
+				runtimeDB, adminDB := newSandboxServiceTestDB(t)
+				seedSandboxExecutionStoreFixture(t, adminDB)
+				client := dbconnect.NewClientForTesting(runtimeDB)
+				queueStore := queue.NewPostgreSQLStore(client)
+				now := time.Now().UTC()
+				candidate, readBusinessState := seedOverLimitLifecycleWork(t, runtimeDB, adminDB, client, queueStore, kind, now)
+				if changed {
+					if _, err := adminDB.Exec(`UPDATE queue_jobs SET attempt_count=attempt_count+1
+						WHERE workspace_id=$1 AND id=$2`, candidate.WorkspaceID, candidate.JobID); err != nil {
+						t.Fatalf("change over-limit candidate: %v", err)
+					}
+				}
+
+				updated, err := NewPostgreSQLSandboxQueueOverLimitFinalizer(client).FinalizePendingAtOrOverBudget(context.Background(), candidate, now.Add(time.Second))
+				if err != nil || updated == changed {
+					t.Fatalf("FinalizePendingAtOrOverBudget = (%t,%v); want updated=%t", updated, err, !changed)
+				}
+				businessState := readBusinessState()
+				var queueState string
+				if err := adminDB.QueryRow(`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`, candidate.WorkspaceID, candidate.JobID).Scan(&queueState); err != nil {
+					t.Fatalf("read Queue state: %v", err)
+				}
+				if changed {
+					if businessState != "pending" && businessState != "running" {
+						t.Fatalf("changed candidate business state = %q; want original pending/running", businessState)
+					}
+					if queueState != queue.StatusPending {
+						t.Fatalf("changed candidate Queue state = %q; want pending", queueState)
+					}
+					return
+				}
+				if businessState != "failed" && businessState != "terminal_unconsumed" {
+					t.Fatalf("matching candidate business state = %q; want failed/terminal_unconsumed", businessState)
+				}
+				if queueState != queue.StatusDeadLettered {
+					t.Fatalf("matching candidate Queue state = %q; want dead_lettered", queueState)
+				}
+			})
+		}
+	}
+}
+
+func TestPostgreSQLSandboxQueueOverLimitFinalizerPreservesConsumedToolResult(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		name := "matching"
+		if changed {
+			name = "changed"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtimeDB, adminDB := newSandboxServiceTestDB(t)
+			seedSandboxExecutionStoreFixture(t, adminDB)
+			now := time.Now().UTC()
+			seedReadySandboxBinding(t, adminDB, now)
+			encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, sandboxdriver.ForegroundCommandObservation{
+				Reference: sandboxdriver.CommandReference{
+					Target: sandboxdriver.ToolTarget{ProviderSandboxID: "provider_execution_store"},
+					Task:   sandboxdriver.BackgroundTask{TaskID: "task_limit", ProviderSessionID: "provider_execution_store", ProviderCommandID: "command_limit"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("encode cancellation reference: %v", err)
+			}
+			if _, err := adminDB.Exec(`INSERT INTO session_events (
+				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+			) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store',
+				'evt_limit_consumed_result',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+				t.Fatalf("seed consumed Tool Result: %v", err)
+			}
+			if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+				SET execution_state='consumed', result_digest='conversation_digest',
+				    consumed_by_terminal_event_id='evt_limit_consumed_result', consumption_reason='conversation_tool_result',
+				    cancel_state='pending', cancel_requested_at=$2, provider_command_reference_json=$1
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`, encodedReference, now); err != nil {
+				t.Fatalf("seed consumed cancellation: %v", err)
+			}
+			client := dbconnect.NewClientForTesting(runtimeDB)
+			queueStore := queue.NewPostgreSQLStore(client)
+			jobID := "qjob_cc_limit"
+			if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+				ID: jobID, WorkspaceID: workspace.ID("ws_execution_store"), Kind: queue.KindSandboxToolCancel,
+				PartitionKey:   queue.FormatSandboxCancelPartitionKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+				DedupeKey:      queue.FormatSandboxToolCancelDedupeKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+				PayloadVersion: 1,
+				PayloadJSON:    []byte(`{"workspace_id":"ws_execution_store","session_id":"sesn_execution_store","session_thread_id":"thr_execution_store","tool_use_event_id":"evt_execution_a"}`),
+				MaxAttempts:    1, Now: now,
+			}); err != nil {
+				t.Fatalf("enqueue consumed cancellation: %v", err)
+			}
+			if _, err := adminDB.Exec(`UPDATE queue_jobs SET attempt_count=max_attempts
+				WHERE workspace_id='ws_execution_store' AND id=$1`, jobID); err != nil {
+				t.Fatalf("move cancellation to limit: %v", err)
+			}
+			candidates, err := queueStore.ListPendingAtOrOverBudget(context.Background(), queue.ListPendingAtOrOverBudgetRequest{Limit: 100})
+			if err != nil {
+				t.Fatalf("list over-limit cancellation: %v", err)
+			}
+			var candidate queue.PendingAtOrOverBudgetJob
+			for _, item := range candidates {
+				if item.JobID == jobID {
+					candidate = item
+				}
+			}
+			if candidate.JobID == "" {
+				t.Fatal("consumed cancellation candidate not found")
+			}
+			if changed {
+				if _, err := adminDB.Exec(`UPDATE queue_jobs SET attempt_count=attempt_count+1
+					WHERE workspace_id='ws_execution_store' AND id=$1`, jobID); err != nil {
+					t.Fatalf("change cancellation observation: %v", err)
+				}
+			}
+			updated, err := NewPostgreSQLSandboxQueueOverLimitFinalizer(client).FinalizePendingAtOrOverBudget(context.Background(), candidate, now.Add(time.Second))
+			if err != nil || updated == changed {
+				t.Fatalf("FinalizePendingAtOrOverBudget = %t,%v; want updated=%t", updated, err, !changed)
+			}
+			var state, digest, terminalEvent, queueState string
+			var cancelState, providerReference sql.NullString
+			if err := adminDB.QueryRow(`SELECT execution_state, result_digest, consumed_by_terminal_event_id,
+				cancel_state, provider_command_reference_json FROM session_runtime_tool_results
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(
+				&state, &digest, &terminalEvent, &cancelState, &providerReference,
+			); err != nil {
+				t.Fatalf("read consumed cancellation: %v", err)
+			}
+			if err := adminDB.QueryRow(`SELECT status FROM queue_jobs
+				WHERE workspace_id='ws_execution_store' AND id=$1`, jobID).Scan(&queueState); err != nil {
+				t.Fatalf("read cancellation Queue state: %v", err)
+			}
+			var resultEvents int
+			if err := adminDB.QueryRow(`SELECT count(*) FROM session_events
+				WHERE workspace_id='ws_execution_store' AND type='agent.tool_result'`).Scan(&resultEvents); err != nil {
+				t.Fatalf("count Tool Results: %v", err)
+			}
+			if state != "consumed" || digest != "conversation_digest" || terminalEvent != "evt_limit_consumed_result" || resultEvents != 1 {
+				t.Fatalf("consumed receipt changed = %q/%q/%q events=%d", state, digest, terminalEvent, resultEvents)
+			}
+			if changed {
+				if !cancelState.Valid || !providerReference.Valid || queueState != queue.StatusPending {
+					t.Fatalf("changed observation advanced cancellation = %v/%v/%q", cancelState, providerReference, queueState)
+				}
+			} else if cancelState.Valid || providerReference.Valid || queueState != queue.StatusDeadLettered {
+				t.Fatalf("matching observation failed to close cancellation = %v/%v/%q", cancelState, providerReference, queueState)
+			}
+		})
+	}
+}
+
+func seedOverLimitLifecycleWork(
+	t *testing.T,
+	runtimeDB *sql.DB,
+	adminDB *sql.DB,
+	client *dbconnect.Client,
+	queueStore *queue.PostgreSQLQueueStore,
+	kind string,
+	now time.Time,
+) (queue.PendingAtOrOverBudgetJob, func() string) {
+	t.Helper()
+	setupCtx := sandboxTestQueueContext(t, runtimeDB)
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+	var jobID string
+	var readBusinessState func() string
+
+	switch kind {
+	case queue.KindSandboxActivate:
+		work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForActivation(setupCtx, work, ExecutionNeedsCreation); err != nil {
+			t.Fatalf("seed activation: %v", err)
+		}
+		var operationID string
+		if err := adminDB.QueryRow(`SELECT operation_id, queue_job_id FROM sandbox_lifecycle_operations
+			WHERE workspace_id='ws_execution_store' AND kind='create'`).Scan(&operationID, &jobID); err != nil {
+			t.Fatalf("read activation identity: %v", err)
+		}
+		readBusinessState = lifecycleOperationStateReader(t, adminDB, operationID)
+	case queue.KindSandboxMaterialize:
+		seedReadySandboxBinding(t, adminDB, now)
+		if _, err := adminDB.Exec(`UPDATE sessions SET sandbox_resource_revision=2
+			WHERE workspace_id='ws_execution_store' AND id='sesn_execution_store'`); err != nil {
+			t.Fatalf("advance desired resource revision: %v", err)
+		}
+		work := loadBoundSandboxExecutionWork(t, coordinator, "evt_execution_a")
+		if err := coordinator.WaitForMaterialization(setupCtx, work); err != nil {
+			t.Fatalf("seed materialization: %v", err)
+		}
+		var operationID string
+		if err := adminDB.QueryRow(`SELECT operation_id, queue_job_id FROM sandbox_lifecycle_operations
+			WHERE workspace_id='ws_execution_store' AND kind='materialize'`).Scan(&operationID, &jobID); err != nil {
+			t.Fatalf("read materialization identity: %v", err)
+		}
+		readBusinessState = lifecycleOperationStateReader(t, adminDB, operationID)
+	case queue.KindSandboxRelease:
+		seedReadySandboxBinding(t, adminDB, now)
+		var operationID string
+		if err := client.WithWorkspaceTx(context.Background(), "ws_execution_store", "sandbox.test.release_over_limit", func(tx *dbconnect.Tx) error {
+			var err error
+			operationID, _, err = EnsureSandboxReleaseTx(context.Background(), tx, "ws_execution_store", "sesn_execution_store", SandboxReleaseSessionDelete, "provider_execution_store", now)
+			return err
+		}); err != nil {
+			t.Fatalf("seed release: %v", err)
+		}
+		if err := adminDB.QueryRow(`SELECT queue_job_id FROM sandbox_lifecycle_operations
+			WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&jobID); err != nil {
+			t.Fatalf("read release Queue identity: %v", err)
+		}
+		readBusinessState = lifecycleOperationStateReader(t, adminDB, operationID)
+	case queue.KindSandboxToolCancel:
+		seedReadySandboxBinding(t, adminDB, now)
+		encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, sandboxdriver.ForegroundCommandObservation{
+			Reference: sandboxdriver.CommandReference{
+				Target: sandboxdriver.ToolTarget{ProviderSandboxID: "provider_execution_store"},
+				Task:   sandboxdriver.BackgroundTask{TaskID: "task_over_limit", ProviderSessionID: "provider_execution_store", ProviderCommandID: "command_over_limit"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("encode cancellation reference: %v", err)
+		}
+		if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+			SET execution_state='running', cancel_state='pending', cancel_requested_at=$2,
+			    provider_command_reference_json=$1
+			WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`, encodedReference, now); err != nil {
+			t.Fatalf("seed cancellation work: %v", err)
+		}
+		jobID = "qjob_cancel_limit"
+		if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+			ID: jobID, WorkspaceID: workspace.ID("ws_execution_store"), Kind: queue.KindSandboxToolCancel,
+			PartitionKey:   queue.FormatSandboxCancelPartitionKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+			DedupeKey:      queue.FormatSandboxToolCancelDedupeKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+			PayloadVersion: 1,
+			PayloadJSON:    []byte(`{"workspace_id":"ws_execution_store","session_id":"sesn_execution_store","session_thread_id":"thr_execution_store","tool_use_event_id":"evt_execution_a"}`),
+			MaxAttempts:    1,
+		}); err != nil {
+			t.Fatalf("enqueue cancellation: %v", err)
+		}
+		readBusinessState = func() string {
+			var state string
+			if err := adminDB.QueryRow(`SELECT execution_state FROM session_runtime_tool_results
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(&state); err != nil {
+				t.Fatalf("read cancellation state: %v", err)
+			}
+			return state
+		}
+	default:
+		t.Fatalf("unsupported over-limit kind %q", kind)
+	}
+
+	if _, err := adminDB.Exec(`UPDATE queue_jobs
+		SET status='pending', attempt_count=max_attempts, leased_by=NULL, lease_token=NULL,
+		    leased_at=NULL, leased_until=NULL, updated_at=clock_timestamp()
+		WHERE workspace_id='ws_execution_store' AND id=$1`, jobID); err != nil {
+		t.Fatalf("move Queue work to over-limit pending: %v", err)
+	}
+	candidates, err := queueStore.ListPendingAtOrOverBudget(context.Background(), queue.ListPendingAtOrOverBudgetRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListPendingAtOrOverBudget: %v", err)
+	}
+	for _, candidate := range candidates {
+		if candidate.JobID == jobID {
+			return candidate, readBusinessState
+		}
+	}
+	t.Fatalf("candidate %s not found", jobID)
+	return queue.PendingAtOrOverBudgetJob{}, nil
+}
+
+func lifecycleOperationStateReader(t *testing.T, db *sql.DB, operationID string) func() string {
+	t.Helper()
+	return func() string {
+		var state string
+		if err := db.QueryRow(`SELECT state FROM sandbox_lifecycle_operations
+			WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&state); err != nil {
+			t.Fatalf("read lifecycle state: %v", err)
+		}
+		return state
 	}
 }
 

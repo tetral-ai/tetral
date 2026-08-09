@@ -43,8 +43,8 @@ func TestEnvironmentBuildRunnerMarksReadyEnqueuesFanoutAndAcks(t *testing.T) {
 	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_env_build"}) {
 		t.Fatalf("transitions = %v; want ack", queueClient.transitions)
 	}
-	if !reflect.DeepEqual(store.calls, []string{"claim", "ready:snapshot_ref"}) {
-		t.Fatalf("store calls = %v; want claim then ready", store.calls)
+	if !reflect.DeepEqual(store.calls, []string{"claim", "authorize-create", "ready:snapshot_ref"}) {
+		t.Fatalf("store calls = %v; want claim, provider-create authorization, then ready", store.calls)
 	}
 	if len(builder.requests) != 1 || builder.requests[0].ArtifactInputHash != "hash_packages" {
 		t.Fatalf("builder requests = %+v; want durable artifact input", builder.requests)
@@ -71,7 +71,7 @@ func TestEnvironmentBuildRunnerFinalizesBeforeCancellingWorkContext(t *testing.T
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if !reflect.DeepEqual(store.calls, []string{"claim", "ready:snapshot_ref"}) {
+	if !reflect.DeepEqual(store.calls, []string{"claim", "authorize-create", "ready:snapshot_ref"}) {
 		t.Fatalf("store calls = %v; want live-context finalization", store.calls)
 	}
 	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_env_build"}) {
@@ -212,6 +212,36 @@ func TestEnvironmentBuildRunnerRetriesRetryableFailureAndFinalizesBeforeExhausti
 	}
 }
 
+func TestEnvironmentBuildRunnerPreservesAuthorizationStoreFailureAsControlError(t *testing.T) {
+	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{environmentBuildQueueJob()}}
+	storeErr := errors.New("authorization store unavailable")
+	store := &recordingEnvironmentBuildStore{
+		input: EnvironmentArtifactBuildInput{
+			WorkspaceID: workspace.ID("ws_env"), EnvironmentID: "env_build", Generation: 7,
+			Provider: sandboxdriver.DaytonaProviderName,
+		},
+		claimed: true, authorizeErr: storeErr,
+	}
+	runner := &EnvironmentBuildJobRunner{
+		Queue: queueClient, Store: store,
+		Providers: artifactProviderRegistry(t, &DaytonaAdapter{Artifacts: authorizationArtifactBuilder{}}),
+		Config: EnvironmentRunnerConfig{
+			WorkspaceID: "ws_env", LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second,
+		},
+		Clock: fixedEnvironmentRunnerClock,
+	}
+
+	if err := runner.RunOnce(context.Background()); !errors.Is(err, storeErr) {
+		t.Fatalf("RunOnce error = %v; want authorization store failure", err)
+	}
+	if !reflect.DeepEqual(store.calls, []string{"claim", "authorize-create"}) {
+		t.Fatalf("store calls = %v; want no artifact terminalization after control error", store.calls)
+	}
+	if len(queueClient.transitions) != 0 {
+		t.Fatalf("Queue transitions = %v; want none after control error", queueClient.transitions)
+	}
+}
+
 func TestEnvironmentBuildRunnerLeaseLossCancelsBuildWithoutDurableOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -247,8 +277,8 @@ func TestEnvironmentBuildRunnerLeaseLossCancelsBuildWithoutDurableOutcome(t *tes
 			if err := runner.RunOnce(context.Background()); !errors.Is(err, errQueueLeaseLost) {
 				t.Fatalf("RunOnce err = %v; want queue lease lost", err)
 			}
-			if !reflect.DeepEqual(store.calls, []string{"claim"}) {
-				t.Fatalf("store calls after lease loss = %v; want claim only", store.calls)
+			if !reflect.DeepEqual(store.calls, []string{"claim", "authorize-create"}) {
+				t.Fatalf("store calls after lease loss = %v; want only pre-loss claim and provider-create authorization", store.calls)
 			}
 			if len(queueClient.transitions) != 0 {
 				t.Fatalf("transitions after lease loss = %v; want none", queueClient.transitions)
@@ -511,12 +541,13 @@ type recordingEnvironmentBuildStore struct {
 	input                  EnvironmentArtifactBuildInput
 	claimed                bool
 	rejectCancelledContext bool
+	authorizeErr           error
 	calls                  []string
 }
 
 func (s *recordingEnvironmentBuildStore) AuthorizeEnvironmentArtifactCreate(context.Context, EnvironmentBuildJob, time.Time) (bool, error) {
 	s.calls = append(s.calls, "authorize-create")
-	return true, nil
+	return s.authorizeErr == nil, s.authorizeErr
 }
 
 func (s *recordingEnvironmentBuildStore) ClaimEnvironmentBuild(context.Context, EnvironmentBuildJob, time.Time) (EnvironmentArtifactBuildInput, bool, error) {
@@ -554,6 +585,18 @@ type recordingArtifactBuilder struct {
 	cancelled chan struct{}
 }
 
+type authorizationArtifactBuilder struct{}
+
+func (authorizationArtifactBuilder) BuildArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) (sandbox.BuildArtifactResult, error) {
+	if request.AuthorizeProviderCreate == nil {
+		return sandbox.BuildArtifactResult{}, errors.New("authorization callback is required")
+	}
+	if _, err := request.AuthorizeProviderCreate(ctx); err != nil {
+		return sandbox.BuildArtifactResult{}, err
+	}
+	return sandbox.BuildArtifactResult{ProviderArtifactRef: "snapshot_authorized"}, nil
+}
+
 func (b *recordingArtifactBuilder) BuildArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) (sandbox.BuildArtifactResult, error) {
 	b.requests = append(b.requests, request)
 	if b.block != nil {
@@ -569,16 +612,29 @@ func (b *recordingArtifactBuilder) BuildArtifact(ctx context.Context, request sa
 	return b.result, b.err
 }
 
-func (b *recordingArtifactBuilder) BuildEnvironmentArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) ProviderOutcome[sandbox.BuildArtifactResult] {
+func (b *recordingArtifactBuilder) BuildEnvironmentArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) (ProviderOutcome[sandbox.BuildArtifactResult], error) {
+	if request.AuthorizeProviderCreate != nil {
+		authorized, err := request.AuthorizeProviderCreate(ctx)
+		if err != nil {
+			return ProviderOutcome[sandbox.BuildArtifactResult]{}, err
+		}
+		if !authorized {
+			return ProviderOutcome[sandbox.BuildArtifactResult]{
+				EffectBoundary: ProviderProvedNotStarted,
+				Disposition:    ProviderRetryable,
+				ErrorKind:      "environment_build_lost_authority",
+			}, nil
+		}
+	}
 	result, err := b.BuildArtifact(ctx, request)
 	if err == nil {
-		return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}
+		return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}, nil
 	}
 	boundary := ProviderSubmitted
 	if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
 		boundary = ProviderProvedNotStarted
 	}
-	return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary)
+	return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary), nil
 }
 
 type recordingEnvironmentFanoutStore struct {

@@ -2,6 +2,7 @@ package tetralsandbox
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"testing"
@@ -118,9 +119,11 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 		name       string
 		resultJSON string
 		finalize   bool
+		submit     bool
 	}{
 		{name: "success", resultJSON: `{"status":"cancelled"}`},
 		{name: "unknown outcome"},
+		{name: "provider submission", resultJSON: `{"status":"cancelled"}`, submit: true},
 		{name: "attempt exhaustion", finalize: true},
 	}
 	for _, test := range tests {
@@ -181,7 +184,11 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 				if claimErr != nil || !current {
 					t.Fatalf("successor ClaimToolCancellation = current %t, %v", current, claimErr)
 				}
-				err = coordinator.SettleToolCancellation(firstCtx, firstWork, test.resultJSON, "cancelled", "sandbox execution was cancelled", now)
+				if test.submit {
+					_, err = coordinator.MarkToolCancellationSubmitted(firstCtx, firstWork, now)
+				} else {
+					err = coordinator.SettleToolCancellation(firstCtx, firstWork, test.resultJSON, "cancelled", "sandbox execution was cancelled", now)
+				}
 				firstWork = secondWork
 			} else {
 				err = coordinator.FinalizeToolCancellation(firstCtx, firstJob, now)
@@ -198,6 +205,12 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 				t.Fatalf("execution after stale cancellation = %q; want running", state)
 			}
 			if !test.finalize {
+				if test.submit {
+					submitted, submitErr := coordinator.MarkToolCancellationSubmitted(secondCtx, firstWork, now)
+					if submitErr != nil || !submitted {
+						t.Fatalf("successor cancellation submission = %t, %v", submitted, submitErr)
+					}
+				}
 				err = coordinator.SettleToolCancellation(secondCtx, firstWork, test.resultJSON, "cancelled", "sandbox execution was cancelled", now)
 			} else {
 				err = coordinator.FinalizeToolCancellation(secondCtx, secondJob, now)
@@ -211,6 +224,126 @@ func TestPostgreSQLSandboxToolCancellationRejectsSupersededResults(t *testing.T)
 			}
 			if state != "terminal_unconsumed" {
 				t.Fatalf("successor cancellation state = %q; want terminal_unconsumed", state)
+			}
+		})
+	}
+}
+
+func TestPostgreSQLConsumedCancellationRejectsEverySupersededWriter(t *testing.T) {
+	for _, phase := range []string{"claim", "submit", "settle", "finalize"} {
+		t.Run(phase, func(t *testing.T) {
+			runtimeDB, adminDB := newSandboxServiceTestDB(t)
+			seedSandboxExecutionStoreFixture(t, adminDB)
+			now := time.Now().UTC()
+			seedReadySandboxBinding(t, adminDB, now)
+			encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, sandboxdriver.ForegroundCommandObservation{
+				Reference: sandboxdriver.CommandReference{
+					Target: sandboxdriver.ToolTarget{ProviderSandboxID: "provider_execution_store"},
+					Task: sandboxdriver.BackgroundTask{
+						TaskID: "task_consumed", ProviderSessionID: "provider_execution_store", ProviderCommandID: "command_consumed",
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("encode command reference: %v", err)
+			}
+			if _, err := adminDB.Exec(`INSERT INTO session_events (
+				workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+			) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store',
+				'evt_consumed_cancel_result',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+				t.Fatalf("seed consumed Tool Result: %v", err)
+			}
+			if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+				SET execution_state='consumed', result_digest='conversation_digest',
+				    consumed_by_terminal_event_id='evt_consumed_cancel_result', consumption_reason='conversation_tool_result',
+				    cancel_state='pending', cancel_requested_at=$2, provider_command_reference_json=$1
+				WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`, encodedReference, now); err != nil {
+				t.Fatalf("seed consumed cancellation: %v", err)
+			}
+			client := dbconnect.NewClientForTesting(runtimeDB)
+			coordinator := NewPostgreSQLSandboxExecutionCoordinator(client, 30*time.Minute)
+			var staleWork SandboxToolCancellationWork
+			firstCtx, secondCtx, firstTransport, secondTransport := supersedeSandboxQueueLeaseAfter(t, runtimeDB, adminDB, queue.EnqueueRequest{
+				ID: "qjob_cc_" + phase, WorkspaceID: workspace.ID("ws_execution_store"), Kind: queue.KindSandboxToolCancel,
+				PartitionKey:   queue.FormatSandboxCancelPartitionKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+				DedupeKey:      queue.FormatSandboxToolCancelDedupeKey("ws_execution_store", "sesn_execution_store", "thr_execution_store", "evt_execution_a"),
+				PayloadVersion: 1,
+				PayloadJSON:    []byte(`{"workspace_id":"ws_execution_store","session_id":"sesn_execution_store","session_thread_id":"thr_execution_store","tool_use_event_id":"evt_execution_a"}`),
+				MaxAttempts:    5,
+			}, func(ctx context.Context, transport *queuev1.QueueJob) {
+				if phase == "claim" || phase == "finalize" {
+					return
+				}
+				job, decodeErr := DecodeSandboxToolCancelJob(transport)
+				if decodeErr != nil {
+					t.Fatalf("decode stale cancellation: %v", decodeErr)
+				}
+				var current bool
+				staleWork, current, err = coordinator.ClaimToolCancellation(ctx, job, now)
+				if err != nil || !current {
+					t.Fatalf("stale predecessor claim = %t, %v", current, err)
+				}
+				if phase == "settle" {
+					if submitted, submitErr := coordinator.MarkToolCancellationSubmitted(ctx, staleWork, now); submitErr != nil || !submitted {
+						t.Fatalf("predecessor submit = %t, %v", submitted, submitErr)
+					}
+				}
+			})
+			firstJob, err := DecodeSandboxToolCancelJob(firstTransport)
+			if err != nil {
+				t.Fatalf("decode predecessor: %v", err)
+			}
+			secondJob, err := DecodeSandboxToolCancelJob(secondTransport)
+			if err != nil {
+				t.Fatalf("decode successor: %v", err)
+			}
+			switch phase {
+			case "claim":
+				_, _, err = coordinator.ClaimToolCancellation(firstCtx, firstJob, now)
+			case "submit":
+				_, err = coordinator.MarkToolCancellationSubmitted(firstCtx, staleWork, now)
+			case "settle":
+				err = coordinator.SettleToolCancellation(firstCtx, staleWork, `{"status":"cancelled"}`, "cancelled", "sandbox execution was cancelled", now)
+			case "finalize":
+				err = coordinator.FinalizeToolCancellation(firstCtx, firstJob, now)
+			}
+			if !errors.Is(err, errQueueLeaseLost) {
+				t.Fatalf("stale %s error = %v; want Queue authority loss", phase, err)
+			}
+			if phase == "finalize" {
+				err = coordinator.FinalizeToolCancellation(secondCtx, secondJob, now)
+			} else {
+				work, current, claimErr := coordinator.ClaimToolCancellation(secondCtx, secondJob, now)
+				if claimErr != nil || (phase != "settle" && !current) || (phase == "settle" && current) {
+					t.Fatalf("successor claim = %t, %v; settle takeover closes submitted consumed work", current, claimErr)
+				}
+				if phase == "settle" {
+					err = nil
+				} else {
+					if submitted, submitErr := coordinator.MarkToolCancellationSubmitted(secondCtx, work, now); submitErr != nil || !submitted {
+						t.Fatalf("successor submit = %t, %v", submitted, submitErr)
+					}
+					err = coordinator.SettleToolCancellation(secondCtx, work, `{"status":"cancelled"}`, "cancelled", "sandbox execution was cancelled", now)
+				}
+			}
+			if err != nil {
+				t.Fatalf("successor %s: %v", phase, err)
+			}
+			var state, digest, terminalEvent string
+			var cancelState sql.NullString
+			if err := adminDB.QueryRow(`SELECT execution_state, result_digest, consumed_by_terminal_event_id, cancel_state
+				FROM session_runtime_tool_results WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(
+				&state, &digest, &terminalEvent, &cancelState,
+			); err != nil {
+				t.Fatalf("read consumed cancellation: %v", err)
+			}
+			var resultEvents int
+			if err := adminDB.QueryRow(`SELECT count(*) FROM session_events
+				WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND type='agent.tool_result'`).Scan(&resultEvents); err != nil {
+				t.Fatalf("count Tool Results: %v", err)
+			}
+			if state != "consumed" || digest != "conversation_digest" || terminalEvent != "evt_consumed_cancel_result" || cancelState.Valid || resultEvents != 1 {
+				t.Fatalf("consumed receipt after %s = %q/%q/%q/%v events=%d", phase, state, digest, terminalEvent, cancelState, resultEvents)
 			}
 		})
 	}
@@ -276,6 +409,59 @@ func TestPostgreSQLToolCancellationLocksLifecycleBeforeExecution(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("SettleToolCancellation did not complete after lifecycle lock release")
+	}
+}
+
+func TestPostgreSQLToolCancellationClosesProviderCustodyAfterConversationConsumption(t *testing.T) {
+	runtimeDB, adminDB := newSandboxServiceTestDB(t)
+	seedSandboxExecutionStoreFixture(t, adminDB)
+	now := time.Now().UTC()
+	seedReadySandboxBinding(t, adminDB, now)
+	encodedReference, err := encodeSandboxToolObservationReference(sandboxdriver.DaytonaProviderName, sandboxdriver.ForegroundCommandObservation{
+		Reference: sandboxdriver.CommandReference{
+			Target: sandboxdriver.ToolTarget{ProviderSandboxID: "provider_execution_store"},
+			Task:   sandboxdriver.BackgroundTask{TaskID: "task_cancel", ProviderSessionID: "provider_execution_store", ProviderCommandID: "command_cancel"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode command reference: %v", err)
+	}
+	if _, err := adminDB.Exec(`INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store','evt_cancel_terminal',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+		t.Fatalf("seed conversation terminal event: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+		SET execution_state='consumed', result_digest='conversation_digest',
+		    consumed_by_terminal_event_id='evt_cancel_terminal', consumption_reason='conversation_tool_result',
+		    cancel_state='pending', cancel_requested_at=$2, provider_command_reference_json=$1
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`, encodedReference, now); err != nil {
+		t.Fatalf("seed consumed cancellation work: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtimeDB), 30*time.Minute)
+	ctx := sandboxTestQueueContext(t, runtimeDB)
+	job := SandboxToolCancelJob{WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store", SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a"}
+	work, current, err := coordinator.ClaimToolCancellation(ctx, job, now)
+	if err != nil || !current {
+		t.Fatalf("ClaimToolCancellation = current %t, %v", current, err)
+	}
+	if submitted, err := coordinator.MarkToolCancellationSubmitted(ctx, work, now); err != nil || !submitted {
+		t.Fatalf("MarkToolCancellationSubmitted = %t, %v", submitted, err)
+	}
+	if err := coordinator.SettleToolCancellation(ctx, work, `{"status":"cancelled"}`, "cancelled", "sandbox execution was cancelled", now); err != nil {
+		t.Fatalf("SettleToolCancellation: %v", err)
+	}
+	var state, digest, terminalEvent string
+	var cancelState, reference sql.NullString
+	if err := adminDB.QueryRow(`SELECT execution_state, result_digest, consumed_by_terminal_event_id,
+		cancel_state, provider_command_reference_json FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(
+		&state, &digest, &terminalEvent, &cancelState, &reference,
+	); err != nil {
+		t.Fatalf("read consumed cancellation: %v", err)
+	}
+	if state != "consumed" || digest != "conversation_digest" || terminalEvent != "evt_cancel_terminal" || cancelState.Valid || reference.Valid {
+		t.Fatalf("consumed receipt changed: state=%q digest=%q event=%q cancel=%v reference=%v", state, digest, terminalEvent, cancelState, reference)
 	}
 }
 

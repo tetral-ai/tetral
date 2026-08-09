@@ -6,9 +6,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"strconv"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"google.golang.org/grpc/codes"
@@ -328,6 +328,11 @@ func admitAgentMailDeliveryTx(
 		envelope.DeliveryID,
 	).Scan(&receivedEventID, &receivedSequence, &receivedPayloadJSON, &processedAt)
 	if dbconnect.IsNoRows(err) {
+		if closing, fenceErr := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, targetScope.GetWorkspaceId(), targetScope.GetSessionId(), targetScope.GetSessionThreadId()); fenceErr != nil {
+			return admittedAgentMailDelivery{}, fenceErr
+		} else if closing {
+			return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is closing")
+		}
 		if !threadReceivableTx(threadScope) {
 			return admittedAgentMailDelivery{}, status.Error(codes.FailedPrecondition, "agent mail target is not receivable")
 		}
@@ -425,7 +430,7 @@ func appendDeclaredCompletionMailTx(
 	scope *bridgev1.RuntimeScope,
 	threadScope threadMutationScope,
 	durableTurnID string,
-	draft *bridgev1.RuntimeMessageDraft,
+	create *bridgev1.RuntimeMessageCreate,
 	now time.Time,
 ) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, error) {
 	return appendDeclaredCompletionMailForSourceTx(
@@ -435,7 +440,7 @@ func appendDeclaredCompletionMailTx(
 		threadScope,
 		"finish_idle",
 		durableTurnID,
-		draft,
+		create,
 		now,
 	)
 }
@@ -447,52 +452,33 @@ func appendDeclaredCompletionMailForSourceTx(
 	threadScope threadMutationScope,
 	sourceKind string,
 	sourceID string,
-	draft *bridgev1.RuntimeMessageDraft,
+	create *bridgev1.RuntimeMessageCreate,
 	now time.Time,
 ) (*bridgev1.DurableEventStamp, *bridgev1.DurableMessageStamp, error) {
-	if draft == nil {
+	if create == nil {
 		return nil, nil, nil
 	}
 	if threadScope.role != "subagent" || threadScope.status == "closed_for_runtime" {
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail requires a live sub-agent thread")
 	}
-	if draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_COMPLETION_MAIL ||
-		draft.GetSourceKind() != sourceKind ||
-		draft.GetSourceId() != sourceID ||
-		draft.GetSourceEventId() != "" ||
-		len(draft.GetParts()) != 1 {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft identity is invalid")
-	}
-	expectedMessageLocalID := stableRuntimeID(
-		"runtime_message_draft",
-		scope.GetWorkspaceId(),
-		scope.GetSessionId(),
-		scope.GetSessionThreadId(),
-		sourceKind,
-		sourceID,
-		runtimeDraftKindToken(draft.GetDraftKind()),
-		strconv.FormatInt(int64(draft.GetOrdinal()), 10),
-	)
-	if draft.GetRuntimeLocalId() != expectedMessageLocalID {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft id is invalid")
+	if create.GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL ||
+		create.SourceEventId != nil || len(create.GetParts()) != 1 {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail create identity is invalid")
 	}
 	var messageInfo map[string]any
-	if err := json.Unmarshal([]byte(draft.GetMessageInfoJson()), &messageInfo); err != nil || messageInfo == nil {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft info is invalid")
+	if err := json.Unmarshal([]byte(create.GetMessageInfoJson()), &messageInfo); err != nil || messageInfo == nil {
+		return nil, nil, status.Error(codes.InvalidArgument, "completion mail create info is invalid")
 	}
 	for _, field := range []string{"id", "sessionId", "sequence", "createdAt", "updatedAt", "providerId", "modelId", "parts"} {
 		if _, present := messageInfo[field]; present {
-			return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft contains a durable or routing field")
+			return nil, nil, status.Error(codes.InvalidArgument, "completion mail create contains a durable or routing field")
 		}
 	}
 	if messageInfo["role"] != "user" || messageInfo["origin"] != "runtime" || messageInfo["status"] != "completed" {
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft message is invalid")
 	}
-	part := draft.GetParts()[0]
-	if part == nil ||
-		part.GetPartKind() != "text" ||
-		part.GetOrdinal() != 0 ||
-		part.GetRuntimeLocalPartId() != stableRuntimeID("runtime_message_part_draft", expectedMessageLocalID, "text", "0") {
+	part := create.GetParts()[0]
+	if part == nil || part.GetPartKind() != "text" {
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail part identity is invalid")
 	}
 	var partInfo struct {
@@ -567,12 +553,10 @@ func appendDeclaredCompletionMailForSourceTx(
 	partID := messageID + "_text"
 	return &bridgev1.DurableEventStamp{
 			SessionThreadId: scope.GetSessionThreadId(),
-			SourceEventId:   deliveryID,
 			EventId:         eventID,
 			EventSequence:   sequence,
 			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
 		}, &bridgev1.DurableMessageStamp{
-			RuntimeLocalId:  draft.GetRuntimeLocalId(),
 			SessionThreadId: scope.GetSessionThreadId(),
 			OwningEventId:   eventID,
 			MessageId:       messageID,
@@ -581,13 +565,12 @@ func appendDeclaredCompletionMailForSourceTx(
 			UpdatedAt:       timestamp,
 			Disposition:     bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
 			Parts: []*bridgev1.DurablePartStamp{{
-				RuntimeLocalPartId: part.GetRuntimeLocalPartId(),
-				PartId:             partID,
-				MessageId:          messageID,
-				PartSequence:       0,
-				CreatedAt:          timestamp,
-				UpdatedAt:          timestamp,
-				Disposition:        bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
+				PartId:       partID,
+				MessageId:    messageID,
+				PartSequence: 0,
+				CreatedAt:    timestamp,
+				UpdatedAt:    timestamp,
+				Disposition:  bridgev1.DurableProjectionDisposition_DURABLE_PROJECTION_DISPOSITION_CREATED,
 			}},
 		}, nil
 }

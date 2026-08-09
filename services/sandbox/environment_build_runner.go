@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ type EnvironmentBuildJobRunner struct {
 	Providers *ProviderRegistry
 	Config    EnvironmentRunnerConfig
 	Clock     func() time.Time
+	Logger    *slog.Logger
 }
 
 type EnvironmentRunnerConfig struct {
@@ -96,6 +98,12 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 		}
 	}()
 	ctx = workCtx
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindEnvironmentBuild, writer)
+		}
+	}()
 	if queueJob.GetMaxAttempts() <= 0 || queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if transportJob, identityErr := decodeEnvironmentBuildTransportIdentity(queueJob); identityErr == nil {
 			failure := EnvironmentArtifactFailure{Stage: "build_artifact", LastErrorKind: "environment_build_attempts_exhausted", Reason: "environment build attempt budget exhausted"}
@@ -141,9 +149,14 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 			ErrorMessage: "environment_build queue payload is invalid",
 		}))
 	}
+	jobIdentity.JobID = job.JobID
+	jobIdentity.WorkspaceID = job.WorkspaceID
 	now := r.now()
 	input, claimed, err := r.Store.ClaimEnvironmentBuild(ctx, job, now)
 	if err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("environment_build_claim", err)
+		}
 		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
 			return heartbeatErr
 		}
@@ -166,24 +179,40 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 		}
 		return r.retryEnvironmentBuild(ctx, job, cfg, "provider_configuration_invalid", "environment artifact provider is unavailable")
 	}
-	outcome := builder.BuildEnvironmentArtifact(ctx, sandbox.BuildArtifactRequest{
+	outcome, controlErr := builder.BuildEnvironmentArtifact(ctx, sandbox.BuildArtifactRequest{
 		WorkspaceID:        input.WorkspaceID,
 		EnvironmentID:      input.EnvironmentID,
 		Generation:         input.Generation,
 		ArtifactInputHash:  input.ArtifactInputHash,
 		NormalizedPackages: input.NormalizedPackages,
 		AuthorizeProviderCreate: func(ctx context.Context) (bool, error) {
-			return r.Store.AuthorizeEnvironmentArtifactCreate(ctx, job, r.now())
+			authorized, err := r.Store.AuthorizeEnvironmentArtifactCreate(ctx, job, r.now())
+			if err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					err = queueAuthorityLostBy("environment_build_authorize_create", err)
+				}
+				return false, &environmentArtifactControlError{err: err}
+			}
+			return authorized, err
 		},
 	})
-	if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
-		return heartbeatErr
+	if err := queueLeaseGuardError(ctx); err != nil {
+		return err
+	}
+	if controlErr != nil {
+		return controlErr
 	}
 	if outcome.Failed() {
 		return r.handleBuildFailure(ctx, queueJob, job, cfg, outcome)
 	}
 	if err := r.Store.MarkEnvironmentBuildReady(ctx, job, outcome.Value.ProviderArtifactRef, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("environment_build_mark_ready", err)
+		}
 		return r.retryEnvironmentBuild(ctx, job, cfg, "environment_build_store_error", "environment build ready commit failed")
+	}
+	if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
+		return heartbeatErr
 	}
 	return transitionUpdated(r.Queue.Ack(ctx, &queuev1.AckRequest{
 		WorkspaceId: job.WorkspaceID,
@@ -195,10 +224,17 @@ func (r *EnvironmentBuildJobRunner) processJob(ctx context.Context, queueJob *qu
 func (r *EnvironmentBuildJobRunner) finalizePrecheckedEnvironmentBuild(ctx context.Context, job EnvironmentBuildJob, failure EnvironmentArtifactFailure) error {
 	now := r.now()
 	_, claimed, err := r.Store.ClaimEnvironmentBuild(ctx, job, now)
+	if errors.Is(err, errQueueLeaseLost) {
+		return queueAuthorityLostBy("environment_build_claim", err)
+	}
 	if err != nil || !claimed {
 		return err
 	}
-	return r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, now)
+	err = r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, now)
+	if errors.Is(err, errQueueLeaseLost) {
+		return queueAuthorityLostBy("environment_build_terminal_failure", err)
+	}
+	return err
 }
 
 func decodeEnvironmentBuildTransportIdentity(queueJob *queuev1.QueueJob) (EnvironmentBuildJob, error) {
@@ -238,7 +274,13 @@ func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, queu
 	if outcome.Disposition != ProviderRetryable {
 		failure.Retryable = false
 		if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("environment_build_terminal_failure", err)
+			}
 			return err
+		}
+		if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
+			return heartbeatErr
 		}
 		return transitionUpdated(r.Queue.DeadLetter(ctx, &queuev1.DeadLetterRequest{
 			WorkspaceId:  job.WorkspaceID,
@@ -251,14 +293,23 @@ func (r *EnvironmentBuildJobRunner) handleBuildFailure(ctx context.Context, queu
 	if environmentRetryWillExhaust(queueJob) {
 		failure.Retryable = false
 		if err := r.Store.MarkEnvironmentBuildTerminalFailure(ctx, job, failure, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("environment_build_terminal_failure", err)
+			}
 			return err
 		}
 	} else {
 		failure.Retryable = true
 		rearmCreate := outcome.EffectBoundary == ProviderProvedNotStarted
 		if err := r.Store.MarkEnvironmentBuildRetryableFailure(ctx, job, failure, rearmCreate, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("environment_build_retryable_failure", err)
+			}
 			return err
 		}
+	}
+	if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {
+		return heartbeatErr
 	}
 	return r.retryEnvironmentBuild(ctx, job, cfg, valueOrDefault(failure.LastErrorKind, "environment_build_error"), "environment build failed")
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -677,36 +678,6 @@ func TestPostgreSQLCredentialStoreAuthVariantsPublicRedactionAndSecrets(t *testi
 	assertEncryptedAuthOmits(t, admin, staticBearer.ID, "static-secret-token")
 	assertProviderCredentialColumnsAbsent(t, admin, staticBearer.ID)
 
-	minimalProviderOAuth, err := creds.Create(ctx, workspace.DefaultID, v.ID, vault.CreateCredentialRequest{
-		DisplayName: "minimal provider oauth",
-		Auth: vault.CredentialAuth{ //nolint:gosec // G101: synthetic test secret sentinel, not a real credential
-			Type:        "provider_oauth",
-			ProviderID:  "deepseek",
-			AccessMode:  "oauth",
-			AccessToken: "provider-oauth-minimal-access-secret",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create minimal provider_oauth: %v", err)
-	}
-	if minimalProviderOAuth.Auth.Type != "provider_oauth" ||
-		minimalProviderOAuth.Auth.ProviderID != "deepseek" ||
-		minimalProviderOAuth.Auth.AccessMode != "oauth" ||
-		minimalProviderOAuth.Auth.ExpiresAt != "" ||
-		minimalProviderOAuth.Auth.AccountID != "" {
-		t.Fatalf("minimal provider_oauth public auth = %+v", minimalProviderOAuth.Auth)
-	}
-	assertCredentialJSONOmits(t, minimalProviderOAuth, "provider-oauth-minimal-access-secret")
-	assertEncryptedAuthOmits(t, admin, minimalProviderOAuth.ID, "provider-oauth-minimal-access-secret")
-	assertProviderCredentialColumns(t, admin, minimalProviderOAuth.ID, "deepseek", "oauth", "provider-oauth-minimal-access-secret")
-	decryptedMinimalProviderOAuth, err := creds.DecryptCredential(ctx, workspace.DefaultID, minimalProviderOAuth.ID)
-	if err != nil {
-		t.Fatalf("Decrypt minimal provider_oauth: %v", err)
-	}
-	if decryptedMinimalProviderOAuth.AccessToken != "provider-oauth-minimal-access-secret" || decryptedMinimalProviderOAuth.RefreshToken != "" {
-		t.Fatalf("minimal provider_oauth secret auth = %+v", decryptedMinimalProviderOAuth)
-	}
-
 	oauth, err := creds.Create(ctx, workspace.DefaultID, v.ID, vault.CreateCredentialRequest{
 		DisplayName: "oauth",
 		Auth: vault.CredentialAuth{ //nolint:gosec // G101: synthetic test secret sentinels, not real credentials
@@ -846,7 +817,7 @@ func TestPostgreSQLCredentialStoreProviderCredentialsRedactPersistAndRotate(t *t
 	if providerOAuth.Auth.Type != "provider_oauth" ||
 		providerOAuth.Auth.ProviderID != "openai" ||
 		providerOAuth.Auth.AccessMode != "oauth" ||
-		providerOAuth.Auth.ExpiresAt != "2026-05-04T05:00:00Z" ||
+		providerOAuth.Auth.ExpiresAt != "2026-05-04T05:00:00.000Z" ||
 		providerOAuth.Auth.AccountID != "acct_old" {
 		t.Fatalf("provider_oauth public auth = %+v", providerOAuth.Auth)
 	}
@@ -876,7 +847,7 @@ func TestPostgreSQLCredentialStoreProviderCredentialsRedactPersistAndRotate(t *t
 	if err != nil {
 		t.Fatalf("Update provider_oauth: %v", err)
 	}
-	if updatedProviderOAuth.Auth.ExpiresAt != "2026-05-04T06:00:00Z" || updatedProviderOAuth.Auth.AccountID != "acct_new" {
+	if updatedProviderOAuth.Auth.ExpiresAt != "2026-05-04T06:00:00.000Z" || updatedProviderOAuth.Auth.AccountID != "acct_new" {
 		t.Fatalf("updated provider_oauth public auth = %+v", updatedProviderOAuth.Auth)
 	}
 	decryptedProviderOAuth, err = creds.DecryptCredential(ctx, workspace.DefaultID, providerOAuth.ID)
@@ -1315,6 +1286,142 @@ func TestPostgreSQLCredentialStoreUpdateRotateSecretsAndRejectImmutableAuth(t *t
 		decryptedStaticAfterRejects.Token != "partial-static-token" {
 		t.Fatalf("static bearer changed after immutable reject: public=%+v secret=%+v", staticAfterRejects.Auth, decryptedStaticAfterRejects)
 	}
+}
+
+func TestPostgreSQLCredentialStoreNormalizesAndRejectsProviderOAuthBeforePersistence(t *testing.T) {
+	runtime, admin, encryptor := newPGVaultEnv(t)
+	vaults := vault.NewPostgreSQLVaultStore(dbconnect.NewClientForTesting(runtime))
+	creds := vault.NewPostgreSQLCredentialStore(dbconnect.NewClientForTesting(runtime), encryptor)
+	ctx := context.Background()
+	v, err := vaults.Create(ctx, workspace.DefaultID, vault.CreateVaultRequest{DisplayName: "provider-oauth-validation"})
+	if err != nil {
+		t.Fatalf("Create vault: %v", err)
+	}
+	validAuth := vault.CredentialAuth{ //nolint:gosec // synthetic credential values
+		Type:         "provider_oauth",
+		ProviderID:   "openai",
+		AccessMode:   "oauth",
+		AccessToken:  "access-validation-sentinel",
+		RefreshToken: "refresh-validation-sentinel",
+		ExpiresAt:    "2028-02-29T06:07:08.987654+05:30",
+		AccountID:    "account-validation-sentinel",
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*vault.CredentialAuth)
+	}{
+		{name: "provider", mutate: func(auth *vault.CredentialAuth) { auth.ProviderID = "anthropic" }},
+		{name: "access mode", mutate: func(auth *vault.CredentialAuth) { auth.AccessMode = "api_key" }},
+		{name: "access token", mutate: func(auth *vault.CredentialAuth) { auth.AccessToken = "" }},
+		{name: "refresh token", mutate: func(auth *vault.CredentialAuth) { auth.RefreshToken = "" }},
+		{name: "account id", mutate: func(auth *vault.CredentialAuth) { auth.AccountID = "" }},
+		{name: "expiry absent", mutate: func(auth *vault.CredentialAuth) { auth.ExpiresAt = "" }},
+		{name: "expiry date only", mutate: func(auth *vault.CredentialAuth) { auth.ExpiresAt = "2028-02-29" }},
+		{name: "expiry missing zone", mutate: func(auth *vault.CredentialAuth) { auth.ExpiresAt = "2028-02-29T06:07:08" }},
+		{name: "expiry space separated", mutate: func(auth *vault.CredentialAuth) { auth.ExpiresAt = "2028-02-29 06:07:08Z" }},
+		{name: "expiry invalid day", mutate: func(auth *vault.CredentialAuth) { auth.ExpiresAt = "2027-02-29T06:07:08Z" }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			auth := validAuth
+			testCase.mutate(&auth)
+			if _, err := creds.Create(ctx, workspace.DefaultID, v.ID, vault.CreateCredentialRequest{
+				DisplayName: testCase.name,
+				Auth:        auth,
+			}); err == nil {
+				t.Fatal("invalid provider OAuth credential persisted")
+			}
+			var count int
+			if err := admin.QueryRowContext(ctx,
+				`SELECT count(*) FROM credentials WHERE workspace_id = 'default' AND vault_id = $1`, v.ID,
+			).Scan(&count); err != nil {
+				t.Fatalf("count credentials: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("credential rows = %d; want zero after rejection", count)
+			}
+		})
+	}
+
+	created, err := creds.Create(ctx, workspace.DefaultID, v.ID, vault.CreateCredentialRequest{
+		DisplayName: "valid offset",
+		Auth:        validAuth,
+	})
+	if err != nil {
+		t.Fatalf("Create valid provider OAuth credential: %v", err)
+	}
+	const canonicalCreateExpiry = "2028-02-29T00:37:08.987Z"
+	if created.Auth.ExpiresAt != canonicalCreateExpiry {
+		t.Fatalf("created public expiry = %q; want %q", created.Auth.ExpiresAt, canonicalCreateExpiry)
+	}
+	assertProviderOAuthExpiryCopies(t, admin, creds, created.ID, canonicalCreateExpiry)
+
+	updated, err := creds.Update(ctx, workspace.DefaultID, v.ID, created.ID, mustDecodeCredentialPatch(t,
+		`{"auth":{"expires_at":"2032-02-29T23:59:59.1239-02:30"}}`))
+	if err != nil {
+		t.Fatalf("Update valid provider OAuth expiry: %v", err)
+	}
+	const canonicalUpdateExpiry = "2032-03-01T02:29:59.123Z"
+	if updated.Auth.ExpiresAt != canonicalUpdateExpiry {
+		t.Fatalf("updated public expiry = %q; want %q", updated.Auth.ExpiresAt, canonicalUpdateExpiry)
+	}
+	assertProviderOAuthExpiryCopies(t, admin, creds, created.ID, canonicalUpdateExpiry)
+	lockedPatch := mustDecodeCredentialPatch(t, `{"auth":{"expires_at":"2036-02-29T12:00:00.99999+03:00"}}`)
+	locked, err := creds.UpdateWithLockedCredential(ctx, workspace.DefaultID, v.ID, created.ID, func(current vault.CredentialAuth) (*vault.CredentialPatch, error) {
+		if current.ExpiresAt != canonicalUpdateExpiry {
+			t.Fatalf("locked update current expiry = %q; want %q", current.ExpiresAt, canonicalUpdateExpiry)
+		}
+		return &lockedPatch, nil
+	})
+	if err != nil {
+		t.Fatalf("UpdateWithLockedCredential valid provider OAuth expiry: %v", err)
+	}
+	const canonicalLockedExpiry = "2036-02-29T09:00:00.999Z"
+	if locked.Auth.ExpiresAt != canonicalLockedExpiry {
+		t.Fatalf("locked public expiry = %q; want %q", locked.Auth.ExpiresAt, canonicalLockedExpiry)
+	}
+	assertProviderOAuthExpiryCopies(t, admin, creds, created.ID, canonicalLockedExpiry)
+
+	if err := updateCredentialRaw(ctx, creds, v.ID, created.ID, `{"auth":{"account_id":""}}`); err == nil {
+		t.Fatal("update cleared required provider OAuth account id")
+	}
+	if err := updateCredentialRaw(ctx, creds, v.ID, created.ID, `{"auth":{"expires_at":"2032-02-30T00:00:00Z"}}`); err == nil {
+		t.Fatal("update persisted invalid provider OAuth expiry")
+	}
+	assertProviderOAuthExpiryCopies(t, admin, creds, created.ID, canonicalLockedExpiry)
+
+	logs, err := captureVaultStoreLogs(func() error {
+		auth := validAuth
+		auth.ProviderID = "invalid-provider"
+		_, createErr := creds.Create(ctx, workspace.DefaultID, v.ID, vault.CreateCredentialRequest{
+			DisplayName: "log rejection",
+			Auth:        auth,
+		})
+		return createErr
+	})
+	if err == nil {
+		t.Fatal("logged invalid provider OAuth credential succeeded")
+	}
+	for _, required := range []string{
+		"provider_credential_rejected",
+		"provider.id=invalid-provider",
+		"validation.member=provider_id",
+		"error.code=invalid_provider_oauth",
+	} {
+		if !strings.Contains(logs, required) {
+			t.Fatalf("provider credential rejection log missing %q: %s", required, logs)
+		}
+	}
+	assertStringOmits(t, logs, validAuth.AccessToken, validAuth.RefreshToken, validAuth.AccountID, validAuth.ExpiresAt)
+}
+
+func captureVaultStoreLogs(run func() error) (string, error) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	err := run()
+	return logs.String(), err
 }
 
 func TestPostgreSQLCredentialStoreArchiveDeleteAndPurgedDecrypt(t *testing.T) {
@@ -1938,6 +2045,35 @@ func assertProviderCredentialColumns(t *testing.T, admin *sql.DB, credentialID s
 		t.Fatalf("provider columns = (%q, %q); want (%q, %q)", providerID, accessMode, wantProviderID, wantAccessMode)
 	}
 	assertStringOmits(t, publicAuthJSON, forbiddenValues...)
+}
+
+func assertProviderOAuthExpiryCopies(
+	t *testing.T,
+	admin *sql.DB,
+	creds *vault.PostgreSQLCredentialStore,
+	credentialID string,
+	want string,
+) {
+	t.Helper()
+	storedSecret, err := creds.DecryptCredential(context.Background(), workspace.DefaultID, credentialID)
+	if err != nil {
+		t.Fatalf("decrypt provider OAuth auth: %v", err)
+	}
+	var publicAuthJSON string
+	var expiresAt string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT auth_public_json, expires_at FROM credentials WHERE id = $1`, credentialID,
+	).Scan(&publicAuthJSON, &expiresAt); err != nil {
+		t.Fatalf("read provider OAuth expiry copies: %v", err)
+	}
+	var publicAuth vault.CredentialAuthPublic
+	if err := json.Unmarshal([]byte(publicAuthJSON), &publicAuth); err != nil {
+		t.Fatalf("decode provider OAuth public auth: %v", err)
+	}
+	if publicAuth.ExpiresAt != want || storedSecret.ExpiresAt != want || expiresAt != want {
+		t.Fatalf("provider OAuth expiry copies = public %q secret %q column %q; want %q",
+			publicAuth.ExpiresAt, storedSecret.ExpiresAt, expiresAt, want)
+	}
 }
 
 func assertProviderCredentialColumnsAbsent(t *testing.T, admin *sql.DB, credentialID string) {

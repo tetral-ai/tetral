@@ -1,13 +1,11 @@
 package agentruntimebridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
@@ -16,17 +14,16 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
 
-// normalizedStableReasoningPart is a completed reasoning part in Bridge-internal
-// form. Its Metadata field is the single carve-out to the no-provider-metadata
-// projection rule: Metadata durably retains bounded provider-native provenance
-// (Anthropic signature/redacted data, OpenAI encrypted-reasoning metadata) so a
-// cold reload round-trips reasoning without stripping signatures. That metadata
-// is Bridge-size-bounded, internal cold-start context only, and never surfaces
-// on any public Event or message API.
+// normalizedStableReasoningPart is the bounded, internal audit projection of a
+// completed durable reasoning member. Bridge derives it only from the locked
+// Assistant message while committing its owning event; it is not a recovery or
+// state-machine input and is never exposed by the public Event or message API.
 type normalizedStableReasoningPart struct {
 	ReasoningPartID string         `json:"reasoning_part_id"`
 	ProviderPartID  string         `json:"provider_part_id"`
@@ -47,88 +44,6 @@ func (set normalizedStableReasoningSet) ledgerJSON() any {
 		return nil
 	}
 	return set.CanonicalJSON
-}
-
-type stableReasoningCarrier interface {
-	GetStableReasoningParts() []*bridgev1.StableReasoningPart
-}
-
-func normalizeStableReasoningParts(request stableReasoningCarrier) (normalizedStableReasoningSet, error) {
-	parts := request.GetStableReasoningParts()
-	if len(parts) > MaxStableReasoningPartsPerRequest {
-		return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "too many stable reasoning parts")
-	}
-	if requestEnd, ok := request.(*bridgev1.WriteRequestEndRequest); ok && len(parts) > 0 && (requestEnd.GetIsError() || requestEnd.GetReschedule() != nil) {
-		return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "error or reschedule request end cannot carry stable reasoning")
-	}
-	normalized := normalizedStableReasoningSet{
-		Parts:           make([]normalizedStableReasoningPart, 0, len(parts)),
-		StrictlyOrdered: true,
-	}
-	partIDs := make(map[string]struct{}, len(parts))
-	sequences := make(map[int32]struct{}, len(parts))
-	aggregateBytes := 0
-	var previousSequence int32
-	for index, part := range parts {
-		if part == nil || part.GetReasoningPartId() == "" || part.GetPartSequence() < 0 {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part identity is incomplete")
-		}
-		for _, value := range []string{part.GetReasoningPartId(), part.GetProviderPartId(), part.GetText(), part.GetMetadataJson()} {
-			if !utf8.ValidString(value) {
-				return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part is not UTF-8")
-			}
-		}
-		if len(part.GetMetadataJson()) > 64*1024 {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part exceeds size bounds")
-		}
-		if _, exists := partIDs[part.GetReasoningPartId()]; exists {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part id is duplicated")
-		}
-		if _, exists := sequences[part.GetPartSequence()]; exists {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part sequence is duplicated")
-		}
-		if index > 0 && part.GetPartSequence() <= previousSequence {
-			normalized.StrictlyOrdered = false
-		}
-		previousSequence = part.GetPartSequence()
-		partIDs[part.GetReasoningPartId()] = struct{}{}
-		sequences[part.GetPartSequence()] = struct{}{}
-
-		metadataJSON := defaultString(part.GetMetadataJson(), "{}")
-		var metadata map[string]any
-		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil || metadata == nil {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning metadata must be a JSON object")
-		}
-		canonicalMetadata, err := marshalBridgeDataJSON(metadata)
-		if err != nil {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning metadata must be a JSON object")
-		}
-		if len(canonicalMetadata) > 64*1024 {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning part exceeds size bounds")
-		}
-		// Runtime's stableReasoningMetadataJSON encoder produces metadataJSON;
-		// count those exact transported bytes so both sides enforce one aggregate.
-		// UPDATE-WITH: services/agent-runtime/packages/core/src/contracts/runtime.ts
-		// (stableReasoningMetadataJSON).
-		aggregateBytes += len(part.GetText()) + len(metadataJSON)
-		if aggregateBytes > MaxStableReasoningBytesPerRequest {
-			return normalizedStableReasoningSet{}, status.Error(codes.InvalidArgument, "stable reasoning set exceeds aggregate size bound")
-		}
-		normalized.Parts = append(normalized.Parts, normalizedStableReasoningPart{
-			ReasoningPartID: part.GetReasoningPartId(),
-			ProviderPartID:  part.GetProviderPartId(),
-			PartSequence:    part.GetPartSequence(),
-			Text:            part.GetText(),
-			Metadata:        metadata,
-			Truncated:       part.GetTruncated(),
-		})
-	}
-	canonicalSet, err := marshalBridgeDataJSON(normalized.Parts)
-	if err != nil {
-		return normalizedStableReasoningSet{}, err
-	}
-	normalized.CanonicalJSON = canonicalSet
-	return normalized, nil
 }
 
 func validateStableReasoningBudget(parts []any) error {
@@ -161,157 +76,23 @@ func validateStableReasoningBudget(parts []any) error {
 	return nil
 }
 
-func validateStableReasoningSettlementSupersetTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelRequestID string,
-	settlement normalizedStableReasoningSet,
-) error {
-	rows, err := tx.Query(ctx,
-		`SELECT stable_reasoning_json
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND stable_reasoning_json IS NOT NULL
-		  ORDER BY sequence ASC, event_id ASC
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	settlementByID := make(map[string]normalizedStableReasoningPart, len(settlement.Parts))
-	for _, part := range settlement.Parts {
-		settlementByID[part.ReasoningPartID] = part
-	}
-	anchoredByID := make(map[string]normalizedStableReasoningPart)
-	for rows.Next() {
-		var encoded string
-		if err := rows.Scan(&encoded); err != nil {
-			return err
-		}
-		var anchored []normalizedStableReasoningPart
-		if err := json.Unmarshal([]byte(encoded), &anchored); err != nil {
-			return status.Error(codes.FailedPrecondition, "stable reasoning event ledger is invalid")
-		}
-		for _, part := range anchored {
-			if existing, ok := anchoredByID[part.ReasoningPartID]; ok && !sameNormalizedStableReasoningPart(existing, part) {
-				return status.Error(codes.FailedPrecondition, "stable reasoning event ledger is inconsistent")
-			}
-			anchoredByID[part.ReasoningPartID] = part
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for partID, anchored := range anchoredByID {
-		candidate, ok := settlementByID[partID]
-		if !ok || !sameNormalizedStableReasoningPart(anchored, candidate) {
-			return status.Error(codes.AlreadyExists, "stable reasoning settlement omits or diverges from anchored content")
-		}
-	}
-	return nil
-}
-
-func validateStableReasoningAnchorBudgetTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	scope *bridgev1.RuntimeScope,
-	modelRequestID string,
-	anchor normalizedStableReasoningSet,
-) error {
-	rows, err := tx.Query(ctx,
-		`SELECT stable_reasoning_json
-		   FROM session_events
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND session_thread_id = $3
-		    AND model_request_id = $4
-		    AND stable_reasoning_json IS NOT NULL
-		  ORDER BY sequence ASC, event_id ASC
-		  FOR UPDATE`,
-		scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), modelRequestID,
-	)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	partsByID := make(map[string]normalizedStableReasoningPart)
-	add := func(part normalizedStableReasoningPart) error {
-		if existing, ok := partsByID[part.ReasoningPartID]; ok && !sameNormalizedStableReasoningPart(existing, part) {
-			return status.Error(codes.AlreadyExists, "stable reasoning anchor diverges from durable content")
-		}
-		partsByID[part.ReasoningPartID] = part
-		return nil
-	}
-	for rows.Next() {
-		var encoded string
-		if err := rows.Scan(&encoded); err != nil {
-			return err
-		}
-		var durable []normalizedStableReasoningPart
-		if err := json.Unmarshal([]byte(encoded), &durable); err != nil {
-			return status.Error(codes.FailedPrecondition, "stable reasoning event ledger is invalid")
-		}
-		for _, part := range durable {
-			if err := add(part); err != nil {
-				return err
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, part := range anchor.Parts {
-		if err := add(part); err != nil {
-			return err
-		}
-	}
-	aggregateBytes := 0
-	for _, part := range partsByID {
-		metadata, _ := json.Marshal(part.Metadata)
-		aggregateBytes += len(part.Text) + len(metadata)
-	}
-	if len(partsByID) > MaxStableReasoningPartsPerRequest || aggregateBytes > MaxStableReasoningBytesPerRequest {
-		return status.Error(codes.InvalidArgument, "stable reasoning exceeds per-request budget")
-	}
-	return nil
-}
-
-func sameNormalizedStableReasoningPart(left, right normalizedStableReasoningPart) bool {
-	leftJSON, _ := json.Marshal(left)
-	rightJSON, _ := json.Marshal(right)
-	return bytes.Equal(leftJSON, rightJSON)
-}
-
 func requestEndInterruptCommitRequest(
 	request *bridgev1.WriteRequestEndRequest,
 ) (*bridgev1.CommitInputsRequest, string, error) {
 	settlement := request.GetInterruptSettlement()
-	cancellationDrafts := requestEndCancellationDrafts(request.GetDrafts())
 	if settlement == nil {
-		if len(cancellationDrafts) != 0 {
-			return nil, "", status.Error(codes.InvalidArgument, "request end cancellation drafts require interrupt settlement")
-		}
 		return nil, "", nil
 	}
 	if !request.GetIsError() || request.GetErrorKind() != "runtime_interrupted" || request.GetReschedule() != nil {
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement requires an interrupted terminal end")
 	}
 	interruptRequest := &bridgev1.CommitInputsRequest{
-		Scope:                           request.GetScope(),
-		RuntimeInputId:                  settlement.GetRuntimeInputId(),
-		EventIds:                        settlement.GetEventIds(),
-		SequenceFrom:                    settlement.GetSequenceFrom(),
-		SequenceTo:                      settlement.GetSequenceTo(),
-		InputKind:                       "interrupt_control",
-		Drafts:                          cancellationDrafts,
-		PendingToolCancellations:        settlement.GetPendingToolCancellations(),
-		SandboxExecutionToolUseEventIds: settlement.GetSandboxExecutionToolUseEventIds(),
+		Scope:          request.GetScope(),
+		RuntimeInputId: settlement.GetRuntimeInputId(),
+		EventIds:       settlement.GetEventIds(),
+		SequenceFrom:   settlement.GetSequenceFrom(),
+		SequenceTo:     settlement.GetSequenceTo(),
+		InputKind:      "interrupt_control",
 	}
 	if interruptRequest.GetRuntimeInputId() == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "request end interrupt settlement is missing its runtime input")
@@ -324,26 +105,6 @@ func requestEndInterruptCommitRequest(
 		return nil, "", err
 	}
 	return interruptRequest, digest, nil
-}
-
-func requestEndCancellationDrafts(drafts []*bridgev1.RuntimeMessageDraft) []*bridgev1.RuntimeMessageDraft {
-	cancellations := make([]*bridgev1.RuntimeMessageDraft, 0, len(drafts))
-	for _, draft := range drafts {
-		if draft.GetDraftKind() == bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION {
-			cancellations = append(cancellations, draft)
-		}
-	}
-	return cancellations
-}
-
-func requestEndPrimaryDrafts(drafts []*bridgev1.RuntimeMessageDraft) []*bridgev1.RuntimeMessageDraft {
-	primary := make([]*bridgev1.RuntimeMessageDraft, 0, len(drafts))
-	for _, draft := range drafts {
-		if draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_CANCELLATION {
-			primary = append(primary, draft)
-		}
-	}
-	return primary
 }
 
 func readRequestEndInterruptReceiptTx(
@@ -382,13 +143,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		return nil, status.Error(codes.InvalidArgument, "invalid request end write")
 	}
 	if err := validateRequestEndErrorKind(request); err != nil {
-		return nil, err
-	}
-	if len(request.GetStableReasoningParts()) > 0 && (request.GetIsError() || request.GetReschedule() != nil) {
-		return nil, status.Error(codes.InvalidArgument, "error or reschedule request end cannot carry stable reasoning")
-	}
-	stableReasoning, err := normalizeStableReasoningParts(request)
-	if err != nil {
 		return nil, err
 	}
 	if request.GetReschedule() != nil && !request.GetIsError() {
@@ -444,7 +198,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		requestKind,
 		finishReason,
 		usageJSON,
-		stableReasoning.CanonicalJSON,
 		consumedTransientAttachments.CanonicalJSON,
 		consumedFileAttachments.CanonicalJSON,
 	)
@@ -509,16 +262,6 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if !stableReasoning.StrictlyOrdered {
-			return status.Error(codes.InvalidArgument, "stable reasoning parts must be strictly ordered")
-		}
-		// Only a successful end claims the complete reasoning set. Error and
-		// reschedule ends preserve prefixes already anchored by durable tools.
-		if !request.GetIsError() && request.GetReschedule() == nil {
-			if err := validateStableReasoningSettlementSupersetTx(ctx, tx, request.GetScope(), request.GetModelRequestId(), stableReasoning); err != nil {
-				return err
-			}
-		}
 		if err := verifyModelRequestStartTx(ctx, tx, request.GetScope(), request.GetModelRequestStartEventId(), request.GetModelRequestId(), requestKind); err != nil {
 			return err
 		}
@@ -570,7 +313,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			sessionVisible,
 			request.GetRuntimeWriteId(),
 			request.GetModelRequestId(),
-			stableReasoning.ledgerJSON(),
+			nil,
 			now,
 		); err != nil {
 			return err
@@ -640,11 +383,24 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			threadScope,
 			eventID,
 			sequence,
-			stableReasoning,
 			now,
 		)
 		if err != nil {
 			return err
+		}
+		if !request.GetIsError() && request.GetReschedule() == nil {
+			stableReasoning, err := stableReasoningLedgerTx(ctx, tx, request.GetScope(), request.GetModelRequestId())
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE session_events SET stable_reasoning_json = $5
+				  WHERE workspace_id = $1 AND session_id = $2 AND session_thread_id = $3 AND event_id = $4`,
+				request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(),
+				request.GetScope().GetSessionThreadId(), eventID, stableReasoning.ledgerJSON(),
+			); err != nil {
+				return err
+			}
 		}
 		receipt.RequestReschedule = requestEndDispositionStamp(requestKind, disposition)
 		receipt.DeclarationDigest = declarationDigest
@@ -1004,11 +760,8 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 		if openDurableTurnID == nil || *openDurableTurnID != key {
 			return scopeSupersededError(status.Error(codes.FailedPrecondition, "durable turn is not open"))
 		}
-		if threadScope.role != "subagent" && len(request.GetDrafts()) != 0 {
+		if threadScope.role != "subagent" && request.GetCompletionMailCreate() != nil {
 			return status.Error(codes.InvalidArgument, "completion mail is only valid for a sub-agent thread")
-		}
-		if len(request.GetDrafts()) > 1 {
-			return status.Error(codes.InvalidArgument, "finish idle accepts at most one completion mail")
 		}
 		projectionEventType := "session.status_idle"
 		if threadScope.role != "main" {
@@ -1127,11 +880,10 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			SessionThreadId:   request.GetScope().GetSessionThreadId(),
 			OperationKind:     bridgeOpFinishIdle,
 			SourceKind:        sourceKind,
-			SourceId:          key,
+			OperationId:       key,
 			DeclarationDigest: declarationDigest,
 			Events: []*bridgev1.DurableEventStamp{{
 				SessionThreadId: request.GetScope().GetSessionThreadId(),
-				SourceEventId:   key,
 				EventId:         eventID,
 				EventSequence:   sequence,
 				Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,
@@ -1143,14 +895,14 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 				CommittedIdleAt:   now.UTC().Format(time.RFC3339Nano),
 			},
 		}
-		if len(request.GetDrafts()) == 1 {
+		if request.GetCompletionMailCreate() != nil {
 			mailEvent, mailMessage, err := appendDeclaredCompletionMailTx(
 				ctx,
 				tx,
 				request.GetScope(),
 				threadScope,
 				key,
-				request.GetDrafts()[0],
+				request.GetCompletionMailCreate(),
 				now,
 			)
 			if err != nil {
@@ -1331,9 +1083,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			request.GetScope(),
 			threadScope,
 			request.GetRuntimeWriteId(),
-			request.GetDrafts(),
-			request.GetPendingToolCancellations(),
-			request.GetSandboxExecutionToolUseEventIds(),
+			request.GetToolSettlements(),
+			request.GetCompletionMailCreate(),
 			now,
 		)
 		if err != nil {
@@ -1350,6 +1101,18 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 			if err := closeRuntimeTerminatedSessionSiblingsTx(ctx, tx, request.GetScope(), request.GetRuntimeWriteId(), now); err != nil {
 				return err
 			}
+		}
+		// Runtime termination removes every current-thread and, for the main
+		// thread, sibling Sandbox blocker before release readiness is evaluated
+		// once for the Session. Queue custody is assigned in this transaction.
+		releaseJobs, err := sandboxrelease.ReadyRequestsTx(
+			ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), now, nil,
+		)
+		if err != nil {
+			return err
+		}
+		if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
+			return err
 		}
 		errorStamp, err := appendRuntimeTerminationErrorTx(ctx, tx, request.GetScope(), threadScope, request.GetRuntimeWriteId(), failureJSON, now)
 		if err != nil {

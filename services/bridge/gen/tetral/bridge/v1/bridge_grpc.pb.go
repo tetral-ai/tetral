@@ -30,6 +30,8 @@ const (
 	AgentRuntimeBridgeService_ResolveChildThread_FullMethodName            = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveChildThread"
 	AgentRuntimeBridgeService_ListChildThreads_FullMethodName              = "/tetral.bridge.v1.AgentRuntimeBridgeService/ListChildThreads"
 	AgentRuntimeBridgeService_ResolveInterAgentDelivery_FullMethodName     = "/tetral.bridge.v1.AgentRuntimeBridgeService/ResolveInterAgentDelivery"
+	AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName           = "/tetral.bridge.v1.AgentRuntimeBridgeService/AdmitChildInterrupt"
+	AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName           = "/tetral.bridge.v1.AgentRuntimeBridgeService/AwaitChildInterrupt"
 	AgentRuntimeBridgeService_MarkChildThreadClosed_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadClosed"
 	AgentRuntimeBridgeService_MarkChildThreadActive_FullMethodName         = "/tetral.bridge.v1.AgentRuntimeBridgeService/MarkChildThreadActive"
 	AgentRuntimeBridgeService_AcceptSandboxExecution_FullMethodName        = "/tetral.bridge.v1.AgentRuntimeBridgeService/AcceptSandboxExecution"
@@ -63,6 +65,8 @@ type AgentRuntimeBridgeServiceClient interface {
 	ResolveChildThread(ctx context.Context, in *ResolveChildThreadRequest, opts ...grpc.CallOption) (*ResolveChildThreadResponse, error)
 	ListChildThreads(ctx context.Context, in *ListChildThreadsRequest, opts ...grpc.CallOption) (*ListChildThreadsResponse, error)
 	ResolveInterAgentDelivery(ctx context.Context, in *ResolveInterAgentDeliveryRequest, opts ...grpc.CallOption) (*ResolveInterAgentDeliveryResponse, error)
+	AdmitChildInterrupt(ctx context.Context, in *AdmitChildInterruptRequest, opts ...grpc.CallOption) (*AdmitChildInterruptResponse, error)
+	AwaitChildInterrupt(ctx context.Context, in *AwaitChildInterruptRequest, opts ...grpc.CallOption) (*AwaitChildInterruptResponse, error)
 	MarkChildThreadClosed(ctx context.Context, in *MarkChildThreadClosedRequest, opts ...grpc.CallOption) (*MarkChildThreadClosedResponse, error)
 	MarkChildThreadActive(ctx context.Context, in *MarkChildThreadActiveRequest, opts ...grpc.CallOption) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(ctx context.Context, in *AcceptSandboxExecutionRequest, opts ...grpc.CallOption) (*AcceptSandboxExecutionResponse, error)
@@ -193,6 +197,26 @@ func (c *agentRuntimeBridgeServiceClient) ResolveInterAgentDelivery(ctx context.
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResolveInterAgentDeliveryResponse)
 	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_ResolveInterAgentDelivery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) AdmitChildInterrupt(ctx context.Context, in *AdmitChildInterruptRequest, opts ...grpc.CallOption) (*AdmitChildInterruptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdmitChildInterruptResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeBridgeServiceClient) AwaitChildInterrupt(ctx context.Context, in *AwaitChildInterruptRequest, opts ...grpc.CallOption) (*AwaitChildInterruptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AwaitChildInterruptResponse)
+	err := c.cc.Invoke(ctx, AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -374,6 +398,8 @@ type AgentRuntimeBridgeServiceServer interface {
 	ResolveChildThread(context.Context, *ResolveChildThreadRequest) (*ResolveChildThreadResponse, error)
 	ListChildThreads(context.Context, *ListChildThreadsRequest) (*ListChildThreadsResponse, error)
 	ResolveInterAgentDelivery(context.Context, *ResolveInterAgentDeliveryRequest) (*ResolveInterAgentDeliveryResponse, error)
+	AdmitChildInterrupt(context.Context, *AdmitChildInterruptRequest) (*AdmitChildInterruptResponse, error)
+	AwaitChildInterrupt(context.Context, *AwaitChildInterruptRequest) (*AwaitChildInterruptResponse, error)
 	MarkChildThreadClosed(context.Context, *MarkChildThreadClosedRequest) (*MarkChildThreadClosedResponse, error)
 	MarkChildThreadActive(context.Context, *MarkChildThreadActiveRequest) (*MarkChildThreadActiveResponse, error)
 	AcceptSandboxExecution(context.Context, *AcceptSandboxExecutionRequest) (*AcceptSandboxExecutionResponse, error)
@@ -432,6 +458,12 @@ func (UnimplementedAgentRuntimeBridgeServiceServer) ListChildThreads(context.Con
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) ResolveInterAgentDelivery(context.Context, *ResolveInterAgentDeliveryRequest) (*ResolveInterAgentDeliveryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveInterAgentDelivery not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AdmitChildInterrupt(context.Context, *AdmitChildInterruptRequest) (*AdmitChildInterruptResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AdmitChildInterrupt not implemented")
+}
+func (UnimplementedAgentRuntimeBridgeServiceServer) AwaitChildInterrupt(context.Context, *AwaitChildInterruptRequest) (*AwaitChildInterruptResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AwaitChildInterrupt not implemented")
 }
 func (UnimplementedAgentRuntimeBridgeServiceServer) MarkChildThreadClosed(context.Context, *MarkChildThreadClosedRequest) (*MarkChildThreadClosedResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MarkChildThreadClosed not implemented")
@@ -697,6 +729,42 @@ func _AgentRuntimeBridgeService_ResolveInterAgentDelivery_Handler(srv interface{
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentRuntimeBridgeServiceServer).ResolveInterAgentDelivery(ctx, req.(*ResolveInterAgentDeliveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_AdmitChildInterrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdmitChildInterruptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitChildInterrupt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AdmitChildInterrupt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AdmitChildInterrupt(ctx, req.(*AdmitChildInterruptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntimeBridgeService_AwaitChildInterrupt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AwaitChildInterruptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeBridgeServiceServer).AwaitChildInterrupt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntimeBridgeService_AwaitChildInterrupt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeBridgeServiceServer).AwaitChildInterrupt(ctx, req.(*AwaitChildInterruptRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1039,6 +1107,14 @@ var AgentRuntimeBridgeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveInterAgentDelivery",
 			Handler:    _AgentRuntimeBridgeService_ResolveInterAgentDelivery_Handler,
+		},
+		{
+			MethodName: "AdmitChildInterrupt",
+			Handler:    _AgentRuntimeBridgeService_AdmitChildInterrupt_Handler,
+		},
+		{
+			MethodName: "AwaitChildInterrupt",
+			Handler:    _AgentRuntimeBridgeService_AwaitChildInterrupt_Handler,
 		},
 		{
 			MethodName: "MarkChildThreadClosed",

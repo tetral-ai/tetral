@@ -9,6 +9,7 @@ import { runtimeFailureFromProviderError } from "../../../src/llm/llm-event.js";
 import type { Interface as LLMServiceInterface, LLMRequest } from "../../../src/llm/llm-service.js";
 import {
   ApplyPatchInstructionsText,
+  DefaultProviderCallRuntimeConfig,
   PlatformBaseSystemPrompt,
   assembleProviderCallRequest,
   requestErrorKindFromFailure,
@@ -24,6 +25,8 @@ import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeConfigPatchState } from "../../../src/thread-loop/thread-state.js";
 import { runtimeModelForThread, runtimeToolPolicyFromPatchPayloads } from "../../../../runtime-pod/src/command.js";
+import { createToolCatalog, lookupToolEntry } from "../../../src/tools/tool-catalog.js";
+import type { ToolCatalog } from "../../../src/tools/tool-catalog.js";
 import { buildThreadLoopUserMessage as userMessage, buildThreadLoopDurableRuntimeNotificationMessage as runtimeNotificationMessage } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
 import { QueuedContextLoader, RecordingContextLoader, RecordingRuntimeMetrics, ThreadLoopRuntimeStore, acceptedInput, approvalReviewerPolicy, catalogForTest, compactionTransportHistory, createdAt, failingEventWriter, llmService, queuedLLMService, runtimeThreadLoopLayer, testRunCustody, utf8RoundTrip, writerFrom } from "./thread-loop-test-support.js";
@@ -124,7 +127,7 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
             {
                 name: "third_group_lookup",
                 description: "third group tool description",
-                inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}",
+                function: { inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
             },
         ],
         maxOutputTokens: 321,
@@ -166,7 +169,7 @@ test("provider-call assembler builds the complete non-persistent LLM request sha
                 {
                     name: "third_group_lookup",
                     description: "third group tool description",
-                    inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}",
+                    function: { inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
                 },
             ],
             attachments: [],
@@ -362,12 +365,12 @@ test("a bounded live rejection is authored by the loop and committed before prov
     };
     session.state.enqueueAcceptedInput(firstInput);
     session.state.enqueueAcceptedInput(secondInput);
-    const submittedDrafts: Array<readonly unknown[]> = [];
+    const submittedCreates: Array<readonly unknown[]> = [];
     const loader: TestContextLoader = {
         buildContext: async () => [],
         loadPendingInput: async () => ({ type: "empty" }),
         commitAcceptedInput: async (accepted, options) => {
-            submittedDrafts.push([...(options?.drafts ?? [])]);
+            submittedCreates.push([...(options?.messageCreates ?? [])]);
             return acceptedInputReceipt(accepted);
         },
     };
@@ -380,9 +383,9 @@ test("a bounded live rejection is authored by the loop and committed before prov
         },
     }))));
     expect(result).toMatchObject({ type: "completed" });
-    expect(submittedDrafts).toHaveLength(2);
-    for (const drafts of submittedDrafts) {
-        expect(drafts).toEqual([
+    expect(submittedCreates).toHaveLength(2);
+    for (const creates of submittedCreates) {
+        expect(creates).toEqual([
             expect.objectContaining({
                 role: "assistant",
                 origin: "agent",
@@ -699,7 +702,6 @@ test("runtime layer compacts context before the next provider request", async ()
     expect(requestEndEnvelopes[0]?.prefixConsumption).toEqual({
         childThreadId: "thrd_child",
         parentBoundaryEventId: "sevt_parent_boundary",
-        checkpointRuntimeLocalId: expect.any(String),
     });
     expect(compactionBoundaryOrder).toEqual([
         "compaction-start-ack",
@@ -817,14 +819,14 @@ test("failed-attempt reasoning is absent from reschedule and successful retry co
     expect(requestEnds).toHaveLength(2);
     expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1 });
     expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
-    expect(requestEnds[0]?.stableReasoningParts).toBeUndefined();
+    expect(requestEnds[0]?.trailingPartAppend).toBeUndefined();
     expect(requestEnds[1]?.reschedule).toBeUndefined();
     expect(requestEnds[1]?.consumedFileAttachments).toEqual([{
             sourceEventId: "sevt_retry_file",
             fileId: "file_retry",
         }]);
-    expect(requestEnds[1]?.stableReasoningParts?.map((part) => part.text)).toEqual(successfulReasoning);
-    expect(requestEnds.filter((envelope) => (envelope.stableReasoningParts?.length ?? 0) > 0)).toHaveLength(1);
+    expect(requestEnds[1]?.trailingPartAppend).toBeUndefined();
+    expect(requestEnds.filter((envelope) => (envelope.trailingPartAppend?.parts.length ?? 0) > 0)).toHaveLength(0);
     expect(new Set(requestEnds.map((envelope) => envelope.modelRequestId)).size).toBe(2);
     const durableEvents = JSON.stringify(appended);
     const hotContext = JSON.stringify(session.state.contextManager.messages());
@@ -906,6 +908,7 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
     });
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const reschedules: ThreadLoop.RuntimeProviderRescheduleObservation[] = [];
     const baseWriter = writerFrom((envelope) => ({
         ok: true,
         writeId: envelope.writeId,
@@ -952,6 +955,7 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
         writer,
         llmService: retryingLLM,
         runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+        recordProviderReschedule: (event) => reschedules.push(event),
     }))));
     expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
     expect(requests).toHaveLength(2);
@@ -959,9 +963,136 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
     expect(requestEnds[0]).toMatchObject({
         isError: true,
         errorKind: "gateway_stream_error",
-        reschedule: { attempt: 1 },
+        reschedule: { attempt: 1, backoffMs: 1_000 },
     });
     expect(requestEnds[1]).toMatchObject({ isError: false });
+    expect(reschedules).toEqual([expect.objectContaining({
+        attempt: 1,
+        delayMs: 1_000,
+        delaySource: "runtime_fallback",
+        failureCode: "gateway_unavailable",
+    })]);
+});
+test("provider reschedule fallback remains 1s 2s 4s before the fourth failure exhausts", async () => {
+    const session = new ThreadRuntime("sesn_provider_reschedule_fallback");
+    const loader = new RecordingContextLoader([], {
+        type: "messages",
+        messages: [userMessage("user-provider-reschedule-fallback", 0, "send this request")],
+    });
+    const requests: LLMRequest[] = [];
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const reschedules: ThreadLoop.RuntimeProviderRescheduleObservation[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => {
+            requestEnds.push(envelope);
+            return await baseWriter.writeRequestEnd(envelope);
+        },
+    };
+    const failure = {
+        type: "llm-service" as const,
+        error: {
+            type: "runtime" as const,
+            code: "gateway_unavailable" as const,
+            message: "Gateway provider stream is unavailable.",
+            retryable: true,
+            fatal: false,
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        llmService: {
+            stream(request) {
+                requests.push(request);
+                return Stream.fail(failure);
+            },
+        },
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+        recordProviderReschedule: (event) => reschedules.push(event),
+    }))));
+
+    expect(result).toMatchObject({
+        type: "failed",
+        error: { code: "gateway_unavailable", retryStatus: { type: "exhausted" } },
+    });
+    expect(requests).toHaveLength(4);
+    expect(requestEnds.map((end) => end.reschedule?.backoffMs)).toEqual([1_000, 2_000, 4_000, undefined]);
+    expect(requestEnds.slice(0, 3).map((end) => end.reschedule?.attempt)).toEqual([1, 2, 3]);
+    expect(reschedules.map((event) => ({ attempt: event.attempt, delayMs: event.delayMs, source: event.delaySource }))).toEqual([
+        { attempt: 1, delayMs: 1_000, source: "runtime_fallback" },
+        { attempt: 2, delayMs: 2_000, source: "runtime_fallback" },
+        { attempt: 3, delayMs: 4_000, source: "runtime_fallback" },
+    ]);
+});
+test("positive provider retry delay overrides fallback without changing the attempt count", async () => {
+    const session = new ThreadRuntime("sesn_provider_reschedule_override");
+    const loader = new RecordingContextLoader([], {
+        type: "messages",
+        messages: [userMessage("user-provider-reschedule-override", 0, "send this request")],
+    });
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const reschedules: ThreadLoop.RuntimeProviderRescheduleObservation[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => {
+            requestEnds.push(envelope);
+            return await baseWriter.writeRequestEnd(envelope);
+        },
+    };
+    let attempt = 0;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        llmService: {
+            stream() {
+                attempt += 1;
+                return attempt === 1
+                    ? Stream.fail({
+                        type: "llm-service" as const,
+                        error: {
+                            type: "provider" as const,
+                            code: "provider_rate_limited" as const,
+                            message: "Provider is rate limited.",
+                            retryable: true,
+                            fatal: false,
+                            retryAfterMs: 2_500,
+                        },
+                    })
+                    : Stream.fromIterable([
+                        { type: "text-start" as const, id: "text_retry_override" },
+                        { type: "text-delta" as const, id: "text_retry_override", text_delta: "done" },
+                        { type: "text-end" as const, id: "text_retry_override" },
+                        { type: "finish" as const, finishReason: "stop" as const },
+                    ]);
+            },
+        },
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+        recordProviderReschedule: (event) => reschedules.push(event),
+    }))));
+
+    expect(result).toMatchObject({ type: "completed" });
+    expect(requestEnds[0]?.reschedule).toMatchObject({ attempt: 1, backoffMs: 2_500 });
+    expect(reschedules).toEqual([expect.objectContaining({
+        attempt: 1,
+        delayMs: 2_500,
+        delaySource: "provider",
+        failureCode: "provider_rate_limited",
+    })]);
 });
 test("a stale no-content request-end receipt discards hot state before another provider request", async () => {
     const session = new ThreadRuntime("sesn_stale_empty_request_end");
@@ -1195,18 +1326,16 @@ test("commits completed reasoning with provider metadata only after durable requ
     }))));
     expect(result).toMatchObject({ type: "completed" });
     expect(requestEnds).toHaveLength(1);
-    expect(requestEnds[0]?.stableReasoningParts).toEqual([
+    expect(requestEnds[0]?.trailingPartAppend?.parts).toEqual([
         expect.objectContaining({
             text: "thinking",
             providerPartId: "reasoning-1",
             providerMetadata: { anthropic: { signature: "sig_round_trip" } },
-            partSequence: 0,
         }),
         expect.objectContaining({
             text: "again",
             providerPartId: "reasoning-2",
             providerMetadata: { openai: { encrypted_content: "ciphertext" } },
-            partSequence: 1,
         }),
     ]);
     expect(order.filter((entry) => entry === "event:span.model_request_end")).toHaveLength(1);
@@ -1282,7 +1411,7 @@ test("retries a transient request-end failure with the identical ordered reasoni
     expect(result).toMatchObject({ type: "completed" });
     expect(attempts).toHaveLength(2);
     expect(attempts[1]).toEqual(attempts[0]);
-    expect(attempts[0]?.stableReasoningParts?.map((part) => part.text)).toEqual(["first", "second"]);
+    expect(attempts[0]?.trailingPartAppend?.parts.flatMap((part) => part.type === "reasoning" ? [part.text] : [])).toEqual(["first", "second"]);
     expect(session.state.contextManager.messages().flatMap((message) => message.parts).filter((part) => part.type === "reasoning")).toHaveLength(2);
 });
 test("discards completed reasoning when the provider attempt ends with a non-retryable error", async () => {
@@ -1339,7 +1468,7 @@ test("discards completed reasoning when the provider attempt ends with a non-ret
     expect(result).toMatchObject({ type: "failed" });
     expect(requestEnds).toHaveLength(1);
     expect(requestEnds[0]).toMatchObject({ isError: true, errorKind: "provider_error" });
-    expect(requestEnds[0]?.stableReasoningParts).toBeUndefined();
+    expect(requestEnds[0]?.trailingPartAppend).toBeUndefined();
     expect(requestEnds[0]?.consumedAttachmentRefs ?? []).toEqual([]);
     expect(requestEnds[0]?.consumedFileAttachments ?? []).toEqual([]);
     expect(session.state.contextManager.messages().flatMap((message) => message.parts).some((part) => part.type === "reasoning")).toBe(false);
@@ -1685,6 +1814,125 @@ test("denied provider reschedule appends one exhausted error before idle", async
 });
 
 describe("provider call skill guidance", () => {
+    test("rejects a freeform declaration outside the GPT family before request open", async () => {
+        const hostileGrammar = "start: /private provider payload marker/";
+        const catalog: ToolCatalog = {
+            entries: [{
+                name: "apply_patch",
+                definition: {
+                    kind: "freeform",
+                    name: "apply_patch",
+                    description: "Apply a patch",
+                    larkGrammar: hostileGrammar,
+                },
+                inputContract: { kind: "freeform_string", executionField: "patch" },
+                route: { kind: "sandbox", operation: "RunTool", helperSubcommand: "apply_patch" },
+                formatter: { successShape: "changed files", errorShape: "patch error", forbiddenFields: [] },
+                defaultPermissionPolicy: "always_ask",
+                required: true,
+            }],
+            configs: [{ name: "apply_patch", enabled: true }],
+        };
+        const input = providerInput([]);
+        expect(assembleProviderCallRequest({
+            ...input,
+            runtime: { ...input.runtime, toolCatalog: catalog, toolsetFamily: "claude" },
+        })).toMatchObject({
+            ok: false,
+            error: { reason: "runtime_contract_validation" },
+            toolDeclarationRejection: {
+                declarationKind: "freeform",
+                family: "claude",
+                validationMember: "tool_family",
+            },
+        });
+
+        const observations: unknown[] = [];
+        let providerCalled = false;
+        const loader = new RecordingContextLoader([], {
+            type: "messages",
+            messages: [userMessage("user-declaration", 0, "hello")],
+        });
+        const result = await Effect.runPromise(Effect.gen(function* () {
+            const threadLoop = yield* ThreadLoop.Service;
+            return yield* threadLoop.run(new ThreadRuntime("sesn_1"), testRunCustody());
+        }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+            providerCallRuntime: { ...DefaultProviderCallRuntimeConfig, toolCatalog: catalog, toolsetFamily: "claude" },
+            recordProviderToolDeclarationRejection: (event) => observations.push(event),
+            onStream: () => {
+                providerCalled = true;
+            },
+        }))));
+
+        expect(result).toMatchObject({
+            type: "failed",
+            error: { code: "runtime_invalid_sequence", reason: "runtime_contract_validation" },
+        });
+        expect(providerCalled).toBe(false);
+        expect(observations).toEqual([expect.objectContaining({
+            workspaceId: "workspace-test",
+            sessionId: "sesn_1",
+            sessionThreadId: "thread-test",
+            declarationKind: "freeform",
+            family: "claude",
+            validationMember: "tool_family",
+        })]);
+        expect(JSON.stringify(observations)).not.toContain(hostileGrammar);
+    });
+
+    test("preserves third-party provider content through request assembly by top-level projection", () => {
+        const input = providerInput([]);
+        const catalog = createToolCatalog({
+            family: "gpt",
+            includeSubAgentTools: false,
+            mcpManifests: [{
+                mcpServerName: "projection-server",
+                manifestETag: "etag-projection",
+                manifestGeneration: 1,
+                tools: [{
+                    name: "content_canary",
+                    description: "Use operation credentials exactly as described.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            route: { const: "binding" },
+                            binding: { const: "credentials" },
+                        },
+                    },
+                }],
+            }],
+        });
+        const result = assembleProviderCallRequest({
+            ...input,
+            runtime: { ...input.runtime, toolCatalog: catalog, toolsetFamily: "gpt" },
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) {
+            return;
+        }
+        const projected = result.request.tools.find((tool) => tool.name === "content_canary");
+        expect(projected).toEqual({
+            name: "content_canary",
+            description: "Use operation credentials exactly as described.",
+            function: {
+                inputSchemaJson: JSON.stringify({
+                    type: "object",
+                    properties: {
+                        route: { const: "binding" },
+                        binding: { const: "credentials" },
+                    },
+                }),
+            },
+        });
+        expect(result.request.tools.find((tool) => tool.name === "exec_command")?.function)
+            .toBeDefined();
+        expect(lookupToolEntry(catalog, "content_canary")).toMatchObject({
+            route: { kind: "gateway", operation: "RunMcpTool", mcpServerName: "projection-server" },
+            defaultPermissionPolicy: "always_ask",
+            required: false,
+        });
+    });
+
     test("rejects an unspecified provider request kind", () => {
         expect(assembleProviderCallRequest(providerInput([], ProviderRequestKind.PROVIDER_REQUEST_KIND_UNSPECIFIED))).toMatchObject({ ok: false, error: { reason: "runtime_contract_validation" } });
     });

@@ -41,9 +41,7 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 		"task_"+completionTestChildID(suffix),
 		"the loop authored this body\nverbatim",
 	)
-	request.Drafts = []*bridgev1.RuntimeMessageDraft{
-		bridgeCompletionMailDraftForTest(request.GetScope(), request.GetDurableTurnId(), wantEnvelope),
-	}
+	request.CompletionMailCreate = bridgeCompletionMailCreateForTest(request.GetScope(), request.GetDurableTurnId(), wantEnvelope)
 
 	response, err := finishIdleWithStagedCaptureForTest(t, admin, store, request)
 	if err != nil {
@@ -104,7 +102,7 @@ func TestPostgreSQLBridgeAPIStoreChildFinishIdleRearmsPendingCompletionMail(t *t
 			store := completionMailTestStore(t, runtime)
 			request := bridgeAPIChildFinishIdleFailureRequest(suffix)
 			request.StopReasonJson = test.stopReason
-			request.Drafts = nil
+			request.CompletionMailCreate = nil
 			if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, request); err != nil {
 				t.Fatalf("FinishIdle %s: %v", test.name, err)
 			}
@@ -238,7 +236,7 @@ func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t 
 
 	first := bridgeAPIChildFinishIdleFailureRequest(suffix)
 	first.StopReasonJson = `{"type":"requires_action","event_ids":["evt_pending"]}`
-	first.Drafts = nil
+	first.CompletionMailCreate = nil
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, first); err != nil {
 		t.Fatalf("FinishIdle requires_action: %v", err)
 	}
@@ -260,13 +258,11 @@ func TestPostgreSQLCompletionMailRequiresActionThenSameChildCompletesNextTurn(t 
 
 	second := bridgeAPIChildFinishIdleFailureRequest(suffix)
 	second.DurableTurnId = "evt_completion_running_second_" + suffix
-	second.Drafts = []*bridgev1.RuntimeMessageDraft{
-		bridgeCompletionMailDraftForTest(
-			second.GetScope(),
-			second.GetDurableTurnId(),
-			completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "completed after action"),
-		),
-	}
+	second.CompletionMailCreate = bridgeCompletionMailCreateForTest(
+		second.GetScope(),
+		second.GetDurableTurnId(),
+		completionMailEnvelope("main", "task_"+completionTestChildID(suffix), "completed after action"),
+	)
 	if _, err := finishIdleWithStagedCaptureForTest(t, admin, store, second); err != nil {
 		t.Fatalf("FinishIdle next clean turn: %v", err)
 	}

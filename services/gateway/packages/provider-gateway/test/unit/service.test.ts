@@ -71,9 +71,10 @@ describe("ProviderGatewayServiceShell", () => {
 
   test("invalid requests log each independently bounded identity and validation class", async () => {
     const hostileIdentity = `https://example.invalid/${"x".repeat(300)}`;
-    const logs: unknown[] = [];
+    const infoLogs: unknown[] = [];
+    const errorLogs: unknown[] = [];
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
-      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      logger: { info: (record) => infoLogs.push(record), error: (record) => errorLogs.push(record) },
     });
 
     await expectGrpcCode(collectEvents(service.streamProviderRequest(
@@ -81,8 +82,9 @@ describe("ProviderGatewayServiceShell", () => {
       metadata(),
     )), status.INVALID_ARGUMENT);
 
-    expect(JSON.stringify(logs)).not.toContain(hostileIdentity);
-    expect(logs).toEqual([
+    expect(infoLogs).toEqual([]);
+    expect(JSON.stringify(errorLogs)).not.toContain(hostileIdentity);
+    expect(errorLogs).toEqual([
       expect.objectContaining({
         event: "provider_request_streamed",
         "request.outcome": "failed",
@@ -92,10 +94,10 @@ describe("ProviderGatewayServiceShell", () => {
         "session.id": "sesn_1",
         "thread.id": "thrd_1",
         "request.id": "req_1",
-        "provider.request.id": "mreq_1",
+        "model_request.id": "mreq_1",
       }),
     ]);
-    expect(logs[0]).not.toHaveProperty("workspace.id");
+    expect(errorLogs[0]).not.toHaveProperty("workspace.id");
   });
 
   test("valid ProviderRequest streams catalog-gated provider-unavailable terminal event", async () => {
@@ -217,7 +219,7 @@ describe("ProviderGatewayServiceShell", () => {
         "error.class": "provider_error",
         "error.code": "provider_unavailable",
         "request.id": request.requestId,
-        "provider.request.id": request.modelRequestId,
+        "model_request.id": request.modelRequestId,
         "duration.ms": expect.any(Number),
       }),
       expect.objectContaining({
@@ -351,7 +353,7 @@ describe("ProviderGatewayServiceShell", () => {
     await first;
     expect(logs.filter((record) =>
       (record as { readonly event?: unknown }).event === "provider_request_streamed"
-      && (record as { readonly "provider.request.id"?: unknown })["provider.request.id"] === "mreq_2"
+      && (record as { readonly "model_request.id"?: unknown })["model_request.id"] === "mreq_2"
     )).toEqual([
       expect.objectContaining({
         "request.outcome": "failed",
@@ -361,7 +363,7 @@ describe("ProviderGatewayServiceShell", () => {
     ]);
   });
 
-  test("header timeout produces a retryable terminal provider-error", async () => {
+  test("first normalized event timeout produces a retryable terminal provider-error", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     let aborted = false;
     let release!: () => void;
@@ -425,11 +427,9 @@ describe("ProviderGatewayServiceShell", () => {
 
     const events = await collectEvents(service.streamProviderRequest(request, metadata()));
 
-    expect(events).toHaveLength(3);
+    expect(events).toHaveLength(2);
     expect(events[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-    expect(events[1]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END);
-    expect(events[1]?.text?.id).toBe(events[0]?.text?.id);
-    expect(events[2]?.providerError?.error).toMatchObject({
+    expect(events[1]?.providerError?.error).toMatchObject({
       code: "provider_timeout",
       message: "Provider stream stalled before the next chunk.",
       retryable: true,
@@ -464,14 +464,13 @@ describe("ProviderGatewayServiceShell", () => {
     const third = await iterator.next();
 
     expect(first.value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-    expect(second.value?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END);
-    expect(second.value?.text?.id).toBe(first.value?.text?.id);
-    expect(third.value?.providerError?.error).toMatchObject({
+    expect(second.value?.providerError?.error).toMatchObject({
       code: "provider_cancelled",
       retryable: false,
       fatal: false,
       statusCode: 499,
     });
+    expect(third.done).toBe(true);
     await iterator.return?.();
   });
 
@@ -635,17 +634,15 @@ describe("ProviderGatewayServiceShell", () => {
 
     expect(attempts).toEqual(["pfk_1"]);
     expect(pool.recordedFailures).toEqual([]);
-    expect(events).toHaveLength(3);
+    expect(events).toHaveLength(2);
     expect(events[0]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START);
-    expect(events[1]?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END);
-    expect(events[1]?.text?.id).toBe(events[0]?.text?.id);
-    expect(events[2]?.providerError?.error).toMatchObject({
+    expect(events[1]?.providerError?.error).toMatchObject({
       code: "provider_stream_error",
       retryable: true,
     });
   });
 
-  test("closes open provider fragments before post-first-byte provider errors", async () => {
+  test("discards open provider fragments before post-first-byte provider errors", async () => {
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     const request = validProviderRequest({
       ...base,
@@ -669,18 +666,123 @@ describe("ProviderGatewayServiceShell", () => {
       ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START,
       ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START,
       ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
       ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
     ]);
-    expect(events[3]?.text?.id).toBe(events[0]?.text?.id);
-    expect(events[4]?.reasoning?.id).toBe(events[1]?.reasoning?.id);
-    expect(events[5]?.toolInput?.id).toBe(events[2]?.toolInput?.id);
-    expect(events[6]?.providerError?.error).toMatchObject({
+    expect(events[3]?.providerError?.error).toMatchObject({
       code: "provider_stream_error",
       retryable: true,
     });
+  });
+
+  test("nominal provider termination rejects unresolved fragment lifecycles without synthetic ends", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+    });
+    const cases = [
+      {
+        name: "open text at finish",
+        events: [textEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START, ""), finishEvent(request)],
+        category: "finish",
+        counts: { text: 1, reasoning: 0, toolInput: 0 },
+      },
+      {
+        name: "ended tool input without call",
+        events: [
+          toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", ""),
+          toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup", ""),
+          finishEvent(request),
+        ],
+        category: "finish",
+        counts: { text: 0, reasoning: 0, toolInput: 1 },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const logs: unknown[] = [];
+      const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+        logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+        providerStreamer: { stream: async function* () { yield* testCase.events; } },
+      });
+
+      const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+      expect(events.at(-1)?.providerError?.error, testCase.name).toMatchObject({
+        code: "provider_stream_error",
+        retryable: true,
+        fatal: false,
+      });
+      expect(events.some((event) => event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH), testCase.name).toBe(false);
+      expect(logs).toContainEqual(expect.objectContaining({
+        event: "provider_stream_incomplete",
+        "stream.terminal_category": testCase.category,
+        "stream.open_text_count": testCase.counts.text,
+        "stream.open_reasoning_count": testCase.counts.reasoning,
+        "stream.open_tool_input_count": testCase.counts.toolInput,
+      }));
+    }
+  });
+
+  test("rejects a streamed tool call before its explicit input end", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+    });
+    const logs: unknown[] = [];
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
+      providerStreamer: {
+        stream: async function* () {
+          yield toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup", "", "tool_early");
+          yield toolCallEvent(request, "tool_early", "lookup", '{"query":"hello"}');
+        },
+      },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START,
+      ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR,
+    ]);
+    expect(events.at(-1)?.providerError?.error).toMatchObject({
+      code: "provider_stream_error",
+      retryable: true,
+      fatal: false,
+    });
+    expect(logs).toContainEqual(expect.objectContaining({
+      event: "provider_stream_incomplete",
+      "stream.terminal_category": "tool_call",
+      "stream.open_tool_input_count": 1,
+    }));
+  });
+
+  test("keeps concurrent streamed tool inputs isolated until each matching call consumes it", async () => {
+    const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
+    const request = validProviderRequest({
+      ...base,
+      runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
+    });
+    const streamEvents = [
+      toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup_a", "", "tool_a"),
+      toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START, "lookup_b", "", "tool_b"),
+      toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, "lookup_b", '{"b":1}', "tool_b"),
+      toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup_b", "", "tool_b"),
+      toolCallEvent(request, "tool_b", "lookup_b", '{"b":1}'),
+      toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA, "lookup_a", '{"a":1}', "tool_a"),
+      toolInputEvent(request, ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END, "lookup_a", "", "tool_a"),
+      toolCallEvent(request, "tool_a", "lookup_a", '{"a":1}'),
+      finishEvent(request),
+    ];
+    const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      providerStreamer: { stream: async function* () { yield* streamEvents; } },
+    });
+
+    const events = await collectEvents(service.streamProviderRequest(request, metadata()));
+
+    expect(events).toEqual(streamEvents);
+    expect(events.at(-1)?.type).toBe(ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH);
   });
 
   test("platform fail-fast classification returns immediately without switching keys", async () => {
@@ -1289,17 +1391,32 @@ function toolInputEvent(
   type: ProviderStreamEventType,
   name: string,
   text: string,
+  id = "tool_1",
 ): ProviderStreamEvent {
   return {
     requestId: request.requestId,
     modelRequestId: request.modelRequestId,
     type,
     toolInput: {
-      id: "tool_1",
+      id,
       name,
       text,
       metadataJson: "{}",
     },
+  };
+}
+
+function toolCallEvent(
+  request: { readonly requestId: string; readonly modelRequestId: string },
+  id: string,
+  name: string,
+  inputJson: string,
+): ProviderStreamEvent {
+  return {
+    requestId: request.requestId,
+    modelRequestId: request.modelRequestId,
+    type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL,
+    toolCall: { id, name, inputJson, metadataJson: "{}" },
   };
 }
 

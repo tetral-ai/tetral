@@ -22,6 +22,7 @@ import { OpenAICodexOAuthClientId, OpenAICodexOAuthTokenEndpoint } from "./opena
 import type { ResolvedSessionOAuthCredential } from "./credentials.js";
 import { setWorkspaceRLS } from "./credentials.js";
 import type { GatewayCredentialSQL } from "./credentials.js";
+import { normalizeOpenAIOAuthExpiry, parseCanonicalOpenAIOAuthExpiry } from "./openai-oauth-expiry.js";
 
 /** Time before expiry at which a credential is treated as due for refresh. */
 export const OpenAIOAuthRefreshSkewMs = 60_000;
@@ -291,6 +292,7 @@ export class SQLOpenAIOAuthCredentialRefreshWriter implements OpenAIOAuthCredent
              auth_public_json = ${JSON.stringify(publicAuth)},
              provider_id = ${rotated.providerId},
              access_mode = ${rotated.accessMode},
+             expires_at = ${rotated.expiresAt},
              updated_at = ${new Date(this.now()).toISOString()}
        WHERE workspace_id = ${workspaceId}
          AND vault_id = ${rotated.vaultId}
@@ -314,8 +316,8 @@ export function openAIOAuthCredentialRefreshDue(expiresAt: string | undefined, n
   if (expiresAt === undefined || expiresAt.length === 0) {
     return false;
   }
-  const expiresMs = Date.parse(expiresAt);
-  return Number.isFinite(expiresMs) && expiresMs <= nowMs + OpenAIOAuthRefreshSkewMs;
+  const expiresMs = parseCanonicalOpenAIOAuthExpiry(expiresAt);
+  return expiresMs !== undefined && expiresMs <= nowMs + OpenAIOAuthRefreshSkewMs;
 }
 
 function providerOAuthRowUsable(row: ProviderOAuthCredentialSQLRow, credential: ResolvedSessionOAuthCredential): boolean {
@@ -334,7 +336,7 @@ function storedAuthMatchesCredential(auth: StoredProviderOAuthAuth, credential: 
     nonEmptyString(auth.refresh_token) &&
     nonEmptyString(auth.expires_at) &&
     nonEmptyString(auth.account_id) &&
-    Number.isFinite(Date.parse(auth.expires_at));
+    parseCanonicalOpenAIOAuthExpiry(auth.expires_at) !== undefined;
 }
 
 function credentialFromAuth(base: ResolvedSessionOAuthCredential, auth: StoredProviderOAuthAuth): ResolvedSessionOAuthCredential {
@@ -370,8 +372,8 @@ function publicAuthFromStoredAuth(auth: StoredProviderOAuthAuth): StoredProvider
 }
 
 function tokenExpiresAt(payload: TokenEndpointResponse, nowMs: number): string | undefined {
-  if (typeof payload.expires_at === "string" && Number.isFinite(Date.parse(payload.expires_at))) {
-    return payload.expires_at;
+  if (typeof payload.expires_at === "string") {
+    return normalizeOpenAIOAuthExpiry(payload.expires_at);
   }
   if (typeof payload.expires_in !== "number" || !Number.isFinite(payload.expires_in) || payload.expires_in <= 0) {
     return undefined;

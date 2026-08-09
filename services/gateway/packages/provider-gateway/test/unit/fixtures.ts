@@ -52,8 +52,7 @@ export function validProviderRequest(overrides: Partial<ProviderRequest> = {}): 
       {
         name: "Read",
         description: "Read a file.",
-        inputSchemaJson: JSON.stringify({ type: "object" }),
-        outputSchemaJson: undefined,
+        function: { inputSchemaJson: JSON.stringify({ type: "object" }), outputSchemaJson: undefined },
       },
     ],
     attachments: [],

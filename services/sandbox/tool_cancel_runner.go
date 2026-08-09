@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -51,6 +52,7 @@ type SandboxToolCancelJobRunner struct {
 	Providers *ProviderRegistry
 	Config    SandboxLifecycleRunnerConfig
 	Clock     func() time.Time
+	Logger    *slog.Logger
 }
 
 func (r *SandboxToolCancelJobRunner) RunOnce(ctx context.Context) error {
@@ -93,9 +95,18 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 		}
 	}()
 	ctx = workCtx
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindSandboxToolCancel, writer)
+		}
+	}()
 	transportJob, transportErr := decodeSandboxToolCancelQueueTransportIdentity(queueJob)
 	if transportErr == nil && queueJob.GetMaxAttempts() <= 0 {
 		if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -108,6 +119,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	}
 	if transportErr == nil && queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -122,6 +136,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	if err != nil {
 		if transportErr == nil {
 			if err := r.Store.FinalizeToolCancellation(ctx, transportJob, r.now()); err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+				}
 				return err
 			}
 		}
@@ -136,7 +153,7 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	work, current, err := r.Store.ClaimToolCancellation(ctx, job, r.now())
 	if err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
-			return err
+			return queueAuthorityLostBy("sandbox_tool_cancel_claim", err)
 		}
 		return r.retry(ctx, queueJob, "sandbox_tool_cancel_store_error")
 	}
@@ -157,7 +174,7 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 	submitted, err := r.Store.MarkToolCancellationSubmitted(ctx, work, r.now())
 	if err != nil {
 		if errors.Is(err, errQueueLeaseLost) {
-			return err
+			return queueAuthorityLostBy("sandbox_tool_cancel_mark_submitted", err)
 		}
 		return r.retry(ctx, queueJob, "sandbox_tool_cancel_store_error")
 	}
@@ -177,6 +194,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 		resultJSON = `{"status":"cancelled"}`
 	}
 	if err := r.Store.SettleToolCancellation(ctx, work, resultJSON, "cancelled", "sandbox execution was cancelled", r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_tool_cancel_settle", err)
+		}
 		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -187,6 +207,9 @@ func (r *SandboxToolCancelJobRunner) processJob(ctx context.Context, queueJob *q
 
 func (r *SandboxToolCancelJobRunner) settleUnknown(ctx context.Context, work SandboxToolCancellationWork, kind string, message string) error {
 	if err := r.Store.SettleToolCancellation(ctx, work, "", kind, message, r.now()); err != nil {
+		if errors.Is(err, errQueueLeaseLost) {
+			return queueAuthorityLostBy("sandbox_tool_cancel_settle", err)
+		}
 		return err
 	}
 	if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -202,6 +225,9 @@ func (r *SandboxToolCancelJobRunner) retry(ctx context.Context, job *queuev1.Que
 			return err
 		}
 		if err := r.Store.FinalizeToolCancellation(ctx, decoded, r.now()); err != nil {
+			if errors.Is(err, errQueueLeaseLost) {
+				return queueAuthorityLostBy("sandbox_tool_cancel_finalize", err)
+			}
 			return err
 		}
 		if err := stopQueueLeaseGuard(ctx); err != nil {
@@ -303,10 +329,13 @@ func (c *PostgreSQLSandboxExecutionCoordinator) ClaimToolCancellation(ctx contex
 		if err != nil {
 			return err
 		}
-		if state != "running" || !cancelState.Valid {
+		if (state != "running" && state != "consumed") || !cancelState.Valid {
 			return nil
 		}
 		if cancelState.String == "submitted" {
+			if state == "consumed" {
+				return clearConsumedToolCancellationTx(ctx, tx, job, generation, now)
+			}
 			return settleSandboxExecutionTx(ctx, tx, SandboxExecutionRef{
 				WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, SessionThreadID: job.SessionThreadID, ToolUseEventID: job.ToolUseEventID,
 			}, generation, SandboxExecutionSettlement{
@@ -341,7 +370,7 @@ func (c *PostgreSQLSandboxExecutionCoordinator) MarkToolCancellationSubmitted(ct
 			`UPDATE session_runtime_tool_results
 			    SET cancel_state='submitted', cancel_submitted_at=$6, updated_at=$6
 			  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
-			    AND execution_attempt_generation=$5 AND execution_state='running' AND cancel_state='pending'`,
+			    AND execution_attempt_generation=$5 AND execution_state IN ('running','consumed') AND cancel_state='pending'`,
 			work.Job.WorkspaceID, work.Job.SessionID, work.Job.SessionThreadID, work.Job.ToolUseEventID,
 			work.AttemptGeneration, now.UTC(),
 		)
@@ -365,6 +394,21 @@ func (c *PostgreSQLSandboxExecutionCoordinator) SettleToolCancellation(ctx conte
 		}
 		if err := lockSandboxLifecycleOperationsForSession(ctx, tx, work.Job.WorkspaceID, work.Job.SessionID); err != nil {
 			return err
+		}
+		var state string
+		if err := tx.QueryRow(ctx,
+			`SELECT execution_state FROM session_runtime_tool_results
+			  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
+			    AND execution_attempt_generation=$5 AND cancel_state IN ('pending','submitted') FOR UPDATE`,
+			work.Job.WorkspaceID, work.Job.SessionID, work.Job.SessionThreadID, work.Job.ToolUseEventID,
+			work.AttemptGeneration,
+		).Scan(&state); dbconnect.IsNoRows(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if state == "consumed" {
+			return clearConsumedToolCancellationTx(ctx, tx, work.Job, work.AttemptGeneration, now)
 		}
 		settlementKind := SandboxExecutionFailed
 		if resultJSON == "" {
@@ -400,7 +444,7 @@ func finalizeToolCancellationTx(ctx context.Context, tx *dbconnect.Tx, job Sandb
 	err := tx.QueryRow(ctx,
 		`SELECT execution_attempt_generation FROM session_runtime_tool_results
 		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
-		    AND execution_state='running' AND cancel_state IN ('pending','submitted') FOR UPDATE`,
+		    AND execution_state IN ('running','consumed') AND cancel_state IN ('pending','submitted') FOR UPDATE`,
 		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.ToolUseEventID,
 	).Scan(&generation)
 	if dbconnect.IsNoRows(err) {
@@ -409,9 +453,36 @@ func finalizeToolCancellationTx(ctx context.Context, tx *dbconnect.Tx, job Sandb
 	if err != nil {
 		return err
 	}
+	var state string
+	if err := tx.QueryRow(ctx,
+		`SELECT execution_state FROM session_runtime_tool_results
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
+		    AND execution_attempt_generation=$5 FOR UPDATE`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.ToolUseEventID, generation,
+	).Scan(&state); err != nil {
+		return err
+	}
+	if state == "consumed" {
+		return clearConsumedToolCancellationTx(ctx, tx, job, generation, now)
+	}
 	return settleSandboxExecutionTx(ctx, tx, SandboxExecutionRef{
 		WorkspaceID: job.WorkspaceID, SessionID: job.SessionID, SessionThreadID: job.SessionThreadID, ToolUseEventID: job.ToolUseEventID,
 	}, generation, SandboxExecutionSettlement{
 		Kind: SandboxExecutionUnknownOutcome, ErrorKind: "sandbox_cancellation_outcome_unknown", SafeMessage: "sandbox cancellation outcome is unknown",
 	}, now)
+}
+
+// clearConsumedToolCancellationTx closes provider-cancellation custody after
+// the conversation terminal writer has consumed the execution. It deliberately
+// leaves that writer's Tool result and execution receipt untouched.
+func clearConsumedToolCancellationTx(ctx context.Context, tx *dbconnect.Tx, job SandboxToolCancelJob, generation int64, now time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE session_runtime_tool_results
+		    SET cancel_state=NULL, cancel_requested_at=NULL, cancel_submitted_at=NULL,
+		        provider_command_reference_json=NULL, updated_at=$6
+		  WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND tool_use_event_id=$4
+		    AND execution_attempt_generation=$5 AND execution_state='consumed'`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.ToolUseEventID, generation, now.UTC(),
+	)
+	return err
 }

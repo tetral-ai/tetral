@@ -42,7 +42,7 @@ invariants stated with them.
 | `ThreadRunSlot` | `session-manager.ts` | the single-owner run guard (below) | hot memory only; durable truth is `session_events` / `session_messages` / `session_pending_tool_uses` / `session_threads` |
 | `ThreadState` | `thread-loop/thread-state.ts` | accepted inputs, pending tool and approval work, attachments, configuration views, and request usage hints for one resident thread | rebuilt from durable state on cold start; held limits and usage hints are never durable |
 | `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
-| `SessionProcessor` | `accumulator.ts` | the request-turn accumulator (assistant shell, part/tool maps, tool-use ids, terminal state) | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; state never leaks across turns |
+| `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
 | `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | recoverable hot state on the parent thread; durable truth is the trunk ledger |
 
@@ -331,11 +331,13 @@ Invariants a replacement must preserve:
   received source and inbox, and the parent's `CommitInputs` projects it once.
   `wait_agent` returns the exact stored envelope immediately while ensuring the
   same delivery remains recoverable for the parent's next legal run.
-- `close_agent` freezes the complete descendant subtree, closes its
-  non-terminal rows, preserves `failed` and `terminated` outcomes, and only
-  then releases resident hot state. `resume_agent` reactivates only
-  `closed_for_runtime` rows; terminal rows remain terminal and are never
-  installed into hot state.
+- `interrupt_agent` and `close_agent` first ask Bridge to freeze the durable
+  target census. Each target acknowledges the internal control input before
+  the parent can complete; Bridge owns terminal Tool projection and the
+  no-new-work fence. `close_agent` then closes the complete descendant subtree,
+  preserves `failed` and `terminated` outcomes, and only afterward releases
+  resident hot state. `resume_agent` validates a quiescent closed checkpoint
+  before reactivation; terminal rows are never installed into hot state.
 
 Conformance tests: `core/test/unit/session-manager.test.ts`,
 `core/test/unit/conversation-turns.test.ts`,
@@ -371,7 +373,7 @@ bun run test:integration   # runtime-pod/test/integration against fakes and gRPC
 | `core/test/unit/thread-loop/compaction.test.ts` | proactive and reactive compaction lifecycle |
 | `core/test/unit/thread-loop/provider-request.test.ts` | system-segment composition, tool-definition-only requests, attachment inclusion |
 | `core/test/unit/llm-service.test.ts` | provider-stream ordering/identity validation and normalization |
-| `core/test/unit/runtime-accumulator.test.ts` | per-turn `SessionProcessor` accumulation that never leaks across turns |
+| `core/test/unit/runtime-accumulator.test.ts` | per-turn `ProviderStreamAccumulator` framing that never leaks across turns |
 | `core/test/unit/session-event-writer.test.ts`, `runtime-message-projection.test.ts` | `WriteEvent` projection whitelist and hot-state updates after ACK |
 | `core/test/unit/turn-retry-budget.test.ts` | provider and compaction reschedule budgets |
 | `core/test/unit/tool-system.test.ts` | `evaluateToolGate` decisions, `runPolicy` serialization/parallelism, invalid-tool repair, approval routing |

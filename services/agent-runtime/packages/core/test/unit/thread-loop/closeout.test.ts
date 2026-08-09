@@ -12,7 +12,7 @@ import type { AcceptedInputCommitResult } from "../../../src/context/context-loa
 import { normalizeProviderError } from "../../../src/contracts/provider.js";
 import { ThreadRuntime } from "../../../src/thread-loop/thread-runtime.js";
 import type { RuntimeAcceptedInputState } from "../../../src/thread-loop/thread-state.js";
-import { SessionProcessor } from "../../../src/runtime/accumulator.js";
+import { ProviderStreamAccumulator } from "../../../src/runtime/accumulator.js";
 import { buildThreadLoopUserMessage as userMessage, buildRuntimeControlCommitResult } from "../runtime-message-builders.js";
 import { acceptedInputReceipt } from "../runtime-declaration-fixtures.js";
 import { QueuedContextLoader, RecordingContextLoader, ThreadLoopRuntimeStore, acceptedInput, beginTestUserInterrupt, catalogForTest, createdAt, deferred, emptyColdCoverage, expectNoProviderDiagnosticCanaries, failingEventWriter, flushMicrotasks, queuedLLMService, runtimeThreadLoopLayer, sleepUntilAborted, testControlCommit, testRunCustody, threadLoopRuntime, waitForCondition, waitForReleaseOrAbort, withFinishIdleReceiptForTest, withRuntimeTerminationReceiptForTest, writerFrom } from "./thread-loop-test-support.js";
@@ -695,13 +695,12 @@ test("discards completed reasoning when an in-flight request is interrupted", as
         return yield* threadLoop.run(session, testRunCustody());
     }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, { llmService: service, writer }))));
     await reasoningProcessed.promise;
-    const interruptCommand = acceptedInput("rin_reasoning_interrupt");
+    const interruptCommand = { ...acceptedInput("rin_reasoning_interrupt"), origin: "user" as const };
     session.state.beginUserInterrupt(interruptCommand, testControlCommit(interruptCommand));
     await Effect.runPromise(Fiber.interrupt(runFiber));
     releaseStream.resolve();
     expect(requestEnds).toHaveLength(1);
     expect(requestEnds[0]).toMatchObject({ isError: true, errorKind: "runtime_interrupted", finishReason: "cancelled" });
-    expect(requestEnds[0]?.stableReasoningParts).toBeUndefined();
     expect(session.state.contextManager.messages().flatMap((message) => message.parts).some((part) => part.type === "reasoning")).toBe(false);
     expect(session.state.pendingAttachments()).toEqual([attachment]);
 });
@@ -1139,7 +1138,7 @@ test("failed interrupt receipt application leaves FinishIdle unwritten and surfa
                 declaration: {
                     ...result.declaration,
                     relatedReceipts: result.declaration.relatedReceipts?.map((receipt) => receipt.sourceKind === "interrupt_control"
-                        ? { ...receipt, messages: [] }
+                        ? { ...receipt, interruptToolProjections: [] }
                         : receipt),
                 },
             };
@@ -1286,7 +1285,7 @@ test("SessionManager joins the original interrupt FinishIdle ACK before releasin
         }));
         await Effect.runPromise(manager.acceptInput(firstInput));
         await firstProviderStarted.promise;
-        const interruptCommand = { ...acceptedInput("rin_finish_idle_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
+        const interruptCommand = { ...acceptedInput("rin_finish_idle_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
         let interruptSettled = false;
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, testControlCommit(interruptCommand))).then((result) => {
             interruptSettled = true;
@@ -1459,7 +1458,7 @@ test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains t
         }));
         await Effect.runPromise(manager.acceptInput(preFenceInput));
         await preCommitStarted.promise;
-        const interruptCommand = { ...acceptedInput("rin_commit_fence_interrupt"), sequenceFrom: 9, sequenceTo: 9 };
+        const interruptCommand = { ...acceptedInput("rin_commit_fence_interrupt"), origin: "user" as const, sequenceFrom: 9, sequenceTo: 9 };
         const interrupt = Effect.runPromise(manager.interruptControl("sesn_1", interruptCommand, async (declaration) => {
             order.push("commit:interrupt");
             return buildRuntimeControlCommitResult(interruptCommand, "interrupt_control", declaration);
@@ -1556,6 +1555,7 @@ test("runtime layer requests hot-state discard when invalid finish terminal appe
         "span.model_request_start",
         "span.model_request_end",
         "session.error",
+        "session.status_idle",
     ]);
     expect(appended).toContainEqual(expect.objectContaining({
         type: "span.model_request_end",
@@ -1782,7 +1782,7 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
             return withRuntimeTerminationReceiptForTest(envelope, {
                 ok: true,
                 writeId: envelope.writeId,
-                eventId: envelope.writeId,
+                eventId: `sevt_termination_${envelope.writeId}`,
                 processedAt: createdAt,
             });
         },
@@ -1821,8 +1821,7 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
         sessionId: "sesn_1",
         sessionThreadId: "thread-test",
         failure,
-        drafts: [],
-        pendingToolCancellations: [],
+        toolSettlements: [],
     });
     expect(closeoutOrder).toEqual(["write_request_end", "commit_runtime_termination"]);
     expect(requestEnds).toEqual([
@@ -1831,11 +1830,6 @@ test("runtime layer routes a proven terminal provider failure through atomic ter
             isError: true,
             errorKind: "provider_error",
             finishReason: "error",
-            drafts: [expect.objectContaining({
-                    sourceKind: "model_request",
-                    draftKind: "assistant_text",
-                    status: "failed",
-                })],
         }),
     ]);
     expect(appended.map((event) => event.type)).toEqual([
@@ -1889,7 +1883,7 @@ test("runtime layer seals a terminal stream failure before atomic termination", 
             return withRuntimeTerminationReceiptForTest(envelope, {
                 ok: true,
                 writeId: envelope.writeId,
-                eventId: envelope.writeId,
+                eventId: `sevt_termination_${envelope.writeId}`,
                 processedAt: createdAt,
             });
         },
@@ -1920,7 +1914,6 @@ test("runtime layer seals a terminal stream failure before atomic termination", 
         expect.objectContaining({
             isError: true,
             finishReason: "error",
-            drafts: [expect.objectContaining({ status: "failed" })],
         }),
     ]);
     expect(session.state.contextManager.messages()).toEqual([
@@ -1957,7 +1950,7 @@ test("processor settlement failure seals durable assistant content before termin
             { type: "step-start", stepIndex: 1 },
         ],
         createProcessor: (options) => {
-            const processor = new SessionProcessor(options);
+            const processor = new ProviderStreamAccumulator(options);
             const process = processor.process.bind(processor);
             processor.process = async (source) => {
                 if (source.event.type === "step-start") {
@@ -1984,10 +1977,6 @@ test("processor settlement failure seals durable assistant content before termin
         expect.objectContaining({
             isError: true,
             finishReason: "error",
-            drafts: [expect.objectContaining({
-                    status: "failed",
-                    parts: [expect.objectContaining({ type: "text", text: "durable before repair" })],
-                })],
         }),
     ]);
     expect(session.state.contextManager.messages()).toEqual([]);

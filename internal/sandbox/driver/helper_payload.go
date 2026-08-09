@@ -60,17 +60,13 @@ func helperRunToolInput(helperCommand string, toolName string, rawInputJSON stri
 
 func helperRunToolInputForInvocation(helperCommand string, toolName string, rawInputJSON string, toolUseEventID string) (any, helperRunToolComposition, error) {
 	if helperCommand == helperSubcommandApplyPatch {
-		var patch string
-		if err := json.Unmarshal([]byte(rawInputJSON), &patch); err == nil {
-			return map[string]any{"patch": patch}, helperRunToolComposition{}, nil
-		}
 		var object map[string]any
-		if err := decodeJSONObject(rawInputJSON, &object); err == nil {
-			if _, ok := object["patch"]; ok {
-				return object, helperRunToolComposition{}, nil
+		if err := decodeJSONObject(rawInputJSON, &object); err == nil && len(object) == 1 {
+			if patch, ok := object["patch"].(string); ok {
+				return map[string]any{"patch": patch}, helperRunToolComposition{}, nil
 			}
 		}
-		return nil, helperRunToolComposition{}, errors.New("apply_patch input must be a JSON string or object with patch")
+		return nil, helperRunToolComposition{}, errors.New("apply_patch input must be exactly one string patch field")
 	}
 	if strings.TrimSpace(rawInputJSON) == "" {
 		return map[string]any{}, helperRunToolComposition{}, nil

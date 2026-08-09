@@ -166,13 +166,32 @@ describe("openai request lowering", () => {
       tools: [{
         name: "Read",
         description: "Read a file",
-        inputSchemaJson: JSON.stringify({ type: "object", properties: { path: { type: "string" } } }),
-        outputSchemaJson: undefined,
+        function: {
+          inputSchemaJson: JSON.stringify({ type: "object", properties: { path: { type: "string" } } }),
+          outputSchemaJson: undefined,
+        },
       }],
     }));
 
     expect(lowered.tools.Read?.providerOptions).toEqual({
       openai: { strict: false },
+    });
+  });
+
+  test("openai-custom-tool lowering preserves the freeform grammar arm", () => {
+    const grammar = "start: PATCH";
+    const lowered = lowerOpenAIRequest(openAIRequest({
+      tools: [{
+        name: "apply_patch",
+        description: "Apply a patch",
+        freeform: { larkGrammar: grammar },
+      }],
+    }));
+
+    expect(lowered.tools.apply_patch).toEqual({
+      kind: "freeform",
+      description: "Apply a patch",
+      larkGrammar: grammar,
     });
   });
 
@@ -238,8 +257,7 @@ describe("openai request lowering", () => {
       tools: [{
         name: "tool_\uDC00",
         description: "description",
-        inputSchemaJson: "{}",
-        outputSchemaJson: undefined,
+        function: { inputSchemaJson: "{}", outputSchemaJson: undefined },
       }],
     }), { resolvedAttachments: [attachment] });
 
@@ -255,7 +273,7 @@ describe("openai request lowering", () => {
       tools: [{
         name: "Search",
         description: "Search",
-        inputSchemaJson: JSON.stringify({
+        function: { inputSchemaJson: JSON.stringify({
           properties: {
             enabled: true,
             mode: { const: "fast", title: "dropped" },
@@ -285,12 +303,11 @@ describe("openai request lowering", () => {
           },
           required: ["mode"],
           title: "dropped root",
-        }),
-        outputSchemaJson: JSON.stringify(false),
+        }), outputSchemaJson: JSON.stringify(false) },
       }],
     }));
 
-    expect(lowered.tools.Search?.inputSchema.schema).toEqual({
+    expect(lowered.tools.Search?.inputSchema?.schema).toEqual({
       properties: {
         enabled: { type: "string" },
         mode: { enum: ["fast"], type: "string" },
@@ -343,7 +360,7 @@ describe("openai request lowering", () => {
       required: ["cmd"],
     };
     const lowered = lowerOpenAIRequest(openAIRequest({
-      tools: [{ name: "exec_command", description: "Run a command", inputSchemaJson: JSON.stringify(execSchema) }],
+      tools: [{ name: "exec_command", description: "Run a command", function: { inputSchemaJson: JSON.stringify(execSchema) } }],
     }));
 
     expect(lowered.tools.exec_command?.inputSchema).toEqual({ kind: "ai-sdk-json-schema", schema: execSchema });

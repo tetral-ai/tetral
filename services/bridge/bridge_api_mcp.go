@@ -391,7 +391,7 @@ func mcpMaterializationDeclarationReceipt(
 		SessionThreadId:   request.GetScope().GetSessionThreadId(),
 		OperationKind:     bridgeOpCommitMcpToolResult,
 		SourceKind:        "mcp_tool_execution",
-		SourceId:          sourceID,
+		OperationId:       sourceID,
 		DeclarationDigest: declarationDigest,
 	}
 	if attachment == nil {
@@ -449,11 +449,11 @@ func validStoredMCPMaterializationReceipt(
 		receipt.GetSessionThreadId() != sessionThreadID ||
 		receipt.GetOperationKind() != bridgeOpCommitMcpToolResult ||
 		receipt.GetSourceKind() != "mcp_tool_execution" ||
-		receipt.GetSourceId() != sourceID ||
+		receipt.GetOperationId() != sourceID ||
 		receipt.GetDeclarationDigest() != declarationDigest ||
 		len(receipt.GetEvents()) != 0 ||
 		len(receipt.GetMessages()) != 0 ||
-		len(receipt.GetPendingToolDeltaJson()) != 0 ||
+		len(receipt.GetInterruptToolProjections()) != 0 ||
 		len(receipt.GetPrefixConsumptions()) != 0 ||
 		receipt.GetRequestReschedule() != nil ||
 		len(receipt.GetChildLifecycle()) != 0 ||
@@ -1275,7 +1275,7 @@ func logMCPMaterialization(logger *slog.Logger, eventKind string, request *bridg
 		slog.String("component", ServiceNameBridgeAPI),
 		slog.String("workspace.id", request.GetScope().GetWorkspaceId()),
 		slog.String("session.id", request.GetScope().GetSessionId()),
-		slog.String("session.thread.id", request.GetScope().GetSessionThreadId()),
+		slog.String("thread.id", request.GetScope().GetSessionThreadId()),
 		slog.String("mcp.tool_use_event_id", request.GetToolUseEventId()),
 		slog.String("mcp.server.name", request.GetMcpServerName()),
 		slog.String("mcp.tool.name", request.GetToolName()),

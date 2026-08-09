@@ -35,13 +35,13 @@ import type {
   DurableRuntimeMessage,
   RuntimeDeclarationReceipt,
   RuntimeMessage,
-  RuntimeMessageDraft,
+  RuntimeMessageCreate,
 } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeControlInputCommitResult,
   RuntimeControlInputDeclaration,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
-import { taskNotificationDraft } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
+import { taskNotificationCreate } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import { GrpcStatusError } from "./errors.js";
 import { runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
 
@@ -85,7 +85,7 @@ export interface RuntimeSessionRunHost {
   >;
   readonly handleInterruptControl: (
     sessionId: string,
-    command: RuntimeCommandScope,
+    command: RuntimeCommandScope & { readonly origin: "user" | "agent" },
     commitInterruptInput: (declaration: RuntimeControlInputDeclaration) => Promise<RuntimeControlInputCommitResult>,
   ) => Promise<
     | { readonly ok: true; readonly sessionId: string; readonly created: boolean; readonly interrupted: boolean; readonly idleInterrupt: boolean; readonly duplicate?: true | undefined; readonly stale?: true | undefined }
@@ -120,6 +120,7 @@ export interface RuntimeSessionRunHost {
     },
     commit: () => Promise<
       | { readonly ok: true; readonly stale: true }
+      | { readonly ok: true; readonly deferred: true }
       | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
       | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string | number }
     >,
@@ -199,10 +200,11 @@ export interface RuntimeTaskNotificationCommitter {
       readonly sourceToolUseEventId: string;
       readonly status: "completed" | "failed" | "cancelled" | "expired";
       readonly payloadJson: string;
-      readonly draft: RuntimeMessageDraft;
+      readonly messageCreate: RuntimeMessageCreate;
     };
   }) => Promise<
     | { readonly ok: true; readonly stale: true }
+    | { readonly ok: true; readonly deferred: true }
     | { readonly ok: true; readonly committedMessage: DurableRuntimeMessage }
     | { readonly ok: false; readonly retryable: boolean; readonly errorCode: string; readonly message: string }
   >;
@@ -215,12 +217,7 @@ export interface RuntimeControlInputCommitter {
   readonly commitControlInput: (input: {
     readonly scope: RuntimeCommandScope;
     readonly inputKind: "interrupt_control" | "tool_confirmation";
-    readonly drafts: readonly RuntimeMessageDraft[];
-    readonly pendingToolCancellations: readonly {
-      readonly toolUseEventId: string;
-      readonly runtimeLocalId: string;
-    }[];
-    readonly sandboxExecutionToolUseEventIds: readonly string[];
+    readonly messageCreates: readonly RuntimeMessageCreate[];
   }) => Promise<
     | { readonly ok: true; readonly stale: true }
     | { readonly ok: true; readonly receipt: RuntimeDeclarationReceipt }
@@ -598,11 +595,11 @@ export class RuntimeControlService {
       return;
     }
     // INTERRUPT CLOSEOUT ORDER. The run host freezes new work before settling
-    // the command. When a provider request is open, the loop joins its
-    // loop-authored cancellations and the interrupt input into WriteRequestEnd;
-    // the callback below then observes that joined receipt instead of issuing a
-    // second CommitInputs declaration. Outside an open provider request, the
-    // callback remains the interrupt input's CommitInputs boundary.
+    // the command. When a provider request is open, WriteRequestEnd joins the
+    // separately owned interrupt CommitInputs envelope; otherwise this callback
+    // is that input's CommitInputs boundary. Bridge locks the durable unfinished-
+    // Tool census, writes each terminal conversation result, and returns only
+    // the minimal projections needed by a current-custody hot Thread.
     //
     //  # | action                                      | durable boundary
     // ---+---------------------------------------------+------------------------------------------
@@ -614,26 +611,30 @@ export class RuntimeControlService {
     //  6 | record end_turn                             | FinishIdle after the interrupt receipt
     //
     // INVARIANTS:
-    // - The loop authors cancellation messages; the Bridge only validates and
-    //   persists the frozen declaration.
+    // - Runtime carries cancellation intent; Bridge owns the exhaustive durable
+    //   census, terminal result writes, and Sandbox execution consumption.
     // - An open request and its interrupt are one atomic database operation, so
     //   losing either transport response is resolved by declaration replay.
     // - The interrupt receipt is the last input commit; only its FinishIdle may
     //   follow before the run slot is released.
     // - The admitted user.interrupt event already exists. The host callback
-    //   commits the loop-authored cancellation declaration, marks that source
-    //   processed, and settles the named pending-tool rows without creating a
-    //   second interrupt event.
+    //   commits the intent, marks that source processed, and applies the returned
+    //   census projections without creating a second interrupt event.
     // - An admitted idle interrupt still commits its declaration. Only redelivery
     //   after that exact closeout has completed is a no-op; the interrupt fence
     //   sequence rides the command so redelivered events stay ordered.
-    // - A late tool result for the interrupted request is never appended twice; it
-    //   is dropped or folded into the already-committed cancellation receipt.
+    // - A late tool result cannot overwrite the Bridge-authored terminal result;
+    //   provider cancellation and background cleanup remain independently owned.
     if (effect === "interrupt") {
+	  const interruptPayload = parseObjectPayload(request.payloadJson, "interrupt control");
+	  const origin = stringField(interruptPayload, "origin");
+	  if (origin !== "user" && origin !== "agent") {
+		throw new GrpcStatusError(status.INVALID_ARGUMENT, "invalid interrupt control origin");
+	  }
       let closeoutCommitResult: Awaited<ReturnType<typeof this.commitControlInput>> | undefined;
       const result = await this.options.runHost.handleInterruptControl(
         request.sessionId,
-        commandScope(request),
+		{ ...commandScope(request), origin },
         async (declaration) => {
           const committed = await this.commitControlInput(request, "interrupt_control", declaration);
           closeoutCommitResult = committed;
@@ -695,12 +696,7 @@ export class RuntimeControlService {
         scope: taskNotificationCommitScope(request),
         command: {
           ...command,
-          draft: taskNotificationDraft({
-            workspaceId: request.workspaceId,
-            sessionId: request.sessionId,
-            sessionThreadId: request.sessionThreadId,
-            runtimeInputId: request.runtimeInputId,
-            taskId: command.taskId,
+          messageCreate: taskNotificationCreate({
             payloadJson: command.payloadJson,
           }),
         },
@@ -754,9 +750,7 @@ export class RuntimeControlService {
     const ack = await this.options.controlInputCommitter.commitControlInput({
       scope: commandScope(request),
       inputKind,
-      drafts: declaration.drafts,
-      pendingToolCancellations: declaration.pendingToolCancellations,
-      sandboxExecutionToolUseEventIds: declaration.sandboxExecutionToolUseEventIds,
+      messageCreates: declaration.messageCreates,
     });
     if (!ack.ok) {
       return {

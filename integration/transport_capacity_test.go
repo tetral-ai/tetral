@@ -4,10 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -210,33 +207,20 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 			TargetPodUid:      s.podUID,
 		},
 	}
-	runtimeLocalID := transportStableRuntimeID(
-		"runtime_message_draft",
-		request.GetWorkspaceId(),
-		request.GetSessionId(),
-		s.threadID,
-		"messages",
-		request.GetRuntimeInputId(),
-		"user_input",
-		"0",
-	)
 	committed, err := s.bridge.CommitInputs(ctx, &bridgev1.CommitInputsRequest{
 		Scope:          scope,
 		RuntimeInputId: request.GetRuntimeInputId(),
+		InputKind:      "messages",
 		EventIds:       request.GetEventIds(),
 		SequenceFrom:   request.GetSequenceFrom(),
 		SequenceTo:     request.GetSequenceTo(),
-		Drafts: []*bridgev1.RuntimeMessageDraft{{
-			RuntimeLocalId:  runtimeLocalID,
-			SourceKind:      "messages",
-			SourceId:        request.GetRuntimeInputId(),
-			SourceEventId:   request.GetEventIds()[0],
-			DraftKind:       bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_USER_INPUT,
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{{
+			SourceEventId:   &request.EventIds[0],
+			MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT,
 			MessageInfoJson: `{"role":"user","origin":"user","status":"completed"}`,
-			Parts: []*bridgev1.RuntimePartDraft{{
-				RuntimeLocalPartId: transportStableRuntimeID("runtime_message_part_draft", runtimeLocalID, "text", "0"),
-				PartKind:           "text",
-				PartJson:           fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, payload.Messages[0].Parts[0].Text),
+			Parts: []*bridgev1.RuntimePartCreate{{
+				PartKind: "text",
+				PartJson: fmt.Sprintf(`{"type":"text","text":%q,"truncated":false,"status":"completed"}`, payload.Messages[0].Parts[0].Text),
 			}},
 		}},
 	})
@@ -275,17 +259,6 @@ func (s *settlingTransportSender) SendRuntimeCommand(
 		return nil, err
 	}
 	return response, nil
-}
-
-func transportStableRuntimeID(parts ...string) string {
-	hasher := sha256.New()
-	var length [4]byte
-	for _, part := range parts {
-		binary.BigEndian.PutUint32(length[:], uint32(len([]byte(part)))) // #nosec G115 -- test identifiers are bounded below uint32.
-		_, _ = hasher.Write(length[:])
-		_, _ = hasher.Write([]byte(part))
-	}
-	return "stid_" + hex.EncodeToString(hasher.Sum(nil))
 }
 
 func seedTransportSession(t *testing.T, db *sql.DB, sessionID string, threadID string, bindingID string, podUID string) {

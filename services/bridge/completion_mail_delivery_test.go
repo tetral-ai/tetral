@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -271,7 +272,7 @@ func TestPostgreSQLAgentMailInboxRepairRedeliversAfterAcceptedQueueAck(t *testin
 	if err != nil || initialPlan.Request == nil {
 		t.Fatalf("prepare initial agent-mail wake = %#v/%v; want Runtime command", initialPlan, err)
 	}
-	if err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), initialJob, initialPlan.Request); err != nil {
+	if _, err := deliveryStore.MarkRuntimeInputAccepted(context.Background(), initialJob, initialPlan.Request); err != nil {
 		t.Fatalf("mark initial agent-mail accepted: %v", err)
 	}
 	if acknowledged, err := queueStore.Ack(context.Background(), queue.AckRequest{
@@ -315,21 +316,18 @@ func TestPostgreSQLAgentMailInboxRepairRedeliversAfterAcceptedQueueAck(t *testin
 		repairedPlan.Request.GetSequenceFrom() != initialPlan.Request.GetSequenceFrom() {
 		t.Fatalf("repaired agent-mail command = %#v; want stable original %#v", repairedPlan.Request, initialPlan.Request)
 	}
-	if err := recoveryStore.MarkRuntimeInputAccepted(context.Background(), repairedJob, repairedPlan.Request); err != nil {
+	if _, err := recoveryStore.MarkRuntimeInputAccepted(context.Background(), repairedJob, repairedPlan.Request); err != nil {
 		t.Fatalf("mark repaired agent-mail accepted: %v", err)
 	}
-	draft := bridgeInputDraftForTest(
-		"default",
-		sessionID,
-		mainID,
-		"agent_mail",
-		completionRuntimeInputID(deliveryID),
-		resolved.GetReceivedEventId(),
-		bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_AGENT_MAIL_INPUT,
-		"user",
-		completionMailEnvelope("main", "sender", deliveryID),
+	sourceEventID := resolved.GetReceivedEventId()
+	create := bridgeMessageCreateForTest(
+		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
+		"user", "agent", &sourceEventID,
+		bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf(
+			`{"type":"text","text":%q,"truncated":false,"status":"completed"}`,
+			completionMailEnvelope("main", "sender", deliveryID),
+		)},
 	)
-	draft.MessageInfoJson = `{"role":"user","origin":"runtime","status":"completed"}`
 	if _, err := apiStore.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
 		Scope:          scope,
 		RuntimeInputId: completionRuntimeInputID(deliveryID),
@@ -337,7 +335,7 @@ func TestPostgreSQLAgentMailInboxRepairRedeliversAfterAcceptedQueueAck(t *testin
 		EventIds:       []string{resolved.GetReceivedEventId()},
 		SequenceFrom:   resolved.GetReceivedSequence(),
 		SequenceTo:     resolved.GetReceivedSequence(),
-		Drafts:         []*bridgev1.RuntimeMessageDraft{draft},
+		MessageCreates: []*bridgev1.RuntimeMessageCreate{create},
 	}); err != nil {
 		t.Fatalf("commit repaired agent-mail input: %v", err)
 	}

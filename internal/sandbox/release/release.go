@@ -150,7 +150,7 @@ func ensureTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, session
 			}
 			if state == "pending" {
 				releaseRequest, ready, err := pendingReleaseEnqueueRequestTx(
-					ctx, tx, workspaceID, sessionID, currentBinding.logicalSandboxID, operationID, targetHandle, now,
+					ctx, tx, workspaceID, sessionID, currentBinding.logicalSandboxID, operationID, targetHandle, now, nil,
 				)
 				if err != nil {
 					return "", false, err
@@ -308,6 +308,7 @@ func pendingReleaseEnqueueRequestTx(
 	operationID string,
 	targetHandle string,
 	now time.Time,
+	stagedJobIDs map[string]struct{},
 ) (queue.EnqueueRequest, bool, error) {
 	blocked, err := BlockedTx(ctx, tx, workspaceID, sessionID, logicalSandboxID, operationID, targetHandle)
 	if err != nil || blocked {
@@ -324,6 +325,9 @@ func pendingReleaseEnqueueRequestTx(
 		return queue.EnqueueRequest{}, false, err
 	}
 	if currentJobID.Valid {
+		if _, staged := stagedJobIDs[currentJobID.String]; staged {
+			return queue.EnqueueRequest{}, false, nil
+		}
 		var status string
 		err := tx.QueryRow(ctx,
 			`SELECT status FROM queue_jobs WHERE workspace_id=$1 AND id=$2`,
@@ -387,6 +391,87 @@ func BlockedTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessio
 		workspaceID, sessionID, targetHandle, logicalSandboxID, operationID,
 	).Scan(&blocked)
 	return blocked, err
+}
+
+// ReadyRequestsTx converts every unblocked pending release for a Session into
+// durable Queue custody. Callers hold the Session mutation lock; this helper
+// locks the lifecycle rows before taking outgoing Queue locks so every blocker
+// removal and release wake share one ordering and one transaction boundary.
+func ReadyRequestsTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, sessionID string, now time.Time, stagedJobIDs map[string]struct{}) ([]queue.EnqueueRequest, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT logical_sandbox_id
+		   FROM sandbox_lifecycle_operations
+		  WHERE workspace_id=$1 AND session_id=$2
+		  ORDER BY logical_sandbox_id`, workspaceID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var logicalIDs []string
+	for rows.Next() {
+		var logicalID string
+		if err := rows.Scan(&logicalID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		logicalIDs = append(logicalIDs, logicalID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, logicalID := range logicalIDs {
+		if err := lockLifecycleOperationsTx(ctx, tx, workspaceID, logicalID); err != nil {
+			return nil, err
+		}
+	}
+
+	rows, err = tx.Query(ctx,
+		`SELECT operation_id, logical_sandbox_id, target_provider_resource_id
+		   FROM sandbox_lifecycle_operations
+		  WHERE workspace_id=$1 AND session_id=$2 AND kind='release' AND state='pending'
+		    AND superseded_by_operation_id IS NULL
+		  ORDER BY operation_id`, workspaceID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	type pendingRelease struct{ operationID, logicalSandboxID, targetHandle string }
+	var pending []pendingRelease
+	for rows.Next() {
+		var item pendingRelease
+		if err := rows.Scan(&item.operationID, &item.logicalSandboxID, &item.targetHandle); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	requests := make([]queue.EnqueueRequest, 0, len(pending))
+	for _, item := range pending {
+		blocked, err := BlockedTx(ctx, tx, workspaceID, sessionID, item.logicalSandboxID, item.operationID, item.targetHandle)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			continue
+		}
+		request, ready, err := pendingReleaseEnqueueRequestTx(ctx, tx, workspaceID, sessionID, item.logicalSandboxID, item.operationID, item.targetHandle, now, stagedJobIDs)
+		if err != nil {
+			return nil, err
+		}
+		if ready {
+			requests = append(requests, request)
+		}
+	}
+	return requests, nil
 }
 
 // CompleteTx reports whether Session-delete release custody is closed without

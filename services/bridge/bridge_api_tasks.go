@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -30,7 +31,7 @@ import (
 // the task-notification inbox birth; Bridge verifies the Runtime declaration
 // against that stored terminal result before committing one event and message.
 func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Context, request *bridgev1.CommitTaskNotificationResultRequest) (*bridgev1.CommitTaskNotificationResultResponse, error) {
-	if request.GetRuntimeInputId() == "" || request.GetTaskId() == "" || request.GetResultJson() == "" || request.GetDraft() == nil {
+	if request.GetRuntimeInputId() == "" || request.GetTaskId() == "" || request.GetResultJson() == "" || request.GetMessageCreate() == nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid task notification result request")
 	}
 	resultJSON := stripInternalProviderFields(request.GetResultJson())
@@ -54,7 +55,7 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 	}
 	key := request.GetTaskId() + ":" + request.GetRuntimeInputId()
 	sourceID := stableRuntimeID("task_notification", request.GetRuntimeInputId(), request.GetTaskId())
-	if err := validateTaskNotificationDraft(request, sourceID, resultJSON); err != nil {
+	if err := validateTaskNotificationCreate(request, resultJSON); err != nil {
 		return nil, err
 	}
 	declarationDigest, err := taskNotificationDeclarationDigest(request, resultJSON)
@@ -98,6 +99,26 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			}
 			ack = duplicateAck(sourceID, "")
 			return nil
+		}
+		var inboxStatus, threadStatus string
+		err := tx.QueryRow(ctx, `SELECT inbox.status,thread.status
+			FROM session_runtime_inbox inbox JOIN session_threads thread
+			 ON thread.workspace_id=inbox.workspace_id AND thread.session_id=inbox.session_id AND thread.id=inbox.session_thread_id
+			WHERE inbox.workspace_id=$1 AND inbox.session_id=$2 AND inbox.session_thread_id=$3
+			 AND inbox.runtime_input_id=$4 AND inbox.input_kind='task_notification' FOR UPDATE OF inbox,thread`,
+			request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId(), request.GetRuntimeInputId()).Scan(&inboxStatus, &threadStatus)
+		if err != nil && !dbconnect.IsNoRows(err) {
+			return err
+		}
+		if err == nil && (inboxStatus == "queued" || inboxStatus == "parked") {
+			closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId(), request.GetScope().GetSessionThreadId())
+			if err != nil {
+				return err
+			}
+			if closing || threadStatus == "closed_for_runtime" {
+				ack = rejectedAck("task_notification_deferred")
+				return nil
+			}
 		}
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
@@ -713,48 +734,28 @@ func runtimeNotificationJSON(taskID string, sourceToolUseEventID string, termina
 	})
 }
 
-func validateTaskNotificationDraft(
+func validateTaskNotificationCreate(
 	request *bridgev1.CommitTaskNotificationResultRequest,
-	sourceID string,
 	resultJSON string,
 ) error {
-	draft := request.GetDraft()
-	if draft == nil ||
-		draft.GetDraftKind() != bridgev1.RuntimeDraftKind_RUNTIME_DRAFT_KIND_TASK_NOTIFICATION ||
-		draft.GetOrdinal() != 0 ||
-		draft.GetSourceKind() != "task_notification" ||
-		draft.GetSourceId() != sourceID ||
-		draft.GetSourceEventId() != "" ||
-		len(draft.GetParts()) != 1 {
-		return status.Error(codes.InvalidArgument, "task notification draft identity is invalid")
-	}
-	expectedMessageID := stableRuntimeID(
-		"runtime_message_draft",
-		request.GetScope().GetWorkspaceId(),
-		request.GetScope().GetSessionId(),
-		request.GetScope().GetSessionThreadId(),
-		"task_notification",
-		sourceID,
-		runtimeDraftKindToken(draft.GetDraftKind()),
-		"0",
-	)
-	if draft.GetRuntimeLocalId() != expectedMessageID {
-		return status.Error(codes.InvalidArgument, "task notification draft id is invalid")
+	create := request.GetMessageCreate()
+	if create == nil ||
+		create.GetMessageKind() != bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION ||
+		create.SourceEventId != nil || len(create.GetParts()) != 1 {
+		return status.Error(codes.InvalidArgument, "task notification create identity is invalid")
 	}
 	var messageInfo map[string]any
-	if err := json.Unmarshal([]byte(draft.GetMessageInfoJson()), &messageInfo); err != nil ||
+	if err := json.Unmarshal([]byte(create.GetMessageInfoJson()), &messageInfo); err != nil ||
 		len(messageInfo) != 3 ||
 		messageInfo["role"] != "user" ||
 		messageInfo["origin"] != "runtime" ||
 		messageInfo["status"] != "completed" {
-		return status.Error(codes.InvalidArgument, "task notification draft message is invalid")
+		return status.Error(codes.InvalidArgument, "task notification create message is invalid")
 	}
-	part := draft.GetParts()[0]
+	part := create.GetParts()[0]
 	if part == nil ||
-		part.GetPartKind() != "text" ||
-		part.GetOrdinal() != 0 ||
-		part.GetRuntimeLocalPartId() != stableRuntimeID("runtime_message_part_draft", expectedMessageID, "text", "0") {
-		return status.Error(codes.InvalidArgument, "task notification draft part identity is invalid")
+		part.GetPartKind() != "text" {
+		return status.Error(codes.InvalidArgument, "task notification create part identity is invalid")
 	}
 	var partInfo map[string]any
 	if err := json.Unmarshal([]byte(part.GetPartJson()), &partInfo); err != nil ||
@@ -763,7 +764,7 @@ func validateTaskNotificationDraft(
 		partInfo["text"] != resultJSON ||
 		partInfo["truncated"] != false ||
 		partInfo["status"] != "completed" {
-		return status.Error(codes.InvalidArgument, "task notification draft part is invalid")
+		return status.Error(codes.InvalidArgument, "task notification create part is invalid")
 	}
 	return nil
 }
@@ -837,17 +838,13 @@ func commitTaskNotificationDeclarationTx(
 	); err != nil {
 		return false, nil, err
 	}
-	messageStamp, err := upsertRuntimeOutputDraftTx(
+	messageStamp, err := insertRuntimeMessageCreateTx(
 		ctx,
 		tx,
 		scope,
-		sourceID,
 		"task_notification",
 		eventID,
-		"",
-		0,
-		request.GetDraft(),
-		runtimeOutputWritePolicy{AllowNewParts: true},
+		request.GetMessageCreate(),
 		now,
 	)
 	if err != nil {
@@ -881,10 +878,9 @@ func commitTaskNotificationDeclarationTx(
 		SessionThreadId: scope.GetSessionThreadId(),
 		OperationKind:   bridgeOpCommitTaskNotificationResult,
 		SourceKind:      "task_notification",
-		SourceId:        sourceID,
+		OperationId:     sourceID,
 		Events: []*bridgev1.DurableEventStamp{{
 			SessionThreadId: scope.GetSessionThreadId(),
-			SourceEventId:   sourceID,
 			EventId:         eventID,
 			EventSequence:   eventSequence,
 			Disposition:     bridgev1.DurableEventDisposition_DURABLE_EVENT_DISPOSITION_CREATED,

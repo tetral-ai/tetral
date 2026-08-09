@@ -6,8 +6,9 @@
  * verifies the Runtime binding, admits the turn, resolves attachments and
  * credentials, and streams catalog-approved provider events back to gRPC.
  * Platform credentials may switch only before the provider streamer emits its
- * first event; session credentials always receive one attempt. Caught provider
- * faults close open fragments before the shell emits a terminal provider error.
+ * first event; session credentials always receive one attempt. The request-local
+ * fragment tracker forwards success only after every explicit fragment lifecycle
+ * closes; provider faults discard partial fragments and retain their own error.
  *
  * The application and gRPC server construct and call this module. It delegates
  * binding checks to `RuntimeBindingTokenVerifier`, attachment reads to
@@ -124,7 +125,6 @@ export class ProviderGatewayServiceShell {
       readonly "session.id": string;
       readonly "thread.id": string;
       readonly "request.id": string;
-      readonly "provider.request.id": string;
       readonly "model_request.id": string;
     }> | undefined;
     try {
@@ -229,9 +229,10 @@ export class ProviderGatewayServiceShell {
         "duration.ms": Math.round(performance.now() - started),
       } as const;
       try {
-        this.options.logger.info(requestOutcome === "ok"
-          ? record
-          : {
+        if (requestOutcome === "ok") {
+          this.options.logger.info(record);
+        } else {
+          this.options.logger.error({
               ...record,
               ...semanticErrorFields({
                 errorClass,
@@ -239,6 +240,7 @@ export class ProviderGatewayServiceShell {
                 messageSafe: "provider request failed",
               }),
             });
+        }
       } catch {
         // Observability must not replace the request's outcome.
       }
@@ -353,9 +355,9 @@ export class ProviderGatewayServiceShell {
     //   | emitted == true (any src) | any        | no switch, no retry; forward terminal;    | no              |
     //   |                           |            | Runtime owns recovery                     |                 |
     //
-    // A fault that arrives mid-fragment first drains ProviderOpenFragmentTracker
-    // -end events to close any open text/reasoning/tool-input fragment, THEN emits
-    // the provider-error terminal, so no fragment is left unclosed downstream.
+    // ProviderOpenFragmentTracker validates only this attempt. A nominal finish or
+    // EOF with unresolved fragments becomes one retryable provider-stream failure;
+    // an explicit provider fault retains its classification without synthetic ENDs.
     const attemptedPlatformKeyIds = new Set<string>();
     let platformAttempts = 0;
     let lastPlatformProviderError: ProviderErrorInput | undefined;
@@ -394,6 +396,7 @@ export class ProviderGatewayServiceShell {
           openFragments.record(event);
           yield event;
         }
+        openFragments.assertComplete("eof");
         return;
       } catch (error) {
         if (error instanceof GrpcStatusError) {
@@ -405,16 +408,13 @@ export class ProviderGatewayServiceShell {
             ? new ProviderKeyFailureError(classifyProviderFailure(resolvedCredential.providerId, providerAttemptFailureInput(error)))
             : undefined;
         if (providerKeyFailure === undefined) {
-          for (const closeEvent of openFragments.closeEvents(request)) {
-            yield closeEvent;
+          if (error instanceof ProviderIncompleteStreamError) {
+            logProviderStreamIncomplete(this.options.logger, request, error);
           }
           yield providerErrorEvent(request, classifyProviderStreamError(error));
           return;
         }
         if (resolvedCredential?.source !== "platform" || emitted) {
-          for (const closeEvent of openFragments.closeEvents(request)) {
-            yield closeEvent;
-          }
           yield providerErrorEvent(request, providerKeyFailure.classification.providerError);
           return;
         }
@@ -494,7 +494,6 @@ function safeRequestIdentity(request: ProviderRequest): Partial<{
   readonly "session.id": string;
   readonly "thread.id": string;
   readonly "request.id": string;
-  readonly "provider.request.id": string;
   readonly "model_request.id": string;
 }> {
   const bounded = (value: string): string | undefined =>
@@ -509,9 +508,7 @@ function safeRequestIdentity(request: ProviderRequest): Partial<{
     ...(sessionId !== undefined ? { "session.id": sessionId } : {}),
     ...(threadId !== undefined ? { "thread.id": threadId } : {}),
     ...(requestId !== undefined ? { "request.id": requestId } : {}),
-    ...(modelRequestId !== undefined
-      ? { "provider.request.id": modelRequestId, "model_request.id": modelRequestId }
-      : {}),
+    ...(modelRequestId !== undefined ? { "model_request.id": modelRequestId } : {}),
   };
 }
 
@@ -552,78 +549,162 @@ function providerAttemptHeaders(value: unknown): Readonly<Record<string, string 
 class ProviderOpenFragmentTracker {
   private readonly textIds = new Set<string>();
   private readonly reasoningIds = new Set<string>();
-  private readonly toolInputs = new Map<string, string>();
+  private readonly toolInputs = new Map<string, { readonly name: string; ended: boolean }>();
+  private readonly toolCalls = new Set<string>();
 
   record(event: ProviderStreamEvent): void {
     switch (event.type) {
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START:
-        this.add(this.textIds, event.text?.id);
+        this.start(this.textIds, event.text?.id, "text");
+        return;
+      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA:
+        this.delta(this.textIds, event.text?.id, "text");
         return;
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END:
-        this.delete(this.textIds, event.text?.id);
+        this.end(this.textIds, event.text?.id, "text");
         return;
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START:
-        this.add(this.reasoningIds, event.reasoning?.id);
+        this.start(this.reasoningIds, event.reasoning?.id, "reasoning");
+        return;
+      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA:
+        this.delta(this.reasoningIds, event.reasoning?.id, "reasoning");
         return;
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END:
-        this.delete(this.reasoningIds, event.reasoning?.id);
+        this.end(this.reasoningIds, event.reasoning?.id, "reasoning");
         return;
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START:
         if (event.toolInput !== undefined && event.toolInput.id.length > 0) {
-          this.toolInputs.set(event.toolInput.id, event.toolInput.name);
+          if (this.toolInputs.has(event.toolInput.id) || this.toolCalls.has(event.toolInput.id)) {
+            throw this.incomplete("tool_input");
+          }
+          this.toolInputs.set(event.toolInput.id, { name: event.toolInput.name, ended: false });
         }
         return;
+      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA:
+        this.toolInputDelta(event.toolInput?.id, event.toolInput?.name);
+        return;
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END:
+        this.endToolInput(event.toolInput?.id, event.toolInput?.name);
+        return;
       case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL:
-        this.toolInputs.delete(event.toolInput?.id ?? event.toolCall?.id ?? "");
+        this.consumeToolCall(event.toolCall?.id, event.toolCall?.name);
+        return;
+      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH:
+        this.assertComplete("finish");
+        return;
+      case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR:
+        this.clear();
         return;
       default:
         return;
     }
   }
 
-  closeEvents(request: ProviderRequest): ProviderStreamEvent[] {
-    const events: ProviderStreamEvent[] = [];
-    for (const id of this.textIds) {
-      events.push({
-        requestId: request.requestId,
-        modelRequestId: request.modelRequestId,
-        type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END,
-        text: { id, text: "", metadataJson: "{}" },
-      });
+  assertComplete(category: ProviderIncompleteStreamCategory): void {
+    if (this.textIds.size > 0 || this.reasoningIds.size > 0 || this.toolInputs.size > 0) {
+      throw this.incomplete(category);
     }
-    for (const id of this.reasoningIds) {
-      events.push({
-        requestId: request.requestId,
-        modelRequestId: request.modelRequestId,
-        type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END,
-        reasoning: { id, text: "", metadataJson: "{}" },
-      });
+  }
+
+  private endToolInput(id: string | undefined, name: string | undefined): void {
+    const fragment = id === undefined ? undefined : this.toolInputs.get(id);
+    if (fragment === undefined || fragment.ended || fragment.name !== name) {
+      throw this.incomplete("tool_input");
     }
-    for (const [id, name] of this.toolInputs) {
-      events.push({
-        requestId: request.requestId,
-        modelRequestId: request.modelRequestId,
-        type: ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END,
-        toolInput: { id, name, text: "", metadataJson: "{}" },
-      });
+    fragment.ended = true;
+  }
+
+  private toolInputDelta(id: string | undefined, name: string | undefined): void {
+    const fragment = id === undefined ? undefined : this.toolInputs.get(id);
+    if (fragment === undefined || fragment.ended || fragment.name !== name) {
+      throw this.incomplete("tool_input");
     }
+  }
+
+  private consumeToolCall(id: string | undefined, name: string | undefined): void {
+    if (id === undefined || name === undefined || this.toolCalls.has(id)) {
+      throw this.incomplete("tool_call");
+    }
+    const fragment = this.toolInputs.get(id);
+    if (fragment !== undefined && (!fragment.ended || fragment.name !== name)) {
+      throw this.incomplete("tool_call");
+    }
+    if (fragment !== undefined) {
+      this.toolInputs.delete(id);
+    }
+    this.toolCalls.add(id);
+  }
+
+  private incomplete(category: ProviderIncompleteStreamCategory): ProviderIncompleteStreamError {
+    return new ProviderIncompleteStreamError(category, {
+      text: this.textIds.size,
+      reasoning: this.reasoningIds.size,
+      toolInput: this.toolInputs.size,
+    });
+  }
+
+  private clear(): void {
     this.textIds.clear();
     this.reasoningIds.clear();
     this.toolInputs.clear();
-    return events;
+    this.toolCalls.clear();
   }
 
-  private add(ids: Set<string>, id: string | undefined): void {
-    if (id !== undefined && id.length > 0) {
-      ids.add(id);
+  private start(ids: Set<string>, id: string | undefined, category: "text" | "reasoning"): void {
+    if (id === undefined || id.length === 0 || ids.has(id)) {
+      throw this.incomplete(category);
+    }
+    ids.add(id);
+  }
+
+  private delta(ids: ReadonlySet<string>, id: string | undefined, category: "text" | "reasoning"): void {
+    if (id === undefined || id.length === 0 || !ids.has(id)) {
+      throw this.incomplete(category);
     }
   }
 
-  private delete(ids: Set<string>, id: string | undefined): void {
-    if (id !== undefined && id.length > 0) {
-      ids.delete(id);
-    }
+  private end(ids: Set<string>, id: string | undefined, category: "text" | "reasoning"): void {
+    this.delta(ids, id, category);
+    ids.delete(id!);
+  }
+}
+
+type ProviderIncompleteStreamCategory = "finish" | "eof" | "text" | "reasoning" | "tool_input" | "tool_call";
+
+class ProviderIncompleteStreamError extends Error {
+  constructor(
+    readonly category: ProviderIncompleteStreamCategory,
+    readonly counts: { readonly text: number; readonly reasoning: number; readonly toolInput: number },
+  ) {
+    super("provider stream ended with an incomplete fragment lifecycle");
+    this.name = "ProviderIncompleteStreamError";
+  }
+}
+
+function logProviderStreamIncomplete(
+  logger: GatewayLogger,
+  request: ProviderRequest,
+  error: ProviderIncompleteStreamError,
+): void {
+  try {
+    logger.error({
+      event: "provider_stream_incomplete",
+      "event.kind": "provider_stream_incomplete",
+      operation: "StreamProviderRequest",
+      component: "gateway",
+      ...safeRequestIdentity(request),
+      "stream.terminal_category": error.category,
+      "stream.open_text_count": error.counts.text,
+      "stream.open_reasoning_count": error.counts.reasoning,
+      "stream.open_tool_input_count": error.counts.toolInput,
+      ...semanticErrorFields({
+        errorClass: "provider_stream",
+        errorCode: "provider_stream_incomplete",
+        messageSafe: "provider stream ended with incomplete fragments",
+      }),
+    });
+  } catch {
+    // Provider settlement does not depend on observability delivery.
   }
 }
 

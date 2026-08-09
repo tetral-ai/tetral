@@ -571,9 +571,9 @@ func (s *recordingRuntimeDeliveryStore) PrepareRuntimeCommand(_ context.Context,
 	return s.plan, s.err
 }
 
-func (s *recordingRuntimeDeliveryStore) MarkRuntimeInputAccepted(_ context.Context, job RuntimeJob, _ *agentruntimev1.RuntimeInputCommandRequest) error {
+func (s *recordingRuntimeDeliveryStore) MarkRuntimeInputAccepted(_ context.Context, job RuntimeJob, _ *agentruntimev1.RuntimeInputCommandRequest) (bool, error) {
 	s.acceptedJobs = append(s.acceptedJobs, job)
-	return s.acceptedErr
+	return false, s.acceptedErr
 }
 
 func (s *recordingRuntimeDeliveryStore) PrepareRuntimeInputRejection(_ context.Context, job RuntimeJob, result RuntimeDeliveryResult) (bool, error) {

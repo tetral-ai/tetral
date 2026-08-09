@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/blob"
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/storage"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
@@ -36,7 +37,7 @@ import (
 
 type RuntimeDeliveryStore interface {
 	PrepareRuntimeCommand(context.Context, RuntimeJob) (RuntimeCommandPlan, error)
-	MarkRuntimeInputAccepted(context.Context, RuntimeJob, *agentruntimev1.RuntimeInputCommandRequest) error
+	MarkRuntimeInputAccepted(context.Context, RuntimeJob, *agentruntimev1.RuntimeInputCommandRequest) (bool, error)
 	PrepareRuntimeInputRejection(context.Context, RuntimeJob, RuntimeDeliveryResult) (bool, error)
 }
 
@@ -66,6 +67,7 @@ const initialMCPManifestListTimeout = 180 * time.Second
 type RuntimeCommandPlan struct {
 	StaleAccepted     bool
 	SettledAccepted   bool
+	QueueLeaseSettled bool
 	CleanupTargetGone bool
 	Target            RuntimePodTarget
 	Request           *agentruntimev1.RuntimeInputCommandRequest
@@ -89,6 +91,14 @@ type RuntimePodTarget struct {
 type RuntimePodDirectDeliverer struct {
 	Store  RuntimeDeliveryStore
 	Sender RuntimeCommandSender
+}
+
+func (d RuntimePodDirectDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
+	repairer, ok := d.Store.(RuntimePodLossRepairer)
+	if !ok || repairer == nil {
+		return 0, nil
+	}
+	return repairer.RepairLostRuntimeBindings(ctx, workspaceID)
 }
 
 func (d RuntimePodDirectDeliverer) RepairRuntimeInbox(ctx context.Context, workspaceID string, limit int) (int, error) {
@@ -137,7 +147,7 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return runtimeDeliveryResultFromPrepareError(err), nil
 	}
 	if plan.SettledAccepted {
-		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted}, nil
+		return RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted, QueueLeaseSettled: plan.QueueLeaseSettled}, nil
 	}
 	if plan.StaleAccepted {
 		return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, nil
@@ -194,8 +204,12 @@ func (d RuntimePodDirectDeliverer) DeliverRuntimeJob(ctx context.Context, job Ru
 		return d.DeliverRuntimeJob(ctx, job)
 	}
 	if job.Kind == queue.KindRuntimeInput && (result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
-		if err := d.Store.MarkRuntimeInputAccepted(ctx, job, plan.Request); err != nil {
+		queueLeaseSettled, err := d.Store.MarkRuntimeInputAccepted(ctx, job, plan.Request)
+		if err != nil {
 			return runtimeDeliveryResultFromPrepareError(err), nil
+		}
+		if queueLeaseSettled {
+			result.QueueLeaseSettled = true
 		}
 	}
 	if (job.Kind == queue.KindCleanupSession || job.Kind == queue.KindSessionDeleteCleanup) && (result.Status == RuntimeDeliveryAccepted || result.Status == RuntimeDeliveryDuplicate) {
@@ -485,22 +499,40 @@ func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeCommand(ctx context.Conte
 	return plan, nil
 }
 
-func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Context, job RuntimeJob, request *agentruntimev1.RuntimeInputCommandRequest) error {
+func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Context, job RuntimeJob, request *agentruntimev1.RuntimeInputCommandRequest) (bool, error) {
 	if job.Kind != queue.KindRuntimeInput {
-		return nil
+		return false, nil
 	}
 	if s == nil || s.Client == nil {
-		return runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
+		return false, runtimeDeliveryPrepareError{kind: "runtime_reconcile_unavailable", message: "runtime delivery store is unavailable", retryable: true}
 	}
 	if job.WorkspaceID == "" || job.SessionID == "" || job.RuntimeInputID == "" || request == nil ||
 		request.GetBindingId() == "" || request.GetBindingGeneration() <= 0 || request.GetTargetPodUid() == "" {
-		return runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime job identity is incomplete", retryable: false}
+		return false, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "runtime job identity is incomplete", retryable: false}
 	}
 	now := storage.Now()
 	if s.Clock != nil {
 		now = s.Clock().UTC()
 	}
-	return s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
+	queueLeaseSettled := false
+	err := s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.mark_runtime_input_accepted", func(tx *dbconnect.Tx) error {
+		if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+			return err
+		}
+		if job.InputKind == "task_notification" {
+			closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, job.WorkspaceID, job.SessionID, job.SessionThreadID)
+			if err != nil {
+				return err
+			}
+			if closing {
+				settled, err := deferLeasedTaskNotificationTx(ctx, tx, job, now)
+				if err != nil {
+					return err
+				}
+				queueLeaseSettled = settled
+				return nil
+			}
+		}
 		result, err := tx.Exec(ctx,
 			`UPDATE session_runtime_inbox
 			    SET status = CASE
@@ -531,6 +563,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) MarkRuntimeInputAccepted(ctx context.Co
 		}
 		return nil
 	})
+	return queueLeaseSettled, err
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) PrepareRuntimeInputRejection(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (bool, error) {
@@ -1540,12 +1573,13 @@ func interruptControlCommandPayloadTx(ctx context.Context, tx *dbconnect.Tx, job
 	if err != nil {
 		return "", err
 	}
-	if eventType != "user.interrupt" {
+	if eventType != "user.interrupt" && eventType != childInterruptRequestedEventType {
 		return "", runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "interrupt control event type is invalid", retryable: false}
 	}
 	return marshalBridgeJSON(map[string]any{
 		"source_event_id":          eventID,
 		"interrupt_fence_sequence": sequence,
+		"origin":                   map[bool]string{true: "agent", false: "user"}[eventType == childInterruptRequestedEventType],
 		"reason":                   nil,
 	})
 }
@@ -1902,6 +1936,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareAgentMailCommandTx(
 }
 
 func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, port int, now time.Time) (*RuntimeTaskNotificationPlan, RuntimeCommandPlan, error) {
+	if err := lockRuntimeMutationSessionTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
+		return nil, RuntimeCommandPlan{}, err
+	}
 	taskID := taskNotificationTaskID(job.RuntimeInputID)
 	if taskID == "" {
 		return nil, RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "invalid_runtime_job_payload", message: "task notification runtime input id must identify a task", retryable: false}
@@ -1932,6 +1969,17 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 	}
 	if !terminalResultJSON.Valid || terminalResultJSON.String == "" || !json.Valid([]byte(terminalResultJSON.String)) || !validBackgroundTaskTerminalStatus(taskStatus) {
 		return nil, RuntimeCommandPlan{}, runtimeDeliveryPrepareError{kind: "task_notification_result_invalid", message: "task notification durable result is invalid", retryable: false}
+	}
+	closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, job.WorkspaceID, job.SessionID, job.SessionThreadID)
+	if err != nil {
+		return nil, RuntimeCommandPlan{}, err
+	}
+	if closing {
+		settled, err := deferLeasedTaskNotificationTx(ctx, tx, job, now)
+		if err != nil {
+			return nil, RuntimeCommandPlan{}, err
+		}
+		return nil, RuntimeCommandPlan{SettledAccepted: true, QueueLeaseSettled: settled}, nil
 	}
 	if err := requireInitialMCPManifestReadyTx(ctx, tx, job.WorkspaceID, job.SessionID); err != nil {
 		return nil, RuntimeCommandPlan{}, err
@@ -1986,6 +2034,39 @@ func (s *PostgreSQLRuntimeDeliveryStore) prepareTaskNotificationCommandTx(ctx co
 		}, nil
 }
 
+// deferLeasedTaskNotificationTx transfers ownership of a leased notification
+// from Queue to the dormant Runtime Inbox record. The caller holds the Session
+// mutation lock, so the close fence and inbox transition share one winner with
+// notification commit and resume.
+func deferLeasedTaskNotificationTx(ctx context.Context, tx *dbconnect.Tx, job RuntimeJob, now time.Time) (bool, error) {
+	result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+		SET status = CASE WHEN status IN ('delivering','accepted','parked') THEN 'parked' ELSE 'queued' END,
+		    binding_id = CASE WHEN status IN ('delivering','accepted','parked') THEN binding_id ELSE NULL END,
+		    binding_generation = CASE WHEN status IN ('delivering','accepted','parked') THEN binding_generation ELSE NULL END,
+		    target_pod_uid = CASE WHEN status IN ('delivering','accepted','parked') THEN target_pod_uid ELSE NULL END,
+		    updated_at = $4
+		WHERE workspace_id=$1 AND session_id=$2 AND runtime_input_id=$3
+		  AND session_thread_id=$5 AND input_kind='task_notification'
+		  AND status IN ('queued','delivering','accepted','parked')`,
+		job.WorkspaceID, job.SessionID, job.RuntimeInputID, now, job.SessionThreadID)
+	if err != nil {
+		return false, err
+	}
+	if !rowsAffected(result) {
+		return false, runtimeDeliveryPrepareError{kind: "task_notification_defer_missing", message: "task notification inbox is not deferrable", retryable: true}
+	}
+	updated, err := queue.AckTx(ctx, tx, queue.AckRequest{
+		WorkspaceID: workspace.ID(job.WorkspaceID), JobID: job.JobID, LeaseToken: job.LeaseToken, Now: now,
+	})
+	if err != nil {
+		return false, err
+	}
+	if !updated {
+		return false, runtimeDeliveryPrepareError{kind: "queue_authority_lost", message: "task notification Queue lease is no longer owned", retryable: true}
+	}
+	return true, nil
+}
+
 func taskNotificationTaskID(runtimeInputID string) string {
 	value := strings.TrimSpace(runtimeInputID)
 	for _, prefix := range []string{"task_notification:"} {
@@ -2029,6 +2110,40 @@ type KubernetesRuntimeTargetResolver struct {
 	Clock    func() time.Time
 }
 
+func (r KubernetesRuntimeTargetResolver) BindingVisibilitySnapshot() enginekubernetes.BindingVisibilitySnapshot {
+	if r.Snapshot == nil {
+		return enginekubernetes.BindingVisibilitySnapshot{}
+	}
+	return r.Snapshot()
+}
+
+type runtimeBindingVisibilityDisposition string
+
+const (
+	runtimeBindingVisibilityReusable     runtimeBindingVisibilityDisposition = "reusable"
+	runtimeBindingVisibilityProvenGone   runtimeBindingVisibilityDisposition = "proven_gone"
+	runtimeBindingVisibilityAvailability runtimeBindingVisibilityDisposition = "availability"
+)
+
+func classifyRuntimeBindingVisibility(state enginekubernetes.BindingVisibilityState) runtimeBindingVisibilityDisposition {
+	switch state {
+	case enginekubernetes.BindingVisibilityReusable:
+		return runtimeBindingVisibilityReusable
+	case enginekubernetes.BindingVisibilityAbsent,
+		enginekubernetes.BindingVisibilityDeleted,
+		enginekubernetes.BindingVisibilityUIDChanged,
+		enginekubernetes.BindingVisibilityIPChanged:
+		return runtimeBindingVisibilityProvenGone
+	case enginekubernetes.BindingVisibilitySnapshotNotReady,
+		enginekubernetes.BindingVisibilityNotReady,
+		enginekubernetes.BindingVisibilityNotServing,
+		enginekubernetes.BindingVisibilityTerminating:
+		return runtimeBindingVisibilityAvailability
+	default:
+		return runtimeBindingVisibilityAvailability
+	}
+}
+
 type runtimeBindingLostError struct {
 	binding runtimeBindingForDelivery
 }
@@ -2070,18 +2185,12 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 			PodUID:    current.PodUID,
 			PodIP:     current.PodIP,
 		})
-		switch visibility {
-		case enginekubernetes.BindingVisibilityReusable:
+		switch classifyRuntimeBindingVisibility(visibility) {
+		case runtimeBindingVisibilityReusable:
 			return current, nil
-		case enginekubernetes.BindingVisibilityAbsent,
-			enginekubernetes.BindingVisibilityDeleted,
-			enginekubernetes.BindingVisibilityUIDChanged,
-			enginekubernetes.BindingVisibilityIPChanged:
+		case runtimeBindingVisibilityProvenGone:
 			return runtimeBindingForDelivery{}, runtimeBindingLostError{binding: current}
-		case enginekubernetes.BindingVisibilitySnapshotNotReady,
-			enginekubernetes.BindingVisibilityNotReady,
-			enginekubernetes.BindingVisibilityNotServing,
-			enginekubernetes.BindingVisibilityTerminating:
+		case runtimeBindingVisibilityAvailability:
 			return runtimeBindingForDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_binding_not_available", message: "runtime binding is not currently available: " + string(visibility), retryable: true}
 		default:
 			return runtimeBindingForDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_binding_not_available", message: "runtime binding visibility is not reusable", retryable: true}
@@ -2403,9 +2512,30 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		sessionIDs := make([]string, 0, len(taskCandidates))
+		seenSessions := make(map[string]struct{}, len(taskCandidates))
+		for _, candidate := range taskCandidates {
+			if _, seen := seenSessions[candidate.SessionID]; !seen {
+				seenSessions[candidate.SessionID] = struct{}{}
+				sessionIDs = append(sessionIDs, candidate.SessionID)
+			}
+		}
+		sort.Strings(sessionIDs)
+		for _, sessionID := range sessionIDs {
+			if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+				return err
+			}
+		}
 		ws := workspace.ID(workspaceID)
 		enqueueRequests := make([]queue.EnqueueRequest, 0, len(taskCandidates))
 		for _, candidate := range taskCandidates {
+			eligible, err := taskNotificationEligibleForRepairTx(ctx, tx, workspaceID, candidate)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				continue
+			}
 			if _, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
 				SET status='queued', binding_id=NULL, binding_generation=NULL, target_pod_uid=NULL, updated_at=$3
 				WHERE workspace_id=$1 AND runtime_input_id=$2
@@ -2421,7 +2551,8 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 			}
 			enqueueRequests = append(enqueueRequests, request)
 		}
-		remaining := limit - len(taskCandidates)
+		taskEnqueueCount := len(enqueueRequests)
+		remaining := limit - taskEnqueueCount
 		if remaining == 0 {
 			if _, err := queue.EnqueueBatchTx(ctx, tx, enqueueRequests); err != nil {
 				return err
@@ -2496,7 +2627,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		repaired += len(taskCandidates) + ordinaryEnqueueCount
+		repaired += taskEnqueueCount + ordinaryEnqueueCount
 		for _, validation := range agentMailValidations {
 			inserted, err := validateAgentMailWakeJob(
 				enqueued[validation.requestIndex],
@@ -2519,6 +2650,25 @@ func (s *PostgreSQLRuntimeDeliveryStore) RepairRuntimeInbox(ctx context.Context,
 		return 0, err
 	}
 	return repaired, nil
+}
+
+func taskNotificationEligibleForRepairTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, candidate taskNotificationInboxRepairCandidate) (bool, error) {
+	var threadStatus string
+	err := tx.QueryRow(ctx, `SELECT status FROM session_threads WHERE workspace_id=$1 AND session_id=$2 AND id=$3 FOR SHARE`, workspaceID, candidate.SessionID, candidate.SessionThreadID).Scan(&threadStatus)
+	if dbconnect.IsNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if threadStatus == "closed_for_runtime" || threadStatus == "failed" || threadStatus == "terminated" {
+		return false, nil
+	}
+	closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, workspaceID, candidate.SessionID, candidate.SessionThreadID)
+	if err != nil {
+		return false, err
+	}
+	return !closing, nil
 }
 
 func settleSupersededRuntimeInboxRepairCandidateTx(ctx context.Context, tx *dbconnect.Tx, workspaceID string, candidate runtimeInboxRepairCandidate, now time.Time) (bool, error) {

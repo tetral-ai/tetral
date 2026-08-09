@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/workload"
 )
@@ -169,6 +170,13 @@ func JobRunnerConfigFromEnv(env Env) (JobRunnerConfig, error) {
 	}
 	if cfg.GatewayTokenPath == "" {
 		return JobRunnerConfig{}, workload.NewConfigError(EnvJobRunnerGatewayTokenPath + " is required")
+	}
+	poolConfig, poolErr := dbconnect.PoolConfigFromEnv(env.Getenv)
+	if poolErr != nil {
+		return JobRunnerConfig{}, workload.NewConfigError("database pool config invalid: " + poolErr.Error())
+	}
+	if poolConfig.MaxOpenConns < 2 {
+		return JobRunnerConfig{}, workload.NewConfigError(dbconnect.EnvDBMaxOpenConns + " must be at least 2 for the bridge job runner")
 	}
 	var err error
 	if raw := env.Getenv(EnvJobRunnerLeaseDurationMS); raw != "" {

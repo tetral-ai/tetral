@@ -6,6 +6,8 @@ import { BuiltinToolCopy } from "../../src/tools/tool-copy.js";
 import { evaluateToolGate } from "../../src/tools/tool-gate.js";
 import { SessionToolCoordinator, ToolScheduler, inferBuiltinRunPolicy, inferToolRunPolicy } from "../../src/tools/tool-scheduler.js";
 import type { ToolJob } from "../../src/tools/tool-scheduler.js";
+import { registerRuntimeToolCall } from "../../src/thread-loop/tool-execution.js";
+import { ApplyPatchLarkGrammar } from "../../src/tools/apply-patch-grammar.js";
 
 const route: ToolRoute = { kind: "sandbox", operation: "RunTool", helperSubcommand: "write" };
 
@@ -191,17 +193,19 @@ describe("Tool system contracts", () => {
     for (const [name, copy] of Object.entries(BuiltinToolCopy)) {
       const definition = definitions.get(name);
       expect(definition?.description).toBe(copy.description);
+      if (name === "apply_patch") {
+        expect(definition).toMatchObject({ kind: "freeform", name: "apply_patch" });
+        expect(definition?.larkGrammar).toContain("start: begin_patch hunk+ end_patch");
+      }
       const schema = definition?.inputSchema as {
         readonly description?: string;
         readonly properties?: Readonly<Record<string, { readonly description?: string }>>;
       };
-      for (const [label, description] of Object.entries(copy.parameters)) {
-        if (label === "(raw string input)") {
-          expect(schema.description).toBe(description);
-          continue;
-        }
-        for (const parameter of label.replace(/ \(required\)$/, "").split(" / ")) {
-          expect(schema.properties?.[parameter]?.description).toBe(description);
+      if ("parameters" in copy) {
+        for (const [label, description] of Object.entries(copy.parameters)) {
+          for (const parameter of label.replace(/ \(required\)$/, "").split(" / ")) {
+            expect(schema.properties?.[parameter]?.description).toBe(description);
+          }
         }
       }
     }
@@ -241,7 +245,7 @@ describe("Tool system contracts", () => {
     expect(lookupToolEntry(gptWithDisabledExec, "exec_command")).toBeUndefined();
   });
 
-  test("ToolEntry materialization separates provider definitions from route, formatter, and policy", () => {
+  test("provider projection preserves third-party schema content while excluding execution fields structurally", () => {
     const catalog = createToolCatalog({
       family: "claude",
       configs: [
@@ -249,6 +253,22 @@ describe("Tool system contracts", () => {
         { name: "web", enabled: true, permissionPolicy: "always_allow" },
       ],
       includeSubAgentTools: false,
+      mcpManifests: [{
+        mcpServerName: "content-canary",
+        manifestETag: "etag-1",
+        manifestGeneration: 1,
+        tools: [{
+          name: "content_canary",
+          description: "Describe operation and credentials without becoming execution metadata.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              route: { const: "binding" },
+              binding: { const: "credentials" },
+            },
+          },
+        }],
+      }],
     });
 
     expect(lookupToolEntry(catalog, "Read")).toBeUndefined();
@@ -264,10 +284,25 @@ describe("Tool system contracts", () => {
     const definitions = providerToolDefinitions(catalog);
     expect(definitions.some((definition) => definition.name === "Read")).toBe(false);
     expect(definitions.some((definition) => definition.name === "memory")).toBe(true);
-    const serialized = JSON.stringify(definitions);
-    for (const forbidden of ["route", "operation", "formatter", "permissionPolicy", "permission_policy", "bindingId", "credentials", "runtimeBindingToken"]) {
-      expect(serialized).not.toContain(forbidden);
-    }
+    const projectedMCP = definitions.find((definition) => definition.name === "content_canary");
+    expect(projectedMCP).toEqual({
+      kind: "function",
+      name: "content_canary",
+      description: "Describe operation and credentials without becoming execution metadata.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          route: { const: "binding" },
+          binding: { const: "credentials" },
+        },
+      },
+    });
+    expect(Object.keys(projectedMCP ?? {}).toSorted()).toEqual(["description", "inputSchema", "kind", "name"]);
+    expect(lookupToolEntry(catalog, "content_canary")).toMatchObject({
+      route: { kind: "gateway", operation: "RunMcpTool", mcpServerName: "content-canary" },
+      defaultPermissionPolicy: "always_ask",
+      required: false,
+    });
 
     expect(() =>
       createToolCatalog({
@@ -276,6 +311,99 @@ describe("Tool system contracts", () => {
         includeSubAgentTools: false,
       }),
     ).toThrow("required tool memory cannot be disabled");
+  });
+
+  test("GPT declares required apply_patch as the sole freeform family tool", () => {
+    const gpt = createToolCatalog({ family: "gpt", includeSubAgentTools: false });
+    const familyNames = new Set(["exec_command", "write_stdin", "view_image", "apply_patch"]);
+    const familyDefinitions = providerToolDefinitions(gpt).filter((definition) => familyNames.has(definition.name));
+
+    expect(familyDefinitions.map((definition) => [definition.name, definition.kind])).toEqual([
+      ["exec_command", "function"],
+      ["write_stdin", "function"],
+      ["view_image", "function"],
+      ["apply_patch", "freeform"],
+    ]);
+    const patch = lookupToolEntry(gpt, "apply_patch");
+    expect(patch).toMatchObject({
+      required: true,
+      inputContract: { kind: "freeform_string", executionField: "patch" },
+    });
+    expect(patch?.definition.larkGrammar).toContain('filename: /[^\\r\\n]*[^\\s\\r\\n][^\\r\\n]*/');
+    expect(() => createToolCatalog({ family: "gpt", configs: [{ name: "apply_patch", enabled: false }] }))
+      .toThrow("required tool apply_patch cannot be disabled");
+    expect(() => createToolCatalog({ family: "claude", configs: [{ name: "apply_patch", enabled: false }] }))
+      .not.toThrow();
+    expect(lookupToolEntry(createToolCatalog({ family: "claude" }), "apply_patch")).toBeUndefined();
+    expect(gpt.entries.length).toBeGreaterThan(familyDefinitions.length);
+  });
+
+  test("apply_patch grammar admits the helper-safe envelope and rejects incomplete hunks", () => {
+    expect(ApplyPatchLarkGrammar).toBe(String.raw`start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change
+
+filename: /[^\r\n]*[^\s\r\n][^\r\n]*/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: change_context* change_line (change_context | change_line)* eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF`);
+
+    const cases = [
+      { name: "add", accepted: true, patch: "*** Begin Patch\n*** Add File: notes.txt\n+hello\n*** End Patch\n" },
+      { name: "delete", accepted: true, patch: "*** Begin Patch\n*** Delete File: notes.txt\n*** End Patch" },
+      { name: "update", accepted: true, patch: "*** Begin Patch\n*** Update File: notes.txt\n@@\n-old\n+new\n*** End Patch\n" },
+      { name: "move with change", accepted: true, patch: "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@ section\n-old\n+new\n*** End Patch" },
+      { name: "explicit eof", accepted: true, patch: "*** Begin Patch\n*** Update File: notes.txt\n@@\n line\n*** End of File\n*** End Patch" },
+      { name: "blank path", accepted: false, patch: "*** Begin Patch\n*** Add File:   \n+hello\n*** End Patch" },
+      { name: "add without body", accepted: false, patch: "*** Begin Patch\n*** Add File: notes.txt\n*** End Patch" },
+      { name: "empty update", accepted: false, patch: "*** Begin Patch\n*** Update File: notes.txt\n*** End Patch" },
+      { name: "move only", accepted: false, patch: "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n*** End Patch" },
+      { name: "context marker only", accepted: false, patch: "*** Begin Patch\n*** Update File: notes.txt\n@@\n*** End Patch" },
+    ] as const;
+
+    for (const scenario of cases) {
+      expect(helperSafePatchGrammarAccepts(scenario.patch), scenario.name).toBe(scenario.accepted);
+    }
+  });
+
+  test("Runtime registration converts freeform patch input exactly once", () => {
+    const toolScheduler = new ToolScheduler();
+    const state = {
+      executionPolicy: { toolCatalog: createToolCatalog({ family: "gpt" }) },
+      toolScheduler,
+      toolEntries: {},
+      nextToolModelOrder: 0,
+    };
+    const patch = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n";
+
+    expect(registerRuntimeToolCall("mreq_patch", state, {
+      type: "tool-call",
+      id: "call_patch",
+      toolName: "apply_patch",
+      input: patch,
+      inputPreview: { preview: patch, truncated: false },
+    })).toEqual({ type: "registered", jobId: "mreq_patch:call_patch" });
+    expect(toolScheduler.jobs()[0]?.input).toEqual({ patch });
+
+    expect(registerRuntimeToolCall("mreq_patch", state, {
+      type: "tool-call",
+      id: "call_patch_object",
+      toolName: "apply_patch",
+      input: { patch },
+      inputPreview: { preview: "object", truncated: false },
+    })).toEqual({ type: "invalid" });
+    expect(toolScheduler.jobs()).toHaveLength(1);
   });
 
   test("SubAgent provider tool schemas expose the durable snake_case contract", () => {
@@ -656,3 +784,79 @@ describe("Tool system contracts", () => {
     expect(starts).toEqual(["active", "replacement"]);
   });
 });
+
+// Executes the fixed Lark productions as a line grammar. The helper parser's own
+// table tests consume the same positive and negative envelope shapes at the execution boundary.
+function helperSafePatchGrammarAccepts(patch: string): boolean {
+  if (patch.includes("\r")) {
+    return false;
+  }
+  const lines = patch.split("\n");
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+  if (lines.shift() !== "*** Begin Patch" || lines.pop() !== "*** End Patch" || lines.length === 0) {
+    return false;
+  }
+  const pathAfter = (line: string, prefix: string): boolean =>
+    line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0;
+  const isHunkHeader = (line: string): boolean =>
+    line.startsWith("*** Add File: ") || line.startsWith("*** Delete File: ") || line.startsWith("*** Update File: ");
+  let index = 0;
+  let hunks = 0;
+  while (index < lines.length) {
+    const header = lines[index] ?? "";
+    if (pathAfter(header, "*** Add File: ")) {
+      index += 1;
+      let additions = 0;
+      while (index < lines.length && !isHunkHeader(lines[index] ?? "")) {
+        if (!(lines[index] ?? "").startsWith("+")) {
+          return false;
+        }
+        additions += 1;
+        index += 1;
+      }
+      if (additions === 0) {
+        return false;
+      }
+    } else if (pathAfter(header, "*** Delete File: ")) {
+      index += 1;
+    } else if (pathAfter(header, "*** Update File: ")) {
+      index += 1;
+      if (index < lines.length && (lines[index] ?? "").startsWith("*** Move to: ")) {
+        if (!pathAfter(lines[index] ?? "", "*** Move to: ")) {
+          return false;
+        }
+        index += 1;
+      }
+      let changeLines = 0;
+      while (index < lines.length && !isHunkHeader(lines[index] ?? "")) {
+        const line = lines[index] ?? "";
+        if (line === "*** End of File") {
+          index += 1;
+          if (index < lines.length && !isHunkHeader(lines[index] ?? "")) {
+            return false;
+          }
+          break;
+        }
+        if (line === "@@" || (line.startsWith("@@ ") && line.length > 3)) {
+          index += 1;
+          continue;
+        }
+        if (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) {
+          changeLines += 1;
+          index += 1;
+          continue;
+        }
+        return false;
+      }
+      if (changeLines === 0) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+    hunks += 1;
+  }
+  return hunks > 0;
+}

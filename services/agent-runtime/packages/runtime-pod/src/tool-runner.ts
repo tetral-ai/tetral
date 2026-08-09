@@ -23,8 +23,14 @@ import { bridgeAttachmentGrpcChannelOptions, grpcClientChannelOptions, webGrpcCh
 import {
   AgentRuntimeBridgeServiceClient,
   BridgeWriteStatus,
+  ChildControlAction,
+  ChildInterruptOutcome,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
+  AdmitChildInterruptRequest,
+  AdmitChildInterruptResponse,
+  AwaitChildInterruptRequest,
+  AwaitChildInterruptResponse,
   CreateChildThreadRequest,
   CreateChildThreadResponse,
   ListChildThreadsRequest,
@@ -84,7 +90,7 @@ import type {
 } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import type { PublicMcpErrorEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { selectRecentUserLedTurns } from "@tetral/agent-runtime-core/src/runtime/conversation-turns.js";
-import type { RuntimeAcceptedInputState, RuntimeThreadStatusState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import type { RuntimeAcceptedInputState, RuntimeThreadControlState, RuntimeThreadStatusState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { RuntimeSubAgentRunHost } from "./core-hosts.js";
@@ -151,6 +157,8 @@ export interface RuntimePodToolRunnerOptions {
     | "resolveChildThread"
     | "listChildThreads"
     | "resolveInterAgentDelivery"
+    | "admitChildInterrupt"
+    | "awaitChildInterrupt"
     | "markChildThreadClosed"
     | "markChildThreadActive"
     | "writeEvent"
@@ -195,6 +203,8 @@ export class RuntimePodToolRunner {
     | "resolveChildThread"
     | "listChildThreads"
     | "resolveInterAgentDelivery"
+    | "admitChildInterrupt"
+    | "awaitChildInterrupt"
     | "markChildThreadClosed"
     | "markChildThreadActive"
     | "writeEvent"
@@ -205,7 +215,6 @@ export class RuntimePodToolRunner {
   private readonly sleep: (delayMs: number, abortSignal: AbortSignal) => Promise<void>;
   private readonly childOperationLocks = new Map<string, Promise<void>>();
   private readonly childTaskOperationQueues = new Map<string, ChildTaskOperationQueueState>();
-  private readonly pendingChildLifecycleTimestamps = new Map<string, string>();
   private nextChildTaskOperationSequence = 0;
 
   /**
@@ -834,22 +843,35 @@ export class RuntimePodToolRunner {
   }
 
   private async interruptAgent(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
-    const result = await this.withResolvedChild(request, "interrupt_agent", async (parentScope, child, _metadata) => {
-      const host = this.options.subAgentRunHost?.();
-      if (host === undefined) {
-        return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
-      }
+    const result = await this.withResolvedChild(request, "interrupt_agent", async (parentScope, child, metadata) => {
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
         throwIfToolRouteAborted(request.abortSignal);
-        const lifecycle = await host.interruptThread(threadControlFromRequest(request, parentScope, child.sessionThreadId));
-        if (!lifecycle.ok) {
-          return toolFailure(request, `Sub-agent interrupt was not accepted: ${lifecycle.reason}.`, true);
+        const control = await this.admitAndAwaitChildInterrupt(
+          request,
+          parentScope,
+          child.sessionThreadId,
+          ChildControlAction.CHILD_CONTROL_ACTION_INTERRUPT,
+          false,
+          metadata,
+        );
+        if (!control.ok) {
+          return toolFailure(request, control.message, control.retryable);
         }
+        const rootOutcome = control.response.outcomes.find((entry) =>
+          entry.target?.childThreadId === child.sessionThreadId
+        )?.outcome;
+        const interrupted = rootOutcome === ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_COMPLETED ||
+          rootOutcome === ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DUPLICATE;
+        const terminalStatus = rootOutcome === ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_PRESERVED_FAILED
+          ? "failed"
+          : rootOutcome === ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_PRESERVED_TERMINATED
+            ? "terminated"
+            : undefined;
         return completedText([
           `task_name: ${child.taskName}`,
           `session_thread_id: ${child.sessionThreadId}`,
-          `interrupted: ${lifecycle.runExitOutcome === "interrupt_applied"}`,
-          ...(lifecycle.runExitOutcome === undefined ? [] : [`run_outcome: ${lifecycle.runExitOutcome}`]),
+          `interrupted: ${interrupted}`,
+          ...(terminalStatus === undefined ? [] : [`status: ${terminalStatus}`]),
         ].join("\n"));
       });
     });
@@ -863,14 +885,23 @@ export class RuntimePodToolRunner {
         return toolFailure(request, "Sub-agent runtime host is unavailable.", true);
       }
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
-        const lifecycleKey = childLifecycleRequestKey("close", request, child.sessionThreadId);
-        const closedAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
-        this.pendingChildLifecycleTimestamps.set(lifecycleKey, closedAt);
+        const control = await this.admitAndAwaitChildInterrupt(
+          request,
+          parentScope,
+          child.sessionThreadId,
+          ChildControlAction.CHILD_CONTROL_ACTION_CLOSE,
+          true,
+          metadata,
+        );
+        if (!control.ok) {
+          return toolFailure(request, control.message, control.retryable);
+        }
         const response = await markChildThreadClosed(this.bridgeClient, {
           scope: parentScope,
           childThreadId: child.sessionThreadId,
-          closedAt,
           source: { sourceToolUseEventId: request.toolUseEventId },
+          sourceToolUseEventId: request.toolUseEventId,
+          targets: control.targets,
         }, metadata, request.abortSignal);
         const declaration = validateChildLifecycleDeclarationResponse({
           action: "close",
@@ -878,7 +909,6 @@ export class RuntimePodToolRunner {
           childThreadId: child.sessionThreadId,
           sourceKind: "tool_use",
           sourceCommandId: request.toolUseEventId,
-          requestedAt: closedAt,
           bindingId: request.bindingId,
           bindingGeneration: request.bindingGeneration,
         }, response);
@@ -886,7 +916,6 @@ export class RuntimePodToolRunner {
           if (declaration.discardHotState) {
             return { type: "stale_custody" };
           }
-          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return toolFailure(request, declaration.errorCode, true);
         }
         const rootDisposition = declaration.dispositions.find(
@@ -904,7 +933,6 @@ export class RuntimePodToolRunner {
             rootRunExitOutcome = lifecycle.runExitOutcome;
           }
         }
-        this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
         const rootStatus = rootDisposition === "preserved_failed"
           ? "failed"
           : rootDisposition === "preserved_terminated"
@@ -920,6 +948,63 @@ export class RuntimePodToolRunner {
     });
   }
 
+  private async admitAndAwaitChildInterrupt(
+    request: RuntimeToolExecutionRequest,
+    parentScope: RuntimeScope,
+    rootChildThreadId: string,
+    action: ChildControlAction,
+    includeDescendants: boolean,
+    metadata: Metadata,
+  ): Promise<
+    | { readonly ok: true; readonly targets: AdmitChildInterruptResponse["targets"]; readonly response: AwaitChildInterruptResponse }
+    | { readonly ok: false; readonly retryable: boolean; readonly message: string }
+  > {
+    let admitted: AdmitChildInterruptResponse;
+    try {
+      admitted = await admitChildInterrupt(this.bridgeClient, {
+        scope: parentScope,
+        rootChildThreadId,
+        sourceToolUseEventId: request.toolUseEventId,
+        action,
+        includeDescendants,
+      }, metadata, request.abortSignal);
+    } catch (error) {
+      return { ok: false, retryable: !isDurableBridgeRejection(error), message: "Sub-agent interrupt admission failed." };
+    }
+    if (!bridgeAckAccepted(admitted.ack?.status) || admitted.targets.length === 0) {
+      return { ok: false, retryable: false, message: admitted.ack?.errorCode || "Sub-agent interrupt admission was rejected." };
+    }
+    const awaitRequest: AwaitChildInterruptRequest = {
+      scope: parentScope,
+      rootChildThreadId,
+      sourceToolUseEventId: request.toolUseEventId,
+      action,
+      includeDescendants,
+      targets: admitted.targets,
+    };
+    while (true) {
+      throwIfToolRouteAborted(request.abortSignal);
+      try {
+        const response = await awaitChildInterrupt(this.bridgeClient, awaitRequest, metadata, request.abortSignal);
+        if (!bridgeAckAccepted(response.ack?.status) || response.outcomes.length !== admitted.targets.length) {
+          return { ok: false, retryable: false, message: response.ack?.errorCode || "Sub-agent interrupt completion was malformed." };
+        }
+        const failed = response.outcomes.find((entry) =>
+          entry.outcome === ChildInterruptOutcome.CHILD_INTERRUPT_OUTCOME_DELIVERY_FAILED
+        );
+        if (failed !== undefined) {
+          return { ok: false, retryable: false, message: failed.errorCode ?? "Sub-agent interrupt delivery failed." };
+        }
+        return { ok: true, targets: admitted.targets, response };
+      } catch (error) {
+        if (!isGrpcStatus(error, status.DEADLINE_EXCEEDED)) {
+          return { ok: false, retryable: !isDurableBridgeRejection(error), message: "Sub-agent interrupt completion is unavailable." };
+        }
+        await this.sleep(DURABLE_TOOL_REJOIN_DELAY_MS, request.abortSignal);
+      }
+    }
+  }
+
   // A durable terminal receipt completes without installing hot state; reopened children require hot residency.
   private async resumeAgent(request: RuntimeToolExecutionRequest): Promise<RuntimeToolExecutionResult> {
     return await this.withResolvedChild(request, "resume_agent", async (parentScope, child, metadata) => {
@@ -929,78 +1014,72 @@ export class RuntimePodToolRunner {
       }
       return await this.withChildOperationLock(request.sessionId, child.sessionThreadId, request.abortSignal, async () => {
         const control = threadControlFromRequest(request, parentScope, child.sessionThreadId);
-        const lifecycleKey = childLifecycleRequestKey("resume", request, child.sessionThreadId);
-        const activeAt = this.pendingChildLifecycleTimestamps.get(lifecycleKey) ?? new Date().toISOString();
-        this.pendingChildLifecycleTimestamps.set(lifecycleKey, activeAt);
-        const response = await markChildThreadActive(this.bridgeClient, {
+		if (child.status === "failed" || child.status === "terminated") {
+		  return completedText([
+			`task_name: ${child.taskName}`,
+			`session_thread_id: ${child.sessionThreadId}`,
+			`status: ${child.status}`,
+		  ].join("\n"));
+		}
+		let preloadedClosed = false;
+		if (child.status === "closed_for_runtime") {
+		  const preloaded = await preloadChildThread(host, request, parentScope, child.sessionThreadId, {
+			parentThreadId: request.sessionThreadId,
+			role: "subagent",
+			visibility: "public",
+			taskName: child.taskName,
+			agentType: child.agentType,
+			status: "closed_for_runtime",
+		  });
+		  if (!preloaded.ok) {
+			return toolFailure(request, `Sub-agent resume context preload failed: ${preloaded.reason}.`, true);
+		  }
+		  preloadedClosed = true;
+		}
+		let response: MarkChildThreadActiveResponse;
+		try {
+		  response = await markChildThreadActive(this.bridgeClient, {
           scope: parentScope,
           childThreadId: child.sessionThreadId,
-          activeAt,
           source: { sourceToolUseEventId: request.toolUseEventId },
         }, metadata, request.abortSignal);
+		} catch (error) {
+		  if (preloadedClosed) {
+			await host.markThreadClosed(control);
+		  }
+		  throw error;
+		}
         const declaration = validateChildLifecycleDeclarationResponse({
           action: "resume",
           sessionThreadId: request.sessionThreadId,
           childThreadId: child.sessionThreadId,
           sourceKind: "tool_use",
           sourceCommandId: request.toolUseEventId,
-          requestedAt: activeAt,
           bindingId: request.bindingId,
           bindingGeneration: request.bindingGeneration,
         }, response);
         if (!declaration.ok) {
+		  if (preloadedClosed) {
+			await host.markThreadClosed(control);
+		  }
           if (declaration.discardHotState) {
             return { type: "stale_custody" };
           }
-          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
           return toolFailure(request, declaration.errorCode, true);
         }
         const disposition = declaration.dispositions[0]?.disposition;
-        const preservedStatus = disposition === "preserved_failed"
-          ? "failed"
-          : disposition === "preserved_terminated"
-            ? "terminated"
-            : undefined;
-        if (preservedStatus !== undefined) {
-          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
-          return completedText([
-            `task_name: ${child.taskName}`,
-            `session_thread_id: ${child.sessionThreadId}`,
-            `status: ${preservedStatus}`,
-          ].join("\n"));
+        // MarkChildThreadActive is the durable resume boundary. A resident
+        // quiescent copy follows that receipt, while a notification that has
+        // already created a run slot is further ahead and must not be stopped.
+        // Missing or otherwise non-applicable hot state is disposable; the
+        // next access reconstructs the durable idle Thread.
+        if (disposition === "resumed") {
+          await host.markThreadActive(control).catch(() => undefined);
         }
-        // Observe residency after the durable receipt so a concurrent run exit cannot make the result stale.
-        const inspected = await host.inspectThread(control);
-        if (!inspected.ok) {
-          return toolFailure(request, `Sub-agent resume inspection failed: ${inspected.reason}.`, true);
-        }
-        if (disposition === "already_active" && inspected.observed) {
-          this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
-          return completedText([
-            `task_name: ${child.taskName}`,
-            `session_thread_id: ${child.sessionThreadId}`,
-            `status: ${inspected.status ?? child.status}`,
-          ].join("\n"));
-        }
-        if (disposition === "resumed" && inspected.observed) {
-          const lifecycle = await host.markThreadActive(control);
-          if (!lifecycle.ok) {
-            return toolFailure(request, `Sub-agent resume was not accepted: ${lifecycle.reason}.`, true);
-          }
-        }
-        const activeStatus = disposition === "resumed" ? "idle" : child.status;
-        const preloaded = await preloadChildThread(host, request, parentScope, child.sessionThreadId, {
-          parentThreadId: request.sessionThreadId,
-          role: "subagent",
-          visibility: "public",
-          taskName: child.taskName,
-          agentType: child.agentType,
-          status: activeStatus,
-        });
-        if (!preloaded.ok) {
-          return toolFailure(request, `Sub-agent resume context preload failed: ${preloaded.reason}.`, true);
-        }
-        this.pendingChildLifecycleTimestamps.delete(lifecycleKey);
+        const inspected = await host.inspectThread(control).catch(() => undefined);
+        const activeStatus = inspected?.ok === true && inspected.observed
+          ? inspected.status ?? "idle"
+          : disposition === "resumed" ? "idle" : child.status;
         return completedText(`task_name: ${child.taskName}\nsession_thread_id: ${child.sessionThreadId}\nstatus: ${activeStatus}`);
       });
     });
@@ -1342,11 +1421,9 @@ async function writeThreadMessageSent(
       message,
     }),
     sessionVisible: true,
-    stableReasoningParts: [],
     serverToolUse: undefined,
     contextThroughMessageSequence: undefined,
     requestKind: "",
-    drafts: [],
   }, metadata, abortSignal);
 }
 
@@ -1468,7 +1545,7 @@ function threadControlFromRequest(
   request: RuntimeToolExecutionRequest,
   parentScope: RuntimeScope,
   childThreadId: string,
-): Parameters<RuntimeSubAgentRunHost["interruptThread"]>[0] {
+): RuntimeThreadControlState {
   return {
     requestId: stableId("req", `thread-control:${request.toolUseEventId}:${childThreadId}`),
     workspaceId: parentScope.workspaceId,
@@ -1482,21 +1559,6 @@ function threadControlFromRequest(
     sequenceFrom: 0,
     sequenceTo: 0,
   };
-}
-
-function childLifecycleRequestKey(
-  action: "close" | "resume",
-  request: RuntimeToolExecutionRequest,
-  childThreadId: string,
-): string {
-  return [
-    action,
-    request.workspaceId,
-    request.sessionId,
-    request.sessionThreadId,
-    request.toolUseEventId,
-    childThreadId,
-  ].join("\u0000");
 }
 
 function recordInput(input: RuntimeJsonValue): Record<string, RuntimeJsonValue> {
@@ -1610,6 +1672,28 @@ function resolveInterAgentDelivery(
 ): Promise<ResolveInterAgentDeliveryResponse> {
   return unaryCall(request, metadata, (unaryRequest, unaryMetadata, callback) =>
     client.resolveInterAgentDelivery(unaryRequest, unaryMetadata, callback)
+  );
+}
+
+function admitChildInterrupt(
+  client: Pick<AgentRuntimeBridgeServiceClient, "admitChildInterrupt">,
+  request: AdmitChildInterruptRequest,
+  metadata: Metadata,
+  abortSignal: AbortSignal,
+): Promise<AdmitChildInterruptResponse> {
+  return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
+    client.admitChildInterrupt(unaryRequest, unaryMetadata, callback)
+  );
+}
+
+function awaitChildInterrupt(
+  client: Pick<AgentRuntimeBridgeServiceClient, "awaitChildInterrupt">,
+  request: AwaitChildInterruptRequest,
+  metadata: Metadata,
+  abortSignal: AbortSignal,
+): Promise<AwaitChildInterruptResponse> {
+  return cancellableUnaryCall(request, metadata, abortSignal, (unaryRequest, unaryMetadata, callback) =>
+    client.awaitChildInterrupt(unaryRequest, unaryMetadata, callback)
   );
 }
 

@@ -192,8 +192,19 @@ message RuntimeToolPart {
 message RuntimeToolDefinition {
   string name = 1;
   string description = 2;
-  string input_schema_json = 3;
-  optional string output_schema_json = 4;
+  oneof declaration {
+    RuntimeFunctionToolDefinition function = 3;
+    RuntimeFreeformToolDefinition freeform = 4;
+  }
+}
+
+message RuntimeFunctionToolDefinition {
+  string input_schema_json = 1;
+  optional string output_schema_json = 2;
+}
+
+message RuntimeFreeformToolDefinition {
+  string lark_grammar = 1;
 }
 
 message ProviderRequestAttachment {

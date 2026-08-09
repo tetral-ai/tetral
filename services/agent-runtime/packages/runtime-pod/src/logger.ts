@@ -9,6 +9,8 @@ import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observab
 import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
 import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
+import type { RuntimeProviderToolDeclarationRejectionObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
+import type { RuntimeProviderRescheduleObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type { RuntimeReceiptEvidenceOutcome } from "./metrics.js";
 
 /** Structured JSON logger accepted by Runtime Pod composition and runtime services. */
@@ -27,7 +29,7 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "startup.cause_class"?: string;
   readonly "startup.cause_category"?: RuntimeStartupCauseCategory;
   readonly "declaration.source.kind"?: string;
-  readonly "declaration.source.id"?: string;
+  readonly "operation.id"?: string;
   readonly "declaration.digest"?: string;
   readonly "receipt.application_disposition"?: "current_custody" | "stale_custody";
   readonly "receipt.discard_reason"?: Exclude<RuntimeReceiptEvidenceOutcome, "applied">;
@@ -43,7 +45,7 @@ export interface RuntimeReceiptEvidence {
   readonly sessionThreadId: string;
   readonly operation: string;
   readonly sourceKind: string;
-  readonly sourceId: string;
+  readonly operationId: string;
   readonly declarationDigest: string;
   readonly bindingId: string;
   readonly bindingGeneration: number;
@@ -77,7 +79,7 @@ export function recordRuntimeReceiptEvidence(
       "binding.id": evidence.bindingId,
       "binding.generation": evidence.bindingGeneration,
       "declaration.source.kind": evidence.sourceKind,
-      "declaration.source.id": evidence.sourceId,
+      "operation.id": evidence.operationId,
       "declaration.digest": evidence.declarationDigest,
       ...(evidence.applicationDisposition === undefined
         ? {}
@@ -95,6 +97,7 @@ export interface JsonLoggerOptions {
   readonly serviceName?: string;
   readonly deploymentEnvironment?: string;
   readonly serviceVersion?: string;
+  readonly clock?: (() => Date) | undefined;
 }
 
 /** Creates a Runtime Pod JSON logger backed by the shared observability serializer. */
@@ -104,6 +107,7 @@ export function createJsonLogger(options: JsonLoggerOptions): RuntimePodLogger {
     serviceName: options.serviceName ?? "agent-runtime",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
+    clock: options.clock,
   });
 }
 
@@ -141,6 +145,55 @@ export function workloadStartedLogRecord(): RuntimePodLogRecord {
     component: "workload",
     "listener.transport": "tcp",
     "readiness.state": "ready",
+  };
+}
+
+/** Builds the payload-free record for one declaration rejected before a provider request opens. */
+export function providerToolDeclarationRejectedLogRecord(
+  event: RuntimeProviderToolDeclarationRejectionObservation,
+): RuntimePodLogRecord {
+  return {
+    event: "provider_tool_declaration_rejected",
+    "event.kind": "provider_tool_declaration_rejected",
+    operation: "assemble_provider_request",
+    component: "agent-runtime",
+    message: "provider tool declaration rejected",
+    "workspace.id": event.workspaceId,
+    "session.id": event.sessionId,
+    "thread.id": event.sessionThreadId,
+    "request.id": event.requestId,
+    "model_request.id": event.modelRequestId,
+    "tool.declaration.kind": event.declarationKind,
+    "tool.family": event.family,
+    "validation.member": event.validationMember,
+    ...semanticErrorFields({
+      errorClass: "provider_tool_declaration",
+      errorCode: "invalid_tool_definition",
+      messageSafe: "provider tool declaration rejected",
+    }),
+  };
+}
+
+/** Builds the bounded fact emitted only after durable provider reschedule admission. */
+export function providerRescheduleSelectedLogRecord(
+  event: RuntimeProviderRescheduleObservation,
+): RuntimePodLogRecord {
+  return {
+    event: "provider_reschedule_selected",
+    "event.kind": "provider_reschedule_selected",
+    operation: "provider_reschedule",
+    component: "agent-runtime",
+    message: "provider request reschedule selected",
+    "workspace.id": event.workspaceId,
+    "session.id": event.sessionId,
+    "thread.id": event.sessionThreadId,
+    "request.id": event.requestId,
+    "model_request.id": event.modelRequestId,
+    "retry.attempt": event.attempt,
+    "delay.ms": event.delayMs,
+    "delay.source": event.delaySource,
+    "provider.failure.code": event.failureCode,
+    retryable: true,
   };
 }
 

@@ -7,6 +7,8 @@ import (
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
+	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 
 	"google.golang.org/grpc/codes"
@@ -67,6 +69,17 @@ func repairLostRuntimeBindingTx(ctx context.Context, tx *dbconnect.Tx, workspace
 		if inserted {
 			repaired++
 		}
+	}
+	// Tool closeout removes every Sandbox execution blocker before readiness is
+	// evaluated once for the Session. The shared release boundary assigns fresh
+	// Queue custody atomically; duplicate repair and late settlement therefore
+	// observe the same pending operation/job rather than creating another wake.
+	releaseJobs, err := sandboxrelease.ReadyRequestsTx(ctx, tx, workspaceID, sessionID, now, nil)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := queue.EnqueueBatchTx(ctx, tx, releaseJobs); err != nil {
+		return 0, err
 	}
 	deliveryRepaired, err := settleRuntimePodLostSubAgentDeliveriesTx(ctx, tx, workspaceID, sessionID, affected.ThreadIDs, binding, now)
 	if err != nil {
@@ -446,9 +459,47 @@ func insertRuntimePodLostSettlementEventTx(
 	return eventID, nil
 }
 
+type runtimePodLossMutationStatus string
+
+const (
+	runtimePodLossMutationRepaired runtimePodLossMutationStatus = "repaired"
+	runtimePodLossMutationStale    runtimePodLossMutationStatus = "stale"
+)
+
+type runtimePodLossMutationResult struct {
+	status      runtimePodLossMutationStatus
+	staleReason string
+}
+
 func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Context, workspaceID string, sessionID string, binding runtimeBindingForDelivery, now time.Time) error {
-	return s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
+	result, err := s.mutateLostRuntimeBinding(ctx, workspaceID, sessionID, binding, now, false)
+	if err != nil {
+		return err
+	}
+	if result.status == runtimePodLossMutationStale {
+		return runtimePodLostStaleFenceError("runtime pod-loss repair binding fence is stale")
+	}
+	return nil
+}
+
+// mutateLostRuntimeBinding is the sole pod-loss closeout transaction. The proactive
+// caller adds an active-session admission fence; input-triggered recovery retains the
+// existing idle-binding behavior while sharing every closeout and binding mutation.
+func (s *PostgreSQLRuntimeDeliveryStore) mutateLostRuntimeBinding(
+	ctx context.Context,
+	workspaceID string,
+	sessionID string,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+	requireActive bool,
+) (runtimePodLossMutationResult, error) {
+	result := runtimePodLossMutationResult{status: runtimePodLossMutationRepaired}
+	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_lost_runtime_binding", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(ctx, tx, workspaceID, sessionID); err != nil {
+			if code, ok := closeoutSentinelCode(err); requireActive && ok && code == closeoutScopeSupersededCode {
+				result = runtimePodLossMutationResult{status: runtimePodLossMutationStale, staleReason: "inactive"}
+				return nil
+			}
 			return err
 		}
 		current, found, err := readOptionalRuntimeBindingForDeliveryTx(ctx, tx, workspaceID, sessionID)
@@ -456,7 +507,24 @@ func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Co
 			return err
 		}
 		if !found || current.BindingID != binding.BindingID || current.BindingGeneration != binding.BindingGeneration {
+			if requireActive {
+				result = runtimePodLossMutationResult{status: runtimePodLossMutationStale, staleReason: "binding_changed"}
+				return nil
+			}
 			return runtimePodLostStaleFenceError("runtime pod-loss repair binding fence is stale")
+		}
+		// The census retains only the fence identity. Once that fence wins, the
+		// current durable row supplies the full binding facts consumed by closeout.
+		binding = current
+		if requireActive {
+			active, err := runtimePodLossSessionActiveTx(ctx, tx, workspaceID, sessionID, binding)
+			if err != nil {
+				return err
+			}
+			if !active {
+				result = runtimePodLossMutationResult{status: runtimePodLossMutationStale, staleReason: "inactive"}
+				return nil
+			}
 		}
 		if _, err := repairLostRuntimeBindingTx(ctx, tx, workspaceID, sessionID, binding, now); err != nil {
 			return err
@@ -471,7 +539,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Co
 		); err != nil {
 			return err
 		}
-		result, err := tx.Exec(ctx,
+		dbResult, err := tx.Exec(ctx,
 			`UPDATE session_runtime_status
 			    SET cleanup_after=NULL, cleanup_enqueued_at=NULL, cleanup_claimed_at=NULL,
 			        cleanup_job_id=NULL, binding_id=NULL, binding_generation=NULL, updated_at=$5
@@ -481,11 +549,42 @@ func (s *PostgreSQLRuntimeDeliveryStore) repairLostRuntimeBinding(ctx context.Co
 		if err != nil {
 			return err
 		}
-		if !rowsAffected(result) {
+		if !rowsAffected(dbResult) {
 			return runtimePodLostStaleFenceError("runtime pod-loss binding finalization fence is stale")
 		}
 		return nil
 	})
+	if err != nil {
+		return runtimePodLossMutationResult{}, err
+	}
+	return result, nil
+}
+
+func runtimePodLossSessionActiveTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	workspaceID string,
+	sessionID string,
+	binding runtimeBindingForDelivery,
+) (bool, error) {
+	var active bool
+	err := tx.QueryRow(ctx,
+		`SELECT (runtime.status = 'running' OR session.status = 'rescheduling')
+		   FROM session_runtime_status runtime
+		   JOIN sessions session
+		     ON session.workspace_id = runtime.workspace_id
+		    AND session.id = runtime.session_id
+		  WHERE runtime.workspace_id = $1
+		    AND runtime.session_id = $2
+		    AND runtime.binding_id = $3
+		    AND runtime.binding_generation = $4
+		  FOR UPDATE OF runtime`,
+		workspaceID, sessionID, binding.BindingID, binding.BindingGeneration,
+	).Scan(&active)
+	if dbconnect.IsNoRows(err) {
+		return false, nil
+	}
+	return active, err
 }
 
 func runtimePodLostStaleFenceError(message string) runtimeDeliveryPrepareError {

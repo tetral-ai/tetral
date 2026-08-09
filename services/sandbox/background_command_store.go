@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxdriver "github.com/tetral-ai/tetral/internal/sandbox/driver"
@@ -520,11 +521,18 @@ func settleBackgroundTaskResultTx(ctx context.Context, tx *dbconnect.Tx, work Sa
 	if err != nil {
 		return err
 	}
+	closing, err := childcontrol.ThreadOrAncestorClosingTx(ctx, tx, work.WorkspaceID, work.SessionID, work.SessionThreadID)
+	if err != nil {
+		return err
+	}
 	releaseRequests, err := readySandboxReleaseRequestsTx(ctx, tx, work.WorkspaceID, work.SessionID, now, nil)
 	if err != nil {
 		return err
 	}
-	requests := append([]queue.EnqueueRequest{request}, releaseRequests...)
+	requests := append([]queue.EnqueueRequest(nil), releaseRequests...)
+	if !closing {
+		requests = append([]queue.EnqueueRequest{request}, requests...)
+	}
 	_, err = queue.EnqueueBatchTx(ctx, tx, requests)
 	return err
 }

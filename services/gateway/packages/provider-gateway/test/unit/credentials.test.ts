@@ -146,7 +146,7 @@ describe("Gateway provider credential resolver", () => {
               access_mode: "oauth",
               access_token: "oauth-access",
               refresh_token: "oauth-refresh",
-              expires_at: "2026-07-03T00:00:00Z",
+              expires_at: "2026-07-03T00:00:00.000Z",
               account_id: "acct_1",
             },
           }),
@@ -177,13 +177,19 @@ describe("Gateway provider credential resolver", () => {
       access_mode: "oauth",
       access_token: "oauth-access",
       refresh_token: "oauth-refresh",
-      expires_at: "2026-07-03T00:00:00Z",
+      expires_at: "2026-07-03T00:00:00.000Z",
       account_id: "acct_1",
     };
     for (const testCase of [
       { name: "missing refresh", auth: { ...baseAuth, refresh_token: "" } },
       { name: "missing expiry", auth: { ...baseAuth, expires_at: "" } },
       { name: "malformed expiry", auth: { ...baseAuth, expires_at: "not a date" } },
+      { name: "date-only expiry", auth: { ...baseAuth, expires_at: "2026-07-03" } },
+      { name: "missing-zone expiry", auth: { ...baseAuth, expires_at: "2026-07-03T00:00:00.000" } },
+      { name: "space-separated expiry", auth: { ...baseAuth, expires_at: "2026-07-03 00:00:00.000Z" } },
+      { name: "normalized-overflow expiry", auth: { ...baseAuth, expires_at: "2026-02-30T00:00:00.000Z" } },
+      { name: "offset stored expiry", auth: { ...baseAuth, expires_at: "2026-07-03T02:00:00.000+02:00" } },
+      { name: "non-millisecond stored expiry", auth: { ...baseAuth, expires_at: "2026-07-03T00:00:00Z" } },
       { name: "missing account", auth: { ...baseAuth, account_id: "" } },
     ]) {
       const platformPool = new RecordingPlatformPool();

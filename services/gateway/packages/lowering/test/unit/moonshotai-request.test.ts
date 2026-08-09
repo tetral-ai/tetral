@@ -173,12 +173,11 @@ describe("moonshotai Kimi request lowering", () => {
       tools: [{
         name: "Search",
         description: "Search",
-        inputSchemaJson: JSON.stringify(inputSchema),
-        outputSchemaJson: undefined,
+        function: { inputSchemaJson: JSON.stringify(inputSchema), outputSchemaJson: undefined },
       }],
     }));
 
-    expect(lowered.tools.Search?.inputSchema.schema).toEqual({
+    expect(lowered.tools.Search?.inputSchema?.schema).toEqual({
       type: "object",
       properties: {
         refSibling: { $ref: "#/$defs/Thing" },

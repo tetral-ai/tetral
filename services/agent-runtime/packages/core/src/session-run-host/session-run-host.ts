@@ -32,7 +32,6 @@ export interface Interface {
     command: Parameters<SessionManager.Interface["ensureThreadInstalled"]>[0],
     options?: Parameters<SessionManager.Interface["ensureThreadInstalled"]>[1],
   ) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
-  readonly handleInterruptThread: (command: Parameters<SessionManager.Interface["interruptThread"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleInterruptReviewerExecution: (command: Parameters<SessionManager.Interface["interruptReviewerExecution"]>[0], token: SessionManager.ReviewerExecutionToken) => Effect.Effect<SessionManager.ReviewerExecutionControlResult>;
   readonly handleMarkThreadClosed: (command: Parameters<SessionManager.Interface["markThreadClosed"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
   readonly handleMarkThreadActive: (command: Parameters<SessionManager.Interface["markThreadActive"]>[0]) => Effect.Effect<SessionManager.ThreadLifecycleResult>;
@@ -66,7 +65,6 @@ export const layer = Layer.effect(
       handleCleanupSession: (sessionId, command) => manager.cleanupSession(sessionId, command),
       handlePreloadThread: (command) => manager.preloadThread(command),
       handleEnsureThreadInstalled: (command, options) => manager.ensureThreadInstalled(command, options),
-      handleInterruptThread: (command) => manager.interruptThread(command),
       handleInterruptReviewerExecution: (command, token) => manager.interruptReviewerExecution(command, token),
       handleMarkThreadClosed: (command) => manager.markThreadClosed(command),
       handleMarkThreadActive: (command) => manager.markThreadActive(command),

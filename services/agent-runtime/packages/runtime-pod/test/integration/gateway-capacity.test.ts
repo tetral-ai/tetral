@@ -3,11 +3,13 @@ import {
   capacityProofHasRequiredHeadroom,
   runGatewayCapacityProof,
   runGatewayCapacityFuseMutation,
+  runGatewayAbsentRetryDelayProof,
   runGatewayReceiveCapacityFuseMutation,
   runGatewayReceiveFuseProof,
   runLargeToolInputMappingProof,
   runMaximumReadTransportProof,
   runPreEventGatewayFailureProof,
+  runRecordedGLMTransportProof,
 } from "../harness/gateway-transport-harness.js";
 
 describe("Runtime-to-Gateway catalog capacity", () => {
@@ -105,5 +107,37 @@ describe("Runtime-to-Gateway catalog capacity", () => {
       type: "llm-service",
       error: { code: "gateway_stream_error", retryable: true, fatal: false },
     });
+  }, 30_000);
+
+  test("treats a zero retry delay crossing real Gateway gRPC as absent", async () => {
+    const failure = await runGatewayAbsentRetryDelayProof();
+    expect(failure).toMatchObject({
+      type: "provider",
+      code: "provider_unavailable",
+      retryable: true,
+      fatal: false,
+    });
+    expect(failure).not.toHaveProperty("retryAfterMs");
+  }, 30_000);
+
+  test("replays recorded GLM reasoning text tool and terminal events through Gateway gRPC", async () => {
+    const events = await runRecordedGLMTransportProof();
+    const types = events.map((event) => event.type);
+
+    expect(types.filter((type) => type === "reasoning-start")).toHaveLength(1);
+    expect(types.filter((type) => type === "reasoning-delta")).toHaveLength(66);
+    expect(types.filter((type) => type === "reasoning-end")).toHaveLength(1);
+    expect(types.filter((type) => type === "text-start")).toHaveLength(1);
+    expect(types.filter((type) => type === "text-delta")).toHaveLength(1);
+    expect(types.filter((type) => type === "text-end")).toHaveLength(1);
+    expect(types.filter((type) => type === "tool-input-start")).toHaveLength(1);
+    expect(types.filter((type) => type === "tool-input-delta")).toHaveLength(1);
+    expect(types.filter((type) => type === "tool-input-end")).toHaveLength(1);
+    expect(events.find((event) => event.type === "tool-call")).toMatchObject({
+      type: "tool-call",
+      toolName: "Search",
+      input: { query: "tetral" },
+    });
+    expect(events.at(-1)).toMatchObject({ type: "finish", finishReason: "tool-calls" });
   }, 30_000);
 });

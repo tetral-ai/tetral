@@ -56,6 +56,7 @@ export const ZaiGLM52Rules: ProviderRules = {
   },
   requestOptions: undefined,
   toolOptions: undefined,
+  freeformTools: undefined,
   providerOptions: {
     zai: {
       thinking: { type: "enabled", clear_thinking: false },

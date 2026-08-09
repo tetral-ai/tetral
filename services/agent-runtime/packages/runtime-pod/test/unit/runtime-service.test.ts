@@ -26,7 +26,7 @@ import {
   buildRuntimeServiceBridgeRuntimeMessage as bridgeRuntimeMessage,
   buildRuntimeServiceDurableBridgeRuntimeMessage as durableBridgeRuntimeMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
-import { RuntimeMessageDraftSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import { RuntimeMessageCreateSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   RuntimeControlInputDeclaration,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
@@ -410,7 +410,7 @@ describe("RuntimeControlService command envelope", () => {
         call: (request) => fixture.service.interrupt(request, authMetadata()),
         kind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
         runtimeInputId: "rin_interrupt",
-        payloadJson: "",
+        payloadJson: JSON.stringify({ origin: "user" }),
       },
       {
         call: (request) => fixture.service.resolveToolConfirmation(request, authMetadata()),
@@ -467,7 +467,7 @@ describe("RuntimeControlService command envelope", () => {
 
     expect(fixture.runHost.sessionIds).toEqual([]);
     expect(fixture.runHost.interrupts).toEqual([
-      { sessionId: "sesn_1", command: commandScope({ runtimeInputId: "rin_interrupt" }) },
+      { sessionId: "sesn_1", command: { ...commandScope({ runtimeInputId: "rin_interrupt" }), origin: "user" } },
     ]);
     expect(fixture.runHost.toolConfirmations).toEqual([
       {
@@ -511,7 +511,7 @@ describe("RuntimeControlService command envelope", () => {
       },
     ]);
     expect(fixture.taskNotificationCommitter.commits.map(({ command }) => {
-      const { draft: _draft, ...fields } = command;
+      const { messageCreate: _messageCreate, ...fields } = command;
       return fields;
     })).toEqual([
       {
@@ -537,11 +537,9 @@ describe("RuntimeControlService command envelope", () => {
         }),
       },
     ]);
-    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => command.draft)).toEqual(
+    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => command.messageCreate)).toEqual(
       fixture.taskNotificationCommitter.commits.map(({ command }) => expect.objectContaining({
-        sourceKind: "task_notification",
-        sourceId: expect.any(String),
-        draftKind: "task_notification",
+        messageKind: "task_notification",
         role: "user",
         origin: "runtime",
         status: "completed",
@@ -608,6 +606,7 @@ describe("RuntimeControlService command envelope", () => {
     const command = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
       runtimeInputId: "rin_interrupt_commit_fail",
+      payloadJson: JSON.stringify({ origin: "user" }),
     });
 
     await expect(fixture.service.interrupt(command, authMetadata())).resolves.toEqual(
@@ -622,10 +621,10 @@ describe("RuntimeControlService command envelope", () => {
     );
 
     expect(fixture.runHost.interrupts).toEqual([
-      { sessionId: "sesn_1", command: commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }) },
+      { sessionId: "sesn_1", command: { ...commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), origin: "user" } },
       {
         sessionId: "sesn_1",
-        command: { ...commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), requestId: "req_retry" },
+        command: { ...commandScope({ runtimeInputId: "rin_interrupt_commit_fail" }), requestId: "req_retry", origin: "user" },
       },
     ]);
     expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
@@ -663,6 +662,7 @@ describe("RuntimeControlService command envelope", () => {
     const command = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
       runtimeInputId: "rin_joined_interrupt_rejected",
+      payloadJson: JSON.stringify({ origin: "user" }),
     });
 
     await expect(fixture.service.interrupt(command, authMetadata())).resolves.toEqual(
@@ -689,6 +689,7 @@ describe("RuntimeControlService command envelope", () => {
     const command = validCommand({
       commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
       runtimeInputId: "rin_idle_interrupt",
+      payloadJson: JSON.stringify({ origin: "user" }),
     });
 
     await expect(fixture.service.interrupt(command, authMetadata())).resolves.toEqual(
@@ -918,6 +919,7 @@ describe("RuntimeControlService command envelope", () => {
         validCommand({
           commandKind: RuntimeCommandKind.RUNTIME_COMMAND_KIND_INTERRUPT_CONTROL,
           runtimeInputId: "rin_interrupt_busy",
+          payloadJson: JSON.stringify({ origin: "user" }),
         }),
         authMetadata(),
       ),
@@ -1089,7 +1091,7 @@ describe("RuntimeControlService command envelope", () => {
     const applied = fixture.runHost.taskNotifications[0]?.command.payloadJson;
     expect(JSON.parse(committed ?? "{}")).toEqual(expected);
     expect(JSON.parse(applied ?? "{}")).toEqual(expected);
-    expect(fixture.taskNotificationCommitter.commits[0]?.command.draft.parts[0]).toMatchObject({
+    expect(fixture.taskNotificationCommitter.commits[0]?.command.messageCreate.parts[0]).toMatchObject({
       type: "text",
       text: committed,
       truncated: false,
@@ -1298,31 +1300,22 @@ function testControlDeclaration(
   inputKind: "interrupt_control" | "tool_confirmation",
 ): RuntimeControlInputDeclaration {
   if (inputKind === "interrupt_control") {
-    return { drafts: [], pendingToolCancellations: [], sandboxExecutionToolUseEventIds: [] };
+    return { messageCreates: [] };
   }
-  const runtimeLocalId = `draft_${command.runtimeInputId}`;
   return {
-    drafts: [RuntimeMessageDraftSchema.parse({
-      runtimeLocalId,
-      sourceKind: "tool_confirmation",
-      sourceId: command.runtimeInputId,
+    messageCreates: [RuntimeMessageCreateSchema.parse({
       sourceEventId: command.eventIds[0],
-      draftKind: "approval_input",
-      ordinal: 0,
+      messageKind: "approval_input",
       role: "user",
       origin: "user",
       status: "completed",
       parts: [{
-        runtimeLocalPartId: `part_${command.runtimeInputId}`,
-        ordinal: 0,
         type: "text",
         text: "Approval allowed",
         truncated: false,
         status: "completed",
       }],
     })],
-    pendingToolCancellations: [],
-    sandboxExecutionToolUseEventIds: [],
   };
 }
 
@@ -1335,26 +1328,23 @@ function testControlReceipt(
       sessionThreadId: input.scope.sessionThreadId,
       operationKind: "commit_inputs",
       sourceKind: input.inputKind,
-      sourceId: input.scope.runtimeInputId,
+      operationId: input.scope.runtimeInputId,
       declarationDigest: "digest_test",
       events: input.scope.eventIds.map((eventId, index) => ({
         sessionThreadId: input.scope.sessionThreadId,
-        sourceEventId: eventId,
         eventId,
         eventSequence: input.scope.sequenceFrom + index,
         disposition: "existing" as const,
       })),
-      messages: input.drafts.map((draft, index) => ({
-        runtimeLocalId: draft.runtimeLocalId,
+      messages: input.messageCreates.map((create, index) => ({
         sessionThreadId: input.scope.sessionThreadId,
-        owningEventId: draft.sourceEventId!,
+        owningEventId: create.sourceEventId!,
         messageId: `msg_${index}_${input.scope.runtimeInputId}`,
         messageSequence: input.scope.sequenceTo + index + 1,
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "",
         disposition: "created" as const,
-        parts: draft.parts.map((part, partIndex) => ({
-          runtimeLocalPartId: part.runtimeLocalPartId,
+        parts: create.parts.map((_part, partIndex) => ({
           partId: `part_${partIndex}_${input.scope.runtimeInputId}`,
           messageId: `msg_${index}_${input.scope.runtimeInputId}`,
           partSequence: partIndex,
@@ -1364,12 +1354,7 @@ function testControlReceipt(
         })),
       })),
       pendingAttachmentDelta: [],
-      pendingToolDelta: input.pendingToolCancellations.map((cancellation) => JSON.stringify({
-        runtime_local_id: cancellation.runtimeLocalId,
-        tool_use_event_id: cancellation.toolUseEventId,
-        status: "cancelled",
-        result_event_id: input.scope.eventIds[0],
-      })),
+      interruptToolProjections: [],
       prefixConsumptions: [],
       childLifecycle: [],
     },

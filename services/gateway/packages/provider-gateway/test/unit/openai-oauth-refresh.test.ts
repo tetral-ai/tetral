@@ -9,6 +9,7 @@ import { OpenAICodexOAuthTokenEndpoint } from "../../src/providers/openai-oauth.
 import { decryptAES256GCM, encryptAES256GCM } from "../../src/providers/crypto.js";
 import type { ResolvedSessionOAuthCredential } from "../../src/providers/credentials.js";
 import type { GatewayCredentialSQL } from "../../src/providers/credentials.js";
+import { normalizeOpenAIOAuthExpiry, parseCanonicalOpenAIOAuthExpiry } from "../../src/providers/openai-oauth-expiry.js";
 
 const MasterKeyHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const Now = Date.parse("2026-07-06T12:00:00.000Z");
@@ -27,7 +28,7 @@ describe("OpenAI OAuth refresh boundary", () => {
         return Response.json({
           access_token: "oauth-access-rotated",
           refresh_token: "oauth-refresh-rotated",
-          expires_in: 3600,
+          expires_at: "2026-07-06T15:00:00+02:00",
         });
       }),
     });
@@ -36,12 +37,26 @@ describe("OpenAI OAuth refresh boundary", () => {
       workspaceId: "wksp_1",
       credential: expiredCredential(),
       abortSignal: NeverAbort,
-    })).resolves.toMatchObject({ ok: true });
+    })).resolves.toMatchObject({ ok: true, credential: { expiresAt: "2026-07-06T13:00:00.000Z" } });
 
     expect(MAX_FOLLOWED_REDIRECTS).toBe(0);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe(OpenAICodexOAuthTokenEndpoint);
     expect(requests[0]?.init?.redirect).toBe("manual");
+  });
+
+  test("normalizes issuer timestamps and accepts only canonical persisted expiry", () => {
+    expect(normalizeOpenAIOAuthExpiry("2024-02-29T23:30:00.123456-02:30")).toBe("2024-03-01T02:00:00.123Z");
+    expect(parseCanonicalOpenAIOAuthExpiry("2024-02-29T23:30:00.123Z")).toBe(Date.parse("2024-02-29T23:30:00.123Z"));
+    for (const invalid of [
+      "2024-02-30T00:00:00.000Z",
+      "2024-02-29",
+      "2024-02-29 00:00:00.000Z",
+      "2024-02-29T00:00:00Z",
+      "2024-02-29T00:00:00.000+00:00",
+    ]) {
+      expect(parseCanonicalOpenAIOAuthExpiry(invalid), invalid).toBeUndefined();
+    }
   });
 
   test.each([
@@ -155,6 +170,7 @@ describe("OpenAI OAuth refresh boundary", () => {
     expect(second).toMatchObject({ ok: true, credential: { accessToken: "oauth-access-rotated", refreshToken: "oauth-refresh-rotated" } });
     expect(issuerRefreshTokens).toEqual(["oauth-refresh-old"]);
     expect(sql.updateCount).toBe(1);
+    expect(sql.row.expires_at).toBe("2026-07-06T13:00:00.000Z");
     await expect(decryptedRowAuth(sql)).resolves.toMatchObject({
       access_token: "oauth-access-rotated",
       refresh_token: "oauth-refresh-rotated",
@@ -286,6 +302,7 @@ interface FakeCredentialRow {
   auth_type: "provider_oauth";
   provider_id: "openai";
   access_mode: "oauth";
+  expires_at: string;
   encrypted_auth: Uint8Array;
   auth_public_json: string;
   archived_at: string | null;
@@ -304,6 +321,7 @@ async function lockedCredentialSQL(encryptedAuth: Uint8Array, options: { readonl
     auth_type: "provider_oauth",
     provider_id: "openai",
     access_mode: "oauth",
+    expires_at: "2000-01-01T00:00:00.000Z",
     encrypted_auth: encryptedAuth,
     auth_public_json: "{}",
     archived_at: null,
@@ -326,13 +344,14 @@ async function lockedCredentialSQL(encryptedAuth: Uint8Array, options: { readonl
         row.encrypted_auth = await encryptedAuthForStored(options.casWinnerAuth);
         return [] as T;
       }
-      if (options.failUpdate === true || values[10] !== row.encrypted_auth) {
+      if (options.failUpdate === true || values[11] !== row.encrypted_auth) {
         return [] as T;
       }
       row.encrypted_auth = values[0] as Uint8Array;
       row.auth_public_json = values[1] as string;
       row.provider_id = values[2] as "openai";
       row.access_mode = values[3] as "oauth";
+      row.expires_at = values[4] as string;
       sql.updateCount += 1;
       return [{ id: row.id }] as T;
     }

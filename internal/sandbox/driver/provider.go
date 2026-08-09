@@ -22,6 +22,8 @@ import (
 
 const DaytonaProviderName = "daytona"
 
+var ErrSandboxOwnershipMismatch = stderrors.New("sandbox provider ownership mismatch")
+
 type DaytonaLifecycleProvider struct {
 	client         daytonaLifecycleClient
 	lifecycle      daytonaLifecyclePolicy
@@ -139,11 +141,16 @@ func (p *DaytonaLifecycleProvider) ResolveSandbox(ctx context.Context, name stri
 		}
 		return sandbox.ProviderHandle{}, false, mapped
 	}
-	if got == nil || got.ID == "" || got.Name != name {
+	if got == nil || got.ID == "" {
 		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona returned an invalid sandbox identity", nil)
 	}
+	if got.Name != name {
+		return sandbox.ProviderHandle{}, false, fmt.Errorf("%w: %w", ErrSandboxOwnershipMismatch,
+			daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona sandbox stable name does not match", nil))
+	}
 	if !daytonaOwnershipLabelsMatch(got.Labels, labels) {
-		return sandbox.ProviderHandle{}, false, daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona sandbox ownership labels do not match", nil)
+		return sandbox.ProviderHandle{}, false, fmt.Errorf("%w: %w", ErrSandboxOwnershipMismatch,
+			daytonaProviderError(sandbox.StageStatus, sandbox.ProviderErrorUnknown, false, 0, "daytona sandbox ownership labels do not match", nil))
 	}
 	return sandbox.ProviderHandle{
 		Provider: DaytonaProviderName, SandboxID: got.ID,
@@ -373,17 +380,13 @@ func daytonaIntervalMinutes(interval time.Duration, name string) (*int, error) {
 }
 
 func daytonaLabels(request sandbox.CreateSandboxRequest) map[string]string {
-	labels := map[string]string{
+	return map[string]string{
 		"tetral.workspace_id":    string(request.Setup.WorkspaceID),
 		"tetral.session_id":      request.Setup.SessionID,
 		"tetral.sandbox_id":      request.Setup.SandboxID,
 		"tetral.environment_id":  request.Setup.EnvironmentID,
 		"tetral.lifecycle_owner": "sandbox",
 	}
-	if request.Setup.LifecycleOperationID != "" {
-		labels["tetral.lifecycle_operation_id"] = request.Setup.LifecycleOperationID
-	}
-	return labels
 }
 
 func daytonaNetworkPolicy(network sandbox.NetworkSetup) (bool, *string, error) {

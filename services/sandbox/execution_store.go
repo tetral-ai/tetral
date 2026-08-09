@@ -314,12 +314,11 @@ func (c *PostgreSQLSandboxExecutionCoordinator) WaitForActivation(ctx context.Co
 					Kind: SandboxExecutionFailed, ErrorKind: "environment_artifact_failed", SafeMessage: "sandbox environment artifact is unavailable",
 				}, now)
 			}
-			labelsJSON, err := json.Marshal(sandboxActivationLabels(
+			labelsJSON, err := json.Marshal(stableSandboxOwnershipLabels(
 				work.Ref.WorkspaceID,
 				work.Ref.SessionID,
 				environmentID,
 				binding.LogicalSandboxID,
-				operationID,
 			))
 			if err != nil {
 				return err

@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	frozenForkSDKCommit     = "a8f5b9262e0d42fb571cb2ea8f902124bbb4f01d"
-	supersededForkSDKCommit = "52103cbc6f820984f0f2f5cce82dfefb344c0c4a"
+	frozenForkSDKCommit     = "83ad546898bf9ac0369a4d214463c63fd4502586"
+	supersededForkSDKCommit = "a8f5b9262e0d42fb571cb2ea8f902124bbb4f01d"
 )
 
 func TestEngineCIForkSDKCheckoutsPinFrozenCommit(t *testing.T) {

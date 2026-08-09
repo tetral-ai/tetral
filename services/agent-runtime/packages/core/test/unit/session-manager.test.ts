@@ -147,7 +147,7 @@ function threadControl(
   sessionId: string,
   runtimeInputId = `rin_control_${sessionId}`,
   sessionThreadId = `thrd_${sessionId}`,
-): RuntimeThreadControlState {
+): RuntimeThreadControlState & { readonly origin: "user" } {
   return {
     requestId: `req_${runtimeInputId}`,
     workspaceId: "wksp_test",
@@ -160,6 +160,7 @@ function threadControl(
     eventIds: [`sevt_${runtimeInputId}`],
     sequenceFrom: 1,
     sequenceTo: 1,
+		origin: "user",
   };
 }
 
@@ -310,9 +311,7 @@ function makeInterruptRecordingThreadLoop(): InterruptRecordingThreadLoop {
             if (session.state.userInterruptRequested()) {
               const runtimeInputId = session.state.userInterruptCommand()?.runtimeInputId;
               await session.state.commitUserInterruptInput({
-                drafts: [],
-                pendingToolCancellations: [],
-                sandboxExecutionToolUseEventIds: [],
+                messageCreates: [],
               });
               if (runtimeInputId !== undefined) {
                 session.state.completeUserInterrupt(runtimeInputId);
@@ -355,9 +354,7 @@ function makeInterruptCleanupThreadLoop(): InterruptCleanupThreadLoop {
               await cleanupReleased;
               if (session.state.userInterruptRequested()) {
                 await session.state.commitUserInterruptInput({
-                  drafts: [],
-                  pendingToolCancellations: [],
-                  sandboxExecutionToolUseEventIds: [],
+                  messageCreates: [],
                 });
                 const runtimeInputId = session.state.userInterruptCommand()?.runtimeInputId;
                 if (runtimeInputId !== undefined) {
@@ -1267,7 +1264,46 @@ describe("SessionManager", () => {
       const idleInterrupt = { ...threadControl("sesn_1"), runtimeInputId: "rin_idle_interrupt", sequenceTo: 10 };
       expect(await Effect.runPromise(manager.interruptControl("sesn_1", idleInterrupt, async (declaration) => {
         idleInterruptCommits += 1;
-        return buildRuntimeControlCommitResult(idleInterrupt, "interrupt_control", declaration);
+        const result = buildRuntimeControlCommitResult(idleInterrupt, "interrupt_control", declaration);
+        if (!result.ok || !("receipt" in result)) return result;
+        return {
+          ...result,
+          receipt: {
+            ...result.receipt,
+            interruptToolProjections: [
+              {
+                toolUseEventId: "sevt_idle_interrupt_tool",
+                resultEvent: {
+                  sessionThreadId: idleInterrupt.sessionThreadId,
+                  eventId: "sevt_idle_interrupt_tool_cancelled",
+                  eventSequence: 11,
+                  disposition: "created" as const,
+                },
+                terminalState: { type: "cancelled" as const },
+              },
+              {
+                toolUseEventId: "sevt_idle_interrupt_sandbox",
+                resultEvent: {
+                  sessionThreadId: idleInterrupt.sessionThreadId,
+                  eventId: "sevt_idle_interrupt_sandbox_unknown",
+                  eventSequence: 12,
+                  disposition: "created" as const,
+                },
+                terminalState: {
+                  type: "error" as const,
+                  error: {
+                    type: "runtime" as const,
+                    code: "runtime_invalid_sequence",
+                    message: "Sandbox outcome is unknown after interruption.",
+                    retryable: false,
+                    fatal: false,
+                    reason: "aborted" as const,
+                  },
+                },
+              },
+            ],
+          },
+        };
       }))).toEqual({
         ok: true,
         sessionId: "sesn_1",
@@ -1277,10 +1313,11 @@ describe("SessionManager", () => {
       });
       expect(idleInterruptCommits).toBe(1);
       expect(session.state.contextManager.messages().flatMap((message) => message.parts)
-        .flatMap((part) => part.type === "tool" && part.state.status === "cancelled"
-          ? [part.toolUseEventId]
+        .flatMap((part) => part.type === "tool"
+          ? [{ toolUseEventId: part.toolUseEventId, status: part.state.status }]
           : [])).toEqual([
-          "sevt_idle_interrupt_tool",
+          { toolUseEventId: "sevt_idle_interrupt_tool", status: "cancelled" },
+          { toolUseEventId: "sevt_idle_interrupt_sandbox", status: "error" },
         ]);
       expect(session.state.pendingApprovalToolJobs()).toHaveLength(0);
       expect(session.state.pendingSandboxExecutionJobs()).toHaveLength(0);
@@ -1304,7 +1341,7 @@ describe("SessionManager", () => {
         duplicate: true,
       });
       expect(idleInterruptCommits).toBe(1);
-      expect(session.state.contextManager.messages()).toHaveLength(3);
+      expect(session.state.contextManager.messages()).toHaveLength(2);
       expect(threadLoop.runs).toHaveLength(1);
       expect(threadLoop.interruptions).toHaveLength(1);
     });
@@ -1366,6 +1403,64 @@ describe("SessionManager", () => {
         },
       ]);
       expect(commitCount).toBe(1);
+    });
+  });
+
+  test("invalid idle interrupt projection evicts hot state before the next cold retry", async () => {
+    const threadLoop = makeInterruptRecordingThreadLoop();
+    const sessionId = "sesn_invalid_interrupt_projection";
+    const threadId = "thrd_invalid_interrupt_projection";
+    let loads = 0;
+    await withSessionManager(sessionManagerLayer(threadLoop, {
+      loadThreadContext: async (command) => {
+        loads += 1;
+        return {
+          ...command,
+          runtimeBindingToken: "runtime-binding-token",
+          messages: [],
+          coldCoverage: coldCoverage(),
+        };
+      },
+    }), async (manager) => {
+      expect(await Effect.runPromise(manager.acceptInput(acceptedInput(sessionId, "rin_invalid_projection_owner", threadId))))
+        .toMatchObject({ ok: true, started: true });
+      await waitForInterruptRecordingRuns(threadLoop, 1);
+      const session = threadLoop.runs[0]?.session;
+      if (session === undefined) throw new Error("expected resident session");
+
+      const stop = { ...threadControl(sessionId, "rin_invalid_projection_stop", threadId), sequenceTo: 2 };
+      expect(await Effect.runPromise(manager.interruptControl(sessionId, stop, testControlCommit(stop))))
+        .toMatchObject({ ok: true, interrupted: true });
+
+      session.state.contextManager.appendMessage(pendingApprovalAssistantMessage(sessionId, "tool_invalid_projection"));
+      const interrupt = { ...threadControl(sessionId, "rin_invalid_projection", threadId), sequenceTo: 3 };
+      const loadsBeforeInvalidReceipt = loads;
+      const invalid = await Effect.runPromise(manager.interruptControl(sessionId, interrupt, async (declaration) => {
+        const committed = buildRuntimeControlCommitResult(interrupt, "interrupt_control", declaration);
+        if (!committed.ok || !("receipt" in committed)) return committed;
+        return {
+          ...committed,
+          receipt: {
+            ...committed.receipt,
+            interruptToolProjections: [{
+              toolUseEventId: "tool_invalid_projection",
+              resultEvent: {
+                sessionThreadId: "other_thread",
+                eventId: "result_invalid_projection",
+                eventSequence: 4,
+                disposition: "created" as const,
+              },
+              terminalState: { type: "cancelled" as const },
+            }],
+          },
+        };
+      }));
+      expect(invalid).toEqual({ ok: false, sessionId, reason: "context_load_failed" });
+      expect(loads).toBe(loadsBeforeInvalidReceipt);
+
+      expect(await Effect.runPromise(manager.interruptControl(sessionId, interrupt, testControlCommit(interrupt))))
+        .toMatchObject({ ok: true, idleInterrupt: true });
+      expect(loads).toBe(loadsBeforeInvalidReceipt + 1);
     });
   });
 
@@ -1545,6 +1640,64 @@ describe("SessionManager", () => {
       });
       expect(commitCalls).toBe(0);
       threadLoop.runs[1]!.release();
+    });
+  });
+
+  test("task notification that starts a child wins over a trailing hot resume projection", async () => {
+    const threadLoop = makeControlledThreadLoop();
+    const sessionId = "sesn_task_notification_resume_race";
+    const threadId = "thrd_task_notification_resume_race";
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
+      expect(await Effect.runPromise(manager.preloadThread({
+        ...threadControl(sessionId, "rin_preload_task_notification_resume", threadId),
+        runtimeBindingToken: "runtime-binding-token",
+        messages: [],
+        backgroundTools: [{
+          taskId: "task_notification_resume",
+          sourceToolUseEventId: "sevt_task_notification_resume",
+        }],
+        thread: {
+          parentThreadId: "thrd_task_notification_resume_parent",
+          role: "subagent",
+          visibility: "public",
+          taskName: "notification worker",
+          agentType: "worker",
+          status: "idle",
+        },
+        coldCoverage: coldCoverage(),
+      }))).toMatchObject({ ok: true, applied: true });
+
+      expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
+        ...threadControl(sessionId, "task_notification:task_notification_resume", threadId),
+        taskId: "task_notification_resume",
+        sourceToolUseEventId: "sevt_task_notification_resume",
+        status: "completed",
+        payloadJson: "{\"status\":\"completed\"}",
+      }, async () => ({
+        ok: true,
+        committedMessage: bridgeRuntimeMessage(sessionId, "task completed"),
+      })))).toMatchObject({ ok: true, applied: true });
+      await waitForRuns(threadLoop, 1);
+      expect(threadLoop.runs[0]?.session.state.peekAcceptedInput()).toMatchObject({
+        kind: "task_notification",
+        taskId: "task_notification_resume",
+      });
+
+      expect(await Effect.runPromise(manager.markThreadActive(
+        threadControl(sessionId, "rin_hot_resume_after_notification", threadId),
+      ))).toEqual({
+        ok: false,
+        sessionId,
+        sessionThreadId: threadId,
+        reason: "thread_busy",
+      });
+      expect(await Effect.runPromise(manager.inspectThread(
+        threadControl(sessionId, "rin_inspect_notification_resume", threadId),
+      ))).toMatchObject({ observed: true, status: "running" });
+
+      threadLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
+      await waitForCondition(() => threadLoop.runs.length === 1, "single task notification run");
+      expect(threadLoop.runs).toHaveLength(1);
     });
   });
 
@@ -4185,7 +4338,6 @@ describe("SessionManager", () => {
       "inspectThread",
       "interruptControl",
       "interruptReviewerExecution",
-      "interruptThread",
       "markThreadActive",
       "markThreadClosed",
       "preloadThread",

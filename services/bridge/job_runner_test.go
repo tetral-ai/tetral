@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tetral-ai/tetral/internal/dbconnect"
+	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -162,6 +163,99 @@ func TestJobRunnerRepairsRuntimeInboxAndCompletionMailBeforeLeasingJobs(t *testi
 	}
 	if len(queueClient.leaseKinds) == 0 {
 		t.Fatal("queue was not leased after runtime inbox and completion-mail repair")
+	}
+}
+
+func TestJobRunnerRunsPodLossBeforeOtherRepairsAndJoinsEveryPhaseError(t *testing.T) {
+	podLossErr := errors.New("pod loss unavailable")
+	inboxErr := errors.New("inbox unavailable")
+	mailErr := errors.New("mail unavailable")
+	queueErr := errors.New("queue unavailable")
+	steps := []string{}
+	queueClient := &recordingQueueClient{leaseErr: queueErr, phaseSteps: &steps}
+	deliverer := &recordingDeliverer{
+		podLossRepairErr: podLossErr,
+		repairErr:        inboxErr,
+		mailRepairErr:    mailErr,
+		phaseSteps:       &steps,
+	}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	err := runner.RunOnce(context.Background())
+	for _, sentinel := range []error{podLossErr, inboxErr, mailErr, queueErr} {
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("RunOnce error %v does not retain %v", err, sentinel)
+		}
+	}
+	if want := []string{"pod-loss", "inbox", "mail", "lease"}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("workspace phases = %v; want %v", steps, want)
+	}
+}
+
+func TestJobRunnerProcessesQueueAfterPodLossRepairError(t *testing.T) {
+	podLossErr := errors.New("pod loss candidate failed")
+	queueClient := &recordingQueueClient{leased: []*queuev1.QueueJob{runtimeInputQueueJob()}}
+	deliverer := &recordingDeliverer{
+		podLossRepairErr: podLossErr,
+		result:           RuntimeDeliveryResult{Status: RuntimeDeliveryAccepted},
+	}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	err := runner.RunOnce(context.Background())
+	if !errors.Is(err, podLossErr) {
+		t.Fatalf("RunOnce error = %v; want pod-loss repair sentinel", err)
+	}
+	if len(deliverer.jobs) != 1 || !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_1"}) {
+		t.Fatalf("queue after repair error delivered=%d transitions=%v; want one delivery and ACK", len(deliverer.jobs), queueClient.transitions)
+	}
+}
+
+func TestJobRunnerFoldsPodLossRepairIntoWorkspaceActivity(t *testing.T) {
+	deliverer := &recordingDeliverer{podLossRepairCount: 1}
+	runner := &JobRunner{
+		Queue:      &recordingQueueClient{},
+		Workspaces: staticWorkspaceLister{"ws_bridge"},
+		Deliverer:  deliverer,
+	}
+
+	hadWork, err := runner.RunOnceWithActivity(context.Background())
+	if err != nil || !hadWork || deliverer.podLossRepairCalls != 1 {
+		t.Fatalf("RunOnceWithActivity = %t/%v calls=%d; want true/nil/1", hadWork, err, deliverer.podLossRepairCalls)
+	}
+}
+
+func TestJobRunnerContextCancellationStopsAfterCurrentPhase(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	steps := []string{}
+	deliverer := &recordingDeliverer{
+		phaseSteps: &steps,
+		podLossRepair: func(context.Context, string) (int, error) {
+			cancel()
+			return 0, nil
+		},
+	}
+	queueClient := &recordingQueueClient{phaseSteps: &steps}
+	runner := &JobRunner{Queue: queueClient, Workspaces: staticWorkspaceLister{"ws_bridge"}, Deliverer: deliverer}
+
+	err := runner.RunOnce(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce error = %v; want context cancellation", err)
+	}
+	if want := []string{"pod-loss"}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("cancelled workspace phases = %v; want %v", steps, want)
+	}
+}
+
+func TestProductionRuntimeDelivererExposesPodLossRepair(t *testing.T) {
+	store := NewJobRunnerRuntimeDeliveryStore(nil, nil, JobRunnerConfig{}, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.BindingVisibilitySnapshot{}
+	})
+	deliverer := RuntimePodDirectDeliverer{Store: store}
+	if _, ok := any(store).(RuntimePodLossRepairer); !ok {
+		t.Fatal("production runtime delivery store does not expose pod-loss repair")
+	}
+	if _, ok := any(deliverer).(RuntimePodLossRepairer); !ok {
+		t.Fatal("production direct deliverer does not expose pod-loss repair")
 	}
 }
 
@@ -1295,12 +1389,14 @@ type recordingQueueClient struct {
 	leaseKinds        []string
 	leaseWorkspaceIDs []string
 	leaseErrWorkspace string
+	leaseErr          error
 	transitions       []string
 	heartbeatLost     bool
 	heartbeatErr      error
 	heartbeats        int
 	heartbeatNotify   chan struct{}
 	steps             *[]string
+	phaseSteps        *[]string
 }
 
 type staticWorkspaceLister []workspace.ID
@@ -1314,6 +1410,12 @@ func (c *recordingQueueClient) Lease(_ context.Context, request *queuev1.LeaseRe
 	defer c.mu.Unlock()
 	c.leaseKinds = append([]string(nil), request.GetKinds()...)
 	c.leaseWorkspaceIDs = append(c.leaseWorkspaceIDs, request.GetWorkspaceId())
+	if c.phaseSteps != nil {
+		*c.phaseSteps = append(*c.phaseSteps, "lease")
+	}
+	if c.leaseErr != nil {
+		return nil, c.leaseErr
+	}
 	if c.leaseErrWorkspace != "" && request.GetWorkspaceId() == c.leaseErrWorkspace {
 		return nil, errors.New("queue unavailable for " + c.leaseErrWorkspace)
 	}
@@ -1387,6 +1489,10 @@ type recordingDeliverer struct {
 	err                    error
 	jobs                   []RuntimeJob
 	repairErr              error
+	podLossRepairErr       error
+	podLossRepairCount     int
+	podLossRepairCalls     int
+	podLossRepair          func(context.Context, string) (int, error)
 	repairCount            int
 	repairCalls            int
 	repairWorkspaceID      string
@@ -1402,6 +1508,7 @@ type recordingDeliverer struct {
 	finalizeErr            error
 	finalizations          []recordedRuntimeFinalization
 	steps                  *[]string
+	phaseSteps             *[]string
 	replayResult           RuntimeDeliveryResult
 	replayFound            bool
 	replayErr              error
@@ -1446,11 +1553,25 @@ func (d *recordingDeliverer) ResolveRuntimeInputSeal(context.Context, RuntimeJob
 	return d.sealedAttempt, d.sealErr
 }
 
+func (d *recordingDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
+	d.podLossRepairCalls++
+	if d.phaseSteps != nil {
+		*d.phaseSteps = append(*d.phaseSteps, "pod-loss")
+	}
+	if d.podLossRepair != nil {
+		return d.podLossRepair(ctx, workspaceID)
+	}
+	return d.podLossRepairCount, d.podLossRepairErr
+}
+
 func (d *recordingDeliverer) RepairRuntimeInbox(_ context.Context, workspaceID string, limit int) (int, error) {
 	d.repairCalls++
 	d.repairWorkspaceID = workspaceID
 	d.repairWorkspaceIDs = append(d.repairWorkspaceIDs, workspaceID)
 	d.repairLimit = limit
+	if d.phaseSteps != nil {
+		*d.phaseSteps = append(*d.phaseSteps, "inbox")
+	}
 	return d.repairCount, d.repairErr
 }
 
@@ -1459,6 +1580,9 @@ func (d *recordingDeliverer) RepairCompletionMail(_ context.Context, workspaceID
 	d.mailRepairWorkspaceID = workspaceID
 	d.mailRepairWorkspaceIDs = append(d.mailRepairWorkspaceIDs, workspaceID)
 	d.mailRepairLimit = limit
+	if d.phaseSteps != nil {
+		*d.phaseSteps = append(*d.phaseSteps, "mail")
+	}
 	return d.mailRepairCount, d.mailRepairErr
 }
 

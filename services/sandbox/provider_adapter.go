@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	apiclient "github.com/daytonaio/daytona/libs/api-client-go"
 
@@ -133,8 +134,18 @@ type ProviderAdapter interface {
 }
 
 type EnvironmentArtifactAdapter interface {
-	BuildEnvironmentArtifact(context.Context, sandbox.BuildArtifactRequest) ProviderOutcome[sandbox.BuildArtifactResult]
+	BuildEnvironmentArtifact(context.Context, sandbox.BuildArtifactRequest) (ProviderOutcome[sandbox.BuildArtifactResult], error)
 }
+
+// environmentArtifactControlError keeps authorization-store failures on the
+// control-plane channel while the provider adapter continues to classify only
+// Daytona failures as provider outcomes.
+type environmentArtifactControlError struct {
+	err error
+}
+
+func (e *environmentArtifactControlError) Error() string { return e.err.Error() }
+func (e *environmentArtifactControlError) Unwrap() error { return e.err }
 
 type MemoryProjectionAdapter interface {
 	RefreshMemoryProjection(context.Context, sandboxdriver.MemoryProjectionRefresh) ProviderOutcome[struct{}]
@@ -226,25 +237,33 @@ func (a *DaytonaAdapter) EnvironmentArtifactAdapter() EnvironmentArtifactAdapter
 	return a
 }
 
-func (a *DaytonaAdapter) BuildEnvironmentArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) ProviderOutcome[sandbox.BuildArtifactResult] {
+func (a *DaytonaAdapter) BuildEnvironmentArtifact(ctx context.Context, request sandbox.BuildArtifactRequest) (outcome ProviderOutcome[sandbox.BuildArtifactResult], controlErr error) {
 	if a == nil || a.Artifacts == nil {
-		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_configuration_invalid", "daytona artifact builder is unavailable")
+		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_configuration_invalid", "daytona artifact builder is unavailable"), nil
 	}
 	identity := providerOperationIdentity{workspaceID: string(request.WorkspaceID), environmentID: request.EnvironmentID}
-	return observeProviderOutcome(ctx, a.Logger, "sandbox.provider.build_artifact", identity, func() ProviderOutcome[sandbox.BuildArtifactResult] {
-		result, err := a.Artifacts.BuildArtifact(ctx, request)
-		if err != nil {
-			boundary := ProviderSubmitted
-			if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
-				boundary = ProviderProvedNotStarted
-			}
-			return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary)
+	started := time.Now()
+	defer func() {
+		if controlErr == nil {
+			logProviderOutcomeCompletion(ctx, a.Logger, "sandbox.provider.build_artifact", identity, time.Since(started), outcome)
 		}
-		if strings.TrimSpace(result.ProviderArtifactRef) == "" {
-			return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no provider reference")
+	}()
+	result, err := a.Artifacts.BuildArtifact(ctx, request)
+	if err != nil {
+		var controlErr *environmentArtifactControlError
+		if errors.As(err, &controlErr) {
+			return ProviderOutcome[sandbox.BuildArtifactResult]{}, controlErr.err
 		}
-		return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}
-	})
+		boundary := ProviderSubmitted
+		if sandboxdriver.ProviderOperationWasNotSubmitted(err) {
+			boundary = ProviderProvedNotStarted
+		}
+		return outcomeFromProviderError[sandbox.BuildArtifactResult](err, boundary), nil
+	}
+	if strings.TrimSpace(result.ProviderArtifactRef) == "" {
+		return terminalProviderFailure[sandbox.BuildArtifactResult]("provider_response_malformed", "daytona artifact builder returned no provider reference"), nil
+	}
+	return ProviderOutcome[sandbox.BuildArtifactResult]{Value: result}, nil
 }
 
 type DaytonaSandboxResolver interface {
@@ -395,6 +414,9 @@ func (a *DaytonaAdapter) ResolveActivation(ctx context.Context, request Activati
 		return a.Resolver.ResolveSandbox(ctx, request.StableName, request.Labels)
 	})
 	if err != nil {
+		if errors.Is(err, sandboxdriver.ErrSandboxOwnershipMismatch) {
+			return terminalProviderFailure[ActivationResolution]("sandbox_identity_mismatch", "sandbox provider ownership identity does not match")
+		}
 		return outcomeFromProviderError[ActivationResolution](err, ProviderProvedNotStarted)
 	}
 	return ProviderOutcome[ActivationResolution]{Value: ActivationResolution{Found: found, Handle: handle}}

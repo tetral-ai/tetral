@@ -14,9 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/vault"
-	"github.com/tetral-ai/tetral/internal/workspace"
 )
 
 func TestSDKCompatibilityVaultAndCredentialMetadataNullClearsAll(t *testing.T) {
@@ -42,73 +40,6 @@ func TestSDKCompatibilityVaultAndCredentialMetadataNullClearsAll(t *testing.T) {
 	}
 	if len(updatedCredential.Metadata) != 0 {
 		t.Fatalf("Credential metadata = %#v; want cleared", updatedCredential.Metadata)
-	}
-}
-
-func TestSDKCompatibilityProviderOAuthDerivesRefreshPresenceForOldRows(t *testing.T) {
-	runtime, admin, encryptor := newPGVaultEnv(t)
-	ctx := context.Background()
-	vaultStore := vault.NewPostgreSQLVaultStore(dbconnect.NewClientForTesting(runtime))
-	credentialStore := vault.NewPostgreSQLCredentialStore(dbconnect.NewClientForTesting(runtime), encryptor)
-	container, err := vaultStore.Create(ctx, workspace.DefaultID, vault.CreateVaultRequest{DisplayName: "provider auth"})
-	if err != nil {
-		t.Fatalf("Create Vault: %v", err)
-	}
-
-	withRefresh, err := credentialStore.Create(ctx, workspace.DefaultID, container.ID, vault.CreateCredentialRequest{
-		Auth: vault.CredentialAuth{
-			Type:         "provider_oauth",
-			ProviderID:   "anthropic",
-			AccessMode:   "workspace",
-			AccessToken:  "provider-access-sentinel",
-			RefreshToken: "provider-refresh-sentinel",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create provider_oauth: %v", err)
-	}
-	if _, err := admin.ExecContext(ctx,
-		`UPDATE credentials SET auth_public_json = $1 WHERE id = $2`,
-		`{"type":"provider_oauth","provider_id":"anthropic","access_mode":"workspace"}`,
-		withRefresh.ID,
-	); err != nil {
-		t.Fatalf("downgrade auth_public_json to old-row shape: %v", err)
-	}
-	oldRow, err := credentialStore.GetMetadata(ctx, workspace.DefaultID, container.ID, withRefresh.ID)
-	if err != nil {
-		t.Fatalf("Get old provider_oauth row: %v", err)
-	}
-	assertProviderOAuthRefreshField(t, oldRow.Auth, true)
-
-	withoutRefresh, err := credentialStore.Create(ctx, workspace.DefaultID, container.ID, vault.CreateCredentialRequest{
-		Auth: vault.CredentialAuth{
-			Type:        "provider_oauth",
-			ProviderID:  "openai",
-			AccessMode:  "workspace",
-			AccessToken: "provider-access-without-refresh",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create provider_oauth without refresh: %v", err)
-	}
-	assertProviderOAuthRefreshField(t, withoutRefresh.Auth, false)
-
-	staticBearer, err := credentialStore.Create(ctx, workspace.DefaultID, container.ID, vault.CreateCredentialRequest{
-		Auth: staticBearerAuth("static-provider-refresh-field"),
-	})
-	if err != nil {
-		t.Fatalf("Create static bearer: %v", err)
-	}
-	body, err := json.Marshal(staticBearer.Auth)
-	if err != nil {
-		t.Fatalf("Marshal static bearer auth: %v", err)
-	}
-	var fields map[string]any
-	if err := json.Unmarshal(body, &fields); err != nil {
-		t.Fatalf("Unmarshal static bearer auth: %v", err)
-	}
-	if _, ok := fields["has_refresh_token"]; ok {
-		t.Fatalf("non-provider auth emitted has_refresh_token: %s", body)
 	}
 }
 
@@ -193,24 +124,6 @@ func TestSDKCompatibilityCredentialValidationTransportFailureIsUnknown(t *testin
 	}
 	if strings.Contains(string(body), "secret-internal-address") {
 		t.Fatalf("validation leaked transport detail: %s", body)
-	}
-}
-
-func assertProviderOAuthRefreshField(t *testing.T, auth vault.CredentialAuthPublic, want bool) {
-	t.Helper()
-	body, err := json.Marshal(auth)
-	if err != nil {
-		t.Fatalf("Marshal provider_oauth auth: %v", err)
-	}
-	var fields map[string]any
-	if err := json.Unmarshal(body, &fields); err != nil {
-		t.Fatalf("Unmarshal provider_oauth auth: %v", err)
-	}
-	if fields["has_refresh_token"] != want {
-		t.Fatalf("has_refresh_token = %#v; want %v (%s)", fields["has_refresh_token"], want, body)
-	}
-	if strings.Contains(string(body), "provider-refresh-sentinel") {
-		t.Fatalf("public auth leaked refresh token: %s", body)
 	}
 }
 

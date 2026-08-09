@@ -12,7 +12,7 @@ import type {
   DurableRuntimeMessage,
   RuntimeJsonValue,
   RuntimeMessage,
-  RuntimeMessageDraft,
+  RuntimeMessageCreate,
 } from "../contracts/runtime.js";
 import type { RuntimeDeclarationReceipt } from "../runtime/runtime-declaration.js";
 import type {
@@ -64,7 +64,7 @@ export interface ContextLoader {
   readonly commitAcceptedInput?: (
     input: RuntimeAcceptedInputState,
     options?: {
-      readonly drafts?: readonly RuntimeMessageDraft[] | undefined;
+      readonly messageCreates?: readonly RuntimeMessageCreate[] | undefined;
     },
   ) => Promise<AcceptedInputCommitResult>;
   /** Resolves one durable sent envelope into its database-stamped input source. */

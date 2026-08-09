@@ -972,7 +972,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsTaskNotificationFromDurableTaskAnd
 		plan.TaskNotification.TaskID != taskID {
 		t.Fatalf("repaired task notification plan = %#v; want original runtime input and task", plan)
 	}
-	if err := store.MarkRuntimeInputAccepted(context.Background(), repairedJob, plan.Request); err != nil {
+	if _, err := store.MarkRuntimeInputAccepted(context.Background(), repairedJob, plan.Request); err != nil {
 		t.Fatalf("mark repaired task notification accepted: %v", err)
 	}
 	if ok, err := queueStore.Ack(context.Background(), queue.AckRequest{
@@ -1405,7 +1405,7 @@ func TestPostgreSQLRuntimeDeliveryStoreMarkAcceptedFencesRuntimeInboxBinding(t *
 		    AND runtime_input_id = 'rin_inbox_accept_fence'`); err != nil {
 		t.Fatalf("mutate inbox fence: %v", err)
 	}
-	err = store.MarkRuntimeInputAccepted(context.Background(), job, plan.Request)
+	_, err = store.MarkRuntimeInputAccepted(context.Background(), job, plan.Request)
 	var prepareErr runtimeDeliveryPrepareError
 	if !errors.As(err, &prepareErr) || prepareErr.kind != "runtime_inbox_accept_missing" || !prepareErr.retryable {
 		t.Fatalf("MarkRuntimeInputAccepted fenced err = %v; want retryable runtime_inbox_accept_missing", err)

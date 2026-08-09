@@ -406,13 +406,13 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		ModelRequestId: "mreq_mcp_media",
 		EventType:      "agent.mcp_tool_use",
 		PayloadJson:    `{"type":"agent.mcp_tool_use","name":"get_file_contents","input":{"path":"plot.png"},"mcp_server_name":"github","evaluated_permission":"allow"}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t,
 			scope,
 			"rwrite_mcp_media_tool_use",
 			"agent.mcp_tool_use",
 			"streaming",
-			bridgeRuntimePartDraftForTest{
+			bridgeRuntimePartCreateForTest{
 				kind: "tool",
 				json: `{"type":"tool","toolCallId":"call_mcp_media","toolName":"get_file_contents","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{"path":"plot.png"},"preview":"{\"path\":\"plot.png\"}","truncated":false}}}`,
 			},
@@ -551,17 +551,7 @@ func TestPostgreSQLBridgeAPIStoreMCPToolResultCommitsInlineMediaAsRefsOnly(t *te
 		EventType:                "agent.mcp_tool_result",
 		McpMaterializationHandle: &materializationHandle,
 		PayloadJson:              `{"type":"agent.mcp_tool_result","mcp_tool_use_id":"` + toolUse.GetEventId() + `","content":[{"type":"text","text":"[MCP attachment: plot.png]"}]}`,
-		Drafts: []*bridgev1.RuntimeMessageDraft{bridgeRuntimeOutputDraftForTest(
-			t,
-			scope,
-			"rwrite_mcp_media_tool_result",
-			"agent.mcp_tool_result",
-			"completed",
-			bridgeRuntimePartDraftForTest{
-				kind: "tool",
-				json: `{"type":"tool","toolCallId":"call_mcp_media","toolName":"get_file_contents","toolUseEventId":"` + toolUse.GetEventId() + `","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"completed","input":{"value":{"path":"plot.png"},"preview":"{\"path\":\"plot.png\"}","truncated":false},"output":{"text":"[MCP attachment: plot.png]","truncated":false}}}`,
-			},
-		)},
+		Declaration:              &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeCompletedToolSettlementForTest(toolUse.GetEventId(), "[MCP attachment: plot.png]")},
 	}
 	resultEvent, err := store.WriteEvent(context.Background(), resultWrite)
 	if err != nil {
@@ -883,14 +873,13 @@ func assertMCPMaterializationDeclaration(
 	if receipt.GetSessionThreadId() != scope.GetSessionThreadId() ||
 		receipt.GetOperationKind() != bridgeOpCommitMcpToolResult ||
 		receipt.GetSourceKind() != "mcp_tool_execution" ||
-		receipt.GetSourceId() != mcpMaterializationSourceID(request) ||
+		receipt.GetOperationId() != mcpMaterializationSourceID(request) ||
 		receipt.GetDeclarationDigest() != digest {
 		t.Fatalf("MCP declaration receipt = %+v; want matching materialization identity", receipt)
 	}
 	if len(receipt.GetEvents()) != 0 ||
 		len(receipt.GetMessages()) != 0 ||
 		len(receipt.GetPendingAttachmentDeltaJson()) != len(request.GetInlineMedia()) ||
-		len(receipt.GetPendingToolDeltaJson()) != 0 ||
 		len(receipt.GetPrefixConsumptions()) != 0 ||
 		receipt.GetRequestReschedule() != nil ||
 		len(receipt.GetChildLifecycle()) != 0 ||

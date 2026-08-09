@@ -3,6 +3,7 @@ package tetralsandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ type EnvironmentReadyFanoutJobRunner struct {
 	Store  EnvironmentReadyFanoutStore
 	Config EnvironmentRunnerConfig
 	Clock  func() time.Time
+	Logger *slog.Logger
 }
 
 type EnvironmentReadyFanoutJob struct {
@@ -78,9 +80,18 @@ func (r *EnvironmentReadyFanoutJobRunner) processJob(ctx context.Context, queueJ
 		}
 	}()
 	ctx = workCtx
+	jobIdentity := SandboxLifecycleJob{JobID: queueJob.GetId(), WorkspaceID: queueJob.GetWorkspaceId()}
+	defer func() {
+		if writer := queueAuthorityLossWriter(resultErr); writer != "" {
+			logSandboxQueueAuthorityLost(r.Logger, jobIdentity, queue.KindEnvironmentReadyFanout, writer)
+		}
+	}()
 	if queueJob.GetMaxAttempts() <= 0 || queueJob.GetAttemptCount() > queueJob.GetMaxAttempts() {
 		if transportJob, identityErr := decodeEnvironmentReadyFanoutTransportIdentity(queueJob); identityErr == nil {
 			if err := r.Store.FinalizeReadyEnvironmentFanout(ctx, transportJob, r.now()); err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("environment_ready_fanout_finalize", err)
+				}
 				return err
 			}
 		}
@@ -102,6 +113,9 @@ func (r *EnvironmentReadyFanoutJobRunner) processJob(ctx context.Context, queueJ
 	if err != nil {
 		if transportJob, identityErr := decodeEnvironmentReadyFanoutTransportIdentity(queueJob); identityErr == nil {
 			if err := r.Store.FinalizeReadyEnvironmentFanout(ctx, transportJob, r.now()); err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("environment_ready_fanout_finalize", err)
+				}
 				return err
 			}
 		}
@@ -119,10 +133,13 @@ func (r *EnvironmentReadyFanoutJobRunner) processJob(ctx context.Context, queueJ
 	_, fanoutErr := r.Store.FanoutReadyEnvironment(ctx, job, r.now())
 	if fanoutErr != nil {
 		if errors.Is(fanoutErr, errQueueLeaseLost) {
-			return fanoutErr
+			return queueAuthorityLostBy("environment_ready_fanout_apply", fanoutErr)
 		}
 		if queueJob.GetMaxAttempts() > 0 && queueJob.GetAttemptCount() >= queueJob.GetMaxAttempts() {
 			if err := r.Store.FinalizeReadyEnvironmentFanout(ctx, job, r.now()); err != nil {
+				if errors.Is(err, errQueueLeaseLost) {
+					return queueAuthorityLostBy("environment_ready_fanout_finalize", err)
+				}
 				return err
 			}
 			if heartbeatErr := stopQueueLeaseGuard(ctx); heartbeatErr != nil {

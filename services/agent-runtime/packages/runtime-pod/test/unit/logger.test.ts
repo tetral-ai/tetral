@@ -1,7 +1,60 @@
 import { describe, expect, test } from "bun:test";
-import { createJsonLogger, logWorkloadStarted, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
+import { createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, recordRuntimeReceiptEvidence, runtimeCloseoutLogRecord, shutdownFailureLogRecord, startupFailureLogRecord, workloadStartedLogRecord } from "../../src/logger.js";
 
 describe("Runtime Pod JSON logger", () => {
+  test("provider reschedule record pins accepted attempt and selected delay", () => {
+    expect(providerRescheduleSelectedLogRecord({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_1",
+      requestId: "req_1",
+      modelRequestId: "mreq_1",
+      attempt: 2,
+      delayMs: 2_000,
+      delaySource: "runtime_fallback",
+      failureCode: "provider_unavailable",
+    })).toEqual(expect.objectContaining({
+      event: "provider_reschedule_selected",
+      "request.id": "req_1",
+      "model_request.id": "mreq_1",
+      "retry.attempt": 2,
+      "delay.ms": 2_000,
+      "delay.source": "runtime_fallback",
+      "provider.failure.code": "provider_unavailable",
+      retryable: true,
+    }));
+  });
+
+  test("provider tool declaration rejection contains only bounded identities and discriminators", () => {
+    const record = providerToolDeclarationRejectedLogRecord({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      sessionThreadId: "thr_1",
+      requestId: "req_1",
+      modelRequestId: "mreq_1",
+      declarationKind: "freeform",
+      family: "claude",
+      validationMember: "tool_family",
+    });
+
+    expect(record).toEqual(expect.objectContaining({
+      event: "provider_tool_declaration_rejected",
+      "workspace.id": "wksp_1",
+      "session.id": "sesn_1",
+      "thread.id": "thr_1",
+      "request.id": "req_1",
+      "model_request.id": "mreq_1",
+      "tool.declaration.kind": "freeform",
+      "tool.family": "claude",
+      "validation.member": "tool_family",
+      "error.class": "provider_tool_declaration",
+      "error.code": "invalid_tool_definition",
+      "error.message_safe": "provider tool declaration rejected",
+    }));
+    expect(JSON.stringify(record)).not.toContain("lark");
+    expect(JSON.stringify(record)).not.toContain("input_schema");
+  });
+
   test("emits service identity fields on structured records", () => {
     const lines: string[] = [];
     const logger = createJsonLogger({
@@ -9,6 +62,7 @@ describe("Runtime Pod JSON logger", () => {
       serviceName: "agent-runtime",
       deploymentEnvironment: "test",
       serviceVersion: "unit",
+      clock: () => new Date("2026-08-08T12:34:56.789Z"),
     });
 
     logger.info({
@@ -28,6 +82,7 @@ describe("Runtime Pod JSON logger", () => {
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
     expect(record).toMatchObject({
       level: "info",
+      time: "2026-08-08T12:34:56.789Z",
       "service.name": "agent-runtime",
       "deployment.environment": "test",
       "service.version": "unit",
@@ -43,6 +98,16 @@ describe("Runtime Pod JSON logger", () => {
       "request.id": "req_1",
     });
     expect(record).not.toHaveProperty("error.class");
+  });
+
+  test("logger owns the event time even when a caller supplies one", () => {
+    const lines: string[] = [];
+    const logger = createJsonLogger({
+      write: (line) => lines.push(line),
+      clock: () => new Date("2026-08-08T00:00:00.000Z"),
+    });
+    logger.info({ event: "clock_test", time: "2000-01-01T00:00:00.000Z" });
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ time: "2026-08-08T00:00:00.000Z" });
   });
 
   test("startup and shutdown failures include shared safe error fields", () => {
@@ -169,7 +234,7 @@ describe("Runtime Pod JSON logger", () => {
       sessionThreadId: "thrd_1",
       operation: "write_event",
       sourceKind: "agent.message",
-      sourceId: "rwrite_1",
+      operationId: "rwrite_1",
       declarationDigest: "digest_1",
       bindingId: "bind_1",
       bindingGeneration: 2,
@@ -198,7 +263,7 @@ describe("Runtime Pod JSON logger", () => {
     expect(records[0]).toMatchObject({
       event: "runtime_receipt_applied",
       "event.kind": "runtime_receipt_applied",
-      "declaration.source.id": "rwrite_1",
+      "operation.id": "rwrite_1",
       "declaration.digest": "digest_1",
       "receipt.application_disposition": "current_custody",
     });
@@ -207,6 +272,8 @@ describe("Runtime Pod JSON logger", () => {
       "receipt.discard_reason": "stale_custody",
     });
     expect(JSON.stringify(records)).not.toContain("prompt");
+    expect(JSON.stringify(records)).not.toContain("declaration.source.id");
+    expect(JSON.stringify(records)).not.toContain("session.thread.id");
     expect(outcomes).toEqual(["applied"]);
   });
 });
