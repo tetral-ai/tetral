@@ -174,6 +174,7 @@ test("apply_patch preserves the provider scalar while declaring one canonical ex
     expect(toolPart?.type === "tool" && toolPart.state.status === "running" ? toolPart.state.input.value : undefined).toBe(patch);
     expect(toolUseEnvelope?.event.type).toBe("agent.tool_use");
     if (toolUseEnvelope?.event.type !== "agent.tool_use") throw new Error("expected apply_patch Tool Use event");
+    expect(toolUseEnvelope.event.name).toBe("apply_patch");
     expect(toolUseEnvelope.event.input).toEqual({ patch });
     expect(executionInput).toEqual({ patch });
     expect(executionInput).not.toEqual({ patch: { patch } });

@@ -119,12 +119,20 @@ func TestSchemaOwnershipJobRunnerUsesProductionRuntimeDeliveryAssembly(t *testin
 	text := readSchemaOwnershipFile(t, filepath.Join(root, path))
 	for _, required := range []string{
 		"deliveryStore := agentruntimebridge.NewJobRunnerRuntimeDeliveryStore(",
+		"agentruntimebridge.JobRunner{",
 		"Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{",
 		"Store: deliveryStore,",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("job-runner startup missing production runtime-delivery wiring %q in %s", required, path)
 		}
+	}
+	// The deliverer must be a field of the JobRunner literal, not a detached
+	// value: pin the ordering so the assignment itself is proven.
+	runnerAt := strings.Index(text, "agentruntimebridge.JobRunner{")
+	delivererAt := strings.Index(text, "Deliverer: agentruntimebridge.RuntimePodDirectDeliverer{")
+	if runnerAt >= delivererAt {
+		t.Fatalf("job-runner startup does not assign the deliverer inside the JobRunner literal in %s (JobRunner at %d, Deliverer at %d)", path, runnerAt, delivererAt)
 	}
 }
 

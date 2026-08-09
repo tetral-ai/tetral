@@ -379,6 +379,21 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 	if string(afterA[1]) == string(afterB[1]) {
 		t.Fatal("settling A did not change target Tool part")
 	}
+	// A second settlement for an already-terminal Tool Use is a distinct
+	// declaration operation (new RuntimeWriteId, different settlement outcome),
+	// so it is not the idempotent replay path exercised above: it must be
+	// rejected and must leave the stored terminal result untouched.
+	duplicate := &bridgev1.WriteEventRequest{
+		Scope: scope, RuntimeWriteId: "rwrite_stable_result_a_second", ModelRequestId: requestID,
+		EventType: "agent.tool_result", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_result","tool_use_id":%q,"content":[{"type":"text","text":"second A"}]}`, toolA.GetEventId()),
+		Declaration: &bridgev1.WriteEventRequest_ToolSettlement{ToolSettlement: bridgeErrorToolSettlementForTest(toolA.GetEventId(), "second A")},
+	}
+	if _, err := store.WriteEvent(context.Background(), duplicate); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("second settlement for %s = %v; want AlreadyExists", toolA.GetEventId(), err)
+	}
+	if afterDuplicate := readParts(); !reflect.DeepEqual(afterDuplicate, afterA) {
+		t.Fatalf("rejected second settlement changed the Assistant projection: before %+v after %+v", afterA, afterDuplicate)
+	}
 	for _, target := range []*bridgev1.WriteEventResponse{toolA, toolB} {
 		var results int
 		if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type='agent.tool_result' AND payload_json::jsonb->>'tool_use_id'=$3`, sessionID, threadID, target.GetEventId()).Scan(&results); err != nil {
