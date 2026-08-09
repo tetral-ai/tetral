@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -400,7 +403,13 @@ func TestPostgreSQLRuntimePodLossSweepTreatsDeletedFrozenCandidateAsInactiveAndC
 	if !deletedAfterCensus.Load() {
 		t.Fatal("pod-loss census did not run deletion race hook")
 	}
+	if err := store.repairLostRuntimeBinding(context.Background(), "default", deleted.sessionID, deleted.binding, time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC)); err == nil {
+		t.Fatal("input-triggered pod-loss repair accepted a deleted Session")
+	} else if code, ok := closeoutSentinelCode(err); !ok || code != closeoutScopeSupersededCode || status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("input-triggered deleted-Session repair error = %v; want typed scope-superseded rejection", err)
+	}
 	var lifecycleState, bindingID string
+	var runtimeState string
 	var bindingGeneration int64
 	var closeoutEvents int
 	if err := admin.QueryRowContext(context.Background(), `SELECT lifecycle_state FROM sessions
@@ -411,14 +420,18 @@ func TestPostgreSQLRuntimePodLossSweepTreatsDeletedFrozenCandidateAsInactiveAndC
 		FROM session_runtime_bindings WHERE workspace_id='default' AND session_id=$1`, deleted.sessionID).Scan(&bindingID, &bindingGeneration); err != nil {
 		t.Fatalf("read deleted frozen binding: %v", err)
 	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_status
+		WHERE workspace_id='default' AND session_id=$1`, deleted.sessionID).Scan(&runtimeState); err != nil {
+		t.Fatalf("read deleted frozen Runtime status: %v", err)
+	}
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_events
 		WHERE workspace_id='default' AND session_id=$1
 		  AND type IN ('session.error','span.model_request_end','agent.tool_result')`, deleted.sessionID).Scan(&closeoutEvents); err != nil {
 		t.Fatalf("count deleted frozen closeout events: %v", err)
 	}
-	if lifecycleState != "deleted" || bindingID != deleted.binding.BindingID || bindingGeneration != deleted.binding.BindingGeneration || closeoutEvents != 0 {
-		t.Fatalf("deleted frozen candidate = lifecycle %q binding %q/%d closeout %d; want deleted original binding and no repair",
-			lifecycleState, bindingID, bindingGeneration, closeoutEvents)
+	if lifecycleState != "deleted" || runtimeState != "idle" || bindingID != deleted.binding.BindingID || bindingGeneration != deleted.binding.BindingGeneration || closeoutEvents != 0 {
+		t.Fatalf("deleted frozen candidate = lifecycle %q Runtime %q binding %q/%d closeout %d; want deleted idle scope, original binding, and no repair",
+			lifecycleState, runtimeState, bindingID, bindingGeneration, closeoutEvents)
 	}
 	var laterBindings int
 	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_bindings

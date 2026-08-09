@@ -172,7 +172,9 @@ test("apply_patch preserves the provider scalar while declaring one canonical ex
     expect(result).toMatchObject({ type: "completed" });
     const toolPart = toolUseEnvelope?.assistantPartAppend?.parts.find((part) => part.type === "tool");
     expect(toolPart?.type === "tool" && toolPart.state.status === "running" ? toolPart.state.input.value : undefined).toBe(patch);
-    expect(toolUseEnvelope?.event).toMatchObject({ type: "agent.tool_use", name: "apply_patch", input: { patch } });
+    expect(toolUseEnvelope?.event.type).toBe("agent.tool_use");
+    if (toolUseEnvelope?.event.type !== "agent.tool_use") throw new Error("expected apply_patch Tool Use event");
+    expect(toolUseEnvelope.event.input).toEqual({ patch });
     expect(executionInput).toEqual({ patch });
     expect(executionInput).not.toEqual({ patch: { patch } });
 });
@@ -1938,6 +1940,80 @@ test("serializes one shared-message declaration stream while four safe tools exe
         ["reasoning:second completed reasoning part", "tool:tool-3"],
         ["tool:tool-4"],
     ]);
+});
+test("settles a Tool Result while a sibling Assistant declaration ACK is still in flight", async () => {
+    const session = new ThreadRuntime("sesn_tool_settlement_during_sibling_declaration");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-1", 0, "read both")] });
+    const secondDeclarationArrived = deferred<void>();
+    const releaseSecondDeclaration = deferred<void>();
+    const declarations: SessionEventEnvelope[] = [];
+    const settlements: SessionEventEnvelope[] = [];
+    let secondDeclarationReleased = false;
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        append: async (envelope) => {
+            if (envelope.event.type === "agent.tool_use") {
+                declarations.push(envelope);
+                if (declarations.length === 2) {
+                    secondDeclarationArrived.resolve(undefined);
+                    await releaseSecondDeclaration.promise;
+                    secondDeclarationReleased = true;
+                }
+            }
+            else if (envelope.event.type === "agent.tool_result") {
+                settlements.push(envelope);
+            }
+            return await baseWriter.append(envelope);
+        },
+    };
+    const runPromise = Effect.runPromise(Effect.gen(function* () {
+        const threadLoop = yield* ThreadLoop.Service;
+        return yield* threadLoop.run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        events: [
+            {
+                type: "tool-call",
+                id: "tool-1",
+                toolName: "Read",
+                input: { file_path: "src/a.ts" },
+                inputPreview: { preview: "{\"file_path\":\"src/a.ts\"}", truncated: false },
+            },
+            {
+                type: "tool-call",
+                id: "tool-2",
+                toolName: "Read",
+                input: { file_path: "src/b.ts" },
+                inputPreview: { preview: "{\"file_path\":\"src/b.ts\"}", truncated: false },
+            },
+            { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+            systemInstructions: "tool settlement and declaration independence test",
+            toolCatalog: catalogForTest({ name: "Read", description: "Read file", inputSchema: { type: "object" } }),
+        },
+        runTool: async (request) => {
+            if (request.modelToolCallId === "tool-1") {
+                await secondDeclarationArrived.promise;
+            }
+            return { type: "completed", output: { text: `done ${request.modelToolCallId}`, truncated: false } };
+        },
+    }))));
+    await secondDeclarationArrived.promise;
+    await waitForCondition(() => settlements.length === 1, "Tool Result settlement during sibling declaration ACK");
+    expect(secondDeclarationReleased).toBe(false);
+    expect(settlements[0]?.event).toMatchObject({ type: "agent.tool_result" });
+    expect(settlements[0]?.event).not.toHaveProperty("is_error");
+    releaseSecondDeclaration.resolve(undefined);
+    expect(await runPromise).toMatchObject({ type: "completed" });
+    expect(declarations).toHaveLength(2);
+    expect(settlements).toHaveLength(2);
 });
 test("settles parallel Tool Results in completion order with target-only envelopes", async () => {
     const session = new ThreadRuntime("sesn_tool_projection_order");

@@ -159,26 +159,59 @@ func TestPostgreSQLBridgeAPIStoreLoadContextProjectsOnlyPendingChildInterruptWor
 			bindingID := "bind_child_interrupt_projection_" + suffix
 			podUID := "pod_child_interrupt_projection_" + suffix
 			seedBridgeAPISession(t, admin, "default", sessionID, mainID)
-			seedBridgeAPIChildThread(t, admin, "default", sessionID, mainID, childID)
+			seedBridgeAPIChildThreadWithDurableStatus(t, admin, sessionID, mainID, childID, test.threadStatus)
 			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
-			if _, err := admin.ExecContext(context.Background(), `UPDATE session_threads
-				SET status=$1 WHERE workspace_id='default' AND session_id=$2 AND id=$3`, test.threadStatus, sessionID, childID); err != nil {
-				t.Fatalf("set child status: %v", err)
-			}
 			sourceID := "evt_child_interrupt_projection_source_" + suffix
 			seedBridgeAPIChildLifecycleToolSource(t, admin, sessionID, mainID, sourceID)
 			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 			store.RuntimeBindingTokenHMACKey = []byte("child-interrupt-projection-key-32")
 			parentScope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
-			admitted, err := store.AdmitChildInterrupt(context.Background(), &bridgev1.AdmitChildInterruptRequest{
+			admission := &bridgev1.AdmitChildInterruptRequest{
 				Scope: parentScope, RootChildThreadId: childID, SourceToolUseEventId: sourceID,
 				Action: bridgev1.ChildControlAction_CHILD_CONTROL_ACTION_CLOSE, IncludeDescendants: true,
-			})
+			}
+			admitted, err := store.AdmitChildInterrupt(context.Background(), admission)
 			if err != nil {
 				t.Fatalf("AdmitChildInterrupt: %v", err)
 			}
 			if len(admitted.GetTargets()) != 1 || admitted.GetTargets()[0].GetDisposition() != test.wantDisposition {
 				t.Fatalf("admitted disposition = %+v; want %s", admitted.GetTargets(), test.wantDisposition)
+			}
+			replayed, err := store.AdmitChildInterrupt(context.Background(), admission)
+			if err != nil || replayed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE ||
+				!reflect.DeepEqual(replayed.GetTargets(), admitted.GetTargets()) {
+				t.Fatalf("AdmitChildInterrupt replay = %+v, %v; want identical durable census", replayed, err)
+			}
+			var censusPayload string
+			if err := admin.QueryRowContext(context.Background(), `SELECT payload_json FROM session_events
+				WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND type=$3
+				  AND payload_json::jsonb ->> 'source_tool_use_event_id'=$4`,
+				sessionID, childID, childInterruptRequestedEventType, sourceID).Scan(&censusPayload); err != nil {
+				t.Fatalf("read durable child-control census: %v", err)
+			}
+			if got := testJSONPathString(t, censusPayload, "disposition"); got != childInterruptDispositionName(test.wantDisposition) {
+				t.Fatalf("durable child-control disposition = %q; want %q", got, childInterruptDispositionName(test.wantDisposition))
+			}
+			var inboxRows, queueRows int
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_runtime_inbox
+				WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2 AND input_kind='interrupt_control'`,
+				sessionID, childID).Scan(&inboxRows); err != nil {
+				t.Fatalf("count child-control Runtime Inputs: %v", err)
+			}
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+				WHERE workspace_id='default' AND kind='runtime_input'
+				  AND payload_json::jsonb ->> 'session_id'=$1
+				  AND payload_json::jsonb ->> 'session_thread_id'=$2
+				  AND payload_json::jsonb ->> 'input_kind'='interrupt_control'
+				  AND status IN ('pending','leased')`, sessionID, childID).Scan(&queueRows); err != nil {
+				t.Fatalf("count child-control Queue custody: %v", err)
+			}
+			wantCustody := 0
+			if test.wantDisposition == bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL {
+				wantCustody = 1
+			}
+			if inboxRows != wantCustody || queueRows != wantCustody {
+				t.Fatalf("child-control custody = inbox %d Queue %d; want %d/%d", inboxRows, queueRows, wantCustody, wantCustody)
 			}
 			switch test.corruptDisposition {
 			case "missing":
@@ -224,6 +257,44 @@ func TestPostgreSQLBridgeAPIStoreLoadContextProjectsOnlyPendingChildInterruptWor
 				t.Fatalf("child interrupt projected = %t; want %t in %+v", included, test.wantIncluded, payload.TurnFacts.Events)
 			}
 		})
+	}
+}
+
+func seedBridgeAPIChildThreadWithDurableStatus(t *testing.T, db *sql.DB, sessionID string, parentID string, childID string, threadStatus string) {
+	t.Helper()
+	if threadStatus == "idle" {
+		seedBridgeAPIChildThread(t, db, "default", sessionID, parentID, childID)
+		return
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_threads (
+		workspace_id, id, session_id, parent_thread_id, role, visibility, status,
+		task_name, created_at, last_active_at, closed_at, updated_at
+	) VALUES ('default',$1,$2,$3,'subagent','public',$4,$5,
+		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:01Z','2026-01-01T00:00:01Z')`,
+		childID, sessionID, parentID, threadStatus, "task_"+childID); err != nil {
+		t.Fatalf("seed durable child status: %v", err)
+	}
+	eventType := "session.thread_status_terminated"
+	payload := fmt.Sprintf(`{"type":"session.thread_status_terminated","session_thread_id":%q,"task_name":%q}`, childID, "task_"+childID)
+	if threadStatus == "closed_for_runtime" {
+		eventType = "session.thread_status_idle"
+		payload = fmt.Sprintf(`{"type":"session.thread_status_idle","session_thread_id":%q,"task_name":%q,"stop_reason":{"type":"closed_for_runtime"}}`, childID, "task_"+childID)
+	}
+	seedBridgeAPIEvent(t, db, "default", sessionID, childID, "evt_child_status_"+childID, 1, eventType, payload)
+}
+
+func childInterruptDispositionName(disposition bridgev1.ChildInterruptDisposition) string {
+	switch disposition {
+	case bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PENDING_CONTROL:
+		return "pending_control"
+	case bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_ALREADY_CLOSED:
+		return "already_closed"
+	case bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PRESERVED_FAILED:
+		return "preserved_failed"
+	case bridgev1.ChildInterruptDisposition_CHILD_INTERRUPT_DISPOSITION_PRESERVED_TERMINATED:
+		return "preserved_terminated"
+	default:
+		return ""
 	}
 }
 

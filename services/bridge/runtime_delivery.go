@@ -842,7 +842,7 @@ func replayRuntimeDeliveryFinalizationTx(ctx context.Context, tx *dbconnect.Tx, 
 			return runtimeDeliveryExhaustedResult(), true, nil
 		case "committed", "cancelled":
 			return RuntimeDeliveryResult{Status: RuntimeDeliveryDuplicate}, true, nil
-		case "queued", "delivering", "accepted":
+		case "delivering", "accepted":
 			return RuntimeDeliveryResult{}, false, nil
 		default:
 			return RuntimeDeliveryResult{}, false, runtimeDeliveryPrepareError{kind: "runtime_inbox_status_invalid", message: "runtime inbox status is invalid", retryable: false}

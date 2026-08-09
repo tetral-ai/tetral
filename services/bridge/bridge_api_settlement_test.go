@@ -25,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
 // This file owns the Bridge settlement protocol-family boundary.
@@ -1764,11 +1765,11 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationConsumesDispatchedSandb
 		`INSERT INTO session_runtime_tool_results (
 			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
 			normalized_input_hash, tool_name, input_json, ack_status, result_json,
-			model_tool_call_id, execution_state, execution_attempt_generation,
+			model_tool_call_id, execution_state, execution_attempt_generation, authorized_provider_resource_id,
 			created_at, updated_at
 		) VALUES ('default', 'sesn_bridge_terminate_direct_sandbox', 'thr_bridge_terminate_direct_sandbox',
 			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', NULL,
-			'call_terminate_direct_sandbox', 'running', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+			'call_terminate_direct_sandbox', 'running', 1, 'provider_terminate_direct_sandbox', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`,
 	); err != nil {
 		t.Fatalf("seed dispatched sandbox execution: %v", err)
@@ -1857,6 +1858,26 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 	if err != nil {
 		t.Fatalf("WriteEvent sandbox tool use: %v", err)
 	}
+	blockingToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope: siblingScope, RuntimeWriteId: "rwrite_terminate_sandbox_blocker", ModelRequestId: "mreq_terminate_sandbox",
+		EventType:      "agent.tool_use",
+		PayloadJson:    `{"type":"agent.tool_use","name":"Bash","input":{"command":"sleep 20"},"evaluated_permission":"allow"}`,
+		SessionVisible: true,
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			t,
+			siblingScope,
+			"rwrite_terminate_sandbox_blocker",
+			"agent.tool_use",
+			"streaming",
+			bridgeRuntimePartCreateForTest{
+				kind: "tool",
+				json: `{"type":"tool","toolCallId":"call_terminate_sandbox_blocker","toolName":"Bash","state":{"status":"running","input":{"value":{"command":"sleep 20"},"preview":"{\"command\":\"sleep 20\"}","truncated":false}}}`,
+			},
+		)},
+	})
+	if err != nil {
+		t.Fatalf("WriteEvent sibling Sandbox release blocker: %v", err)
+	}
 	mcpToolUse, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
 		Scope: mcpSiblingScope, RuntimeWriteId: "rwrite_terminate_sandbox_mcp", ModelRequestId: "mreq_terminate_mcp",
 		EventType:      "agent.mcp_tool_use",
@@ -1892,6 +1913,20 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationSettlesSiblingMCPAndSta
 		toolUse.GetEventId(), sha256Hex(`{"command":"sleep 10"}`), `{"command":"sleep 10"}`, stagedResultJSON, stagedResultDigest,
 	); err != nil {
 		t.Fatalf("seed staged sandbox execution: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(),
+		`INSERT INTO session_runtime_tool_results (
+			workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
+			normalized_input_hash, tool_name, input_json, ack_status, result_json,
+			model_tool_call_id, execution_state, execution_attempt_generation,
+			authorized_provider_resource_id, created_at, updated_at
+		) VALUES ('default', 'sesn_bridge_terminate_sandbox', 'thr_bridge_terminate_sandbox_sibling',
+			$1, 'sandbox_tool', $2, 'Bash', $3, 'committed', NULL,
+			'call_terminate_sandbox_blocker', 'preparing', 1,
+			'provider_terminate_sandbox', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		blockingToolUse.GetEventId(), sha256Hex(`{"command":"sleep 20"}`), `{"command":"sleep 20"}`,
+	); err != nil {
+		t.Fatalf("seed sibling Sandbox release blocker: %v", err)
 	}
 	releaseOperationID, oldReleaseJobID := parkBridgeSandboxRelease(
 		t, runtime, admin, "sesn_bridge_terminate_sandbox", "sbox_bridge_terminate_sandbox", "provider_terminate_sandbox",
@@ -1995,26 +2030,47 @@ func parkBridgeSandboxRelease(t *testing.T, runtime *sql.DB, admin *sql.DB, sess
 		t.Fatalf("seed terminated Sandbox release: %v", err)
 	}
 	queueStore := queue.NewPostgreSQLStore(client)
+	now := time.Now().UTC()
 	leased, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
 		WorkspaceID: "default", Kinds: []string{queue.KindSandboxRelease},
-		LeaseOwner: "sandbox-runtime-termination-park", MaxJobs: 1, LeaseDuration: time.Minute,
+		LeaseOwner: "sandbox-runtime-termination-park", MaxJobs: 1, LeaseDuration: time.Minute, Now: now,
 	})
 	if err != nil || len(leased) != 1 {
 		t.Fatalf("lease release before termination = %#v, %v; want one job", leased, err)
 	}
-	oldJobID := leased[0].ID
-	if updated, err := queueStore.Ack(context.Background(), queue.AckRequest{
-		WorkspaceID: "default", JobID: oldJobID, LeaseToken: leased[0].LeaseToken,
-	}); err != nil || !updated {
-		t.Fatalf("ACK parked termination release = %t, %v; want true,nil", updated, err)
+	leasedJob := leased[0]
+	if leasedJob.LeasedUntil == nil {
+		t.Fatal("leased termination release has no expiry")
 	}
-	if _, err := admin.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
-		SET queue_job_id=NULL, queue_kind=NULL, queue_partition_key=NULL, queue_dedupe_key=NULL,
-		    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
-		WHERE workspace_id='default' AND operation_id=$1`, operationID); err != nil {
-		t.Fatalf("park terminated Sandbox release: %v", err)
+	job := tetralsandbox.SandboxLifecycleJob{
+		JobID: leasedJob.ID, LeaseToken: leasedJob.LeaseToken, LeaseOwner: leasedJob.LeasedBy,
+		LeaseExpiresAt: *leasedJob.LeasedUntil, AttemptCount: leasedJob.AttemptCount, MaxAttempts: leasedJob.MaxAttempts,
+		WorkspaceID: string(leasedJob.WorkspaceID), SessionID: sessionID,
+		LogicalSandboxID: logicalSandboxID, OperationID: operationID,
 	}
-	return operationID, oldJobID
+	lifecycleStore := tetralsandbox.NewPostgreSQLSandboxLifecycleStore(client, nil, 0)
+	disposition, err := lifecycleStore.ParkBlockedRelease(context.Background(), job, now.Add(time.Second))
+	if err != nil || disposition != tetralsandbox.SandboxLifecycleApplied {
+		t.Fatalf("ParkBlockedRelease before termination = %s, %v; want applied", disposition, err)
+	}
+	var state, oldStatus string
+	var parkedJobID sql.NullString
+	var activeJobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT o.state, o.queue_job_id, q.status
+		FROM sandbox_lifecycle_operations o JOIN queue_jobs q ON q.workspace_id=o.workspace_id AND q.id=$2
+		WHERE o.workspace_id='default' AND o.operation_id=$1`, operationID, leasedJob.ID).Scan(&state, &parkedJobID, &oldStatus); err != nil {
+		t.Fatalf("read parked termination release: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1 AND payload_json::jsonb ->> 'operation_id'=$2
+		  AND status IN ('pending','leased')`, queue.KindSandboxRelease, operationID).Scan(&activeJobs); err != nil {
+		t.Fatalf("count active parked termination release jobs: %v", err)
+	}
+	if state != "pending" || parkedJobID.Valid || oldStatus != queue.StatusAcknowledged || activeJobs != 0 {
+		t.Fatalf("parked termination release = state %q job %v old %q active %d; want pending, no identity, acknowledged old job, no active custody",
+			state, parkedJobID, oldStatus, activeJobs)
+	}
+	return operationID, leasedJob.ID
 }
 
 func assertBridgeSandboxReleaseWoken(t *testing.T, admin *sql.DB, operationID string, oldJobID string, wantJobCount int) string {

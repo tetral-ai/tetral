@@ -48,6 +48,10 @@ import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/s
 import type { ToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { DurableRuntimeMessage, RuntimeJsonValue, RuntimeMessage } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import { RuntimeInternalToolRepairStore, SessionEventWriterRetryPolicy } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import {
+  extractColdThreadToolRouteView,
+  extractThreadTurnCheckpoint,
+} from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import type { ThreadTurnLoadFacts } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
@@ -56,7 +60,7 @@ import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
 import { childLifecycleDeclarationDigest } from "../../src/runtime-declaration-wire.js";
-import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
+import { buildRuntimeCoreHosts, validateClosedThreadResumeCheckpoint } from "../../src/core-hosts.js";
 import type { RuntimeCoreHostsOptions, RuntimeSubAgentRunHost } from "../../src/core-hosts.js";
 import {
   buildCoreHostsAssistantRunningToolMessage as assistantRunningToolMessage,
@@ -2210,11 +2214,11 @@ describe("RuntimePodToolRunner", () => {
       {
         name: "open request",
         context: {
-          messages: [], thread: closedThread, durableTurnId: "sevt_resume_running",
+          messages: [], thread: closedThread,
+          pendingToolUses: [], pendingSandboxExecutions: [],
           turnFacts: {
             events: [
-              { eventId: "sevt_resume_running", eventSequence: 1, type: "session.status_running" as const },
-              { eventId: "sevt_resume_start", eventSequence: 2, type: "span.model_request_start" as const, modelRequestId: "mreq_resume_open", requestStart: { requestKind: "agent_provider_request" as const, contextThroughMessageSequence: 0 } },
+              { eventId: "sevt_resume_start", eventSequence: 1, type: "span.model_request_start" as const, modelRequestId: "mreq_resume_open", requestStart: { requestKind: "agent_provider_request" as const, contextThroughMessageSequence: 0 } },
             ],
             messageLineage: [],
           },
@@ -2225,12 +2229,14 @@ describe("RuntimePodToolRunner", () => {
         context: {
           messages: pendingMessages, thread: closedThread, turnFacts: pendingFacts,
           pendingToolUses: [{ toolUseEventId: "sevt_tool_resume_checkpoint", modelRequestId: "mreq_resume_checkpoint", modelToolCallId: "tool-resume-checkpoint", toolName: "Read", input: { file_path: "a.txt" }, status: "pending" as const }],
+          pendingSandboxExecutions: [],
         },
       },
       {
         name: "unfinished sandbox route",
         context: {
           messages: pendingMessages, thread: closedThread, turnFacts: pendingFacts,
+          pendingToolUses: [],
           pendingSandboxExecutions: [{ toolUseEventId: "sevt_tool_resume_checkpoint", modelRequestId: "mreq_resume_checkpoint", modelToolCallId: "tool-resume-checkpoint", toolName: "Read", input: { file_path: "a.txt" }, executionState: "running" as const }],
         },
       },
@@ -2238,15 +2244,28 @@ describe("RuntimePodToolRunner", () => {
         name: "unresolved interrupt",
         context: {
           messages: [], thread: closedThread,
+          pendingToolUses: [], pendingSandboxExecutions: [],
           turnFacts: { events: [{ eventId: "sevt_resume_interrupt", eventSequence: 1, type: "agent.thread_interrupt_requested" as const }], messageLineage: [] },
         },
       },
       {
         name: "reducer has pending input",
-        context: { messages: [pendingInput], thread: closedThread, turnFacts: resumeTurnFactsFor([pendingInput]) },
+        context: { messages: [pendingInput], thread: closedThread, pendingToolUses: [], pendingSandboxExecutions: [], turnFacts: resumeTurnFactsFor([pendingInput]) },
       },
     ];
     for (const testCase of cases) {
+      const checkpoint = extractThreadTurnCheckpoint({ messages: testCase.context.messages, facts: testCase.context.turnFacts });
+      const routeView = extractColdThreadToolRouteView({
+        checkpoint,
+        pendingToolUses: testCase.context.pendingToolUses,
+        pendingSandboxExecutions: testCase.context.pendingSandboxExecutions,
+      });
+      expect(() => validateClosedThreadResumeCheckpoint(
+        checkpoint,
+        routeView,
+        testCase.context.pendingToolUses,
+        testCase.context.pendingSandboxExecutions,
+      ), testCase.name).toThrow("closed Thread resume requires a quiescent durable checkpoint");
       const hosts = await buildResumeTestHosts(async () => ({
         ...testCase.context,
         runtimeBindingToken: "runtime-binding-token-resume-checkpoint",

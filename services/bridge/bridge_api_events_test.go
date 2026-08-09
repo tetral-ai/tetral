@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -239,6 +241,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	scope := bridgeAPIScope(sessionID, threadID, "bind_stable_reasoning", 1, "pod_stable_reasoning")
 	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_stable_start", requestID, "agent_provider_request", 0)
+	writeRequests := make(map[string]*bridgev1.WriteEventRequest)
 
 	writeTool := func(writeID, callID, reasoningID, reasoningText string) *bridgev1.WriteEventResponse {
 		t.Helper()
@@ -254,10 +257,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 		if err != nil {
 			t.Fatalf("WriteEvent %s: %v", callID, err)
 		}
-		replay, err := store.WriteEvent(context.Background(), request)
-		if err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetEventId() != response.GetEventId() {
-			t.Fatalf("WriteEvent replay %s = %+v, %v; want duplicate original event", callID, replay, err)
-		}
+		writeRequests[callID] = request
 		return response
 	}
 	toolA := writeTool("rwrite_stable_tool_a", "call_stable_a", "provider_reasoning_a", "R1")
@@ -278,20 +278,38 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 		}
 		return parts
 	}
-	assertLedger := func(eventID string, texts []string, sequences []int32) {
+	assertLedger := func(eventID string, texts []string, sequences []int32) []normalizedStableReasoningPart {
 		t.Helper()
 		parts := readLedger(eventID)
 		if len(parts) != len(texts) {
 			t.Fatalf("stable reasoning for %s = %+v; want texts %v", eventID, parts, texts)
 		}
 		for i, text := range texts {
-			if parts[i].Text != text || parts[i].PartSequence != sequences[i] || parts[i].ReasoningPartID == "" {
-				t.Fatalf("stable reasoning part %d for %s = %+v; want deterministic sequence/text", i, eventID, parts[i])
+			expectedID := stableRuntimeID(
+				"reasoning_ledger_part", "default", sessionID, threadID, requestID,
+				strconv.FormatInt(int64(sequences[i]), 10),
+			)
+			if parts[i].Text != text || parts[i].PartSequence != sequences[i] || parts[i].ReasoningPartID != expectedID {
+				t.Fatalf("stable reasoning part %d for %s = %+v; want identity %q at deterministic sequence/text", i, eventID, parts[i], expectedID)
 			}
 		}
+		return parts
 	}
-	assertLedger(toolA.GetEventId(), []string{"R1"}, []int32{0})
-	assertLedger(toolB.GetEventId(), []string{"R1", "R2"}, []int32{0, 2})
+	toolALedger := assertLedger(toolA.GetEventId(), []string{"R1"}, []int32{0})
+	toolBLedger := assertLedger(toolB.GetEventId(), []string{"R1", "R2"}, []int32{0, 2})
+	for callID, written := range map[string]*bridgev1.WriteEventResponse{"call_stable_a": toolA, "call_stable_b": toolB} {
+		replay, err := store.WriteEvent(context.Background(), writeRequests[callID])
+		if err != nil || replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE || replay.GetEventId() != written.GetEventId() {
+			t.Fatalf("WriteEvent replay %s = %+v, %v; want duplicate original event", callID, replay, err)
+		}
+		beforeReplay := toolALedger
+		if callID == "call_stable_b" {
+			beforeReplay = toolBLedger
+		}
+		if afterReplay := readLedger(written.GetEventId()); !reflect.DeepEqual(afterReplay, beforeReplay) {
+			t.Fatalf("stable reasoning changed across replay for %s: before %+v after %+v", callID, beforeReplay, afterReplay)
+		}
+	}
 
 	_, err := store.WriteRequestEnd(context.Background(), &bridgev1.WriteRequestEndRequest{
 		Scope: scope, RuntimeWriteId: "rwrite_stable_end", ModelRequestId: requestID,

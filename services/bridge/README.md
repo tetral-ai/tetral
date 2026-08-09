@@ -223,9 +223,8 @@ replacement must preserve, and the conformance suites that prove it.
 - **Invariants a replacement must preserve.** Event and message declaration are atomic;
   the declaration class is whitelisted by event type; a replay is byte-identical or a
   fatal conflict; no double-count on replay; per-request stable-reasoning
-  byte/part budgets validated before any write.
-- **Conformance.** `bridge_api_events_test.go`, the stable-reasoning cases in
-  `bridge_api_settlement_test.go`.
+  byte/part budgets roll back the enclosing transaction when validation fails.
+- **Conformance.** `bridge_api_events_test.go`.
 
 ### Settlement transaction
 
@@ -305,9 +304,9 @@ replacement must preserve, and the conformance suites that prove it.
   leave a durable anchored prefix while its unanchored suffix is discarded.
 - **Conformance.** `bridge_api_events_test.go` drives PostgreSQL `WriteEvent`
   and `WriteRequestEnd` to prove cumulative R1/R2 ledgers, deterministic replay,
-  target-only Tool settlement, public redaction, and exact/one-over count and
-  byte bounds with transactional rollback. Runtime's thread-loop and accumulator
-  tests prove the corresponding incremental producer stream and trailing suffix.
+  target-only Tool settlement, and exact/one-over count and byte bounds with
+  transactional rollback. `internal/eventstream/eventstream_test.go` proves the
+  internal ledger does not alter or leak through public list and stream bytes.
 
 ### Delivery and durable wake machinery
 
@@ -470,7 +469,7 @@ never deletes durable history.
 | `bridge_api_context_test.go` | `LoadContext` cold-start assembly, in-band manifests, pending-media reconstruction |
 | `bridge_api_inputs_test.go` | `CommitInputs` / `CommitTaskNotificationResult` stamping, projection, interrupt-snapshot control state |
 | `bridge_api_events_test.go` | `WriteEvent` atomicity, whitelisted projection, anchored-reasoning and usage-attachment folding, replay conflict |
-| `bridge_api_settlement_test.go` | `WriteRequestEnd` / `FinishIdle` / `CommitRuntimeTermination`, single-terminal-end serialization, reschedule ceiling, best-effort capture gate, stable-reasoning merge |
+| `bridge_api_settlement_test.go` | `WriteRequestEnd` / `FinishIdle` / `CommitRuntimeTermination`, single-terminal-end serialization, reschedule ceiling, best-effort capture gate |
 | `bridge_api_children_test.go` | Child create/resolve/mark lifecycle and thread-context-prefix checkpoint |
 | Sandbox execution store/runner suites and Runtime Pod tool-runner tests | Sandbox acceptance/result-wait separation, exact replay identity, result custody, and durable memory behavior |
 | `bridge_api_tasks_test.go`, `background_bash_real_lifecycle_test.go`, `command_read_claim_test.go` | Background-command follow-ups and stdin write-sequence dedupe |
