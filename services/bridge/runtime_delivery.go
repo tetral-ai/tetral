@@ -93,6 +93,14 @@ type RuntimePodDirectDeliverer struct {
 	Sender RuntimeCommandSender
 }
 
+func (d RuntimePodDirectDeliverer) RepairLostRuntimeBindings(ctx context.Context, workspaceID string) (int, error) {
+	repairer, ok := d.Store.(RuntimePodLossRepairer)
+	if !ok || repairer == nil {
+		return 0, nil
+	}
+	return repairer.RepairLostRuntimeBindings(ctx, workspaceID)
+}
+
 func (d RuntimePodDirectDeliverer) RepairRuntimeInbox(ctx context.Context, workspaceID string, limit int) (int, error) {
 	repairer, ok := d.Store.(RuntimeInboxRepairer)
 	if !ok || repairer == nil {
@@ -2102,6 +2110,40 @@ type KubernetesRuntimeTargetResolver struct {
 	Clock    func() time.Time
 }
 
+func (r KubernetesRuntimeTargetResolver) BindingVisibilitySnapshot() enginekubernetes.BindingVisibilitySnapshot {
+	if r.Snapshot == nil {
+		return enginekubernetes.BindingVisibilitySnapshot{}
+	}
+	return r.Snapshot()
+}
+
+type runtimeBindingVisibilityDisposition string
+
+const (
+	runtimeBindingVisibilityReusable     runtimeBindingVisibilityDisposition = "reusable"
+	runtimeBindingVisibilityProvenGone   runtimeBindingVisibilityDisposition = "proven_gone"
+	runtimeBindingVisibilityAvailability runtimeBindingVisibilityDisposition = "availability"
+)
+
+func classifyRuntimeBindingVisibility(state enginekubernetes.BindingVisibilityState) runtimeBindingVisibilityDisposition {
+	switch state {
+	case enginekubernetes.BindingVisibilityReusable:
+		return runtimeBindingVisibilityReusable
+	case enginekubernetes.BindingVisibilityAbsent,
+		enginekubernetes.BindingVisibilityDeleted,
+		enginekubernetes.BindingVisibilityUIDChanged,
+		enginekubernetes.BindingVisibilityIPChanged:
+		return runtimeBindingVisibilityProvenGone
+	case enginekubernetes.BindingVisibilitySnapshotNotReady,
+		enginekubernetes.BindingVisibilityNotReady,
+		enginekubernetes.BindingVisibilityNotServing,
+		enginekubernetes.BindingVisibilityTerminating:
+		return runtimeBindingVisibilityAvailability
+	default:
+		return runtimeBindingVisibilityAvailability
+	}
+}
+
 type runtimeBindingLostError struct {
 	binding runtimeBindingForDelivery
 }
@@ -2143,18 +2185,12 @@ func (r KubernetesRuntimeTargetResolver) ResolveRuntimeTarget(ctx context.Contex
 			PodUID:    current.PodUID,
 			PodIP:     current.PodIP,
 		})
-		switch visibility {
-		case enginekubernetes.BindingVisibilityReusable:
+		switch classifyRuntimeBindingVisibility(visibility) {
+		case runtimeBindingVisibilityReusable:
 			return current, nil
-		case enginekubernetes.BindingVisibilityAbsent,
-			enginekubernetes.BindingVisibilityDeleted,
-			enginekubernetes.BindingVisibilityUIDChanged,
-			enginekubernetes.BindingVisibilityIPChanged:
+		case runtimeBindingVisibilityProvenGone:
 			return runtimeBindingForDelivery{}, runtimeBindingLostError{binding: current}
-		case enginekubernetes.BindingVisibilitySnapshotNotReady,
-			enginekubernetes.BindingVisibilityNotReady,
-			enginekubernetes.BindingVisibilityNotServing,
-			enginekubernetes.BindingVisibilityTerminating:
+		case runtimeBindingVisibilityAvailability:
 			return runtimeBindingForDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_binding_not_available", message: "runtime binding is not currently available: " + string(visibility), retryable: true}
 		default:
 			return runtimeBindingForDelivery{}, runtimeDeliveryPrepareError{kind: "runtime_binding_not_available", message: "runtime binding visibility is not reusable", retryable: true}

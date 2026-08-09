@@ -337,6 +337,43 @@ func TestForegroundSettlementWakesParkedSandboxRelease(t *testing.T) {
 	if _, disposition, err := store.ClaimRelease(claimCtx, claimJob, now.Add(2*time.Second)); err != nil || disposition != SandboxLifecycleApplied {
 		t.Fatalf("ClaimRelease(fresh generation) = %s, %v; want applied", disposition, err)
 	}
+	if _, err := adminDB.Exec(`INSERT INTO session_events (
+		workspace_id, session_id, session_thread_id, event_id, sequence, type, payload_json, created_at, updated_at
+	) VALUES ('ws_execution_store','sesn_execution_store','thr_execution_store',
+		'evt_execution_consumed',1,'agent.tool_result','{}',$1,$1)`, now); err != nil {
+		t.Fatalf("seed consumed terminal event: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE session_runtime_tool_results
+		SET execution_state='consumed', result_json=NULL,
+		    consumed_by_terminal_event_id='evt_execution_consumed', consumption_reason='pod_lost'
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`); err != nil {
+		t.Fatalf("consume execution before late settlement: %v", err)
+	}
+	if err := coordinator.SettleExecution(settlementCtx, SandboxExecutionWork{
+		Ref: SandboxExecutionRef{
+			WorkspaceID: "ws_execution_store", SessionID: "sesn_execution_store",
+			SessionThreadID: "thr_execution_store", ToolUseEventID: "evt_execution_a",
+		},
+		AttemptGeneration: 1,
+	}, SandboxExecutionSettlement{
+		Kind: SandboxExecutionFailed, ErrorKind: "late_provider_failure", SafeMessage: "late settlement",
+	}); err != nil {
+		t.Fatalf("late consumed settlement: %v", err)
+	}
+	var retainedReleaseJobID string
+	if err := adminDB.QueryRow(`SELECT queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, releaseOperationID).Scan(&retainedReleaseJobID); err != nil {
+		t.Fatalf("read release after late settlement: %v", err)
+	}
+	var releaseJobCount int
+	if err := adminDB.QueryRow(`SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='ws_execution_store' AND kind=$1
+		  AND payload_json::jsonb ->> 'operation_id'=$2`, queue.KindSandboxRelease, releaseOperationID).Scan(&releaseJobCount); err != nil {
+		t.Fatalf("count release jobs after late settlement: %v", err)
+	}
+	if retainedReleaseJobID != secondJobID || releaseJobCount != 2 {
+		t.Fatalf("late settlement changed release custody = %q/%d; want %q/2", retainedReleaseJobID, releaseJobCount, secondJobID)
+	}
 }
 
 func TestForegroundCompletionAndSandboxReleaseConvergeUnderSessionLockRace(t *testing.T) {

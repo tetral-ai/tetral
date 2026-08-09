@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,8 +151,8 @@ func TestBackgroundTaskNotificationSurvivesQueueLossThroughProductionDeliveryRou
 		Queue: bridgeQueue, Workspaces: staticWorkspaceLister{workspace.ID(workspaceID)}, Deliverer: deliverer,
 		Config: JobRunnerConfig{LeaseOwner: "bridge-background-e2e", MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: 10 * time.Second},
 	}
-	if err := jobRunner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run production Bridge Job Runner: %v", err)
+	if err := jobRunner.RunOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "runtime pod-loss visibility snapshot is unavailable") {
+		t.Fatalf("run production Bridge Job Runner error = %v; want joined pod-loss visibility error", err)
 	}
 	var captured *agentruntimev1.RuntimeInputCommandRequest
 	select {

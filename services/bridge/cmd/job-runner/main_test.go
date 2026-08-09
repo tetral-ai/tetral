@@ -151,6 +151,22 @@ func TestJobRunnerCommandStartupFailureLogUsesSharedFields(t *testing.T) {
 	}
 }
 
+func TestJobRunnerSingleDatabaseConnectionStopsBeforeDatabaseOpen(t *testing.T) {
+	previousOpen := openDatabase
+	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {
+		t.Fatal("database opened after single-connection configuration was rejected")
+		return dbconnect.OpenResult{}, nil
+	}
+	t.Cleanup(func() { openDatabase = previousOpen })
+	env := validJobRunnerSchemaEnv()
+	env[dbconnect.EnvDBMaxOpenConns] = "1"
+
+	err := run(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), dbconnect.EnvDBMaxOpenConns+" must be at least 2") {
+		t.Fatalf("run error = %v; want single-connection startup rejection", err)
+	}
+}
+
 func TestJobRunnerDatabaseOpenFailureUsesDependencyReadinessCause(t *testing.T) {
 	previousOpen := openDatabase
 	openDatabase = func(context.Context, string, string) (dbconnect.OpenResult, error) {

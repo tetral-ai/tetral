@@ -339,6 +339,15 @@ func (c *Client) WithWorkspaceReadOnlyTx(ctx context.Context, workspaceID string
 	return c.withWorkspaceTx(ctx, workspaceID, operation, &sql.TxOptions{ReadOnly: true}, fn, nil)
 }
 
+// WithWorkspaceReadOnlyRepeatableReadTx freezes one workspace-scoped census while
+// allowing callers to close the snapshot before applying ordinary write transactions.
+func (c *Client) WithWorkspaceReadOnlyRepeatableReadTx(ctx context.Context, workspaceID string, operation string, fn func(*Tx) error) error {
+	return c.withWorkspaceTx(ctx, workspaceID, operation, &sql.TxOptions{
+		ReadOnly:  true,
+		Isolation: sql.LevelRepeatableRead,
+	}, fn, nil)
+}
+
 func (c *Client) WithWorkspaceTxAndCleanup(ctx context.Context, workspaceID string, operation string, fn func(*Tx) error, onCommitFailure func()) error {
 	return c.withWorkspaceTx(ctx, workspaceID, operation, nil, fn, onCommitFailure)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
+	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
@@ -119,7 +120,6 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		bridgeAPIScope("sesn_bridge_pod_loss", "thr_bridge_pod_loss", "bind_bridge_pod_loss_old", 7, "pod_uid_pod_loss_old"),
 		"attachment_pod_loss", "evt_pod_loss_tool", []byte("pod-loss-attachment"),
 	)
-	resultJSON := `{"status":"success","attachment_ref":"` + attachment.GetAttachmentRef() + `"}`
 	if _, err := admin.ExecContext(context.Background(), `UPDATE session_transient_attachments
 		SET status='staged', expires_at='2026-01-01T00:01:00Z'
 		WHERE workspace_id='default' AND attachment_ref=$1`, attachment.GetAttachmentRef()); err != nil {
@@ -127,14 +127,15 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	}
 	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_tool_results (
 		workspace_id, session_id, session_thread_id, tool_use_event_id, tool_kind,
-		normalized_input_hash, tool_name, input_json, ack_status, result_json,
-		model_tool_call_id, execution_state, execution_attempt_generation, result_digest,
+		normalized_input_hash, tool_name, input_json, ack_status,
+		model_tool_call_id, execution_state, execution_attempt_generation,
+		authorized_binding_revision, authorized_provider_resource_id,
 		created_at, updated_at
 	) VALUES ('default','sesn_bridge_pod_loss','thr_bridge_pod_loss','evt_pod_loss_tool','sandbox_tool',
-		$1,'Write','{"file_path":"src/a.ts"}','committed',$2,
-		'tool-call-pod-loss','terminal_unconsumed',1,$3,
+		$1,'Write','{"file_path":"src/a.ts"}','committed',
+		'tool-call-pod-loss','running',1,1,'provider_pod_loss',
 		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
-		sha256Hex(`{"file_path":"src/a.ts"}`), resultJSON, sha256Hex(resultJSON)); err != nil {
+		sha256Hex(`{"file_path":"src/a.ts"}`)); err != nil {
 		t.Fatalf("seed pod-loss sandbox execution: %v", err)
 	}
 	if _, err := admin.ExecContext(context.Background(),
@@ -147,6 +148,50 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 			'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
 		)`); err != nil {
 		t.Fatalf("seed lost pending approval: %v", err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_sandbox_bindings (
+		workspace_id, session_id, logical_sandbox_id, environment_id,
+		environment_generation, provider, provider_resource_id, binding_revision,
+		materialized_resource_revision, resource_credential_expires_at,
+		resource_roots_json, helper_verified_at, created_at, updated_at
+	) VALUES (
+		'default','sesn_bridge_pod_loss','sbox_bridge_pod_loss','env_sesn_bridge_pod_loss',
+		1,'daytona','provider_pod_loss',1,1,'2027-01-01T00:00:00Z','[]','2026-01-01T00:00:00Z',
+		'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'
+	)`); err != nil {
+		t.Fatalf("seed pod-loss Sandbox binding: %v", err)
+	}
+	client := dbconnect.NewClientForTesting(runtime)
+	var releaseOperationID string
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.pod_loss_release", func(tx *dbconnect.Tx) error {
+		var err error
+		releaseOperationID, _, err = sandboxrelease.EnsureTx(
+			context.Background(), tx, "default", "sesn_bridge_pod_loss",
+			sandboxrelease.SessionDelete, "provider_pod_loss", time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC),
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed pod-loss Sandbox release: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(client)
+	leasedRelease, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: "default", Kinds: []string{queue.KindSandboxRelease},
+		LeaseOwner: "sandbox-pod-loss-park", MaxJobs: 1, LeaseDuration: time.Minute,
+	})
+	if err != nil || len(leasedRelease) != 1 {
+		t.Fatalf("lease release before park = %#v, %v; want one job", leasedRelease, err)
+	}
+	oldReleaseJobID := leasedRelease[0].ID
+	if updated, err := queueStore.Ack(context.Background(), queue.AckRequest{
+		WorkspaceID: "default", JobID: oldReleaseJobID, LeaseToken: leasedRelease[0].LeaseToken,
+	}); err != nil || !updated {
+		t.Fatalf("ACK parked release = %t, %v; want true,nil", updated, err)
+	}
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sandbox_lifecycle_operations
+		SET queue_job_id=NULL, queue_kind=NULL, queue_partition_key=NULL, queue_dedupe_key=NULL,
+		    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL
+		WHERE workspace_id='default' AND operation_id=$1`, releaseOperationID); err != nil {
+		t.Fatalf("park pod-loss Sandbox release: %v", err)
 	}
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_pod_loss", "thr_bridge_pod_loss", "evt_pod_loss_later", 3, "user.message", `{"content":[{"type":"text","text":"after pod loss"}]}`)
 	if _, err := admin.ExecContext(context.Background(),
@@ -199,7 +244,7 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 		enginekubernetes.BindingVisibilityDeleted,
 		[]enginekubernetes.BindingCandidate{newCandidate},
 	)
-	store := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	store := NewPostgreSQLRuntimeDeliveryStore(client, 9090)
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 4, 4, 0, time.UTC) }
 	store.TargetResolver = KubernetesRuntimeTargetResolver{
 		Snapshot: func() enginekubernetes.BindingVisibilitySnapshot { return snapshot },
@@ -225,6 +270,30 @@ func TestPostgreSQLRuntimeDeliveryStoreRepairsLostRuntimePodBeforeBindingReplace
 	}
 	if plan.Request == nil || plan.Request.GetTargetPodUid() != "pod_uid_pod_loss_new" {
 		t.Fatalf("plan target pod uid = %#v; want replacement pod", plan.Request)
+	}
+	var replacementReleaseJobID, replacementReleaseStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT o.queue_job_id, q.status
+		FROM sandbox_lifecycle_operations o
+		JOIN queue_jobs q ON q.workspace_id=o.workspace_id AND q.id=o.queue_job_id
+		WHERE o.workspace_id='default' AND o.operation_id=$1`, releaseOperationID).Scan(
+		&replacementReleaseJobID, &replacementReleaseStatus,
+	); err != nil {
+		t.Fatalf("read release woken by pod loss: %v", err)
+	}
+	if replacementReleaseJobID == oldReleaseJobID || replacementReleaseStatus != queue.StatusPending {
+		t.Fatalf("pod-loss release job = %q/%q; want fresh pending job", replacementReleaseJobID, replacementReleaseStatus)
+	}
+	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+		t.Fatalf("duplicate pod-loss repair = %d, %v; want 0,nil", repaired, err)
+	}
+	var releaseJobCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id='default' AND kind=$1
+		  AND payload_json::jsonb ->> 'operation_id'=$2`, queue.KindSandboxRelease, releaseOperationID).Scan(&releaseJobCount); err != nil {
+		t.Fatalf("count pod-loss release jobs: %v", err)
+	}
+	if releaseJobCount != 2 {
+		t.Fatalf("pod-loss release jobs = %d; want acknowledged predecessor plus one successor", releaseJobCount)
 	}
 
 	var requestEndPayload string

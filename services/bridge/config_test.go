@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/queue"
 )
 
@@ -104,6 +105,35 @@ func TestJobRunnerConfigRequiresDeliveryDependencies(t *testing.T) {
 	if cfg.MCPConnectorGRPCAddress != "gateway.tetral-system.svc.cluster.local:9091" ||
 		cfg.GatewayTokenPath != "/var/run/secrets/tetral-internal-grpc/gateway/token" {
 		t.Fatalf("JobRunnerConfigFromEnv MCP route = %q / %q; want env projection", cfg.MCPConnectorGRPCAddress, cfg.GatewayTokenPath)
+	}
+}
+
+func TestJobRunnerConfigRequiresTwoDatabaseConnections(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		maxOpen string
+		wantErr bool
+	}{
+		{name: "unchanged default"},
+		{name: "minimum", maxOpen: "2"},
+		{name: "listener would consume only connection", maxOpen: "1", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env := validJobRunnerConfigEnv()
+			if test.maxOpen != "" {
+				env[dbconnect.EnvDBMaxOpenConns] = test.maxOpen
+			}
+			_, err := JobRunnerConfigFromEnv(env)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), dbconnect.EnvDBMaxOpenConns+" must be at least 2") {
+					t.Fatalf("JobRunnerConfigFromEnv max open %q error = %v; want minimum validation", test.maxOpen, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("JobRunnerConfigFromEnv max open %q: %v", test.maxOpen, err)
+			}
+		})
 	}
 }
 

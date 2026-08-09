@@ -119,6 +119,16 @@ interrupting.
 
 ### Repair (Job Runner, on proven-gone)
 
+Each workspace pass performs pod-loss reconciliation before inbox repair,
+completion-mail repair, and Queue leasing. It freezes the active binding census
+in a read-only repeatable-read transaction, takes one watcher snapshot after
+the database snapshot exists, and keyset-pages binding identities in batches of
+32. The read transaction closes before any candidate mutation. Running Runtime
+status or a rescheduling Session admits proactive closeout; an idle retained
+binding remains for the next input to replace through the same Session lock and
+binding-generation fence. Errors are isolated across repair and Queue phases,
+with runner cancellation as the only early stop.
+
 Under the session mutation lock and binding fence, from durable evidence
 alone: every Thread sharing the lost Session binding that has unfinished work
 is included regardless of its current Thread status; unfinished
@@ -467,7 +477,7 @@ never deletes durable history.
 | `closeout_sentinel_test.go` | `scope_superseded` / `closeout_unrepairable` typing and `errorCode`-keyed ack mapping |
 | `job_runner_test.go`, `runtime_delivery_test.go`, `runtime_delivery_store_test.go`, `runtime_delivery_exhaustion_test.go` | Queue reconcile, direct-to-pod delivery, inbox upsert, delivery-exhaustion fencing |
 | `completion_mail_test.go`, `completion_mail_delivery_test.go` | Child completion-return discriminator and atomic envelope-plus-wake write |
-| `runtime_pod_lost.go` suites (`runtime_pod_lost_interrupt_fence_test.go`, `runtime_pod_lost_delivery_repair_test.go`, `runtime_pod_lost_store_test.go`) | Proven-gone repair, interrupted-then-lost quiet settlement, and Sandbox-lifecycle independence |
+| `runtime_pod_lost.go` suites (`runtime_pod_loss_repair_test.go`, `runtime_pod_lost_interrupt_fence_test.go`, `runtime_pod_lost_delivery_repair_test.go`, `runtime_pod_lost_store_test.go`) | Lazy proven-gone discovery, snapshot/pagination and concurrency fences, interrupted-then-lost quiet settlement, and Sandbox-lifecycle independence |
 | `runtime_session_cleanup_test.go` | Cleanup order, the tree fence claim proof, reschedule-at-both-points, and the durable Sandbox release gate |
 | `bridge_visibility_test.go` + `internal/kubernetes/*_test.go` | Pod/EndpointSlice visibility and the proven-gone vs merely-unavailable classification |
 | `config_test.go`, `cmd/bridge-api/main_test.go`, `cmd/job-runner/main_test.go` | Startup config validation and production dependency assembly |

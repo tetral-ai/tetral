@@ -679,6 +679,40 @@ func TestWithWorkspaceReadOnlyTxScopesAndRejectsWrites(t *testing.T) {
 	}
 }
 
+func TestWithWorkspaceReadOnlyRepeatableReadTxUsesFrozenReadOnlySnapshot(t *testing.T) {
+	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	client := newTestClient(runtimeDB)
+	ctx := context.Background()
+	seedWorkspaceAndVault(t, admin, "workspace_dbconnect_frozen", "vlt_dbconnect_frozen")
+
+	err := client.WithWorkspaceReadOnlyRepeatableReadTx(ctx, "workspace_dbconnect_frozen", "dbconnect.frozen_workspace", func(tx *Tx) error {
+		var isolation string
+		var readOnly bool
+		if err := tx.QueryRow(ctx, `SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')::boolean`).Scan(&isolation, &readOnly); err != nil {
+			return err
+		}
+		if isolation != "repeatable read" || !readOnly {
+			t.Fatalf("transaction mode = %q/%t; want repeatable read/read-only", isolation, readOnly)
+		}
+		var before int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM vaults`).Scan(&before); err != nil {
+			return err
+		}
+		seedWorkspaceAndVault(t, admin, "workspace_dbconnect_frozen", "vlt_dbconnect_frozen_after_snapshot")
+		var after int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM vaults`).Scan(&after); err != nil {
+			return err
+		}
+		if before != 1 || after != before {
+			t.Fatalf("repeatable-read vault counts = %d then %d; want frozen 1/1", before, after)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithWorkspaceReadOnlyRepeatableReadTx: %v", err)
+	}
+}
+
 func TestWithWorkspaceTxAndCleanupSemantics(t *testing.T) {
 	runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	client := newTestClient(runtimeDB)
