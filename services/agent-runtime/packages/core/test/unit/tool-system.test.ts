@@ -196,15 +196,16 @@ describe("Tool system contracts", () => {
       if (name === "apply_patch") {
         expect(definition).toMatchObject({ kind: "freeform", name: "apply_patch" });
         expect(definition?.larkGrammar).toContain("start: begin_patch hunk+ end_patch");
-        continue;
       }
       const schema = definition?.inputSchema as {
         readonly description?: string;
         readonly properties?: Readonly<Record<string, { readonly description?: string }>>;
       };
-      for (const [label, description] of Object.entries(copy.parameters)) {
-        for (const parameter of label.replace(/ \(required\)$/, "").split(" / ")) {
-          expect(schema.properties?.[parameter]?.description).toBe(description);
+      if ("parameters" in copy) {
+        for (const [label, description] of Object.entries(copy.parameters)) {
+          for (const parameter of label.replace(/ \(required\)$/, "").split(" / ")) {
+            expect(schema.properties?.[parameter]?.description).toBe(description);
+          }
         }
       }
     }

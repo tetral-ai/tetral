@@ -91,10 +91,7 @@ export const BuiltinToolCopy = {
     }
   },
   "apply_patch": {
-    "description": "The `apply_patch` tool edits files in the session sandbox. This is a\nraw-text tool: pass the patch as a plain string and do NOT wrap it in\nJSON. A patch is a `*** Begin Patch` / `*** End Patch` envelope\ncontaining one or more `*** Add File:` / `*** Update File:` /\n`*** Delete File:` sections; relative paths resolve against the\nworkspace root. May pause for user approval before it runs.",
-    "parameters": {
-      "(raw string input)": "The full `*** Begin Patch` … `*** End Patch`\nenvelope. Do not JSON-wrap it."
-    }
+    "description": "The `apply_patch` tool edits files in the session sandbox. This is a\nraw-text tool: pass the patch as a plain string and do NOT wrap it in\nJSON. A patch is a `*** Begin Patch` / `*** End Patch` envelope\ncontaining one or more `*** Add File:` / `*** Update File:` /\n`*** Delete File:` sections; relative paths resolve against the\nworkspace root. May pause for user approval before it runs."
   },
   "web": {
     "description": "Search the public web, fetch a page, or find a pattern inside a page\nyou already fetched. Pass any of three parallel batches in one call:\n`search_query` runs web searches; `open` fetches a URL or re-opens a\nprior result; `find` regex-scans an already-opened document. Search\nreturns ranked result stubs with a short `ref_id` each — open a\n`ref_id` or a URL to read the actual content. Opened content comes back\nas a line-numbered window; large pages paginate via `next_lineno`. Use\nthis only for live internet content; for files in your sandbox use Read\nand Grep. `ref_id`s are temporary and per-session; a stale one returns\n\"invalid or expired ref — re-open by URL.\" Only public http/https hosts\nare reachable; internal, private, and loopback addresses are refused.\nMay pause for user approval before it runs.",
@@ -173,8 +170,11 @@ export function builtinToolDescription(name: DocumentedBuiltinToolName): string 
 
 /** Resolves a schema field to its approved provider-facing parameter description. */
 export function builtinToolParameterDescription(name: DocumentedBuiltinToolName, parameter: string): string {
-  const parameters = BuiltinToolCopy[name].parameters as Readonly<Record<string, string>>;
-  for (const [label, description] of Object.entries(parameters)) {
+  const copy = BuiltinToolCopy[name];
+  if (!("parameters" in copy)) {
+    throw new Error(`documented parameter ${name}.${parameter} is missing`);
+  }
+  for (const [label, description] of Object.entries(copy.parameters)) {
     const names = label.replace(/ \(required\)$/, "").split(" / ");
     if (names.includes(parameter) || label === parameter) {
       return description;

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -211,6 +212,85 @@ func TestEnvironmentArtifactReadyFanoutWakesWaitingSandboxActivation(t *testing.
 	}
 	if state != "pending" || !queueJobID.Valid {
 		t.Fatalf("activation after artifact ready = state %q queue %v; want pending with notification", state, queueJobID)
+	}
+}
+
+func TestEnvironmentArtifactReadyFanoutRejectsSupersededQueueLeaseBeforeMutation(t *testing.T) {
+	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
+	seedSandboxExecutionStoreFixture(t, admin)
+	setupCtx := sandboxTestQueueContext(t, runtime)
+	if _, err := admin.Exec(`UPDATE environment_artifacts
+		SET status='pending', provider_artifact_ref=NULL
+		WHERE workspace_id='ws_execution_store' AND environment_id='env_execution_store' AND generation=1`); err != nil {
+		t.Fatalf("mark artifact pending: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(setupCtx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	var operationID string
+	var parkedQueueID sql.NullString
+	if err := admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(&operationID); err != nil {
+		t.Fatalf("read parked activation: %v", err)
+	}
+	if err := admin.QueryRow(`SELECT queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&parkedQueueID); err != nil {
+		t.Fatalf("read parked activation Queue identity: %v", err)
+	}
+	if parkedQueueID.Valid {
+		t.Fatalf("parked activation retained Queue custody: %v", parkedQueueID)
+	}
+	if _, err := admin.Exec(`UPDATE environment_artifacts SET status='ready', provider_artifact_ref='artifact_ready'
+		WHERE workspace_id='ws_execution_store' AND environment_id='env_execution_store' AND generation=1`); err != nil {
+		t.Fatalf("mark artifact ready: %v", err)
+	}
+	firstCtx, secondCtx, firstTransport, secondTransport := supersedeSandboxQueueLease(t, runtime, admin, queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: "ws_execution_store", Kind: queue.KindEnvironmentReadyFanout,
+		PartitionKey:   queue.FormatEnvironmentPartitionKey("ws_execution_store", "env_execution_store"),
+		DedupeKey:      queue.FormatEnvironmentReadyFanoutDedupeKey("ws_execution_store", "env_execution_store", "1"),
+		PayloadVersion: 1,
+		PayloadJSON:    []byte(`{"workspace_id":"ws_execution_store","environment_id":"env_execution_store","generation":1}`),
+		MaxAttempts:    3,
+	})
+	first := EnvironmentReadyFanoutJob{JobID: firstTransport.GetId(), LeaseToken: firstTransport.GetLeaseToken(), WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	second := EnvironmentReadyFanoutJob{JobID: secondTransport.GetId(), LeaseToken: secondTransport.GetLeaseToken(), WorkspaceID: "ws_execution_store", EnvironmentID: "env_execution_store", Generation: 1}
+	var queueRowsBefore int
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='ws_execution_store'`).Scan(&queueRowsBefore); err != nil {
+		t.Fatalf("count Queue rows before stale fanout: %v", err)
+	}
+	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
+	if _, err := store.FanoutReadyEnvironment(firstCtx, first, fixedEnvironmentStoreTime); !errors.Is(err, errQueueLeaseLost) {
+		t.Fatalf("stale FanoutReadyEnvironment error = %v; want Queue authority loss", err)
+	}
+	var state string
+	if err := admin.QueryRow(`SELECT state,queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&state, &parkedQueueID); err != nil {
+		t.Fatalf("read activation after stale fanout: %v", err)
+	}
+	var queueRowsAfterStale int
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='ws_execution_store'`).Scan(&queueRowsAfterStale); err != nil {
+		t.Fatalf("count Queue rows after stale fanout: %v", err)
+	}
+	if state != "waiting_artifact" || parkedQueueID.Valid || queueRowsAfterStale != queueRowsBefore {
+		t.Fatalf("stale fanout mutated activation or Queue: state=%q queue=%v rows=%d/%d", state, parkedQueueID, queueRowsAfterStale, queueRowsBefore)
+	}
+	advanced, err := store.FanoutReadyEnvironment(secondCtx, second, fixedEnvironmentStoreTime.Add(time.Second))
+	if err != nil || advanced != 1 {
+		t.Fatalf("current FanoutReadyEnvironment = %d,%v; want 1,nil", advanced, err)
+	}
+	var currentQueueID string
+	if err := admin.QueryRow(`SELECT state,queue_job_id FROM sandbox_lifecycle_operations
+		WHERE workspace_id='ws_execution_store' AND operation_id=$1`, operationID).Scan(&state, &currentQueueID); err != nil {
+		t.Fatalf("read activation after current fanout: %v", err)
+	}
+	var activationQueueRows int
+	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='ws_execution_store' AND id=$1 AND kind=$2`, currentQueueID, queue.KindSandboxActivate).Scan(&activationQueueRows); err != nil {
+		t.Fatalf("count current activation Queue row: %v", err)
+	}
+	if state != "pending" || activationQueueRows != 1 {
+		t.Fatalf("current fanout activation = state %q Queue rows %d; want pending/one", state, activationQueueRows)
 	}
 }
 
@@ -520,15 +600,43 @@ func TestEnvironmentArtifactStoreBuildReadyAdvancesSameInputFollowers(t *testing
 func TestEnvironmentArtifactStoreRejectsExpiredWriterAfterLeaseTransfer(t *testing.T) {
 	runtime, admin := newEnvironmentArtifactStoreTestDB(t)
 	ctx := context.Background()
-	seedEnvironmentArtifactStoreEnvironment(t, admin, "ws_env_lease", "env_build")
-	seedEnvironmentArtifact(t, admin, "ws_env_lease", "env_build", 7, "pending", "", `{"apt":["git"]}`)
+	seedSandboxExecutionStoreFixture(t, admin)
+	setupCtx := sandboxTestQueueContext(t, runtime)
+	if _, err := admin.Exec(`UPDATE environment_artifacts SET status='pending',provider_artifact_ref=NULL
+		WHERE workspace_id='ws_execution_store' AND environment_id='env_execution_store' AND generation=1`); err != nil {
+		t.Fatalf("mark rich artifact pending: %v", err)
+	}
+	coordinator := NewPostgreSQLSandboxExecutionCoordinator(dbconnect.NewClientForTesting(runtime), 30*time.Minute)
+	work := loadSandboxExecutionWork(t, coordinator, "evt_execution_a")
+	if err := coordinator.WaitForActivation(setupCtx, work, ExecutionNeedsCreation); err != nil {
+		t.Fatalf("WaitForActivation: %v", err)
+	}
+	var activationID string
+	if err := admin.QueryRow(`SELECT waiting_activation_operation_id FROM session_runtime_tool_results
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_a'`).Scan(&activationID); err != nil {
+		t.Fatalf("read rich activation: %v", err)
+	}
+	if _, err := admin.Exec(`UPDATE session_runtime_tool_results
+		SET execution_state='waiting_activation',waiting_activation_operation_id=$1
+		WHERE workspace_id='ws_execution_store' AND tool_use_event_id='evt_execution_b'`, activationID); err != nil {
+		t.Fatalf("seed second activation waiter: %v", err)
+	}
+	if _, err := admin.Exec(`INSERT INTO sandbox_lifecycle_operations (
+		workspace_id,operation_id,session_id,logical_sandbox_id,kind,state,
+		observed_binding_revision,target_environment_generation,target_resource_revision,
+		target_provider_resource_id,materialization_resources_json,waiting_activation_operation_id,
+		created_at,updated_at
+	) VALUES ('ws_execution_store','sop_env_lease_dependent','sesn_execution_store','sbox_execution_store',
+		'materialize','waiting_activation',1,1,1,'provider_execution_store','{}',$1,$2,$2)`, activationID, fixedEnvironmentStoreTime); err != nil {
+		t.Fatalf("seed activation-dependent materialization: %v", err)
+	}
 	store := NewEnvironmentArtifactStore(dbconnect.NewClientForTesting(runtime))
-	first := leaseEnvironmentBuildJob(t, runtime, "ws_env_lease", "env_build", 7, fixedEnvironmentStoreTime, time.Second)
+	first := leaseEnvironmentBuildJob(t, runtime, "ws_execution_store", "env_execution_store", 1, fixedEnvironmentStoreTime, time.Second)
 	firstCtx := withEnvironmentBuildQueueAuthority(ctx, first)
 	if _, claimed, err := store.ClaimEnvironmentBuild(firstCtx, first, fixedEnvironmentStoreTime); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild(first) = claimed %t err %v; want true/nil", claimed, err)
 	}
-	assertEnvironmentArtifactLease(t, admin, "ws_env_lease", "env_build", 7, first.JobID, first.LeaseToken, first.AttemptCount)
+	assertEnvironmentArtifactLease(t, admin, "ws_execution_store", "env_execution_store", 1, first.JobID, first.LeaseToken, first.AttemptCount)
 	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
 	if _, err := admin.Exec(`UPDATE queue_jobs SET leased_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND id=$2`, first.WorkspaceID, first.JobID); err != nil {
 		t.Fatalf("expire first Queue lease: %v", err)
@@ -548,13 +656,14 @@ func TestEnvironmentArtifactStoreRejectsExpiredWriterAfterLeaseTransfer(t *testi
 	second := EnvironmentBuildJob{
 		JobID: leased[0].ID, LeaseToken: leased[0].LeaseToken, AttemptCount: leased[0].AttemptCount,
 		WorkspaceID:   string(leased[0].WorkspaceID),
-		EnvironmentID: "env_build", Generation: 7,
+		EnvironmentID: "env_execution_store", Generation: 1,
 	}
 	secondCtx := withEnvironmentBuildQueueAuthority(ctx, second)
 	if _, claimed, err := store.ClaimEnvironmentBuild(secondCtx, second, fixedEnvironmentStoreTime.Add(2*time.Second)); err != nil || !claimed {
 		t.Fatalf("ClaimEnvironmentBuild(second) = claimed %t err %v; want true/nil", claimed, err)
 	}
-	assertEnvironmentArtifactLease(t, admin, "ws_env_lease", "env_build", 7, second.JobID, second.LeaseToken, second.AttemptCount)
+	assertEnvironmentArtifactLease(t, admin, "ws_execution_store", "env_execution_store", 1, second.JobID, second.LeaseToken, second.AttemptCount)
+	beforeStale := snapshotEnvironmentFailureDependents(t, admin, "ws_execution_store")
 	if _, claimed, err := store.ClaimEnvironmentBuild(firstCtx, first, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) || claimed {
 		t.Fatalf("ClaimEnvironmentBuild(stale) = claimed %t err %v; want false/lost authority", claimed, err)
 	}
@@ -564,23 +673,61 @@ func TestEnvironmentArtifactStoreRejectsExpiredWriterAfterLeaseTransfer(t *testi
 	if err := store.MarkEnvironmentBuildReady(firstCtx, first, "snapshot_stale", fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) {
 		t.Fatalf("MarkEnvironmentBuildReady(stale) = %v; want lost authority", err)
 	}
-	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "building", "")
+	assertEnvironmentArtifactStatus(t, admin, "ws_execution_store", "env_execution_store", 1, "building", "")
 	if err := store.MarkEnvironmentBuildRetryableFailure(firstCtx, first, EnvironmentArtifactFailure{
 		Stage: "build_artifact", LastErrorKind: "stale_failure", Retryable: true,
 	}, true, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) {
 		t.Fatalf("MarkEnvironmentBuildRetryableFailure(stale) = %v; want lost authority", err)
 	}
-	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "building", "")
+	assertEnvironmentArtifactStatus(t, admin, "ws_execution_store", "env_execution_store", 1, "building", "")
+	if afterRetry := snapshotEnvironmentFailureDependents(t, admin, "ws_execution_store"); !reflect.DeepEqual(afterRetry, beforeStale) {
+		t.Fatalf("stale retryable failure mutated rich dependents\nbefore=%v\nafter=%v", beforeStale, afterRetry)
+	}
 	if err := store.MarkEnvironmentBuildTerminalFailure(firstCtx, first, EnvironmentArtifactFailure{
 		Stage: "build_artifact", LastErrorKind: "stale_terminal", Retryable: false,
 	}, fixedEnvironmentStoreTime.Add(3*time.Second)); !errors.Is(err, errQueueLeaseLost) {
 		t.Fatalf("MarkEnvironmentBuildTerminalFailure(stale) = %v; want lost authority", err)
 	}
-	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "building", "")
+	assertEnvironmentArtifactStatus(t, admin, "ws_execution_store", "env_execution_store", 1, "building", "")
+	if afterTerminal := snapshotEnvironmentFailureDependents(t, admin, "ws_execution_store"); !reflect.DeepEqual(afterTerminal, beforeStale) {
+		t.Fatalf("stale terminal failure mutated rich dependents\nbefore=%v\nafter=%v", beforeStale, afterTerminal)
+	}
 	if err := store.MarkEnvironmentBuildReady(secondCtx, second, "snapshot_current", fixedEnvironmentStoreTime.Add(4*time.Second)); err != nil {
 		t.Fatalf("MarkEnvironmentBuildReady(current): %v", err)
 	}
-	assertEnvironmentArtifactStatus(t, admin, "ws_env_lease", "env_build", 7, "ready", "snapshot_current")
+	assertEnvironmentArtifactStatus(t, admin, "ws_execution_store", "env_execution_store", 1, "ready", "snapshot_current")
+}
+
+func snapshotEnvironmentFailureDependents(t *testing.T, db *sql.DB, workspaceID string) map[string]string {
+	t.Helper()
+	queries := map[string]string{
+		"artifact":   `SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY environment_id,generation),'[]'::jsonb)::text FROM (SELECT * FROM environment_artifacts WHERE workspace_id=$1) row_data`,
+		"operations": `SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY operation_id),'[]'::jsonb)::text FROM (SELECT * FROM sandbox_lifecycle_operations WHERE workspace_id=$1) row_data`,
+		"tools":      `SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY session_thread_id,tool_use_event_id),'[]'::jsonb)::text FROM (SELECT * FROM session_runtime_tool_results WHERE workspace_id=$1) row_data`,
+		"queue":      `SELECT COALESCE(jsonb_agg(to_jsonb(row_data) ORDER BY id),'[]'::jsonb)::text FROM (SELECT * FROM queue_jobs WHERE workspace_id=$1) row_data`,
+	}
+	snapshot := make(map[string]string, len(queries))
+	for name, query := range queries {
+		var value string
+		if err := db.QueryRow(query, workspaceID).Scan(&value); err != nil {
+			t.Fatalf("snapshot %s: %v", name, err)
+		}
+		snapshot[name] = value
+		if snapshot[name] == "[]" {
+			t.Fatalf("rich stale-writer fixture has no %s rows", name)
+		}
+	}
+	var waiters, dependents int
+	if err := db.QueryRow(`SELECT count(*) FROM session_runtime_tool_results WHERE workspace_id=$1 AND waiting_activation_operation_id IS NOT NULL`, workspaceID).Scan(&waiters); err != nil {
+		t.Fatalf("count activation waiters: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM sandbox_lifecycle_operations WHERE workspace_id=$1 AND kind='materialize' AND state='waiting_activation'`, workspaceID).Scan(&dependents); err != nil {
+		t.Fatalf("count activation dependents: %v", err)
+	}
+	if waiters < 2 || dependents < 1 {
+		t.Fatalf("rich stale-writer fixture = %d waiters, %d dependents; want at least two/one", waiters, dependents)
+	}
+	return snapshot
 }
 
 func firstWorkspace(job EnvironmentBuildJob) workspace.ID {

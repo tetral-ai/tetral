@@ -20,9 +20,14 @@ describe("Provider Gateway logger", () => {
     });
   });
 
-  test("does not let caller records override shared resource fields", () => {
+  test("inherits logger-owned resource fields and timestamp", () => {
     const lines: string[] = [];
-    const logger = createJsonLogger({ write: (line) => lines.push(line), deploymentEnvironment: "prod", serviceVersion: "v1" });
+    const logger = createJsonLogger({
+      write: (line) => lines.push(line),
+      deploymentEnvironment: "prod",
+      serviceVersion: "v1",
+      clock: () => new Date("2026-08-09T04:28:21.000Z"),
+    });
 
     logger.error({
       event: "provider_request_failed",
@@ -30,6 +35,7 @@ describe("Provider Gateway logger", () => {
       "deployment.environment": "spoofed-env",
       "service.version": "spoofed-version",
       level: "info",
+      time: "1900-01-01T00:00:00.000Z",
     });
 
     const record = JSON.parse(lines[0] ?? "{}") as Record<string, unknown>;
@@ -38,6 +44,7 @@ describe("Provider Gateway logger", () => {
       "service.name": "gateway",
       "deployment.environment": "prod",
       "service.version": "v1",
+      time: "2026-08-09T04:28:21.000Z",
       event: "provider_request_failed",
     });
   });

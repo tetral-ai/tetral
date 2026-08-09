@@ -59,6 +59,73 @@ func TestSandboxActivationRunnerLogsResolutionAndDurableAttemptOutcome(t *testin
 	if strings.Contains(got, "must-not-appear") || strings.Contains(got, "private.test") {
 		t.Fatalf("activation log contains provider-label payload: %s", got)
 	}
+	if strings.Contains(got, `"error.`) {
+		t.Fatalf("successful activation log contains error fields: %s", got)
+	}
+}
+
+func TestSandboxActivationRunnerLogsRetryAndTerminalAttemptOutcomes(t *testing.T) {
+	tests := []struct {
+		name            string
+		resolution      ProviderOutcome[ActivationResolution]
+		wantTransition  string
+		wantLevel       string
+		wantOutcome     string
+		wantErrorFields bool
+	}{
+		{
+			name: "retry", resolution: ProviderOutcome[ActivationResolution]{
+				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderRetryable, ErrorKind: "provider_transition_in_progress",
+			},
+			wantTransition: "retry:qjob_activation:provider_transition_in_progress", wantLevel: "INFO", wantOutcome: "retry",
+		},
+		{
+			name: "terminal failure", resolution: ProviderOutcome[ActivationResolution]{
+				EffectBoundary: ProviderProvedNotStarted, Disposition: ProviderTerminal,
+				ErrorKind: "provider_activation_rejected", SafeMessage: "provider rejected activation",
+			},
+			wantTransition: "dead:qjob_activation:provider_activation_rejected", wantLevel: "ERROR", wantOutcome: "terminal_failure", wantErrorFields: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+			store := &recordingSandboxLifecycleStore{activation: sandboxActivationTestWork(true), current: true}
+			registry, err := NewProviderRegistry(map[string]ProviderAdapter{
+				sandboxdriver.DaytonaProviderName: &recordingLifecycleAdapter{resolution: test.resolution},
+			})
+			if err != nil {
+				t.Fatalf("NewProviderRegistry: %v", err)
+			}
+			runner := &SandboxActivationJobRunner{
+				Queue: queueClient, Store: store, Providers: registry,
+				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+			}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if !reflect.DeepEqual(queueClient.transitions, []string{test.wantTransition}) {
+				t.Fatalf("Queue transitions = %v; want %q", queueClient.transitions, test.wantTransition)
+			}
+			got := logs.String()
+			for _, want := range []string{`"level":"` + test.wantLevel + `"`, `"event":"sandbox_activation_attempt_completed"`, `"outcome":"` + test.wantOutcome + `"`} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("attempt log missing %s: %s", want, got)
+				}
+			}
+			if test.wantErrorFields {
+				for _, want := range []string{`"error.class":"sandbox_activation_error"`, `"error.code":"provider_activation_rejected"`, `"error.message_safe":"sandbox activation failed"`} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("terminal log missing %s: %s", want, got)
+					}
+				}
+			} else if strings.Contains(got, `"error.`) {
+				t.Fatalf("retry log contains error fields: %s", got)
+			}
+		})
+	}
 }
 
 func TestSandboxActivationRunnerLogsTransactionAuthorityLossAtInfo(t *testing.T) {
@@ -389,43 +456,54 @@ func TestSandboxReleaseRunnerReauthorizesAfterProviderProvesNoReleaseStarted(t *
 	}
 }
 
-func TestSandboxActivationRunnerConvertsMissingStartToReplacement(t *testing.T) {
-	queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
-	work := sandboxActivationTestWork(true)
-	work.Kind = ActivationStart
-	work.CurrentHandle = sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_deleted"}
-	replacement := sandboxActivationTestWork(true)
-	replacement.Kind = ActivationReplace
-	store := &recordingSandboxLifecycleStore{activation: work, replacement: replacement, current: true}
-	adapter := &recordingLifecycleAdapter{
-		inspectionSequence: []ProviderOutcome[ExecutionReadiness]{
-			{Value: ExecutionNeedsCreation},
-			{Value: ExecutionReady},
-		},
-		resolution: ProviderOutcome[ActivationResolution]{Value: ActivationResolution{Found: false}},
-		activation: ProviderOutcome[sandbox.ProviderHandle]{Value: sandbox.ProviderHandle{
-			Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_replacement",
-		}},
+func TestSandboxActivationRunnerResolvesMissingStartExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name                   string
+		replacementDisposition SandboxLifecycleDisposition
+		replacement            SandboxActivationWork
+		wantStore              []string
+	}{
+		{name: "replacement no longer applicable", replacementDisposition: SandboxLifecycleNotApplicable, wantStore: []string{"claim", "replace-missing"}},
+		{name: "empty replacement", wantStore: []string{"claim", "replace-missing"}},
+		{name: "replacement continues", replacement: func() SandboxActivationWork {
+			work := sandboxActivationTestWork(true)
+			work.Kind = ActivationReplace
+			return work
+		}(), wantStore: []string{"claim", "replace-missing", "complete:provider_replacement"}},
 	}
-	registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
-	if err != nil {
-		t.Fatalf("NewProviderRegistry: %v", err)
-	}
-	runner := &SandboxActivationJobRunner{
-		Queue: queueClient, Store: store, Providers: registry,
-		Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
-	}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if !reflect.DeepEqual(adapter.calls, []string{"inspect", "resolve", "activate:replace", "inspect"}) {
-		t.Fatalf("adapter calls = %v", adapter.calls)
-	}
-	if !reflect.DeepEqual(store.calls, []string{"claim", "replace-missing", "complete:provider_replacement"}) {
-		t.Fatalf("store calls = %v", store.calls)
-	}
-	if !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_activation"}) {
-		t.Fatalf("queue transitions = %v", queueClient.transitions)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			queueClient := &recordingSandboxQueue{leased: []*queuev1.QueueJob{sandboxActivationQueueJob()}}
+			work := sandboxActivationTestWork(true)
+			work.Kind = ActivationStart
+			work.CurrentHandle = sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_deleted"}
+			store := &recordingSandboxLifecycleStore{activation: work, replacement: test.replacement, replacementDisposition: test.replacementDisposition, current: true}
+			adapter := &recordingLifecycleAdapter{
+				inspectionSequence: []ProviderOutcome[ExecutionReadiness]{{Value: ExecutionNeedsCreation}, {Value: ExecutionReady}},
+				resolution:         ProviderOutcome[ActivationResolution]{Value: ActivationResolution{Found: false}},
+				activation:         ProviderOutcome[sandbox.ProviderHandle]{Value: sandbox.ProviderHandle{Provider: sandboxdriver.DaytonaProviderName, SandboxID: "provider_replacement"}},
+			}
+			registry, err := NewProviderRegistry(map[string]ProviderAdapter{sandboxdriver.DaytonaProviderName: adapter})
+			if err != nil {
+				t.Fatalf("NewProviderRegistry: %v", err)
+			}
+			runner := &SandboxActivationJobRunner{
+				Queue: queueClient, Store: store, Providers: registry,
+				Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+				Config: SandboxLifecycleRunnerConfig{WorkspaceID: "ws_lifecycle", LeaseDuration: time.Minute, HeartbeatInterval: 15 * time.Second},
+			}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if !reflect.DeepEqual(store.calls, test.wantStore) || !reflect.DeepEqual(queueClient.transitions, []string{"ack:qjob_activation"}) {
+				t.Fatalf("store=%v Queue=%v; want %v and ACK", store.calls, queueClient.transitions, test.wantStore)
+			}
+			got := logs.String()
+			if strings.Count(got, `"event":"sandbox_activation_resolved"`) != 1 || strings.Count(got, `"event":"sandbox_activation_attempt_completed"`) != 1 || !strings.Contains(got, `"resolution":"absent"`) {
+				t.Fatalf("missing-start lifecycle logs = %s; want one absent resolution and one completion", got)
+			}
+		})
 	}
 }
 
@@ -985,17 +1063,18 @@ func sandboxReleaseQueueJob() *queuev1.QueueJob {
 }
 
 type recordingSandboxLifecycleStore struct {
-	activation         SandboxActivationWork
-	replacement        SandboxActivationWork
-	materialization    SandboxMaterializationWork
-	release            SandboxReleaseWork
-	current            bool
-	disposition        SandboxLifecycleDisposition
-	finalizer          SandboxLifecycleDisposition
-	waitDisposition    SandboxLifecycleDisposition
-	claimReleaseErr    error
-	claimActivationErr error
-	calls              []string
+	activation             SandboxActivationWork
+	replacement            SandboxActivationWork
+	replacementDisposition SandboxLifecycleDisposition
+	materialization        SandboxMaterializationWork
+	release                SandboxReleaseWork
+	current                bool
+	disposition            SandboxLifecycleDisposition
+	finalizer              SandboxLifecycleDisposition
+	waitDisposition        SandboxLifecycleDisposition
+	claimReleaseErr        error
+	claimActivationErr     error
+	calls                  []string
 }
 
 type releaseRecheckQueue struct {
@@ -1081,6 +1160,9 @@ func (s *recordingSandboxLifecycleStore) CompleteActivation(_ context.Context, _
 }
 func (s *recordingSandboxLifecycleStore) ReplaceMissingActivation(_ context.Context, _ SandboxActivationWork, _ time.Time) (SandboxActivationWork, SandboxLifecycleDisposition, error) {
 	s.calls = append(s.calls, "replace-missing")
+	if s.replacementDisposition != "" {
+		return s.replacement, s.replacementDisposition, nil
+	}
 	return s.replacement, s.lifecycleDisposition(), nil
 }
 func (s *recordingSandboxLifecycleStore) ObserveUnknownActivation(_ context.Context, _ SandboxActivationWork, kind string, _ time.Time) (SandboxLifecycleDisposition, error) {

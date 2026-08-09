@@ -318,9 +318,11 @@ func (r *SandboxActivationJobRunner) activate(ctx context.Context, job SandboxLi
 				return queueAuthorityLostBy("sandbox_activation_replace_missing", errQueueLeaseLost)
 			}
 			if disposition == SandboxLifecycleNotApplicable {
+				logSandboxActivationResolved(r.Logger, job, "absent", "")
 				return r.ack(ctx, job)
 			}
 			if replacement.Kind == "" {
+				logSandboxActivationResolved(r.Logger, job, "absent", "")
 				return r.ack(ctx, job)
 			}
 			return r.activate(ctx, job, replacement, adapter)

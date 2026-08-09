@@ -129,6 +129,54 @@ test("cold apply_patch recovery accepts only the canonical execution object", as
     }
 });
 
+test("apply_patch preserves the provider scalar while declaring one canonical execution object", async () => {
+    const patch = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch\n";
+    const session = new ThreadRuntime("sesn_patch_producer");
+    const loader = new RecordingContextLoader([], { type: "messages", messages: [userMessage("user-patch", 0, "apply it")] });
+    let toolUseEnvelope: SessionEventEnvelope | undefined;
+    let executionInput: unknown;
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        approvalMode: "full_access",
+        writer: writerFrom((envelope) => {
+            if (envelope.event.type === "agent.tool_use") toolUseEnvelope = envelope;
+            return {
+                ok: true,
+                writeId: envelope.writeId,
+                eventId: envelope.event.type === "agent.tool_use" ? "sevt_patch_producer" : `bridge-${envelope.writeId}`,
+                processedAt: createdAt,
+            };
+        }),
+        events: [
+            {
+                type: "tool-call",
+                id: "call-patch-producer",
+                toolName: "apply_patch",
+                input: patch,
+                inputPreview: { preview: patch, truncated: false },
+            },
+            { type: "finish", finishReason: "tool-calls" },
+        ],
+        providerCallRuntime: {
+            systemInstructions: "apply patch producer projection test",
+            toolCatalog: createToolCatalog({ family: "gpt" }),
+            toolsetFamily: "gpt",
+        },
+        runTool: (request) => {
+            executionInput = request.input;
+            return { type: "completed", output: { text: "done", truncated: false } };
+        },
+    }))));
+
+    expect(result).toMatchObject({ type: "completed" });
+    const toolPart = toolUseEnvelope?.assistantPartAppend?.parts.find((part) => part.type === "tool");
+    expect(toolPart?.type === "tool" && toolPart.state.status === "running" ? toolPart.state.input.value : undefined).toBe(patch);
+    expect(toolUseEnvelope?.event).toMatchObject({ type: "agent.tool_use", name: "apply_patch", input: { patch } });
+    expect(executionInput).toEqual({ patch });
+    expect(executionInput).not.toEqual({ patch: { patch } });
+});
+
 test("first accepted turn rides the file attachments returned by CommitInputs", async () => {
     const session = new ThreadRuntime("sesn_first_turn_media");
     const input = acceptedInput("rin_first_turn_media", session.sessionId);

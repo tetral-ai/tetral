@@ -32,12 +32,14 @@ export function createJsonLogger(options: {
   readonly serviceName?: string;
   readonly deploymentEnvironment?: string;
   readonly serviceVersion?: string;
+  readonly clock?: (() => Date) | undefined;
 }): GatewayLogger {
   return createTetralJsonLogger<GatewayLogRecord>({
     write: options.write,
     serviceName: options.serviceName ?? "gateway",
     deploymentEnvironment: options.deploymentEnvironment,
     serviceVersion: options.serviceVersion,
+    clock: options.clock,
   });
 }
 
