@@ -714,7 +714,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 
 }
 
-func TestPostgreSQLBridgeAPIStorePullSelectsOldestCompletionAndEnsuresDurableWake(t *testing.T) {
+func TestPostgreSQLBridgeAPIStorePullSelectsOldestCompletionFromProducerCustody(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	const (
 		sessionID     = "sesn_bridge_completion_pull"
@@ -747,9 +747,11 @@ func TestPostgreSQLBridgeAPIStorePullSelectsOldestCompletionAndEnsuresDurableWak
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_pull_first", 1,
 		"agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, firstDelivery, childID, mainID, "", "sevt_bridge_completion_pull_spawn_first", firstMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, mainID, firstDelivery, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	seedBridgeAPIEvent(t, admin, "default", sessionID, childID, "evt_bridge_completion_pull_next", 2,
 		"agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, nextDelivery, childID, mainID, "", "sevt_bridge_completion_pull_spawn_next", nextMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, mainID, nextDelivery, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC) }
 	scope := bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
@@ -783,7 +785,7 @@ func TestPostgreSQLBridgeAPIStorePullSelectsOldestCompletionAndEnsuresDurableWak
 		t.Fatalf("repeated completion pull = %+v; want stable first result %+v", replay, first)
 	}
 	assertActiveCompletionWake(t, admin, sessionID, firstDelivery, true)
-	assertActiveCompletionWake(t, admin, sessionID, nextDelivery, false)
+	assertActiveCompletionWake(t, admin, sessionID, nextDelivery, true)
 	var receivedCount, inboxCount int
 	if err := admin.QueryRowContext(context.Background(),
 		`SELECT
@@ -1020,6 +1022,53 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	}
 	if projectedRole != "user" || projectedOrigin != "agent" {
 		t.Fatalf("main completion message role/origin = %q/%q; want user/agent", projectedRole, projectedOrigin)
+	}
+}
+
+func TestPostgreSQLBridgeAPIStoreSentInterAgentBirthRollsBackEventInboxAndQueueTogether(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_inter_agent_birth_rollback"
+		parentID  = "thr_inter_agent_birth_parent"
+		childID   = "thr_inter_agent_birth_child"
+		bindingID = "bind_inter_agent_birth"
+		podUID    = "pod_inter_agent_birth"
+		delivery  = "delivery_inter_agent_birth"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	seedBridgeAPIChildThread(t, admin, "default", sessionID, parentID, childID)
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+	if _, err := admin.ExecContext(context.Background(), `CREATE FUNCTION fail_inter_agent_queue_birth() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected inter-agent Queue failure'; END; $$ LANGUAGE plpgsql;
+		CREATE TRIGGER fail_inter_agent_queue_birth BEFORE INSERT ON queue_jobs
+		FOR EACH ROW WHEN (NEW.kind = 'runtime_input') EXECUTE FUNCTION fail_inter_agent_queue_birth()`); err != nil {
+		t.Fatalf("install inter-agent Queue failure: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	messageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_inter_agent_birth", "rollback")
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          bridgeAPIScope(sessionID, parentID, bindingID, 1, podUID),
+		RuntimeWriteId: "rwrite_inter_agent_birth",
+		EventType:      "agent.thread_message_sent",
+		PayloadJson: bridgeInterAgentSentEventJSON(
+			t, delivery, parentID, childID, "child", "evt_inter_agent_birth_tool", messageJSON,
+		),
+		SessionVisible: true,
+	}); err == nil {
+		t.Fatal("WriteEvent succeeded despite injected inter-agent Queue failure")
+	}
+	var sent, inbox, jobs, operations int
+	if err := admin.QueryRowContext(context.Background(), `SELECT
+		(SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='agent.thread_message_sent'),
+		(SELECT count(*) FROM session_runtime_inbox WHERE workspace_id='default' AND session_id=$1 AND runtime_input_id=$2),
+		(SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND payload_json::jsonb ->> 'runtime_input_id'=$2),
+		(SELECT count(*) FROM session_bridge_operations WHERE workspace_id='default' AND session_id=$1 AND idempotency_key='rwrite_inter_agent_birth')`,
+		sessionID, completionRuntimeInputID(delivery),
+	).Scan(&sent, &inbox, &jobs, &operations); err != nil {
+		t.Fatalf("read rolled-back inter-agent custody: %v", err)
+	}
+	if sent != 0 || inbox != 0 || jobs != 0 || operations != 0 {
+		t.Fatalf("rolled-back inter-agent custody = event %d Inbox %d Queue %d receipt %d; want 0/0/0/0", sent, inbox, jobs, operations)
 	}
 }
 

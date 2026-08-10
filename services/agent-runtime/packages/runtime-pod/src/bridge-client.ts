@@ -98,7 +98,7 @@ import type { RuntimeDeclarationReceipt } from "@tetral/agent-runtime-core/src/r
 import { buildOutboundBearerMetadata } from "./auth.js";
 import type { ServiceAccountTokenConfig } from "./auth.js";
 import type { ApprovalReviewerThreadCreation, RuntimeApprovalReviewerThreadCreator } from "./approval-reviewer.js";
-import type { RuntimeControlInputCommitter, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
+import type { RuntimeControlInputCommitter } from "./runtime-service.js";
 import {
   recordRuntimeReceiptEvidence,
 } from "./logger.js";
@@ -357,7 +357,7 @@ export interface BridgeAPITaskNotificationCommitterOptions extends BridgeDeclara
  * returned durable stamps before handing the message to Runtime Core. A stale Bridge disposition
  * is an idempotent success, while malformed receipts fail without retry.
  */
-export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificationCommitter {
+export class BridgeAPITaskNotificationCommitter {
   private readonly client: AgentRuntimeBridgeServiceClient;
   private readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
 
@@ -367,7 +367,17 @@ export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificati
   }
 
   /** Commits one task-notification draft and returns its receipt-stamped message or stale disposition. */
-  async commitTaskNotification(input: Parameters<RuntimeTaskNotificationCommitter["commitTaskNotification"]>[0]) {
+  async commitTaskNotification(input: {
+    readonly scope: RuntimeAcceptedInputState;
+    readonly command: {
+      readonly runtimeInputId: string;
+      readonly taskId: string;
+      readonly sourceToolUseEventId: string;
+      readonly status: "completed" | "failed" | "cancelled" | "expired";
+      readonly payloadJson: string;
+      readonly messageCreate: CoreRuntimeMessageCreate;
+    };
+  }) {
     let metadata: Metadata;
     try {
       metadata = await this.metadataFactory({ tokenPath: this.options.tokenPath });
@@ -400,16 +410,18 @@ export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificati
     let response: CommitTaskNotificationResultResponse;
     try {
       response = await commitTaskNotificationResult(this.client, request, metadata);
-    } catch {
+    } catch (error) {
       return {
         ok: false as const,
-        retryable: true,
+        // A queued Inbox without Queue custody is a durable invariant violation;
+        // live-lease contention and all other transport failures remain retryable.
+        retryable: grpcStatusCode(error) !== status.FAILED_PRECONDITION,
         errorCode: "bridge_commit_unavailable",
         message: "task notification durable commit failed",
       };
     }
-    const status = response.ack?.status;
-    if (status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE) {
+    const ackStatus = response.ack?.status;
+    if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED || ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE) {
       const declaration = response.declaration;
       const bridgeReceipt = declaration?.receipts[0];
       const applicationDisposition = declaration === undefined
@@ -497,7 +509,14 @@ export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificati
           applicationDisposition,
           outcome: "applied",
         });
-        return { ok: true as const, committedMessage: message };
+        return {
+          ok: true as const,
+          committedMessage: message,
+          receipt,
+          inputDisposition: ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_DUPLICATE
+            ? "duplicate" as const
+            : "committed" as const,
+        };
       } catch {
         recordBridgeReceiptEvidence(this.options, {
           workspaceId: input.scope.workspaceId,
@@ -520,12 +539,12 @@ export class BridgeAPITaskNotificationCommitter implements RuntimeTaskNotificati
         };
       }
     }
-    if (status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_stale") {
+    if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_stale") {
       return { ok: true as const, stale: true as const };
     }
-	if (status === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_deferred") {
-	  return { ok: true as const, deferred: true as const };
-	}
+    if (ackStatus === BridgeWriteStatus.BRIDGE_WRITE_STATUS_REJECTED && response.ack?.errorCode === "task_notification_deferred") {
+      return { ok: true as const, deferred: true as const };
+    }
     return {
       ok: false as const,
       retryable: false,
@@ -651,6 +670,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
   private readonly nowEpochMs: () => number;
   private readonly refreshMarginMs: number;
   private readonly sleep: (durationMs: number) => Promise<void>;
+  private readonly taskNotificationCommitter: BridgeAPITaskNotificationCommitter;
 
   constructor(private readonly options: BridgeAPIContextLoaderOptions) {
     this.client = options.client ?? new AgentRuntimeBridgeServiceClient(options.address, credentials.createInsecure(), bridgeDurableContextGrpcChannelOptions());
@@ -658,6 +678,7 @@ export class BridgeAPIContextLoader implements ContextLoader {
     this.nowEpochMs = options.nowEpochMs ?? (() => Date.now());
     this.refreshMarginMs = options.refreshMarginMs ?? RuntimeBindingTokenRefreshPolicy.marginMs;
     this.sleep = options.sleep ?? (async (durationMs) => await new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
+    this.taskNotificationCommitter = new BridgeAPITaskNotificationCommitter(options);
   }
 
   /**
@@ -822,6 +843,46 @@ export class BridgeAPIContextLoader implements ContextLoader {
     },
   ): Promise<AcceptedInputCommitResult> {
     const messageCreates = options?.messageCreates ?? [];
+    if (input.kind === "task_notification") {
+      const messageCreate = messageCreates[0];
+      if (messageCreates.length !== 1 || messageCreate === undefined) {
+        throw normalizeContextLoaderError({
+          code: "schema_mismatch",
+          sessionId: input.sessionId,
+          reason: "task notification declaration is incomplete",
+        });
+      }
+      const result = await this.taskNotificationCommitter.commitTaskNotification({
+        scope: input,
+        command: {
+          runtimeInputId: input.runtimeInputId,
+          taskId: input.taskId,
+          sourceToolUseEventId: input.sourceToolUseEventId,
+          status: input.status,
+          payloadJson: input.payloadJson,
+          messageCreate,
+        },
+      });
+      if (!result.ok) {
+        throw normalizeContextLoaderError({
+          code: result.retryable ? "unavailable" : "schema_mismatch",
+          sessionId: input.sessionId,
+          reason: result.errorCode,
+        });
+      }
+      if ("deferred" in result) {
+        return { type: "task_notification_deferred" };
+      }
+      if ("stale" in result) {
+        return { type: "stale_custody" };
+      }
+      return {
+        type: "receipt",
+        inputDisposition: result.inputDisposition,
+        applicationDisposition: "current_custody",
+        receipt: result.receipt,
+      };
+    }
     const sourceKind = acceptedInputDeclarationKind(input);
     const metadata = await this.metadata();
     const scope = bridgeScope(input);

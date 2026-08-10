@@ -1488,6 +1488,56 @@ func seedBridgeAPIRuntimeInput(t *testing.T, db *sql.DB, workspaceID string, ses
 	}
 }
 
+func seedRuntimeInboxBirthForJob(t *testing.T, db *sql.DB, job RuntimeJob) {
+	t.Helper()
+	eventIDs := job.EventIDs
+	if eventIDs == nil {
+		eventIDs = []string{}
+	}
+	eventIDsJSON, err := json.Marshal(eventIDs)
+	if err != nil {
+		t.Fatalf("marshal Runtime Inbox birth events: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,rejection_reason_code,
+		event_ids_json,sequence_from,sequence_to,status,created_at,updated_at
+	) VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7,NULLIF($8,0),NULLIF($9,0),'queued','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID, job.InputKind,
+		job.RejectionReasonCode, string(eventIDsJSON), job.SequenceFrom, job.SequenceTo,
+	); err != nil {
+		t.Fatalf("seed Runtime Inbox birth: %v", err)
+	}
+}
+
+func seedAgentMailCustody(t *testing.T, db *sql.DB, sessionID string, targetThreadID string, deliveryID string, now time.Time) {
+	t.Helper()
+	runtimeInputID := completionRuntimeInputID(deliveryID)
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,event_ids_json,status,created_at,updated_at
+	) VALUES ('default',$1,$2,$3,'agent_mail','[]','queued',$4,$4)`,
+		sessionID, targetThreadID, runtimeInputID, now,
+	); err != nil {
+		t.Fatalf("seed agent-mail Inbox custody: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": targetThreadID,
+		"runtime_input_id": runtimeInputID, "event_ids": []string{}, "sequence_from": 0,
+		"sequence_to": 0, "input_kind": "agent_mail",
+	})
+	if err != nil {
+		t.Fatalf("marshal agent-mail Queue custody: %v", err)
+	}
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(db))
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		ID: queue.NewJobID(), WorkspaceID: workspace.ID("default"), Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.ID("default"), sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.ID("default"), sessionID, runtimeInputID),
+		PayloadVersion: 1, PayloadJSON: payload, MaxAttempts: queue.DefaultMaxAttempts, Now: now,
+	}); err != nil {
+		t.Fatalf("seed agent-mail Queue custody: %v", err)
+	}
+}
+
 func seedBridgeAPIRuntimeInbox(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, inputKind string, eventsJSON string, status string, bindingID string, podUID string, sequenceFrom int64, sequenceTo int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
@@ -1904,80 +1954,6 @@ func (l *recordingMCPManifestLister) ListMCPTools(_ context.Context, request MCP
 	result := l.results[0]
 	l.results = l.results[1:]
 	return result, nil
-}
-
-func assertRuntimeInputRepairQueueJob(t *testing.T, db *sql.DB, workspaceID string, sessionID string, threadID string, runtimeInputID string, eventIDs []string, sequenceFrom int64, sequenceTo int64, inputKind string, priority int) {
-	t.Helper()
-	var payload string
-	var partitionKey string
-	var statusValue string
-	var priorityValue int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT payload_json, partition_key, status, priority
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND dedupe_key = $3`,
-		workspaceID,
-		queue.KindRuntimeInput,
-		queue.FormatRuntimeInputDedupeKey(workspace.ID(workspaceID), sessionID, runtimeInputID),
-	).Scan(&payload, &partitionKey, &statusValue, &priorityValue); err != nil {
-		t.Fatalf("read runtime input repair queue job: %v", err)
-	}
-	if want := queue.FormatSessionPartitionKey(workspace.ID(workspaceID), sessionID); partitionKey != want {
-		t.Fatalf("runtime input repair partition = %q; want %q", partitionKey, want)
-	}
-	if statusValue != "pending" || priorityValue != priority {
-		t.Fatalf("runtime input repair queue state = %s priority %d; want pending priority %d", statusValue, priorityValue, priority)
-	}
-	var parsed struct {
-		WorkspaceID     string   `json:"workspace_id"`
-		SessionID       string   `json:"session_id"`
-		SessionThreadID string   `json:"session_thread_id"`
-		RuntimeInputID  string   `json:"runtime_input_id"`
-		EventIDs        []string `json:"event_ids"`
-		SequenceFrom    int64    `json:"sequence_from"`
-		SequenceTo      int64    `json:"sequence_to"`
-		InputKind       string   `json:"input_kind"`
-	}
-	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
-		t.Fatalf("parse runtime input repair payload: %v", err)
-	}
-	if parsed.WorkspaceID != workspaceID ||
-		parsed.SessionID != sessionID ||
-		parsed.SessionThreadID != threadID ||
-		parsed.RuntimeInputID != runtimeInputID ||
-		parsed.SequenceFrom != sequenceFrom ||
-		parsed.SequenceTo != sequenceTo ||
-		parsed.InputKind != inputKind ||
-		len(parsed.EventIDs) != len(eventIDs) {
-		t.Fatalf("runtime input repair payload = %s; want canonical runtime input identity", payload)
-	}
-	for index := range eventIDs {
-		if parsed.EventIDs[index] != eventIDs[index] {
-			t.Fatalf("runtime input repair event_ids = %v; want %v", parsed.EventIDs, eventIDs)
-		}
-	}
-}
-
-func assertNoRuntimeInputRepairQueueJob(t *testing.T, db *sql.DB, workspaceID string, sessionID string, runtimeInputID string) {
-	t.Helper()
-	var count int
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT count(*)
-		   FROM queue_jobs
-		  WHERE workspace_id = $1
-		    AND kind = $2
-		    AND dedupe_key = $3`,
-		workspaceID,
-		queue.KindRuntimeInput,
-		queue.FormatRuntimeInputDedupeKey(workspace.ID(workspaceID), sessionID, runtimeInputID),
-	).Scan(&count); err != nil {
-		t.Fatalf("count runtime input repair queue job: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("runtime input repair queue jobs = %d; want 0", count)
-	}
 }
 
 func assertRuntimeMCPManifestQueueJob(t *testing.T, db *sql.DB, workspaceID string, sessionID string, mcpServerName string, manifestGeneration int64) {

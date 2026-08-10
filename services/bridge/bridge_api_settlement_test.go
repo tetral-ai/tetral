@@ -25,6 +25,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/queue"
 	sandboxrelease "github.com/tetral-ai/tetral/internal/sandbox/release"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	tetralsandbox "github.com/tetral-ai/tetral/services/sandbox"
 )
 
@@ -46,6 +47,24 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 	})
 	if err != nil {
 		t.Fatalf("WriteEvent start: %v", err)
+	}
+	if _, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{
+		Scope:          bridgeAPIScope("sesn_bridge_request_end", "thr_bridge_request_end", "bind_bridge_request_end", 1, "pod_uid_request_end"),
+		RuntimeWriteId: "rwrite_bridge_request_progress",
+		ModelRequestId: "mreq_bridge_request",
+		EventType:      "agent.message",
+		PayloadJson:    `{"type":"agent.message","content":[{"type":"text","text":"done"}]}`,
+		SessionVisible: true,
+		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
+			t,
+			nil,
+			"rwrite_bridge_request_progress",
+			"agent.message",
+			"completed",
+			bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"done","truncated":false,"status":"completed"}`},
+		)},
+	}); err != nil {
+		t.Fatalf("WriteEvent assistant progress: %v", err)
 	}
 	request := &bridgev1.WriteRequestEndRequest{
 		Scope:                    bridgeAPIScope("sesn_bridge_request_end", "thr_bridge_request_end", "bind_bridge_request_end", 1, "pod_uid_request_end"),
@@ -147,6 +166,35 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 	}
 	if !providerUsageJSON.Valid || providerUsageJSON.String != `{"provider":"openai","raw_tokens":18}` {
 		t.Fatalf("provider usage json = %q valid=%v; want raw provider usage", providerUsageJSON.String, providerUsageJSON.Valid)
+	}
+	var assistantDataJSON string
+	if err := admin.QueryRowContext(context.Background(),
+		`SELECT data_json FROM session_messages
+		  WHERE workspace_id = 'default'
+		    AND session_id = 'sesn_bridge_request_end'
+		    AND model_request_id = 'mreq_bridge_request'
+		    AND kind = 'assistant'`).Scan(&assistantDataJSON); err != nil {
+		t.Fatalf("read sealed assistant usage: %v", err)
+	}
+	for path, want := range map[string]int64{
+		"usage.inputTokens":      6,
+		"usage.cacheReadTokens":  3,
+		"usage.cacheWriteTokens": 2,
+		"usage.outputTokens":     7,
+		"usage.reasoningTokens":  1,
+		"usage.totalTokens":      18,
+	} {
+		if got := testJSONPathInt(t, assistantDataJSON, path); got != want {
+			t.Fatalf("sealed assistant %s = %d; want %d", path, got, want)
+		}
+	}
+	if got := testJSONPathString(t, assistantDataJSON, "usage.providerUsageJson"); got != `{"provider":"openai","raw_tokens":18}` {
+		t.Fatalf("sealed assistant providerUsageJson = %q; want canonical provider usage", got)
+	}
+	for _, retiredKey := range []string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens", "reasoning_output_tokens", "provider_usage_json"} {
+		if strings.Contains(assistantDataJSON, retiredKey) {
+			t.Fatalf("sealed assistant usage retained request-accounting key %q: %s", retiredKey, assistantDataJSON)
+		}
 	}
 
 	var sessionUsage string
@@ -770,30 +818,8 @@ func TestPostgreSQLBridgeAPIStoreFinishIdlePersistsStatusEventAndRuntimeStatus(t
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_finish_idle", "thr_bridge_finish_idle")
 	seedBridgeAPIChildThread(t, admin, "default", "sesn_bridge_finish_idle", "thr_bridge_finish_idle", "thr_bridge_finish_idle_sender")
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_finish_idle", "bind_bridge_finish_idle", 1, "pod_uid_finish_idle")
-	seedBridgeAPIEvent(
-		t,
-		admin,
-		"default",
-		"sesn_bridge_finish_idle",
-		"thr_bridge_finish_idle_sender",
-		"evt_bridge_finish_idle_pending_mail",
-		1,
-		"agent.thread_message_sent",
-		bridgeInterAgentSentEventJSON(
-			t,
-			"delivery_bridge_finish_idle_pending",
-			"thr_bridge_finish_idle_sender",
-			"thr_bridge_finish_idle",
-			"",
-			"sevt_bridge_finish_idle_pending",
-			bridgeRuntimeNotificationMessageJSON(
-				t,
-				"sesn_bridge_finish_idle",
-				"msg_bridge_finish_idle_pending",
-				completionMailEnvelope("main", "sender", "pending"),
-			),
-		),
-	)
+	seedCompletionMailSentAt(t, admin, "sesn_bridge_finish_idle", "thr_bridge_finish_idle", "thr_bridge_finish_idle_sender",
+		"delivery_bridge_finish_idle_pending", 1, "2026-01-01T00:00:00Z")
 	if _, err := admin.ExecContext(context.Background(),
 		`INSERT INTO session_runtime_status (
 			workspace_id, session_id, status, running_since, active_seconds_total,
@@ -934,11 +960,6 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleAdoptsCaptureAndMailInOneTransaction(
 	seedBridgeAPISession(t, admin, "default", sessionID, threadID)
 	seedBridgeAPIChildThread(t, admin, "default", sessionID, threadID, senderID)
 	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, "pod_finish_idle_adoption_atomic")
-	seedBridgeAPIEvent(t, admin, "default", sessionID, senderID, "evt_finish_idle_adoption_mail", 1,
-		"agent.thread_message_sent", bridgeInterAgentSentEventJSON(
-			t, "delivery_finish_idle_adoption", senderID, threadID, "", "sevt_finish_idle_adoption_spawn",
-			bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_finish_idle_adoption", completionMailEnvelope("main", "sender", "done")),
-		))
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	store.Clock = func() time.Time { return now }
@@ -1003,7 +1024,7 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleAdoptsCaptureAndMailInOneTransaction(
 	if _, err := store.FinishIdle(context.Background(), request); err == nil {
 		t.Fatal("FinishIdle with missing existing file succeeded")
 	}
-	var fileRows, objectRows, captureRows, idleEvents, wakeJobs int
+	var fileRows, objectRows, captureRows, idleEvents int
 	var blobState string
 	var blobFileID sql.NullString
 	var indexedFileID, indexedDigest string
@@ -1027,15 +1048,11 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleAdoptsCaptureAndMailInOneTransaction(
 	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
 		t.Fatalf("count rolled-back idle events: %v", err)
 	}
-	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1 AND status IN ('pending','leased')`,
-		"runtime_input:default:"+sessionID+":agent_mail:delivery_finish_idle_adoption").Scan(&wakeJobs); err != nil {
-		t.Fatalf("count rolled-back mail wakes: %v", err)
-	}
 	if fileRows != 1 || objectRows != 1 || captureRows != 1 || indexedFileID != oldFileID || indexedSize != 7 ||
 		indexedDigest != strings.Repeat("d", 64) || !indexedAt.Equal(oldCapturedAt) ||
-		blobState != "uploaded" || blobFileID.Valid || idleEvents != 0 || wakeJobs != 0 {
-		t.Fatalf("failed adoption leaked files=%d objects=%d captures=%d index=%q/%d/%q/%s blob=%s/%v idle=%d wakes=%d",
-			fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt, blobState, blobFileID, idleEvents, wakeJobs)
+		blobState != "uploaded" || blobFileID.Valid || idleEvents != 0 {
+		t.Fatalf("failed adoption leaked files=%d objects=%d captures=%d index=%q/%d/%q/%s blob=%s/%v idle=%d",
+			fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt, blobState, blobFileID, idleEvents)
 	}
 
 	manifestJSON, err = json.Marshal([]stagedOutputCaptureEntry{validEntry})
@@ -1083,16 +1100,12 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleAdoptsCaptureAndMailInOneTransaction(
 	if err := admin.QueryRow(`SELECT count(*) FROM session_events WHERE workspace_id='default' AND session_id=$1 AND type='session.status_idle'`, sessionID).Scan(&idleEvents); err != nil {
 		t.Fatalf("count idle events after final-operation rollback: %v", err)
 	}
-	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1 AND status IN ('pending','leased')`,
-		"runtime_input:default:"+sessionID+":agent_mail:delivery_finish_idle_adoption").Scan(&wakeJobs); err != nil {
-		t.Fatalf("count mail wakes after final-operation rollback: %v", err)
-	}
 	if captureState != "staged" || fileRows != 1 || objectRows != 1 || captureRows != 1 || indexedFileID != oldFileID ||
 		indexedSize != 7 || indexedDigest != strings.Repeat("d", 64) || !indexedAt.Equal(oldCapturedAt) ||
-		blobState != "uploaded" || blobFileID.Valid || idleEvents != 0 || wakeJobs != 0 {
-		t.Fatalf("final-operation rollback leaked capture=%s files=%d objects=%d index=%d/%q/%d/%q/%s blob=%s/%v idle=%d wakes=%d",
+		blobState != "uploaded" || blobFileID.Valid || idleEvents != 0 {
+		t.Fatalf("final-operation rollback leaked capture=%s files=%d objects=%d index=%d/%q/%d/%q/%s blob=%s/%v idle=%d",
 			captureState, fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt,
-			blobState, blobFileID, idleEvents, wakeJobs)
+			blobState, blobFileID, idleEvents)
 	}
 	if _, err := admin.Exec(`DROP TRIGGER reject_finish_idle_operation_for_test ON session_bridge_operations`); err != nil {
 		t.Fatalf("drop FinishIdle rollback trigger: %v", err)
@@ -1135,17 +1148,13 @@ func TestPostgreSQLBridgeAPIStoreFinishIdleAdoptsCaptureAndMailInOneTransaction(
 		Scan(&capturedBlobKey, &capturedSize, &capturedDigest); err != nil {
 		t.Fatalf("read adopted file object identity: %v", err)
 	}
-	if err := admin.QueryRow(`SELECT count(*) FROM queue_jobs WHERE workspace_id='default' AND dedupe_key=$1 AND status IN ('pending','leased')`,
-		"runtime_input:default:"+sessionID+":agent_mail:delivery_finish_idle_adoption").Scan(&wakeJobs); err != nil {
-		t.Fatalf("count committed mail wake: %v", err)
-	}
 	if captureState != "adopted" || blobState != "adopted" || capturedFileID == "" || fileRows != 2 || objectRows != 2 ||
 		captureRows != 1 || indexedFileID != capturedFileID || indexedSize != validEntry.SizeBytes ||
 		indexedDigest != validEntry.SHA256 || !indexedAt.Equal(now) || capturedBlobKey != blobKey ||
-		capturedSize != validEntry.SizeBytes || capturedDigest != validEntry.SHA256 || wakeJobs != 1 {
-		t.Fatalf("adoption result operation=%s blob=%s file=%q files=%d objects=%d captures=%d index=%q/%d/%q/%s object=%q/%d/%q wakes=%d",
+		capturedSize != validEntry.SizeBytes || capturedDigest != validEntry.SHA256 {
+		t.Fatalf("adoption result operation=%s blob=%s file=%q files=%d objects=%d captures=%d index=%q/%d/%q/%s object=%q/%d/%q",
 			captureState, blobState, capturedFileID, fileRows, objectRows, captureRows, indexedFileID, indexedSize, indexedDigest, indexedAt,
-			capturedBlobKey, capturedSize, capturedDigest, wakeJobs)
+			capturedBlobKey, capturedSize, capturedDigest)
 	}
 }
 
@@ -2135,6 +2144,44 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	if err != nil {
 		t.Fatalf("WriteEvent child tool use: %v", err)
 	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_child_terminate", "thr_bridge_child_terminate", "rin_child_terminate_accepted", "messages", `["evt_child_terminate_accepted"]`, "accepted", "bind_bridge_child_terminate", "pod_uid_child_terminate", 2, 2)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_child_terminate", "thr_bridge_child_terminate", "task_notification:child_terminate_parked", "task_notification", `[]`, "parked", "bind_bridge_child_terminate", "pod_uid_child_terminate", 0, 0)
+	if _, err := admin.ExecContext(context.Background(), `INSERT INTO session_runtime_inbox (
+		workspace_id, session_id, session_thread_id, runtime_input_id, input_kind,
+		event_ids_json, status, created_at, updated_at
+	) VALUES (
+		'default', 'sesn_bridge_child_terminate', 'thr_bridge_child_terminate',
+		'task_notification:child_terminate_queued', 'task_notification', '[]', 'queued', now(), now()
+	)`); err != nil {
+		t.Fatalf("seed reactivated child notification: %v", err)
+	}
+	seedBridgeAPIRuntimeInbox(t, admin, "default", "sesn_bridge_child_terminate", "thr_bridge_child_terminate_main", "rin_main_survives_child_terminate", "messages", `["evt_main_survives_child_terminate"]`, "accepted", "bind_bridge_child_terminate", "pod_uid_child_terminate", 1, 1)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	queuedRequest, err := queue.NewTaskNotificationRuntimeInputEnqueueRequest(
+		workspace.DefaultID,
+		"sesn_bridge_child_terminate",
+		"thr_bridge_child_terminate",
+		"child_terminate_queued",
+		store.Clock(),
+	)
+	if err != nil {
+		t.Fatalf("build reactivated child notification Queue job: %v", err)
+	}
+	queuedRequest.ID = "qjob_child_term"
+	if _, err := queueStore.Enqueue(context.Background(), queuedRequest); err != nil {
+		t.Fatalf("enqueue reactivated child notification: %v", err)
+	}
+	leasedNotification, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID:   workspace.DefaultID,
+		Kinds:         []string{queue.KindRuntimeInput},
+		LeaseOwner:    "bridge-child-termination-test",
+		MaxJobs:       1,
+		LeaseDuration: time.Minute,
+		Now:           store.Clock().Add(time.Second),
+	})
+	if err != nil || len(leasedNotification) != 1 || leasedNotification[0].ID != queuedRequest.ID {
+		t.Fatalf("lease reactivated child notification = %#v, %v; want %s", leasedNotification, err, queuedRequest.ID)
+	}
 	envelope := completionMailEnvelope(
 		"main",
 		"task_thr_bridge_child_terminate",
@@ -2164,6 +2211,30 @@ func TestPostgreSQLBridgeAPIStoreCommitRuntimeTerminationKeepsChildBlastRadiusLo
 	}
 	if sessionStatus != "running" || mainStatus != "idle" || childStatus != "failed" {
 		t.Fatalf("child blast radius = session:%q main:%q child:%q; want running/idle/failed", sessionStatus, mainStatus, childStatus)
+	}
+	for runtimeInputID, wantStatus := range map[string]string{
+		"rin_child_terminate_accepted":             "cancelled",
+		"task_notification:child_terminate_parked": "cancelled",
+		"task_notification:child_terminate_queued": "cancelled",
+		"rin_main_survives_child_terminate":        "accepted",
+	} {
+		var inboxStatus string
+		if err := admin.QueryRowContext(context.Background(), `SELECT status FROM session_runtime_inbox
+			WHERE workspace_id = 'default' AND runtime_input_id = $1`, runtimeInputID).Scan(&inboxStatus); err != nil {
+			t.Fatalf("read child-termination input %s: %v", runtimeInputID, err)
+		}
+		if inboxStatus != wantStatus {
+			t.Fatalf("child-termination input %s = %q; want %q", runtimeInputID, inboxStatus, wantStatus)
+		}
+	}
+	var terminatedQueueStatus string
+	var terminatedLeaseValid bool
+	if err := admin.QueryRowContext(context.Background(), `SELECT status, lease_token IS NOT NULL FROM queue_jobs
+		WHERE workspace_id = 'default' AND id = $1`, queuedRequest.ID).Scan(&terminatedQueueStatus, &terminatedLeaseValid); err != nil {
+		t.Fatalf("read terminalized reactivated child notification: %v", err)
+	}
+	if terminatedQueueStatus != queue.StatusCancelled || terminatedLeaseValid {
+		t.Fatalf("reactivated child notification Queue custody = %q lease=%v; want cancelled without lease", terminatedQueueStatus, terminatedLeaseValid)
 	}
 	var pendingToolStatus string
 	if err := admin.QueryRowContext(context.Background(),
@@ -2263,8 +2334,9 @@ func TestParseRuntimeTerminationFailureRejectsNonTerminalClasses(t *testing.T) {
 		})
 	}
 	for name, failureJSON := range map[string]string{
-		"semantic invariant": `{"type":"runtime","code":"runtime_invalid_sequence","reason":"runtime_contract_validation","retryable":false,"retryStatus":{"type":"terminal"}}`,
-		"provider terminal":  `{"type":"provider","code":"provider_invalid_request","retryable":false,"retryStatus":{"type":"terminal"}}`,
+		"semantic invariant":         `{"type":"runtime","code":"runtime_invalid_sequence","reason":"runtime_contract_validation","retryable":false,"retryStatus":{"type":"terminal"}}`,
+		"accepted input persistence": `{"type":"runtime","code":"runtime_persistence_exhausted","reason":"runtime_input_commit_exhausted","retryable":false,"retryStatus":{"type":"terminal"}}`,
+		"provider terminal":          `{"type":"provider","code":"provider_invalid_request","retryable":false,"retryStatus":{"type":"terminal"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, err := parseRuntimeTerminationFailure(failureJSON); err != nil {

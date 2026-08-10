@@ -466,6 +466,9 @@ function makeReviewerGenerationThreadLoop(): ReviewerGenerationThreadLoop {
           observedReviewerInputIds.push(acceptedInput.runtimeInputId);
         }
         const recordDecision = Effect.sync(() => {
+          if (acceptedInput !== undefined) {
+            session.state.acknowledgeAcceptedInput(acceptedInput.runtimeInputId);
+          }
           session.state.contextManager.appendMessage(reviewerDecisionMessage(
             session.sessionId,
             currentRun === 0 ? "msg_target_a" : "msg_target_b",
@@ -1019,7 +1022,7 @@ describe("SessionManager", () => {
     });
   });
 
-  test("acceptInput marks one pending wake while running and starts exactly one follow-up run", async () => {
+  test("accepted facts installed while running reduce to exactly one follow-up run", async () => {
     const threadLoop = makeControlledThreadLoop();
     await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       await Effect.runPromise(
@@ -1027,9 +1030,9 @@ describe("SessionManager", () => {
         const first = yield* manager.acceptInput(acceptedInput("sesn_1", "rin_1"));
         const second = yield* manager.acceptInput(acceptedInput("sesn_1", "rin_2"));
         const third = yield* manager.acceptInput(acceptedInput("sesn_1", "rin_3"));
-        expect(first).toEqual({ ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false });
-        expect(second).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: false, pendingWake: true });
-        expect(third).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: false, pendingWake: true });
+        expect(first).toEqual({ ok: true, sessionId: "sesn_1", created: true, started: true });
+        expect(second).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: false });
+        expect(third).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: false });
         }),
       );
 
@@ -1043,6 +1046,31 @@ describe("SessionManager", () => {
     });
   });
 
+  test("input acceptance racing ThreadLoop completion retains exactly one successor run", async () => {
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
+      expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_finish_race", "rin_finish_race_first")))).toMatchObject({
+        ok: true,
+        started: true,
+      });
+      await waitForRuns(threadLoop, 1);
+
+      const acceptedDuringCompletion = Effect.runPromise(
+        manager.acceptInput(acceptedInput("sesn_finish_race", "rin_finish_race_next")),
+      );
+      const completedRun = Promise.resolve().then(() => threadLoop.runs[0]?.release());
+      const [accepted] = await Promise.all([acceptedDuringCompletion, completedRun]);
+      expect(accepted).toMatchObject({ ok: true, sessionId: "sesn_finish_race" });
+
+      await waitForRuns(threadLoop, 2);
+      expect(threadLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_finish_race", "sesn_finish_race"]);
+      expect(threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId).toBe("rin_finish_race_next");
+      threadLoop.runs[1]?.release();
+      await waitForThreadIdle(manager, "sesn_finish_race", "thrd_sesn_finish_race");
+      expect(threadLoop.runs).toHaveLength(2);
+    });
+  });
+
   test("duplicate accepted input is idempotent and does not schedule an empty follow-up", async () => {
     const threadLoop = makeControlledThreadLoop();
     await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
@@ -1051,7 +1079,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_duplicate")))).toEqual({
@@ -1059,7 +1086,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: false,
         started: false,
-        pendingWake: false,
         duplicate: true,
       });
       threadLoop.runs[0]?.release();
@@ -1091,7 +1117,6 @@ describe("SessionManager", () => {
         sessionId: input.sessionId,
         created: true,
         started: true,
-        pendingWake: false,
         duplicate: true,
       });
       await waitForRuns(threadLoop, 1);
@@ -1606,7 +1631,6 @@ describe("SessionManager", () => {
   test("task notification received during a run remains pending for the follow-up turn", async () => {
     const threadLoop = makeControlledThreadLoop();
     const sessionId = "sesn_task_notification_wake";
-    let commitCalls = 0;
     await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput(sessionId)))).toMatchObject({
         ok: true,
@@ -1619,14 +1643,7 @@ describe("SessionManager", () => {
         sourceToolUseEventId: "sevt_task_notification_wake",
         status: "completed",
         payloadJson: "{\"status\":\"completed\"}",
-      }, async () => {
-        commitCalls += 1;
-        return {
-          ok: true,
-          committedMessage: bridgeRuntimeMessage(sessionId, "task completed"),
-        };
       }))).toMatchObject({ ok: true, applied: true });
-      expect(commitCalls).toBe(0);
       expect(threadLoop.runs[0]!.session.state.contextManager.messages()).not.toContainEqual(
         bridgeRuntimeMessage(sessionId, "task completed"),
       );
@@ -1638,7 +1655,6 @@ describe("SessionManager", () => {
         runtimeInputId: "rin_task_notification_wake",
         taskId: "task_notification_wake",
       });
-      expect(commitCalls).toBe(0);
       threadLoop.runs[1]!.release();
     });
   });
@@ -1673,10 +1689,7 @@ describe("SessionManager", () => {
         sourceToolUseEventId: "sevt_task_notification_resume",
         status: "completed",
         payloadJson: "{\"status\":\"completed\"}",
-      }, async () => ({
-        ok: true,
-        committedMessage: bridgeRuntimeMessage(sessionId, "task completed"),
-      })))).toMatchObject({ ok: true, applied: true });
+      }))).toMatchObject({ ok: true, applied: true });
       await waitForRuns(threadLoop, 1);
       expect(threadLoop.runs[0]?.session.state.peekAcceptedInput()).toMatchObject({
         kind: "task_notification",
@@ -1763,6 +1776,7 @@ describe("SessionManager", () => {
         sessionId: "sesn_shared_install_failure",
         sessionThreadId: "thrd_shared_initializer",
         reason: "context_load_failed",
+        retryable: false,
       });
       await expect(Effect.runPromise(manager.ensureThreadInstalled(
         threadControl("sesn_shared_install_failure", "rin_early_retry", "thrd_shared_initializer"),
@@ -1771,6 +1785,7 @@ describe("SessionManager", () => {
         sessionId: "sesn_shared_install_failure",
         sessionThreadId: "thrd_shared_initializer",
         reason: "context_load_failed",
+        retryable: false,
       });
       expect(loadCount).toBe(2);
 
@@ -1829,7 +1844,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_child",
         created: false,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
 
@@ -1844,8 +1858,6 @@ describe("SessionManager", () => {
 
   test("preloadThread restores running background task handles before task notification settlement", async () => {
     const threadLoop = makeControlledThreadLoop();
-    const committedMessage = bridgeRuntimeMessage("sesn_cold_background", "background task completed after cold load");
-    let commitCalls = 0;
 
     await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
       expect(
@@ -1871,9 +1883,6 @@ describe("SessionManager", () => {
             sourceToolUseEventId: "sevt_tool_background",
             status: "completed",
             payloadJson: "{\"task_id\":\"task_cold_background\",\"source_tool_use_event_id\":\"sevt_tool_background\",\"status\":\"completed\"}",
-          }, async () => {
-            commitCalls += 1;
-            return { ok: true, committedMessage };
           }),
         ),
       ).toEqual({ ok: true, sessionId: "sesn_cold_background", created: false, applied: true });
@@ -1888,7 +1897,6 @@ describe("SessionManager", () => {
         kind: "task_notification",
         runtimeInputId: "rin_task_background",
       });
-      expect(commitCalls).toBe(0);
       threadLoop.runs[0]?.release();
     });
   });
@@ -1986,12 +1994,11 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(mails[3]!))).toMatchObject({
         ok: true,
         started: false,
-        pendingWake: false,
       });
     });
   });
 
-  test("completion mail admitted to a busy resident thread is a pending-wake success", async () => {
+  test("completion mail admitted to a busy resident thread remains reducer-visible", async () => {
     const threadLoop = makeControlledThreadLoop();
     const layer = sessionManagerLayer(threadLoop);
     const sessionID = "sesn_busy_agent_mail";
@@ -2026,7 +2033,6 @@ describe("SessionManager", () => {
         sessionId: sessionID,
         created: false,
         started: false,
-        pendingWake: true,
       });
       threadLoop.runs[0]?.release({ type: "completed", modelMessageCount: 1 });
       await waitForRuns(threadLoop, 2);
@@ -2271,6 +2277,22 @@ describe("SessionManager", () => {
       await waitForRuns(threadLoop, 1);
       const session = threadLoop.runs[0]?.session;
       expect(session).toBeDefined();
+      session?.state.installThreadTurn({
+        pendingInputMessageIds: [],
+        request: {
+          modelRequestId: "mreq_1",
+          requestStartEventId: "sevt_request_start_1",
+          requestKind: "agent_provider_request",
+          contextThroughMessageSequence: 0,
+          requestEnd: { eventId: "sevt_request_end_1", isError: false, rescheduled: false },
+          toolMembers: [{
+            memberKind: "public_tool_use",
+            modelToolCallId: "tool-1",
+            toolUseEventId: "sevt_tool_1",
+            toolName: "Write",
+          }],
+        },
+      }, { routes: [{ toolUseEventId: "sevt_tool_1", disposition: "requires_user_action" }] });
       session?.state.recordPendingApprovalToolJob({
         toolUseEventId: "sevt_tool_1",
         modelRequestId: "mreq_1",
@@ -2414,7 +2436,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
 
@@ -2532,7 +2553,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       const session = threadLoop.runs[0]?.session;
@@ -2612,7 +2632,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       const firstSession = threadLoop.runs[0]?.session;
@@ -2630,7 +2649,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: false,
         started: false,
-        pendingWake: true,
       });
 
       threadLoop.releaseCleanup();
@@ -2654,7 +2672,6 @@ describe("SessionManager", () => {
 
       expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_before_fence"), sequenceTo: 5 }))).toMatchObject({
         ok: true,
-        pendingWake: true,
       });
       const interruptCommand = {
         ...threadControl("sesn_fence", "rin_interrupt_fence"),
@@ -2669,7 +2686,6 @@ describe("SessionManager", () => {
 
       expect(await Effect.runPromise(manager.acceptInput({ ...acceptedInput("sesn_fence", "rin_after_fence"), sequenceFrom: 10, sequenceTo: 10 }))).toMatchObject({
         ok: true,
-        pendingWake: true,
       });
       threadLoop.releaseCleanup();
       await expect(interrupt).resolves.toMatchObject({ ok: true, interrupted: true });
@@ -2708,7 +2724,6 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
         ok: true,
         started: false,
-        pendingWake: true,
       });
 
       const interruptCommand = {
@@ -2732,7 +2747,6 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
         ok: true,
         started: false,
-        pendingWake: false,
       });
       expect(threadLoop.runs).toHaveLength(2);
     });
@@ -2777,7 +2791,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_shutdown",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       const session = threadLoop.runs[0]?.session;
@@ -2883,7 +2896,7 @@ describe("SessionManager", () => {
       for (let attempt = 0; attempt < 100 && threadLoop.runs.length === 2; attempt += 1) {
         const result = await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_restart_after_idle")));
         if (result.ok && result.started) {
-          expect(result).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: true, pendingWake: false });
+          expect(result).toEqual({ ok: true, sessionId: "sesn_1", created: false, started: true });
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 1));
@@ -2906,7 +2919,7 @@ describe("SessionManager", () => {
 
       await waitForRuns(threadLoop, 1);
       expect([first, second, third].filter((result) => result.ok && result.started)).toHaveLength(1);
-      expect([first, second, third].filter((result) => result.ok && result.pendingWake)).toHaveLength(2);
+      expect([first, second, third].filter((result) => result.ok && !result.started)).toHaveLength(2);
       threadLoop.runs[0]?.release();
       await waitForRuns(threadLoop, 2);
       expect(threadLoop.runs.map((run) => run.sessionId)).toEqual(["sesn_1", "sesn_1"]);
@@ -2962,7 +2975,6 @@ describe("SessionManager", () => {
       await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_waiter_scope", "rin_pending")))).toMatchObject({
         ok: true,
-        pendingWake: true,
       });
       const session = threadLoop.runs[0]?.session;
       expect(session?.state.acceptedInputCount()).toBe(2);
@@ -2997,7 +3009,6 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_follow_cleanup", "rin_during_cleanup")))).toMatchObject({
         ok: true,
         started: false,
-        pendingWake: true,
       });
       threadLoop.releaseFollowUpCleanup();
 
@@ -3020,7 +3031,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       expect(threadLoop.runs[0]?.args).toHaveLength(2);
@@ -3049,7 +3059,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_2"))).toEqual({
         ok: true,
@@ -3066,7 +3075,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: false,
         started: false,
-        pendingWake: true,
       });
       threadLoop.runs[0]?.release();
       threadLoop.runs[1]?.release();
@@ -3196,14 +3204,12 @@ describe("SessionManager", () => {
         sessionId: "sesn_shared",
         created: true,
         started: true,
-        pendingWake: false,
       });
       expect(await Effect.runPromise(manager.acceptInput(workspaceB))).toEqual({
         ok: true,
         sessionId: "sesn_shared",
         created: true,
         started: true,
-        pendingWake: false,
       });
 
       await waitForRuns(threadLoop, 2);
@@ -3241,14 +3247,12 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_thread_b", "thrd_b")))).toEqual({
         ok: true,
         sessionId: "sesn_1",
         created: false,
         started: true,
-        pendingWake: false,
       });
 
       await waitForRuns(threadLoop, 2);
@@ -3260,7 +3264,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: false,
         started: false,
-        pendingWake: true,
       });
 
       threadLoop.runs[0]?.release();
@@ -3355,8 +3358,6 @@ describe("SessionManager", () => {
         sourceToolUseEventId: "sevt_cleanup_receipt",
         status: "completed",
         payloadJson: "{\"status\":\"completed\"}",
-      }, async () => {
-        throw new Error("transport admission must not settle the task");
       }))).toMatchObject({ ok: true, applied: true });
       await waitForRuns(threadLoop, 1);
 
@@ -3436,7 +3437,6 @@ describe("SessionManager", () => {
       expect(await Effect.runPromise(manager.acceptInput(mail))).toMatchObject({
         ok: true,
         started: false,
-        pendingWake: true,
       });
 
       const failure = fatalRunResult("persistence_failed");
@@ -3464,50 +3464,6 @@ describe("SessionManager", () => {
       await waitForRuns(threadLoop, 2);
       expect(threadLoop.runs[1]?.session.state.peekAcceptedInput()?.runtimeInputId).toBe(mail.runtimeInputId);
       threadLoop.runs[1]?.release({ type: "completed", modelMessageCount: 1 });
-    });
-  });
-
-  test("value-level failed exit releases a queued task notification for inbox repair", async () => {
-    const threadLoop = makeControlledThreadLoop();
-    const sessionId = "sesn_failed_task_notification_redelivery";
-    const threadId = "thrd_failed_task_notification_redelivery";
-    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
-      expect(await Effect.runPromise(manager.preloadThread({
-        ...threadControl(sessionId, "rin_preload_failed_task_notification", threadId),
-        runtimeBindingToken: "runtime-binding-token",
-        messages: [],
-        backgroundTools: [{
-          taskId: "task_failed_task_notification",
-          sourceToolUseEventId: "sevt_failed_task_notification",
-        }],
-        coldCoverage: coldCoverage(),
-      }))).toMatchObject({ ok: true, applied: true });
-      expect(await Effect.runPromise(manager.acceptInput(
-        acceptedInput(sessionId, "rin_failed_task_notification_active", threadId),
-      ))).toMatchObject({ ok: true, started: true });
-      await waitForRuns(threadLoop, 1);
-      expect(await Effect.runPromise(manager.commitTaskNotification(sessionId, {
-        ...threadControl(sessionId, "task_notification:task_failed_task_notification", threadId),
-        taskId: "task_failed_task_notification",
-        sourceToolUseEventId: "sevt_failed_task_notification",
-        status: "completed",
-        payloadJson: "{\"status\":\"completed\"}",
-      }, async () => {
-        throw new Error("failed owner run must not settle the queued task");
-      }))).toMatchObject({ ok: true, applied: true });
-
-      const failure = fatalRunResult("persistence_failed");
-      if (failure.type !== "failed") {
-        throw new Error("expected failed run fixture");
-      }
-      threadLoop.runs[0]?.release({ type: "failed", error: failure.error });
-
-      await waitForCondition(async () => {
-        const snapshot = await Effect.runPromise(manager.inspectThread(
-          threadControl(sessionId, "rin_inspect_failed_task_release", threadId),
-        ));
-        return snapshot.ok && !snapshot.observed;
-      }, "failed task-notification recipient release");
     });
   });
 
@@ -3541,7 +3497,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_discard_hot_state",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 2);
       expect(threadLoop.runs[1]?.session).not.toBe(staleSession);
@@ -3559,7 +3514,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       expect(await Effect.runPromise(manager.acceptInput(acceptedInput("sesn_1", "rin_event_write_follow")))).toEqual({
@@ -3567,7 +3521,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: false,
         started: false,
-        pendingWake: true,
       });
       threadLoop.runs[0]?.release(fatalRunResult("event_write_failed"));
 
@@ -3596,7 +3549,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForRuns(threadLoop, 1);
       threadLoop.runs[0]?.session.state.contextManager.appendMessage({
@@ -3614,7 +3566,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_1",
         created: false,
         started: false,
-        pendingWake: true,
       });
       threadLoop.runs[0]?.release(fatalRunResult("crashed"));
 
@@ -3634,7 +3585,7 @@ describe("SessionManager", () => {
     });
   });
 
-  test("ThreadLoop Effect failure clears hot state, drops pending wake, and releases capacity", async () => {
+  test("ThreadLoop Effect failure clears admitted hot input and releases capacity", async () => {
     const threadLoop = makeControlledCrashThreadLoop("fail");
     const layer = sessionManagerLayer(threadLoop, { maxLocalSessions: 1 });
 
@@ -3644,7 +3595,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_fail",
         created: true,
         started: true,
-        pendingWake: false,
       });
       await waitForCrashRuns(threadLoop, 1);
       threadLoop.runs[0]?.session.state.contextManager.appendMessage({
@@ -3662,7 +3612,6 @@ describe("SessionManager", () => {
         sessionId: "sesn_fail",
         created: false,
         started: false,
-        pendingWake: true,
       });
 
       threadLoop.runs[0]?.releaseCrash();
@@ -3925,7 +3874,7 @@ describe("SessionManager", () => {
     ]);
   });
 
-  test("superseded and unrepairable closeouts release immediately with only the unrepairable record", async () => {
+  test("superseded closeout releases while unrepairable accepted custody remains resident", async () => {
     for (const disposition of ["superseded", "unrepairable"] as const) {
       const events: SessionManager.RuntimeCloseoutEvent[] = [];
       const threadLoop = makeControlledCrashThreadLoop("die", {
@@ -3948,8 +3897,16 @@ describe("SessionManager", () => {
         threadLoop.runs[0]?.releaseCrash();
         await waitForCondition(async () => {
           const snapshot = await Effect.runPromise(manager.inspectThread(threadControl(sessionId)));
-          return snapshot.ok && !snapshot.observed;
-        }, `${disposition} closeout release`);
+          return snapshot.ok && snapshot.observed === (disposition === "unrepairable");
+        }, `${disposition} closeout disposition`);
+        if (disposition === "unrepairable") {
+          expect(threadLoop.runs[0]?.session.state.acceptedInputCount()).toBe(1);
+          expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_after_unrepairable"))).toEqual({
+            ok: false,
+            sessionId: "sesn_after_unrepairable",
+            reason: "local_session_capacity_exceeded",
+          });
+        }
       });
 
       expect(events).toEqual(disposition === "unrepairable"
@@ -3962,7 +3919,7 @@ describe("SessionManager", () => {
     }
   });
 
-  test("a throwing unrepairable observer cannot retain the failed run slot", async () => {
+  test("a throwing unrepairable observer cannot bypass the accepted-custody fence", async () => {
     const threadLoop = makeControlledCrashThreadLoop("die", {
       closeFailedRun: () => Effect.succeed({
         type: "unrepairable",
@@ -3986,14 +3943,15 @@ describe("SessionManager", () => {
       threadLoop.runs[0]?.releaseCrash();
       await waitForCondition(async () => {
         const snapshot = await Effect.runPromise(manager.inspectThread(threadControl("sesn_closeout_observer_defect")));
-        return snapshot.ok && !snapshot.observed;
-      }, "unrepairable closeout release after observer defect");
+        return snapshot.ok && snapshot.observed;
+      }, "unrepairable accepted custody after observer defect");
       expect(await joined).toMatchObject({ ok: true, observed: true, timedOut: false });
-      expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_after_observer_defect"))).toMatchObject({
-        ok: true,
-        started: true,
+      expect(threadLoop.runs[0]?.session.state.acceptedInputCount()).toBe(1);
+      expect(await Effect.runPromise(manager.startTestRunThroughAcceptedInput("sesn_after_observer_defect"))).toEqual({
+        ok: false,
+        sessionId: "sesn_after_observer_defect",
+        reason: "local_session_capacity_exceeded",
       });
-      await waitForCrashRuns(threadLoop, 2);
     });
   });
 
@@ -4267,7 +4225,7 @@ describe("SessionManager", () => {
           }
           await new Promise((resolve) => setTimeout(resolve, 1));
         }
-        expect(accepted).toEqual({ ok: true, sessionId: `accept_${reason}`, created: true, started: true, pendingWake: false });
+        expect(accepted).toEqual({ ok: true, sessionId: `accept_${reason}`, created: true, started: true });
         await waitForRuns(threadLoop, 2);
         expect(threadLoop.runs[1]?.session).not.toBe(fatalSession);
         threadLoop.runs[1]?.release();

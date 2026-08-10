@@ -76,12 +76,15 @@ export interface ContextLoader {
 }
 
 /** Result of committing one accepted command before mutating its hot thread state. */
-export type AcceptedInputCommitResult = {
-  readonly type: "receipt";
-  readonly inputDisposition: "committed" | "duplicate";
-  readonly applicationDisposition: "current_custody" | "stale_custody";
-  readonly receipt: RuntimeDeclarationReceipt;
-};
+export type AcceptedInputCommitResult =
+  | {
+      readonly type: "receipt";
+      readonly inputDisposition: "committed" | "duplicate";
+      readonly applicationDisposition: "current_custody" | "stale_custody";
+      readonly receipt: RuntimeDeclarationReceipt;
+    }
+  | { readonly type: "task_notification_deferred" }
+  | { readonly type: "stale_custody" };
 
 /** Durable pending tool-use state reconstructed during a cold thread load. */
 export interface RuntimeLoadedPendingToolUse {

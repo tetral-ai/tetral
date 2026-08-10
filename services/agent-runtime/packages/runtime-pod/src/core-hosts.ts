@@ -178,10 +178,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
         if (result.ok) {
           return result;
         }
-        if (result.reason === "context_load_failed") {
-          throw new Error("cold thread preload failed");
-        }
-        return { ok: false, sessionId: result.sessionId, reason: "local_session_capacity_exceeded" };
+        return {
+          ok: false,
+          sessionId: result.sessionId,
+          reason: result.reason === "context_load_failed"
+            ? "context_load_failed"
+            : result.reason === "local_session_capacity_exceeded"
+              ? "local_session_capacity_exceeded"
+              : "control_conflict",
+          ...(result.reason === "context_load_failed" && result.retryable !== undefined
+            ? { retryable: result.retryable }
+            : {}),
+        };
       },
       handleAgentMail: async (command) => {
         try {
@@ -193,15 +201,18 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
               reason: result.reason === "local_session_capacity_exceeded"
                 ? "local_session_capacity_exceeded"
                 : "thread_not_receivable",
+              ...(result.reason === "context_load_failed" && result.retryable !== undefined
+                ? { reason: "context_load_failed" as const, retryable: result.retryable }
+                : {}),
             } as const;
           }
           return {
             ok: true,
             sessionId: command.sessionId,
-            applied: result.started || result.pendingWake,
+            applied: result.duplicate !== true || result.started,
           };
         } catch {
-          return { ok: false, sessionId: command.sessionId, reason: "context_load_failed" };
+          return { ok: false, sessionId: command.sessionId, reason: "context_load_failed", retryable: false };
         }
       },
       handleInterruptControl: async (sessionId, command, commitInput) => await Effect.runPromise(host.handleInterruptControl(
@@ -211,8 +222,8 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
       )),
       handleToolConfirmation: async (sessionId, command, commit) =>
         await Effect.runPromise(host.handleToolConfirmation(sessionId, command, commit)),
-      handleTaskNotification: async (sessionId, command, commit) =>
-        await Effect.runPromise(host.handleTaskNotification(sessionId, command, commit)),
+      handleTaskNotification: async (sessionId, command) =>
+        await Effect.runPromise(host.handleTaskNotification(sessionId, command)),
       handleRuntimeConfigPatch: async (sessionId, command) => {
         return await Effect.runPromise(host.handleRuntimeConfigPatch(sessionId, command));
       },

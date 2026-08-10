@@ -1,44 +1,52 @@
 import type { AcceptedInputCommitResult } from "../../src/context/context-loader.js";
 import { acceptedInputCreates, acceptedInputDeclarationKind } from "../../src/runtime/runtime-declaration.js";
+import { taskNotificationOperationId } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeDeclarationReceipt } from "../../src/runtime/runtime-declaration.js";
 import type { RuntimeAcceptedInputState } from "../../src/thread-loop/thread-state.js";
 
 const committedAt = "2026-07-28T00:00:00.000Z";
+type AcceptedInputReceiptResult = Extract<AcceptedInputCommitResult, { readonly type: "receipt" }>;
 
 /** Builds a complete database-shaped receipt for accepted-input unit tests. */
 export function acceptedInputReceipt(
   input: RuntimeAcceptedInputState,
-  inputDisposition: AcceptedInputCommitResult["inputDisposition"] = "committed",
+  inputDisposition: AcceptedInputReceiptResult["inputDisposition"] = "committed",
   messageSequenceStart = 1,
-): AcceptedInputCommitResult {
+): AcceptedInputReceiptResult {
 	const creates = acceptedInputCreates(input);
+  const taskEventId = `sevt_${input.runtimeInputId}`;
   const receipt: RuntimeDeclarationReceipt = {
     sessionThreadId: input.sessionThreadId,
-    operationKind: "commit_inputs",
+    operationKind: input.kind === "task_notification" ? "commit_task_notification_result" : "commit_inputs",
     sourceKind: acceptedInputDeclarationKind(input),
-		operationId: input.runtimeInputId,
+    operationId: input.kind === "task_notification"
+      ? taskNotificationOperationId(input.runtimeInputId, input.taskId)
+      : input.runtimeInputId,
     declarationDigest: `digest_${input.runtimeInputId}`,
     pendingAttachmentDelta: [],
 		interruptToolProjections: [],
     prefixConsumptions: [],
 
     childLifecycle: [],
-    events: input.eventIds.map((eventId, index) => ({
+    events: (input.kind === "task_notification" ? [taskEventId] : input.eventIds).map((eventId, index) => ({
       sessionThreadId: input.sessionThreadId,
       eventId,
-      eventSequence: input.kind === "approval_review"
+      eventSequence: input.kind === "approval_review" || input.kind === "task_notification"
         ? messageSequenceStart + index
         : input.sequenceFrom + index,
-      disposition: input.kind === "approval_review" ? "created" : "existing",
+      disposition: input.kind === "approval_review" || input.kind === "task_notification"
+        ? "created"
+        : "existing",
     })),
 		messages: creates.map((create, messageIndex) => {
-			if (create.sourceEventId === undefined) {
+      const sourceEventId = input.kind === "task_notification" ? taskEventId : create.sourceEventId;
+      if (sourceEventId === undefined) {
 				throw new Error("accepted input test create is missing its source event");
 			}
 			const messageId = `msg_${input.runtimeInputId}_${messageIndex}`;
 			return {
 				sessionThreadId: input.sessionThreadId,
-				owningEventId: create.sourceEventId,
+        owningEventId: sourceEventId,
 				messageId,
         messageSequence: messageSequenceStart + messageIndex,
         createdAt: committedAt,

@@ -119,8 +119,8 @@ interrupting.
 
 ### Repair (Job Runner, on proven-gone)
 
-Each workspace pass performs pod-loss reconciliation before inbox repair,
-completion-mail repair, and Queue leasing. It freezes the active binding census
+Each workspace pass performs pod-loss reconciliation before Queue leasing. It
+freezes the active binding census
 in a read-only repeatable-read transaction, takes one watcher snapshot after
 the database snapshot exists, and keyset-pages binding identities in batches of
 32. The read transaction closes before any candidate mutation. Running Runtime
@@ -310,9 +310,10 @@ replacement must preserve, and the conformance suites that prove it.
 
 ### Delivery and durable wake machinery
 
-- **Contract.** The Job Runner (`job_runner.go`, `runtime_delivery.go`)
-  reconciles durable job/event state, upserts `session_runtime_inbox`, sends
-  typed commands to the bound pod, and maps replies onto queue transitions.
+- **Contract.** Message producers commit `session_runtime_inbox` and Queue
+  custody beside their source facts. The Job Runner (`job_runner.go`,
+  `runtime_delivery.go`) binds that existing custody, sends typed commands to
+  the bound pod, and maps replies onto queue transitions.
   Child completion returns to the parent through one
   `agent.thread_message_sent` envelope written in the child's settling
   transaction (`completion_mail.go`), with a durable agent-mail wake enqueued
@@ -322,21 +323,11 @@ replacement must preserve, and the conformance suites that prove it.
   exhausted`, an `end_turn` carrying a terminal `session.error`, and a child-
   scoped termination mail an errored envelope; a processed `user.interrupt`,
   `requires_action`, reviewer settlements, and pod-loss repairs mail nothing.
-- **Invariants a replacement must preserve.** There is no settled-without-mail
-  or mail-without-settlement state. Every deliverable completion mail that is
-  still unreceived has at all times a live wake job or a durably-scheduled
-  reconciliation pass that will mint one — hot machinery only ever delivers
-  faster than that floor; losing every hot path degrades latency, never
-  delivery. Delivery targets the bound pod directly, never a load-balanced
-  service. The floor is `CompletionMailReconcilerMinAge` (`completion_mail.go`).
-  Its lower bound is not free: the reconciler only mints a wake job for mail
-  older than this age, so the age must dominate the hot-retry envelope — the
-  queue's `DefaultMaxAttempts` (`internal/queue`) times its exponential backoff
-  plus the job-runner poll/lease cadence — or a completion still inside a normal
-  retry cycle would be reconciled as if abandoned. It is a fixed compile-time
-  invariant, deliberately not operator-tunable: unlike the job-runner
-  lease/heartbeat/poll cadence, it carries no `Env*` wiring in `config.go`, and
-  changing it is a code change, not configuration. Initial MCP manifest listing
+- **Invariants a replacement must preserve.** There is no settled-without-mail,
+  mail-without-Inbox, or Inbox-without-Queue birth state. Completion replay
+  joins the same durable identities; delivery never scans the event ledger to
+  reconstruct custody. Delivery targets the bound pod directly, never a
+  load-balanced service. Initial MCP manifest listing
   similarly uses a fixed 180-second per-call deadline. This accommodates the
   connector's credential, reconnect, and list budgets while bounding the
   single-threaded Job Runner sweep to 180 seconds per stalled workspace; it

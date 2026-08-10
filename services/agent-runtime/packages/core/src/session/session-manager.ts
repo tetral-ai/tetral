@@ -26,7 +26,7 @@
  *              services/agent-runtime/packages/core/src/thread-loop/thread-state.ts,
  *              services/bridge/bridge_api_store.go
  */
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore } from "effect";
 import * as ThreadLoop from "../thread-loop/thread-loop.js";
 import * as ThreadRuntime from "../thread-loop/thread-runtime.js";
 import type {
@@ -37,13 +37,12 @@ import type {
   RuntimeThreadPreloadState,
   RuntimeThreadStatusState,
   RuntimeTaskNotificationCommandState,
-  RuntimeTaskNotificationCommit,
   RuntimeThreadControlState,
   RuntimeThreadVisibilityState,
   RuntimeToolConfirmationState,
   RuntimeControlInputCommit,
 } from "../thread-loop/thread-state.js";
-import { normalizeRuntimeFailure } from "../contracts/runtime.js";
+import { ContextLoaderErrorSchema, normalizeRuntimeFailure } from "../contracts/runtime.js";
 import type { RuntimeMessage } from "../contracts/runtime.js";
 import { NoopRuntimeMetricsSink } from "../runtime/metrics.js";
 import type { RuntimeHotStateMetrics, RuntimeMetricsSink } from "../runtime/metrics.js";
@@ -77,8 +76,6 @@ export interface RuntimeInterruptControlCommand extends RuntimeThreadControlStat
 
 /** Fenced command that releases one session's disposable hot state. */
 export interface RuntimeCleanupSessionCommand extends RuntimeThreadControlState {}
-
-export type { RuntimeTaskNotificationCommit } from "../thread-loop/thread-state.js";
 
 function unfinishedToolUseEventIds(messages: readonly RuntimeMessage[]): string[] {
   return messages.flatMap((message) => message.parts
@@ -133,7 +130,6 @@ export type AcceptInputResult =
       readonly sessionId: string;
       readonly created: boolean;
       readonly started: boolean;
-      readonly pendingWake: boolean;
       readonly duplicate?: true | undefined;
       readonly reviewerExecutionToken?: ReviewerExecutionToken | undefined;
     }
@@ -141,6 +137,7 @@ export type AcceptInputResult =
       readonly ok: false;
       readonly sessionId: string;
       readonly reason: SubAgentRejectionReason;
+      readonly retryable?: boolean | undefined;
     };
 
 /** Result of a thread preload, interrupt, activation, or close operation. */
@@ -159,6 +156,7 @@ export type ThreadLifecycleResult =
       readonly sessionId: string;
       readonly sessionThreadId: string;
       readonly reason: LocalSessionRejectionReason | "thread_busy" | "context_load_failed";
+      readonly retryable?: boolean | undefined;
     };
 
 /** Observation result for joining a resident thread with an optional timeout. */
@@ -273,7 +271,6 @@ export interface Interface {
   readonly commitTaskNotification: (
     sessionId: string,
     command: RuntimeTaskNotificationCommandState,
-    commit: RuntimeTaskNotificationCommit,
   ) => Effect.Effect<RuntimeTaskNotificationResult>;
   readonly applyRuntimeConfigPatch: (sessionId: string, command: RuntimeConfigPatchState) => Effect.Effect<RuntimeControlResult>;
   readonly cleanupSession: (sessionId: string, command: RuntimeCleanupSessionCommand) => Effect.Effect<CleanupSessionResult>;
@@ -329,7 +326,7 @@ export class Service extends Context.Service<Service, Interface>()("tetral-agent
 
 // ThreadRunSlot: single-owner run guard for one ThreadEntry (OpenCode coordinator
 // pattern). At most one owner ThreadRun per thread key; many callers may join that
-// owner, and wakes coalesce while it runs. run_slot is hot memory only — durable truth
+// owner, while accepted facts remain reducer-visible during the run. run_slot is hot memory only — durable truth
 // stays in session_events / session_messages / session_pending_tool_uses / session_threads.
 //
 //   | field                | meaning                                                       |
@@ -337,20 +334,17 @@ export class Service extends Context.Service<Service, Interface>()("tetral-agent
 //   | ownerFiber           | the one ThreadRun owner fiber (forked once per run)           |
 //   | doneDeferred         | joiners await this; completed when the run settles            |
 //   | scope                | run scope, closed on finish or direct lifecycle cancellation |
-//   | pendingWake          | coalescing flag (NOT a counter): many inputs -> one follow-up |
-//   | pendingWakeAfterStop | wake accepted during interrupt cleanup; must not be dropped   |
 //   | stopping             | an interrupt is unwinding this run                            |
 //
 // wake/interrupt transitions:
 //   | trigger        | run_slot empty            | active (stopping=false)          | active (stopping=true)        |
 //   | -------------- | ------------------------- | -------------------------------- | ----------------------------- |
-//   | wake/new input | start run_slot(wake)      | set pendingWake=true             | set pendingWakeAfterStop=true |
-//   | interrupt      | fiber no-op (nothing runs)| stopping=true, clear pendingWake,| already stopping              |
-//   |                |                           | signal in-run closeout, await owner                              |
+//   | wake/new input | start run_slot(wake)      | install reducer-visible fact     | install reducer-visible fact  |
+//   | interrupt      | fiber no-op (nothing runs)| stopping=true, signal closeout   | already stopping              |
 //
-// On a successful owner exit: pendingWake -> start exactly one follow-up ThreadRun;
-// else pendingWakeAfterStop -> clear stopping and start one follow-up after cleanup;
-// else clear run_slot and complete doneDeferred. A cold thread is inserted in the
+// On owner exit SessionManager clears the old slot, reduces the latest
+// ThreadProcessor projection, and starts at most one successor for an active action.
+// A cold thread is inserted in the
 // installing state before its sole LoadContext call and becomes command-ready only
 // after that install succeeds. Cleanup cannot release an installing ThreadEntry or a
 // ThreadEntry with an active run_slot except on the approved closeout path.
@@ -360,8 +354,6 @@ interface ThreadRunSlot {
   ownerFiber: Fiber.Fiber<ThreadLoop.ThreadLoopRunResult, unknown> | undefined;
   readonly doneDeferred: Deferred.Deferred<ThreadLoop.ThreadLoopRunResult, unknown>;
   readonly scope: Scope.Scope;
-  pendingWake: boolean;
-  pendingWakeAfterStop: boolean;
   stopping: boolean;
   readonly reviewerExecutionToken: ReviewerExecutionToken | undefined;
   durableTurnId: string | undefined;
@@ -392,6 +384,7 @@ interface ThreadEntry {
 interface ThreadInstallation {
   readonly start: Deferred.Deferred<void>;
   readonly result: Deferred.Deferred<ThreadLifecycleResult>;
+  readonly cleanup: Deferred.Deferred<void>;
   fiber: Fiber.Fiber<void, never> | undefined;
 }
 
@@ -720,7 +713,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           Effect.andThen(threadEntry.approvalReviewer?.dispose() ?? Effect.void),
           Effect.ensuring(Effect.sync(() => {
             threadEntry.bridgeScope = undefined;
-            threadEntry.runtimeThread.state.clear();
+            threadEntry.runtimeThread.state.clearAfterCustodyHandoff();
             threadEntry.runSlot = undefined;
             sessionEntry.threads.delete(threadEntry.sessionThreadId);
             const key = entrySessionKey(sessionEntry);
@@ -744,8 +737,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               continue;
             }
             childRunSlot.stopping = true;
-            childRunSlot.pendingWake = false;
-            childRunSlot.pendingWakeAfterStop = false;
           }
           yield* Effect.all(
             residentChildren.map((childEntry) => {
@@ -787,8 +778,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           const runSlot = threadEntry.runSlot;
           if (runSlot?.ownerFiber !== undefined) {
             runSlot.stopping = true;
-            runSlot.pendingWake = false;
-            runSlot.pendingWakeAfterStop = false;
             yield* Fiber.interrupt(runSlot.ownerFiber).pipe(Effect.exit, Effect.asVoid);
             yield* awaitRunSlot(runSlot);
           }
@@ -824,8 +813,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             ownerFiber: undefined,
             doneDeferred: yield* Deferred.make<ThreadLoop.ThreadLoopRunResult, unknown>(),
             scope: runScope,
-            pendingWake: false,
-            pendingWakeAfterStop: false,
             stopping: false,
             reviewerExecutionToken: reviewId === undefined
               ? undefined
@@ -849,8 +836,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               threadEntry.durableTurnId = undefined;
             },
           };
-          const run = threadLoop
-            .run(threadEntry.runtimeThread, custody)
+          const run = threadLoop.run(threadEntry.runtimeThread, custody)
             .pipe(Scope.provide(runScope), Effect.onExit((exit) => finishThreadRun(sessionEntry, threadEntry, runSlot, exit)));
           const fiber = yield* Effect.forkIn(run, runScope);
           runSlot.ownerFiber = fiber;
@@ -876,7 +862,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         sessionEntry: SessionEntry,
         threadEntry: ThreadEntry,
         exit: Exit.Exit<ThreadLoop.ThreadLoopRunResult, unknown>,
-      ): Effect.Effect<void> => {
+      ): Effect.Effect<"disposed" | "unrepairable" | "shutdown"> => {
         const closeoutId = beginFailedRunCloseout();
         const custody: ThreadLoop.ThreadLoopRunCustody = {
           durableTurnId: () => threadEntry.runSlot?.durableTurnId ?? threadEntry.durableTurnId,
@@ -901,7 +887,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           for (;;) {
             const result = yield* attempt;
             if (result.type === "landed" || result.type === "superseded") {
-              return;
+              return "disposed" as const;
             }
             if (result.type === "unrepairable") {
               const current = activeCloseouts.get(closeoutId);
@@ -917,14 +903,14 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 activeCloseouts: stalledCloseoutCount(),
                 errorCode,
               });
-              return;
+              return "unrepairable" as const;
             }
             observeFailedRunCloseoutStall(closeoutId);
             const waited = yield* Effect.promise(() =>
               waitForFailedRunCloseoutRetry(sessionEntry, backoffMs)
             );
             if (waited === "shutdown") {
-              return;
+              return "shutdown" as const;
             }
             backoffMs = Math.min(backoffMs * 2, CloseoutRetryMaxBackoffMs);
           }
@@ -940,6 +926,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         exit: Exit.Exit<ThreadLoop.ThreadLoopRunResult, unknown>,
       ): Effect.Effect<void> =>
         Effect.gen(function* () {
+          threadEntry.runtimeThread.state.finishThreadRunProjection();
           if (threadEntry.runSlot !== runSlot) {
             yield* closeRunScope(runSlot, exit);
             yield* completeRunSlot(runSlot, exit);
@@ -952,12 +939,16 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             return;
           }
           if (Exit.hasFails(exit) || Exit.hasDies(exit)) {
-            const releaseFailedRun = releaseThreadEntry(sessionEntry, threadEntry).pipe(
-              Effect.ensuring(completeRunSlot(runSlot, exit)),
-            );
-            yield* Effect.gen(function* () {
-              yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
-            }).pipe(Effect.ensuring(releaseFailedRun));
+            const closeout = yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
+            if (closeout === "unrepairable" && threadEntry.runtimeThread.state.acceptedInputCount() > 0) {
+              // No receipt exists that can release the accepted fact. Retain the
+              // completed run slot as a loud custody fence until Pod shutdown
+              // transfers ownership through binding-loss reconciliation.
+              yield* completeRunSlot(runSlot, exit);
+              return;
+            }
+            yield* releaseThreadEntry(sessionEntry, threadEntry);
+            yield* completeRunSlot(runSlot, exit);
             return;
           }
           if (runRequiresHotStateDiscard(exit)) {
@@ -970,15 +961,18 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             yield* completeRunSlot(runSlot, exit);
             return;
           }
-          const cleanExit = Exit.isSuccess(exit) && exit.value.type === "completed";
           const valueLevelFailed = Exit.isSuccess(exit) && exit.value.type === "failed";
-          if (
-            valueLevelFailed &&
-            (
-              threadEntry.runtimeThread.state.hasQueuedInterAgentMessage() ||
-              threadEntry.runtimeThread.state.hasQueuedTaskNotification()
-            )
-          ) {
+          if (valueLevelFailed) {
+            if (
+              threadEntry.runtimeThread.state.acceptedInputCount() > 0 &&
+              exit.value.releaseSession?.reason !== "terminated"
+            ) {
+              const closeout = yield* settleFailedRunCloseout(sessionEntry, threadEntry, exit);
+              if (closeout === "unrepairable") {
+                yield* completeRunSlot(runSlot, exit);
+                return;
+              }
+            }
             yield* releaseThreadEntry(sessionEntry, threadEntry);
             yield* completeRunSlot(runSlot, exit);
             return;
@@ -991,28 +985,15 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           threadEntry.runSlot = undefined;
           threadEntry.status = "idle";
           recordHotStateMetrics();
-          const queuedInput = threadEntry.runtimeThread.state.peekAcceptedInput() !== undefined;
           const reviewerRun = runSlot.reviewerExecutionToken !== undefined;
-          const shouldWakeAfterStop =
-            runSlot.stopping &&
-            !valueLevelFailed &&
-            (
-              (queuedInput && !reviewerRun) ||
-              runSlot.pendingWakeAfterStop
-            ) &&
-            sessionEntry.threads.get(threadEntry.sessionThreadId) === threadEntry;
-          const shouldWake =
-            !runSlot.stopping &&
-            cleanExit &&
-            (
-              (queuedInput && !reviewerRun) ||
-              runSlot.pendingWake
-            ) &&
-            sessionEntry.threads.get(threadEntry.sessionThreadId) === threadEntry;
-
-          if (shouldWakeAfterStop) {
-            yield* startThreadRun(sessionEntry, threadEntry).pipe(Effect.asVoid);
-          } else if (shouldWake) {
+          const latestActionNeedsRun = ThreadLoop.threadTurnActionNeedsRun(
+            threadEntry.runtimeThread.state.threadTurnReduction().action,
+          );
+          if (
+            (!reviewerRun || !runSlot.stopping) &&
+            latestActionNeedsRun &&
+            sessionEntry.threads.get(threadEntry.sessionThreadId) === threadEntry
+          ) {
             yield* startThreadRun(sessionEntry, threadEntry).pipe(Effect.asVoid);
           }
           yield* completeRunSlot(runSlot, exit);
@@ -1024,12 +1005,18 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
         command: RuntimeThreadControlState,
         metadata: RuntimeAcceptedThreadMetadataState,
         run: (threadResult: ResidentThreadResult) => Effect.Effect<CommandResult>,
-        unavailable: (reason: "local_session_capacity_exceeded" | "context_load_failed" | "thread_busy") => CommandResult,
+        unavailable: (
+          reason: "local_session_capacity_exceeded" | "context_load_failed" | "thread_busy",
+          retryable?: boolean,
+        ) => CommandResult,
       ): Effect.Effect<CommandResult> =>
         Effect.gen(function* () {
           const prepared = yield* prepareThreadInstallation(command, metadata);
           if (prepared.threadResult === undefined) {
-            return unavailable(prepared.failedResult.reason);
+            return unavailable(
+              prepared.failedResult.reason,
+              "retryable" in prepared.failedResult ? prepared.failedResult.retryable : undefined,
+            );
           }
           const queued = yield* prepared.threadResult.sessionEntry.controlGate.withPermit(
             Effect.gen(function* () {
@@ -1044,9 +1031,12 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                   if (prepared.installation !== undefined) {
                     const installed = yield* Deferred.await(prepared.installation.result);
                     if (!installed.ok) {
-                      return unavailable(installed.reason === "local_session_capacity_exceeded"
-                        ? "local_session_capacity_exceeded"
-                        : "context_load_failed");
+                      return unavailable(
+                        installed.reason === "local_session_capacity_exceeded"
+                          ? "local_session_capacity_exceeded"
+                          : "context_load_failed",
+                        installed.retryable,
+                      );
                     }
                   }
                   return yield* run(prepared.threadResult);
@@ -1060,9 +1050,16 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           if (prepared.createdInstallation && prepared.installation !== undefined) {
             yield* Deferred.succeed(prepared.installation.start, undefined);
           }
-          return yield* queued.value.pipe(
+          const commandResult = yield* queued.value.pipe(
             Effect.catchCause(() => Effect.succeed(unavailable("thread_busy"))),
           );
+          if (prepared.installation !== undefined) {
+            const installed = yield* Deferred.await(prepared.installation.result);
+            if (!installed.ok) {
+              yield* Deferred.await(prepared.installation.cleanup);
+            }
+          }
+          return commandResult;
         });
 
       const acceptInput = (command: RuntimeAcceptedInputState): Effect.Effect<AcceptInputResult> =>
@@ -1101,19 +1098,13 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               sessionId,
               created: threadResult.sessionCreated,
               started,
-              pendingWake: false,
               duplicate: true,
             } as const;
           }
           threadResult.threadEntry.bridgeScope = command;
           const runSlot = threadResult.threadEntry.runSlot;
           if (runSlot !== undefined) {
-            if (runSlot.stopping) {
-              runSlot.pendingWakeAfterStop = true;
-            } else {
-              runSlot.pendingWake = true;
-            }
-            return { ok: true, sessionId, created: threadResult.sessionCreated, started: false, pendingWake: true } as const;
+            return { ok: true, sessionId, created: threadResult.sessionCreated, started: false } as const;
           }
           const started = yield* startThreadRun(
             threadResult.sessionEntry,
@@ -1131,14 +1122,14 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             sessionId,
             created: threadResult.sessionCreated,
             started,
-            pendingWake: false,
             ...(reviewerExecutionToken === undefined ? {} : { reviewerExecutionToken }),
           } as const;
         }),
-          (reason) => ({
+          (reason, retryable) => ({
             ok: false,
             sessionId: command.sessionId,
             reason: reason === "thread_busy" ? "thread_busy" : reason,
+            ...(reason === "context_load_failed" && retryable !== undefined ? { retryable } : {}),
           } as AcceptInputResult),
         );
 
@@ -1164,6 +1155,12 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           const admitted = threadEntry.runtimeThread.state.beginUserInterrupt(command, commitInput);
           if (admitted === "conflict") {
             return { ok: false, sessionId, reason: "control_busy" } as const;
+          }
+          if (admitted === "applied") {
+            threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(
+              command.sequenceTo,
+              command.origin === "user",
+            );
           }
           if (command.eventIds.length !== 1) {
             return { ok: false, sessionId, reason: "context_load_failed" } as const;
@@ -1215,6 +1212,11 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             }
           }
           threadEntry.runtimeThread.state.completeUserInterrupt(command.runtimeInputId);
+          // An idle interrupt has no owner Fiber whose run finalizer can reopen
+          // reducer admission. Release that local fence only after the durable
+          // interrupt receipt has been applied, so a later accepted input can
+          // become the sole follow-up run without racing the control commit.
+          threadEntry.runtimeThread.state.finishThreadRunProjection();
           if ("stale" in committed) {
             return {
               ok: true,
@@ -1296,7 +1298,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 });
                 if (result === "applied") {
                   runSlot.stopping = true;
-                  runSlot.pendingWake = false;
 				  threadEntry.runtimeThread.state.discardQueuedAcceptedInputsBeforeFence(command.sequenceTo, command.origin === "user");
                 }
                 return result;
@@ -1436,14 +1437,12 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 return { ok: false, sessionId, reason: "control_conflict" } as const;
               }
               if (threadResult.threadEntry.runtimeThread.state.hasPendingApprovalToolJobs()) {
+                threadResult.threadEntry.runtimeThread.state.recordThreadToolRoute(
+                  command.toolUseEventId,
+                  "resume_approval_settlement",
+                );
                 const runSlot = threadResult.threadEntry.runSlot;
-                if (runSlot !== undefined) {
-                  if (runSlot.stopping) {
-                    runSlot.pendingWakeAfterStop = true;
-                  } else {
-                    runSlot.pendingWake = true;
-                  }
-                } else {
+                if (runSlot === undefined) {
                   yield* startThreadRun(threadResult.sessionEntry, threadResult.threadEntry).pipe(Effect.asVoid);
                 }
               }
@@ -1478,7 +1477,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
       const commitTaskNotification = (
         sessionId: string,
         command: RuntimeTaskNotificationCommandState,
-        commit: RuntimeTaskNotificationCommit,
       ): Effect.Effect<RuntimeTaskNotificationResult> =>
         submitInstalledThreadCommand<RuntimeTaskNotificationResult>(
           command,
@@ -1487,7 +1485,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             const accepted = threadResult.threadEntry.acceptedInputQueue.enqueueAcceptedInput({
               ...command,
               kind: "task_notification",
-              commit,
             });
             if (accepted === "conflict") {
               return { ok: false, sessionId, reason: "control_conflict" } as const;
@@ -1497,10 +1494,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               const runSlot = threadResult.threadEntry.runSlot;
               if (runSlot === undefined) {
                 yield* startThreadRun(threadResult.sessionEntry, threadResult.threadEntry).pipe(Effect.asVoid);
-              } else if (runSlot.stopping) {
-                runSlot.pendingWakeAfterStop = true;
-              } else {
-                runSlot.pendingWake = true;
               }
             }
             return {
@@ -1727,6 +1720,7 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             sessionId: command.sessionId,
             sessionThreadId: command.sessionThreadId,
             reason: "context_load_failed",
+            retryable: false,
           } as const;
           if (admissionClosed) {
             return { failedResult } as const;
@@ -1777,9 +1771,11 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             threadResult.sessionEntry.sharedStateInitializerThreadId === command.sessionThreadId;
           const start = yield* Deferred.make<void>();
           const resultDeferred = yield* Deferred.make<ThreadLifecycleResult>();
+          const cleanupDeferred = yield* Deferred.make<void>();
           const installation: ThreadInstallation = {
             start,
             result: resultDeferred,
+            cleanup: cleanupDeferred,
             fiber: undefined,
           };
           threadResult.threadEntry.installation = installation;
@@ -1787,7 +1783,10 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             Effect.gen(function* () {
               yield* Deferred.await(start);
               const installExit = yield* restore(Effect.gen(function* () {
-                const context = yield* Effect.promise(() => options.loadThreadContext!(command));
+                const context = yield* Effect.tryPromise({
+                  try: () => options.loadThreadContext!(command),
+                  catch: (error) => error,
+                });
                 if (
                   admissionClosed ||
                   threadResult.sessionEntry.threads.get(command.sessionThreadId) !== threadResult.threadEntry
@@ -1796,7 +1795,16 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 }
                 return yield* preloadThread(context, initializeSharedState, false);
               })).pipe(Effect.exit);
-              const result = Exit.isSuccess(installExit) ? installExit.value : failedResult;
+              const loadFailure = Exit.isFailure(installExit)
+                ? Option.getOrUndefined(Cause.findErrorOption(installExit.cause))
+                : undefined;
+              const parsedLoadFailure = ContextLoaderErrorSchema.safeParse(loadFailure);
+              const result = Exit.isSuccess(installExit)
+                ? installExit.value
+                : {
+                    ...failedResult,
+                    retryable: parsedLoadFailure.success ? parsedLoadFailure.data.retryable : false,
+                  };
               if (!result.ok) {
                 if (
                   initializeSharedState &&
@@ -1805,13 +1813,29 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                   threadResult.sessionEntry.sharedStateStatus = "failed";
                   threadResult.sessionEntry.completeSharedStateReady(false);
                 }
-                if (
-                  threadResult.sessionEntry.threads.get(command.sessionThreadId) === threadResult.threadEntry
-                ) {
-                  yield* removeThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
-                }
               }
               yield* Deferred.succeed(resultDeferred, result);
+              if (
+                !result.ok &&
+                threadResult.sessionEntry.threads.get(command.sessionThreadId) === threadResult.threadEntry
+              ) {
+                // Publish the typed load result before closing the command
+                // channel whose current and joined commands are awaiting it.
+                // Cleanup begins only after those waiters have drained.
+                yield* Effect.gen(function* () {
+                  while (threadResult.threadEntry.commandChannel.busy()) {
+                    yield* Effect.sleep("0 millis");
+                  }
+                  if (
+                    threadResult.sessionEntry.threads.get(command.sessionThreadId) === threadResult.threadEntry
+                  ) {
+                    yield* removeThreadEntry(threadResult.sessionEntry, threadResult.threadEntry);
+                  }
+                }).pipe(
+                  Effect.ensuring(Deferred.succeed(cleanupDeferred, undefined).pipe(Effect.asVoid)),
+                  Effect.forkIn(installationScope),
+                );
+              }
             }),
           ).pipe(
             Effect.ensuring(Effect.sync(() => {
@@ -1852,6 +1876,9 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             yield* Deferred.succeed(prepared.installation.start, undefined);
           }
           const result = yield* Deferred.await(prepared.installation.result);
+          if (!result.ok) {
+            yield* Deferred.await(prepared.installation.cleanup);
+          }
           if (
             result.ok &&
             installOptions.requirePendingApprovalToolJobs === true &&
@@ -1890,8 +1917,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             return reviewerExecutionRejection(command, "thread_busy");
           }
           runSlot.stopping = true;
-          runSlot.pendingWake = false;
-          runSlot.pendingWakeAfterStop = false;
           yield* submitThreadCommand(
             threadEntry,
             Effect.sync(() => threadEntry.runtimeThread.state.beginCooperativeCancel()),
@@ -1925,8 +1950,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
               threadEntry.status = "closed_for_runtime";
               if (runSlot !== undefined) {
                 runSlot.stopping = true;
-                runSlot.pendingWake = false;
-                runSlot.pendingWakeAfterStop = false;
                 threadEntry.runtimeThread.state.beginCooperativeCancel();
               }
             }),
@@ -2155,8 +2178,6 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
                 threadEntry.runtimeThread.state.beginRuntimeShutdown();
                 if (runSlot !== undefined) {
                   runSlot.stopping = true;
-                  runSlot.pendingWake = false;
-                  runSlot.pendingWakeAfterStop = false;
                 }
               }),
               undefined,

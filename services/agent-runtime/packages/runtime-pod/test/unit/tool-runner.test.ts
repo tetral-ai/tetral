@@ -3441,7 +3441,6 @@ class RecordingSubAgentHost implements RuntimeSubAgentRunHost {
       sessionId: input.sessionId,
       created: false,
       started: true,
-      pendingWake: false,
       ...(input.kind === "approval_review"
         ? { reviewerExecutionToken: { reviewId: input.reviewId, reviewerThreadId: input.sessionThreadId, runId: 1 } }
         : {}),

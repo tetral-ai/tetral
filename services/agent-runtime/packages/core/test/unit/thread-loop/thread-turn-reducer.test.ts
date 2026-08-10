@@ -6,6 +6,7 @@ import {
   reduceThreadTurn,
   ThreadTurnContractError,
 } from "../../../src/thread-loop/thread-turn-reducer.js";
+import type { ThreadTurnAction } from "../../../src/thread-loop/thread-turn-reducer.js";
 import type {
   ThreadToolRouteView,
   ThreadTurnCheckpoint,
@@ -22,6 +23,127 @@ describe("Thread-turn reducer", () => {
     expect(deriveThreadTurnDecision({
       pendingInputMessageIds: ["msg_1", "msg_2"],
     }, noRoutes)).toEqual({
+      state: { state: "ready_to_request" },
+      action: { action: "prepare_next_request" },
+    });
+  });
+
+  test("retains accepted input behind active work and selects one exact commit at a safe boundary", () => {
+    const oneOutstandingTool = sealedCheckpoint([{
+      memberKind: "public_tool_use",
+      modelToolCallId: "call_waiting",
+      toolUseEventId: "event_tool_waiting",
+      toolName: "Read",
+    }]);
+    const multipleOutstandingTools = sealedCheckpoint([
+      {
+        memberKind: "public_tool_use",
+        modelToolCallId: "call_waiting_1",
+        toolUseEventId: "event_tool_waiting_1",
+        toolName: "Read",
+      },
+      {
+        memberKind: "public_tool_use",
+        modelToolCallId: "call_waiting_2",
+        toolUseEventId: "event_tool_waiting_2",
+        toolName: "Read",
+      },
+    ]);
+    const cases: readonly {
+      readonly name: string;
+      readonly checkpoint: ThreadTurnCheckpoint;
+      readonly routes: ThreadToolRouteView;
+      readonly expectedAction: ThreadTurnAction["action"];
+    }[] = [
+      {
+        name: "idle",
+        checkpoint: { pendingInputMessageIds: [] },
+        routes: noRoutes,
+        expectedAction: "commit_accepted_input",
+      },
+      {
+        name: "open request",
+        checkpoint: openRequest().checkpoint,
+        routes: noRoutes,
+        expectedAction: "await_request_end",
+      },
+      {
+        name: "one outstanding Tool Result",
+        checkpoint: oneOutstandingTool,
+        routes: {
+          routes: [{ toolUseEventId: "event_tool_waiting", disposition: "hot_execution" }],
+        },
+        expectedAction: "await_tool_results",
+      },
+      {
+        name: "multiple outstanding Tool Results",
+        checkpoint: multipleOutstandingTools,
+        routes: {
+          routes: [
+            { toolUseEventId: "event_tool_waiting_1", disposition: "hot_execution" },
+            { toolUseEventId: "event_tool_waiting_2", disposition: "hot_execution" },
+          ],
+        },
+        expectedAction: "await_tool_results",
+      },
+      {
+        name: "interrupt",
+        checkpoint: { ...sealedCheckpoint([]), interruptEventId: "event_interrupt" },
+        routes: noRoutes,
+        expectedAction: "close_interrupted",
+      },
+      {
+        name: "terminal closeout",
+        checkpoint: {
+          ...sealedCheckpoint([]),
+          terminalCloseout: {
+            failureEventId: "event_failure",
+            closeoutEventId: "event_closeout",
+            disposition: "terminated",
+          },
+        },
+        routes: noRoutes,
+        expectedAction: "await_input",
+      },
+      {
+        name: "sealed safe boundary",
+        checkpoint: sealedCheckpoint([]),
+        routes: noRoutes,
+        expectedAction: "commit_accepted_input",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const decision = deriveThreadTurnDecision(
+        testCase.checkpoint,
+        testCase.routes,
+        ["rin_first", "rin_second"],
+      );
+      expect(decision.action.action, testCase.name).toBe(testCase.expectedAction);
+      if (decision.action.action === "commit_accepted_input") {
+        expect(decision.action.runtimeInputId, testCase.name).toBe("rin_first");
+      }
+    }
+  });
+
+  test("a committed-input receipt advances the same reducer to request preparation", () => {
+    const selected = initializeThreadTurnReduction(
+      { executionRunId: "run_input", pendingInputMessageIds: [] },
+      noRoutes,
+      ["rin_input"],
+    );
+    expect(selected.action).toEqual({
+      action: "commit_accepted_input",
+      runtimeInputId: "rin_input",
+    });
+
+    const applied = reduceThreadTurn(selected, {
+      fact: "inputs_committed",
+      eventId: "event_input_committed",
+      messageIds: ["message_input"],
+    }, noRoutes);
+    expect(applied).toMatchObject({
+      checkpoint: { pendingInputMessageIds: ["message_input"] },
       state: { state: "ready_to_request" },
       action: { action: "prepare_next_request" },
     });

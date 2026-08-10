@@ -40,7 +40,6 @@ const (
 	EnvRuntimePodServiceTokenPath       = "TETRAL_BRIDGE_RUNTIME_POD_TOKEN_PATH" //nolint:gosec // Env-var name, not a token value.
 	defaultJobRunnerLeaseDuration       = 30 * time.Second
 	defaultJobRunnerMaxJobs             = 1
-	defaultRuntimeInboxRepairBatch      = 32
 	defaultJobRunnerPollInterval        = time.Second
 	defaultJobRunnerHTTPAddress         = ":8081"
 	defaultAgentRuntimeGRPCPort         = 9090

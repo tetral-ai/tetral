@@ -880,7 +880,7 @@ function fakeDependencies(records: string[]): RuntimePodCommandDependencies {
     tokenReviewClient: { createTokenReview: async () => ({ authenticated: true, audiences: [], username: "" }) },
     coreHosts: {
       commandRunHost: {
-        handleAcceptInput: async (command) => ({ ok: true, sessionId: command.sessionId, created: false, started: false, pendingWake: false }),
+        handleAcceptInput: async (command) => ({ ok: true, sessionId: command.sessionId, created: false, started: false }),
         handleAgentMail: async (command) => ({ ok: true, sessionId: command.sessionId, applied: true }),
         handleInterruptControl: async (sessionId) => ({ ok: true, sessionId, created: false, interrupted: true, idleInterrupt: false }),
         handleToolConfirmation: async (sessionId) => ({ ok: true, sessionId, created: false, applied: true }),
@@ -888,7 +888,7 @@ function fakeDependencies(records: string[]): RuntimePodCommandDependencies {
         handleRuntimeConfigPatch: async (sessionId) => ({ ok: true, sessionId, created: false, applied: true }),
       },
       subAgentRunHost: {
-        enqueueThreadInput: async (input) => ({ ok: true, sessionId: input.sessionId, created: false, started: false, pendingWake: false }),
+        enqueueThreadInput: async (input) => ({ ok: true, sessionId: input.sessionId, created: false, started: false }),
         preloadThread: async (input) => ({ ok: true, sessionId: input.sessionId, sessionThreadId: input.sessionThreadId, applied: true }),
         interruptReviewerExecution: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true, terminal: true }),
         markThreadClosed: async (command) => ({ ok: true, sessionId: command.sessionId, sessionThreadId: command.sessionThreadId, applied: true }),

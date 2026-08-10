@@ -184,7 +184,7 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 			[]enginekubernetes.BindingCandidate{replacement},
 		)
 	}}
-	plan, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
+	job := RuntimeJob{
 		JobID:           "job_idle_rebind",
 		LeaseToken:      "lease_idle_rebind",
 		Kind:            queue.KindRuntimeInput,
@@ -198,7 +198,9 @@ func TestPostgreSQLRuntimePodLossSweepLeavesIdleBindingForInputRecovery(t *testi
 		InputKind:       "messages",
 		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
 		PayloadJSON:     `{"workspace_id":"default","session_id":"` + candidate.sessionID + `","session_thread_id":"` + candidate.threadID + `","runtime_input_id":"rin_idle_rebind","event_ids":["evt_idle_rebind_input"],"sequence_from":1,"sequence_to":1,"input_kind":"messages"}`,
-	})
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
+	plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 	if err != nil {
 		t.Fatalf("idle input-triggered rebind: %v", err)
 	}
@@ -225,6 +227,53 @@ func TestPostgreSQLRuntimePodLossSweepIncludesReschedulingSession(t *testing.T) 
 	})
 	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
 		t.Fatalf("rescheduling-session sweep = %d/%v; want 1/nil", repaired, err)
+	}
+}
+
+func TestPostgreSQLRuntimePodLossSweepIncludesAcceptedInputBeforeRunningStatus(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	candidate := seedRuntimePodLossSweepSession(t, admin, 23, "idle")
+	const runtimeInputID = "rin_pod_loss_pre_running_accept"
+	seedBridgeAPIRuntimeInbox(
+		t,
+		admin,
+		"default",
+		candidate.sessionID,
+		candidate.threadID,
+		runtimeInputID,
+		"messages",
+		`["evt_pod_loss_pre_running_accept"]`,
+		"accepted",
+		candidate.binding.BindingID,
+		candidate.binding.PodUID,
+		1,
+		1,
+	)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE session_runtime_inbox
+		SET binding_generation = $2
+		WHERE workspace_id = 'default' AND runtime_input_id = $1`, runtimeInputID, candidate.binding.BindingGeneration); err != nil {
+		t.Fatalf("align accepted input binding generation: %v", err)
+	}
+	store := runtimePodLossSweepStore(runtime, nil, func() enginekubernetes.BindingVisibilitySnapshot {
+		return enginekubernetes.NewBindingVisibilitySnapshotForTest(true, nil)
+	})
+	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 1 {
+		t.Fatalf("pre-running accepted-input sweep = %d/%v; want 1/nil", repaired, err)
+	}
+	var inboxStatus, queueStatus string
+	if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status, job.status
+		FROM session_runtime_inbox inbox
+		JOIN queue_jobs job
+		  ON job.workspace_id = inbox.workspace_id
+		 AND job.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+		WHERE inbox.workspace_id = 'default' AND inbox.runtime_input_id = $1`, runtimeInputID).Scan(&inboxStatus, &queueStatus); err != nil {
+		t.Fatalf("read pre-running accepted-input handoff: %v", err)
+	}
+	if inboxStatus != "queued" || queueStatus != queue.StatusPending {
+		t.Fatalf("pre-running accepted-input handoff = inbox %q / Queue %q; want queued / pending", inboxStatus, queueStatus)
+	}
+	if repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default"); err != nil || repaired != 0 {
+		t.Fatalf("repeated pre-running accepted-input sweep = %d/%v; want 0/nil", repaired, err)
 	}
 }
 
@@ -494,26 +543,28 @@ func TestPostgreSQLRuntimePodLossSweepRacingInputWritesOneCloseout(t *testing.T)
 	}
 	sweepResults := make(chan sweepResult, 1)
 	inputResults := make(chan inputResult, 1)
+	job := RuntimeJob{
+		JobID:           "job_pod_loss_racing_input",
+		LeaseToken:      "lease_pod_loss_racing_input",
+		Kind:            queue.KindRuntimeInput,
+		WorkspaceID:     "default",
+		SessionID:       fixture.sessionID,
+		SessionThreadID: fixture.parentThreadID,
+		RuntimeInputID:  "rin_pod_loss_racing_input",
+		EventIDs:        []string{inputEventID},
+		SequenceFrom:    3,
+		SequenceTo:      3,
+		InputKind:       "messages",
+		CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
+		PayloadJSON:     `{"workspace_id":"default"}`,
+	}
+	seedRuntimeInboxBirthForJob(t, admin, job)
 	go func() {
 		repaired, err := store.RepairLostRuntimeBindings(context.Background(), "default")
 		sweepResults <- sweepResult{repaired: repaired, err: err}
 	}()
 	go func() {
-		plan, err := store.PrepareRuntimeCommand(context.Background(), RuntimeJob{
-			JobID:           "job_pod_loss_racing_input",
-			LeaseToken:      "lease_pod_loss_racing_input",
-			Kind:            queue.KindRuntimeInput,
-			WorkspaceID:     "default",
-			SessionID:       fixture.sessionID,
-			SessionThreadID: fixture.parentThreadID,
-			RuntimeInputID:  "rin_pod_loss_racing_input",
-			EventIDs:        []string{inputEventID},
-			SequenceFrom:    3,
-			SequenceTo:      3,
-			InputKind:       "messages",
-			CommandKind:     agentruntimev1.RuntimeCommandKind_RUNTIME_COMMAND_KIND_MESSAGES,
-			PayloadJSON:     `{"workspace_id":"default"}`,
-		})
+		plan, err := store.PrepareRuntimeCommand(context.Background(), job)
 		inputResults <- inputResult{plan: plan, err: err}
 	}()
 	sweep := <-sweepResults

@@ -86,7 +86,7 @@ export function acceptedInputDeclarationKind(input: RuntimeAcceptedInputState): 
 /** Converts one accepted command's semantic messages into ordered creates. */
 export function acceptedInputCreates(input: RuntimeAcceptedInputState): readonly RuntimeMessageCreate[] {
   if (input.kind === "task_notification") {
-    throw new Error("task notification uses its dedicated declaration boundary");
+    return [taskNotificationCreate({ payloadJson: input.payloadJson })];
   }
   if (input.kind === "rejection") {
     if (input.eventIds.length === 0) {
@@ -126,7 +126,16 @@ export function applyAcceptedInputReceipt(
   receipt: RuntimeDeclarationReceipt,
 ): readonly DurableRuntimeMessage[] {
   if (input.kind === "task_notification") {
-    throw new Error("task notification uses its dedicated declaration receipt");
+    const create = creates[0];
+    if (creates.length !== 1 || create === undefined) {
+      throw new Error("task notification declaration must contain one message create");
+    }
+    return [applyTaskNotificationReceipt({
+      sessionId: input.sessionId,
+      sessionThreadId: input.sessionThreadId,
+      operationId: taskNotificationOperationId(input.runtimeInputId, input.taskId),
+      create,
+    }, receipt)];
   }
   assertOrdinaryDeclarationReceipt(receipt);
   assertReceiptIdentity(receipt, {

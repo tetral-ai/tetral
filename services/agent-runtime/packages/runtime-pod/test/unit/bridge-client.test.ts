@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Metadata } from "@grpc/grpc-js";
+import { Metadata, status } from "@grpc/grpc-js";
 import type { CallOptions } from "@grpc/grpc-js";
 import {
   BridgeWriteStatus,
@@ -12,6 +12,7 @@ import type {
   CommitInputsRequest,
   CommitInternalToolRepairRequest,
   CommitRuntimeTerminationRequest,
+  CommitTaskNotificationResultRequest,
   FinishIdleRequest,
   LoadContextRequest,
   RuntimeMessageCreate,
@@ -26,6 +27,7 @@ import type {
 import {
   acceptedInputCreates,
   runtimeInternalToolRepairCreate,
+  taskNotificationOperationId,
 } from "@tetral/agent-runtime-core/src/runtime/runtime-declaration.js";
 import type {
   RuntimeInternalToolRepairCommit,
@@ -45,6 +47,7 @@ import {
   finishIdleDeclarationDigest,
   internalToolRepairDeclarationDigest,
   runtimeTerminationDeclarationDigest,
+  taskNotificationDeclarationDigest,
   writeEventDeclarationDigest,
   writeRequestEndDeclarationDigest,
 } from "../../src/runtime-declaration-wire.js";
@@ -80,10 +83,47 @@ describe("Bridge runtime declaration adapters", () => {
     const result = await loader.commitAcceptedInput(input, { messageCreates: creates });
 
     expect(result).toMatchObject({ type: "receipt", inputDisposition: "committed", applicationDisposition: "current_custody" });
+    if (result.type !== "receipt") {
+      throw new Error("expected accepted-input receipt");
+    }
     expect(result.receipt.operationId).toBe(input.runtimeInputId);
     expect(result.receipt.messages).toHaveLength(1);
     expect(bridge.commitInputsRequests[0]?.messageCreates).toHaveLength(1);
     expect(bridge.commitInputsRequests[0]?.messageCreates[0]).not.toHaveProperty("runtimeLocalId");
+  });
+
+  test("retries live task-notification lease contention and converges after custody settles", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationErrors.push(status.ABORTED);
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_live_lease");
+    const messageCreates = acceptedInputCreates(input);
+
+    await expect(loader.commitAcceptedInput(input, { messageCreates })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "unavailable",
+      retryable: true,
+      fatal: false,
+    });
+    const result = await loader.commitAcceptedInput(input, { messageCreates });
+
+    expect(result).toMatchObject({ type: "receipt", inputDisposition: "committed" });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(2);
+  });
+
+  test("treats missing task-notification Queue custody as terminal without retry", async () => {
+    const bridge = new DeclarationBridge();
+    bridge.taskNotificationErrors.push(status.FAILED_PRECONDITION);
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input = taskNotificationInput("rin_task_missing_custody");
+
+    await expect(loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) })).rejects.toMatchObject({
+      type: "context-loader",
+      code: "schema_mismatch",
+      retryable: false,
+      fatal: true,
+    });
+    expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
   });
 
   test("commits interrupt intent without a client-owned Tool census", async () => {
@@ -315,6 +355,17 @@ function acceptedInput(runtimeInputId: string): RuntimeAcceptedInputState {
   };
 }
 
+function taskNotificationInput(runtimeInputId: string): Extract<RuntimeAcceptedInputState, { readonly kind: "task_notification" }> {
+  return {
+    ...control(runtimeInputId),
+    kind: "task_notification",
+    taskId: `task_${runtimeInputId}`,
+    sourceToolUseEventId: `sevt_tool_${runtimeInputId}`,
+    status: "completed",
+    payloadJson: JSON.stringify({ status: "completed", text: "background task completed" }),
+  };
+}
+
 function eventScope(writeId: string) {
   return {
     requestId: `req_${writeId}`,
@@ -335,7 +386,9 @@ class DeclarationBridge {
   readonly writeRequestEndRequests: WriteRequestEndRequest[] = [];
   readonly finishIdleRequests: FinishIdleRequest[] = [];
   readonly terminationRequests: CommitRuntimeTerminationRequest[] = [];
+  readonly commitTaskNotificationRequests: CommitTaskNotificationResultRequest[] = [];
   readonly repairRequests: CommitInternalToolRepairRequest[] = [];
+  readonly taskNotificationErrors: number[] = [];
   repairOperationId = "repair";
   private eventSequence = 0;
   private messageSequence = 0;
@@ -348,6 +401,7 @@ class DeclarationBridge {
       writeRequestEnd: this.writeRequestEnd.bind(this),
       finishIdle: this.finishIdle.bind(this),
       commitRuntimeTermination: this.commitRuntimeTermination.bind(this),
+      commitTaskNotificationResult: this.commitTaskNotificationResult.bind(this),
       commitInternalToolRepair: this.commitInternalToolRepair.bind(this),
     } as unknown as AgentRuntimeBridgeServiceClient;
   }
@@ -383,6 +437,31 @@ class DeclarationBridge {
       digest: commitInputsDeclarationDigest(request),
       events,
       messages: request.messageCreates.map((create, index) => this.message(request, create, events[index]!.eventId)),
+    })]));
+    return grpcCall();
+  }
+
+  private commitTaskNotificationResult(
+    request: CommitTaskNotificationResultRequest,
+    _metadata: Metadata,
+    callback: (error: Error | null, response: unknown) => void,
+  ): unknown {
+    this.commitTaskNotificationRequests.push(request);
+    const errorCode = this.taskNotificationErrors.shift();
+    if (errorCode !== undefined) {
+      callback(Object.assign(new Error("task notification commit rejected"), { code: errorCode }), {});
+      return grpcCall();
+    }
+    const event = this.event(request, `sevt_${request.runtimeInputId}`);
+    const operationId = taskNotificationOperationId(request.runtimeInputId, request.taskId);
+    callback(null, response(request, request.runtimeInputId, [receipt({
+      request,
+      operationKind: "commit_task_notification_result",
+      sourceKind: "task_notification",
+      operationId,
+      digest: taskNotificationDeclarationDigest(request),
+      events: [event],
+      messages: request.messageCreate === undefined ? [] : [this.message(request, request.messageCreate, event.eventId)],
     })]));
     return grpcCall();
   }

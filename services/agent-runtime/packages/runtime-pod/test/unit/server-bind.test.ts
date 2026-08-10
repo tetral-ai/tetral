@@ -102,7 +102,7 @@ function fakeRuntimeControlService(): RuntimeControlService {
       authenticate: async () => ({ ok: true, serviceAccount: { namespace: "engine", name: "bridge" } }),
     },
     runHost: {
-      handleAcceptInput: async (command) => ({ ok: true, sessionId: command.sessionId, created: false, started: false, pendingWake: false }),
+      handleAcceptInput: async (command) => ({ ok: true, sessionId: command.sessionId, created: false, started: false }),
       handleAgentMail: async (command) => ({ ok: true, sessionId: command.sessionId, applied: true }),
       handleInterruptControl: async (sessionId) => ({ ok: true, sessionId, created: false, interrupted: true, idleInterrupt: false }),
       handleToolConfirmation: async (sessionId) => ({ ok: true, sessionId, created: false, applied: true }),

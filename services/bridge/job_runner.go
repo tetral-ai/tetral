@@ -76,14 +76,6 @@ type RuntimeDeliveryFinalizationReplayer interface {
 	ReplayRuntimeDeliveryFinalization(context.Context, RuntimeJob) (RuntimeDeliveryResult, bool, error)
 }
 
-type RuntimeInboxRepairer interface {
-	RepairRuntimeInbox(context.Context, string, int) (int, error)
-}
-
-type CompletionMailRepairer interface {
-	RepairCompletionMail(context.Context, string, int) (int, error)
-}
-
 type RuntimePodLossRepairer interface {
 	RepairLostRuntimeBindings(context.Context, string) (int, error)
 }
@@ -200,26 +192,6 @@ func (r *JobRunner) runWorkspaceOnce(ctx context.Context, workspaceID string, cf
 		hadWork = repaired > 0
 		if err != nil {
 			phaseErrs = append(phaseErrs, fmt.Errorf("runtime pod-loss repair: %w", err))
-		}
-		if ctx.Err() != nil {
-			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
-		}
-	}
-	if repairer, ok := r.Deliverer.(RuntimeInboxRepairer); ok {
-		repaired, err := repairer.RepairRuntimeInbox(ctx, workspaceID, defaultRuntimeInboxRepairBatch)
-		hadWork = hadWork || repaired > 0
-		if err != nil {
-			phaseErrs = append(phaseErrs, fmt.Errorf("runtime inbox repair: %w", err))
-		}
-		if ctx.Err() != nil {
-			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)
-		}
-	}
-	if repairer, ok := r.Deliverer.(CompletionMailRepairer); ok {
-		repaired, err := repairer.RepairCompletionMail(ctx, workspaceID, defaultRuntimeInboxRepairBatch)
-		hadWork = hadWork || repaired > 0
-		if err != nil {
-			phaseErrs = append(phaseErrs, fmt.Errorf("completion-mail repair: %w", err))
 		}
 		if ctx.Err() != nil {
 			return hadWork, errors.Join(append(phaseErrs, ctx.Err())...)

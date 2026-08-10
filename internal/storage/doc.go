@@ -68,7 +68,7 @@
 //	                                                                                                                         Runtime pending ToolJob
 //	session_runtime_status                                 Bridge, the cleanup scheduler, and session-create seeding        cleanup scheduler, Bridge Job Runner, repair
 //	session_runtime_bindings                               Bridge only                                                      Bridge command delivery/reconcile, repair
-//	session_runtime_inbox (runtime delivery commits)       Bridge delivery; Sandbox task notifications                    Bridge repair, Runtime cold-load guard
+//	session_runtime_inbox (runtime delivery commits)       Bridge delivery; Sandbox task notifications                    Bridge lifecycle and exact pod-loss custody
 //	session_sandbox_bindings                               Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service tool/lifecycle workers
 //	                                                        Session-delete release boundary
 //	sandbox_lifecycle_operations                           Sandbox Service; api/Bridge through the provider-neutral         Sandbox Service lifecycle workers

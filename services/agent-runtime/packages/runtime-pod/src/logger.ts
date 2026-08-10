@@ -11,6 +11,7 @@ import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/sessio
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeProviderToolDeclarationRejectionObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type { RuntimeProviderRescheduleObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
+import type { RuntimeAcceptedInputCommitObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type { RuntimeReceiptEvidenceOutcome } from "./metrics.js";
 
 /** Structured JSON logger accepted by Runtime Pod composition and runtime services. */
@@ -24,6 +25,7 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "grpc.code"?: string;
   readonly "caller.service_account"?: string;
   readonly "runtime_input.id"?: string;
+  readonly "runtime_input.kind"?: string;
   readonly "closeout.active_count"?: number;
   readonly "closeout.error_code"?: RuntimeCloseoutEvent["errorCode"];
   readonly "startup.cause_class"?: string;
@@ -194,6 +196,28 @@ export function providerRescheduleSelectedLogRecord(
     "delay.source": event.delaySource,
     "provider.failure.code": event.failureCode,
     retryable: true,
+  };
+}
+
+/** Builds the payload-free record for one reducer-owned accepted-input commit observation. */
+export function acceptedInputCommitLogRecord(
+  event: RuntimeAcceptedInputCommitObservation,
+): RuntimePodLogRecord {
+  return {
+    event: "runtime_accepted_input_commit",
+    "event.kind": "runtime_accepted_input_commit",
+    operation: "commit_accepted_input",
+    component: "agent-runtime",
+    message: "accepted input commit observed",
+    "workspace.id": event.workspaceId,
+    "session.id": event.sessionId,
+    "thread.id": event.sessionThreadId,
+    "request.id": event.requestId,
+    "runtime_input.id": event.runtimeInputId,
+    "runtime_input.kind": event.inputKind,
+    "retry.attempt": event.attempt,
+    "duration.ms": event.durationMs,
+    outcome: event.outcome,
   };
 }
 

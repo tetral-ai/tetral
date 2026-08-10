@@ -184,6 +184,7 @@ interface TestContextLoader extends ContextLoader {
 class RecordingContextLoader implements TestContextLoader {
     readonly buildCalls: string[] = [];
     readonly pendingCalls: string[] = [];
+    readonly commitCalls: RuntimeAcceptedInputState[] = [];
     private nextMessageSequence = 1;
     constructor(private readonly history: readonly RuntimeMessage[], private readonly pending: PendingInputResult) { }
     async buildContext(sessionId: string): Promise<readonly RuntimeMessage[]> {
@@ -195,6 +196,7 @@ class RecordingContextLoader implements TestContextLoader {
         return this.pending;
     }
     async commitAcceptedInput(input: RuntimeAcceptedInputState): Promise<AcceptedInputCommitResult> {
+        this.commitCalls.push(input);
         const result = acceptedInputReceipt(input, "committed", this.nextMessageSequence);
         this.nextMessageSequence += result.receipt.messages.length;
         return result;
@@ -1047,6 +1049,7 @@ async function activeCompactionRun(session: ThreadRuntime = new ThreadRuntime("s
     await streamStarted.promise;
     return {
         session,
+        loader,
         providerRelease,
         requestEndStarted,
         requestEndAck,
@@ -1117,6 +1120,7 @@ function runtimeThreadLoopLayer(loader: TestContextLoader, options: {
     readonly metrics?: RuntimeMetricsSink;
     readonly recordProviderReschedule?: Parameters<typeof ThreadLoop.layer>[0]["recordProviderReschedule"];
     readonly recordProviderToolDeclarationRejection?: Parameters<typeof ThreadLoop.layer>[0]["recordProviderToolDeclarationRejection"];
+    readonly recordAcceptedInputCommit?: Parameters<typeof ThreadLoop.layer>[0]["recordAcceptedInputCommit"];
     readonly refreshRuntimeBindingToken?: Parameters<typeof ThreadLoop.layer>[0]["refreshRuntimeBindingToken"];
     readonly installLoaderState?: boolean;
 } = {}): Layer.Layer<ThreadLoop.Service> {
@@ -1167,6 +1171,9 @@ function runtimeThreadLoopLayer(loader: TestContextLoader, options: {
         ...(options.recordProviderReschedule !== undefined ? { recordProviderReschedule: options.recordProviderReschedule } : {}),
         ...(options.recordProviderToolDeclarationRejection !== undefined
             ? { recordProviderToolDeclarationRejection: options.recordProviderToolDeclarationRejection }
+            : {}),
+        ...(options.recordAcceptedInputCommit !== undefined
+            ? { recordAcceptedInputCommit: options.recordAcceptedInputCommit }
             : {}),
         ...(options.refreshRuntimeBindingToken !== undefined ? { refreshRuntimeBindingToken: options.refreshRuntimeBindingToken } : {}),
     }).pipe(Layer.provide(ThreadLoop.contextLoaderLayer(loader)));

@@ -116,6 +116,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 				return err
 			}
 			if closing || threadStatus == "closed_for_runtime" {
+				if err := deferTaskNotificationResultTx(ctx, tx, request.GetScope(), request.GetRuntimeInputId(), inboxStatus, now); err != nil {
+					return err
+				}
 				ack = rejectedAck("task_notification_deferred")
 				return nil
 			}
@@ -241,6 +244,64 @@ func (s *PostgreSQLBridgeAPIStore) CommitTaskNotificationResult(ctx context.Cont
 			ApplicationDisposition:    observation.Disposition,
 		},
 	}, nil
+}
+
+// deferTaskNotificationResultTx makes the deferred receipt a proof of durable
+// parked custody. A pending Queue owner is cancelled in the same Session
+// transaction; an independently leased owner must settle its own token through
+// the delivery path before this declaration can report deferral.
+func deferTaskNotificationResultTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	scope *bridgev1.RuntimeScope,
+	runtimeInputID string,
+	inboxStatus string,
+	now time.Time,
+) error {
+	var jobID, kind, partitionKey, dedupeKey, queueStatus string
+	err := tx.QueryRow(ctx, `SELECT id,kind,partition_key,dedupe_key,status
+		FROM queue_jobs
+		WHERE workspace_id=$1
+		  AND dedupe_key='runtime_input:' || $1 || ':' || $2 || ':' || $3
+		  AND status IN ('pending','leased')
+		FOR UPDATE`, scope.GetWorkspaceId(), scope.GetSessionId(), runtimeInputID).Scan(
+		&jobID, &kind, &partitionKey, &dedupeKey, &queueStatus,
+	)
+	if err != nil && !dbconnect.IsNoRows(err) {
+		return err
+	}
+	if queueStatus == queue.StatusLeased {
+		return status.Error(codes.Aborted, "task notification Queue lease remains active")
+	}
+	if queueStatus == queue.StatusPending {
+		cancelled, err := queue.CancelTx(ctx, tx, queue.TargetedCancelRequest{
+			WorkspaceID: workspace.ID(scope.GetWorkspaceId()),
+			JobID:       jobID, Kind: kind, PartitionKey: partitionKey, DedupeKey: dedupeKey, Now: now,
+		})
+		if err != nil {
+			return err
+		}
+		if !cancelled {
+			return status.Error(codes.Aborted, "task notification Queue authority changed during deferral")
+		}
+	} else if inboxStatus == "queued" {
+		return status.Error(codes.FailedPrecondition, "queued task notification has no active Queue custody")
+	}
+	binding := runtimeBindingForDelivery{
+		BindingID:         scope.GetBinding().GetBindingId(),
+		BindingGeneration: scope.GetBinding().GetBindingGeneration(),
+		PodUID:            scope.GetBinding().GetTargetPodUid(),
+	}
+	parked, err := parkTaskNotificationInboxTx(
+		ctx, tx, scope.GetWorkspaceId(), scope.GetSessionId(), scope.GetSessionThreadId(), runtimeInputID, binding, now,
+	)
+	if err != nil {
+		return err
+	}
+	if !parked {
+		return status.Error(codes.Aborted, "task notification Inbox authority changed during deferral")
+	}
+	return nil
 }
 
 func (s *PostgreSQLBridgeAPIStore) ReadCommandResult(ctx context.Context, request *bridgev1.ReadCommandResultRequest) (*bridgev1.ReadCommandResultResponse, error) {

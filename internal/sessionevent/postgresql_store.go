@@ -46,8 +46,9 @@ func NewPostgreSQLStore(client *dbconnect.Client, options ...PostgreSQLStoreOpti
 
 // AppendClientEvents serializes public event admission on the session row and
 // the runtime-status row. It numbers new events from MAX(sequence), stores
-// them as unprocessed public input, and admits matching runtime_input queue
-// jobs in the same PostgreSQL transaction.
+// them as unprocessed public input, and creates the matching Runtime Inbox and
+// Queue custody in the same PostgreSQL transaction. Delivery may bind that
+// custody to a Runtime Pod, but it never reconstructs an input from the event.
 //
 // The append path never scans, locks, or JSON-decodes stored session_events
 // rows; the only session_events read is the bounded MAX(sequence) aggregate.
@@ -289,6 +290,20 @@ func (s *PostgreSQLSessionEventStore) enqueueRuntimeInputJobs(ctx context.Contex
 			}
 			payloadJSON, err := json.Marshal(payload)
 			if err != nil {
+				return err
+			}
+			eventIDsJSON, err := json.Marshal(eventIDs)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_inbox (
+				workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,
+				event_ids_json,sequence_from,sequence_to,status,created_at,updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9,$9)`,
+				string(workspaceID), sessionID, chunk[0].ThreadID, runtimeInputID,
+				segment.inputKind, string(eventIDsJSON), chunk[0].Sequence,
+				chunk[len(chunk)-1].Sequence, now,
+			); err != nil {
 				return err
 			}
 			if s.beforeQueueJobInsert != nil {

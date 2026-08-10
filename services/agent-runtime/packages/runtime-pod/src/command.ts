@@ -23,7 +23,7 @@ import type { RuntimeThreadRoleState } from "@tetral/agent-runtime-core/src/thre
 import { createLLMService } from "@tetral/agent-runtime-core/src/llm/llm-service.js";
 import { buildOutboundBearerMetadata, KubernetesTokenReviewClient, validateKubernetesTokenReviewReviewerMaterial } from "./auth.js";
 import type { RuntimeTokenReviewClient, ServiceAccountTokenConfig } from "./auth.js";
-import { BridgeAPIApprovalReviewerThreadCreator, BridgeAPIContextLoader, BridgeAPIControlInputCommitter, BridgeAPIEventWriter, BridgeAPIInternalToolRepairCommitter, BridgeAPITaskNotificationCommitter } from "./bridge-client.js";
+import { BridgeAPIApprovalReviewerThreadCreator, BridgeAPIContextLoader, BridgeAPIControlInputCommitter, BridgeAPIEventWriter, BridgeAPIInternalToolRepairCommitter } from "./bridge-client.js";
 import { buildRuntimeCoreHosts } from "./core-hosts.js";
 import type { RuntimeCoreHosts } from "./core-hosts.js";
 import { createRuntimeApprovalReviewer, loadApprovalReviewerAssets } from "./approval-reviewer.js";
@@ -33,9 +33,9 @@ import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
 import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
 import { createRuntimePodApp } from "./app.js";
 import type { RuntimePodApp } from "./app.js";
-import { createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
+import { acceptedInputCommitLogRecord, createJsonLogger, logWorkloadStarted, providerRescheduleSelectedLogRecord, providerToolDeclarationRejectedLogRecord, runtimeCloseoutLogRecord, startupFailureLogRecord } from "./logger.js";
 import type { RuntimePodLogger } from "./logger.js";
-import type { RuntimeControlInputCommitter, RuntimeTaskNotificationCommitter } from "./runtime-service.js";
+import type { RuntimeControlInputCommitter } from "./runtime-service.js";
 import { RuntimePodToolRunner } from "./tool-runner.js";
 import { RuntimePodMetricsRegistry } from "./metrics.js";
 import type { RuntimePodMetricsSource } from "./metrics.js";
@@ -74,10 +74,6 @@ export interface RuntimePodDependencyBuilderOptions {
     readonly config: RuntimePodConfig;
     readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
   }) => RuntimeControlInputCommitter;
-  readonly taskNotificationCommitterFactory?: (input: {
-    readonly config: RuntimePodConfig;
-    readonly metadataFactory: (config: ServiceAccountTokenConfig) => Promise<Metadata>;
-  }) => RuntimeTaskNotificationCommitter;
 }
 
 function providerStreamTimeoutOptions(config: Pick<RuntimePodConfig, "providerStreamTimeoutMs">): {
@@ -240,6 +236,9 @@ export async function buildRuntimePodCommandDependencies(input: {
       recordProviderToolDeclarationRejection: (event) => {
         input.logger.error(providerToolDeclarationRejectedLogRecord(event));
       },
+      recordAcceptedInputCommit: (event) => {
+        input.logger.info(acceptedInputCommitLogRecord(event));
+      },
       providerCallRuntime: {
         ...DefaultProviderCallRuntimeConfig,
         ...streamTimeoutOptions.providerCallRuntime,
@@ -281,15 +280,6 @@ export async function buildRuntimePodCommandDependencies(input: {
       reviewerTokenPath: input.config.tokenReviewReviewerTokenPath,
       apiServerCaCertPath: input.config.kubernetesApiCaCertPath,
     });
-  const taskNotificationCommitter =
-    input.builderOptions?.taskNotificationCommitterFactory?.({ config: input.config, metadataFactory: outboundMetadataFactory }) ??
-    new BridgeAPITaskNotificationCommitter({
-      address: input.config.bridgeApiGrpcAddress,
-      tokenPath: input.config.outboundInternalGrpcTokenPath,
-      metadataFactory: outboundMetadataFactory,
-      logger: input.logger,
-      metrics,
-    });
   const controlInputCommitter =
     input.builderOptions?.controlInputCommitterFactory?.({ config: input.config, metadataFactory: outboundMetadataFactory }) ??
     new BridgeAPIControlInputCommitter({
@@ -303,7 +293,6 @@ export async function buildRuntimePodCommandDependencies(input: {
     tokenReviewClient,
     commandRunHost: coreHosts.commandRunHost,
     controlInputCommitter,
-    taskNotificationCommitter,
     cleanupRunHost: coreHosts.cleanupRunHost,
     shutdownActiveRuns: coreHosts.shutdownActiveRuns,
     metrics,

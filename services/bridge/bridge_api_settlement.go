@@ -380,6 +380,8 @@ func (s *PostgreSQLBridgeAPIStore) WriteRequestEnd(ctx context.Context, request 
 			ctx,
 			tx,
 			request,
+			usage,
+			providerUsageJSON,
 			threadScope,
 			eventID,
 			sequence,
@@ -911,16 +913,6 @@ func (s *PostgreSQLBridgeAPIStore) FinishIdle(ctx context.Context, request *brid
 			receipt.Events = append(receipt.Events, mailEvent)
 			receipt.Messages = append(receipt.Messages, mailMessage)
 		}
-		if _, err := rearmPendingCompletionMailForThreadTx(
-			ctx,
-			tx,
-			request.GetScope().GetWorkspaceId(),
-			request.GetScope().GetSessionId(),
-			request.GetScope().GetSessionThreadId(),
-			now,
-		); err != nil {
-			return err
-		}
 		receiptJSON, err := marshalDeclarationReceipt(receipt)
 		if err != nil {
 			return err
@@ -1022,8 +1014,9 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	}
 	now := s.now()
 	var (
-		ack     *bridgev1.BridgeWriteAck
-		receipt *bridgev1.DeclarationReceipt
+		ack                *bridgev1.BridgeWriteAck
+		receipt            *bridgev1.DeclarationReceipt
+		custodyTransitions runtimeTerminationCustodyTransitions
 	)
 	if err := s.withScopeTx(ctx, request.GetScope(), "agentruntimebridge.commit_runtime_termination", func(tx *dbconnect.Tx) error {
 		if err := lockRuntimeMutationSessionTx(
@@ -1102,6 +1095,16 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 				return err
 			}
 		}
+		custodyTransitions, err = cancelRuntimeTerminationInputsTx(
+			ctx,
+			tx,
+			request.GetScope(),
+			threadScope.role == "main",
+			now,
+		)
+		if err != nil {
+			return err
+		}
 		// Runtime termination removes every current-thread and, for the main
 		// thread, sibling Sandbox blocker before release readiness is evaluated
 		// once for the Session. Queue custody is assigned in this transaction.
@@ -1150,6 +1153,8 @@ func (s *PostgreSQLBridgeAPIStore) CommitRuntimeTermination(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "accepted_to_cancelled", custodyTransitions.accepted)
+	logRuntimeInputCustodyTransition(s.Logger, request.GetScope(), "parked_to_cancelled", custodyTransitions.parked)
 	logRuntimeDeclaration(
 		s.Logger,
 		request.GetScope(),

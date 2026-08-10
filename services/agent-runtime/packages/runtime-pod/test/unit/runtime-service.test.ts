@@ -19,12 +19,10 @@ import type {
   RuntimeCommandScope,
   RuntimeCommandRunner,
   RuntimeSessionRunHost,
-  RuntimeTaskNotificationCommitter,
 } from "../../src/runtime-service.js";
 import type { RuntimePodLogRecord } from "../../src/logger.js";
 import {
   buildRuntimeServiceBridgeRuntimeMessage as bridgeRuntimeMessage,
-  buildRuntimeServiceDurableBridgeRuntimeMessage as durableBridgeRuntimeMessage,
 } from "../../../core/test/unit/runtime-message-builders.js";
 import { RuntimeMessageCreateSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
@@ -129,7 +127,7 @@ describe("RuntimeControlService command envelope", () => {
   test("returns a retryable in-band rejection when agent-mail context loading is transiently unavailable", async () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
-        agentMailResult: { ok: false, sessionId: "sesn_1", reason: "context_load_failed" },
+        agentMailResult: { ok: false, sessionId: "sesn_1", reason: "context_load_failed", retryable: true },
       }),
     });
     const request = validCommand({
@@ -152,8 +150,8 @@ describe("RuntimeControlService command envelope", () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
         acceptInputResults: [
-          { ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false },
-          { ok: true, sessionId: "sesn_1", created: false, started: false, pendingWake: false, duplicate: true },
+          { ok: true, sessionId: "sesn_1", created: true, started: true },
+          { ok: true, sessionId: "sesn_1", created: false, started: false, duplicate: true },
         ],
       }),
     });
@@ -269,7 +267,7 @@ describe("RuntimeControlService command envelope", () => {
     const fixture = runtimeFixture({
       runHost: new RecordingRunHost({
         acceptInputResults: [
-          { ok: true, sessionId: "sesn_1", created: true, started: true, pendingWake: false },
+          { ok: true, sessionId: "sesn_1", created: true, started: true },
           { ok: false, sessionId: "sesn_1", reason: "control_conflict" },
         ],
       }),
@@ -461,10 +459,6 @@ describe("RuntimeControlService command envelope", () => {
       );
       expect(response).toEqual(acceptedResponse({ runtimeInputId: command.runtimeInputId }));
     }
-    for (const commit of fixture.runHost.taskNotificationCommits) {
-      await commit();
-    }
-
     expect(fixture.runHost.sessionIds).toEqual([]);
     expect(fixture.runHost.interrupts).toEqual([
       { sessionId: "sesn_1", command: { ...commandScope({ runtimeInputId: "rin_interrupt" }), origin: "user" } },
@@ -510,47 +504,6 @@ describe("RuntimeControlService command envelope", () => {
         },
       },
     ]);
-    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => {
-      const { messageCreate: _messageCreate, ...fields } = command;
-      return fields;
-    })).toEqual([
-      {
-        runtimeInputId: "rin_task",
-        taskId: "task_1",
-        sourceToolUseEventId: "sevt_tool_1",
-        status: "completed",
-        payloadJson: canonicalTaskNotificationPayloadJson({
-          taskId: "task_1",
-          sourceToolUseEventId: "sevt_tool_1",
-          status: "completed",
-        }),
-      },
-      {
-        runtimeInputId: "rin_task_expired",
-        taskId: "task_expired",
-        sourceToolUseEventId: "sevt_tool_expired",
-        status: "expired",
-        payloadJson: canonicalTaskNotificationPayloadJson({
-          taskId: "task_expired",
-          sourceToolUseEventId: "sevt_tool_expired",
-          status: "expired",
-        }),
-      },
-    ]);
-    expect(fixture.taskNotificationCommitter.commits.map(({ command }) => command.messageCreate)).toEqual(
-      fixture.taskNotificationCommitter.commits.map(({ command }) => expect.objectContaining({
-        messageKind: "task_notification",
-        role: "user",
-        origin: "runtime",
-        status: "completed",
-        parts: [expect.objectContaining({
-          type: "text",
-          text: command.payloadJson,
-          truncated: false,
-          status: "completed",
-        })],
-      })),
-    );
     expect(fixture.controlInputCommitter.commits.map(({ scope, inputKind }) => ({ scope, inputKind }))).toEqual([
       {
         scope: commandScope({ runtimeInputId: "rin_interrupt" }),
@@ -787,14 +740,7 @@ describe("RuntimeControlService command envelope", () => {
   });
 
   test("task-notification transport acceptance does not perform the semantic commit", async () => {
-    const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({
-        ok: false,
-        retryable: true,
-        errorCode: "bridge_commit_unavailable",
-        message: "bridge unavailable",
-      }),
-    });
+    const fixture = runtimeFixture();
 
     await expect(
       fixture.service.acceptTaskNotification(
@@ -807,9 +753,7 @@ describe("RuntimeControlService command envelope", () => {
       ),
     ).resolves.toEqual(acceptedResponse({ runtimeInputId: "rin_task" }));
 
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(0);
     expect(fixture.runHost.taskNotifications).toHaveLength(1);
-    expect(fixture.runHost.taskNotificationCommits).toHaveLength(1);
   });
 
   test("returns in-band terminal rejection when task-notification admission conflicts", async () => {
@@ -840,7 +784,6 @@ describe("RuntimeControlService command envelope", () => {
       }),
     );
 
-    expect(fixture.taskNotificationCommitter.commits).toHaveLength(0);
     expect(fixture.runHost.taskNotifications).toHaveLength(1);
   });
 
@@ -1032,15 +975,11 @@ describe("RuntimeControlService command envelope", () => {
       );
     }
 
-    expect(fixture.taskNotificationCommitter.commits).toEqual([]);
     expect(fixture.runHost.taskNotifications).toEqual([]);
   });
 
   test("defers the canonicalized task notification declaration to the owning loop", async () => {
-    const runtimeMessage = durableBridgeRuntimeMessage({ text: "bridge-projected runtime notification" });
-    const fixture = runtimeFixture({
-      taskNotificationCommitter: new RecordingTaskNotificationCommitter({ ok: true, committedMessage: runtimeMessage }),
-    });
+    const fixture = runtimeFixture();
     const payloadJson = JSON.stringify({
       task_id: "task_1",
       source_tool_use_event_id: "sevt_tool_1",
@@ -1075,10 +1014,6 @@ describe("RuntimeControlService command envelope", () => {
       }),
       authMetadata(),
     );
-    expect(fixture.taskNotificationCommitter.commits).toEqual([]);
-    expect(fixture.runHost.taskNotificationCommits).toHaveLength(1);
-    const commitResult = await fixture.runHost.taskNotificationCommits[0]!();
-
     const expected = {
       task_id: "task_1",
       source_tool_use_event_id: "sevt_tool_1",
@@ -1087,24 +1022,8 @@ describe("RuntimeControlService command envelope", () => {
       stdout: { text: "done", truncated: false, original_bytes: 4 },
       stderr: { text: "", truncated: false, original_lines: null },
     };
-    const committed = fixture.taskNotificationCommitter.commits[0]?.command.payloadJson;
     const applied = fixture.runHost.taskNotifications[0]?.command.payloadJson;
-    expect(JSON.parse(committed ?? "{}")).toEqual(expected);
     expect(JSON.parse(applied ?? "{}")).toEqual(expected);
-    expect(fixture.taskNotificationCommitter.commits[0]?.command.messageCreate.parts[0]).toMatchObject({
-      type: "text",
-      text: committed,
-      truncated: false,
-      status: "completed",
-    });
-    expect(commitResult).toEqual({ ok: true, committedMessage: runtimeMessage });
-    expect(commitResult.ok === true && "committedMessage" in commitResult
-      ? commitResult.committedMessage.parts[0]
-      : undefined).toMatchObject({
-      type: "text",
-      text: "bridge-projected runtime notification",
-    });
-    expect(JSON.stringify(fixture.taskNotificationCommitter.commits)).not.toContain("provider_");
     expect(JSON.stringify(fixture.runHost.taskNotifications)).not.toContain("provider_");
   });
 
@@ -1134,7 +1053,6 @@ function runtimeFixture(options: {
   readonly runHost?: RecordingRunHost;
   readonly cleanupController?: RecordingCleanupController;
   readonly controlInputCommitter?: RecordingControlInputCommitter;
-  readonly taskNotificationCommitter?: RecordingTaskNotificationCommitter;
   readonly commandRunner?: RuntimeCommandRunner;
   readonly metrics?: RuntimePodMetricsRegistry;
   readonly events?: string[] | undefined;
@@ -1142,7 +1060,6 @@ function runtimeFixture(options: {
   const runHost = options.runHost ?? new RecordingRunHost(undefined, options.events);
   const cleanupController = options.cleanupController ?? new RecordingCleanupController();
   const controlInputCommitter = options.controlInputCommitter ?? new RecordingControlInputCommitter(undefined, options.events);
-  const taskNotificationCommitter = options.taskNotificationCommitter ?? new RecordingTaskNotificationCommitter();
   const logger = new RecordingLogger();
   const service = new RuntimeControlService({
     ownPod: { namespace: "engine", name: "runtime-pod-a", uid: "uid-a", ip: "10.0.0.1" },
@@ -1150,14 +1067,13 @@ function runtimeFixture(options: {
     authenticator: new FixedAuthenticator(options.auth ?? "allow"),
     runHost,
     controlInputCommitter,
-    taskNotificationCommitter,
     cleanupController,
     logger,
     ready: () => true,
     ...(options.metrics !== undefined ? { metrics: options.metrics } : {}),
     ...(options.commandRunner !== undefined ? { commandRunner: options.commandRunner } : {}),
   });
-  return { service, runHost, cleanupController, controlInputCommitter, taskNotificationCommitter, logger };
+  return { service, runHost, cleanupController, controlInputCommitter, logger };
 }
 
 function validCommand(overrides: Partial<RuntimeInputCommandRequest> = {}): RuntimeInputCommandRequest {
@@ -1377,7 +1293,6 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   readonly toolConfirmations: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[1] }> = [];
   readonly toolConfirmationCommitResults: Array<Awaited<ReturnType<Parameters<RuntimeSessionRunHost["handleToolConfirmation"]>[2]>>> = [];
   readonly taskNotifications: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1] }> = [];
-  readonly taskNotificationCommits: Array<Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2]> = [];
   readonly runtimeConfigPatches: Array<{ readonly sessionId: string; readonly command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1] }> = [];
 
   constructor(
@@ -1414,7 +1329,6 @@ class RecordingRunHost implements RuntimeSessionRunHost {
     sessionId: "sesn_1",
     created: true,
     started: true,
-    pendingWake: false,
   };
   private readonly acceptInputResults: Array<Awaited<ReturnType<RuntimeSessionRunHost["handleAcceptInput"]>>> = [];
   private readonly toolConfirmationResult: Awaited<ReturnType<RuntimeSessionRunHost["handleToolConfirmation"]>> = {
@@ -1498,32 +1412,14 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   async handleTaskNotification(
     sessionId: string,
     command: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[1],
-    commit: Parameters<RuntimeSessionRunHost["handleTaskNotification"]>[2],
   ) {
     this.taskNotifications.push({ sessionId, command });
-    this.taskNotificationCommits.push(commit);
     return this.taskNotificationResult;
   }
 
   async handleRuntimeConfigPatch(sessionId: string, command: Parameters<RuntimeSessionRunHost["handleRuntimeConfigPatch"]>[1]) {
     this.runtimeConfigPatches.push({ sessionId, command });
     return this.runtimeConfigPatchResults.shift() ?? this.runtimeConfigPatchResult;
-  }
-}
-
-class RecordingTaskNotificationCommitter implements RuntimeTaskNotificationCommitter {
-  readonly commits: Array<Parameters<RuntimeTaskNotificationCommitter["commitTaskNotification"]>[0]> = [];
-
-  constructor(
-    private readonly result: Awaited<ReturnType<RuntimeTaskNotificationCommitter["commitTaskNotification"]>> = {
-      ok: true,
-      committedMessage: durableBridgeRuntimeMessage(),
-    },
-  ) {}
-
-  async commitTaskNotification(input: Parameters<RuntimeTaskNotificationCommitter["commitTaskNotification"]>[0]) {
-    this.commits.push(input);
-    return this.result;
   }
 }
 

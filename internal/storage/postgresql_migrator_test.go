@@ -128,7 +128,7 @@ func TestMigrateSchemaCreatesStableReasoningMessageAssociation(t *testing.T) {
 }
 
 func TestPostgreSQLSchemaVersionOneChecksumIsGolden(t *testing.T) {
-	const want = "786118b580c5351a5573116dbd712fb1c05b903349077a68aa2d08ae4527a27f"
+	const want = "b3524de83064493ac449227dfafa353044524393045e536044cb6694f7476bc5"
 	if storage.PostgreSQLSchemaVersionOneChecksum != want {
 		t.Fatalf("PostgreSQLSchemaVersionOneChecksum = %q, want %q", storage.PostgreSQLSchemaVersionOneChecksum, want)
 	}
@@ -478,7 +478,7 @@ func TestMigrateSchemaRequiresGitHubResourceCredential(t *testing.T) {
 	}
 }
 
-func TestMigrateSchemaCreatesCompletionMailReconciliationIndex(t *testing.T) {
+func TestMigrateSchemaCreatesAgentMailDeliveryIndex(t *testing.T) {
 	db := storagetest.NewEmptyPostgreSQLAdminDB(t)
 	ctx := context.Background()
 	if err := storage.MigrateSchema(ctx, db); err != nil {
@@ -489,9 +489,9 @@ func TestMigrateSchemaCreatesCompletionMailReconciliationIndex(t *testing.T) {
 		`SELECT indexdef
 		   FROM pg_indexes
 		  WHERE schemaname = current_schema()
-		    AND indexname = 'idx_session_events_completion_mail_reconciliation'`,
+		    AND indexname = 'idx_session_events_agent_mail_delivery'`,
 	).Scan(&definition); err != nil {
-		t.Fatalf("read completion mail reconciliation index: %v", err)
+		t.Fatalf("read agent mail delivery index: %v", err)
 	}
 	for _, want := range []string{
 		"workspace_id",
@@ -502,7 +502,7 @@ func TestMigrateSchemaCreatesCompletionMailReconciliationIndex(t *testing.T) {
 		"agent.thread_message_received",
 	} {
 		if !strings.Contains(definition, want) {
-			t.Fatalf("completion mail reconciliation index = %q; want %q", definition, want)
+			t.Fatalf("agent mail delivery index = %q; want %q", definition, want)
 		}
 	}
 }

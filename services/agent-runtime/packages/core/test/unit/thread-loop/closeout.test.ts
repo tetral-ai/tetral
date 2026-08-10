@@ -67,6 +67,62 @@ test("failed-run closeout writes a sanitized terminal error before idle settleme
         action: { action: "await_input" },
     });
 });
+test("failed-run closeout with accepted custody uses atomic Runtime termination", async () => {
+    const session = new ThreadRuntime("sesn_failed_closeout_accepted");
+    const unresolved = acceptedInput("rin_failed_closeout_accepted", session.sessionId);
+    session.state.installThreadTurn({
+        executionRunId: "evt_failed_closeout_accepted_running",
+        pendingInputMessageIds: [],
+    }, { routes: [] });
+    session.state.enqueueAcceptedInput(unresolved);
+    const appended: SessionEvent[] = [];
+    const terminations: SessionEventWriterRuntimeTerminationEnvelope[] = [];
+    const baseWriter = writerFrom((envelope) => {
+        appended.push(envelope.event);
+        return {
+            ok: true,
+            writeId: envelope.writeId,
+            eventId: `bridge-${envelope.writeId}`,
+            processedAt: createdAt,
+        };
+    });
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        commitRuntimeTermination: async (envelope) => {
+            terminations.push(envelope);
+            return await baseWriter.commitRuntimeTermination!(envelope);
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).closeFailedRun(
+            session,
+            new Error("failed run"),
+            testRunCustody("evt_failed_closeout_accepted_running"),
+        );
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(
+        new RecordingContextLoader([], { type: "empty" }),
+        { writer, runtime: { ...threadLoopRuntime(), sleep: sleepUntilAborted } },
+    ))));
+
+    expect(result).toEqual({ type: "landed" });
+    expect(appended).toEqual([]);
+    expect(terminations).toHaveLength(1);
+    expect(terminations[0]).toMatchObject({
+        writeId: "evt_failed_closeout_accepted_running",
+        failure: {
+            type: "runtime",
+            code: "runtime_invalid_sequence",
+            reason: "runtime_contract_validation",
+            retryStatus: { type: "terminal" },
+        },
+    });
+    expect(session.state.threadTurnReduction()).toMatchObject({
+        checkpoint: { terminalCloseout: { disposition: "terminated" } },
+        state: { state: "idle" },
+        action: { action: "await_input" },
+    });
+    expect(session.state.acceptedInputSnapshot()).toEqual([unresolved]);
+});
 test("failed-run closeout observes one in-flight step across timeout windows and memoizes success", async () => {
     const errorResult = deferred<SessionEventWriterAppendResult>();
     let errorCalls = 0;
@@ -1295,7 +1351,6 @@ test("SessionManager joins the original interrupt FinishIdle ACK before releasin
         const postFenceInput = { ...acceptedInput("rin_after_finish_idle"), sequenceFrom: 10, sequenceTo: 10 };
         expect(await Effect.runPromise(manager.acceptInput(postFenceInput))).toMatchObject({
             ok: true,
-            pendingWake: true,
         });
         await flushMicrotasks(50);
         expect(interruptSettled).toBe(false);
@@ -1413,7 +1468,7 @@ test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains t
     const order: string[] = [];
     const commitCalls: string[] = [];
     let nextMessageSequence = 1;
-    const commitReceipt = (input: RuntimeAcceptedInputState): AcceptedInputCommitResult => {
+    const commitReceipt = (input: RuntimeAcceptedInputState): ReturnType<typeof acceptedInputReceipt> => {
         const result = acceptedInputReceipt(input, "committed", nextMessageSequence);
         nextMessageSequence += result.receipt.messages.length;
         return result;
@@ -1436,6 +1491,7 @@ test("interrupt snapshot joins an in-flight pre-fence CommitInputs and remains t
     };
     const appended: SessionEvent[] = [];
     const managerLayer = SessionManager.layer({ maxLocalSessions: 4, now: () => createdAt }).pipe(Layer.provide(runtimeThreadLoopLayer(loader, {
+        runtime: { ...threadLoopRuntime(), sleep: sleepUntilAborted },
         writer: writerFrom((envelope) => {
             appended.push(envelope.event);
             order.push(`event:${envelope.event.type}`);

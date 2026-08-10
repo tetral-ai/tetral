@@ -309,7 +309,7 @@ class RecordingRunHost implements RuntimeSessionRunHost {
   async handleAcceptInput(command: Parameters<RuntimeSessionRunHost["handleAcceptInput"]>[0]) {
     this.sessionIds.push(command.sessionId);
     await this.gate;
-    return { ok: true as const, sessionId: command.sessionId, created: true, started: true, pendingWake: false };
+    return { ok: true as const, sessionId: command.sessionId, created: true, started: true };
   }
 
   async handleAgentMail(command: Parameters<RuntimeSessionRunHost["handleAgentMail"]>[0]) {

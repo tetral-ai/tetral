@@ -641,6 +641,8 @@ func commitWriteRequestEndDeclarationTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	request *bridgev1.WriteRequestEndRequest,
+	usage bridgeUsage,
+	providerUsageJSON string,
 	threadScope threadMutationScope,
 	requestEndEventID string,
 	requestEndSequence int64,
@@ -683,7 +685,7 @@ func commitWriteRequestEndDeclarationTx(
 			}
 			receipt.Messages = []*bridgev1.DurableMessageStamp{messageStamp}
 		}
-		if err := sealRuntimeAssistantMessageTx(ctx, tx, request, requestEndEventID, now); err != nil {
+		if err := sealRuntimeAssistantMessageTx(ctx, tx, request, usage, providerUsageJSON, requestEndEventID, now); err != nil {
 			return nil, err
 		}
 		return receipt, nil
@@ -810,7 +812,15 @@ func commitWriteRequestEndDeclarationTx(
 // loads the locked durable projection and changes no member identity or Tool
 // state; member append, target settlement, and request seal therefore remain
 // disjoint writers even though they share one Assistant row.
-func sealRuntimeAssistantMessageTx(ctx context.Context, tx *dbconnect.Tx, request *bridgev1.WriteRequestEndRequest, requestEndEventID string, now time.Time) error {
+func sealRuntimeAssistantMessageTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	request *bridgev1.WriteRequestEndRequest,
+	usage bridgeUsage,
+	providerUsageJSON string,
+	requestEndEventID string,
+	now time.Time,
+) error {
 	var messageID, dataJSON string
 	err := tx.QueryRow(ctx, `SELECT message_id,data_json FROM session_messages
 		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
@@ -832,11 +842,19 @@ func sealRuntimeAssistantMessageTx(ctx context.Context, tx *dbconnect.Tx, reques
 	}
 	message["finishReason"] = request.GetFinishReason()
 	if request.GetUsageJson() != "" {
-		var usage any
-		if err := json.Unmarshal([]byte(request.GetUsageJson()), &usage); err != nil {
-			return status.Error(codes.InvalidArgument, "request usage is invalid")
+		// Request accounting and durable Runtime messages intentionally use
+		// different wire vocabularies. This seal is the sole projection owner:
+		// cold Runtime loads must see the same canonical usage contract that hot
+		// Runtime messages use, including uncached rather than total input tokens.
+		message["usage"] = map[string]any{
+			"inputTokens":       usage.InputUncached,
+			"cacheReadTokens":   optionalInt64Value(usage.InputCacheRead),
+			"cacheWriteTokens":  optionalInt64Value(usage.InputCacheWrite),
+			"outputTokens":      usage.OutputTotal,
+			"reasoningTokens":   optionalInt64Value(usage.OutputReasoning),
+			"totalTokens":       optionalInt64Value(usage.Total),
+			"providerUsageJson": defaultString(providerUsageJSON, "{}"),
 		}
-		message["usage"] = usage
 	}
 	message["updatedAt"] = now.UTC().Format(time.RFC3339Nano)
 	updatedJSON, err := json.Marshal(message)

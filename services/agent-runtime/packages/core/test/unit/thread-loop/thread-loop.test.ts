@@ -31,6 +31,7 @@ test("the ThreadLoop action interpreter exhaustively classifies the closed actio
         { action: "continue_after_compaction", modelRequestId: "mrq_compaction" },
         { action: "complete_reviewer", modelRequestId: "mrq_reviewer" },
         { action: "apply_request_retry_or_reschedule", modelRequestId: "mrq_retry" },
+        { action: "commit_accepted_input", runtimeInputId: "rin_commit" },
         { action: "close_interrupted" },
         { action: "close_failed" },
     ];
@@ -346,6 +347,105 @@ test("lost CommitInputs response retries the frozen declaration without duplicat
     expect(new Set(submittedCreates).size).toBe(1);
     expect(session.state.contextManager.messages().filter((message) => message.origin === "user")).toHaveLength(1);
 });
+test("hung CommitInputs attempts exhaust the bounded writer budget without opening provider work", async () => {
+    const session = new ThreadRuntime("sesn_hung_commit_inputs");
+    const input = acceptedInput("rin_hung_commit_inputs", session.sessionId);
+    session.state.enqueueAcceptedInput(input);
+    const submittedCreates: string[] = [];
+    const commitOutcomes: string[] = [];
+    const terminationEnvelopes: Array<Parameters<NonNullable<SessionEventWriter["commitRuntimeTermination"]>>[0]> = [];
+    let providerCalls = 0;
+    const loader: TestContextLoader = {
+        buildContext: async () => [],
+        loadPendingInput: async () => ({ type: "empty" }),
+        commitAcceptedInput: async (_accepted, options) => {
+            submittedCreates.push(JSON.stringify(options?.messageCreates ?? []));
+            return await new Promise<never>(() => undefined);
+        },
+    };
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer: {
+            ...baseWriter,
+            commitRuntimeTermination: (envelope) => {
+                terminationEnvelopes.push(envelope);
+                return baseWriter.commitRuntimeTermination!(envelope);
+            },
+        },
+        onStream: () => {
+            providerCalls += 1;
+        },
+        recordAcceptedInputCommit: (event) => commitOutcomes.push(`${event.attempt}:${event.outcome}`),
+    }))));
+    expect(result).toMatchObject({
+        type: "failed",
+        error: {
+            code: "runtime_persistence_exhausted",
+            reason: "runtime_input_commit_exhausted",
+            retryable: false,
+            fatal: true,
+            retryStatus: { type: "terminal" },
+        },
+    });
+    expect(submittedCreates).toHaveLength(3);
+    expect(new Set(submittedCreates).size).toBe(1);
+    expect(commitOutcomes).toEqual([
+        "1:started", "1:retry",
+        "2:started", "2:retry",
+        "3:started", "3:exhausted",
+    ]);
+    expect(providerCalls).toBe(0);
+    expect(terminationEnvelopes).toHaveLength(1);
+    expect(terminationEnvelopes[0]?.failure).toMatchObject({
+        type: "runtime",
+        code: "runtime_persistence_exhausted",
+        reason: "runtime_input_commit_exhausted",
+        retryable: false,
+        fatal: true,
+        retryStatus: { type: "terminal" },
+    });
+    expect(session.state.acceptedInputSnapshot().map((accepted) => accepted.runtimeInputId)).toEqual([
+        input.runtimeInputId,
+    ]);
+});
+test("non-retryable CommitInputs rejection stops after the first frozen attempt", async () => {
+    const session = new ThreadRuntime("sesn_nonretryable_commit_inputs");
+    const input = acceptedInput("rin_nonretryable_commit_inputs", session.sessionId);
+    session.state.enqueueAcceptedInput(input);
+    let attempts = 0;
+    const loader: TestContextLoader = {
+        buildContext: async () => [],
+        loadPendingInput: async () => ({ type: "empty" }),
+        commitAcceptedInput: async (accepted) => {
+            attempts += 1;
+            throw normalizeContextLoaderError({
+                code: "schema_mismatch",
+                sessionId: accepted.sessionId,
+                reason: "CommitInputs receipt is invalid",
+            });
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader))));
+    expect(result).toMatchObject({
+        type: "failed",
+        error: {
+            code: "runtime_invalid_sequence",
+            reason: "runtime_contract_validation",
+            retryable: false,
+        },
+    });
+    expect(attempts).toBe(1);
+    expect(session.state.acceptedInputSnapshot()).toHaveLength(1);
+});
 test("one request cut commits every input accepted before the boundary", async () => {
     const session = new ThreadRuntime("sesn_plural_input_cut");
     session.state.enqueueAcceptedInput(acceptedInput("rin_plural_first", session.sessionId));
@@ -369,7 +469,7 @@ test("one request cut commits every input accepted before the boundary", async (
         RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER,
     ]);
 });
-test("inputs accepted during CommitInputs wait for a later finite request cut", async () => {
+test("inputs admitted during a commit are reducer-selected before the finite request cut", async () => {
     const session = new ThreadRuntime("sesn_dynamic_input_cut");
     const first = acceptedInput("rin_dynamic_first", session.sessionId);
     const second = acceptedInput("rin_dynamic_second", session.sessionId);
@@ -400,10 +500,8 @@ test("inputs accepted during CommitInputs wait for a later finite request cut", 
         second.runtimeInputId,
         third.runtimeInputId,
     ]);
-    expect(requests).toHaveLength(3);
-    expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(1);
-    expect(requests[1]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(2);
-    expect(requests[2]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(3);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.messages.filter((message) => message.role === RuntimeMessageRole.RUNTIME_MESSAGE_ROLE_USER)).toHaveLength(3);
 });
 test("lost CommitInputs acknowledgement cold-loads the database-stamped input exactly once", async () => {
     const session = new ThreadRuntime("sesn_cold_committed_input");
@@ -841,7 +939,7 @@ test("runtime layer gates assistant progress hot context on durable event ACKs",
         expect.objectContaining({ type: "text", text: "hello", status: "completed" }),
     ]);
 });
-test("hot input reconciliation preserves a full retry ride and queues new media for the next request", async () => {
+test("hot input reconciliation preserves a full retry ride and advances new media at the next safe request", async () => {
     const session = new ThreadRuntime("sesn_hot_attachment_reconcile");
     const activeRide = Array.from({ length: 32 }, (_, index) => ({
         transient: {
@@ -915,12 +1013,13 @@ test("hot input reconciliation preserves a full retry ride and queues new media 
         runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
     }))));
     expect(result).toMatchObject({ type: "completed" });
-    expect(requests.map((request) => request.attachments)).toEqual([activeRide, activeRide]);
+    expect(requests.map((request) => request.attachments)).toEqual([activeRide, activeRide, [nextRide]]);
     expect(loader.commitCalls.map((input) => input.runtimeInputId)).toEqual([
         expect.stringMatching(/^rin_test_harness_/),
+        followUp.runtimeInputId,
     ]);
-    expect(session.state.peekAcceptedInput()).toEqual(followUp);
-    expect(session.state.pendingAttachments()).toEqual([nextRide]);
+    expect(session.state.peekAcceptedInput()).toBeUndefined();
+    expect(session.state.pendingAttachments()).toEqual([]);
 });
 test("running status append failure stops before accepted input commit", async () => {
     const session = new ThreadRuntime("sesn_1");
@@ -1259,9 +1358,11 @@ describe("ThreadState", () => {
 
     expect(state.enqueueAcceptedInput(mail)).toBe("applied");
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+    expect(state.enqueueAcceptedInput({ ...mail, bindingGeneration: 2 })).toBe("conflict");
     state.acknowledgeAcceptedInput(mail.runtimeInputId);
     expect(state.peekAcceptedInput()).toBeUndefined();
     expect(state.enqueueAcceptedInput(mail)).toBe("duplicate");
+    expect(state.enqueueAcceptedInput({ ...mail, sourceToolUseEventId: "sevt_conflicting_spawn" })).toBe("conflict");
   });
 
   test("interrupt fence preserves queued stamped completion mail", () => {
@@ -1334,7 +1435,6 @@ describe("ThreadState", () => {
       sourceToolUseEventId: "sevt_task_notification_source",
       status: "completed",
       payloadJson: "{\"status\":\"completed\"}",
-      commit: async () => ({ ok: true, stale: true }),
     } satisfies RuntimeAcceptedInputState;
 
     expect(state.enqueueAcceptedInput(notification)).toBe("applied");
@@ -1410,5 +1510,17 @@ describe("ThreadState", () => {
     state.clear();
 
     expect(state.pendingAttachments()).toEqual([]);
+  });
+
+  test("generic failure cleanup preserves accepted custody until a durable handoff", () => {
+    const state = new ThreadState("sesn_clear_accepted");
+    const input = acceptedInput("rin_clear_accepted", "sesn_clear_accepted");
+    state.enqueueAcceptedInput(input);
+
+    state.clear();
+    expect(state.acceptedInputSnapshot()).toEqual([input]);
+
+    state.clearAfterCustodyHandoff();
+    expect(state.acceptedInputSnapshot()).toEqual([]);
   });
 });

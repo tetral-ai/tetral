@@ -592,6 +592,7 @@ func TestPostgreSQLBridgeAPIStoreChildControlFenceRejectsDirectedWorkUntilClose(
 	directMessageJSON := bridgeRuntimeNotificationMessageJSON(t, sessionID, "msg_child_control_work_fence_direct", "direct message")
 	seedBridgeAPIEvent(t, admin, "default", sessionID, mainID, "evt_child_control_work_fence_sent", 2, "agent.thread_message_sent",
 		bridgeInterAgentSentEventJSON(t, "delivery_child_control_work_fence_direct", mainID, childID, "worker", "evt_child_control_work_fence_send_tool", directMessageJSON))
+	seedAgentMailCustody(t, admin, sessionID, childID, "delivery_child_control_work_fence_direct", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	seedCompletionMailSentAt(t, admin, sessionID, childID, grandchildID, "delivery_child_control_work_fence_completion", 1, "2026-08-09T00:00:00Z")
 
 	client := dbconnect.NewClientForTesting(runtime)
@@ -1656,12 +1657,44 @@ func TestPostgreSQLBridgeAPIStoreMarkChildThreadClosedCascadesAcrossDescendants(
 		Source:        closeSource,
 	}
 	prepareCompletedChildCloseForTest(t, admin, store, closeRequest)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, childID, "rin_close_tree_message", "messages", `["evt_close_tree_message"]`, "accepted", bindingID, podUID, 1, 1)
+	seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, grandchildID, "task_notification:close_tree", "task_notification", `[]`, "accepted", bindingID, podUID, 0, 0)
+	queueStore := queue.NewPostgreSQLStore(dbconnect.NewClientForTesting(runtime))
+	for _, input := range []runtimePodLostAcceptedInput{
+		{SessionThreadID: childID, RuntimeInputID: "rin_close_tree_message", InputKind: "messages", EventIDsJSON: `["evt_close_tree_message"]`, SequenceFrom: sql.NullInt64{Int64: 1, Valid: true}, SequenceTo: sql.NullInt64{Int64: 1, Valid: true}},
+		{SessionThreadID: grandchildID, RuntimeInputID: "task_notification:close_tree", InputKind: "task_notification", EventIDsJSON: `[]`},
+	} {
+		request, err := lostRuntimeInputEnqueueRequest("default", sessionID, input, store.Clock())
+		if err != nil {
+			t.Fatalf("build close-time Queue custody: %v", err)
+		}
+		if _, err := queueStore.Enqueue(context.Background(), request); err != nil {
+			t.Fatalf("enqueue close-time Queue custody: %v", err)
+		}
+	}
 	response, err := store.MarkChildThreadClosed(context.Background(), closeRequest)
 	if err != nil {
 		t.Fatalf("MarkChildThreadClosed tree: %v", err)
 	}
 	if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
 		t.Fatalf("close tree ack = %s; want committed", response.GetAck().GetStatus())
+	}
+	for runtimeInputID, wantStatus := range map[string]string{
+		"rin_close_tree_message":       "cancelled",
+		"task_notification:close_tree": "parked",
+	} {
+		var inboxStatus, queueStatus string
+		if err := admin.QueryRowContext(context.Background(), `SELECT inbox.status, job.status
+			FROM session_runtime_inbox inbox
+			JOIN queue_jobs job
+			  ON job.workspace_id = inbox.workspace_id
+			 AND job.dedupe_key = 'runtime_input:' || inbox.workspace_id || ':' || inbox.session_id || ':' || inbox.runtime_input_id
+			WHERE inbox.workspace_id = 'default' AND inbox.runtime_input_id = $1`, runtimeInputID).Scan(&inboxStatus, &queueStatus); err != nil {
+			t.Fatalf("read child-close input %s: %v", runtimeInputID, err)
+		}
+		if inboxStatus != wantStatus || queueStatus != queue.StatusCancelled {
+			t.Fatalf("child-close input %s = inbox %q / Queue %q; want %q / cancelled", runtimeInputID, inboxStatus, queueStatus, wantStatus)
+		}
 	}
 	if len(response.GetDeclaration().GetReceipts()) != 2 {
 		t.Fatalf("close tree receipts = %d; want one per target", len(response.GetDeclaration().GetReceipts()))

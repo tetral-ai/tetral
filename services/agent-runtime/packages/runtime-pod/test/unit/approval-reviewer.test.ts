@@ -1472,7 +1472,6 @@ class RecordingReviewerHost {
       sessionId: input.sessionId,
       created: false,
       started: true,
-      pendingWake: false,
       ...(reviewerExecutionToken === undefined ? {} : { reviewerExecutionToken }),
     };
   }

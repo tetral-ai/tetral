@@ -60,6 +60,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			toolName:        "send_message",
 			childStatus:     "closed_for_runtime",
 			withSent:        true,
+			wantWake:        1,
 			wantResultError: true,
 			wantResultText:  "not receivable",
 		},
@@ -76,6 +77,7 @@ func TestPostgreSQLRuntimePodLossDeliverySettlementMatrix(t *testing.T) {
 			childStatus:    "idle",
 			withSent:       true,
 			withTerminal:   true,
+			wantWake:       1,
 			wantResultText: "existing terminal",
 		},
 	}
@@ -456,6 +458,7 @@ func seedRuntimePodLostDeliveryFixture(
 		messageJSON := bridgeRuntimeUserMessageJSON(t, fixture.sessionID, "msg_"+fixture.deliveryID, "hello worker")
 		sentPayload := bridgeInterAgentSentEventJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.childThreadID, "worker", fixture.toolUseEventID, messageJSON)
 		seedRuntimePodLostDeliveryEvent(t, db, fixture, fixture.parentThreadID, "evt_sent_"+fixture.toolUseEventID, sequence, "agent.thread_message_sent", sentPayload, "public", true)
+		seedAgentMailCustody(t, db, fixture.sessionID, fixture.childThreadID, fixture.deliveryID, fixture.now)
 		sequence++
 		if withReceived {
 			receivedPayload := bridgeInterAgentMessageJSON(t, fixture.deliveryID, fixture.parentThreadID, fixture.toolUseEventID, messageJSON)

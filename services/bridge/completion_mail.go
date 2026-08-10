@@ -8,12 +8,10 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/tetral-ai/tetral/internal/childcontrol"
-	"github.com/tetral-ai/tetral/internal/storage"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/tetral-ai/tetral/internal/childcontrol"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/id"
 	"github.com/tetral-ai/tetral/internal/queue"
@@ -22,17 +20,8 @@ import (
 )
 
 const (
-	MailFetchMaxEnvelopes          = 4
-	CompletionMailReconcilerMinAge = 300 * time.Second
+	MailFetchMaxEnvelopes = 4
 )
-
-type pendingCompletionDelivery struct {
-	SessionID      string
-	TargetThreadID string
-	DeliveryID     string
-	Sequence       int64
-	CreatedAt      time.Time
-}
 
 type storedAgentMailEnvelope struct {
 	SentEventID          string
@@ -412,7 +401,7 @@ func admitAgentMailDeliveryTx(
 			SequenceFrom:    receivedSequence,
 			SequenceTo:      receivedSequence,
 		}
-		if err := upsertRuntimeInboxDeliveryTx(ctx, tx, job, binding, now); err != nil {
+		if err := claimAgentMailInboxDeliveryTx(ctx, tx, job, binding, now); err != nil {
 			return admittedAgentMailDelivery{}, err
 		}
 	}
@@ -422,6 +411,50 @@ func admitAgentMailDeliveryTx(
 		ReceivedSequence: receivedSequence,
 		Terminal:         terminal,
 	}, nil
+}
+
+// The sent-event transaction creates agent-mail custody before the received
+// projection has a sequence. Admission fills that deterministic projection
+// identity while binding the existing row; it never inserts replacement
+// custody from the Queue payload.
+func claimAgentMailInboxDeliveryTx(
+	ctx context.Context,
+	tx *dbconnect.Tx,
+	job RuntimeJob,
+	binding runtimeBindingForDelivery,
+	now time.Time,
+) error {
+	if len(job.EventIDs) != 1 || job.SequenceFrom <= 0 || job.SequenceTo != job.SequenceFrom {
+		return runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "agent mail projection identity is invalid", retryable: false}
+	}
+	eventIDsJSON, err := json.Marshal(job.EventIDs)
+	if err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `UPDATE session_runtime_inbox
+		SET event_ids_json=$5,sequence_from=$6,sequence_to=$6,status='delivering',
+		    binding_id=$7,binding_generation=$8,target_pod_uid=$9,updated_at=$10
+		WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3 AND runtime_input_id=$4
+		  AND input_kind='agent_mail'
+		  AND (
+		    (status='queued' AND (
+		      (event_ids_json='[]' AND sequence_from IS NULL AND sequence_to IS NULL)
+		      OR (event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6)
+		    ))
+		    OR (status='delivering' AND event_ids_json=$5 AND sequence_from=$6 AND sequence_to=$6
+		        AND binding_id=$7 AND binding_generation=$8 AND target_pod_uid=$9)
+		  )`,
+		job.WorkspaceID, job.SessionID, job.SessionThreadID, job.RuntimeInputID,
+		string(eventIDsJSON), job.SequenceFrom, binding.BindingID, binding.BindingGeneration,
+		binding.PodUID, now,
+	)
+	if err != nil {
+		return err
+	}
+	if !rowsAffected(result) {
+		return runtimeDeliveryPrepareError{kind: "runtime_inbox_custody_invalid", message: "agent mail has no matching producer custody", retryable: false}
+	}
+	return nil
 }
 
 func appendDeclaredCompletionMailTx(
@@ -537,7 +570,7 @@ func appendDeclaredCompletionMailForSourceTx(
 	if _, err := appendSessionEventStreamChangeTx(ctx, tx, scope, eventID, visibility, sessionVisible, now); err != nil {
 		return nil, nil, err
 	}
-	if _, err := enqueueCompletionMailWakeTx(
+	if err := birthCompletionMailCustodyTx(
 		ctx,
 		tx,
 		scope.GetWorkspaceId(),
@@ -575,9 +608,10 @@ func appendDeclaredCompletionMailForSourceTx(
 		}, nil
 }
 
-// Completion mail is durably identified by delivery id. Reconciliation may
-// reuse the same wake only when its immutable envelope identity matches.
-func enqueueCompletionMailWakeTx(
+// Completion mail is born with its Runtime Inbox row and Queue job in the same
+// transaction as the sent event. Delivery only binds this existing custody to
+// a Runtime; no later lifecycle may reconstruct it from the event ledger.
+func birthCompletionMailCustodyTx(
 	ctx context.Context,
 	tx *dbconnect.Tx,
 	workspaceID string,
@@ -585,8 +619,17 @@ func enqueueCompletionMailWakeTx(
 	targetThreadID string,
 	deliveryID string,
 	now time.Time,
-) (bool, error) {
-	inserted, err := enqueueAgentMailWakeTx(
+) error {
+	runtimeInputID := completionRuntimeInputID(deliveryID)
+	if _, err := tx.Exec(ctx, `INSERT INTO session_runtime_inbox (
+		workspace_id,session_id,session_thread_id,runtime_input_id,input_kind,
+		event_ids_json,status,created_at,updated_at
+	) VALUES ($1,$2,$3,$4,'agent_mail','[]','queued',$5,$5)`,
+		workspaceID, sessionID, targetThreadID, runtimeInputID, now,
+	); err != nil {
+		return err
+	}
+	_, err := enqueueAgentMailWakeTx(
 		ctx,
 		tx,
 		workspaceID,
@@ -595,10 +638,7 @@ func enqueueCompletionMailWakeTx(
 		deliveryID,
 		now,
 	)
-	if err != nil {
-		return false, err
-	}
-	return inserted, nil
+	return err
 }
 
 func enqueueAgentMailWakeTx(
@@ -688,400 +728,6 @@ func validateAgentMailWakeJob(
 		return false, status.Error(codes.AlreadyExists, "agent mail wake conflicts with the durable delivery")
 	}
 	return active.ID == jobID, nil
-}
-
-func rearmPendingCompletionMailForThreadTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	targetThreadID string,
-	now time.Time,
-) (int, error) {
-	deliveries, err := pendingCompletionDeliveriesForThreadTx(
-		ctx,
-		tx,
-		workspaceID,
-		sessionID,
-		targetThreadID,
-		MailFetchMaxEnvelopes,
-	)
-	if err != nil {
-		return 0, err
-	}
-	rearmed := 0
-	for _, delivery := range deliveries {
-		ensured, err := enqueueCompletionMailWakeTx(
-			ctx,
-			tx,
-			workspaceID,
-			sessionID,
-			targetThreadID,
-			delivery.DeliveryID,
-			now,
-		)
-		if err != nil {
-			return 0, err
-		}
-		if ensured {
-			rearmed++
-		}
-	}
-	return rearmed, nil
-}
-
-func rearmPendingCompletionMailForSessionTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	now time.Time,
-) (int, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT id
-		   FROM session_threads
-		  WHERE workspace_id = $1
-		    AND session_id = $2
-		    AND role IN ('main', 'subagent')
-		  ORDER BY id`,
-		workspaceID,
-		sessionID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = rows.Close() }()
-	threadIDs := make([]string, 0)
-	for rows.Next() {
-		var threadID string
-		if err := rows.Scan(&threadID); err != nil {
-			return 0, err
-		}
-		threadIDs = append(threadIDs, threadID)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	rearmed := 0
-	for _, threadID := range threadIDs {
-		count, err := rearmPendingCompletionMailForThreadTx(ctx, tx, workspaceID, sessionID, threadID, now)
-		if err != nil {
-			return 0, err
-		}
-		rearmed += count
-	}
-	return rearmed, nil
-}
-
-func pendingCompletionDeliveriesForThreadTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	sessionID string,
-	targetThreadID string,
-	limit int,
-) ([]pendingCompletionDelivery, error) {
-	if limit <= 0 || limit > MailFetchMaxEnvelopes {
-		limit = MailFetchMaxEnvelopes
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT sent.payload_json::jsonb ->> 'delivery_id',
-		        sent.sequence,
-		        sent.created_at
-		   FROM session_events sent
-		   JOIN sessions session_row
-		     ON session_row.workspace_id = sent.workspace_id
-		    AND session_row.id = sent.session_id
-		    AND session_row.status <> 'terminated'
-		    AND session_row.lifecycle_state <> 'deleted'
-			   JOIN session_threads source
-			     ON source.workspace_id = sent.workspace_id
-			    AND source.session_id = sent.session_id
-			    AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
-			   JOIN session_threads target
-			     ON target.workspace_id = sent.workspace_id
-			    AND target.session_id = sent.session_id
-			    AND target.id = $3
-			  WHERE sent.workspace_id = $1
-			    AND sent.session_id = $2
-			    AND sent.type = 'agent.thread_message_sent'
-			    AND sent.payload_json::jsonb ->> 'target_thread_id' = $3
-			    AND (
-			        (source.role = 'subagent' AND source.parent_thread_id = target.id)
-			        OR (target.role = 'subagent' AND target.parent_thread_id = source.id)
-			    )
-			    AND (
-			        NOT EXISTS (
-			            SELECT 1
-			              FROM session_events received
-			             WHERE received.workspace_id = sent.workspace_id
-			               AND received.session_id = sent.session_id
-			               AND received.session_thread_id = $3
-			               AND received.type = 'agent.thread_message_received'
-			               AND received.payload_json::jsonb ->> 'delivery_id' =
-			                   sent.payload_json::jsonb ->> 'delivery_id'
-			        )
-			        OR EXISTS (
-			            SELECT 1
-			              FROM session_events received
-			              JOIN session_runtime_inbox inbox
-			                ON inbox.workspace_id = received.workspace_id
-			               AND inbox.session_id = received.session_id
-			               AND inbox.session_thread_id = received.session_thread_id
-			               AND inbox.runtime_input_id =
-			                   'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
-			               AND inbox.status = 'cancelled'
-			             WHERE received.workspace_id = sent.workspace_id
-			               AND received.session_id = sent.session_id
-			               AND received.session_thread_id = $3
-			               AND received.type = 'agent.thread_message_received'
-			               AND received.payload_json::jsonb ->> 'delivery_id' =
-			                   sent.payload_json::jsonb ->> 'delivery_id'
-			               AND received.processed_at IS NULL
-			        )
-			    )
-		    AND NOT EXISTS (
-		        SELECT 1
-		          FROM session_events exhausted
-		         WHERE exhausted.workspace_id = sent.workspace_id
-		           AND exhausted.session_id = sent.session_id
-		           AND exhausted.event_id =
-		               'evt_runtime_exhausted_' || substr(encode(sha256(
-		                   convert_to(sent.workspace_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(sent.session_id, 'UTF8') ||
-		                   decode('00', 'hex') ||
-		                   convert_to(
-		                       'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
-		                       'UTF8'
-		                   ) ||
-		                   decode('00', 'hex') ||
-		                   convert_to('runtime_delivery_exhausted', 'UTF8')
-		               ), 'hex'), 1, 24)
-		           AND exhausted.type = 'session.error'
-		           AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
-		    )
-		  ORDER BY sent.sequence ASC, sent.event_id ASC
-		  LIMIT $4`,
-		workspaceID,
-		sessionID,
-		targetThreadID,
-		limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	deliveries := make([]pendingCompletionDelivery, 0, limit)
-	for rows.Next() {
-		var delivery pendingCompletionDelivery
-		delivery.SessionID = sessionID
-		delivery.TargetThreadID = targetThreadID
-		if err := rows.Scan(&delivery.DeliveryID, &delivery.Sequence, &delivery.CreatedAt); err != nil {
-			return nil, err
-		}
-		if delivery.DeliveryID == "" {
-			return nil, status.Error(codes.FailedPrecondition, "pending completion delivery id is missing")
-		}
-		deliveries = append(deliveries, delivery)
-	}
-	return deliveries, rows.Err()
-}
-
-func (s *PostgreSQLRuntimeDeliveryStore) RepairCompletionMail(
-	ctx context.Context,
-	workspaceID string,
-	limit int,
-) (int, error) {
-	if s == nil || s.Client == nil {
-		return 0, runtimeDeliveryPrepareError{
-			kind:      "runtime_reconcile_unavailable",
-			message:   "completion mail reconciler is unavailable",
-			retryable: true,
-		}
-	}
-	if workspaceID == "" {
-		return 0, runtimeDeliveryPrepareError{
-			kind:      "invalid_runtime_job_payload",
-			message:   "completion mail reconcile workspace is required",
-			retryable: false,
-		}
-	}
-	if limit <= 0 || limit > defaultRuntimeInboxRepairBatch {
-		limit = defaultRuntimeInboxRepairBatch
-	}
-	now := storage.Now()
-	if s.Clock != nil {
-		now = s.Clock().UTC()
-	}
-	cutoff := now.Add(-CompletionMailReconcilerMinAge)
-	repaired := 0
-	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.repair_completion_mail", func(tx *dbconnect.Tx) error {
-		candidates, err := completionMailReconcileCandidatesTx(ctx, tx, workspaceID, cutoff, limit)
-		if err != nil {
-			return err
-		}
-		for _, candidate := range candidates {
-			ensured, err := enqueueCompletionMailWakeTx(
-				ctx,
-				tx,
-				workspaceID,
-				candidate.SessionID,
-				candidate.TargetThreadID,
-				candidate.DeliveryID,
-				now,
-			)
-			if err != nil {
-				return err
-			}
-			if ensured {
-				repaired++
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	return repaired, nil
-}
-
-func completionMailReconcileCandidatesTx(
-	ctx context.Context,
-	tx *dbconnect.Tx,
-	workspaceID string,
-	cutoff time.Time,
-	limit int,
-) ([]pendingCompletionDelivery, error) {
-	rows, err := tx.Query(ctx,
-		`WITH eligible AS (
-			SELECT sent.session_id,
-			       sent.payload_json::jsonb ->> 'target_thread_id' AS target_thread_id,
-			       sent.payload_json::jsonb ->> 'delivery_id' AS delivery_id,
-			       sent.sequence,
-			       sent.event_id,
-			       sent.created_at AS created_at,
-			       ROW_NUMBER() OVER (
-			           PARTITION BY sent.session_id, sent.payload_json::jsonb ->> 'target_thread_id'
-			           ORDER BY sent.sequence ASC, sent.event_id ASC
-			       ) AS recipient_rank
-			  FROM session_events sent
-			  JOIN sessions session_row
-			    ON session_row.workspace_id = sent.workspace_id
-			   AND session_row.id = sent.session_id
-			   AND session_row.status <> 'terminated'
-			   AND session_row.lifecycle_state <> 'deleted'
-				  JOIN session_threads source
-				    ON source.workspace_id = sent.workspace_id
-				   AND source.session_id = sent.session_id
-				   AND source.id = sent.payload_json::jsonb ->> 'source_thread_id'
-				  JOIN session_threads target
-				    ON target.workspace_id = sent.workspace_id
-				   AND target.session_id = sent.session_id
-				   AND target.id = sent.payload_json::jsonb ->> 'target_thread_id'
-				   AND target.status NOT IN ('closed_for_runtime', 'terminated')
-				 WHERE sent.workspace_id = $1
-				   AND sent.type = 'agent.thread_message_sent'
-				   AND sent.created_at <= $2
-				   AND (
-				       (source.role = 'subagent' AND source.parent_thread_id = target.id)
-				       OR (target.role = 'subagent' AND target.parent_thread_id = source.id)
-				   )
-				   AND (
-				       NOT EXISTS (
-				           SELECT 1
-				             FROM session_events received
-				            WHERE received.workspace_id = sent.workspace_id
-				              AND received.session_id = sent.session_id
-				              AND received.session_thread_id =
-				                  sent.payload_json::jsonb ->> 'target_thread_id'
-				              AND received.type = 'agent.thread_message_received'
-				              AND received.payload_json::jsonb ->> 'delivery_id' =
-				                  sent.payload_json::jsonb ->> 'delivery_id'
-				       )
-				       OR EXISTS (
-				           SELECT 1
-				             FROM session_events received
-				             JOIN session_runtime_inbox inbox
-				               ON inbox.workspace_id = received.workspace_id
-				              AND inbox.session_id = received.session_id
-				              AND inbox.session_thread_id = received.session_thread_id
-				              AND inbox.runtime_input_id =
-				                  'agent_mail:' || (received.payload_json::jsonb ->> 'delivery_id')
-				              AND inbox.status = 'cancelled'
-				            WHERE received.workspace_id = sent.workspace_id
-				              AND received.session_id = sent.session_id
-				              AND received.session_thread_id =
-				                  sent.payload_json::jsonb ->> 'target_thread_id'
-				              AND received.type = 'agent.thread_message_received'
-				              AND received.payload_json::jsonb ->> 'delivery_id' =
-				                  sent.payload_json::jsonb ->> 'delivery_id'
-				              AND received.processed_at IS NULL
-				       )
-				   )
-			   AND NOT EXISTS (
-			       SELECT 1
-			         FROM queue_jobs active_wake
-			        WHERE active_wake.workspace_id = sent.workspace_id
-			          AND active_wake.dedupe_key =
-			              'runtime_input:' || sent.workspace_id || ':' || sent.session_id ||
-			              ':agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id')
-			          AND active_wake.status IN ('pending', 'leased')
-			   )
-			   AND NOT EXISTS (
-			       SELECT 1
-			         FROM session_events exhausted
-			        WHERE exhausted.workspace_id = sent.workspace_id
-			          AND exhausted.session_id = sent.session_id
-			          AND exhausted.event_id =
-			              'evt_runtime_exhausted_' || substr(encode(sha256(
-			                  convert_to(sent.workspace_id, 'UTF8') ||
-			                  decode('00', 'hex') ||
-			                  convert_to(sent.session_id, 'UTF8') ||
-			                  decode('00', 'hex') ||
-			                  convert_to(
-			                      'agent_mail:' || (sent.payload_json::jsonb ->> 'delivery_id'),
-			                      'UTF8'
-			                  ) ||
-			                  decode('00', 'hex') ||
-			                  convert_to('runtime_delivery_exhausted', 'UTF8')
-			              ), 'hex'), 1, 24)
-			          AND exhausted.type = 'session.error'
-			          AND exhausted.payload_json::jsonb #>> '{error,retry_status,type}' = 'exhausted'
-			   )
-		)
-		SELECT session_id, target_thread_id, delivery_id, sequence, created_at
-		  FROM eligible
-		 WHERE recipient_rank <= $4
-		 ORDER BY created_at ASC, session_id ASC, sequence ASC, event_id ASC
-		 LIMIT $3`,
-		workspaceID,
-		cutoff,
-		limit,
-		MailFetchMaxEnvelopes,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	candidates := make([]pendingCompletionDelivery, 0, limit)
-	for rows.Next() {
-		var candidate pendingCompletionDelivery
-		if err := rows.Scan(
-			&candidate.SessionID,
-			&candidate.TargetThreadID,
-			&candidate.DeliveryID,
-			&candidate.Sequence,
-			&candidate.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		if candidate.SessionID == "" || candidate.TargetThreadID == "" || candidate.DeliveryID == "" {
-			return nil, status.Error(codes.FailedPrecondition, "completion mail reconcile candidate is malformed")
-		}
-		candidates = append(candidates, candidate)
-	}
-	return candidates, rows.Err()
 }
 
 func completionLineageTx(

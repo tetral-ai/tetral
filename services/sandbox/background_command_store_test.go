@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +176,99 @@ func TestPostgreSQLBackgroundTaskTerminalCASCreatesBindingNeutralNotification(t 
 	}
 	if strings.Contains(payload, "binding_id") {
 		t.Fatalf("notification payload contains retired delivery identity: %s", payload)
+	}
+}
+
+func TestPostgreSQLBackgroundTaskSettlementParksAtomicallyBehindClosedChildFence(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		name := "commit"
+		if rollback {
+			name = "rollback"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtimeDB, adminDB := newSandboxServiceTestDB(t)
+			seedSandboxExecutionStoreFixture(t, adminDB)
+			seedBackgroundTaskFromExecution(t, runtimeDB, adminDB)
+			if _, err := adminDB.Exec(`INSERT INTO session_runtime_bindings (
+				workspace_id, session_id, binding_id, binding_generation,
+				agent_runtime_namespace, agent_runtime_pod_name, agent_runtime_pod_uid,
+				agent_runtime_pod_ip, bound_at, updated_at
+			) VALUES (
+				'ws_execution_store', 'sesn_execution_store', 'bind_execution_store', 7,
+				'runtime', 'runtime-0', 'pod_uid_execution_store', '127.0.0.1', now(), now()
+			)`); err != nil {
+				t.Fatalf("seed Runtime binding: %v", err)
+			}
+			if _, err := adminDB.Exec(`UPDATE session_threads
+				SET status='closed_for_runtime', closed_at=now()
+				WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND id='thr_execution_store'`); err != nil {
+				t.Fatalf("close background task thread: %v", err)
+			}
+			client := dbconnect.NewClientForTesting(runtimeDB)
+			now := time.Now().UTC()
+			errRollback := errors.New("rollback parked notification")
+			err := client.WithWorkspaceTx(context.Background(), "ws_execution_store", "test.background_task_closed_fence", func(tx *dbconnect.Tx) error {
+				work, current, err := loadBackgroundTaskForUpdateTx(context.Background(), tx, "ws_execution_store", "sesn_execution_store", "task_execution")
+				if err != nil || !current {
+					return fmt.Errorf("load background task: current=%t err=%w", current, err)
+				}
+				if err := settleBackgroundTaskResultTx(context.Background(), tx, work, sandboxdriver.CommandResult{
+					ResultJSON:     `{"status":"completed","result":{"stdout":"done"}}`,
+					TerminalStatus: "completed",
+				}, now); err != nil {
+					return err
+				}
+				if rollback {
+					return errRollback
+				}
+				return nil
+			})
+			if rollback {
+				if !errors.Is(err, errRollback) {
+					t.Fatalf("rollback settlement error = %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("commit settlement: %v", err)
+			}
+
+			var taskStatus string
+			if err := adminDB.QueryRow(`SELECT status FROM session_background_tasks
+				WHERE workspace_id='ws_execution_store' AND session_id='sesn_execution_store' AND task_id='task_execution'`).Scan(&taskStatus); err != nil {
+				t.Fatalf("read task status: %v", err)
+			}
+			var inboxCount, queueCount int
+			var inboxStatus sql.NullString
+			if err := adminDB.QueryRow(`SELECT count(*), max(status) FROM session_runtime_inbox
+				WHERE workspace_id='ws_execution_store' AND runtime_input_id='task_notification:task_execution'`).Scan(&inboxCount, &inboxStatus); err != nil {
+				t.Fatalf("read parked notification: %v", err)
+			}
+			if err := adminDB.QueryRow(`SELECT count(*) FROM queue_jobs
+				WHERE workspace_id='ws_execution_store'
+				  AND dedupe_key='runtime_input:ws_execution_store:sesn_execution_store:task_notification:task_execution'`).Scan(&queueCount); err != nil {
+				t.Fatalf("count notification Queue jobs: %v", err)
+			}
+			if rollback {
+				if taskStatus != "running" || inboxCount != 0 || queueCount != 0 {
+					t.Fatalf("rollback task/inbox/Queue = %q/%d/%d; want running/0/0", taskStatus, inboxCount, queueCount)
+				}
+				return
+			}
+			var bindingID, targetPodUID string
+			var bindingGeneration int64
+			if err := adminDB.QueryRow(`SELECT binding_id, binding_generation, target_pod_uid
+				FROM session_runtime_inbox
+				WHERE workspace_id='ws_execution_store' AND runtime_input_id='task_notification:task_execution'`).Scan(
+				&bindingID, &bindingGeneration, &targetPodUID,
+			); err != nil {
+				t.Fatalf("read parked custody identity: %v", err)
+			}
+			if taskStatus != "completed" || inboxCount != 1 || inboxStatus.String != "parked" || queueCount != 0 {
+				t.Fatalf("closed-fence task/inbox/Queue = %q/%d:%q/%d; want completed/1:parked/0", taskStatus, inboxCount, inboxStatus.String, queueCount)
+			}
+			if bindingID != "bind_execution_store" || bindingGeneration != 7 || targetPodUID != "pod_uid_execution_store" {
+				t.Fatalf("parked custody identity = %q/%d/%q", bindingID, bindingGeneration, targetPodUID)
+			}
+		})
 	}
 }
 
