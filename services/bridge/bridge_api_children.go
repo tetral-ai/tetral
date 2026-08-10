@@ -833,16 +833,35 @@ func validateChildLifecycleSourceTx(
 }
 
 func validateSettledApprovalReviewerCloseTx(ctx context.Context, tx *dbconnect.Tx, scope *bridgev1.RuntimeScope, childThreadID, reviewID string) error {
-	var settled bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
+	var outcomeCount int
+	err := tx.QueryRow(ctx, `SELECT COUNT(*)
+		FROM session_events WHERE workspace_id=$1 AND session_id=$2 AND session_thread_id=$3
 		 AND type IN ('approval_review.decision','approval_review.failure')
-		 AND payload_json::jsonb->>'review_id'=$4)`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&settled)
+		 AND payload_json::jsonb->>'review_id'=$4`, scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID, reviewID).Scan(&outcomeCount)
 	if err != nil {
 		return err
 	}
-	if !settled {
-		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome")
+	if outcomeCount > 1 {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close found competing durable outcomes")
+	}
+	outcomeSettled := outcomeCount == 1
+	var cancelledRequestSettled bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		  FROM session_events end_event
+		 WHERE end_event.workspace_id=$1
+		   AND end_event.session_id=$2
+		   AND end_event.session_thread_id=$3
+		   AND end_event.type='span.model_request_end'
+		   AND end_event.payload_json::jsonb->>'request_kind'='approval_reviewer'
+		   AND end_event.payload_json::jsonb->>'error_kind'='runtime_interrupted'
+		   AND end_event.payload_json::jsonb->>'finish_reason'='cancelled')`,
+		scope.GetWorkspaceId(), scope.GetSessionId(), childThreadID).Scan(&cancelledRequestSettled)
+	if err != nil {
+		return err
+	}
+	if !outcomeSettled && !cancelledRequestSettled {
+		return status.Error(codes.FailedPrecondition, "approval reviewer close requires a durable outcome or cancelled request")
 	}
 	var unfinished bool
 	err = tx.QueryRow(ctx, `SELECT

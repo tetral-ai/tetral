@@ -42,11 +42,39 @@ export interface GatewayClientError {
 }
 
 /** Streaming Gateway dependency used by the Runtime LLM service. */
+export type RuntimeGatewayStreamCancelKind = "caller" | "consumer_validation" | "consumer_early_exit";
+
+/** Transport completion settles only after the adapter has released reader, listener, and call custody. */
+export type RuntimeGatewayStreamCompletion =
+  | { readonly outcome: "eof" }
+  | { readonly outcome: "cancelled"; readonly cancelKind: RuntimeGatewayStreamCancelKind }
+  | { readonly outcome: "completion_deadline" }
+  | { readonly outcome: "transport_failure"; readonly error: GatewayClientError };
+
+/** One generated Gateway call and its single-consumer event and completion carriers. */
+export interface RuntimeGatewayStreamHandle {
+  readonly events: Stream.Stream<ProviderStreamEvent>;
+  readonly completion: Promise<RuntimeGatewayStreamCompletion>;
+  readonly cancel: (reason: RuntimeGatewayStreamCancelKind) => void;
+}
+
 export interface GatewayClient {
   readonly streamProviderRequest: (
     request: ProviderRequest,
     options?: { readonly abortSignal?: AbortSignal },
-  ) => Stream.Stream<ProviderStreamEvent, GatewayClientError>;
+  ) => Promise<RuntimeGatewayStreamHandle>;
+}
+
+/** Identity-only observations emitted by the semantic stream owner. */
+export interface LLMServiceStreamObserver {
+  readonly terminalObserved?: (request: ProviderRequest, terminalKind: "finish" | "provider_error") => void;
+  readonly streamClosed?: (
+    request: ProviderRequest,
+    completion: RuntimeGatewayStreamCompletion,
+    terminalCandidateExisted: boolean,
+    durationMs: number,
+  ) => void;
+  readonly nowEpochMs?: () => number;
 }
 
 /** Error channel exposed by the Runtime LLM service. */
@@ -399,10 +427,10 @@ function hasUnconsumedToolInput(fragments: ReadonlyMap<string, FragmentState>): 
 }
 
 /** Builds the LLM service around a concrete Gateway streaming client. */
-export function createLLMService(gatewayClient: GatewayClient): Interface {
+export function createLLMService(gatewayClient: GatewayClient, observer: LLMServiceStreamObserver = {}): Interface {
   return {
     stream(request, options) {
-      return streamLLMEvents(request, gatewayClient, options);
+      return streamLLMEvents(request, gatewayClient, options, observer);
     },
   };
 }
@@ -412,9 +440,10 @@ export function streamLLMEvents(
   request: LLMRequest,
   gatewayClient: GatewayClient,
   options: { readonly abortSignal?: AbortSignal } = {},
+  observer: LLMServiceStreamObserver = {},
 ): Stream.Stream<LLMEvent, LLMServiceError> {
   return Stream.fromAsyncIterable(
-    streamLLMEventsAsync(request, gatewayClient, options),
+    streamLLMEventsAsync(request, gatewayClient, options, observer),
     (error): LLMServiceError => isLLMServiceError(error) ? error : {
       type: "llm-service",
       error: gatewayStreamFailure(request),
@@ -426,39 +455,124 @@ async function* streamLLMEventsAsync(
   request: LLMRequest,
   gatewayClient: GatewayClient,
   options: { readonly abortSignal?: AbortSignal },
+  observer: LLMServiceStreamObserver,
 ): AsyncGenerator<LLMEvent> {
   const validator = new ProviderStreamValidator(request);
-  const stream = gatewayClient.streamProviderRequest(request, options);
-  let terminalEvent: LLMEvent | undefined;
+  const startedAt = (observer.nowEpochMs ?? Date.now)();
+  let handle: RuntimeGatewayStreamHandle;
   try {
-    for await (const event of Stream.toAsyncIterable(stream)) {
-      const mapped = validator.map(event);
-      if (isRuntimeFailure(mapped)) {
-        yield { type: "provider-error", error: mapped };
-        return;
-      }
-      if (mapped.type === "provider-error" || mapped.type === "finish") {
-        terminalEvent = mapped;
-        continue;
-      }
-      yield mapped;
-    }
-    if (terminalEvent !== undefined) {
-      yield terminalEvent;
-      return;
-    }
-    yield { type: "provider-error", error: gatewayStreamFailure(request) };
+    handle = await gatewayClient.streamProviderRequest(request, options);
   } catch (error) {
     throw {
       type: "llm-service",
       error: gatewayClientFailure(request, error, options.abortSignal),
     } satisfies LLMServiceError;
   }
+  let terminalEvent: LLMEvent | undefined;
+  let completion: RuntimeGatewayStreamCompletion | undefined;
+  let semanticFailure: RuntimeFailure | undefined;
+  try {
+    for await (const event of Stream.toAsyncIterable(handle.events)) {
+      const mapped = validator.map(event);
+      if (isRuntimeFailure(mapped)) {
+        semanticFailure = mapped;
+        handle.cancel("consumer_validation");
+        break;
+      }
+      if (mapped.type === "provider-error" || mapped.type === "finish") {
+        terminalEvent = mapped;
+        try {
+          observer.terminalObserved?.(request, mapped.type === "finish" ? "finish" : "provider_error");
+        } catch {
+          // Observability cannot replace stream settlement.
+        }
+        continue;
+      }
+      yield mapped;
+    }
+    completion = await handle.completion;
+    recordStreamClosed(observer, request, completion, terminalEvent !== undefined, startedAt);
+    if (semanticFailure !== undefined) {
+      yield { type: "provider-error", error: semanticFailure };
+      return;
+    }
+    if (completion.outcome === "eof" && terminalEvent !== undefined) {
+      yield terminalEvent;
+      return;
+    }
+    if (completion.outcome === "completion_deadline") {
+      throw {
+        type: "llm-service",
+        error: gatewayTransportCompletionDeadlineFailure(request),
+      } satisfies LLMServiceError;
+    }
+    if (completion.outcome === "transport_failure") {
+      throw {
+        type: "llm-service",
+        error: gatewayClientFailure(request, completion.error, options.abortSignal),
+      } satisfies LLMServiceError;
+    }
+    if (completion.outcome === "cancelled") {
+      throw {
+        type: "llm-service",
+        error: gatewayClientFailure(request, gatewayCancelledError(), options.abortSignal),
+      } satisfies LLMServiceError;
+    }
+    yield { type: "provider-error", error: gatewayStreamFailure(request) };
+  } finally {
+    if (completion === undefined) {
+      handle.cancel("consumer_early_exit");
+      completion = await handle.completion;
+      recordStreamClosed(observer, request, completion, terminalEvent !== undefined, startedAt);
+    }
+  }
 }
 
 /** Provides the configured LLM service as an Effect layer. */
-export function layer(gatewayClient: GatewayClient): Layer.Layer<Service> {
-  return Layer.succeed(Service, Service.of(createLLMService(gatewayClient)));
+export function layer(gatewayClient: GatewayClient, observer: LLMServiceStreamObserver = {}): Layer.Layer<Service> {
+  return Layer.succeed(Service, Service.of(createLLMService(gatewayClient, observer)));
+}
+
+function recordStreamClosed(
+  observer: LLMServiceStreamObserver,
+  request: ProviderRequest,
+  completion: RuntimeGatewayStreamCompletion,
+  terminalCandidateExisted: boolean,
+  startedAt: number,
+): void {
+  try {
+    observer.streamClosed?.(
+      request,
+      completion,
+      terminalCandidateExisted,
+      Math.max(0, (observer.nowEpochMs ?? Date.now)() - startedAt),
+    );
+  } catch {
+    // Observability cannot replace stream settlement.
+  }
+}
+
+function gatewayCancelledError(): GatewayClientError {
+  return {
+    type: "gateway-client",
+    code: "gateway_cancelled",
+    message: "Gateway provider stream was cancelled.",
+    retryable: false,
+    fatal: false,
+  };
+}
+
+function gatewayTransportCompletionDeadlineFailure(request: ProviderRequest): RuntimeFailure {
+  return RuntimeFailureSchema.parse({
+    type: "runtime",
+    code: "gateway_stream_error",
+    reason: "gateway_transport_completion_deadline",
+    message: "Gateway provider stream did not complete before the Runtime transport deadline.",
+    retryable: true,
+    fatal: false,
+    providerId: request.model?.providerId,
+    modelId: request.model?.modelId,
+  });
 }
 
 function runtimeFailureFromGatewayProviderError(error: GatewayProviderError | undefined): RuntimeFailure {

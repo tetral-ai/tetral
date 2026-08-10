@@ -44,7 +44,7 @@ invariants stated with them.
 | `ContextManager` | `context-manager.ts` | hot `RuntimeMessage` state for one thread | appends only after durable ACK |
 | `ProviderStreamAccumulator` | `accumulator.ts` | request-local provider framing and incremental Assistant member state | created per provider turn at the ThreadLoop boundary, discarded when the turn settles; it never owns or retransmits a complete durable Assistant message |
 | `ToolJob` / `ToolScheduler` | `tool-scheduler.ts` | per-provider-request coordination over `toolJobs[]` | belongs to the active provider request; reads no database, owns no Bridge |
-| `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | recoverable hot state on the parent thread; durable truth is the trunk ledger |
+| `AutoApprovalReviewerManager` | `approval-reviewer-manager.ts` | reviewer trunk + ephemeral sidecars, transcript feed cursor, last-committed snapshot, target-specific decision memo | disposable hot state on the parent thread; each outcome is ACKed on the Reviewer Thread that executed it, while a new hot lifetime re-reviews on a fresh trunk |
 
 Invariants a replacement must preserve:
 
@@ -193,6 +193,12 @@ Invariants a replacement must preserve:
 - Stream events echo the request identity and arrive well-formed: fragments in
   order, one terminal event, each tool call at most once per id; any violation
   closes the turn as a protocol error and discards uncommitted drafts.
+- A validated terminal is held until the Gateway gRPC stream reaches normal
+  EOF. Runtime adapts grpc-js through a Web reader and owns one typed completion
+  latch; EOF without a terminal, transport failure after a terminal, consumer
+  cancellation, or expiry of the request timeout plus the fixed 10-second
+  transport-completion allowance cannot be mistaken for success. Every
+  non-EOF exit cancels the reader and generated call before the latch settles.
 - The stable `tool-call` is the execution boundary; `tool-input` fragments start
   nothing.
 - The next request cannot start until the stream is terminal, the request end is

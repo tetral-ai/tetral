@@ -4,7 +4,7 @@ import { SessionEventWriterRetryPolicy } from "../../src/contracts/runtime.js";
 import { createSessionEventWriter } from "../../src/runtime/session-event-writer.js";
 
 const createdAt = "2026-06-14T00:00:00.000Z";
-const hostileText = "UNIT5_DUMMY_TOKEN_CANARY authorization: bearer raw-secret raw provider payload marker";
+const hostileText = "DUMMY_TOKEN_CANARY authorization: bearer raw-secret raw provider payload marker";
 
 function envelope(writeId = "write-1"): SessionEventEnvelope {
   return {
@@ -175,7 +175,7 @@ describe("SessionEventWriter boundary", () => {
       error: expect.objectContaining({ type: "session-event-writer", code: "unavailable", writeId: "terminal-write" }),
     });
     expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests)).not.toContain("UNIT5_DUMMY_TOKEN_CANARY");
+    expect(JSON.stringify(requests)).not.toContain("DUMMY_TOKEN_CANARY");
     expect(JSON.stringify(requests)).not.toContain("authorization: bearer raw-secret");
     expect(JSON.stringify(requests)).not.toContain("raw provider payload marker");
   });

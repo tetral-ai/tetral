@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 import type { RuntimeModelRef } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type { RuntimeApprovalReviewer, RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
 import { DurableRuntimeMessageSchema, RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
-import type { RuntimeJsonValue, RuntimeMessage, SessionEvent } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
+import type { RuntimeJsonValue, RuntimeMessage, SessionEvent, SessionEventWriterAppendResult } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type { RuntimeAcceptedInputState, RuntimeThreadControlState } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
 import type { ReviewerExecutionToken } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { ApprovalReviewRiskLevel, ApprovalReviewUserAuthorization, ApprovalReviewerOutcome } from "@tetral/agent-runtime-core/src/tools/tool-gate.js";
@@ -189,8 +189,9 @@ export function createRuntimeApprovalReviewer(
       feed.messages,
       feed.reanchored,
     );
-    const trunkCommitInput = { ...input, sessionThreadId: trunkThreadId };
     let sidecarCreated = false;
+    let requestQuiescent = false;
+    let cancelledRequestQuiescent = false;
     let releaseInFinally = true;
     let resourcesReleased = false;
     const releaseResources = () => {
@@ -200,17 +201,29 @@ export function createRuntimeApprovalReviewer(
       resourcesReleased = true;
       lease.release();
     };
+    const failBeforeInputReceipt = (
+      failureKind: ApprovalReviewFailureKind,
+      message: string,
+    ): ApprovalReviewerOutcome => {
+      if (lease.kind === "trunk") {
+        manager.discardTrunk(executionThreadId);
+      }
+      return failWithLog(failureKind, message);
+    };
     const settleCancellation = (): Effect.Effect<void> => Effect.gen(function* () {
       const token = lease.executionToken();
-      if (token !== undefined) {
-        const interrupted = yield* Effect.promise(() => host.interruptReviewerExecution(control, token)).pipe(
-          Effect.catchCause(() => Effect.succeed(undefined)),
-        );
-        if (interrupted === undefined || !interrupted.ok || !interrupted.terminal) {
-          return yield* Effect.never;
+      if (token === undefined) {
+        if (lease.kind === "trunk") {
+          manager.discardTrunk(executionThreadId);
         }
+        return;
       }
-      if (lease.kind === "sidecar" && sidecarCreated) {
+      requestQuiescent = yield* quiesceReviewerRequestEffect(host, control, token);
+      cancelledRequestQuiescent = requestQuiescent;
+      if (!requestQuiescent && lease.kind === "trunk") {
+        manager.discardTrunk(executionThreadId);
+      }
+      if (requestQuiescent && lease.kind === "sidecar" && sidecarCreated) {
         yield* closeApprovalReviewerSidecarEffect(
           host,
           options.threadCreator,
@@ -225,30 +238,49 @@ export function createRuntimeApprovalReviewer(
     const failWithRecord = (
       failureKind: ApprovalReviewFailureKind,
       message: string,
-      ownerSettlement: Effect.Effect<void> | undefined = undefined,
+      ownerSettlement: Effect.Effect<boolean> | undefined = undefined,
     ): Effect.Effect<ApprovalReviewerOutcome> => Effect.gen(function* () {
-      if (!lease.claimOutcome()) {
-        yield* settleCancellation();
-        return { type: "failed", message };
+      let quiescenceAttempted = false;
+      if (ownerSettlement !== undefined) {
+        requestQuiescent = yield* ownerSettlement;
+        cancelledRequestQuiescent = requestQuiescent;
+        quiescenceAttempted = true;
       }
-      const failureCommit = approvalReviewFailureCommitEffect(
-        host,
-        trunkCommitInput,
-        approvalReviewFailureEvent(trunkCommitInput, failureKind, message),
+      const event = approvalReviewFailureEvent(input, failureKind, message);
+      const settlement = yield* commitReviewerOutcomeEffect(
+        () => host.commitApprovalReviewFailure(input, event),
         failureCommitTimeoutMs,
-        lease.kind === "sidecar" && sidecarCreated ? { creation: executionCreation, control } : undefined,
-        options.threadCreator,
-        options.logger,
-        request,
       );
-      yield* manager.fork(
-        (ownerSettlement === undefined
-          ? failureCommit
-          : Effect.all([failureCommit, ownerSettlement], { concurrency: "unbounded" }).pipe(Effect.asVoid)
-        ).pipe(Effect.ensuring(Effect.sync(releaseResources))),
-      );
-      releaseInFinally = false;
-      yield* Effect.yieldNow;
+      if (settlement === "acknowledged" && !lease.claimOutcome()) {
+        yield* settleCancellation();
+        return { type: "failed", message: "approval reviewer was cancelled" };
+      }
+      if ((settlement !== "acknowledged" || !requestQuiescent) && !quiescenceAttempted) {
+        const token = lease.executionToken();
+        if (token !== undefined) {
+          requestQuiescent = yield* quiesceReviewerRequestEffect(host, control, token, failureCommitTimeoutMs);
+          cancelledRequestQuiescent = requestQuiescent;
+          quiescenceAttempted = true;
+        }
+      }
+      if (lease.kind === "sidecar" && sidecarCreated && requestQuiescent &&
+        (settlement === "acknowledged" || cancelledRequestQuiescent)) {
+        yield* closeApprovalReviewerSidecarEffect(
+          host,
+          options.threadCreator,
+          executionCreation,
+          control,
+          options.logger,
+          request,
+          reviewId,
+        );
+      }
+      if (settlement !== "acknowledged") {
+        logApprovalReviewFailure(options.logger, request, reviewId, failureKind, message);
+      }
+      if (lease.kind === "trunk" && (!requestQuiescent || settlement !== "acknowledged")) {
+        manager.discardTrunk(executionThreadId);
+      }
       return { type: "failed", message };
     });
 
@@ -258,7 +290,7 @@ export function createRuntimeApprovalReviewer(
           Effect.catchCause(() => Effect.succeed(undefined)),
         );
         if (created === undefined || !created.ok) {
-          return yield* failWithRecord("runtime_failure", created?.message ?? "approval reviewer sidecar creation failed");
+          return failBeforeInputReceipt("runtime_failure", created?.message ?? "approval reviewer sidecar creation failed");
         }
         sidecarCreated = true;
       }
@@ -271,7 +303,7 @@ export function createRuntimeApprovalReviewer(
           thread: input.thread,
         })).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
       if (preloaded === undefined || (!preloaded.ok && preloaded.reason !== "thread_busy")) {
-        return yield* failWithRecord("runtime_failure", "approval reviewer preload failed");
+        return failBeforeInputReceipt("runtime_failure", "approval reviewer preload failed");
       }
       if (lease.raceState() === "cancellation_won") {
         yield* settleCancellation();
@@ -307,21 +339,6 @@ export function createRuntimeApprovalReviewer(
           yield* Effect.yieldNow;
           return failWithLog("runtime_failure", "approval reviewer input was rejected");
         }
-        if (lease.kind === "sidecar" && sidecarCreated) {
-          yield* manager.fork(
-            closeApprovalReviewerSidecarEffect(
-              host,
-              options.threadCreator,
-              executionCreation,
-              control,
-              options.logger,
-              request,
-              reviewId,
-            ).pipe(Effect.ensuring(Effect.sync(releaseResources))),
-          );
-          releaseInFinally = false;
-          yield* Effect.yieldNow;
-        }
         return failWithLog("runtime_failure", "approval reviewer input was rejected");
       }
       const waitAbortController = new AbortController();
@@ -346,9 +363,10 @@ export function createRuntimeApprovalReviewer(
         return yield* failWithRecord(
           "timeout",
           "approval reviewer timed out",
-          settleTimedOutReviewerOwnerEffect(host, control, executionToken),
+          settleTimedOutReviewerOwnerEffect(host, control, executionToken, failureCommitTimeoutMs),
         );
       }
+      requestQuiescent = true;
       const snapshot = yield* Effect.promise(() => host.inspectReviewerExecution(control, executionToken)).pipe(
         Effect.catchCause(() => Effect.succeed(undefined)),
       );
@@ -359,30 +377,34 @@ export function createRuntimeApprovalReviewer(
       if (decision.type !== "decision") {
         return yield* failWithRecord(decision.failureKind, decision.message);
       }
-      if (!lease.claimOutcome()) {
+      const committed = yield* commitReviewerOutcomeEffect(
+        () => host.commitApprovalReviewDecision(input, approvalReviewDecisionEvent(input, decision)),
+        waitTimeoutMs,
+      );
+      if (committed === "acknowledged" && !lease.claimOutcome()) {
         yield* settleCancellation();
         return { type: "failed" as const, message: "approval reviewer was cancelled" };
       }
-      const committed = yield* Effect.promise(() => host.commitApprovalReviewDecision(trunkCommitInput, approvalReviewDecisionEvent(trunkCommitInput, decision))).pipe(
-        Effect.timeoutOption(`${Math.max(0, waitTimeoutMs)} millis`),
-        Effect.map((result) => result._tag === "Some" ? result.value : undefined),
-        Effect.catchCause(() => Effect.succeed(undefined)),
-      );
-      if (committed === undefined || !committed.ok) {
-        if (lease.kind === "sidecar" && sidecarCreated) {
-          yield* manager.fork(
-            closeApprovalReviewerSidecarEffect(
-              host,
-              options.threadCreator,
-              executionCreation,
-              control,
-              options.logger,
-              request,
-              reviewId,
-            ).pipe(Effect.ensuring(Effect.sync(releaseResources))),
+      if (committed !== "acknowledged") {
+        requestQuiescent = yield* quiesceReviewerRequestEffect(
+          host,
+          control,
+          executionToken,
+          failureCommitTimeoutMs,
+        );
+        if (requestQuiescent && lease.kind === "sidecar" && sidecarCreated) {
+          yield* closeApprovalReviewerSidecarEffect(
+            host,
+            options.threadCreator,
+            executionCreation,
+            control,
+            options.logger,
+            request,
+            reviewId,
           );
-          releaseInFinally = false;
-          yield* Effect.yieldNow;
+        }
+        if (lease.kind === "trunk") {
+          manager.discardTrunk(executionThreadId);
         }
         return failWithLog("runtime_failure", "approval reviewer decision was not acknowledged");
       }
@@ -430,18 +452,9 @@ function settleTimedOutReviewerOwnerEffect(
   host: RuntimeSubAgentRunHost,
   control: RuntimeThreadControlState,
   token: ReviewerExecutionToken,
-): Effect.Effect<void> {
-  return Effect.promise(async () => {
-    const interrupted = await host.interruptReviewerExecution(control, token);
-    if (!interrupted.ok || !interrupted.terminal) {
-      return false;
-    }
-    const waited = await host.waitReviewerExecution(control, token, undefined);
-    return waited.ok && waited.terminal && !waited.timedOut;
-  }).pipe(
-    Effect.catchCause(() => Effect.succeed(false)),
-    Effect.flatMap((settled) => settled ? Effect.void : Effect.never),
-  );
+  timeoutMs: number,
+): Effect.Effect<boolean> {
+  return quiesceReviewerRequestEffect(host, control, token, timeoutMs);
 }
 
 function reviewCacheKey(request: RuntimeApprovalReviewRequest): string {
@@ -682,42 +695,38 @@ function approvalReviewFailureEvent(
   };
 }
 
-function approvalReviewFailureCommitEffect(
-  host: RuntimeSubAgentRunHost,
-  input: Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>,
-  event: ApprovalReviewFailureEvent,
+type ReviewerOutcomeSettlement = "acknowledged" | "rejected" | "unknown";
+
+function commitReviewerOutcomeEffect(
+  write: () => Promise<SessionEventWriterAppendResult>,
   timeoutMs: number,
-  sidecar: { readonly creation: ApprovalReviewerThreadCreation; readonly control: RuntimeThreadControlState } | undefined,
-  threadCreator: RuntimeApprovalReviewerThreadCreator,
-  logger: RuntimePodLogger | undefined,
-  request: RuntimeApprovalReviewRequest,
-): Effect.Effect<void> {
-  return Effect.gen(function* () {
-      const acknowledged = yield* commitApprovalReviewFailureBestEffort(host, input, event, timeoutMs);
-      if (!acknowledged) {
-        logApprovalReviewFailure(logger, request, input.reviewId, event.failure_kind, event.message);
-        if (sidecar !== undefined) {
-          yield* closeApprovalReviewerSidecarEffect(host, threadCreator, sidecar.creation, sidecar.control, logger, request, input.reviewId);
-        }
-        return;
-      }
-      if (sidecar !== undefined) {
-        yield* closeApprovalReviewerSidecarEffect(host, threadCreator, sidecar.creation, sidecar.control, logger, request, input.reviewId);
-      }
-  }).pipe(Effect.catchCause(() => Effect.sync(() => {
-      logApprovalReviewFailure(logger, request, input.reviewId, event.failure_kind, event.message);
-  })));
+): Effect.Effect<ReviewerOutcomeSettlement> {
+  return Effect.promise(write).pipe(
+    Effect.map((result): ReviewerOutcomeSettlement => result.ok ? "acknowledged" : "rejected"),
+    Effect.timeoutOption(`${Math.max(0, timeoutMs)} millis`),
+    Effect.map((result): ReviewerOutcomeSettlement => result._tag === "Some" ? result.value : "unknown"),
+    Effect.catchCause(() => Effect.succeed("unknown" as const)),
+  );
 }
 
-function commitApprovalReviewFailureBestEffort(
+function quiesceReviewerRequestEffect(
   host: RuntimeSubAgentRunHost,
-  input: Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }>,
-  event: ApprovalReviewFailureEvent,
-  timeoutMs: number,
+  control: RuntimeThreadControlState,
+  token: ReviewerExecutionToken,
+  timeoutMs?: number,
 ): Effect.Effect<boolean> {
-  return Effect.promise(() => host.commitApprovalReviewFailure(input, event)).pipe(
-    Effect.map((result) => result.ok),
-    Effect.catchCause(() => Effect.succeed(false)),
+  const settlement = Effect.promise(async () => {
+    const interrupted = await host.interruptReviewerExecution(control, token);
+    if (!interrupted.ok || !interrupted.terminal) {
+      return false;
+    }
+    const waited = await host.waitReviewerExecution(control, token, undefined);
+    return waited.ok && waited.terminal && !waited.timedOut;
+  }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+  if (timeoutMs === undefined) {
+    return settlement;
+  }
+  return settlement.pipe(
     Effect.timeoutOption(`${Math.max(0, timeoutMs)} millis`),
     Effect.map((result) => result._tag === "Some" ? result.value : false),
   );
@@ -758,26 +767,30 @@ function logApprovalReviewFailure(
   message: string,
 ): void {
   const safeMessage = safeReviewFailureMessage(message);
-  logger?.error({
-    event: "approval_review_failure",
-    "event.kind": "approval_review.failure",
-    operation: "approval_review",
-    component: "agent-runtime",
-    "request.id": request.modelRequestId,
-    "workspace.id": request.workspaceId,
-    "session.id": request.sessionId,
-    "thread.id": request.sessionThreadId,
-    "review.id": reviewId,
-    "target.tool_call.id": request.targetModelToolCallId,
-    "target.tool.name": request.targetToolName,
-    "approval.failure_kind": failureKind,
-    message: safeMessage,
-    ...semanticErrorFields({
-      errorClass: "approval_review_failure",
-      errorCode: failureKind,
-      messageSafe: safeMessage,
-    }),
-  });
+  try {
+    logger?.error({
+      event: "approval_review_failure",
+      "event.kind": "approval_review.failure",
+      operation: "approval_review",
+      component: "agent-runtime",
+      "request.id": request.modelRequestId,
+      "workspace.id": request.workspaceId,
+      "session.id": request.sessionId,
+      "thread.id": request.sessionThreadId,
+      "review.id": reviewId,
+      "target.tool_call.id": request.targetModelToolCallId,
+      "target.tool.name": request.targetToolName,
+      "approval.failure_kind": failureKind,
+      message: safeMessage,
+      ...semanticErrorFields({
+        errorClass: "approval_review_failure",
+        errorCode: failureKind,
+        messageSafe: safeMessage,
+      }),
+    });
+  } catch {
+    // Reviewer settlement is authoritative; observability is not part of its custody boundary.
+  }
 }
 
 function safeReviewFailureMessage(message: string): string {

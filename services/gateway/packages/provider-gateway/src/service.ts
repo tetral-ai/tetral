@@ -38,6 +38,7 @@ import { controlProviderStream } from "./providers/stream-control.js";
 import { classifyProviderFailure, PlatformKeyPoolConstants, ProviderKeyFailureError } from "./providers/pool.js";
 import type { ProviderCredentialResolver, ResolvedProviderCredential } from "./providers/credentials.js";
 import type { ProviderErrorInput } from "@tetral/gateway-lowering/src/errors.js";
+import type { ProviderStreamTimeoutKind } from "@tetral/gateway-lowering/src/errors.js";
 import type { ResolvedProviderRequestAttachment } from "@tetral/gateway-lowering/src/request.js";
 import { ProviderGatewayMetricsRegistry } from "./metrics.js";
 
@@ -167,7 +168,9 @@ export class ProviderGatewayServiceShell {
       const finishMetrics = this.metrics.startProviderStream();
       let failed = false;
       const providerAbortController = new AbortController();
-      const providerDeadline = performance.now() + limits.timeoutMs;
+      const providerStartedAt = performance.now();
+      const providerDeadline = providerStartedAt + limits.timeoutMs;
+      let providerTimeoutLogged = false;
       const forwardAbort = (): void => providerAbortController.abort(abortSignal?.reason ?? new DOMException("Provider request cancelled.", "AbortError"));
       if (abortSignal?.aborted === true) {
         forwardAbort();
@@ -180,7 +183,17 @@ export class ProviderGatewayServiceShell {
           caller.serviceAccount.podUid,
           providerAbortController.signal,
           providerDeadline,
-          () => providerAbortController.abort(new DOMException("Provider request timed out.", "AbortError")),
+          (timeout) => {
+            providerAbortController.abort(new DOMException("Provider request timed out.", "AbortError"));
+            if (providerTimeoutLogged) {
+              return;
+            }
+            providerTimeoutLogged = true;
+            logGatewayProviderTimeout(this.options.logger, request, {
+              ...timeout,
+              elapsedMs: performance.now() - providerStartedAt,
+            });
+          },
         )) {
           if (event.type === ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR) {
             failed = true;
@@ -310,7 +323,7 @@ export class ProviderGatewayServiceShell {
     runtimePodUid: string,
     abortSignal: AbortSignal,
     providerDeadline: number,
-    abortOnTimeout: () => void,
+    abortOnTimeout: (timeout: ProviderTimeoutObservation) => void,
   ): AsyncGenerator<ProviderStreamEvent> {
     const catalogError = this.catalogGate(request);
     if (catalogError !== undefined) {
@@ -321,7 +334,7 @@ export class ProviderGatewayServiceShell {
       this.resolveAttachments(request, runtimePodUid, abortSignal),
       abortSignal,
       providerDeadline,
-      abortOnTimeout,
+      () => abortOnTimeout({ kind: "overall_timeout" }),
     );
     if (!attachmentResolution.ok) {
       yield providerErrorEvent(request, attachmentResolution.error);
@@ -366,7 +379,7 @@ export class ProviderGatewayServiceShell {
         this.resolveCredential(request, attemptedPlatformKeyIds, lastPlatformProviderError),
         abortSignal,
         providerDeadline,
-        abortOnTimeout,
+        () => abortOnTimeout({ kind: "overall_timeout" }),
       );
       if (!credential.ok) {
         yield providerErrorEvent(request, credential.error);
@@ -374,6 +387,8 @@ export class ProviderGatewayServiceShell {
       }
       const resolvedCredential = credential.credential;
       let emitted = false;
+      let lastEventAt: number | undefined;
+      let lastEventKind: string | undefined;
       const openFragments = new ProviderOpenFragmentTracker();
       try {
         const providerEvents = controlProviderStream(this.providerStreamer.stream({
@@ -383,7 +398,13 @@ export class ProviderGatewayServiceShell {
           resolvedAttachments: attachmentResolution.attachments,
         }), {
           abortSignal,
-          abortOnTimeout,
+          abortOnTimeout: (kind) => abortOnTimeout({
+            kind,
+            ...(lastEventAt === undefined ? {} : {
+              interEventGapMs: performance.now() - lastEventAt,
+              lastEventKind,
+            }),
+          }),
           ...this.providerStreamTimeouts(providerDeadlineRemainingMs(providerDeadline)),
           overallTimeoutMs: providerDeadlineRemainingMs(providerDeadline),
         });
@@ -393,6 +414,8 @@ export class ProviderGatewayServiceShell {
             throw new GrpcStatusError(status.INTERNAL, "gateway provider stream contract violation");
           }
           emitted = true;
+          lastEventAt = performance.now();
+          lastEventKind = boundedProviderEventKind(event.type);
           openFragments.record(event);
           yield event;
         }
@@ -486,6 +509,65 @@ export class ProviderGatewayServiceShell {
       };
     }
     return undefined;
+  }
+}
+
+interface ProviderTimeoutObservation {
+  readonly kind: ProviderStreamTimeoutKind;
+  readonly interEventGapMs?: number | undefined;
+  readonly lastEventKind?: string | undefined;
+}
+
+function logGatewayProviderTimeout(
+  logger: GatewayLogger,
+  request: ProviderRequest,
+  timeout: ProviderTimeoutObservation & {
+    readonly elapsedMs: number;
+  },
+): void {
+  const kind = timeout.kind === "first_byte_timeout"
+    ? "first_event"
+    : timeout.kind === "inter_chunk_timeout" ? "inter_event" : "overall";
+  try {
+    logger.error({
+      event: "gateway_provider_timeout",
+      "event.kind": "gateway_provider_timeout",
+      operation: "StreamProviderRequest",
+      component: "gateway",
+      ...safeRequestIdentity(request),
+      "timeout.kind": kind,
+      "timeout.elapsed_ms": Math.max(0, Math.round(timeout.elapsedMs)),
+      ...(timeout.interEventGapMs === undefined ? {} : {
+        "timeout.inter_event_gap_ms": Math.max(0, Math.round(timeout.interEventGapMs)),
+      }),
+      ...(timeout.lastEventKind === undefined ? {} : { "stream.last_event.kind": timeout.lastEventKind }),
+      ...semanticErrorFields({
+        errorClass: "provider_timeout",
+        errorCode: "provider_timeout",
+        messageSafe: "provider stream watchdog expired",
+      }),
+    });
+  } catch {
+    // Provider timeout settlement does not depend on observability delivery.
+  }
+}
+
+function boundedProviderEventKind(type: ProviderStreamEventType): string {
+  switch (type) {
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_START: return "text_start";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_DELTA: return "text_delta";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TEXT_END: return "text_end";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_START: return "reasoning_start";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_DELTA: return "reasoning_delta";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_REASONING_END: return "reasoning_end";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_START: return "tool_input_start";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_DELTA: return "tool_input_delta";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_INPUT_END: return "tool_input_end";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_TOOL_CALL: return "tool_call";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_FINISH: return "finish";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_PROVIDER_ERROR: return "provider_error";
+    case ProviderStreamEventType.PROVIDER_STREAM_EVENT_TYPE_ATTACHMENT_REJECTIONS: return "attachment_rejections";
+    default: return "unknown";
   }
 }
 

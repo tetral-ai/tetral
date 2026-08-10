@@ -246,6 +246,86 @@ func TestPostgreSQLBridgeAPIStoreWriteRequestEndPersistsSpanUsageAndCumulativePr
 	}
 }
 
+func TestPostgreSQLInterruptAdmissionAndProviderDeadlineProduceOneDurableRequestEnd(t *testing.T) {
+	for _, interruptFirst := range []bool{true, false} {
+		name := "provider deadline before interrupt"
+		if interruptFirst {
+			name = "interrupt before provider deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtimeDB, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+			const (
+				sessionID      = "sesn_interrupt_request_end_race"
+				threadID       = "thr_interrupt_request_end_race"
+				bindingID      = "bind_interrupt_request_end_race"
+				podUID         = "pod_interrupt_request_end_race"
+				interruptID    = "rin_interrupt_request_end_race"
+				interruptEvent = "evt_interrupt_request_end_race"
+				modelRequestID = "mreq_interrupt_request_end_race"
+			)
+			seedBridgeAPISession(t, admin, "default", sessionID, threadID)
+			seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+			seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, interruptEvent, 1, "user.interrupt", `{"type":"user.interrupt"}`)
+			seedBridgeAPIRuntimeInbox(t, admin, "default", sessionID, threadID, interruptID, "interrupt_control",
+				`["`+interruptEvent+`"]`, "accepted", bindingID, podUID, 1, 1)
+			store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtimeDB))
+			scope := bridgeAPIScope(sessionID, threadID, bindingID, 1, podUID)
+			start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_interrupt_race_start", modelRequestID, "agent_provider_request", 0)
+			interruptAdmission := func() {
+				response, err := store.CommitInputs(context.Background(), &bridgev1.CommitInputsRequest{
+					Scope: scope, RuntimeInputId: interruptID, InputKind: "interrupt_control",
+					EventIds: []string{interruptEvent}, SequenceFrom: 1, SequenceTo: 1,
+				})
+				if err != nil || response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+					t.Fatalf("CommitInputs interrupt = %+v, %v; want committed", response, err)
+				}
+			}
+			interruptEnd := &bridgev1.WriteRequestEndRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_interrupt_winner", ModelRequestId: modelRequestID,
+				ModelRequestStartEventId: start.GetEventId(), RequestKind: "agent_provider_request",
+				FinishReason: "cancelled", UsageJson: `{}`, IsError: true, ErrorKind: "runtime_interrupted",
+			}
+			deadlineEnd := &bridgev1.WriteRequestEndRequest{
+				Scope: scope, RuntimeWriteId: "rwrite_deadline_winner", ModelRequestId: modelRequestID,
+				ModelRequestStartEventId: start.GetEventId(), RequestKind: "agent_provider_request",
+				FinishReason: "error", UsageJson: `{}`, IsError: true, ErrorKind: "gateway_stream_error",
+				Reschedule: &bridgev1.RequestEndReschedule{
+					Attempt: 1, BackoffMs: 1000, Deadline: time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano),
+				},
+			}
+			winner := deadlineEnd
+			loser := interruptEnd
+			wantErrorKind := "gateway_stream_error"
+			if interruptFirst {
+				interruptAdmission()
+				winner, loser = interruptEnd, deadlineEnd
+				wantErrorKind = "runtime_interrupted"
+			}
+			committed, err := store.WriteRequestEnd(context.Background(), winner)
+			if err != nil || committed.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+				t.Fatalf("winner WriteRequestEnd = %+v, %v; want committed", committed, err)
+			}
+			if !interruptFirst {
+				interruptAdmission()
+			}
+			if _, err := store.WriteRequestEnd(context.Background(), loser); status.Code(err) != codes.AlreadyExists {
+				t.Fatalf("loser WriteRequestEnd err = %v; want AlreadyExists", err)
+			}
+
+			var count int
+			var payload string
+			if err := admin.QueryRowContext(context.Background(), `SELECT count(*), max(payload_json)
+				FROM session_events WHERE workspace_id='default' AND session_id=$1 AND session_thread_id=$2
+				AND type='span.model_request_end' AND model_request_id=$3`, sessionID, threadID, modelRequestID).Scan(&count, &payload); err != nil {
+				t.Fatalf("read durable Request End: %v", err)
+			}
+			if count != 1 || testJSONPathString(t, payload, "error_kind") != wantErrorKind {
+				t.Fatalf("durable Request End count/payload = %d/%s; want one %s", count, payload, wantErrorKind)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreWriteRequestEndRejectsWebToolCounters(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_request_end_web_usage", "thr_bridge_request_end_web_usage")

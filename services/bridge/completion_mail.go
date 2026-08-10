@@ -498,28 +498,12 @@ func appendDeclaredCompletionMailForSourceTx(
 		create.SourceEventId != nil || len(create.GetParts()) != 1 {
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail create identity is invalid")
 	}
-	var messageInfo map[string]any
-	if err := json.Unmarshal([]byte(create.GetMessageInfoJson()), &messageInfo); err != nil || messageInfo == nil {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail create info is invalid")
-	}
-	for _, field := range []string{"id", "sessionId", "sequence", "createdAt", "updatedAt", "providerId", "modelId", "parts"} {
-		if _, present := messageInfo[field]; present {
-			return nil, nil, status.Error(codes.InvalidArgument, "completion mail create contains a durable or routing field")
-		}
-	}
-	if messageInfo["role"] != "user" || messageInfo["origin"] != "runtime" || messageInfo["status"] != "completed" {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail draft message is invalid")
+	if _, err := validateRuntimeMessageCreate(create); err != nil {
+		return nil, nil, err
 	}
 	part := create.GetParts()[0]
 	if part == nil || part.GetPartKind() != "text" {
 		return nil, nil, status.Error(codes.InvalidArgument, "completion mail part identity is invalid")
-	}
-	var partInfo struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal([]byte(part.GetPartJson()), &partInfo); err != nil || partInfo.Type != "text" {
-		return nil, nil, status.Error(codes.InvalidArgument, "completion mail part is invalid")
 	}
 
 	parentThreadID, sourceToolUseEventID, targetTaskName, err := completionLineageTx(ctx, tx, scope)
@@ -527,7 +511,7 @@ func appendDeclaredCompletionMailForSourceTx(
 		return nil, nil, err
 	}
 	deliveryID := completionDeliveryID(scope.GetSessionThreadId(), sourceID)
-	messageJSON, err := completionRuntimeMessageJSON(scope.GetSessionId(), deliveryID, partInfo.Text, now)
+	messageJSON, err := completionRuntimeMessageJSON(scope.GetSessionId(), deliveryID, create, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -768,31 +752,39 @@ func completionLineageTx(
 	return parentThreadID, sourceToolUseEventID, targetTaskName, err
 }
 
-func completionRuntimeMessageJSON(sessionID string, deliveryID string, text string, now time.Time) (string, error) {
-	timestamp := now
+func completionRuntimeMessageJSON(sessionID string, deliveryID string, create *bridgev1.RuntimeMessageCreate, now time.Time) (string, error) {
+	message, err := validateRuntimeMessageCreate(create)
+	if err != nil {
+		return "", err
+	}
+	timestamp := now.UTC().Format(time.RFC3339Nano)
 	messageID := "msg_" + deliveryID
-	return marshalBridgeJSON(map[string]any{
-		"id":        messageID,
-		"sessionId": sessionID,
-		"role":      "user",
-		"origin":    "runtime",
-		"sequence":  0,
-		"status":    "completed",
-		"createdAt": timestamp,
-		"updatedAt": timestamp,
-		"parts": []map[string]any{{
-			"id":          messageID + "_text",
-			"sessionId":   sessionID,
-			"messageId":   messageID,
-			"sequence":    0,
-			"createdAt":   timestamp,
-			"updatedAt":   timestamp,
-			"type":        "text",
-			"text":        text,
-			"truncated":   false,
-			"status":      "completed",
-			"completedAt": timestamp,
-		}},
-		"content": []map[string]string{{"type": "text", "text": text}},
-	})
+	parts := make([]any, 0, len(create.GetParts()))
+	content := make([]map[string]string, 0, len(create.GetParts()))
+	for index, partCreate := range create.GetParts() {
+		part, err := validateRuntimePartCreate(partCreate)
+		if err != nil {
+			return "", err
+		}
+		text, ok := part["text"].(string)
+		if partCreate.GetPartKind() != "text" || !ok {
+			return "", status.Error(codes.InvalidArgument, "completion mail part is invalid")
+		}
+		part["id"] = messageID + "_text"
+		part["sessionId"] = sessionID
+		part["messageId"] = messageID
+		part["sequence"] = index
+		part["createdAt"] = timestamp
+		part["updatedAt"] = timestamp
+		parts = append(parts, part)
+		content = append(content, map[string]string{"type": "text", "text": text})
+	}
+	message["id"] = messageID
+	message["sessionId"] = sessionID
+	message["sequence"] = 0
+	message["createdAt"] = timestamp
+	message["updatedAt"] = timestamp
+	message["parts"] = parts
+	message["content"] = content
+	return marshalBridgeJSON(message)
 }

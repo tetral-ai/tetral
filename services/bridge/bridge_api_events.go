@@ -31,7 +31,17 @@ const (
 	maxWebFetchRequestsPerResult  = 8
 )
 
-func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (*bridgev1.WriteEventResponse, error) {
+func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *bridgev1.WriteEventRequest) (response *bridgev1.WriteEventResponse, resultErr error) {
+	evidence := runtimeDeclarationRejectionEvidence{
+		Active:      request.GetAssistantPartAppend() != nil || request.GetToolSettlement() != nil,
+		Kind:        "identity",
+		Operation:   bridgeOpWriteEvent,
+		OperationID: request.GetRuntimeWriteId(),
+	}
+	if appendValue := request.GetAssistantPartAppend(); appendValue != nil && len(appendValue.GetParts()) > 0 && appendValue.GetParts()[0] != nil {
+		evidence.MessageOrPart = appendValue.GetParts()[0].GetPartKind()
+	}
+	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
 	if request.GetRuntimeWriteId() == "" || request.GetEventType() == "" || request.GetPayloadJson() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid write event request")
 	}
@@ -62,6 +72,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		return nil, err
 	}
 	if !json.Valid([]byte(request.GetPayloadJson())) {
+		evidence.Kind = "schema"
 		return nil, status.Error(codes.InvalidArgument, "event payload must be JSON")
 	}
 	payloadJSON := stripInternalProviderFields(request.GetPayloadJson())
@@ -90,6 +101,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 			return nil, status.Errorf(codes.InvalidArgument, "event type %q does not accept a Runtime declaration", request.GetEventType())
 		}
 	}
+	evidence.Kind = "canonicality"
 	declarationDigest, err := writeEventDeclarationDigest(
 		request,
 		payloadJSON,
@@ -115,9 +127,11 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		); err != nil {
 			return err
 		}
+		evidence.Kind = "authorization"
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		evidence.Kind = "transaction"
 		operationSourceKind, err := writeEventOperationSourceKindTx(ctx, tx, request.GetScope(), request.GetEventType())
 		if err != nil {
 			return err
@@ -152,6 +166,7 @@ func (s *PostgreSQLBridgeAPIStore) WriteEvent(ctx context.Context, request *brid
 		if err != nil {
 			return err
 		}
+		evidence.ThreadRole = threadScope.role
 		if request.GetAssistantPartAppend() != nil {
 			if err := verifyModelRequestAcceptsMembersTx(ctx, tx, request.GetScope(), request.GetModelRequestId()); err != nil {
 				return err

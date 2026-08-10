@@ -40,6 +40,8 @@ func TestPostgreSQLCompletionMailPersistsDeclaredEnvelopeVerbatim(t *testing.T) 
 		"the loop authored this body\nverbatim",
 	)
 	request.CompletionMailCreate = bridgeCompletionMailCreateForTest(request.GetScope(), request.GetDurableTurnId(), wantEnvelope)
+	request.CompletionMailCreate.MessageInfoJson = `{"role":"user","origin":"runtime","status":"completed","finishReason":"stop","responseId":"completion_response","usage":{"inputTokens":1,"outputTokens":2,"reasoningTokens":3,"cacheReadTokens":4,"cacheWriteTokens":5}}`
+	request.CompletionMailCreate.Parts[0].PartJson = fmt.Sprintf(`{"type":"text","text":%q,"truncated":true,"status":"failed","startedAt":"2026-01-01T00:00:40Z","completedAt":"2026-01-01T00:00:41Z"}`, wantEnvelope)
 
 	response, err := finishIdleWithStagedCaptureForTest(t, admin, store, request)
 	if err != nil {

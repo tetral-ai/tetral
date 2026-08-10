@@ -20,6 +20,7 @@ import {
 import type {
   ProviderGatewayServiceServer,
   ProviderRequest,
+  ProviderStreamEvent,
 } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { Effect, Stream } from "effect";
 import { RuntimeMessageSchema } from "../../../core/src/contracts/runtime.js";
@@ -39,6 +40,7 @@ import { RuntimePodGatewayClient } from "../../src/gateway-client.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import { BridgeAPIContextLoader } from "../../src/bridge-client.js";
 import { createLLMService } from "../../../core/src/llm/llm-service.js";
+import type { GatewayClientError } from "../../../core/src/llm/llm-service.js";
 
 const CapacityTargetTokens = 1_050_000;
 const RequiredHeadroomRatio = 0.20;
@@ -134,7 +136,7 @@ export async function runGatewayCapacityProof(): Promise<readonly GatewayCapacit
         const captureKey = `${vector.name}:${route.family}`;
         activeCapture = captureKey;
         activeMarkers = vector.wireMarkers;
-        const events = await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(request)));
+          const events = await collectGatewayEvents(client, request);
         if (events.length === 0) {
           throw new Error("capacity proof transport returned no terminal provider event");
         }
@@ -192,7 +194,7 @@ export async function runGatewayCapacityFuseMutation(): Promise<void> {
     metadataFactory: async () => new Metadata(),
   });
   try {
-    await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(requestForRoute(vector.request, CapacityRoutes[0]))));
+      await collectGatewayEvents(client, requestForRoute(vector.request, CapacityRoutes[0]));
   } finally {
     await server.shutdown();
   }
@@ -256,7 +258,7 @@ export async function runGatewayReceiveCapacityFuseMutation(): Promise<void> {
     metadataFactory: async () => new Metadata(),
   });
   try {
-    await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(request)));
+      await collectGatewayEvents(client, request);
   } finally {
     await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
   }
@@ -522,7 +524,7 @@ export async function runMaximumReadTransportProof() {
     metadataFactory: async () => new Metadata(),
   });
   try {
-    await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(request)));
+      await collectGatewayEvents(client, request);
   } finally {
     await server.shutdown();
   }
@@ -586,7 +588,7 @@ export async function runGatewayReceiveFuseProof() {
     metadataFactory: async () => new Metadata(),
   });
   try {
-    return await Effect.runPromise(Stream.runCollect(client.streamProviderRequest(request)).pipe(Effect.flip));
+      return await collectGatewayError(client, request);
   } finally {
     await new Promise<void>((resolve) => server.tryShutdown(() => resolve()));
   }
@@ -1054,6 +1056,34 @@ function maximumReadEnvelope(): string {
 
 function noopUnaryCall(): ClientUnaryCall {
   return { cancel() {} } as ClientUnaryCall;
+}
+
+async function collectGatewayEvents(
+  client: RuntimePodGatewayClient,
+  request: ProviderRequest,
+): Promise<readonly ProviderStreamEvent[]> {
+  const handle = await client.streamProviderRequest(request);
+  const events = Array.from(await Effect.runPromise(Stream.runCollect(handle.events)));
+  const completion = await handle.completion;
+  if (completion.outcome === "transport_failure") {
+    throw completion.error;
+  }
+  if (completion.outcome !== "eof") {
+    throw new Error(`Gateway stream did not complete normally: ${completion.outcome}`);
+  }
+  return events;
+}
+
+async function collectGatewayError(
+  client: RuntimePodGatewayClient,
+  request: ProviderRequest,
+): Promise<GatewayClientError> {
+  try {
+    await collectGatewayEvents(client, request);
+  } catch (error) {
+    return error as GatewayClientError;
+  }
+  throw new Error("Gateway stream unexpectedly completed normally");
 }
 
 function textMessage(id: string, sequence: number, text: string): RuntimeMessage {

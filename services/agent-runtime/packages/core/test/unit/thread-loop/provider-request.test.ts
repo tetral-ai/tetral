@@ -900,11 +900,11 @@ test("deterministic Gateway rejection closes on the first attempt without resche
     });
     expect(requestEnds[0]?.reschedule).toBeUndefined();
 });
-test("pre-event Gateway unavailability uses the existing reschedule budget", async () => {
-    const session = new ThreadRuntime("sesn_gateway_pre_event_unavailable");
+test("Gateway transport completion deadline uses one existing provider reschedule attempt", async () => {
+    const session = new ThreadRuntime("sesn_gateway_completion_deadline");
     const loader = new RecordingContextLoader([], {
         type: "messages",
-        messages: [userMessage("user-gateway-unavailable", 0, "send this request")],
+        messages: [userMessage("user-gateway-completion-deadline", 0, "send this request")],
     });
     const requests: LLMRequest[] = [];
     const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
@@ -938,10 +938,11 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
                     type: "llm-service" as const,
                     error: {
                         type: "runtime" as const,
-                        code: "gateway_unavailable" as const,
-                        message: "Gateway provider stream is unavailable.",
+                        code: "gateway_stream_error" as const,
+                        message: "Gateway provider stream did not complete within its bounded allowance.",
                         retryable: true,
                         fatal: false,
+                        reason: "gateway_transport_completion_deadline" as const,
                     },
                 });
             }
@@ -970,7 +971,75 @@ test("pre-event Gateway unavailability uses the existing reschedule budget", asy
         attempt: 1,
         delayMs: 1_000,
         delaySource: "runtime_fallback",
-        failureCode: "gateway_unavailable",
+        failureCode: "gateway_stream_error",
+    })]);
+});
+test("Gateway provider timeout seals an error and uses one existing provider reschedule attempt", async () => {
+    const session = new ThreadRuntime("sesn_gateway_provider_timeout");
+    const loader = new RecordingContextLoader([], {
+        type: "messages",
+        messages: [userMessage("user-gateway-provider-timeout", 0, "send this request")],
+    });
+    const requestEnds: SessionEventWriterRequestEndEnvelope[] = [];
+    const reschedules: ThreadLoop.RuntimeProviderRescheduleObservation[] = [];
+    const baseWriter = writerFrom((envelope) => ({
+        ok: true,
+        writeId: envelope.writeId,
+        eventId: `bridge-${envelope.writeId}`,
+        processedAt: createdAt,
+    }));
+    const writer: SessionEventWriter = {
+        ...baseWriter,
+        writeRequestEnd: async (envelope) => {
+            requestEnds.push(envelope);
+            return await baseWriter.writeRequestEnd(envelope);
+        },
+    };
+    const success = llmService([
+        { type: "text-start", id: "text_after_provider_timeout" },
+        { type: "text-delta", id: "text_after_provider_timeout", text_delta: "done" },
+        { type: "text-end", id: "text_after_provider_timeout" },
+        { type: "finish", finishReason: "stop" },
+    ]);
+    let attempt = 0;
+    const service: LLMServiceInterface = {
+        stream(request, options) {
+            attempt += 1;
+            if (attempt === 1) {
+                return Stream.fromIterable<LLMEvent>([{
+                    type: "provider-error",
+                    error: runtimeFailureFromProviderError(normalizeProviderError({
+                        code: "provider_timeout",
+                        message: "Provider request timed out.",
+                        retryable: true,
+                        fatal: false,
+                    })),
+                }]);
+            }
+            return success.stream(request, options);
+        },
+    };
+    const result = await Effect.runPromise(Effect.gen(function* () {
+        return yield* (yield* ThreadLoop.Service).run(session, testRunCustody());
+    }).pipe(Effect.provide(runtimeThreadLoopLayer(loader, {
+        writer,
+        llmService: service,
+        runtimePolicy: () => ({ providerRescheduleBudget: 3, compactionRescheduleBudget: 2 }),
+        recordProviderReschedule: (event) => reschedules.push(event),
+    }))));
+
+    expect(result).toMatchObject({ type: "completed", modelMessageCount: 1 });
+    expect(attempt).toBe(2);
+    expect(requestEnds).toHaveLength(2);
+    expect(requestEnds[0]).toMatchObject({
+        isError: true,
+        errorKind: "provider_error",
+        reschedule: { attempt: 1, backoffMs: 1_000 },
+    });
+    expect(requestEnds[1]).toMatchObject({ isError: false });
+    expect(reschedules).toEqual([expect.objectContaining({
+        attempt: 1,
+        failureCode: "provider_timeout",
     })]);
 });
 test("provider reschedule fallback remains 1s 2s 4s before the fourth failure exhausts", async () => {

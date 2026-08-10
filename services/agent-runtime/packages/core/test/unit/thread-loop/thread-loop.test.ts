@@ -773,53 +773,6 @@ test("no accepted pending input performs no durable turn transition", async () =
     expect(result).toEqual({ type: "completed", modelMessageCount: 0 });
     expect(appendedTypes).toEqual([]);
 });
-test("cold reviewer completion settles its durable run and converges to idle", async () => {
-    const session = new ThreadRuntime({
-        workspaceId: "wksp_reviewer_recovery",
-        sessionId: "sesn_reviewer_recovery",
-        sessionThreadId: "thrd_reviewer_recovery",
-        parentThreadId: "thrd_main",
-        threadRole: "approval_reviewer",
-        bindingId: "bind_reviewer_recovery",
-        bindingGeneration: 1,
-        targetPodUid: "pod_reviewer_recovery",
-        runtimeBindingToken: "token_reviewer_recovery",
-    });
-    session.state.installThreadTurn({
-        executionRunId: "event_running_reviewer",
-        pendingInputMessageIds: [],
-        request: {
-            modelRequestId: "request_reviewer",
-            requestStartEventId: "event_start_reviewer",
-            requestKind: "approval_reviewer",
-            contextThroughMessageSequence: 0,
-            requestEnd: {
-                eventId: "event_end_reviewer",
-                isError: false,
-                rescheduled: false,
-            },
-            toolMembers: [],
-        },
-    }, { routes: [] });
-    const result = await Effect.runPromise(Effect.gen(function* () {
-        return yield* (yield* ThreadLoop.Service).run(
-            session,
-            testRunCustody("event_running_reviewer"),
-        );
-    }).pipe(Effect.provide(runtimeThreadLoopLayer(new QueuedContextLoader([], [])))));
-    expect(result).toMatchObject({ type: "completed" });
-    expect(session.state.threadTurnReduction()).toMatchObject({
-        checkpoint: {
-            pendingInputMessageIds: [],
-            idleCloseout: {
-                eventId: expect.any(String),
-                stopReason: "end_turn",
-            },
-        },
-        state: { state: "idle" },
-        action: { action: "await_input" },
-    });
-});
 test("a second warm turn preserves model and ContextManager state without context reads", async () => {
     const loader = new QueuedContextLoader([], []);
     const session = new ThreadRuntime("sesn_1");

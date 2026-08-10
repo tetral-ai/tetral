@@ -27,7 +27,7 @@ import { BridgeAPIApprovalReviewerThreadCreator, BridgeAPIContextLoader, BridgeA
 import { buildRuntimeCoreHosts } from "./core-hosts.js";
 import type { RuntimeCoreHosts } from "./core-hosts.js";
 import { createRuntimeApprovalReviewer, loadApprovalReviewerAssets } from "./approval-reviewer.js";
-import { RuntimePodGatewayClient } from "./gateway-client.js";
+import { RuntimePodGatewayClient, runtimeProviderStreamObserver } from "./gateway-client.js";
 import { gatewayGrpcChannelOptions } from "./bounds.js";
 import { loadRuntimePodConfigFromProcessEnv, parseModelRef } from "./config.js";
 import type { RuntimePodConfig, RuntimePodModelRef } from "./config.js";
@@ -228,7 +228,7 @@ export async function buildRuntimePodCommandDependencies(input: {
             }, { once: true });
         }),
       },
-      llmService: createLLMService(gatewayClient),
+      llmService: createLLMService(gatewayClient, runtimeProviderStreamObserver(input.logger)),
       storeOperationTimeoutMs: 5_000,
       recordProviderReschedule: (event) => {
         input.logger.info(providerRescheduleSelectedLogRecord(event));

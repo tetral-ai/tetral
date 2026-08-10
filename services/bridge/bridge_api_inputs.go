@@ -21,15 +21,27 @@ const (
 
 // This file owns the Bridge inputs protocol-family boundary.
 
-func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *bridgev1.CommitInputsRequest) (*bridgev1.CommitInputsResponse, error) {
+func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *bridgev1.CommitInputsRequest) (response *bridgev1.CommitInputsResponse, resultErr error) {
 	logStartedAt := time.Now()
+	evidence := runtimeDeclarationRejectionEvidence{
+		Active:      len(request.GetMessageCreates()) > 0,
+		Kind:        "identity",
+		Operation:   bridgeOpCommitInputs,
+		OperationID: request.GetRuntimeInputId(),
+	}
+	if creates := request.GetMessageCreates(); len(creates) > 0 && creates[0] != nil {
+		evidence.MessageOrPart = creates[0].GetMessageKind().String()
+	}
+	defer func() { logRuntimeDeclarationRejected(s.Logger, request.GetScope(), evidence, resultErr) }()
 	inputKind := defaultString(request.GetInputKind(), "messages")
 	if request.GetRuntimeInputId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "invalid commit inputs request")
 	}
 	if err := validateCommitInputsRequest(inputKind, request); err != nil {
+		evidence.Kind = "schema"
 		return nil, err
 	}
+	evidence.Kind = "canonicality"
 	key := request.GetRuntimeInputId()
 	declarationDigest, err := commitInputsDeclarationDigest(request, inputKind)
 	if err != nil {
@@ -46,9 +58,11 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := lockRuntimeMutationSessionTx(ctx, tx, request.GetScope().GetWorkspaceId(), request.GetScope().GetSessionId()); err != nil {
 			return err
 		}
+		evidence.Kind = "authorization"
 		if err := verifyRuntimeDeclarationCaller(ctx, request.GetScope()); err != nil {
 			return err
 		}
+		evidence.Kind = "transaction"
 		if existing, ok, err := readBridgeDeclarationOperationTx(
 			ctx,
 			tx,
@@ -76,9 +90,11 @@ func (s *PostgreSQLBridgeAPIStore) CommitInputs(ctx context.Context, request *br
 		if err := verifyRuntimeScopeTx(ctx, tx, request.GetScope()); err != nil {
 			return err
 		}
-		if err := lockThreadMutationOnlyTx(ctx, tx, request.GetScope()); err != nil {
+		threadScope, err := lockThreadMutationTx(ctx, tx, request.GetScope())
+		if err != nil {
 			return err
 		}
+		evidence.ThreadRole = threadScope.role
 		receipt, err = commitInputDeclarationTx(ctx, tx, request, inputKind, key, now)
 		if err != nil {
 			return err

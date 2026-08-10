@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/tetral-ai/tetral/internal/blob"
 	"github.com/tetral-ai/tetral/internal/dbconnect"
 	"github.com/tetral-ai/tetral/internal/eventwire"
+	internalgrpcauth "github.com/tetral-ai/tetral/internal/internalgrpc/auth"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
 	"github.com/tetral-ai/tetral/internal/workspace"
@@ -485,6 +488,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	seedBridgeAPIRuntimeBinding(t, admin, "default", "sesn_bridge_inter_agent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
 	seedBridgeAPIEvent(t, admin, "default", "sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "evt_bridge_inter_agent_spawn", 1, "agent.tool_use", `{}`)
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	store.RuntimeBindingTokenHMACKey = []byte("inter-agent-context-test-key-32b")
 	parentScope := bridgeAPIScope("sesn_bridge_inter_agent", "thr_bridge_inter_agent_parent", "bind_bridge_inter_agent", 1, "pod_uid_inter_agent")
 	if _, err := store.CreateChildThread(context.Background(), &bridgev1.CreateChildThreadRequest{
 		Scope:                   parentScope,
@@ -579,7 +583,7 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	sourceEventID := beforeReceived.GetReceivedEventId()
 	create := bridgeMessageCreateForTest(
 		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
-		"user", "agent", &sourceEventID,
+		"user", "runtime", &sourceEventID,
 		bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"hello child","truncated":false,"status":"completed"}`},
 	)
 	request := &bridgev1.CommitInputsRequest{
@@ -605,6 +609,20 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsInterAgentMessageExactlyOnc
 	}
 	if replay.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
 		t.Fatalf("inter-agent replay ack = %s; want duplicate", replay.GetAck().GetStatus())
+	}
+	loadResponse, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope:          childScope,
+		RuntimeInputId: "rin_bridge_inter_agent_cold_load",
+	})
+	if err != nil {
+		t.Fatalf("LoadContext inter-agent message: %v", err)
+	}
+	var loaded bridgeLoadContextPayload
+	if err := json.Unmarshal([]byte(loadResponse.GetContextJson()), &loaded); err != nil {
+		t.Fatalf("decode inter-agent context: %v", err)
+	}
+	if len(loaded.Messages) != 1 || testJSONPathString(t, string(loaded.Messages[0]), "origin") != "runtime" {
+		t.Fatalf("loaded inter-agent messages = %s; want one runtime-origin message", loadResponse.GetContextJson())
 	}
 	afterReceived, err := store.ResolveInterAgentDelivery(context.Background(), &bridgev1.ResolveInterAgentDeliveryRequest{
 		Scope:         parentScope,
@@ -1020,8 +1038,8 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsCompletionMailOnMainExactly
 	).Scan(&projectedRole, &projectedOrigin); err != nil {
 		t.Fatalf("read main completion message role: %v", err)
 	}
-	if projectedRole != "user" || projectedOrigin != "agent" {
-		t.Fatalf("main completion message role/origin = %q/%q; want user/agent", projectedRole, projectedOrigin)
+	if projectedRole != "user" || projectedOrigin != "runtime" {
+		t.Fatalf("main completion message role/origin = %q/%q; want user/runtime", projectedRole, projectedOrigin)
 	}
 }
 
@@ -1281,18 +1299,46 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		seedBridgeAPISession(t, admin, "default", sessionID, mainID)
 		seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, mainID, reviewerID)
 		seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, bindingID, 1, podUID)
+		var sharedFixture struct {
+			MessageCreate struct {
+				MessageInfo map[string]any `json:"messageInfo"`
+				Part        map[string]any `json:"part"`
+			} `json:"messageCreate"`
+		}
+		fixtureBytes, err := os.ReadFile(filepath.Join("..", "agent-runtime", "testdata", "reviewer-input-declaration.json"))
+		if err != nil {
+			t.Fatalf("read shared reviewer declaration: %v", err)
+		}
+		if err := json.Unmarshal(fixtureBytes, &sharedFixture); err != nil {
+			t.Fatalf("decode shared reviewer declaration: %v", err)
+		}
+		messageInfoJSON, err := json.Marshal(sharedFixture.MessageCreate.MessageInfo)
+		if err != nil {
+			t.Fatalf("encode shared reviewer message info: %v", err)
+		}
+		partJSON, err := json.Marshal(sharedFixture.MessageCreate.Part)
+		if err != nil {
+			t.Fatalf("encode shared reviewer part: %v", err)
+		}
 		request := &bridgev1.CommitInputsRequest{
 			Scope:          bridgeAPIScope(sessionID, reviewerID, bindingID, 1, podUID),
 			RuntimeInputId: inputID,
 			InputKind:      "approval_review",
 			EventIds:       []string{eventID},
-			MessageCreates: []*bridgev1.RuntimeMessageCreate{bridgeMessageCreateForTest(
-				bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT,
-				"user", "user", bridgeAPIString(eventID),
-				bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"approve","truncated":false,"status":"completed"}`},
-			)},
+			MessageCreates: []*bridgev1.RuntimeMessageCreate{{
+				SourceEventId:   bridgeAPIString(eventID),
+				MessageKind:     bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT,
+				MessageInfoJson: string(messageInfoJSON),
+				Parts: []*bridgev1.RuntimePartCreate{{
+					PartKind: "text",
+					PartJson: string(partJSON),
+				}},
+			}},
 		}
 		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		store.RuntimeBindingTokenHMACKey = []byte("reviewer-context-test-key-32byte")
+		var rejectionLogs bytes.Buffer
+		store.Logger = slog.New(slog.NewJSONHandler(&rejectionLogs, nil))
 		response, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
 			t.Fatalf("CommitInputs reviewer input: %v", err)
@@ -1327,6 +1373,37 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 		if got := testJSONPathString(t, payloadJSON, "runtime_input_id"); got != inputID {
 			t.Fatalf("reviewer input runtime_input_id = %q; want %q", got, inputID)
 		}
+		var storedMessageJSON string
+		if err := admin.QueryRowContext(context.Background(),
+			`SELECT data_json
+			   FROM session_messages
+			  WHERE workspace_id = 'default'
+			    AND session_id = $1
+			    AND session_thread_id = $2
+			    AND source_event_id = $3`,
+			sessionID,
+			reviewerID,
+			eventID,
+		).Scan(&storedMessageJSON); err != nil {
+			t.Fatalf("read reviewer input message: %v", err)
+		}
+		assertReviewerInputDeclarationValues(t, storedMessageJSON)
+
+		loadResponse, err := store.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+			Scope:          request.GetScope(),
+			RuntimeInputId: "rin_bridge_reviewer_input_cold_load",
+		})
+		if err != nil {
+			t.Fatalf("LoadContext reviewer input: %v", err)
+		}
+		var loaded bridgeLoadContextPayload
+		if err := json.Unmarshal([]byte(loadResponse.GetContextJson()), &loaded); err != nil {
+			t.Fatalf("decode reviewer input context: %v", err)
+		}
+		if len(loaded.Messages) != 1 {
+			t.Fatalf("loaded reviewer messages = %d; want one", len(loaded.Messages))
+		}
+		assertReviewerInputDeclarationValues(t, string(loaded.Messages[0]))
 
 		replay, err := store.CommitInputs(context.Background(), request)
 		if err != nil {
@@ -1337,6 +1414,34 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			t.Fatalf("reviewer input ACKs = %s/%s; want committed/duplicate", response.GetAck().GetStatus(), replay.GetAck().GetStatus())
 		}
 		assertSingleCommitInputReceipt(t, replay, "approval_review", inputID, eventID)
+		rejectionLogs.Reset()
+		wrongCaller := internalgrpcauth.ContextWithIdentity(context.Background(), internalgrpcauth.Identity{
+			ServiceAccount:   internalgrpcauth.ServiceAccount{Namespace: "tetral-agent-runtime", Name: "agent-runtime"},
+			KubernetesPodUID: "pod_bridge_reviewer_input_other",
+		})
+		if _, err := store.CommitInputs(wrongCaller, request); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("reviewer input wrong-caller err = %v; want PermissionDenied", err)
+		}
+		logText := rejectionLogs.String()
+		if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||
+			!strings.Contains(logText, `"rejection.kind":"authorization"`) || strings.Contains(logText, "approve") {
+			t.Fatalf("reviewer authorization rejection log = %q; want one safe authorization record", logText)
+		}
+		rejectionLogs.Reset()
+		wrongTarget := proto.Clone(request).(*bridgev1.CommitInputsRequest)
+		wrongTarget.Scope = bridgeAPIScope(sessionID, mainID, bindingID, 1, podUID)
+		wrongTarget.RuntimeInputId = "rin_bridge_reviewer_wrong_target"
+		wrongTarget.EventIds = []string{"evt_bridge_reviewer_wrong_target"}
+		wrongTarget.MessageCreates[0].SourceEventId = bridgeAPIString("evt_bridge_reviewer_wrong_target")
+		if _, err := store.CommitInputs(context.Background(), wrongTarget); status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("reviewer input wrong-target err = %v; want FailedPrecondition", err)
+		}
+		logText = rejectionLogs.String()
+		if strings.Count(logText, `"event.kind":"runtime_declaration_rejected"`) != 1 ||
+			!strings.Contains(logText, `"rejection.kind":"lineage"`) ||
+			!strings.Contains(logText, `"thread.role":"main"`) || strings.Contains(logText, "approve") {
+			t.Fatalf("reviewer lineage rejection log = %q; want one safe lineage record", logText)
+		}
 		var eventCount int
 		var messageCount int
 		if err := admin.QueryRowContext(context.Background(),
@@ -1405,6 +1510,28 @@ func TestPostgreSQLBridgeAPIStoreCommitInputsProjectsReviewerAndRejectionDrafts(
 			t.Fatalf("CommitInputs batched rejection receipt = %+v; want two settled sources and projections", response.GetDeclaration())
 		}
 	})
+}
+
+func assertReviewerInputDeclarationValues(t *testing.T, raw string) {
+	t.Helper()
+	var message struct {
+		Role   string `json:"role"`
+		Origin string `json:"origin"`
+		Status string `json:"status"`
+		Parts  []struct {
+			Type      string `json:"type"`
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
+			Status    string `json:"status"`
+		} `json:"parts"`
+	}
+	if err := json.Unmarshal([]byte(raw), &message); err != nil {
+		t.Fatalf("decode reviewer input message: %v", err)
+	}
+	if message.Role != "user" || message.Origin != "runtime" || message.Status != "completed" || len(message.Parts) != 1 ||
+		message.Parts[0].Type != "text" || message.Parts[0].Text != "review this action" || message.Parts[0].Truncated || message.Parts[0].Status != "completed" {
+		t.Fatalf("reviewer input declaration = %+v; want byte-preserved Runtime semantics", message)
+	}
 }
 
 func assertSingleCommitInputReceipt(t *testing.T, response *bridgev1.CommitInputsResponse, sourceKind string, sourceID string, eventID string) {

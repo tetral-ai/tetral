@@ -200,6 +200,20 @@ never fall through into the retryable code and loop forever.
 Each replaceable boundary states its contract, lifecycle, the invariants a
 replacement must preserve, and the conformance suites that prove it.
 
+### Runtime declaration boundary
+
+Runtime owns the business values of every new message and part. It sends the
+already-canonical output of its strict message-create and part-create schemas;
+Bridge rejects unknown, over-bound, durable-identity, or transform-bearing
+non-canonical values and persists accepted declarations unchanged. Bridge adds
+only durable ids, ordering, timestamps, and relational fields. Source kind
+authorizes a message-create kind, while transaction-local checks continue to
+own caller scope, target role, source-event lineage, replay equality, task
+result equality, completion-mail lineage, and Assistant ownership. The same
+part-create validator guards `CommitInputs`, `WriteEvent` Assistant appends,
+and `WriteRequestEnd` trailing appends without merging those writers' separate
+transactions or lifecycle rules.
+
 ### Event-writer boundary
 
 - **Contract.** `WriteEvent` persists one `session_events` row plus the

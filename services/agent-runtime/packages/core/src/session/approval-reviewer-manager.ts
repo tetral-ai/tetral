@@ -1,5 +1,5 @@
 /**
- * This module coordinates recoverable hot state for automatic approval reviews.
+ * This module coordinates disposable hot state for automatic approval reviews.
  * It guards one freshly minted trunk identity per parent hot lifetime, trunk
  * exclusivity, sidecar ownership, outcome-versus-cancellation linearization,
  * transcript cursors, committed snapshots, and memo lifetime.
@@ -31,7 +31,7 @@ export interface ReviewerTrunkSnapshot {
   readonly parentBoundaryEventId: string;
 }
 
-/** Atomic lease used to choose one winner between reviewer outcome and cancellation. */
+/** Atomic lease used to choose one winner between an acknowledged reviewer outcome and cancellation. */
 export interface ApprovalReviewExecutionLease {
   readonly kind: "trunk" | "sidecar";
   readonly installExecutionToken: (token: ReviewerExecutionToken) => boolean;
@@ -72,7 +72,7 @@ interface ParentTranscriptCursor {
   readonly fedEntryCount: number;
 }
 
-// AutoApprovalReviewerManager: recoverable hot state on a public ThreadEntry under
+// AutoApprovalReviewerManager: disposable hot state on a public ThreadEntry under
 // approve_for_me. Reviews run on isolated internal role=approval_reviewer threads that
 // never surface in public event/thread APIs — the trunk by preference, an ephemeral
 // sidecar (seeded from the trunk's last-committed snapshot, or unseeded and fed the
@@ -82,10 +82,12 @@ interface ParentTranscriptCursor {
 //   | state            | meaning                       | writers         | legal transitions                 |
 //   | ---------------- | ----------------------------- | --------------- | --------------------------------- |
 //   | pending          | lease held, outcome undecided | beginReview     | -> outcome_won | cancellation_won |
-//   | outcome_won      | review produced its outcome   | claimOutcome    | terminal                          |
+//   | outcome_won      | durable outcome receipt ACKed | claimOutcome    | terminal                          |
 //   | cancellation_won | parent cancelled / disposed   | cancel, dispose | terminal                          |
-//   The synchronous claim/cancel calls are the linearization point: only the winner
-//   proceeds and cancellation listeners fire exactly once.
+//   The synchronous claim/cancel calls are the linearization point. The reviewer
+//   runner calls claimOutcome only after its durable write receipt arrives, so a
+//   cancellation that wins while that write is in flight prevents parent progress;
+//   cancellation listeners fire exactly once.
 //
 // Parent-transcript feed cursor (parentTranscriptFeed):
 //   - first review on an unseeded thread, or any review after the cursor is lost or
@@ -93,10 +95,10 @@ interface ParentTranscriptCursor {
 //   - a sidecar inherits the trunk snapshot's cursor position;
 //   - every later review -> only the cursor-delta since the last fed position.
 //
-// Recovery fallbacks: cursor or snapshot loss within one hot lifetime falls back to a
+// Hot-lifetime fallbacks: cursor or snapshot loss within one hot lifetime falls back to a
 // full parent-transcript feed, while a cold return creates a new manager and a fresh
-// trunk rather than reloading the predecessor. Memo loss re-reviews, and durable truth
-// is the reviewer ledger. The
+// trunk rather than reloading the predecessor. Memo loss re-reviews; old Reviewer
+// ledgers are historical receipts, never cold-resume input. The
 // last-committed snapshot is captured ONLY at trunk-review completion (never from a
 // running trunk or a request-turn accumulator); a failed trunk review advances
 // neither cursor nor snapshot, so the next review re-feeds the same delta.
@@ -194,6 +196,16 @@ export class AutoApprovalReviewerManager {
           messages: [...this.#lastCommittedTrunkSnapshot.messages],
           parentBoundaryEventId: this.#lastCommittedTrunkSnapshot.parentBoundaryEventId,
         };
+  }
+
+  /** Forgets an unusable trunk after unknown settlement or failed quiescence. */
+  discardTrunk(reviewerThreadId: string): void {
+    if (this.#trunkThreadId !== reviewerThreadId) {
+      return;
+    }
+    this.#trunkThreadId = undefined;
+    this.#feedCursor = undefined;
+    this.#lastCommittedTrunkSnapshot = undefined;
   }
 
   decisionFor(key: string): ApprovalReviewerOutcome | undefined {

@@ -422,6 +422,9 @@ func canonicalRuntimeMessageCreate(create *bridgev1.RuntimeMessageCreate) (any, 
 	if create == nil {
 		return nil, nil
 	}
+	if _, err := validateRuntimeMessageCreate(create); err != nil {
+		return nil, err
+	}
 	messageInfo, err := canonicalRuntimeDeclarationJSON(create.GetMessageInfoJson())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "runtime message create info is invalid")
@@ -452,8 +455,8 @@ func canonicalRuntimeAssistantPartAppend(appendValue *bridgev1.RuntimeAssistantP
 func canonicalRuntimeParts(runtimeParts []*bridgev1.RuntimePartCreate) ([]any, error) {
 	parts := make([]any, 0, len(runtimeParts))
 	for _, part := range runtimeParts {
-		if part == nil {
-			return nil, status.Error(codes.InvalidArgument, "runtime part is invalid")
+		if _, err := validateRuntimePartCreate(part); err != nil {
+			return nil, err
 		}
 		partJSON, err := canonicalRuntimeDeclarationJSON(part.GetPartJson())
 		if err != nil {
@@ -1015,18 +1018,9 @@ func appendRuntimeAssistantMembersTx(
 	textCount := 0
 	partStamps := make([]*bridgev1.DurablePartStamp, 0, len(appendValue.GetParts()))
 	for _, partCreate := range appendValue.GetParts() {
-		if partCreate == nil || !validRuntimePartKind(partCreate.GetPartKind()) {
-			return nil, status.Error(codes.InvalidArgument, "assistant part append contains an invalid part")
-		}
-		var part map[string]any
-		if err := json.Unmarshal([]byte(partCreate.GetPartJson()), &part); err != nil || part == nil ||
-			part["type"] != partCreate.GetPartKind() {
-			return nil, status.Error(codes.InvalidArgument, "assistant part append payload is invalid")
-		}
-		for _, field := range []string{"id", "sessionId", "messageId", "sequence", "createdAt", "updatedAt"} {
-			if _, present := part[field]; present {
-				return nil, status.Error(codes.InvalidArgument, "assistant part append contains a durable field")
-			}
+		part, err := validateRuntimePartCreate(partCreate)
+		if err != nil {
+			return nil, err
 		}
 		if partCreate.GetPartKind() == "tool" {
 			toolCount++
@@ -1360,37 +1354,35 @@ func lockThreadMutationOnlyTx(ctx context.Context, tx *dbconnect.Tx, scope *brid
 	return err
 }
 
-type runtimeMessageCreateClass struct {
+type runtimeMessageCreateRoute struct {
 	Kind        bridgev1.RuntimeMessageCreateKind
-	Role        string
-	Origin      string
 	MessageKind string
 }
 
-func runtimeMessageCreateClassForSource(sourceKind string) (runtimeMessageCreateClass, bool) {
+func runtimeMessageCreateKindForSource(sourceKind string) (runtimeMessageCreateRoute, bool) {
 	switch sourceKind {
 	case "messages":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user", "user", "user"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_USER_INPUT, "user"}, true
 	case "tool_confirmation":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user", "user", "user"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_APPROVAL_INPUT, "user"}, true
 	case "approval_review":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT, "user", "user", "user"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT, "user"}, true
 	case "agent_mail":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT, "user", "agent", "user"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT, "user"}, true
 	case "rejection":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION, "assistant", "agent", "assistant"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_REJECTION, "assistant"}, true
 	case "task_notification":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION, "user", "runtime", "runtime_notification"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TASK_NOTIFICATION, "runtime_notification"}, true
 	case "completion_mail":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL, "user", "runtime", "runtime_notification"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPLETION_MAIL, "runtime_notification"}, true
 	case "agent.thread_context_compacted":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT, "user", "runtime", "compaction"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_COMPACTION_CHECKPOINT, "compaction"}, true
 	case "internal_tool_repair":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR, "assistant", "agent", "assistant"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_INTERNAL_TOOL_REPAIR, "assistant"}, true
 	case "termination":
-		return runtimeMessageCreateClass{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TERMINATION, "assistant", "agent", "assistant"}, true
+		return runtimeMessageCreateRoute{bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_TERMINATION, "assistant"}, true
 	default:
-		return runtimeMessageCreateClass{}, false
+		return runtimeMessageCreateRoute{}, false
 	}
 }
 
@@ -1403,22 +1395,14 @@ func insertRuntimeMessageCreateTx(
 	create *bridgev1.RuntimeMessageCreate,
 	now time.Time,
 ) (*bridgev1.DurableMessageStamp, error) {
-	class, ok := runtimeMessageCreateClassForSource(sourceKind)
+	class, ok := runtimeMessageCreateKindForSource(sourceKind)
 	if !ok || create == nil || create.GetMessageKind() != class.Kind ||
 		(create.SourceEventId != nil && create.GetSourceEventId() != owningEventID) {
 		return nil, status.Error(codes.InvalidArgument, "runtime message create identity is invalid")
 	}
-	var message map[string]any
-	if err := json.Unmarshal([]byte(create.GetMessageInfoJson()), &message); err != nil || message == nil {
-		return nil, status.Error(codes.InvalidArgument, "runtime message create info is invalid")
-	}
-	for _, field := range []string{"id", "sessionId", "sequence", "createdAt", "updatedAt", "providerId", "modelId", "parts"} {
-		if _, present := message[field]; present {
-			return nil, status.Error(codes.InvalidArgument, "runtime message create contains a durable or routing field")
-		}
-	}
-	if message["role"] != class.Role || message["origin"] != class.Origin {
-		return nil, status.Error(codes.InvalidArgument, "runtime message create ownership is invalid")
+	message, err := validateRuntimeMessageCreate(create)
+	if err != nil {
+		return nil, err
 	}
 	var messageSequence int64
 	if err := tx.QueryRow(ctx,
@@ -1434,18 +1418,9 @@ func insertRuntimeMessageCreateTx(
 	parts := make([]any, 0, len(create.GetParts()))
 	partStamps := make([]*bridgev1.DurablePartStamp, 0, len(create.GetParts()))
 	for index, partCreate := range create.GetParts() {
-		if partCreate == nil || !validRuntimePartKind(partCreate.GetPartKind()) {
-			return nil, status.Error(codes.InvalidArgument, "runtime message create part is invalid")
-		}
-		var part map[string]any
-		if err := json.Unmarshal([]byte(partCreate.GetPartJson()), &part); err != nil || part == nil ||
-			part["type"] != partCreate.GetPartKind() {
-			return nil, status.Error(codes.InvalidArgument, "runtime message create part payload is invalid")
-		}
-		for _, field := range []string{"id", "sessionId", "messageId", "sequence", "createdAt", "updatedAt"} {
-			if _, present := part[field]; present {
-				return nil, status.Error(codes.InvalidArgument, "runtime message create part contains a durable field")
-			}
+		part, err := validateRuntimePartCreate(partCreate)
+		if err != nil {
+			return nil, err
 		}
 		partID := id.New("part_")
 		part["id"] = partID
@@ -1584,6 +1559,9 @@ func logRuntimeDeclaration(
 	if logger == nil || scope == nil || ack == nil {
 		return
 	}
+	defer func() {
+		_ = recover()
+	}()
 	eventKind := "runtime_declaration_committed"
 	outcome := "committed"
 	if ack.GetStatus() == bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_DUPLICATE {
@@ -1606,6 +1584,63 @@ func logRuntimeDeclaration(
 		slog.Int64("binding.generation", observation.BindingGeneration),
 		slog.String("outcome", outcome),
 	)
+}
+
+type runtimeDeclarationRejectionEvidence struct {
+	Active        bool
+	Kind          string
+	Operation     string
+	OperationID   string
+	MessageOrPart string
+	ThreadRole    string
+}
+
+func logRuntimeDeclarationRejected(logger *slog.Logger, scope *bridgev1.RuntimeScope, evidence runtimeDeclarationRejectionEvidence, rejection error) {
+	if logger == nil || rejection == nil || !evidence.Active {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	kind := evidence.Kind
+	if status.Code(rejection) == codes.AlreadyExists {
+		kind = "replay_conflict"
+	}
+	if kind == "transaction" {
+		switch status.Code(rejection) {
+		case codes.InvalidArgument, codes.FailedPrecondition, codes.NotFound:
+			kind = "lineage"
+		default:
+			kind = "durable_constraint"
+		}
+	}
+	if kind == "" {
+		kind = "durable_constraint"
+	}
+	attributes := []any{
+		slog.String("operation", evidence.Operation),
+		slog.String("event.kind", "runtime_declaration_rejected"),
+		slog.String("component", ServiceNameBridgeAPI),
+		slog.String("rejection.kind", kind),
+		slog.String("rpc.grpc.status_name", status.Code(rejection).String()),
+	}
+	if scope != nil {
+		attributes = append(attributes,
+			slog.String("workspace.id", scope.GetWorkspaceId()),
+			slog.String("session.id", scope.GetSessionId()),
+			slog.String("thread.id", scope.GetSessionThreadId()),
+		)
+	}
+	if evidence.OperationID != "" {
+		attributes = append(attributes, slog.String("operation.id", evidence.OperationID))
+	}
+	if evidence.MessageOrPart != "" {
+		attributes = append(attributes, slog.String("declaration.kind", evidence.MessageOrPart))
+	}
+	if evidence.ThreadRole != "" {
+		attributes = append(attributes, slog.String("thread.role", evidence.ThreadRole))
+	}
+	logger.Error("runtime declaration rejected", attributes...)
 }
 
 func (s *PostgreSQLBridgeAPIStore) declarationApplicationObservation(

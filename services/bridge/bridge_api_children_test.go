@@ -930,6 +930,96 @@ func TestPostgreSQLBridgeAPIStoreCreateChildThreadEnforcesReviewerTrunkMarker(t 
 	}
 }
 
+func TestValidateApprovalReviewerSidecarCloseRequiresOutcomeOrCancelledRequestAndQuiescence(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_reviewer_close_proof"
+		parentID  = "thr_reviewer_close_parent"
+		reviewID  = "arvw_reviewer_close"
+		requestID = "mreq_reviewer_close"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	scope := bridgeAPIScope(sessionID, parentID, "bind_reviewer_close", 1, "pod_reviewer_close")
+	sidecarID := approvalReviewerSidecarThreadID(scope, parentID, reviewID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, sidecarID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, sidecarID, "evt_reviewer_start", 1, "span.model_request_start",
+		`{"type":"span.model_request_start","request_kind":"approval_reviewer"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id=$4
+		  WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3`,
+		"default", sessionID, "evt_reviewer_start", requestID); err != nil {
+		t.Fatalf("stamp reviewer request start: %v", err)
+	}
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	validate := func() error {
+		return store.withScopeTx(context.Background(), scope, "test.reviewer_close_proof", func(tx *dbconnect.Tx) error {
+			return validateSettledApprovalReviewerCloseTx(context.Background(), tx, scope, sidecarID, reviewID)
+		})
+	}
+	if err := validate(); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("open request close err = %v; want FailedPrecondition", err)
+	}
+
+	seedBridgeAPIEvent(t, admin, "default", sessionID, sidecarID, "evt_reviewer_cancelled", 2, "span.model_request_end",
+		`{"type":"span.model_request_end","request_kind":"approval_reviewer","is_error":true,"error_kind":"runtime_interrupted","finish_reason":"cancelled"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id=$4
+		  WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3`,
+		"default", sessionID, "evt_reviewer_cancelled", requestID); err != nil {
+		t.Fatalf("stamp reviewer request end: %v", err)
+	}
+	if err := validate(); err != nil {
+		t.Fatalf("cancelled quiescent reviewer close: %v", err)
+	}
+}
+
+func TestValidateApprovalReviewerSidecarCloseRequiresOneOutcomeOnTheExecutingThread(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_reviewer_outcome_close"
+		parentID  = "thr_reviewer_outcome_parent"
+		reviewID  = "arvw_reviewer_outcome"
+		requestID = "mreq_reviewer_outcome"
+	)
+	seedBridgeAPISession(t, admin, "default", sessionID, parentID)
+	scope := bridgeAPIScope(sessionID, parentID, "bind_reviewer_outcome", 1, "pod_reviewer_outcome")
+	sidecarID := approvalReviewerSidecarThreadID(scope, parentID, reviewID)
+	seedBridgeAPIInternalReviewerThread(t, admin, "default", sessionID, parentID, sidecarID)
+	seedBridgeAPIEvent(t, admin, "default", sessionID, sidecarID, "evt_reviewer_outcome_start", 1, "span.model_request_start",
+		`{"type":"span.model_request_start","request_kind":"approval_reviewer"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id=$4 WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3`,
+		"default", sessionID, "evt_reviewer_outcome_start", requestID); err != nil {
+		t.Fatalf("stamp reviewer request start: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, sidecarID, "evt_reviewer_outcome_decision", 2, "approval_review.decision",
+		`{"type":"approval_review.decision","review_id":"`+reviewID+`"}`)
+	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	validate := func() error {
+		return store.withScopeTx(context.Background(), scope, "test.reviewer_outcome_close", func(tx *dbconnect.Tx) error {
+			return validateSettledApprovalReviewerCloseTx(context.Background(), tx, scope, sidecarID, reviewID)
+		})
+	}
+	if err := validate(); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("outcome with open request close err = %v; want FailedPrecondition", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, sidecarID, "evt_reviewer_outcome_end", 3, "span.model_request_end",
+		`{"type":"span.model_request_end","request_kind":"approval_reviewer","is_error":false,"finish_reason":"stop"}`)
+	if _, err := admin.ExecContext(context.Background(),
+		`UPDATE session_events SET model_request_id=$4 WHERE workspace_id=$1 AND session_id=$2 AND event_id=$3`,
+		"default", sessionID, "evt_reviewer_outcome_end", requestID); err != nil {
+		t.Fatalf("stamp reviewer request end: %v", err)
+	}
+	if err := validate(); err != nil {
+		t.Fatalf("quiescent single-outcome reviewer close: %v", err)
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, sidecarID, "evt_reviewer_outcome_failure", 4, "approval_review.failure",
+		`{"type":"approval_review.failure","review_id":"`+reviewID+`"}`)
+	if err := validate(); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("competing reviewer outcomes close err = %v; want FailedPrecondition", err)
+	}
+}
+
 func TestPostgreSQLBridgeAPIStoreCreateChildThreadConcurrentReviewerTrunkReplay(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_reviewer_replay_race", "thr_bridge_reviewer_replay_parent")

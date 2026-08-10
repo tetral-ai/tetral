@@ -805,23 +805,16 @@ func validateTaskNotificationCreate(
 		create.SourceEventId != nil || len(create.GetParts()) != 1 {
 		return status.Error(codes.InvalidArgument, "task notification create identity is invalid")
 	}
-	var messageInfo map[string]any
-	if err := json.Unmarshal([]byte(create.GetMessageInfoJson()), &messageInfo); err != nil ||
-		len(messageInfo) != 3 ||
-		messageInfo["role"] != "user" ||
-		messageInfo["origin"] != "runtime" ||
-		messageInfo["status"] != "completed" {
-		return status.Error(codes.InvalidArgument, "task notification create message is invalid")
+	if _, err := validateRuntimeMessageCreate(create); err != nil {
+		return err
 	}
 	part := create.GetParts()[0]
 	if part == nil ||
 		part.GetPartKind() != "text" {
 		return status.Error(codes.InvalidArgument, "task notification create part identity is invalid")
 	}
-	var partInfo map[string]any
-	if err := json.Unmarshal([]byte(part.GetPartJson()), &partInfo); err != nil ||
-		len(partInfo) != 4 ||
-		partInfo["type"] != "text" ||
+	partInfo, err := validateRuntimePartCreate(part)
+	if err != nil ||
 		partInfo["text"] != resultJSON ||
 		partInfo["truncated"] != false ||
 		partInfo["status"] != "completed" {

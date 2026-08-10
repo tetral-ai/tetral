@@ -6,6 +6,7 @@ import {
   DurableEventDisposition,
   DurableProjectionDisposition,
   ReceiptApplicationDisposition,
+  RuntimeMessageCreateKind,
 } from "@tetral/agent-runtime-protocol/src/gen-bridge/tetral/bridge/v1/bridge.js";
 import type {
   AgentRuntimeBridgeServiceClient,
@@ -24,6 +25,7 @@ import type {
 import type {
   RuntimeAcceptedInputState,
 } from "@tetral/agent-runtime-core/src/thread-loop/thread-state.js";
+import { RuntimeMessageSchema } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import {
   acceptedInputCreates,
   runtimeInternalToolRepairCreate,
@@ -124,6 +126,40 @@ describe("Bridge runtime declaration adapters", () => {
       fatal: true,
     });
     expect(bridge.commitTaskNotificationRequests).toHaveLength(1);
+  });
+
+  test("lowers the shared reviewer declaration through the production CommitInputs adapter", async () => {
+    const fixture = await Bun.file(new URL("../../../../testdata/reviewer-input-declaration.json", import.meta.url)).json() as {
+      message: unknown;
+      messageCreate: { messageInfo: unknown; part: unknown };
+    };
+    const bridge = new DeclarationBridge();
+    const loader = new BridgeAPIContextLoader(options(bridge));
+    const input: Extract<RuntimeAcceptedInputState, { readonly kind: "approval_review" }> = {
+      ...control("rin_reviewer_shared"),
+      kind: "approval_review",
+      reviewId: "review_shared",
+      parentThreadId: "thrd_parent",
+      targetModelToolCallId: "tool_call_shared",
+      targetToolName: "Write",
+      promptItems: [RuntimeMessageSchema.parse(fixture.message)],
+      outputSchemaJson: `{"type":"object"}`,
+      thread: {
+        parentThreadId: "thrd_parent",
+        role: "approval_reviewer",
+        visibility: "internal",
+        agentType: "approval_reviewer",
+        status: "idle",
+      },
+    };
+
+    const result = await loader.commitAcceptedInput(input, { messageCreates: acceptedInputCreates(input) });
+
+    expect(result).toMatchObject({ type: "receipt", inputDisposition: "committed" });
+    const lowered = bridge.commitInputsRequests[0]?.messageCreates[0];
+    expect(lowered?.messageKind).toBe(RuntimeMessageCreateKind.RUNTIME_MESSAGE_CREATE_KIND_REVIEWER_INPUT);
+    expect(JSON.parse(lowered?.messageInfoJson ?? "null")).toEqual(fixture.messageCreate.messageInfo);
+    expect(JSON.parse(lowered?.parts[0]?.partJson ?? "null")).toEqual(fixture.messageCreate.part);
   });
 
   test("commits interrupt intent without a client-owned Tool census", async () => {
@@ -428,7 +464,12 @@ class DeclarationBridge {
 
   private commitInputs(request: CommitInputsRequest, _metadata: Metadata, _options: CallOptions, callback: (error: Error | null, response: unknown) => void): unknown {
     this.commitInputsRequests.push(request);
-    const events = request.eventIds.map((eventId, index) => this.event(request, eventId, request.sequenceFrom + index, "existing"));
+    const events = request.eventIds.map((eventId, index) => this.event(
+      request,
+      eventId,
+      request.sequenceFrom + index,
+      request.inputKind === "approval_review" ? "created" : "existing",
+    ));
     callback(null, response(request, request.runtimeInputId, [receipt({
       request,
       operationKind: "commit_inputs",

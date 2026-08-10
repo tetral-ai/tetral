@@ -364,6 +364,7 @@ describe("ProviderGatewayServiceShell", () => {
   });
 
   test("first normalized event timeout produces a retryable terminal provider-error", async () => {
+    const logs: unknown[] = [];
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     let aborted = false;
     let release!: () => void;
@@ -373,6 +374,7 @@ describe("ProviderGatewayServiceShell", () => {
       limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       providerStreamTimeouts: { firstByteTimeoutMs: 5, interChunkTimeoutMs: 500 },
       providerStreamer: {
         stream: async function* (input) {
@@ -398,9 +400,18 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 504,
     });
     expect(aborted).toBe(true);
+    expect(logs.filter((record) => (record as { readonly event?: unknown }).event === "gateway_provider_timeout")).toEqual([
+      expect.objectContaining({
+        "timeout.kind": "first_event",
+        "timeout.elapsed_ms": expect.any(Number),
+        "error.class": "provider_timeout",
+        "error.code": "provider_timeout",
+      }),
+    ]);
   });
 
   test("inter-chunk timeout produces a retryable terminal provider-error after prior progress", async () => {
+    const logs: unknown[] = [];
     const base = validProviderRequest({ model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" } });
     let aborted = false;
     let release!: () => void;
@@ -410,6 +421,13 @@ describe("ProviderGatewayServiceShell", () => {
       limits: { maxOutputTokens: 1024, timeoutMs: 1_000 },
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: {
+        info: () => undefined,
+        error: (record) => {
+          logs.push(record);
+          throw new Error("logging sink unavailable");
+        },
+      },
       providerStreamTimeouts: { firstByteTimeoutMs: 500, interChunkTimeoutMs: 5 },
       providerStreamer: {
         stream: async function* (input) {
@@ -437,6 +455,17 @@ describe("ProviderGatewayServiceShell", () => {
       statusCode: 504,
     });
     expect(aborted).toBe(true);
+    expect(logs).toEqual([
+      expect.objectContaining({
+        event: "gateway_provider_timeout",
+        "timeout.kind": "inter_event",
+        "timeout.elapsed_ms": expect.any(Number),
+        "timeout.inter_event_gap_ms": expect.any(Number),
+        "stream.last_event.kind": "text_start",
+      }),
+      expect.objectContaining({ event: "provider_request_streamed" }),
+    ]);
+    expect(JSON.stringify(logs)).not.toContain("Provider stream stalled before the next chunk.");
   });
 
   test("abort mid-body errors the provider stream instead of hanging", async () => {
@@ -1175,6 +1204,7 @@ describe("ProviderGatewayServiceShell", () => {
   });
 
   test("overall timeout includes attachment resolution", async () => {
+    const logs: unknown[] = [];
     const attachment = validProviderAttachment();
     const base = validProviderRequest({
       model: { providerId: "anthropic", modelId: "claude-opus-4-8", variant: "" },
@@ -1186,6 +1216,7 @@ describe("ProviderGatewayServiceShell", () => {
       runtimeBindingToken: signedRuntimeBindingToken(base, RuntimePodUid),
     });
     const service = createService(new RecordingAuthenticator(), true, { verify: () => true }, {
+      logger: { info: (record) => logs.push(record), error: (record) => logs.push(record) },
       attachmentResolver: { resolve: async () => never() },
     });
 
@@ -1193,6 +1224,9 @@ describe("ProviderGatewayServiceShell", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0]?.providerError?.error).toMatchObject({ code: "provider_timeout", statusCode: 504 });
+    expect(logs.filter((record) => (record as { readonly event?: unknown }).event === "gateway_provider_timeout")).toEqual([
+      expect.objectContaining({ "timeout.kind": "overall", "timeout.elapsed_ms": expect.any(Number) }),
+    ]);
   });
 
   test("overall timeout includes credential resolution", async () => {

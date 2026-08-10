@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { status } from "@grpc/grpc-js";
 import { Effect, Stream } from "effect";
+import { ProviderRequestKind } from "@tetral/gateway-protocol/src/gen/tetral/provider_gateway/v1/provider_gateway.js";
 import { RuntimeInternalToolRepairStore, normalizeContextLoaderError } from "@tetral/agent-runtime-core/src/contracts/runtime.js";
 import type {
   DurableRuntimeMessage,
@@ -14,6 +15,11 @@ import type { RuntimeControlInputDeclaration } from "@tetral/agent-runtime-core/
 import { createToolCatalog, lookupToolEntry } from "@tetral/agent-runtime-core/src/tools/tool-catalog.js";
 import type { RuntimeCoreHostsOptions } from "../../src/core-hosts.js";
 import { buildRuntimeCoreHosts } from "../../src/core-hosts.js";
+import { createRuntimeApprovalReviewer } from "../../src/approval-reviewer.js";
+import type { ApprovalReviewerThreadCreation } from "../../src/approval-reviewer.js";
+import { AutoApprovalReviewerManager } from "@tetral/agent-runtime-core/src/session/approval-reviewer-manager.js";
+import type { RuntimeApprovalReviewRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import { DefaultProviderCallRuntimeConfig } from "@tetral/agent-runtime-core/src/thread-loop/provider-request.js";
 import { runtimeModelForThread, runtimeToolPolicyForThread } from "../../src/command.js";
 import {
   buildCoreHostsUserMessage as userMessage,
@@ -116,6 +122,106 @@ function turnFactsForPendingTool(input: {
 }
 
 describe("Runtime core host production assembly", () => {
+  test("reviewer input receipt starts one reviewer request and settles the parent gate once", async () => {
+    const observations: string[] = [];
+    const providerRequests: Array<{ readonly requestKind: ProviderRequestKind }> = [];
+    const appended: SessionEvent[] = [];
+    let inputCommits = 0;
+    let nextEventSequence = 2;
+    let nextMessageSequence = 2;
+    const baseWriter = writerFrom((envelope) => {
+      appended.push(envelope.event);
+      const result = successfulEventAppend(envelope);
+      if (!result.ok || result.declaration === undefined) {
+        throw new Error("composed reviewer writer requires a declaration receipt");
+      }
+      return {
+        ...result,
+        declaration: {
+          ...result.declaration,
+          receipt: {
+            ...result.declaration.receipt,
+            events: result.declaration.receipt.events.map((event) => ({ ...event, eventSequence: nextEventSequence++ })),
+            messages: result.declaration.receipt.messages.map((message) => ({ ...message, messageSequence: nextMessageSequence++ })),
+          },
+        },
+      };
+    });
+    const hosts = await buildRuntimeCoreHosts({
+      maxLocalSessions: 4,
+      now: () => "2026-08-11T00:00:00.000Z",
+      ...testCoreDependencies({
+        contextLoader: {
+          loadThreadContext: async () => ({
+            messages: [],
+            turnFacts: emptyTurnFacts,
+            runtimeBindingToken: "runtime-binding-token-reviewer-composed",
+            coldCoverage: emptyColdCoverage,
+          }),
+          commitAcceptedInput: async (input) => {
+            inputCommits += 1;
+            observations.push("input-receipt");
+            return acceptedInputReceipt(input);
+          },
+        },
+        threadLoop: {
+          sessionEventWriter: baseWriter,
+          providerCallRuntime: {
+            ...DefaultProviderCallRuntimeConfig,
+            approvalReviewerPolicy: "Review the proposed action and return the required decision JSON.",
+            timeoutMs: 1_000,
+          },
+          llmService: {
+            stream: (request) => {
+              providerRequests.push(request);
+              observations.push("provider-request");
+              return Stream.fromIterable([
+                { type: "text-start" as const, id: "review-decision" },
+                { type: "text-delta" as const, id: "review-decision", text_delta: JSON.stringify({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "composed allow" }) },
+                { type: "text-end" as const, id: "review-decision" },
+                { type: "finish" as const, finishReason: "stop" as const },
+              ]);
+            },
+          },
+        },
+      }),
+    });
+    const threadCreator = {
+      createApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+      closeApprovalReviewerThread: async (_input: ApprovalReviewerThreadCreation) => ({ ok: true as const }),
+    };
+    try {
+      const reviewerHost = {
+        ...hosts.subAgentRunHost,
+        inspectReviewerExecution: async (...args: Parameters<typeof hosts.subAgentRunHost.inspectReviewerExecution>) => {
+          const result = await hosts.subAgentRunHost.inspectReviewerExecution(...args);
+          observations.push(`inspect:${result.ok ? String(result.observed) : result.reason}`);
+          return result;
+        },
+      };
+      const reviewer = createRuntimeApprovalReviewer(() => reviewerHost, {
+        model: { providerId: "anthropic", modelId: "claude-opus-4-8" },
+        threadCreator,
+        now: () => "2026-08-11T00:00:00.000Z",
+        waitTimeoutMs: 2_000,
+      });
+      const result = await bounded("composed reviewer progression", Effect.runPromise(reviewer(composedReviewRequest())));
+      if (result.type !== "decision") {
+        throw new Error(`composed reviewer failed: ${JSON.stringify({ result, observations, appended })}`);
+      }
+
+      expect(result).toMatchObject({ type: "decision", outcome: "allow", message: "composed allow" });
+      expect(inputCommits).toBe(1);
+      expect(observations).toEqual(["input-receipt", "provider-request", "inspect:true"]);
+      expect(providerRequests).toHaveLength(1);
+      expect(providerRequests[0]?.requestKind).toBe(ProviderRequestKind.PROVIDER_REQUEST_KIND_APPROVAL_REVIEWER);
+      expect(appended.filter((event) => event.type === "span.model_request_start")).toHaveLength(1);
+      expect(appended.filter((event) => event.type === "approval_review.decision")).toHaveLength(1);
+    } finally {
+      await hosts.close();
+    }
+  });
+
   test("resident threads admit stored completion envelopes through the local command channel", async () => {
     const hosts = await buildRuntimeCoreHosts({
       maxLocalSessions: 4,
@@ -1210,6 +1316,29 @@ function acceptedInput(sessionId: string) {
     payloadJson: JSON.stringify({
       messages: [userMessage(sessionId, "msg_rin_1", 1, "test input")],
     }),
+  };
+}
+
+function composedReviewRequest(): RuntimeApprovalReviewRequest {
+  const sessionId = "sesn_reviewer_composed";
+  return {
+    workspaceId: "wksp_1",
+    sessionId,
+    sessionThreadId: "thrd_reviewer_parent",
+    bindingId: "bind_reviewer_composed",
+    bindingGeneration: 1,
+    targetPodUid: "pod_reviewer_composed",
+    runtimeBindingToken: "runtime-binding-token-reviewer-composed",
+    modelRequestId: "mreq_reviewer_parent",
+    targetModelToolCallId: "tool_call_reviewer_composed",
+    targetToolName: "Write",
+    actionJson: { path: "src/a.ts", content: "ok" },
+    approvalReviewerManager: new AutoApprovalReviewerManager(),
+    parentTranscript: { generation: 1, messages: [durableBridgeRuntimeMessage(sessionId, "review this action")] },
+    currentProviderRequestMessages: [],
+    siblingToolCalls: [{ modelToolCallId: "tool_call_reviewer_composed", toolName: "Write", actionJson: { path: "src/a.ts", content: "ok" } }],
+    policyContext: { approvalMode: "approve_for_me", permissionPolicy: "always_ask" },
+    currentModel: { providerId: "anthropic", modelId: "claude-opus-4-8" },
   };
 }
 

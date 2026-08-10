@@ -35,6 +35,8 @@ func TestPostgreSQLBridgeAPIStoreRejectsClosedDeclarationCarrierMatrixBeforeMuta
 	start := seedBridgeAPIRequestStart(t, store, scope, "rwrite_declaration_carrier_start", modelRequestID, "agent_provider_request", 0)
 	appendDeclaration := bridgeRuntimeOutputAppendForTest(t, scope, "carrier_matrix", "agent.message", "streaming",
 		bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"x","truncated":false,"status":"completed"}`})
+	unsafeIntegerAppend := bridgeRuntimeOutputAppendForTest(t, scope, "carrier_matrix_unsafe_integer", "agent.message", "streaming",
+		bridgeRuntimePartCreateForTest{kind: "step-start", json: `{"type":"step-start","stepIndex":9007199254740992}`})
 	settlement := bridgeCompletedToolSettlementForTest("tool_carrier_matrix", "done")
 
 	tests := []struct {
@@ -59,6 +61,10 @@ func TestPostgreSQLBridgeAPIStoreRejectsClosedDeclarationCarrierMatrixBeforeMuta
 		}},
 		{name: "unrelated event carries declaration", call: func() error {
 			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_unrelated", ModelRequestId: modelRequestID, EventType: "agent.thinking", PayloadJson: `{"type":"agent.thinking"}`, Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: appendDeclaration}})
+			return err
+		}},
+		{name: "Assistant event carries unsafe integer", call: func() error {
+			_, err := store.WriteEvent(context.Background(), &bridgev1.WriteEventRequest{Scope: scope, RuntimeWriteId: "carrier_unsafe_integer", ModelRequestId: modelRequestID, EventType: "agent.message", PayloadJson: `{"type":"agent.message","content":[]}`, Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: unsafeIntegerAppend}})
 			return err
 		}},
 		{name: "ordinary Request End carries compaction create", call: func() error {
@@ -249,8 +255,8 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningTracksDurableMembersAndTargetedS
 			Scope: scope, RuntimeWriteId: writeID, ModelRequestId: requestID,
 			EventType: "agent.tool_use", PayloadJson: fmt.Sprintf(`{"type":"agent.tool_use","name":"Read","input":{"path":%q},"evaluated_permission":"allow"}`, callID),
 			Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, writeID, "agent.tool_use", "streaming",
-				bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":%q,"text":%q,"providerMetadata":{},"truncated":false}`, reasoningID, reasoningText)},
-				bridgeRuntimePartCreateForTest{kind: "tool", json: fmt.Sprintf(`{"type":"tool","toolCallId":%q,"toolName":"Read","state":{"status":"running","input":{"value":{"path":%q}}}}`, callID, callID)},
+				bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":%q,"text":%q,"providerMetadata":{},"truncated":false,"status":"completed"}`, reasoningID, reasoningText)},
+				bridgeRuntimePartCreateForTest{kind: "tool", json: fmt.Sprintf(`{"type":"tool","toolCallId":%q,"toolName":"Read","state":{"status":"running","input":{"value":{"path":%q},"preview":%q,"truncated":false}}}`, callID, callID, `{"path":"`+callID+`"}`)},
 			)},
 		}
 		response, err := store.WriteEvent(context.Background(), request)
@@ -437,7 +443,7 @@ func TestPostgreSQLBridgeAPIStoreStableReasoningEnforcesCumulativeBoundsAtomical
 				if err != nil {
 					t.Fatal(err)
 				}
-				parts = append(parts, bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider-%d","text":%s,"providerMetadata":{},"truncated":false}`, i, encodedText)})
+				parts = append(parts, bridgeRuntimePartCreateForTest{kind: "reasoning", json: fmt.Sprintf(`{"type":"reasoning","providerPartId":"provider-%d","text":%s,"providerMetadata":{},"truncated":false,"status":"completed"}`, i, encodedText)})
 			}
 			parts = append(parts, bridgeRuntimePartCreateForTest{kind: "text", json: `{"type":"text","text":"anchor","truncated":false,"status":"completed"}`})
 			request := &bridgev1.WriteEventRequest{
@@ -494,8 +500,8 @@ func TestPostgreSQLBridgeAPIStoreFailedAndRescheduledEndsDoNotPublishStableReaso
 				Scope: scope, RuntimeWriteId: "rwrite_reasoning_member_" + name, ModelRequestId: requestID,
 				EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
 				Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(t, scope, "", "", "",
-					bridgeRuntimePartCreateForTest{kind: "reasoning", json: `{"type":"reasoning","providerPartId":"provider-reasoning","text":"anchored","providerMetadata":{},"truncated":false}`},
-					bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call-reasoning-end","toolName":"Read","state":{"status":"running","input":{"value":{}}}}`},
+					bridgeRuntimePartCreateForTest{kind: "reasoning", json: `{"type":"reasoning","providerPartId":"provider-reasoning","text":"anchored","providerMetadata":{},"truncated":false,"status":"completed"}`},
+					bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call-reasoning-end","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 				)},
 			})
 			if err != nil {
@@ -568,13 +574,13 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsAssistantMembersOutsideOpenReq
 					request.PayloadJson = `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`
 					request.Declaration = &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 						t, scope, request.GetRuntimeWriteId(), eventType, "streaming",
-						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{}}}}`},
+						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 					)}
 				case "agent.mcp_tool_use":
 					request.PayloadJson = `{"type":"agent.mcp_tool_use","name":"search","input":{},"mcp_server_name":"github","evaluated_permission":"allow"}`
 					request.Declaration = &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 						t, scope, request.GetRuntimeWriteId(), eventType, "streaming",
-						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_mcp_membership","toolName":"search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{}}}}`},
+						bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_mcp_membership","toolName":"search","toolEvent":{"kind":"mcp","mcpServerName":"github"},"state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 					)}
 				}
 
@@ -713,7 +719,7 @@ func TestPostgreSQLBridgeAPIStoreWriteEventRejectsOrphanAndDuplicateToolResults(
 		EventType: "agent.tool_use", PayloadJson: `{"type":"agent.tool_use","name":"Read","input":{},"evaluated_permission":"allow"}`,
 		Declaration: &bridgev1.WriteEventRequest_AssistantPartAppend{AssistantPartAppend: bridgeRuntimeOutputAppendForTest(
 			t, scope, "rwrite_tool_result_membership_use", "agent.tool_use", "streaming",
-			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{}}}}`},
+			bridgeRuntimePartCreateForTest{kind: "tool", json: `{"type":"tool","toolCallId":"call_membership","toolName":"Read","state":{"status":"running","input":{"value":{},"preview":"{}","truncated":false}}}`},
 		)},
 	})
 	if err != nil {

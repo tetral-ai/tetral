@@ -172,7 +172,7 @@ func bridgeAgentMailCommitRequestForTest(
 	create := bridgeMessageCreateForTest(
 		bridgev1.RuntimeMessageCreateKind_RUNTIME_MESSAGE_CREATE_KIND_AGENT_MAIL_INPUT,
 		"user",
-		"agent",
+		"runtime",
 		&eventID,
 		bridgeRuntimePartCreateForTest{kind: "text", json: fmt.Sprintf("{\"type\":\"text\",\"text\":%q,\"truncated\":false,\"status\":\"completed\"}", message.Parts[0].Text)},
 	)
