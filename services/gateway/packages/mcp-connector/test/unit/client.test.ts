@@ -392,13 +392,9 @@ describe("McpSDKClient", () => {
   test("refreshes once and retries when an established MCP call returns 401", async () => {
     const credentials = new RotatingCredentialResolver(["token-a"], ["token-b"]);
     const clients: RecordingSDKClient[] = [];
-    const refreshAttempts: string[] = [];
     const client = new McpSDKClient({
       credentialResolver: credentials,
       onToolsListChanged: async () => undefined,
-      onRefreshAttempt: (outcome) => {
-        refreshAttempts.push(outcome);
-      },
       createClient: () => {
         const sdk = new RecordingSDKClient();
         if (clients.length === 0) {
@@ -426,7 +422,6 @@ describe("McpSDKClient", () => {
       credentialId: "cred_1",
       previousTokenHash: "token-a",
     });
-    expect(refreshAttempts).toEqual(["success"]);
     expect(clients).toHaveLength(2);
     expect(clients[0]?.closed).toBe(true);
     expect(client.connectionCount()).toBe(1);
@@ -499,16 +494,12 @@ describe("McpSDKClient", () => {
   });
 
   test("surfaces proactive OAuth refresh during initial connection", async () => {
-    const refreshAttempts: string[] = [];
     const client = new McpSDKClient({
       credentialResolver: {
         resolve: async () => ({ ok: true, mode: "bearer", token: "token-b", tokenHash: "token-b", vaultId: "vlt_1", credentialId: "cred_1", refreshTriggered: true }),
         refresh: async () => ({ ok: false, error: "refresh_failed" }),
       },
       onToolsListChanged: async () => undefined,
-      onRefreshAttempt: (outcome) => {
-        refreshAttempts.push(outcome);
-      },
       createClient: () => new RecordingSDKClient(),
       createTransport: (input) => input,
       setTimer: fakeSetTimer,
@@ -523,20 +514,15 @@ describe("McpSDKClient", () => {
     });
 
     expect(result).toEqual({ content: [{ type: "text", text: "ok" }], refreshTriggered: true });
-    expect(refreshAttempts).toEqual(["success"]);
   });
 
-  test("does not count locked-row credential reuse as a refresh attempt", async () => {
-    const refreshAttempts: string[] = [];
+  test("locked-row credential reuse does not mark the call as refreshed", async () => {
     const client = new McpSDKClient({
       credentialResolver: {
         resolve: async () => ({ ok: true, mode: "bearer", token: "already-rotated", tokenHash: "already-rotated", vaultId: "vlt_1", credentialId: "cred_1" }),
         refresh: async () => ({ ok: false, error: "refresh_failed" }),
       },
       onToolsListChanged: async () => undefined,
-      onRefreshAttempt: (outcome) => {
-        refreshAttempts.push(outcome);
-      },
       createClient: () => new RecordingSDKClient(),
       createTransport: (input) => input,
       setTimer: fakeSetTimer,
@@ -551,20 +537,15 @@ describe("McpSDKClient", () => {
     });
 
     expect(result).toEqual({ content: [{ type: "text", text: "ok" }], refreshTriggered: false });
-    expect(refreshAttempts).toEqual([]);
   });
 
-  test("records failed proactive refresh attempts during initial connection", async () => {
-    const refreshAttempts: string[] = [];
+  test("surfaces failed proactive refresh during initial connection", async () => {
     const client = new McpSDKClient({
       credentialResolver: {
         resolve: async () => ({ ok: false, error: "refresh_failed" }),
         refresh: async () => ({ ok: false, error: "refresh_failed" }),
       },
       onToolsListChanged: async () => undefined,
-      onRefreshAttempt: (outcome) => {
-        refreshAttempts.push(outcome);
-      },
       createClient: () => {
         throw new Error("network should not be reached");
       },
@@ -581,7 +562,6 @@ describe("McpSDKClient", () => {
       toolName: "create_issue",
       input: {},
     })).rejects.toMatchObject({ code: "mcp_authentication_failed", retryStatus: "terminal" });
-    expect(refreshAttempts).toEqual(["failed"]);
   });
 
   test("refreshes once and retries when an established MCP call returns 403", async () => {
@@ -614,13 +594,9 @@ describe("McpSDKClient", () => {
 
   test("second 401 after refresh is terminal", async () => {
     const credentials = new RotatingCredentialResolver(["token-a"], ["token-b"]);
-    const refreshAttempts: string[] = [];
     const client = new McpSDKClient({
       credentialResolver: credentials,
       onToolsListChanged: async () => undefined,
-      onRefreshAttempt: (outcome) => {
-        refreshAttempts.push(outcome);
-      },
       createClient: () => {
         const sdk = new RecordingSDKClient();
         sdk.callToolError = Object.assign(new Error("HTTP 401"), { code: 401 });
@@ -638,20 +614,15 @@ describe("McpSDKClient", () => {
       input: {},
     })).rejects.toMatchObject({ code: "mcp_authentication_failed", retryStatus: "terminal" });
     expect(credentials.refreshes).toBe(1);
-    expect(refreshAttempts).toEqual(["success"]);
   });
 
-  test("records failed refresh attempts when credential refresh cannot mint a replacement", async () => {
-    const refreshAttempts: string[] = [];
+  test("surfaces a forced refresh that cannot mint a replacement", async () => {
     const client = new McpSDKClient({
       credentialResolver: {
         resolve: async () => ({ ok: true, mode: "bearer", token: "token-a", tokenHash: "token-a", vaultId: "vlt_1", credentialId: "cred_1" }),
         refresh: async () => ({ ok: false, error: "refresh_failed" }),
       },
       onToolsListChanged: async () => undefined,
-      onRefreshAttempt: (outcome) => {
-        refreshAttempts.push(outcome);
-      },
       createClient: () => {
         const sdk = new RecordingSDKClient();
         sdk.callToolError = Object.assign(new Error("HTTP 401"), { code: 401 });
@@ -668,7 +639,6 @@ describe("McpSDKClient", () => {
       toolName: "create_issue",
       input: {},
     })).rejects.toMatchObject({ code: "mcp_authentication_failed", retryStatus: "terminal" });
-    expect(refreshAttempts).toEqual(["failed"]);
   });
 
   test("closes an idle cached session and leaves connection cache size zero", async () => {

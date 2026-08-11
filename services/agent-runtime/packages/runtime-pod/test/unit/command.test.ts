@@ -144,6 +144,88 @@ describe("Runtime Pod command entrypoint", () => {
     }
   });
 
+  test("production manifest observability reports effective eligibility for applied and stale generations", async () => {
+    let capturedOptions: RuntimeCoreHostsOptions | undefined;
+    const logged: Array<Record<string, unknown>> = [];
+    const dependencies = await buildRuntimePodCommandDependencies({
+      config: validConfig(),
+      logger: { info: (record) => logged.push(record), error: () => undefined },
+      builderOptions: { coreHostsFactory: async (options) => {
+        capturedOptions = options;
+        return fakeDependencies([]).coreHosts;
+      } },
+    });
+    const effectivePatches = [
+      { generation: 4, payloadJson: JSON.stringify({
+        runtime_config: { installedTools: [{ type: "tetral_agent_toolset", family: "claude" }] },
+        tool_policy: { mcpToolsets: [{ mcpServerName: "github" }] },
+      }) },
+      { generation: 7, mcpServerName: "github", manifestETag: "etag_7", payloadJson: JSON.stringify({
+        mcp_manifest: { mcp_server_name: "github", manifest_etag: "etag_7", manifest_generation: 7,
+          tools: [{ name: "search", description: "CANARY_MANIFEST_SECRET", input_schema: { type: "object" } }] },
+      }) },
+    ] as const;
+    try {
+      const eligible = capturedOptions?.resolveMCPManifestEligibility?.(effectivePatches, "github") ?? false;
+      const activeServerWithoutToolset = capturedOptions?.resolveMCPManifestEligibility?.([
+        { generation: 4, payloadJson: JSON.stringify({
+          runtime_config: {
+            installedTools: [{ type: "tetral_agent_toolset", family: "claude" }],
+            mcpServers: [{ type: "url", name: "github", url: "https://api.githubcopilot.com/mcp/" }],
+          },
+          tool_policy: { mcpToolsets: [] },
+        }) },
+        { generation: 7, mcpServerName: "github", manifestETag: "etag_7", payloadJson: JSON.stringify({
+          mcp_manifest: { mcp_server_name: "github", manifest_etag: "etag_7", manifest_generation: 7,
+            tools: [{ name: "search", description: "Search", input_schema: { type: "object" } }] },
+        }) },
+      ], "github") ?? true;
+      capturedOptions?.recordMCPManifestUpdate?.({
+        workspaceId: "default", sessionId: "sesn_manifest_log", mcpServerName: "github",
+        disposition: "applied", source: "cold_load", receivedGeneration: 7,
+        currentGeneration: 7, toolCatalogEligible: eligible,
+      });
+      capturedOptions?.recordMCPManifestUpdate?.({
+        workspaceId: "default", sessionId: "sesn_manifest_log", mcpServerName: "github",
+        disposition: "stale", source: "runtime_config_update", receivedGeneration: 6,
+        currentGeneration: 7, toolCatalogEligible: eligible,
+      });
+      expect(logged).toEqual([
+        expect.objectContaining({ event: "runtime_mcp_manifest_update", "mcp.manifest.disposition": "applied",
+          "mcp.manifest.source": "cold_load", "mcp.manifest.received_generation": 7,
+          "mcp.manifest.current_generation": 7, "mcp.tool_catalog.eligible": true }),
+        expect.objectContaining({ event: "runtime_mcp_manifest_update", "mcp.manifest.disposition": "stale",
+          "mcp.manifest.source": "runtime_config_update", "mcp.manifest.received_generation": 6,
+          "mcp.manifest.current_generation": 7, "mcp.tool_catalog.eligible": true }),
+      ]);
+      expect(activeServerWithoutToolset).toBe(false);
+      expect(JSON.stringify(logged)).not.toContain("CANARY_MANIFEST_SECRET");
+    } finally {
+      await dependencies.coreHosts.close();
+    }
+  });
+
+  test("production manifest observation is fail-open when the log sink throws", async () => {
+    let capturedOptions: RuntimeCoreHostsOptions | undefined;
+    const dependencies = await buildRuntimePodCommandDependencies({
+      config: validConfig(),
+      logger: { info: () => { throw new Error("log sink unavailable"); }, error: () => undefined },
+      builderOptions: { coreHostsFactory: async (options) => {
+        capturedOptions = options;
+        return fakeDependencies([]).coreHosts;
+      } },
+    });
+    try {
+      expect(() => capturedOptions?.recordMCPManifestUpdate?.({
+        workspaceId: "default", sessionId: "sesn_manifest_log", mcpServerName: "github",
+        disposition: "applied", source: "runtime_config_update", receivedGeneration: 1,
+        currentGeneration: 1, toolCatalogEligible: false,
+      })).not.toThrow();
+    } finally {
+      await dependencies.coreHosts.close();
+    }
+  });
+
   test("command runner starts production dependency graph and closes resources on shutdown", async () => {
     const records: string[] = [];
     let capturedConfig: RuntimePodConfig | undefined;
@@ -812,8 +894,8 @@ async function tokenReviewMaterialFixture(scenario: {
   readonly caCanary: string;
 }> {
   const dir = await mkdtemp(join(tmpdir(), "runtime-tokenreview-"));
-  const tokenCanary = "UNIT4_REVIEWER_TOKEN_CANARY";
-  const caCanary = "UNIT4_CA_CERT_CANARY";
+  const tokenCanary = "REVIEWER_TOKEN_CANARY";
+  const caCanary = "SENSITIVE_CA_CERT_CANARY";
   const outboundInternalGrpcTokenPath = join(dir, "outbound-token");
   await writeFile(outboundInternalGrpcTokenPath, "outbound-token\n", { mode: 0o600 });
   const tokenPath = await materialPath(dir, "reviewer-token", scenario.token, `${tokenCanary}\n`);

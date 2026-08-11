@@ -20,6 +20,7 @@ export { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
 import { REFRESH_SKEW_SECONDS } from "./credential-constants.js";
 import { SQLVaultGitHubMcpCredentialUpdatePath } from "./credential-update-path.js";
 import type { GitHubMcpCredentialRefreshWriter } from "./credential-update-path.js";
+import type { McpOAuthRefreshCompletedEvent } from "./credential-update-path.js";
 
 type FetchLike = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => ReturnType<typeof fetch>;
 
@@ -136,8 +137,9 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     fetchFn: FetchLike = fetch,
     refreshWriter?: GitHubMcpCredentialRefreshWriter,
     refreshHTTPTimeoutMs?: number,
+    onRefreshCompleted?: ((event: McpOAuthRefreshCompletedEvent) => void) | undefined,
   ) {
-    this.refreshWriter = refreshWriter ?? new SQLVaultGitHubMcpCredentialUpdatePath(sql, masterKeyHex, now, fetchFn, refreshHTTPTimeoutMs);
+    this.refreshWriter = refreshWriter ?? new SQLVaultGitHubMcpCredentialUpdatePath(sql, masterKeyHex, now, fetchFn, refreshHTTPTimeoutMs, onRefreshCompleted);
   }
 
   /**
@@ -270,6 +272,7 @@ export class SQLGitHubMcpCredentialResolver implements GitHubMcpCredentialResolv
     if (action === "refresh") {
       const refreshed = await this.refreshWriter.refreshOAuthCredential({
         workspaceId: input.workspaceId,
+        mcpServerName: input.mcpServerName,
         row,
         vaultId: row.vault_id,
         credentialId: row.id,

@@ -635,6 +635,8 @@ function sessionManagerLayer(
     readonly closeoutMonotonicMs?: SessionManager.LayerOptions["closeoutMonotonicMs"];
     readonly closeoutSleep?: SessionManager.LayerOptions["closeoutSleep"];
     readonly recordCloseoutEvent?: SessionManager.LayerOptions["recordCloseoutEvent"];
+    readonly recordMCPManifestUpdate?: SessionManager.LayerOptions["recordMCPManifestUpdate"];
+    readonly resolveMCPManifestEligibility?: SessionManager.LayerOptions["resolveMCPManifestEligibility"];
   } = {},
 ): Layer.Layer<SessionManager.Service> {
   return SessionManager.layer({
@@ -645,6 +647,8 @@ function sessionManagerLayer(
     ...(options.closeoutMonotonicMs !== undefined ? { closeoutMonotonicMs: options.closeoutMonotonicMs } : {}),
     ...(options.closeoutSleep !== undefined ? { closeoutSleep: options.closeoutSleep } : {}),
     ...(options.recordCloseoutEvent !== undefined ? { recordCloseoutEvent: options.recordCloseoutEvent } : {}),
+    ...(options.recordMCPManifestUpdate !== undefined ? { recordMCPManifestUpdate: options.recordMCPManifestUpdate } : {}),
+    ...(options.resolveMCPManifestEligibility !== undefined ? { resolveMCPManifestEligibility: options.resolveMCPManifestEligibility } : {}),
   }).pipe(Layer.provide(threadLoop.layer));
 }
 
@@ -2096,13 +2100,16 @@ describe("SessionManager", () => {
 
   test("cold preload installs generation-fenced MCP manifests before pending MCP approval recovery", async () => {
     const manifestsObservedDuringRecovery: Array<ReturnType<ThreadRuntime.ThreadRuntime["configuration"]["patches"]>> = [];
+    const manifestUpdates: SessionManager.RuntimeMCPManifestUpdateEvent[] = [];
     const threadLoop = makeControlledThreadLoop({
       installLoadedPendingToolUses: (session) => Effect.sync(() => {
         manifestsObservedDuringRecovery.push([...session.configuration.patches()]);
         return { ok: true as const };
       }),
     });
-    await withSessionManager(sessionManagerLayer(threadLoop), async (manager) => {
+    await withSessionManager(sessionManagerLayer(threadLoop, {
+      recordMCPManifestUpdate: (event) => manifestUpdates.push(event),
+    }), async (manager) => {
       const control = threadControl("sesn_mcp_cold_pending", "rin_mcp_cold_pending");
       const result = await Effect.runPromise(manager.preloadThread({
         ...control,
@@ -2162,6 +2169,47 @@ describe("SessionManager", () => {
         mcpServerName: "github",
         manifestETag: "etag_7",
       }));
+      expect(manifestUpdates).toEqual([expect.objectContaining({
+        disposition: "applied", source: "cold_load", receivedGeneration: 7,
+        currentGeneration: 7, mcpServerName: "github",
+      })]);
+      expect(manifestUpdates[0]?.toolCatalogEligible).toBe(false);
+    });
+  });
+
+  test("manifest update observation follows the effective generation and skips nonresident ACKs", async () => {
+    const manifestUpdates: SessionManager.RuntimeMCPManifestUpdateEvent[] = [];
+    const threadLoop = makeControlledThreadLoop();
+    await withSessionManager(sessionManagerLayer(threadLoop, {
+      recordMCPManifestUpdate: (event) => manifestUpdates.push(event),
+      resolveMCPManifestEligibility: (_patches, serverName) => serverName === "github",
+    }), async (manager) => {
+      const cold = {
+        ...threadControl("sesn_manifest_observation", "rin_manifest_cold"),
+        runtimeBindingToken: "runtime-binding-token", messages: [], coldCoverage: coldCoverage(),
+      };
+      expect(await Effect.runPromise(manager.preloadThread(cold))).toMatchObject({ ok: true, applied: true });
+      const patch = {
+        ...threadControl("sesn_manifest_observation", "rin_manifest_update"),
+        generation: 9, mcpServerName: "github", manifestETag: "etag_9",
+        payloadJson: JSON.stringify({ mcp_manifest: {
+          mcp_server_name: "github", manifest_etag: "etag_9", manifest_generation: 9, tools: [],
+        } }),
+      };
+      expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_manifest_observation", patch))).toMatchObject({ ok: true, applied: true });
+      expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_manifest_observation", {
+        ...patch, runtimeInputId: "rin_manifest_stale", generation: 8,
+      }))).toMatchObject({ ok: true, applied: false });
+      expect(await Effect.runPromise(manager.applyRuntimeConfigPatch("sesn_manifest_absent", {
+        ...patch, sessionId: "sesn_manifest_absent",
+      }))).toMatchObject({ ok: true, noResidency: true });
+      expect(manifestUpdates.map(({ disposition, receivedGeneration, currentGeneration, source }) => ({
+        disposition, receivedGeneration, currentGeneration, source,
+      }))).toEqual([
+        { disposition: "applied", receivedGeneration: 9, currentGeneration: 9, source: "runtime_config_update" },
+        { disposition: "stale", receivedGeneration: 8, currentGeneration: 9, source: "runtime_config_update" },
+      ]);
+      expect(manifestUpdates.every((event) => event.toolCatalogEligible)).toBe(true);
     });
   });
 

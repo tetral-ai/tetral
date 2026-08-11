@@ -5,9 +5,8 @@
  * execution. It authenticates internal callers, verifies Runtime bindings for
  * tool calls, enforces readiness and catalog admission, coordinates durable
  * claim and commit, and gives every tool call one terminal settlement record.
- * It also tracks platform-filtered manifest identities and retries changed-
- * manifest notifications without turning notification exhaustion into a
- * readiness transition.
+ * It reports each successfully re-listed manifest to Bridge and retries bounded
+ * manifest-change notifications without turning exhaustion into a readiness transition.
  *
  * The gRPC server and MCP list-change callback call this module. It delegates
  * MCP I/O to `McpClient`, durable result ownership to `McpIdempotencyStore`,
@@ -171,15 +170,15 @@ export interface McpConnectorServiceOptions {
 /**
  * Orchestrates MCP discovery and execution for the gRPC server.
  *
- * The shell admits requests before calling MCP, keeps platform-filtered
- * manifest identity in memory, coordinates Bridge-backed tool result claims
- * and commits, and centralizes terminal metrics and logs. MCP connection and
- * authentication retries remain owned by `McpClient`; durable replay and
+ * The shell admits requests before calling MCP, reports each successfully
+ * re-listed manifest to Bridge, coordinates Bridge-backed tool result claims
+ * and commits, and centralizes terminal metrics and logs. Bridge owns durable
+ * manifest identity and readiness decisions. MCP connection and authentication
+ * retries remain owned by `McpClient`; durable tool-result replay and
  * post-effect commit remain owned by `McpIdempotencyStore`.
  */
 export class McpConnectorServiceShell {
   readonly #idempotencyStore: McpIdempotencyStore;
-  readonly #manifestEtags = new Map<string, string>();
   readonly #metrics: McpConnectorMetricsRegistry;
 
   constructor(private readonly options: McpConnectorServiceOptions) {
@@ -189,7 +188,8 @@ export class McpConnectorServiceShell {
 
   /**
    * Lists one catalog server's enabled tools for Bridge, removes platform tool
-   * collisions, validates the response, and remembers its manifest identity.
+   * collisions, and validates the candidate response. Listing is capture only;
+   * it cannot advance the identity acknowledged by durable Bridge state.
    * Family-specific collision filtering remains downstream of this service.
    */
   async listMcpTools(request: ListMcpToolsRequest, metadata: Metadata): Promise<ListMcpToolsResponse> {
@@ -220,7 +220,6 @@ export class McpConnectorServiceShell {
     if (!responseValidation.ok) {
       throw new GrpcStatusError(status.INTERNAL, "mcp connector response contract violation");
     }
-    this.#manifestEtags.set(manifestStateKey(request), response.manifestEtag);
     this.#metrics.recordManifestRefresh();
     for (const omitted of omittedTools) {
       this.options.logger.info({
@@ -255,18 +254,18 @@ export class McpConnectorServiceShell {
   }
 
   /**
-   * Re-lists tools after an MCP list-change notification and notifies Bridge
-   * only when the platform-filtered manifest identity differs.
+   * Re-lists tools after every MCP list-change notification and reports each
+   * successfully listed platform-filtered manifest to Bridge. Bridge alone
+   * decides whether the durable identity is current or requires progression.
    *
    * Retryable notification failures follow the fixed four-attempt schedule.
-   * Exhaustion emits an error record, retains the previously remembered identity,
-   * and does not change service readiness.
+   * Exhaustion emits an error record and does not change service readiness.
    */
   async handleToolsListChangedNotification(input: {
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly mcpServerName: string;
-  }, signal?: AbortSignal): Promise<{ readonly status: "unchanged" | "notified" | "exhausted"; readonly manifestEtag: string; readonly duplicate?: boolean | undefined }> {
+  }, signal?: AbortSignal): Promise<{ readonly status: "notified" | "exhausted"; readonly manifestEtag: string; readonly duplicate?: boolean | undefined }> {
     this.ensureReady();
     const validation = validateListMcpToolsRequest(input);
     if (!validation.ok || catalogEntryByName(input.mcpServerName) === undefined) {
@@ -280,10 +279,6 @@ export class McpConnectorServiceShell {
     this.#metrics.recordManifestRefresh();
     const { tools } = filterManifestTools(listed, PlatformBuiltinToolNames);
     const nextManifestEtag = manifestEtag(tools);
-    const key = manifestStateKey(input);
-    if (this.#manifestEtags.get(key) === nextManifestEtag) {
-      return { status: "unchanged", manifestEtag: nextManifestEtag };
-    }
     if (this.options.manifestChangeNotifier === undefined) {
       throw new GrpcStatusError(status.FAILED_PRECONDITION, "mcp manifest notifier is unavailable");
     }
@@ -296,7 +291,6 @@ export class McpConnectorServiceShell {
         manifestEtag: nextManifestEtag,
       });
       if (notified.ok) {
-        this.#manifestEtags.set(key, nextManifestEtag);
         this.options.logger.info({
           event: "mcp_manifest_changed_notified",
           "event.kind": "mcp_manifest_changed_notified",
@@ -679,10 +673,6 @@ export class GrpcStatusError extends Error {
     super(message);
     this.name = "GrpcStatusError";
   }
-}
-
-function manifestStateKey(input: { readonly workspaceId: string; readonly sessionId: string; readonly mcpServerName: string }): string {
-  return `${input.workspaceId}\u0000${input.sessionId}\u0000${input.mcpServerName}`;
 }
 
 function mcpIdempotencyContext(request: RunMcpToolRequest, runtimePodUid: string): McpIdempotencyContext {

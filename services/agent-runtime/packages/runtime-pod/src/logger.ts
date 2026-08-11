@@ -7,7 +7,7 @@
  */
 import { createTetralJsonLogger, semanticErrorFields } from "@tetral/ts-observability";
 import type { TetralJsonLogger, TetralLogRecord } from "@tetral/ts-observability";
-import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
+import type { RuntimeCloseoutEvent, RuntimeMCPManifestUpdateEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
 import type { RuntimeProviderToolDeclarationRejectionObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
 import type { RuntimeProviderRescheduleObservation } from "@tetral/agent-runtime-core/src/thread-loop/thread-loop.js";
@@ -35,6 +35,12 @@ export type RuntimePodLogRecord = TetralLogRecord & {
   readonly "declaration.digest"?: string;
   readonly "receipt.application_disposition"?: "current_custody" | "stale_custody";
   readonly "receipt.discard_reason"?: Exclude<RuntimeReceiptEvidenceOutcome, "applied">;
+  readonly "mcp.server.name"?: string;
+  readonly "mcp.manifest.disposition"?: RuntimeMCPManifestUpdateEvent["disposition"];
+  readonly "mcp.manifest.source"?: RuntimeMCPManifestUpdateEvent["source"];
+  readonly "mcp.manifest.received_generation"?: number;
+  readonly "mcp.manifest.current_generation"?: number;
+  readonly "mcp.tool_catalog.eligible"?: boolean;
 };
 
 /** Closed, non-sensitive Runtime Pod startup stages. */
@@ -284,5 +290,20 @@ export function runtimeCloseoutLogRecord(input: RuntimeCloseoutEvent): RuntimePo
       errorCode: input.errorCode ?? input.event,
       messageSafe: input.event,
     }),
+  };
+}
+
+/** Safe effective-state record emitted only after the Session configuration gate decides. */
+export function runtimeMCPManifestUpdateLogRecord(input: RuntimeMCPManifestUpdateEvent): RuntimePodLogRecord {
+  return {
+    event: "runtime_mcp_manifest_update", "event.kind": "runtime_mcp_manifest_update",
+    operation: "runtime_config_apply", component: "agent-runtime",
+    message: "runtime MCP manifest generation observed",
+    "workspace.id": input.workspaceId, "session.id": input.sessionId,
+    "mcp.server.name": input.mcpServerName,
+    "mcp.manifest.disposition": input.disposition, "mcp.manifest.source": input.source,
+    "mcp.manifest.received_generation": input.receivedGeneration,
+    "mcp.manifest.current_generation": input.currentGeneration,
+    "mcp.tool_catalog.eligible": input.toolCatalogEligible,
   };
 }

@@ -23,7 +23,7 @@ import (
 
 // This file owns the Bridge mcp protocol-family boundary.
 
-func TestPostgreSQLBridgeAPIStoreMcpManifestChangedEnqueuesRuntimeConfigUpdate(t *testing.T) {
+func TestPostgreSQLBridgeAPIStoreMcpManifestCommitAndAckLossReplayKeepOneQueueGeneration(t *testing.T) {
 	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
 	seedBridgeAPISession(t, admin, "default", "sesn_bridge_mcp_manifest", "thr_bridge_mcp_manifest")
 	seedBridgeAPIAgentConfig(t, admin, "default", "sesn_bridge_mcp_manifest", `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github","default_config":{"enabled":false,"permission_policy":{"type":"always_ask"}},"configs":[{"name":"github_search","enabled":true,"permission_policy":{"type":"always_allow"}}]}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
@@ -66,6 +66,9 @@ func TestPostgreSQLBridgeAPIStoreMcpManifestChangedEnqueuesRuntimeConfigUpdate(t
 	}
 	assertRuntimeMCPManifestQueueJob(t, admin, "default", "sesn_bridge_mcp_manifest", "github", 1)
 
+	// The caller may lose the committed ACK after dispatch. Replaying the exact
+	// desired identity must recover durable evidence without another list,
+	// generation, or Queue producer.
 	replay, err := store.McpManifestChanged(context.Background(), request)
 	if err != nil {
 		t.Fatalf("McpManifestChanged replay: %v", err)

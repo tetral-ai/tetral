@@ -21,7 +21,7 @@ import { extractColdThreadToolRouteView, extractThreadTurnCheckpoint } from "@te
 import type { ThreadToolRouteView, ThreadTurnCheckpoint } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-checkpoint.js";
 import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-loop/thread-turn-reducer.js";
 import type { RuntimeMetricsSink } from "@tetral/agent-runtime-core/src/runtime/metrics.js";
-import type { RuntimeCloseoutEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
+import type { RuntimeCloseoutEvent, RuntimeMCPManifestUpdateEvent } from "@tetral/agent-runtime-core/src/session/session-manager.js";
 import type { RuntimeAgentMailCommand, RuntimeSessionRunHost } from "./runtime-service.js";
 import type { RuntimeCoreCleanupHost } from "./cleanup-controller.js";
 import { runtimeAgentMailText, runtimeMessageFromPublicAgentMail } from "./agent-mail.js";
@@ -69,6 +69,8 @@ export interface RuntimeCoreHostsOptions {
   readonly threadLoop: ThreadLoop.ThreadLoopRuntimeOptions;
   readonly metrics?: RuntimeMetricsSink | undefined;
   readonly recordCloseoutEvent?: ((event: RuntimeCloseoutEvent) => void) | undefined;
+  readonly recordMCPManifestUpdate?: ((event: RuntimeMCPManifestUpdateEvent) => void) | undefined;
+  readonly resolveMCPManifestEligibility?: SessionManager.LayerOptions["resolveMCPManifestEligibility"];
 }
 
 /**
@@ -161,6 +163,8 @@ export async function buildRuntimeCoreHosts(options: RuntimeCoreHostsOptions): P
     closeoutMonotonicMs: options.threadLoop.runtime.monotonicMs,
     closeoutSleep: options.threadLoop.runtime.sleep,
     ...(options.recordCloseoutEvent !== undefined ? { recordCloseoutEvent: options.recordCloseoutEvent } : {}),
+    ...(options.recordMCPManifestUpdate !== undefined ? { recordMCPManifestUpdate: options.recordMCPManifestUpdate } : {}),
+    ...(options.resolveMCPManifestEligibility !== undefined ? { resolveMCPManifestEligibility: options.resolveMCPManifestEligibility } : {}),
   }).pipe(Layer.provide(threadLoopLayer));
   const hostLayer = SessionRunHost.layer.pipe(Layer.provide(managerLayer));
   const { host, scope } = await Effect.runPromise(

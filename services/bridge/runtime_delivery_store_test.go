@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -18,12 +19,16 @@ import (
 	enginekubernetes "github.com/tetral-ai/tetral/internal/kubernetes"
 	"github.com/tetral-ai/tetral/internal/queue"
 	"github.com/tetral-ai/tetral/internal/storage/storagetest"
+	"github.com/tetral-ai/tetral/internal/workspace"
 	agentruntimev1 "github.com/tetral-ai/tetral/services/agent-runtime/gen/tetral/agent_runtime/v1"
 	bridgev1 "github.com/tetral-ai/tetral/services/bridge/gen/tetral/bridge/v1"
 	providergatewayv1 "github.com/tetral-ai/tetral/services/gateway/gen/tetral/provider_gateway/v1"
+	tetralqueue "github.com/tetral-ai/tetral/services/queue"
 	queuev1 "github.com/tetral-ai/tetral/services/queue/gen/tetral/queue/v1"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // This file owns PostgreSQL runtime delivery-store behavior tests.
@@ -211,6 +216,374 @@ func TestPostgreSQLRuntimeDeliveryStoreInitialMCPManifestCrashAfterCaptureRedriv
 	if len(lister.requests) != 1 {
 		t.Fatalf("connector list calls after durable redrive = %d; want original capture call only", len(lister.requests))
 	}
+}
+
+func TestMCPManifestProductionCompositionRemovesWarmAndColdToolCatalogEntry(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const sessionID = "sesn_manifest_composition"
+	seedBridgeAPISession(t, admin, "default", sessionID, "thrd_"+sessionID)
+	seedBridgeAPIAgentConfig(t, admin, "default", sessionID, `{"name":"agent","model":"anthropic/claude-opus-4-8","tools":[{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}],"skills":[],"metadata":{}}`)
+	if _, err := admin.ExecContext(context.Background(), `UPDATE sessions
+		SET installed_tools_json = '{"tools":[{"type":"tetral_agent_toolset","family":"claude"},{"type":"mcp_toolset","mcp_server_name":"github"}],"mcp_servers":[{"type":"url","name":"github","url":"https://api.githubcopilot.com/mcp/"}]}'
+		WHERE workspace_id = 'default' AND id = $1`, sessionID); err != nil {
+		t.Fatalf("seed manifest composition tools: %v", err)
+	}
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_manifest_composition", 1, "pod_manifest_composition")
+
+	exactTool := exactBoundMCPManifestTool(t)
+	lister := &recordingMCPManifestLister{results: []MCPManifestListResult{
+		mcpManifestResult("etag_ready", "github_search"),
+		{ManifestETag: "etag_over", Tools: []MCPManifestTool{{
+			Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON,
+		}}},
+		{ManifestETag: "etag_over", Tools: []MCPManifestTool{{
+			Name: exactTool.Name, Description: exactTool.Description + "x", InputSchemaJSON: exactTool.InputSchemaJSON,
+		}}},
+	}}
+	bridge := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridge.RuntimeBindingTokenHMACKey = []byte("manifest-composition-binding-token-key")
+	bridge.MCPManifestLister = lister
+	mustAcceptMCPManifestChange(t, bridge, sessionID, "etag_ready")
+	readyPayload := deliverQueuedManifestPayload(t, runtime, admin, sessionID, 1)
+
+	request := &bridgev1.McpManifestChangedRequest{
+		WorkspaceId: "default", SessionId: sessionID, McpServerName: "github", ManifestEtag: "etag_over",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := bridge.McpManifestChanged(context.Background(), request); status.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("over-cap manifest attempt %d = %v; want ResourceExhausted", attempt+1, err)
+		}
+	}
+	var manifestRows, queueJobs int
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_mcp_manifests
+		WHERE workspace_id = 'default' AND session_id = $1 AND manifest_generation = 2
+		AND readiness = 'unready' AND diagnostic = 'manifest_too_large'`, sessionID).Scan(&manifestRows); err != nil {
+		t.Fatalf("read unready manifest: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM queue_jobs
+		WHERE workspace_id = 'default' AND kind = 'runtime_config_update'
+		AND payload_json::jsonb ->> 'session_id' = $1
+		AND payload_json::jsonb ->> 'mcp_server_name' = 'github'`, sessionID).Scan(&queueJobs); err != nil {
+		t.Fatalf("read manifest queue custody: %v", err)
+	}
+	if manifestRows != 1 || queueJobs != 2 {
+		t.Fatalf("manifest rows/jobs = %d/%d; want one generation-2 row and generations 1+2 queue custody", manifestRows, queueJobs)
+	}
+
+	var runtimeConfigPayload string
+	client := dbconnect.NewClientForTesting(runtime)
+	if err := client.WithWorkspaceTx(context.Background(), "default", "test.manifest_composition_runtime_config", func(tx *dbconnect.Tx) error {
+		var err error
+		runtimeConfigPayload, _, err = runtimeCommandPayloadForJobTx(context.Background(), tx, RuntimeJob{
+			Kind: queue.KindRuntimeConfigUpdate, WorkspaceID: "default", SessionID: sessionID, ConfigGeneration: "1",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("rebuild runtime config: %v", err)
+	}
+	cold, err := bridge.LoadContext(context.Background(), &bridgev1.LoadContextRequest{
+		Scope:          bridgeAPIScope(sessionID, "thrd_"+sessionID, "bind_manifest_composition", 1, "pod_manifest_composition"),
+		RuntimeInputId: "rin_manifest_composition_cold",
+	})
+	if err != nil {
+		t.Fatalf("load replacement Runtime context: %v", err)
+	}
+	sender := &bunRuntimeManifestCompositionSender{
+		InputPath:                t.TempDir() + "/manifest-composition.json",
+		RuntimeConfigPayloadJSON: runtimeConfigPayload,
+		ReadyManifestPayloadJSON: readyPayload,
+		ColdContextJSON:          cold.GetContextJson(),
+		ColdRuntimeBindingToken:  cold.GetRuntimeBindingToken(),
+		ReadyGeneration:          1,
+		UnreadyGeneration:        2,
+		ToolName:                 "github_search",
+	}
+	delivery := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	deliveryResult, err := (RuntimePodDirectDeliverer{Store: delivery, Sender: sender}).DeliverRuntimeJob(
+		context.Background(), queuedManifestJob(t, admin, sessionID, 2),
+	)
+	if err != nil {
+		t.Fatalf("deliver unready manifest through Runtime command host: %v", err)
+	}
+	if deliveryResult.Status != RuntimeDeliveryAccepted {
+		t.Fatalf("unready manifest delivery = %+v; want accepted Runtime command", deliveryResult)
+	}
+	if sender.Result.WarmCurrentGeneration != 2 || sender.Result.ColdCurrentGeneration != 2 ||
+		sender.Result.WarmMCPConnectorCalls != 0 || sender.Result.WarmNextProviderRequests < 1 ||
+		sender.Result.ColdMCPConnectorCalls != 0 || sender.Result.ColdNextProviderRequests < 1 {
+		t.Fatalf("Runtime manifest composition = %+v; want warm/cold generation 2, completed next provider requests, and zero connector calls", sender.Result)
+	}
+}
+
+func TestPostgreSQLMCPManifestExhaustionDefersAndRedrivesCurrentGenerationBeforePartitionFollower(t *testing.T) {
+	runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+	const (
+		sessionID = "sesn_manifest_exhaustion_composition"
+		threadID  = "thrd_manifest_exhaustion_composition"
+	)
+	seedMCPFamilySession(t, admin, sessionID, threadID, "claude")
+	seedBridgeAPIRuntimeBinding(t, admin, "default", sessionID, "bind_manifest_exhaustion", 1, "pod_manifest_exhaustion")
+	bridge := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+	bridge.MCPManifestLister = &constantMCPManifestLister{result: mcpManifestResult("etag_exhaustion", "github_search")}
+	mustAcceptMCPManifestChange(t, bridge, sessionID, "etag_exhaustion")
+
+	queueStore := queue.NewPostgreSQLStoreWithRetryPolicy(dbconnect.NewClientForTesting(runtime), queue.RetryPolicy{
+		BaseDelay: time.Millisecond,
+		MaxDelay:  time.Millisecond,
+		RandomInt64: func(int64) int64 {
+			return 0
+		},
+	})
+	follower := RuntimeJob{
+		Kind: queue.KindRuntimeInput, WorkspaceID: "default", SessionID: sessionID, SessionThreadID: threadID,
+		RuntimeInputID: "rin_manifest_partition_follower", EventIDs: []string{"evt_manifest_partition_follower"},
+		SequenceFrom: 1, SequenceTo: 1, InputKind: "messages",
+	}
+	seedBridgeAPIEvent(t, admin, "default", sessionID, threadID, follower.EventIDs[0], 1, "user.message", `{"content":[{"type":"text","text":"after manifest"}]}`)
+	seedRuntimeInboxBirthForJob(t, admin, follower)
+	followerPayload, err := json.Marshal(map[string]any{
+		"workspace_id": "default", "session_id": sessionID, "session_thread_id": threadID,
+		"runtime_input_id": follower.RuntimeInputID, "event_ids": follower.EventIDs,
+		"sequence_from": 1, "sequence_to": 1, "input_kind": "messages",
+	})
+	if err != nil {
+		t.Fatalf("marshal partition follower: %v", err)
+	}
+	if _, err := queueStore.Enqueue(context.Background(), queue.EnqueueRequest{
+		WorkspaceID: workspace.DefaultID, Kind: queue.KindRuntimeInput,
+		PartitionKey:   queue.FormatSessionPartitionKey(workspace.DefaultID, sessionID),
+		DedupeKey:      queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, follower.RuntimeInputID),
+		PayloadVersion: 1, PayloadJSON: followerPayload, MaxAttempts: queue.DefaultMaxAttempts,
+		Now: time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("enqueue partition follower: %v", err)
+	}
+
+	var manifestJobID string
+	var manifestMaxAttempts int
+	if err := admin.QueryRowContext(context.Background(), `SELECT id, max_attempts FROM queue_jobs
+		WHERE workspace_id='default' AND kind='runtime_config_update'
+		AND payload_json::jsonb ->> 'session_id'=$1
+		AND payload_json::jsonb ->> 'mcp_server_name'='github'`, sessionID).Scan(&manifestJobID, &manifestMaxAttempts); err != nil {
+		t.Fatalf("read manifest Queue job: %v", err)
+	}
+	rejected := &agentruntimev1.RuntimeInputCommandResponse{
+		Status:    agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_REJECTED,
+		Retryable: true,
+		ErrorCode: agentruntimev1.RuntimeInputErrorCode_RUNTIME_INPUT_ERROR_CODE_BINDING_IDENTITY_MISMATCH,
+	}
+	responses := make([]*agentruntimev1.RuntimeInputCommandResponse, 0, manifestMaxAttempts+1)
+	for range manifestMaxAttempts {
+		responses = append(responses, rejected)
+	}
+	responses = append(responses, &agentruntimev1.RuntimeInputCommandResponse{Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED})
+	sender := &recordingRuntimeCommandSender{responses: responses}
+	queueServer := tetralqueue.NewServer(queueStore, nil)
+	deliveryStore := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	composedDeliverer := manifestCompositionDeliverer{direct: RuntimePodDirectDeliverer{Store: deliveryStore, Sender: sender}}
+	runner := &JobRunner{
+		Queue: queueServer, Workspaces: staticWorkspaceLister{"default"},
+		Deliverer: composedDeliverer,
+		Config:    JobRunnerConfig{MaxJobs: 1, LeaseDuration: time.Minute, HeartbeatInterval: time.Hour},
+	}
+	for attempt := 1; attempt <= manifestMaxAttempts; attempt++ {
+		if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, manifestJobID); err != nil {
+			t.Fatalf("make manifest attempt %d available: %v", attempt, err)
+		}
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run manifest attempt %d: %v", attempt, err)
+		}
+	}
+
+	var generation int64
+	var readiness, diagnostic, queueStatus string
+	var attemptCount int
+	if err := admin.QueryRowContext(context.Background(), `SELECT manifest_generation, readiness, diagnostic FROM session_mcp_manifests
+		WHERE workspace_id='default' AND session_id=$1 AND mcp_server_name='github'`, sessionID).Scan(&generation, &readiness, &diagnostic); err != nil {
+		t.Fatalf("read exhausted manifest: %v", err)
+	}
+	if err := admin.QueryRowContext(context.Background(), `SELECT status, attempt_count FROM queue_jobs WHERE workspace_id='default' AND id=$1`, manifestJobID).Scan(&queueStatus, &attemptCount); err != nil {
+		t.Fatalf("read deferred manifest custody: %v", err)
+	}
+	if generation != 2 || readiness != "unready" || diagnostic != "delivery_exhausted" || queueStatus != queue.StatusPending || attemptCount != manifestMaxAttempts-1 {
+		t.Fatalf("exhausted manifest/Queue = generation %d %s/%s, %s attempt %d; want generation 2 unready/delivery_exhausted, pending attempt %d", generation, readiness, diagnostic, queueStatus, attemptCount, manifestMaxAttempts-1)
+	}
+	blocked, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "partition-proof",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if err != nil || len(blocked) != 0 {
+		t.Fatalf("partition follower lease before manifest redrive = %d/%v; want blocked", len(blocked), err)
+	}
+
+	if _, err := admin.ExecContext(context.Background(), `UPDATE queue_jobs SET available_at=clock_timestamp()-interval '1 second' WHERE workspace_id='default' AND id=$1`, manifestJobID); err != nil {
+		t.Fatalf("make deferred manifest available: %v", err)
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("redrive deferred manifest: %v", err)
+	}
+	if len(sender.requests) != manifestMaxAttempts+1 {
+		t.Fatalf("Runtime manifest requests = %d; want %d", len(sender.requests), manifestMaxAttempts+1)
+	}
+	redrive := sender.requests[len(sender.requests)-1]
+	var rebuilt struct {
+		MCPManifest struct {
+			Generation int64  `json:"manifest_generation"`
+			Readiness  string `json:"readiness"`
+			Diagnostic string `json:"diagnostic"`
+		} `json:"mcp_manifest"`
+	}
+	if err := json.Unmarshal([]byte(redrive.GetPayloadJson()), &rebuilt); err != nil {
+		t.Fatalf("decode redriven manifest command: %v", err)
+	}
+	if redrive.GetRuntimeInputId() != runtimeMCPManifestInputID(sessionID, "github", 2) || rebuilt.MCPManifest.Generation != 2 || rebuilt.MCPManifest.Readiness != "unready" || rebuilt.MCPManifest.Diagnostic != "delivery_exhausted" {
+		t.Fatalf("redriven command = input %q payload %+v; want durable generation 2 unready payload", redrive.GetRuntimeInputId(), rebuilt.MCPManifest)
+	}
+
+	followers, err := queueStore.Lease(context.Background(), queue.LeaseRequest{
+		WorkspaceID: workspace.DefaultID, Kinds: []string{queue.KindRuntimeInput}, LeaseOwner: "partition-proof",
+		MaxJobs: 1, LeaseDuration: time.Minute, Now: time.Now().UTC(),
+	})
+	if err != nil || len(followers) != 1 || followers[0].DedupeKey != queue.FormatRuntimeInputDedupeKey(workspace.DefaultID, sessionID, follower.RuntimeInputID) {
+		t.Fatalf("partition follower after manifest ACK = %#v/%v; want one exact follower", followers, err)
+	}
+}
+
+type manifestCompositionDeliverer struct {
+	direct RuntimePodDirectDeliverer
+}
+
+func (d manifestCompositionDeliverer) DeliverRuntimeJob(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, error) {
+	return d.direct.DeliverRuntimeJob(ctx, job)
+}
+
+func (d manifestCompositionDeliverer) FinalizeRuntimeDelivery(ctx context.Context, job RuntimeJob, result RuntimeDeliveryResult) (RuntimeDeliveryResult, error) {
+	return d.direct.FinalizeRuntimeDelivery(ctx, job, result)
+}
+
+func (d manifestCompositionDeliverer) ReplayRuntimeDeliveryFinalization(ctx context.Context, job RuntimeJob) (RuntimeDeliveryResult, bool, error) {
+	return d.direct.ReplayRuntimeDeliveryFinalization(ctx, job)
+}
+
+func deliverQueuedManifestPayload(t *testing.T, runtime *sql.DB, admin *sql.DB, sessionID string, generation int64) string {
+	t.Helper()
+	job := queuedManifestJob(t, admin, sessionID, generation)
+	sender := &recordingRuntimeCommandSender{response: &agentruntimev1.RuntimeInputCommandResponse{
+		Status: agentruntimev1.RuntimeCommandStatus_RUNTIME_COMMAND_STATUS_ACCEPTED,
+	}}
+	delivery := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 9090)
+	result, err := (RuntimePodDirectDeliverer{Store: delivery, Sender: sender}).DeliverRuntimeJob(context.Background(), job)
+	if err != nil || result.Status != RuntimeDeliveryAccepted || len(sender.requests) != 1 {
+		t.Fatalf("deliver manifest generation %d = %+v, %v, requests %d", generation, result, err, len(sender.requests))
+	}
+	return sender.requests[0].GetPayloadJson()
+}
+
+func queuedManifestJob(t *testing.T, admin *sql.DB, sessionID string, generation int64) RuntimeJob {
+	t.Helper()
+	var queuedJobID, queuedPayload string
+	if err := admin.QueryRowContext(context.Background(), `SELECT id, payload_json FROM queue_jobs
+		WHERE workspace_id = 'default' AND kind = 'runtime_config_update'
+		AND payload_json::jsonb ->> 'session_id' = $1
+		AND payload_json::jsonb ->> 'mcp_server_name' = 'github'
+		AND payload_json::jsonb ->> 'manifest_generation' = $2
+		ORDER BY created_at LIMIT 1`, sessionID, fmt.Sprint(generation)).Scan(&queuedJobID, &queuedPayload); err != nil {
+		t.Fatalf("read queued manifest generation %d: %v", generation, err)
+	}
+	job, err := DecodeRuntimeJob(&queuev1.QueueJob{
+		Id: queuedJobID, WorkspaceId: "default", Kind: queue.KindRuntimeConfigUpdate,
+		LeaseToken: "lease_manifest_composition", PayloadJson: queuedPayload,
+	})
+	if err != nil {
+		t.Fatalf("decode queued manifest generation %d: %v", generation, err)
+	}
+	return job
+}
+
+type runtimeManifestCompositionResult struct {
+	CommandResponse struct {
+		Status            int32  `json:"status"`
+		Retryable         bool   `json:"retryable"`
+		ErrorCode         int32  `json:"errorCode"`
+		SessionID         string `json:"sessionId"`
+		RuntimeInputID    string `json:"runtimeInputId"`
+		BindingID         string `json:"bindingId"`
+		BindingGeneration int64  `json:"bindingGeneration"`
+	} `json:"commandResponse"`
+	WarmCurrentGeneration    int `json:"warmCurrentGeneration"`
+	ColdCurrentGeneration    int `json:"coldCurrentGeneration"`
+	WarmMCPConnectorCalls    int `json:"warmMcpConnectorCalls"`
+	WarmNextProviderRequests int `json:"warmNextProviderRequests"`
+	ColdMCPConnectorCalls    int `json:"coldMcpConnectorCalls"`
+	ColdNextProviderRequests int `json:"coldNextProviderRequests"`
+}
+
+type bunRuntimeManifestCompositionSender struct {
+	InputPath                string
+	RuntimeConfigPayloadJSON string
+	ReadyManifestPayloadJSON string
+	ColdContextJSON          string
+	ColdRuntimeBindingToken  string
+	ReadyGeneration          int
+	UnreadyGeneration        int
+	ToolName                 string
+	Result                   runtimeManifestCompositionResult
+}
+
+func (s *bunRuntimeManifestCompositionSender) SendRuntimeCommand(ctx context.Context, _ RuntimePodTarget, request *agentruntimev1.RuntimeInputCommandRequest) (*agentruntimev1.RuntimeInputCommandResponse, error) {
+	inputJSON, err := json.Marshal(map[string]any{
+		"workspaceId":              request.GetWorkspaceId(),
+		"sessionId":                request.GetSessionId(),
+		"runtimeConfigPayloadJson": s.RuntimeConfigPayloadJSON,
+		"readyManifestPayloadJson": s.ReadyManifestPayloadJSON,
+		"runtimeCommandRequest": map[string]any{
+			"requestId":          request.GetRequestId(),
+			"workspaceId":        request.GetWorkspaceId(),
+			"sessionId":          request.GetSessionId(),
+			"sessionThreadId":    request.GetSessionThreadId(),
+			"bindingId":          request.GetBindingId(),
+			"bindingGeneration":  request.GetBindingGeneration(),
+			"targetPodNamespace": request.GetTargetPodNamespace(),
+			"targetPodName":      request.GetTargetPodName(),
+			"targetPodUid":       request.GetTargetPodUid(),
+			"targetPodIp":        request.GetTargetPodIp(),
+			"runtimeInputId":     request.GetRuntimeInputId(),
+			"eventIds":           append([]string{}, request.GetEventIds()...),
+			"sequenceFrom":       request.GetSequenceFrom(),
+			"sequenceTo":         request.GetSequenceTo(),
+			"commandKind":        request.GetCommandKind(),
+			"payloadJson":        request.GetPayloadJson(),
+		},
+		"coldContextJson":         s.ColdContextJSON,
+		"coldRuntimeBindingToken": s.ColdRuntimeBindingToken,
+		"readyGeneration":         s.ReadyGeneration,
+		"unreadyGeneration":       s.UnreadyGeneration,
+		"toolName":                s.ToolName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode Runtime composition input: %w", err)
+	}
+	if err := os.WriteFile(s.InputPath, inputJSON, 0o600); err != nil {
+		return nil, fmt.Errorf("write Runtime composition input: %w", err)
+	}
+	command := exec.CommandContext(ctx, "bun", "packages/runtime-pod/test/fixtures/mcp-manifest-composition.ts", s.InputPath) //nolint:gosec // Fixed repository script and test-owned input.
+	command.Dir = "../agent-runtime"
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("run Runtime manifest composition: %w: %s", err, output)
+	}
+	if err := json.Unmarshal(output, &s.Result); err != nil {
+		return nil, fmt.Errorf("decode Runtime manifest composition: %w: %s", err, output)
+	}
+	return &agentruntimev1.RuntimeInputCommandResponse{
+		Status:            agentruntimev1.RuntimeCommandStatus(s.Result.CommandResponse.Status),
+		Retryable:         s.Result.CommandResponse.Retryable,
+		ErrorCode:         agentruntimev1.RuntimeInputErrorCode(s.Result.CommandResponse.ErrorCode),
+		SessionId:         s.Result.CommandResponse.SessionID,
+		RuntimeInputId:    s.Result.CommandResponse.RuntimeInputID,
+		BindingId:         s.Result.CommandResponse.BindingID,
+		BindingGeneration: s.Result.CommandResponse.BindingGeneration,
+	}, nil
 }
 
 func TestJobRunnerRuntimeDeliveryStoreDiscoversInitialMCPManifestThroughProductionAssembly(t *testing.T) {

@@ -50,6 +50,7 @@ import { AutoApprovalReviewerManager } from "./approval-reviewer-manager.js";
 import type { ReviewerExecutionToken } from "./approval-reviewer-manager.js";
 import { SessionToolCoordinator } from "../tools/tool-scheduler.js";
 import { SessionConfiguration } from "./session-configuration.js";
+import type { RuntimeConfigurationPatch } from "./session-configuration.js";
 import { makeThreadCommandChannel } from "./thread-command-channel.js";
 import type { ThreadCommandChannel } from "./thread-command-channel.js";
 
@@ -305,6 +306,8 @@ export interface LayerOptions {
   readonly closeoutMonotonicMs?: (() => number) | undefined;
   readonly closeoutSleep?: ((durationMs: number, signal: AbortSignal) => Promise<boolean>) | undefined;
   readonly recordCloseoutEvent?: ((event: RuntimeCloseoutEvent) => void) | undefined;
+  readonly recordMCPManifestUpdate?: ((event: RuntimeMCPManifestUpdateEvent) => void) | undefined;
+  readonly resolveMCPManifestEligibility?: ((effectivePatches: readonly RuntimeConfigurationPatch[], mcpServerName: string) => boolean) | undefined;
 }
 
 export const CloseoutRetryInitialBackoffMs = 1_000;
@@ -319,6 +322,18 @@ export interface RuntimeCloseoutEvent {
     | "runtime_closeout_unrepairable";
   readonly activeCloseouts: number;
   readonly errorCode?: "schema_mismatch" | "ack_mismatch" | "unrepairable" | undefined;
+}
+
+/** Effective post-gate manifest state observed at the resident Session owner. */
+export interface RuntimeMCPManifestUpdateEvent {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly mcpServerName: string;
+  readonly disposition: "applied" | "stale";
+  readonly source: "runtime_config_update" | "cold_load";
+  readonly receivedGeneration: number;
+  readonly currentGeneration: number;
+  readonly toolCatalogEligible: boolean;
 }
 
 /** Effect service tag for resident session and thread coordination. */
@@ -1534,7 +1549,24 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
             ) {
               return { ok: false, sessionId, reason: "control_busy" } as const;
             }
-            const applied = sessionEntry.configuration.apply(command) === "applied";
+            const disposition = sessionEntry.configuration.apply(command);
+            const applied = disposition === "applied";
+            if (command.mcpServerName !== undefined && command.generation !== undefined) {
+              try {
+                options.recordMCPManifestUpdate?.({
+                  workspaceId: command.workspaceId, sessionId,
+                  mcpServerName: command.mcpServerName, disposition,
+                  source: "runtime_config_update",
+                  receivedGeneration: command.generation,
+                  currentGeneration: sessionEntry.configuration.manifestGeneration(command.mcpServerName),
+                  toolCatalogEligible: options.resolveMCPManifestEligibility?.(
+                    sessionEntry.configuration.patches(), command.mcpServerName,
+                  ) ?? false,
+                });
+              } catch {
+                // Configuration application is authoritative; observation is fail-open.
+              }
+            }
             for (const threadEntry of sessionEntry.threads.values()) {
               threadEntry.bridgeScope = command;
               threadEntry.runtimeThread.updateIdentity({
@@ -1634,7 +1666,22 @@ export function layer(options: LayerOptions): Layer.Layer<Service, never, Thread
           if (shouldInitializeSharedState) {
             yield* threadResult.sessionEntry.controlGate.withPermit(Effect.sync(() => {
               for (const patch of observedSharedPatches) {
-                threadResult.sessionEntry.configuration.apply(patch);
+                const disposition = threadResult.sessionEntry.configuration.apply(patch);
+                if (patch.mcpServerName !== undefined && patch.generation !== undefined) {
+                  try {
+                    options.recordMCPManifestUpdate?.({
+                      workspaceId: command.workspaceId, sessionId: command.sessionId,
+                      mcpServerName: patch.mcpServerName, disposition, source: "cold_load",
+                      receivedGeneration: patch.generation,
+                      currentGeneration: threadResult.sessionEntry.configuration.manifestGeneration(patch.mcpServerName),
+                      toolCatalogEligible: options.resolveMCPManifestEligibility?.(
+                        threadResult.sessionEntry.configuration.patches(), patch.mcpServerName,
+                      ) ?? false,
+                    });
+                  } catch {
+                    // Cold installation remains owned by the configuration gate, not telemetry.
+                  }
+                }
               }
               threadResult.sessionEntry.sharedStateStatus = "ready";
               threadResult.sessionEntry.completeSharedStateReady(true);

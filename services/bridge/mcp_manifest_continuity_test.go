@@ -190,9 +190,76 @@ func TestPostgreSQLBridgeAPIStoreManifestByteBoundAcceptsExactAndPreservesAccept
 			afterETag, afterGeneration, readiness, diagnostic.String, len(afterTools), beforeGeneration+1)
 	}
 	assertQueuedMCPManifestGenerations(t, admin, "sesn_mcp_bytes", []int64{1, 2})
-	if !strings.Contains(logOutput.String(), `"event.kind":"mcp_manifest.readiness_changed"`) || !strings.Contains(logOutput.String(), `"mcp.manifest.diagnostic":"manifest_too_large"`) {
-		t.Fatalf("over-cap readiness log = %s; want structured manifest_too_large transition", logOutput.String())
+	if strings.Count(logOutput.String(), `"event.kind":"mcp_manifest_transition_committed"`) != 2 ||
+		!strings.Contains(logOutput.String(), `"mcp.manifest.previous_generation":1`) ||
+		!strings.Contains(logOutput.String(), `"mcp.manifest.generation":2`) ||
+		!strings.Contains(logOutput.String(), `"mcp.manifest.diagnostic":"manifest_too_large"`) ||
+		!strings.Contains(logOutput.String(), `"queue.custody":"created"`) {
+		t.Fatalf("over-cap transition log = %s; want exact-bound and one idempotent over-cap commit", logOutput.String())
 	}
+}
+
+func TestPostgreSQLBridgeAPIStoreManifestTransitionLoggingIsPostCommitAndFailOpen(t *testing.T) {
+	t.Run("committed event contains only bounded manifest fields", func(t *testing.T) {
+		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		seedMCPFamilySession(t, admin, "sesn_mcp_log_safe", "thr_mcp_log_safe", "claude")
+		manifest := mcpManifestResult("etag_log_safe", "github_search")
+		manifest.Tools[0].Description = "CANARY_MANIFEST_DESCRIPTION"
+		logs := &lockedBuffer{}
+		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		store.MCPManifestLister = &constantMCPManifestLister{result: manifest}
+		store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+
+		mustAcceptMCPManifestChange(t, store, "sesn_mcp_log_safe", "etag_log_safe")
+		if !strings.Contains(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) ||
+			strings.Contains(logs.String(), "CANARY_MANIFEST_DESCRIPTION") {
+			t.Fatalf("manifest transition log = %s; want bounded fields without manifest content", logs.String())
+		}
+	})
+
+	t.Run("throwing logger cannot change committed ACK", func(t *testing.T) {
+		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		seedMCPFamilySession(t, admin, "sesn_mcp_log_fail_open", "thr_mcp_log_fail_open", "claude")
+		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		manifest := mcpManifestResult("etag_log", "github_search")
+		manifest.Tools[0].Description = "CANARY_MANIFEST_DESCRIPTION"
+		store.MCPManifestLister = &constantMCPManifestLister{result: manifest}
+		store.Logger = slog.New(panicSlogHandler{})
+
+		response := mustAcceptMCPManifestChange(t, store, "sesn_mcp_log_fail_open", "etag_log")
+		if response.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED {
+			t.Fatalf("ACK = %s; want committed despite logger panic", response.GetAck().GetStatus())
+		}
+	})
+
+	t.Run("queue write failure rolls back without committed event", func(t *testing.T) {
+		runtime, admin := storagetest.NewPostgreSQLDBWithAdmin(t)
+		seedMCPFamilySession(t, admin, "sesn_mcp_log_rollback", "thr_mcp_log_rollback", "claude")
+		if _, err := admin.ExecContext(context.Background(), `DROP TABLE queue_jobs`); err != nil {
+			t.Fatalf("drop queue_jobs: %v", err)
+		}
+		logs := &lockedBuffer{}
+		store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
+		store.MCPManifestLister = &constantMCPManifestLister{result: mcpManifestResult("etag_rollback", "github_search")}
+		store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+
+		_, err := store.McpManifestChanged(context.Background(), &bridgev1.McpManifestChangedRequest{
+			WorkspaceId: "default", SessionId: "sesn_mcp_log_rollback", McpServerName: "github", ManifestEtag: "etag_rollback",
+		})
+		if err == nil {
+			t.Fatal("McpManifestChanged error = nil; want queue transaction failure")
+		}
+		if strings.Contains(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) {
+			t.Fatalf("rollback log = %s; want no committed transition", logs.String())
+		}
+		var rows int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM session_mcp_manifests WHERE session_id = 'sesn_mcp_log_rollback'`).Scan(&rows); err != nil {
+			t.Fatalf("read rolled-back manifest: %v", err)
+		}
+		if rows != 0 {
+			t.Fatalf("rolled-back manifest rows = %d; want 0", rows)
+		}
+	})
 }
 
 func TestPostgreSQLBridgeAPIStoreFirstOverCapManifestCommitsReadinessOnlyAndColdLoadSurvives(t *testing.T) {
@@ -263,6 +330,8 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 	store := NewPostgreSQLBridgeAPIStore(dbconnect.NewClientForTesting(runtime))
 	lister := &constantMCPManifestLister{result: mcpManifestResult("etag_restore", "github_restore")}
 	store.MCPManifestLister = lister
+	logs := &lockedBuffer{}
+	store.Logger = slog.New(slog.NewJSONHandler(logs, nil))
 	mustAcceptMCPManifestChange(t, store, "sesn_mcp_restore", "etag_restore")
 	if _, err := admin.Exec(`UPDATE session_mcp_manifests SET readiness = 'unready', diagnostic = 'delivery_exhausted', manifest_generation = 2
 		WHERE workspace_id = 'default' AND session_id = 'sesn_mcp_restore' AND mcp_server_name = 'github'`); err != nil {
@@ -271,6 +340,12 @@ func TestPostgreSQLBridgeAPIStoreStoredETagDuplicatePathsRestoreReadyAndEnqueue(
 	restored := mustAcceptMCPManifestChange(t, store, "sesn_mcp_restore", "etag_restore")
 	if restored.GetAck().GetStatus() != bridgev1.BridgeWriteStatus_BRIDGE_WRITE_STATUS_COMMITTED || lister.calls != 1 {
 		t.Fatalf("pre-list restore ACK/list calls = %s/%d; want committed/1", restored.GetAck().GetStatus(), lister.calls)
+	}
+	if strings.Count(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) != 2 ||
+		!strings.Contains(logs.String(), `"mcp.manifest.previous_generation":2`) ||
+		!strings.Contains(logs.String(), `"mcp.manifest.generation":3`) ||
+		!strings.Contains(logs.String(), `"mcp.manifest.readiness":"ready"`) {
+		t.Fatalf("restore transition logs = %s; want initial and post-commit ready restoration", logs.String())
 	}
 	if _, err := admin.Exec(`UPDATE session_mcp_manifests SET readiness = 'unready', diagnostic = 'delivery_exhausted', manifest_generation = 4
 		WHERE workspace_id = 'default' AND session_id = 'sesn_mcp_restore' AND mcp_server_name = 'github'`); err != nil {
@@ -307,10 +382,17 @@ func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyWit
 	bridge.MCPManifestLister = &constantMCPManifestLister{result: mcpManifestResult("etag_exhaust", "github_exhaust")}
 	mustAcceptMCPManifestChange(t, bridge, "sesn_mcp_exhaust", "etag_exhaust")
 	delivery := NewPostgreSQLRuntimeDeliveryStore(dbconnect.NewClientForTesting(runtime), 0)
-	result, err := delivery.FinalizeRuntimeDelivery(context.Background(), RuntimeJob{
+	logs := &lockedBuffer{}
+	delivery.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+	job := RuntimeJob{
 		Kind: "runtime_config_update", WorkspaceID: "default", SessionID: "sesn_mcp_exhaust",
 		RuntimeInputID: runtimeMCPManifestInputID("sesn_mcp_exhaust", "github", 1), MCPServerName: "github",
 		MCPManifestGeneration: "1", AttemptCount: 5, MaxAttempts: 5,
+	}
+	result, err := delivery.FinalizeRuntimeDelivery(context.Background(), RuntimeJob{
+		Kind: job.Kind, WorkspaceID: job.WorkspaceID, SessionID: job.SessionID,
+		RuntimeInputID: job.RuntimeInputID, MCPServerName: job.MCPServerName,
+		MCPManifestGeneration: job.MCPManifestGeneration, AttemptCount: job.AttemptCount, MaxAttempts: job.MaxAttempts,
 	}, RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true})
 	if err != nil {
 		t.Fatalf("FinalizeRuntimeDelivery final MCP attempt: %v", err)
@@ -343,6 +425,16 @@ func TestPostgreSQLRuntimeDeliveryStoreFinalManifestAttemptTransitionsUnreadyWit
 	}
 	if stringSliceJSON(maxAttempts) != stringSliceJSON([]int{5}) {
 		t.Fatalf("MCP max attempts = %v; want the original queue job only", maxAttempts)
+	}
+	if _, err := delivery.FinalizeRuntimeDelivery(context.Background(), job, RuntimeDeliveryResult{Status: RuntimeDeliveryRejected, Retryable: true}); err != nil {
+		t.Fatalf("replay final MCP attempt: %v", err)
+	}
+	if strings.Count(logs.String(), `"event.kind":"mcp_manifest_transition_committed"`) != 1 ||
+		!strings.Contains(logs.String(), `"mcp.manifest.previous_generation":1`) ||
+		!strings.Contains(logs.String(), `"mcp.manifest.generation":2`) ||
+		!strings.Contains(logs.String(), `"mcp.manifest.diagnostic":"delivery_exhausted"`) ||
+		!strings.Contains(logs.String(), `"queue.custody":"retained"`) {
+		t.Fatalf("delivery-exhausted transition log = %s; want one retained-custody commit", logs.String())
 	}
 }
 

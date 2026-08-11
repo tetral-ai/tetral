@@ -768,7 +768,7 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeMCPManifestDelivery(ctx context
 	if s.Clock != nil {
 		now = s.Clock().UTC()
 	}
-	transitioned := false
+	var acceptance mcpManifestAcceptance
 	err = s.Client.WithWorkspaceTx(ctx, job.WorkspaceID, "agentruntimebridge.finalize_mcp_manifest_delivery", func(tx *dbconnect.Tx) error {
 		if err := acquireMCPManifestAcceptanceLockTx(ctx, tx, job.WorkspaceID, job.SessionID, job.MCPServerName); err != nil {
 			return err
@@ -780,22 +780,28 @@ func (s *PostgreSQLRuntimeDeliveryStore) finalizeMCPManifestDelivery(ctx context
 		if !found || current.Generation != jobGeneration {
 			return nil
 		}
-		transitioned = current.Readiness != mcpManifestReadinessUnready || !current.Diagnostic.Valid || current.Diagnostic.String != mcpManifestDiagnosticDeliveryExhausted
+		transitioned := current.Readiness != mcpManifestReadinessUnready || !current.Diagnostic.Valid || current.Diagnostic.String != mcpManifestDiagnosticDeliveryExhausted
 		toolset, err := mcpManifestToolsetConfigTx(ctx, tx, job.WorkspaceID, job.SessionID, job.MCPServerName)
 		if err != nil {
 			return err
 		}
-		_, err = transitionMCPManifestDeliveryExhaustedTx(
+		generation, err := transitionMCPManifestDeliveryExhaustedTx(
 			ctx, tx, job.WorkspaceID, job.SessionID, job.MCPServerName, current, toolset, now,
 		)
+		acceptance = mcpManifestAcceptance{
+			PreviousGeneration: current.Generation,
+			Generation:         generation,
+			Readiness:          mcpManifestReadinessUnready,
+			Diagnostic:         mcpManifestDiagnosticDeliveryExhausted,
+			QueueCustody:       "retained",
+			Transitioned:       transitioned,
+		}
 		return err
 	})
 	if err != nil {
 		return RuntimeDeliveryResult{}, err
 	}
-	if transitioned {
-		logMCPManifestReadiness(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, job.MCPServerName, mcpManifestReadinessUnready, mcpManifestDiagnosticDeliveryExhausted, jobGeneration+1)
-	}
+	logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, job.MCPServerName, acceptance)
 	return runtimeDeliveryExhaustedResult(), nil
 }
 
@@ -1230,11 +1236,9 @@ func (s *PostgreSQLRuntimeDeliveryStore) enqueueInitialMCPManifestUpdatesWithLis
 			}
 			return err
 		}
+		logMCPManifestTransitionCommitted(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, acceptance)
 		if !acceptance.Duplicate {
 			logMCPManifestOmissions(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, acceptance.BuiltinFamily, acceptance.Omissions)
-		}
-		if acceptance.ManifestTooLarge {
-			logMCPManifestReadiness(s.Logger, ServiceNameJobRunner, job.WorkspaceID, job.SessionID, toolset.MCPServerName, mcpManifestReadinessUnready, mcpManifestDiagnosticTooLarge, acceptance.Generation)
 		}
 	}
 	return nil

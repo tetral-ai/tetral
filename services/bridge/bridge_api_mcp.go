@@ -65,8 +65,8 @@ func (s *PostgreSQLBridgeAPIStore) McpManifestChanged(ctx context.Context, reque
 	if err != nil {
 		return nil, err
 	}
+	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, acceptance)
 	if acceptance.ManifestTooLarge {
-		logMCPManifestReadiness(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, mcpManifestReadinessUnready, mcpManifestDiagnosticTooLarge, acceptance.Generation)
 		return nil, status.Error(codes.ResourceExhausted, "mcp manifest tools exceed the accepted byte limit")
 	}
 	if !acceptance.Duplicate {
@@ -777,6 +777,7 @@ func mcpRuntimeToolName(mcpServerName string, toolName string) string {
 
 func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Context, workspaceID string, sessionID string, mcpServerName string, manifestETag string) (*bridgev1.McpManifestChangedResponse, bool, error) {
 	var response *bridgev1.McpManifestChangedResponse
+	var restored mcpManifestAcceptance
 	err := s.Client.WithWorkspaceTx(ctx, workspaceID, "agentruntimebridge.mcp_manifest_changed_replay", func(tx *dbconnect.Tx) error {
 		if err := acquireMCPManifestAcceptanceLockTx(ctx, tx, workspaceID, sessionID, mcpServerName); err != nil {
 			return err
@@ -803,6 +804,11 @@ func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Contex
 			if err != nil {
 				return err
 			}
+			acceptance.PreviousGeneration = row.Generation
+			acceptance.Readiness = mcpManifestReadinessReady
+			acceptance.QueueCustody = "created"
+			acceptance.Transitioned = true
+			restored = acceptance
 			response = &bridgev1.McpManifestChangedResponse{Ack: committedAck(acceptance.RuntimeInputID, "")}
 			return nil
 		}
@@ -814,6 +820,7 @@ func (s *PostgreSQLBridgeAPIStore) replayedMCPManifestChanged(ctx context.Contex
 	if err != nil {
 		return nil, false, err
 	}
+	logMCPManifestTransitionCommitted(s.Logger, ServiceNameBridgeAPI, workspaceID, sessionID, mcpServerName, restored)
 	return response, response != nil, nil
 }
 
@@ -986,12 +993,17 @@ func runtimeMCPManifestCommandPayload(workspaceID string, sessionID string, mcpS
 }
 
 type mcpManifestAcceptance struct {
-	RuntimeInputID   string
-	Generation       int64
-	BuiltinFamily    string
-	Omissions        []mcpManifestOmission
-	Duplicate        bool
-	ManifestTooLarge bool
+	RuntimeInputID     string
+	PreviousGeneration int64
+	Generation         int64
+	Readiness          string
+	Diagnostic         string
+	QueueCustody       string
+	BuiltinFamily      string
+	Omissions          []mcpManifestOmission
+	Duplicate          bool
+	Transitioned       bool
+	ManifestTooLarge   bool
 }
 
 // session_mcp_manifests carries readiness and diagnostic ORTHOGONALLY to the
@@ -1075,8 +1087,19 @@ func captureMCPManifestAcceptanceTx(
 		return mcpManifestAcceptance{}, err
 	}
 	if len([]byte(toolsJSON)) > MaxMcpManifestBytes {
+		transitioned := !rowExists || current.Readiness != mcpManifestReadinessUnready || !current.Diagnostic.Valid || current.Diagnostic.String != mcpManifestDiagnosticTooLarge
 		generation, err := transitionMCPManifestUnreadyTx(ctx, tx, workspaceID, sessionID, mcpServerName, current, rowExists, mcpManifestDiagnosticTooLarge, toolsetConfig, now)
-		return mcpManifestAcceptance{Generation: generation, BuiltinFamily: toolsetConfig.BuiltinFamily, ManifestTooLarge: true}, err
+		return mcpManifestAcceptance{
+			PreviousGeneration: current.Generation,
+			Generation:         generation,
+			Readiness:          mcpManifestReadinessUnready,
+			Diagnostic:         mcpManifestDiagnosticTooLarge,
+			QueueCustody:       "created",
+			BuiltinFamily:      toolsetConfig.BuiltinFamily,
+			Duplicate:          !transitioned,
+			Transitioned:       transitioned,
+			ManifestTooLarge:   true,
+		}, err
 	}
 	if rowExists && current.ManifestETag.Valid && current.ManifestETag.String == manifestETag && current.Readiness == mcpManifestReadinessReady {
 		return mcpManifestAcceptance{
@@ -1089,6 +1112,10 @@ func captureMCPManifestAcceptanceTx(
 		generation = current.Generation + 1
 	}
 	acceptance, err := commitMCPManifestReadyTx(ctx, tx, workspaceID, sessionID, mcpServerName, manifestETag, toolsJSON, generation, toolsetConfig, now)
+	acceptance.PreviousGeneration = current.Generation
+	acceptance.Readiness = mcpManifestReadinessReady
+	acceptance.QueueCustody = "created"
+	acceptance.Transitioned = true
 	acceptance.BuiltinFamily = toolsetConfig.BuiltinFamily
 	acceptance.Omissions = omissions
 	return acceptance, err
@@ -1248,20 +1275,28 @@ func logMCPManifestOmissions(logger *slog.Logger, component string, workspaceID 
 	}
 }
 
-func logMCPManifestReadiness(logger *slog.Logger, component string, workspaceID string, sessionID string, mcpServerName string, readiness string, diagnostic string, generation int64) {
-	if logger == nil {
+// The transaction result is the sole source of this event. Keeping the logger
+// at the post-commit boundary prevents telemetry from becoming manifest state
+// or Queue custody evidence.
+func logMCPManifestTransitionCommitted(logger *slog.Logger, component string, workspaceID string, sessionID string, mcpServerName string, acceptance mcpManifestAcceptance) {
+	if logger == nil || !acceptance.Transitioned {
 		return
 	}
-	logger.Warn("bridge.mcp_manifest.readiness_changed",
-		slog.String("operation", "mcp_manifest.readiness"),
-		slog.String("event.kind", "mcp_manifest.readiness_changed"),
+	defer func() {
+		_ = recover()
+	}()
+	logger.Info("bridge.mcp_manifest.transition_committed",
+		slog.String("operation", "mcp_manifest.transition"),
+		slog.String("event.kind", "mcp_manifest_transition_committed"),
 		slog.String("component", component),
 		slog.String("workspace.id", workspaceID),
 		slog.String("session.id", sessionID),
 		slog.String("mcp.server.name", mcpServerName),
-		slog.String("mcp.manifest.readiness", readiness),
-		slog.String("mcp.manifest.diagnostic", diagnostic),
-		slog.Int64("mcp.manifest.generation", generation),
+		slog.Int64("mcp.manifest.previous_generation", acceptance.PreviousGeneration),
+		slog.Int64("mcp.manifest.generation", acceptance.Generation),
+		slog.String("mcp.manifest.readiness", acceptance.Readiness),
+		slog.String("mcp.manifest.diagnostic", acceptance.Diagnostic),
+		slog.String("queue.custody", acceptance.QueueCustody),
 	)
 }
 

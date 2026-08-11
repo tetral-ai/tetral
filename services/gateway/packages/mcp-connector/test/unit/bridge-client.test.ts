@@ -149,6 +149,43 @@ describe("BridgeAPIManifestChangeNotifier", () => {
     }
   });
 
+  test("treats Bridge ResourceExhausted as the terminal durable over-cap settlement", async () => {
+    const notifier = new BridgeAPIManifestChangeNotifier({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client: new FailingBridgeClient(status.RESOURCE_EXHAUSTED, "mcp manifest tools exceed the accepted byte limit"),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(notifier.notify({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      mcpServerName: "github",
+      manifestEtag: "etag_over_cap",
+    })).resolves.toEqual({ ok: true, duplicate: false });
+  });
+
+  test("does not acknowledge an unrelated ResourceExhausted rejection", async () => {
+    const notifier = new BridgeAPIManifestChangeNotifier({
+      address: "bridge.tetral-system.svc.cluster.local:9090",
+      tokenPath: "/token",
+      client: new FailingBridgeClient(status.RESOURCE_EXHAUSTED, "upstream response exceeded transport capacity"),
+      metadataFactory: async () => new Metadata(),
+    });
+
+    await expect(notifier.notify({
+      workspaceId: "wksp_1",
+      sessionId: "sesn_1",
+      mcpServerName: "github",
+      manifestEtag: "etag_transport_limit",
+    })).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      code: `grpc_${status.RESOURCE_EXHAUSTED}`,
+      message: "mcp manifest change notification failed",
+    });
+  });
+
   test("treats a defined Bridge ACK rejection as terminal", async () => {
     const notifier = new BridgeAPIManifestChangeNotifier({
       address: "bridge.tetral-system.svc.cluster.local:9090",
@@ -453,7 +490,7 @@ async function bindLocalServer(server: Server): Promise<number> {
 class FailingBridgeClient {
   readonly options: CallOptions[] = [];
 
-  constructor(private readonly code: number | undefined) {}
+  constructor(private readonly code: number | undefined, private readonly details?: string) {}
 
   mcpManifestChanged(
     _request: McpManifestChangedRequest,
@@ -462,7 +499,7 @@ class FailingBridgeClient {
     callback: (error: ServiceError | null, response: McpManifestChangedResponse) => void,
   ) {
     this.options.push(options);
-    callback(Object.assign(new Error("bridge unavailable"), { code: this.code }) as ServiceError, { ack: undefined });
+    callback(Object.assign(new Error("bridge unavailable"), { code: this.code, details: this.details }) as ServiceError, { ack: undefined });
   }
 }
 
