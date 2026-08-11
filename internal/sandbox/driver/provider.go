@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"net/netip"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 const DaytonaProviderName = "daytona"
 
 var ErrSandboxOwnershipMismatch = stderrors.New("sandbox provider ownership mismatch")
+var daytonaDiskCapacityMessagePattern = regexp.MustCompile(`^Total disk limit exceeded\. Maximum allowed: ([1-9][0-9]*)(KiB|MiB|GiB|TiB)\.$`)
 
 type DaytonaLifecycleProvider struct {
 	client         daytonaLifecycleClient
@@ -448,6 +451,9 @@ func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 	}
 	var validation *daytonaerrors.DaytonaValidationError
 	if stderrors.As(err, &validation) {
+		if stage == sandbox.StageCreateSandbox && daytonaCreateDiskCapacityExceeded(validation) {
+			return daytonaProviderError(stage, sandbox.ProviderErrorQuotaExceeded, true, http.StatusBadRequest, "sandbox provider capacity is unavailable", err)
+		}
 		return daytonaProviderError(stage, sandbox.ProviderErrorInvalidRequest, false, http.StatusBadRequest, "daytona rejected sandbox request", err)
 	}
 	var conflict *daytonaerrors.DaytonaConflictError
@@ -472,6 +478,22 @@ func mapDaytonaError(stage sandbox.ProviderStage, err error) error {
 		return daytonaProviderError(stage, sandbox.ProviderErrorUnknown, retryable, daytonaErr.StatusCode, "daytona sandbox request failed", err)
 	}
 	return daytonaProviderError(stage, sandbox.ProviderErrorUnknown, true, 0, "daytona sandbox request failed", err)
+}
+
+// Daytona Create capacity is recognized from the SDK's structured response
+// message at the provider boundary. The anchored grammar deliberately fails
+// closed when Daytona changes wording; Queue retry remains owned by the
+// activation lifecycle after this adapter emits a proved-not-started outcome.
+func daytonaCreateDiskCapacityExceeded(validation *daytonaerrors.DaytonaValidationError) bool {
+	if validation == nil || validation.DaytonaError == nil {
+		return false
+	}
+	match := daytonaDiskCapacityMessagePattern.FindStringSubmatch(strings.TrimSpace(validation.Message))
+	if len(match) != 3 {
+		return false
+	}
+	limit, err := strconv.ParseUint(match[1], 10, 64)
+	return err == nil && limit > 0
 }
 
 func daytonaRequestWasRejected(err error) bool {

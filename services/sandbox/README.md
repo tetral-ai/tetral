@@ -160,6 +160,14 @@ mechanics, and helper transport remain behind that adapter. Queue payloads,
 Bridge, Runtime, and binding rows use only Tetral identities and normalized
 outcomes.
 
+Create-time Daytona disk-capacity rejection is classified only from the SDK's
+structured validation message and only when the complete, trimmed message
+matches the driver's anchored capacity grammar. It remains a proved-not-started
+operation and therefore consumes the existing activation Queue budget; other
+validation responses and non-Create stages retain terminal `invalid_request`
+semantics. Provider completion logs record the normalized `quota_exceeded`
+category and fixed safe message, never the response text or capacity value.
+
 The Daytona adapter owns the R2/rclone/FUSE path and the Daytona Linux Helper.
 File resources are copied into a Session-scoped Blob prefix, mounted read-only,
 bound to their declared paths, and verified as the runtime user. GitHub
@@ -208,6 +216,13 @@ Provider results are normalized and stored before Runtime receives a refs-only
 delivery. Media bytes are staged in Blob storage and become public attachments
 only in Bridge's Tool Result commit transaction. Execution receipts do not
 retain a second permanent copy of the result body after that commit.
+
+Activation-budget exhaustion is private lifecycle state. Its Sandbox
+settlement and Bridge wait response carry the internal exhaustion kind with the
+fixed message `sandbox activation could not be completed`; Runtime maps every
+Sandbox Tool family to one error text block containing exactly that message.
+Provider capacity diagnosis, route envelopes, partial output, attempt counts,
+and Runtime error codes are not projected into public Tool Results.
 
 ## Configuration
 

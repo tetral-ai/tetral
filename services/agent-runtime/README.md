@@ -256,6 +256,11 @@ result. A cold Runtime rejoins that accepted execution after refreshing its
 binding token; a transient refresh failure does not invent a Tool Result or
 consume durable custody. The terminal result digest stays internal and is
 returned to Bridge with the loop-authored tool-result declaration.
+Sandbox activation exhaustion is normalized at this shared rejoin boundary for
+command, file, media, and command-I/O routes: the private lifecycle settlement
+becomes one non-retryable Runtime error whose public Tool Result contains only
+`sandbox activation could not be completed`, with no route status, partial
+result, attempt metadata, or provider diagnosis.
 
 `RunWeb` reaches the web-connector through `TETRAL_WEB_CONNECTOR_GRPC_ADDR`,
 which boot config requires and gives no default: a Runtime Pod whose Deployment

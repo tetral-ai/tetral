@@ -61,6 +61,8 @@ import { deriveThreadTurnDecision } from "@tetral/agent-runtime-core/src/thread-
 import { toGatewayRuntimeMessages } from "@tetral/agent-runtime-core/src/runtime/message-projection.js";
 import { MaxProviderRequestToolOutputJsonBytes } from "@tetral/gateway-protocol/src/bounds.js";
 import type { RuntimeToolExecutionRequest } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import { runtimeToolSettlement } from "@tetral/agent-runtime-core/src/thread-loop/tool-execution.js";
+import { runtimeToolResultEvent } from "@tetral/agent-runtime-core/src/runtime/accumulator.js";
 import { stableRuntimeID } from "@tetral/agent-runtime-core/src/runtime/runtime-identity.js";
 import { RuntimePodToolRunner } from "../../src/tool-runner.js";
 import { canonicalRunToolJSON } from "@tetral/gateway-protocol/src/run-tool-canonical-json.js";
@@ -171,6 +173,61 @@ describe("RuntimePodToolRunner", () => {
       },
       sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest,
     });
+  });
+
+  test("maps activation exhaustion to one generic error across sandbox tool families", async () => {
+    for (const testCase of [
+      { toolName: "exec_command", input: { cmd: "true" } },
+      { toolName: "Write", input: { content: "hello", file_path: "notes/a.txt" } },
+      { toolName: "view_image", input: { path: "plot.png" } },
+      { toolName: "write_stdin", input: { session_id: "task_1", chars: "continue" }, commandRoute: "send" },
+      { toolName: "write_stdin", input: { session_id: "task_1", chars: "" }, commandRoute: "poll" },
+    ]) {
+      const bridge = new RecordingBridgeClient();
+      const activationResult = JSON.stringify({
+        status: "error",
+        error: {
+          kind: "sandbox_activation_attempts_exhausted",
+          message: "sandbox activation could not be completed",
+        },
+      });
+      bridge.awaitSandboxExecutionResultJson = activationResult;
+      bridge.awaitSandboxExecutionResultDigest = sha256(bridge.awaitSandboxExecutionResultJson);
+      if (testCase.commandRoute === "send") bridge.sendCommandInputResultJson = activationResult;
+      if (testCase.commandRoute === "poll") bridge.readCommandResultResultJson = activationResult;
+
+      const result = await makeRunner({ bridge }).runTool(toolRequest(testCase.toolName, testCase.input));
+
+      expect(result).toEqual({
+        type: "error",
+        error: {
+          type: "runtime",
+          code: "runtime_invalid_sequence",
+          message: "sandbox activation could not be completed",
+          retryable: false,
+          fatal: false,
+          sessionId: "sesn_1",
+        },
+        ...(testCase.commandRoute !== undefined ? {} : { sandboxResultDigest: bridge.awaitSandboxExecutionResultDigest }),
+      });
+      const projected = JSON.stringify(result);
+      expect(projected).not.toContain("Partial result");
+      expect(projected).not.toContain("sandbox_activation_attempts_exhausted");
+      expect(projected).not.toContain("quota_exceeded");
+      if (result.type !== "error") {
+        throw new Error("activation exhaustion did not produce a Runtime error");
+      }
+      expect(runtimeToolResultEvent(
+        "sevt_tool_1",
+        { kind: "tool" },
+        runtimeToolSettlement(result),
+      )).toEqual({
+        type: "agent.tool_result",
+        tool_use_id: "sevt_tool_1",
+        content: [{ type: "text", text: "sandbox activation could not be completed" }],
+        is_error: true,
+      });
+    }
   });
 
   test("rejects non-boolean sandbox retryability instead of deriving it from status", async () => {
@@ -2971,6 +3028,8 @@ class RecordingBridgeClient {
   awaitSandboxExecutionResultDigest = sha256(this.awaitSandboxExecutionResultJson);
   awaitSandboxExecutionBackgroundTaskStarted = false;
   awaitSandboxExecutionTaskId = "";
+  sendCommandInputResultJson = '{"status":"accepted"}';
+  readCommandResultResultJson = '{"status":"running","task_id":"task_1"}';
   runMemoryResultJson = '{"status":"completed","summary":"created"}';
   runMemoryResultJsons: string[] = [];
   readonly runMemoryErrors: Error[] = [];
@@ -3146,7 +3205,7 @@ class RecordingBridgeClient {
     }
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: '{"status":"accepted"}',
+      resultJson: this.sendCommandInputResultJson,
       writeSeq: this.sendCommandInputRequests.length,
     });
     return grpcCall();
@@ -3164,7 +3223,7 @@ class RecordingBridgeClient {
     }
     callback(null, {
       ack: { status: BridgeWriteStatus.BRIDGE_WRITE_STATUS_COMMITTED, runtimeInputId: "", runtimeWriteId: "", errorCode: "" },
-      resultJson: '{"status":"running","task_id":"task_1"}',
+      resultJson: this.readCommandResultResultJson,
     });
     return grpcCall();
   }
