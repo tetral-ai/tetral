@@ -933,7 +933,7 @@ func TestAgentArchiveAndVersionsRoutesAreRealWhenHandlerInstalled(t *testing.T) 
 	}
 }
 
-// ===== Unit 4: HTTP response-shape proofs =====
+// Agent HTTP response-shape contract.
 
 // targetTopLevelKeys is the top-level field set every Agent response must expose at the flat
 // top level. archived_at is optional ("when/if archive becomes real")
@@ -1447,7 +1447,7 @@ func TestUpdateAgentResponseShapeIsFlat(t *testing.T) {
 	assertAgentResponseShape(t, updateRec.Body.Bytes())
 }
 
-// ===== Unit 4: patch semantics through the real route =====
+// Patch semantics through the real Agent route.
 
 // TestUpdateAgentPatchClearsOptionalScalarWithNull proves the
 // optional-scalar clear semantic (description, system) reaches the
@@ -1594,7 +1594,7 @@ func TestUpdateAgentPrevalidatesInvalidPatchBeforeNotFound(t *testing.T) {
 	}
 }
 
-// ===== Unit 4: 1 MiB body size cap =====
+// Agent request body size boundary.
 
 // TestCreateAgentRejectsOversizedBody proves a body that exceeds the
 // 1 MiB cap is rejected at the wire boundary before any store call.
@@ -1693,7 +1693,7 @@ func TestUpdateAgentRejectsOversizedTrailingPaddingWithoutVersionBump(t *testing
 	}
 }
 
-// ===== Unit 1: strict top-level field rejection =====
+// Strict top-level Agent field rejection.
 
 // TestCreateAgentRejectsUnknownTopLevelField requires unknown create top-level
 // fields to reject before store writes. The error must be 400
@@ -1743,7 +1743,7 @@ func TestUpdateAgentRejectsUnknownTopLevelField(t *testing.T) {
 	}
 }
 
-// ===== Unit 1: create body strict type semantics =====
+// Strict create-body type semantics.
 
 // TestCreateAgentRejectsNullArrayContainers pins create body type semantics:
 // tools/mcp_servers/metadata null reject as strict type errors. Skills null is
@@ -1803,7 +1803,7 @@ func TestCreateAgentRejectsNullSkills(t *testing.T) {
 	assertAgentListCount(t, router, 0)
 }
 
-// ===== Unit 1: generic limits at the HTTP boundary =====
+// Generic Agent limits at the HTTP boundary.
 
 // TestCreateAgentRejectsOverlongName — name > 256 Unicode code points
 // rejects with 400 invalid_request_error and no Agent row is created.
@@ -1855,14 +1855,9 @@ func TestCreateAgentRejectsTooManyTools(t *testing.T) {
 	assertAgentListCount(t, router, 0)
 }
 
-// ===== Unit 1: generic limits enforced after patch materialization =====
-//
-// Contract Unit 1 Proof requires "metadata pair/key/value limits reject
-// after patch materialization" and "array cardinality limits reject
-// after patch materialization". These tests exercise the update path
-// end-to-end so a regression that removes ValidateGenericLimits from
-// Service.UpdatePatch fails here even though
-// the create-path tests above stay green.
+// Generic limits are enforced after patch materialization. These tests exercise
+// the update path end-to-end so removing ValidateGenericLimits from
+// Service.UpdatePatch fails even when create-path validation remains intact.
 
 func TestUpdateAgentRejectsOverlongMetadataKeyAfterMaterialize(t *testing.T) {
 	router := newAgentTestRouter(t)
@@ -1899,11 +1894,8 @@ func TestUpdateAgentRejectsTooManyToolsAfterMaterialize(t *testing.T) {
 	}
 }
 
-// TestUpdateAgentRejectsInvalidPatchEvenWhenOtherwiseNoOp — Contract
-// Unit 1 Proof: "invalid patch materialization followed by an otherwise
-// no-op update rejects instead of returning the current version".
-//
-// The patch repeats the current value of system but adds a metadata
+// TestUpdateAgentRejectsInvalidPatchEvenWhenOtherwiseNoOp proves validation
+// precedes no-op detection. The patch repeats the current value of system but adds a metadata
 // pair whose key is over the 64-cp limit. ValidateGenericLimits must
 // fire before the no-op DeepEqual short-circuit; otherwise an
 // invalid-but-otherwise-equal target would silently return version 1.
@@ -1930,7 +1922,7 @@ func TestUpdateAgentRejectsInvalidPatchEvenWhenOtherwiseNoOp(t *testing.T) {
 	}
 }
 
-// ===== Unit 4: end-to-end normalize + cross-array + no-op =====
+// End-to-end normalization, cross-array validation, and no-op behavior.
 
 // TestCreateAgentTetralToolsetReturnsCanonicalConfig proves the stored shorthand
 // is projected into the SDK-compatible resolved response policy.
